@@ -29,6 +29,9 @@ const PERMISSION_US: u64 = 100_000;
 const STALL_US: u64 = 250_000;
 const TICK: Duration = Duration::from_millis(1);
 const CLEANUP: Duration = Duration::from_secs(2);
+// One absolute setup budget, including original-owner retirement. Starting the
+// replacement thread or accepting its reply cannot restart this clock.
+const SETUP: Duration = Duration::from_secs(2);
 const ACK_PENDING: u8 = 0;
 const ACK_ACCEPTED: u8 = 1;
 type Ack = [u8; wire::AUDIO_CONFIGURED_RECORD_BYTES];
@@ -45,6 +48,7 @@ enum Fault {
     Permission,
     Acknowledgement = 5,
     Expired,
+    Setup,
 }
 fn reason(code: u8) -> &'static str {
     match code {
@@ -52,6 +56,7 @@ fn reason(code: u8) -> &'static str {
         3 => "audio_output_permission_expired",
         5 => "audio_output_acknowledgement_failed",
         6 => "audio_output_late",
+        7 => "audio_output_setup_timeout",
         _ => "audio_output_failed",
     }
 }
@@ -222,6 +227,8 @@ pub(crate) struct Output {
     image: Option<PathBuf>,
     origin: Instant,
     job: Option<Job>,
+    pending: Option<NativeConfig>,
+    setup_until: Option<Instant>,
     current: Option<(u32, AudioConfiguration)>,
     last: Option<AudioGeneration>,
     ended: bool,
@@ -241,6 +248,8 @@ impl Output {
             image: super::super::decoder_image().ok(),
             origin: Instant::now(),
             job: None,
+            pending: None,
+            setup_until: None,
             current: None,
             last: None,
             ended: false,
@@ -287,6 +296,52 @@ impl Output {
         job.thread.thread().unpark();
         Ok(())
     }
+    /// A newer offer owns one metadata slot while the fenced worker drains.
+    /// No old permission is renewed and no native/device owners overlap. The
+    /// spawn operation lets custody tests use real bounded threads separately
+    /// from native playback qualification.
+    fn start_pending(
+        &mut self,
+        spawn: impl FnOnce(Arc<Shared>, NativeConfig) -> Result<Job, ViewerAudioRefused>,
+    ) -> Result<bool, ViewerAudioRefused> {
+        self.check_setup()?;
+        if self.pending.is_none() {
+            return Ok(true);
+        }
+        if !self.account_retired() {
+            return Ok(false);
+        }
+        self.check_setup()?;
+        let config = self.pending.take().ok_or(ViewerAudioRefused)?;
+        let shared = Arc::new(Shared::new(now(self.origin).0));
+        let job = spawn(shared, config).inspect_err(|_| {
+            self.report
+                .borrow_mut()
+                .absent("audio_output_worker_unavailable");
+        })?;
+        self.job = Some(job);
+        // Cleanup can publish the old worker's final committed-PCM count.
+        // Only submissions beyond this stable boundary can prove recovery.
+        self.report.borrow_mut().begin_generation();
+        Ok(true)
+    }
+    fn check_setup(&mut self) -> Result<(), ViewerAudioRefused> {
+        if self
+            .setup_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            if self.pending.take().is_some() {
+                self.report
+                    .borrow_mut()
+                    .failed_generation(reason(Fault::Setup as u8), false);
+            } else if let Some(job) = &self.job {
+                job.shared.fail(Fault::Setup);
+            }
+            self.setup_until = None;
+            return Err(ViewerAudioRefused);
+        }
+        Ok(())
+    }
 }
 impl ViewerAudioOutput for Output {
     fn configure(
@@ -301,11 +356,13 @@ impl ViewerAudioOutput for Output {
             || offer.direction != AudioDirection::Downlink
             || self.last.is_some_and(|last| offer.generation <= last)
             || offer.validate().is_err()
-            || !self.account_retired()
         {
             return Err(ViewerAudioRefused);
         }
         let image = self.image.clone().ok_or(ViewerAudioRefused)?;
+        let setup_until = Instant::now()
+            .checked_add(SETUP)
+            .ok_or(ViewerAudioRefused)?;
         let config = NativeConfig {
             server: self.server.clone(),
             sink: self.sink.clone(),
@@ -314,20 +371,10 @@ impl ViewerAudioOutput for Output {
             binding,
             offer,
             volume: self.volume.clone(),
+            setup_until,
         };
-        let shared = Arc::new(Shared::new(now(self.origin).0));
-        let slot = WORKER_SLOT
-            .get_or_init(|| Arc::new(AtomicBool::new(false)))
-            .clone();
-        let job = Job::spawn(&slot, shared, move |shared, packets, replies| {
-            native(config, shared, &packets, &replies)
-        })
-        .inspect_err(|_| {
-            self.report
-                .borrow_mut()
-                .absent("audio_output_worker_unavailable");
-        })?;
-        self.job = Some(job);
+        self.pending = Some(config);
+        self.setup_until = Some(setup_until);
         self.last = Some(offer.generation);
         self.current = Some((binding, offer));
         self.report.borrow_mut().begin_generation();
@@ -342,10 +389,33 @@ impl ViewerAudioOutput for Output {
         if self.current.is_none() {
             return Ok(()); // Cleanup is owned by the worker, not renewed here.
         }
+        if !live() {
+            self.pending = None;
+            self.setup_until = None;
+            if let Some(job) = &self.job {
+                job.stop();
+            }
+            return Err(ViewerAudioRefused);
+        }
+        if !self.start_pending(|shared, config| {
+            let slot = WORKER_SLOT
+                .get_or_init(|| Arc::new(AtomicBool::new(false)))
+                .clone();
+            Job::spawn(&slot, shared, move |shared, packets, replies| {
+                native(config, shared, &packets, &replies)
+            })
+        })? {
+            return Ok(());
+        }
         self.authorize(live)?;
+        let setup_until = self.setup_until;
         let job = self.job.as_mut().ok_or(ViewerAudioRefused)?;
         match job.replies.try_recv() {
             Ok(record) => {
+                if setup_until.is_some_and(|until| Instant::now() >= until) {
+                    job.shared.fail(Fault::Setup);
+                    return Err(ViewerAudioRefused);
+                }
                 if job.acknowledged || !job.shared.live_at(now(self.origin).0) || !live() {
                     job.shared.fail(Fault::Acknowledgement);
                     return Err(ViewerAudioRefused);
@@ -358,6 +428,10 @@ impl ViewerAudioOutput for Output {
                 // transport acceptance is reported separately below; frd does
                 // not deliver any packets until that admission succeeds.
                 job.acknowledged = true;
+                if setup_until.is_some_and(|until| Instant::now() >= until) {
+                    job.shared.fail(Fault::Setup);
+                    return Err(ViewerAudioRefused);
+                }
                 if !live() || !job.shared.live_at(now(self.origin).0) {
                     job.stop();
                     return Err(ViewerAudioRefused);
@@ -378,7 +452,9 @@ impl ViewerAudioOutput for Output {
         binding: u32,
         offer: AudioConfiguration,
     ) -> Result<(), ViewerAudioRefused> {
+        self.check_setup()?;
         if self.current != Some((binding, offer))
+            || self.pending.is_some()
             || self
                 .job
                 .as_ref()
@@ -386,6 +462,7 @@ impl ViewerAudioOutput for Output {
         {
             return Err(ViewerAudioRefused);
         }
+        self.setup_until = None;
         self.report.borrow_mut().acknowledged = true;
         Ok(())
     }
@@ -441,6 +518,8 @@ impl ViewerAudioOutput for Output {
             job.stop();
         }
         self.current = None;
+        self.pending = None;
+        self.setup_until = None;
         self.ended = true;
         self.account();
         self.report.borrow_mut().absent(end_reason(end));
@@ -450,6 +529,8 @@ impl ViewerAudioOutput for Output {
             job.stop();
         }
         self.current = None;
+        self.pending = None;
+        self.setup_until = None;
         self.account();
         let mut report = self.report.borrow_mut();
         report.resets = report.resets.saturating_add(1);
@@ -475,6 +556,7 @@ struct NativeConfig {
     binding: u32,
     offer: AudioConfiguration,
     volume: AudioVolumeControl,
+    setup_until: Instant,
 }
 // The only wait in the acknowledgement bridge is on the foreign-work thread.
 // PulsePlayout::acknowledge cannot return success until the session accepted its
@@ -482,21 +564,30 @@ struct NativeConfig {
 fn forward_ack(
     shared: &Shared,
     origin: Instant,
+    setup_until: Instant,
     replies: &SyncSender<Ack>,
     bytes: &[u8],
 ) -> Result<(), ViewerAudioRefused> {
     let record: Ack = bytes.try_into().map_err(|_| ViewerAudioRefused)?;
+    if Instant::now() >= setup_until {
+        shared.fail(Fault::Setup);
+        return Err(ViewerAudioRefused);
+    }
     if !shared.live_at(now(origin).0) || replies.try_send(record).is_err() {
         return Err(ViewerAudioRefused);
     }
-    let until = Instant::now() + Duration::from_micros(PERMISSION_US);
+    let until = (Instant::now() + Duration::from_micros(PERMISSION_US)).min(setup_until);
     while shared.live_at(now(origin).0) && Instant::now() < until {
         if shared.ack.load(Ordering::Acquire) == ACK_ACCEPTED {
             return Ok(());
         }
         thread::park_timeout(TICK);
     }
-    shared.fail(Fault::Acknowledgement);
+    shared.fail(if Instant::now() >= setup_until {
+        Fault::Setup
+    } else {
+        Fault::Acknowledgement
+    });
     Err(ViewerAudioRefused)
 }
 fn native(
@@ -512,14 +603,21 @@ fn native(
     let result = (|| {
         // configure() cannot receive the observation callback. Wait for the first
         // session service turn instead of assuming creation grants permission.
-        let until = Instant::now() + CLEANUP;
         while shared.until.load(Ordering::Acquire) == 0 {
-            if shared.stopped.load(Ordering::Acquire) || Instant::now() >= until {
+            if shared.stopped.load(Ordering::Acquire) {
+                return Err(ViewerAudioRefused);
+            }
+            if Instant::now() >= config.setup_until {
+                shared.fail(Fault::Setup);
                 return Err(ViewerAudioRefused);
             }
             thread::park_timeout(TICK);
         }
         if !shared.live_at(now(config.origin).0) {
+            return Err(ViewerAudioRefused);
+        }
+        if Instant::now() >= config.setup_until {
+            shared.fail(Fault::Setup);
             return Err(ViewerAudioRefused);
         }
         output.configure(config.binding, config.offer)?;
@@ -531,8 +629,12 @@ fn native(
                 shared.fail(Fault::Permission);
                 return Err(ViewerAudioRefused);
             }
+            if !report.borrow().acknowledged && Instant::now() >= config.setup_until {
+                shared.fail(Fault::Setup);
+                return Err(ViewerAudioRefused);
+            }
             output.service(&mut || shared.live_at(now(config.origin).0), &mut |bytes| {
-                forward_ack(shared, config.origin, replies, bytes)
+                forward_ack(shared, config.origin, config.setup_until, replies, bytes)
             })?;
             shared
                 .progress

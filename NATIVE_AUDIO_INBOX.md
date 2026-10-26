@@ -51,3 +51,46 @@ Full current-workspace, CLI/frd, PulseAudio-device, authenticated-transport and
 live-tailnet qualification were not executed. Existing device-only tests were
 not selected. This work does not include the separately unpublished Opus FEC
 changes or close the broader fr-p2-audio-playback-lel acceptance bead.
+
+
+## A replacement waits for the original output to retire
+
+An audio reset fences the original worker immediately, but its native output
+and restricted decoder can still need bounded cleanup. A fresh host
+configuration arriving during that cleanup previously failed `configure`.
+The session counted that refusal as another failed generation and requested
+another host epoch. Several fast replies could spend the existing restart
+allowance while the first output was still doing legitimate cleanup.
+
+The CLI now retains exactly one validated, strictly newer configuration as
+bounded metadata. Session turns wait without blocking, renewing the retired
+worker's permission, opening another output or acknowledging readiness. Both
+the old thread's completion and its positive decoder/native retirement proof
+must hold before the replacement starts. An incomplete or poisoned cleanup
+cannot release the process-wide worker slot. A second configuration cannot
+replace the pending offer; cancellation also leaves its generation spent.
+
+One absolute two-second setup deadline starts at configuration admission and
+covers the retirement wait, replacement startup and configuration reply
+admission. Cleanup completion, service turns, worker creation and reply
+backpressure cannot extend it. Expiry discards the pending setup or fences the
+replacement with `audio_output_setup_timeout`; the existing host/session
+restart allowance is unchanged. Host stop, observation loss, reset and drop
+fence the pending setup as well as the original worker. Local volume/mute
+changes remain visible to a waiting replacement and grant no permission.
+
+The final committed-PCM and failure counters from the old worker are collected
+before establishing the new generation's submission baseline. Only an actually
+acknowledged replacement with new submitted PCM can clear absence or count as
+recovery. Old queued packets and receipts are not replayed into that output.
+
+The focused `output::threaded::tests::replacement` regressions use actual
+bounded worker threads and deliberately controlled cleanup, not native device
+or audible playback fixtures. They cover waiting and successful replacement,
+final old-PCM accounting, the unchanged restart count, pending mute, stale and
+competing configurations, poisoned cleanup, original setup expiry, stop and
+observation loss, and acknowledgement after expiry. Pinned Rust formatting and
+whitespace checks pass. These new Rust tests have not yet executed in the full
+CLI: current workspace checking is blocked in the unchanged pinned Asupersync
+build by the shared environment's resource limits. The earlier executed-scope
+results above do not count as qualification of this new replacement behavior.

@@ -29,6 +29,8 @@ fn fixture(
         image: Some(PathBuf::from("/unused-fixture")),
         origin,
         job: Some(job),
+        pending: None,
+        setup_until: None,
         current: Some((73, offer())),
         last: Some(offer().generation),
         ended: false,
@@ -153,7 +155,9 @@ fn reset_cannot_spawn_a_replacement_for_an_unretired_native_owner() {
     output.reset();
     let mut next = offer();
     next.generation = AudioGeneration::from_raw(8);
-    assert!(output.configure(73, next).is_err());
+    output.configure(73, next).unwrap();
+    assert!(output.pending.is_some());
+    assert!(Arc::ptr_eq(&output.job.as_ref().unwrap().shared, &shared));
     assert!(
         Job::spawn(&slot, Arc::new(Shared::new(0)), |_, _, _| {
             panic!("second worker must not start")
@@ -191,7 +195,7 @@ fn queued_ack_is_not_success_until_the_session_accepts_the_exact_bytes() {
     // until the test releases it.
     let (release, released) = mpsc::sync_channel::<()>(1);
     let (mut output, shared, _) = fixture(move |shared, _, replies| {
-        let accepted = forward_ack(shared, origin, &replies, &ack_record()).is_ok();
+        let accepted = forward_ack(shared, origin, origin + SETUP, &replies, &ack_record()).is_ok();
         result.send(accepted).unwrap();
         let _ = released.recv_timeout(Duration::from_secs(5));
         true
@@ -229,7 +233,7 @@ fn failed_transport_acceptance_never_unblocks_playback_as_acknowledged() {
     let (result, completion) = mpsc::sync_channel(1);
     let (mut output, shared, _) = fixture(move |shared, _, replies| {
         result
-            .send(forward_ack(shared, origin, &replies, &ack_record()).is_ok())
+            .send(forward_ack(shared, origin, origin + SETUP, &replies, &ack_record()).is_ok())
             .unwrap();
         true
     });
@@ -410,3 +414,5 @@ fn retirement_collects_final_pcm_and_faults_before_replacement() {
 }
 
 mod overflow;
+
+mod replacement;
