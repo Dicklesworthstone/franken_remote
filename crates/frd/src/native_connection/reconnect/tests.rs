@@ -852,3 +852,6 @@ fn stalled_cleanup_has_exclusive_deadline_and_cannot_leave_a_live_context() {
         assert!(cx.checkpoint().is_err());
     });
 }
+
+#[path = "tests/offers.rs"]
+mod offer_policy;

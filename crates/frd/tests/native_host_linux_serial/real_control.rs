@@ -197,18 +197,20 @@ serve(event, command, idle)
 const VIEWER_DRIVER: &str = r#"
 TITLE = b"FrankenRemote"
 CAPTURE_TITLE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control"
+VIEW_ONLY_TITLE = b"FrankenRemote - View only - F8 requests control"
+VIEW_ONLY_UNAVAILABLE = b"FrankenRemote - View only - F8 unavailable"
 x.XSelectInput(d, root, 1 << 19)
 x.XSync(d, 0)
 state = {"window": 0}
 def event(e):
-    if e.type == 19 and title(e.map.window) == TITLE:
+    if e.type == 19 and title(e.map.window) in (TITLE, VIEW_ONLY_TITLE, VIEW_ONLY_UNAVAILABLE):
         x.XSetInputFocus(d, e.map.window, 2, 0)
         x.XSync(d, 0)
         state["window"] = e.map.window
         say("FOCUSED", e.map.window)
 def command(cmd):
     if cmd[0] == "window":
-        found = [f for name in (TITLE, CAPTURE_TITLE) for f in mapped(name)
+        found = [f for name in (TITLE, CAPTURE_TITLE, VIEW_ONLY_TITLE, VIEW_ONLY_UNAVAILABLE) for f in mapped(name)
                  if f[0] == state["window"]]
         say("WIN", *(found[0] if found else ("none",)))
         return

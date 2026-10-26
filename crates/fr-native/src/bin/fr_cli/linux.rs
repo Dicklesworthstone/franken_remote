@@ -516,7 +516,8 @@ fn completed(
     crate::closure::preserve(result, close_outcome(application)).map_err(|mut failure| {
         failure.earlier = progress.ended.before(progress.attempts);
         if let Some(control) = progress.control {
-            failure.control_history = Some(Box::leak(Box::new(control_history(progress, control))));
+            failure.control_history =
+                Some(Box::leak(Box::new(control_history(progress, &control))));
         }
         if let Some(downloads) = &progress.downloads {
             downloads.summary().preserve(&mut failure);
@@ -623,7 +624,7 @@ fn completed_result(
         if error == reconnect::Failure::Notification
             && let Some(named) = progress
                 .control
-                .and_then(|control| control.cleanup)
+                .and_then(|control| control.latest_cleanup())
                 .and_then(control_retry_stop)
         {
             return Err(named);
@@ -773,6 +774,31 @@ struct Interface {
 }
 #[cfg(feature = "linux-desktop")]
 impl Ui for Interface {
+    fn offer(&mut self, _: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        let mut offer = original.clone();
+        if self
+            .progress
+            .borrow()
+            .control
+            .as_ref()
+            .is_some_and(|control| control.requested)
+        {
+            // The original source selections and receive consent were spent.
+            // Keep a control-capable session for a NEW local input decision,
+            // without advertising file lanes that have no fresh local owner.
+            offer.capabilities.retain(|capability| {
+                !matches!(
+                    capability.name.as_str(),
+                    fr_wire::attachment::FILES_CAPABILITY
+                        | fr_wire::files::CAPABILITY
+                        | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+                        | fr_wire::files::DOWNLOAD_CAPABILITY
+                        | fr_wire::files::DUPLEX_CAPABILITY
+                )
+            });
+        }
+        Ok(offer)
+    }
     fn choose(&mut self, _: u8, catalog: &Catalog) -> Result<Option<u128>, CallbackError> {
         let selected = self.display.select(catalog);
         if selected.is_none() {
@@ -949,7 +975,7 @@ fn completion_with_lease(
     lease: Option<fr_wire::lease_revoked::Revoked>,
 ) -> String {
     if let Some(control) = progress.control {
-        return control_completion(progress, control, json, closure, lease);
+        return control_completion(progress, &control, json, closure, lease);
     }
     let audio = audio_completion(progress, json);
     if json {
@@ -1096,7 +1122,7 @@ fn audio_completion(progress: &Progress, json: bool) -> String {
 #[cfg(feature = "linux-desktop")]
 fn control_completion(
     progress: &Progress,
-    control: control::Counters,
+    control: &control::Counters,
     json: bool,
     closure: Option<crate::closure::Report>,
     lease: Option<fr_wire::lease_revoked::Revoked>,
@@ -1145,7 +1171,7 @@ fn control_completion(
 /// exchange. Retain the same bounded projection when a later retry fails.
 #[cfg(feature = "linux-desktop")]
 #[allow(clippy::too_many_lines)] // One bounded history projection keeps both output formats aligned.
-fn control_history(progress: &Progress, control: control::Counters) -> crate::ControlHistory {
+fn control_history(progress: &Progress, control: &control::Counters) -> crate::ControlHistory {
     let files = progress
         .files
         .as_ref()
@@ -1206,12 +1232,13 @@ fn control_history(progress: &Progress, control: control::Counters) -> crate::Co
         String::new()
     } else {
         format!(
-            " Viewing reconnected {} time(s) without another control request; final attempt mode {}.",
+            " Viewing reconnected {} time(s), each initially without control; final attempt mode {}.",
             control.viewing_reconnects,
             control.mode.name()
         )
     };
-    crate::ControlHistory {
+    let fresh = control.fresh_history();
+    let mut history = crate::ControlHistory {
         json: format!(
             ",\"last_attempt_mode\":\"{}\",\"viewing_reconnects\":{},\"control_request_attempt\":{},\"control_attempt_end\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{granted},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{},\"control_close_exchange\":{},\"control_lease_report\":{}{}",
             control.mode.name(),
@@ -1261,7 +1288,10 @@ fn control_history(progress: &Progress, control: control::Counters) -> crate::Co
             )),
             files.text(),
         ),
-    }
+    };
+    history.json.push_str(&fresh.json);
+    history.text.push_str(&fresh.text);
+    history
 }
 #[cfg(test)]
 mod tests {

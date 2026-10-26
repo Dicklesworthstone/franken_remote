@@ -250,3 +250,90 @@ fn cleanup_summary_is_informational_and_keeps_the_original_stop_on_failure() {
         assert_eq!(summary.failure, session.cleanup_failure());
     }
 }
+
+#[derive(Default)]
+struct OfferUi {
+    seen: Vec<u8>,
+    refuse: bool,
+}
+impl Ui for OfferUi {
+    fn offer(&mut self, attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        self.seen.push(attempt);
+        if self.refuse {
+            return Err(CallbackError);
+        }
+        let mut narrowed = original.clone();
+        narrowed
+            .capabilities
+            .retain(|capability| capability.required);
+        Ok(narrowed)
+    }
+    fn choose(&mut self, _: u8, _: &Catalog) -> Result<Option<u128>, CallbackError> {
+        Ok(None)
+    }
+    fn approval(&mut self, _: u8, _: ApprovalNotice) -> Result<(), CallbackError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn default_ui_offer_is_unchanged_and_native_forwarding_creates_no_owner() {
+    let original = fr_client::native::observation_offer_with_audio();
+    assert_eq!(
+        Ui::offer(&mut SummaryUi::default(), 1, &original),
+        Ok(original.clone())
+    );
+    let mut session = Session::new(
+        Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap(),
+        ObserverPolicy::default(),
+        Mode::Observe,
+        OfferUi::default(),
+    );
+    let narrowed = Application::offer(&mut session, 2, &original).unwrap();
+    let mut expected = original.clone();
+    expected
+        .capabilities
+        .retain(|capability| capability.required);
+    assert_eq!(narrowed, expected);
+    assert!(narrowed.capabilities.len() < original.capabilities.len());
+    assert_eq!(session.ui.seen, [2]);
+    assert_eq!(session.last_attempt, 0);
+    assert!(session.desktop.is_none());
+    assert!(!session.opened);
+    assert!(session.cleanup.is_none());
+
+    session.ui.refuse = true;
+    assert_eq!(
+        Application::offer(&mut session, 3, &original),
+        Err(CallbackError)
+    );
+    assert_eq!(session.ui.seen, [2, 3]);
+    assert!(session.desktop.is_none());
+}
+
+#[test]
+fn offer_forwarding_cannot_bypass_old_native_ownership_or_attempt_bounds() {
+    let original = fr_client::native::observation_offer();
+    let mut session = Session::new(
+        Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap(),
+        ObserverPolicy::default(),
+        Mode::Observe,
+        OfferUi::default(),
+    );
+    session.last_attempt = 4;
+    for attempt in [0, 1, 4, 33] {
+        assert_eq!(
+            Application::offer(&mut session, attempt, &original),
+            Err(CallbackError)
+        );
+    }
+    session.desktop = Some(Desktop::new(session.configuration(5).unwrap()));
+    for attempt in [5, 6] {
+        assert_eq!(
+            Application::offer(&mut session, attempt, &original),
+            Err(CallbackError)
+        );
+    }
+    assert!(session.ui.seen.is_empty());
+    assert!(session.desktop.is_some());
+}

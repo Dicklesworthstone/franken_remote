@@ -1,5 +1,6 @@
 //! The same shipped client and identity through a kernel route failure.
 //! Tailnet admission and displays are the existing namespace fixtures.
+use super::super::real_files::Dir;
 use super::super::real_media::{near, window_pixels};
 use super::*;
 
@@ -83,21 +84,22 @@ impl Drop for RouteFailure {
     }
 }
 
-#[test]
-#[ignore = "explicit isolated user/mount/network namespace; kernel route failure; two Xvfb displays; real input agent"]
-fn transient_control_transport_loss_reconnects_fresh_viewing_without_reacquiring_input() {
-    let mut s = Controlled::start_all(
+fn start_reconnect(files: Option<frd::native_files::Directory>, send: &[PathBuf]) -> Controlled {
+    Controlled::start_all(
         false,
         false,
-        None,
-        &[],
+        files,
+        send,
         None,
         InputSettings {
             reconnect: true,
             ..InputSettings::default()
         },
         None,
-    );
+    )
+}
+
+fn reconnect_viewing(mut s: Controlled) -> Controlled {
     let process = s.client.id();
     let first_maps = s.driver.notices("FOCUSED ").len();
     let listening = s
@@ -189,7 +191,134 @@ fn transient_control_transport_loss_reconnects_fresh_viewing_without_reacquiring
         before,
         "viewing-only input reached the host"
     );
-    finish_viewing_reconnect(s);
+    s
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; kernel route failure; two Xvfb displays; real input agent"]
+fn transient_control_transport_loss_reconnects_fresh_viewing_without_reacquiring_input() {
+    finish_viewing_reconnect(reconnect_viewing(start_reconnect(None, &[])));
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; kernel route failure; two Xvfb displays; real input agent"]
+fn a_new_native_gesture_requests_fresh_control_after_viewing_reconnect() {
+    let (session, upload) = published_upload();
+    let mut s = reconnect_viewing(session);
+    let process = s.client.id();
+    let window = s.window.0;
+    let before = host_events(&mut s.observer).len();
+    let f8: u32 = s.observer.ask("keycode 0xffc5")[1].parse().unwrap();
+    s.viewer("tap 0xffc5");
+    assert!(
+        s.pointer_follows((180, 140), Duration::from_secs(15)),
+        "the explicit fresh request never gained control: {}",
+        s.daemon.dump()
+    );
+    assert!(indicator(&mut s.observer).is_some());
+    assert_eq!(s.client.id(), process);
+    assert_eq!(
+        s.viewer_window().0,
+        window,
+        "request replaced the viewing window"
+    );
+    assert!(
+        !host_events(&mut s.observer)[before..]
+            .iter()
+            .any(|event| event.1 == f8),
+        "the local control shortcut leaked into the fresh lease"
+    );
+    let key: u32 = s.observer.ask("keycode 0x64")[1].parse().unwrap();
+    s.viewer("tap 0x64");
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            host_events(&mut s.observer)[before..]
+                .iter()
+                .any(|event| (event.0, event.1, event.3) == (2, key, false))
+        }),
+        "newly typed input did not reach the host"
+    );
+
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["last_attempt_mode"], "explicit_control", "{report}");
+    assert_eq!(report["control_request_attempt"], 1, "{report}");
+    assert_eq!(
+        report["control_attempt_end"], "native_session_failed",
+        "{report}"
+    );
+    let fresh = report["explicit_control_requests"].as_array().unwrap();
+    assert_eq!(fresh.len(), 1, "{report}");
+    assert!(fresh[0]["attempt"].as_u64().unwrap() >= 2, "{report}");
+    assert_eq!(fresh[0]["granted"], true, "{report}");
+    assert!(
+        fresh[0]["input_submitted_to_os"].as_u64().unwrap() > 0,
+        "{report}"
+    );
+    assert_eq!(report["clipboard_requested"], false, "{report}");
+    upload.assert_retained(&report);
+    assert_eq!(report["cleanup_confirmed"], true, "{report}");
+    s.daemon.finish();
+}
+
+/// Keep the selected source and destination owned across both connections.
+struct SelectedUpload {
+    _source: Dir,
+    destination: Dir,
+    bytes: Vec<u8>,
+}
+fn published_upload() -> (Controlled, SelectedUpload) {
+    let source = Dir::new("recontrol-source");
+    let destination = Dir::new("recontrol-drop");
+    let path = source.0.join("once.bin");
+    let bytes = b"selected before the original control request\n".repeat(1024);
+    fs::write(&path, &bytes).unwrap();
+    let mut session = start_reconnect(Some(destination.directory()), std::slice::from_ref(&path));
+    assert!(
+        eventually(Duration::from_secs(30), || {
+            session.alive();
+            fs::read(destination.0.join("once.bin")).ok().as_ref() == Some(&bytes)
+        }),
+        "original upload never published its exact bytes: {}",
+        session.daemon.dump()
+    );
+    // Allow the original publication receipt to return before the route loss.
+    // The final report must retain that durable receipt, not invent it from
+    // the independent filesystem observation above.
+    thread::sleep(Duration::from_secs(2));
+    // Reusing the original source is now invalid even if a later owner tries.
+    fs::write(&path, b"the old selection changed after publication").unwrap();
+    (
+        session,
+        SelectedUpload {
+            _source: source,
+            destination,
+            bytes,
+        },
+    )
+}
+impl SelectedUpload {
+    fn assert_retained(&self, report: &serde_json::Value) {
+        assert_eq!(report["files_requested"], 1, "{report}");
+        assert_eq!(
+            report["files_sent"],
+            serde_json::json!([{"index": 0, "bytes": self.bytes.len(), "durable": true}]),
+            "{report}"
+        );
+        assert_eq!(report["files_refused"], serde_json::json!([]), "{report}");
+        assert_eq!(report["files_absence"], serde_json::Value::Null, "{report}");
+        assert_eq!(self.destination.entries(), ["once.bin"]);
+        assert_eq!(
+            fs::read(self.destination.0.join("once.bin")).unwrap(),
+            self.bytes
+        );
+    }
 }
 
 fn finish_viewing_reconnect(mut s: Controlled) {

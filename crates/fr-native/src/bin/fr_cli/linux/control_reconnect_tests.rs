@@ -205,7 +205,7 @@ fn a_later_view_close_cannot_replace_the_original_control_exchange_or_input_resu
     let control = progress.control.unwrap();
     assert_eq!(control.cleanup, Some(original));
     assert_eq!(control.ended, Some(Err(transient())));
-    let json = control_completion(&progress, control, true, Some(final_close.into()), None);
+    let json = control_completion(&progress, &control, true, Some(final_close.into()), None);
     let output: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(output["last_attempt_mode"], "view_only");
     assert_eq!(output["viewing_reconnects"], 1);
@@ -227,7 +227,7 @@ fn a_later_view_close_cannot_replace_the_original_control_exchange_or_input_resu
         output["close_exchange"]["host_report"]["reason"],
         "client_requested"
     );
-    let text = control_completion(&progress, control, false, Some(final_close.into()), None);
+    let text = control_completion(&progress, &control, false, Some(final_close.into()), None);
     assert!(
         text.contains("Original control close:") && text.contains("Final connection close:"),
         "{text}"
@@ -282,7 +282,7 @@ fn an_authenticated_host_close_also_vetoes_a_transport_retry() {
     );
     assert_eq!(ui.status(reconnecting()), Err(CallbackError));
     let progress = ui.progress.borrow();
-    let history = control_history(&progress, progress.control.unwrap());
+    let history = control_history(&progress, &progress.control.unwrap());
     assert!(
         history.text.contains("pending=4, uncertain=2"),
         "{}",
@@ -383,4 +383,75 @@ fn late_window_close_after_cleaning_vetoes_retry_without_hiding_cleanup_failure(
         .unwrap_err();
         assert_eq!(failure.code, "native_cleanup_incomplete");
     }
+}
+
+#[test]
+fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() {
+    for clipboard in [false, true] {
+        for audio in [false, true] {
+            for original in [
+                fr_client::native::control_offer_with_auxiliary(clipboard, true, audio),
+                fr_client::native::control_offer_with_download(clipboard, audio),
+                fr_client::native::control_offer_with_duplex(clipboard, audio),
+            ] {
+                let mut ui = interface();
+                ui.status(Status::Connecting { attempt: 1 }).unwrap();
+                assert_eq!(ui.offer(1, &original).unwrap(), original);
+                // A pre-request retry has not spent the file selection.
+                ui.status(Status::Connecting { attempt: 2 }).unwrap();
+                assert_eq!(ui.offer(2, &original).unwrap(), original);
+                {
+                    let mut progress = ui.progress.borrow_mut();
+                    let control = progress.control.as_mut().unwrap();
+                    control.spend_request();
+                    control.granted = true;
+                    control.results = 5;
+                    control.submitted = 4;
+                }
+                ui.status(Status::Cleaning {
+                    attempt: 2,
+                    failure: Some(transient()),
+                })
+                .unwrap();
+                ui.status(Status::Connecting { attempt: 3 }).unwrap();
+                let before = ui.progress.borrow().control.unwrap();
+                let narrowed = ui.offer(3, &original).unwrap();
+                assert_eq!(ui.progress.borrow().control.unwrap(), before);
+                assert_eq!(before.mode, control::AttemptMode::ViewingOnly);
+                assert_eq!(before.request_attempt, Some(2));
+                assert_eq!(before.submitted, 4);
+                assert_eq!(before.ended, Some(Err(transient())));
+                assert!(narrowed.validate().is_ok());
+                assert_eq!(narrowed.role, fr_wire::negotiation::Role::RequestControl);
+                assert_eq!(narrowed.profile, original.profile);
+                assert_eq!(narrowed.profile_version, original.profile_version);
+                assert_eq!(narrowed.versions, original.versions);
+                assert_eq!(narrowed.limits, original.limits);
+                for capability in &original.capabilities {
+                    let file = [
+                        fr_wire::attachment::FILES_CAPABILITY,
+                        fr_wire::files::CAPABILITY,
+                        fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+                        fr_wire::files::DOWNLOAD_CAPABILITY,
+                        fr_wire::files::DUPLEX_CAPABILITY,
+                    ]
+                    .contains(&capability.name.as_str());
+                    assert_eq!(narrowed.capabilities.contains(capability), !file);
+                    if capability.required {
+                        assert!(!file);
+                    }
+                }
+                assert_eq!(ui.offer(4, &original).unwrap(), narrowed);
+            }
+        }
+    }
+}
+
+#[test]
+fn observation_reconnect_keeps_its_original_optional_audio_offer() {
+    let mut ui = interface();
+    ui.progress.borrow_mut().control = None;
+    let original = fr_client::native::observation_offer_with_audio();
+    assert_eq!(ui.offer(1, &original).unwrap(), original);
+    assert_eq!(ui.offer(32, &original).unwrap(), original);
 }

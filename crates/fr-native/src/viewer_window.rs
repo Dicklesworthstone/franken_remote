@@ -5,6 +5,7 @@
 //! and the existing input capture adapter. Mapping is not optical visibility,
 //! observation permission, or an input grant. The local clipboard-space policy
 //! may choose a smaller initial target; later geometry changes remain terminal.
+mod choice;
 use fr_media::worker::{Role, presentation::X11Target};
 use frd::{session_startup::StreamingViewerControl, worker::Launch};
 use std::{
@@ -49,6 +50,10 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn fr_viewer_window_close(handle: *mut c_void);
     fn fr_viewer_window_next(handle: *mut c_void, kind: *mut u32) -> c_int;
+    fn fr_viewer_window_control_offer(handle: *mut c_void, enabled: c_int) -> c_int;
+    fn fr_viewer_window_control_released(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_control_age(handle: *mut c_void) -> u32;
+    fn fr_viewer_window_control_reset(handle: *mut c_void);
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -105,6 +110,7 @@ struct Shared {
     session: StreamingViewerControl,
     state: AtomicU8,
     orderly_close: AtomicU8,
+    control_choice: choice::Choice,
     target: OnceLock<X11Target>,
     width: u32,
     height: u32,
@@ -145,7 +151,8 @@ impl Shared {
         true
     }
 }
-/// A content-free terminal stop. It cannot change the drawable or resume input.
+/// Content-free local window controls. An explicit gesture is only user intent;
+/// this handle cannot change the drawable, grant a lease or resume old input.
 #[derive(Clone)]
 pub struct WindowControl(Arc<Shared>);
 impl WindowControl {
@@ -168,6 +175,21 @@ impl WindowControl {
             1 => Status::Mapped,
             value => Status::Stopped(StopReason::from_state(value).expect("private state")),
         }
+    }
+    /// Offer F8 on this fresh viewing window. It never grants input; the UI must
+    /// consume a fresh gesture and use the session's ordinary control request.
+    pub fn enable_control_request(&self) -> Result<(), Error> {
+        if self.status() != Status::Mapped || !self.0.control_choice.enable() {
+            return Err(Error::NotReady);
+        }
+        Ok(())
+    }
+    /// Missing evidence discards this gesture instead of deferring it until a
+    /// future frame or focus event. Trying again needs another physical gesture.
+    pub fn take_control_request(&self, ready: bool) -> bool {
+        self.0
+            .control_choice
+            .take(ready && self.status() == Status::Mapped)
     }
     /// Only the observation-only Desktop service may arm this policy, after
     /// decoder startup. Default, control, bootstrap and direct stop stay terminal.
@@ -271,6 +293,7 @@ impl ViewerWindow {
             session,
             state: AtomicU8::new(0),
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
+            control_choice: choice::Choice::default(),
             target: OnceLock::new(),
             width,
             height,
@@ -429,12 +452,123 @@ fn open_native<'a>(shared: &'a Shared, display: &CString) -> Option<Native<'a>> 
     // these exact dimensions; neither reconnect nor a later WM event replaces it.
     Some(native)
 }
+/// Local UI only. No intent mutex is held across foreign XCB calls.
+#[derive(Default)]
+struct ControlGesture {
+    armed: bool,
+    barrier_at: Option<Instant>,
+}
+impl ControlGesture {
+    fn offer(&mut self, native: &Native<'_>) -> Result<(), ()> {
+        if !self.armed && native.shared.control_choice.offered() {
+            // SAFETY: the sole window thread owns this handle and its event mask.
+            match unsafe { fr_viewer_window_control_offer(native.handle.as_ptr(), 1) } {
+                1 => self.armed = true,
+                0 => native.shared.control_choice.unavailable(),
+                _ => return Err(()),
+            }
+        }
+        Ok(())
+    }
+    fn invalidate(&mut self, native: &Native<'_>, remap: bool) -> Result<(), ()> {
+        self.barrier_at = None;
+        native.shared.control_choice.invalidate();
+        if remap && self.armed {
+            // SAFETY: discard this shortcut mapping, never change the session.
+            if unsafe { fr_viewer_window_control_offer(native.handle.as_ptr(), 0) } != 1 {
+                return Err(());
+            }
+            self.armed = false;
+        }
+        Ok(())
+    }
+    fn finish(&mut self, native: &Native<'_>, chosen: bool, fresh: bool) -> Result<(), ()> {
+        if !fresh {
+            // SAFETY: a parked batch cannot arm a future release from an old press.
+            unsafe { fr_viewer_window_control_reset(native.handle.as_ptr()) };
+            self.barrier_at = None;
+        }
+        if !chosen || !self.armed || !fresh {
+            return Ok(());
+        }
+        let before = self.barrier_at.take().ok_or(())?;
+        // SAFETY: fixed scalars from the original owner after the whole batch.
+        let age = unsafe { fr_viewer_window_control_age(native.handle.as_ptr()) };
+        let Some(captured) = before.checked_sub(Duration::from_millis(u64::from(age))) else {
+            return Ok(());
+        };
+        if captured.elapsed() >= choice::MAX_AGE {
+            return Ok(());
+        }
+        // Native age comes from the post-release server barrier, never dequeue.
+        // SAFETY: current focus and real held keys are checked independently.
+        match unsafe { fr_viewer_window_control_released(native.handle.as_ptr()) } {
+            0 => return Ok(()),
+            1 => {}
+            _ => return Err(()),
+        }
+        // The server acknowledges disabling this shortcut before the runtime can
+        // request a new lease. The input owner inherits no event subscription.
+        // SAFETY: same exclusive native owner and handle.
+        if unsafe { fr_viewer_window_control_offer(native.handle.as_ptr(), 0) } != 1 {
+            return Err(());
+        }
+        self.armed = false;
+        if native.shared.live() {
+            native.shared.control_choice.publish(captured);
+        }
+        Ok(())
+    }
+}
+fn lifecycle_event(
+    shared: &Shared,
+    mapped: &mut bool,
+    close_started: &mut Option<Instant>,
+    kind: u32,
+) -> Option<StopReason> {
+    match kind {
+        0 => None,
+        1 => {
+            *mapped = true;
+            None
+        }
+        2 => Some(StopReason::Hidden),
+        3 => Some(StopReason::WindowLost),
+        4 => Some(StopReason::GeometryChanged),
+        5 if *mapped && shared.orderly_close.load(Ordering::Acquire) != CLOSE_DISARMED => {
+            // The first WM request fixes the local deadline. Repeated
+            // requests never reset it. Keep the drawable owned until the
+            // original observation loop retires its decoder; all other
+            // negative native events and direct stop still fence NOW.
+            if close_started.is_none() {
+                *close_started = Some(Instant::now());
+                shared
+                    .orderly_close
+                    .store(CLOSE_REQUESTED, Ordering::Release);
+                shared.notify();
+            }
+            None
+        }
+        5 => {
+            // Publish native WM intent before stop cancels the session:
+            // another thread may observe cancellation before User.
+            // This unarmed path still stops immediately, with no grace.
+            shared
+                .orderly_close
+                .store(CLOSE_REQUESTED, Ordering::Release);
+            Some(StopReason::User)
+        }
+        _ => Some(StopReason::NativeFailure),
+    }
+}
 fn run(shared: &Shared, display: &CString, started: Instant) {
     let Some(native) = open_native(shared, display) else {
         return;
     };
     let mut mapped = false;
     let mut close_started: Option<Instant> = None;
+    let mut gesture = ControlGesture::default();
+    let mut previous_turn = Instant::now();
     loop {
         if !shared.live() {
             return;
@@ -447,6 +581,14 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             shared.stop(StopReason::MappingExpired);
             return;
         }
+        let turn = Instant::now();
+        let fresh = turn.duration_since(previous_turn) < choice::MAX_AGE;
+        if gesture.offer(&native).is_err() {
+            shared.stop(StopReason::NativeFailure);
+            return;
+        }
+        let mut chosen = false;
+        let mut invalidated = false;
         let mut drained = false;
         for _ in 0..TURN_EVENTS {
             if !shared.live() {
@@ -466,38 +608,23 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
                 }
             }
             let reason = match kind {
-                0 => None,
-                1 => {
-                    mapped = true;
+                6 => {
+                    chosen = true;
                     None
                 }
-                2 => Some(StopReason::Hidden),
-                3 => Some(StopReason::WindowLost),
-                4 => Some(StopReason::GeometryChanged),
-                5 if mapped && shared.orderly_close.load(Ordering::Acquire) != CLOSE_DISARMED => {
-                    // The first WM request fixes the local deadline. Repeated
-                    // requests never reset it. Keep the drawable owned until the
-                    // original observation loop retires its decoder; all other
-                    // negative native events and direct stop still fence NOW.
-                    if close_started.is_none() {
-                        close_started = Some(Instant::now());
-                        shared
-                            .orderly_close
-                            .store(CLOSE_REQUESTED, Ordering::Release);
-                        shared.notify();
-                    }
+                7 | 8 => {
+                    chosen = false;
+                    invalidated = true;
+                    gesture
+                        .invalidate(&native, kind == 8)
+                        .err()
+                        .map(|()| StopReason::NativeFailure)
+                }
+                9 => {
+                    gesture.barrier_at = Some(turn);
                     None
                 }
-                5 => {
-                    // Publish native WM intent before stop cancels the session:
-                    // another thread may observe cancellation before User.
-                    // This unarmed path still stops immediately, with no grace.
-                    shared
-                        .orderly_close
-                        .store(CLOSE_REQUESTED, Ordering::Release);
-                    Some(StopReason::User)
-                }
-                _ => Some(StopReason::NativeFailure),
+                _ => lifecycle_event(shared, &mut mapped, &mut close_started, kind),
             };
             if let Some(reason) = reason {
                 shared.stop(reason);
@@ -508,6 +635,14 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             shared.stop(StopReason::EventFlood);
             return;
         }
+        if gesture
+            .finish(&native, chosen, fresh && !invalidated)
+            .is_err()
+        {
+            shared.stop(StopReason::NativeFailure);
+            return;
+        }
+        previous_turn = turn;
         if mapped
             && shared.live()
             && shared

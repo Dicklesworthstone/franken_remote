@@ -18,9 +18,9 @@ use frd::native_files::{Directory, Limits};
 use std::{thread, time::Instant};
 
 /// A private directory on the namespace's own /run tmpfs (root-owned there).
-struct Dir(PathBuf);
+pub(super) struct Dir(pub(super) PathBuf);
 impl Dir {
-    fn new(label: &str) -> Self {
+    pub(super) fn new(label: &str) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = PathBuf::from(format!(
             "/run/fr-files-{label}-{}-{}",
@@ -31,7 +31,7 @@ impl Dir {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
         Self(dir)
     }
-    fn entries(&self) -> Vec<String> {
+    pub(super) fn entries(&self) -> Vec<String> {
         let mut names: Vec<_> = fs::read_dir(&self.0)
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -58,7 +58,7 @@ impl Dir {
             .collect()
     }
     /// The operator's validated, descriptor-pinned drop directory.
-    fn directory(&self) -> Directory {
+    pub(super) fn directory(&self) -> Directory {
         Directory::open(&self.0, Limits::default()).unwrap()
     }
 }

@@ -1,6 +1,7 @@
 //! Bounded observation reconnection on the canonical installed-tailnet client.
 //! No input owner, old action, decoder reference, approval or lease crosses attempts.
 mod native;
+mod offer;
 pub use native::{native_control_view, native_control_view_with_setup, native_view};
 
 use super::{Client, Configuration, Error as ConnectionError};
@@ -124,9 +125,18 @@ impl std::error::Error for CallbackError {}
 /// input. `cleanup` is mandatory even if discovery failed before `run` started.
 /// Store a started `NativeObserver` in this owner and call its `reap_media` there.
 /// Return Err if cleanup cannot prove the old worker is gone: no retry follows.
-/// Status callbacks must be bounded/nonblocking; Err stops the entire operation.
+/// Status and offer callbacks must be bounded/nonblocking; Err stops the operation.
 pub trait Application {
     type Output;
+    /// Choose this attempt's advertisement after Connecting and before any
+    /// discovery or dial. Only omission of OPTIONAL capabilities is accepted:
+    /// required entries and every other field must remain exactly unchanged.
+    /// The default preserves the original offer. This cannot grant authority,
+    /// renew consent or replay an operation; no native work belongs here.
+    /// Refusal or invalid changes still run this attempt's normal cleanup.
+    fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        Ok(original.clone())
+    }
     fn run(
         &mut self,
         attempt: u8,
@@ -254,6 +264,9 @@ impl Client {
                         Owned {
                             cx: session.clone(),
                             inner: Box::pin(async {
+                                let selected_offer = offer::prepare(application, attempt, &offer)?;
+                                cx.checkpoint().map_err(|_| Failure::Cancelled)?;
+                                session.checkpoint().map_err(|_| Failure::Cancelled)?;
                                 if identity.is_none() {
                                     identity = Some(
                                         self.api.peer_target(&session, selector).await.map_err(
@@ -266,7 +279,7 @@ impl Client {
                                     viewing.clone(),
                                     selector,
                                     cfg,
-                                    offer.clone(),
+                                    selected_offer,
                                     identity.as_ref(),
                                     |viewer| async {
                                         notify(application, Status::Authenticated { attempt })?;

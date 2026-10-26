@@ -1,8 +1,8 @@
-//! `fr connect --control`: at most ONE explicit control request per `fr`
-//! invocation. Passing `--control` is the local user's decision; nothing here
-//! retries a refused or expired request, reacquires control after loss, or
-//! carries input, a lease or held state into a later connection attempt. A
-//! transient failure can reconnect viewing after confirmed native cleanup.
+//! `fr connect --control` spends the command-line control decision once.
+//! A transient failure can reconnect viewing after confirmed native cleanup.
+//! A fresh native F8 gesture may request a NEW lease on that recovered viewing
+//! session; nothing retries a refused request or carries old input, held state,
+//! files, clipboard consent or a lease into the new request.
 //!
 //! Visibility witness, stated rather than overclaimed: this X11 slice has no
 //! compositor-independent optical proof. A frame is reported visible only when
@@ -20,6 +20,7 @@
 //! local display, a separate XCB connection). Completion reports content-free
 //! tallies only: whether it became active, how many host items were published
 //! to the local CLIPBOARD, or the typed reason it never became active.
+mod renewal;
 use fr_client::input::{self, ResultEvent, viewport::SurfaceRect};
 use fr_core::{
     input::{DesktopPoint, InputBounds},
@@ -227,6 +228,9 @@ pub(super) struct Counters {
     pub(super) cleanup: Option<CleanupSummary>,
     /// Some when this controller's clipboard policy is enabled.
     pub(super) clipboard: Option<ClipboardCounters>,
+    /// One slot per bounded connection attempt. Original report fields above
+    /// are never repurposed when the user makes another explicit local choice.
+    pub(super) fresh: [Option<renewal::Fresh>; renewal::MAX_ATTEMPTS],
 }
 impl Counters {
     pub(super) fn begin_attempt(&mut self, attempt: u8) {
@@ -252,10 +256,74 @@ impl Counters {
     pub(super) fn retain_cleanup(&mut self, attempt: u8, summary: CleanupSummary) {
         if self.request_attempt == Some(attempt) {
             self.cleanup = Some(summary);
+        } else if let Some(fresh) = self
+            .fresh
+            .iter_mut()
+            .flatten()
+            .find(|f| f.attempt == attempt)
+        {
+            fresh.cleanup = Some(summary);
         }
     }
+    /// The fresh local decision is spent before wire admission, just as the
+    /// command-line decision was. Neither outcome can authorize an automatic retry.
+    pub(super) fn spend_fresh_request(&mut self) -> Result<(), CallbackError> {
+        if self.mode != AttemptMode::ViewingOnly
+            || self
+                .request_attempt
+                .is_none_or(|first| self.current_attempt <= first)
+        {
+            return Err(CallbackError);
+        }
+        let slot = self
+            .current_attempt
+            .checked_sub(1)
+            .and_then(|n| self.fresh.get_mut(usize::from(n)))
+            .ok_or(CallbackError)?;
+        if slot.is_some() {
+            return Err(CallbackError);
+        }
+        *slot = Some(renewal::Fresh::new(self.current_attempt));
+        self.mode = AttemptMode::ExplicitControl;
+        Ok(())
+    }
+    fn current_fresh(&mut self) -> Option<&mut renewal::Fresh> {
+        self.fresh
+            .iter_mut()
+            .flatten()
+            .find(|f| f.attempt == self.current_attempt)
+    }
+    pub(super) fn latest_cleanup(&self) -> Option<CleanupSummary> {
+        self.fresh
+            .iter()
+            .rev()
+            .flatten()
+            .find_map(|f| f.cleanup)
+            .or(self.cleanup)
+    }
+    fn control_metrics(&mut self, viewer: &ControlledViewer) -> Result<(), CallbackError> {
+        let capabilities = viewer.granted_capabilities();
+        let (suspensions, suspended_us) = viewer.suspension_totals();
+        let dropped_aged = viewer.input_dropped_aged();
+        if let Some(fresh) = self.current_fresh() {
+            fresh.granted = true;
+            fresh.capabilities = Some(capabilities);
+            fresh.suspensions = suspensions;
+            fresh.suspended_us = suspended_us;
+            fresh.dropped_aged = dropped_aged;
+        } else if self.request_attempt == Some(self.current_attempt) {
+            self.granted = true;
+            self.capabilities = Some(capabilities);
+            self.suspensions = suspensions;
+            self.suspended_us = suspended_us;
+            self.dropped_aged = dropped_aged;
+        } else {
+            return Err(CallbackError);
+        }
+        Ok(())
+    }
     pub(super) fn retry_stopped(&self) -> bool {
-        self.cleanup.is_some_and(|summary| {
+        self.latest_cleanup().is_some_and(|summary| {
             summary.input_stop.is_some_and(|reason| {
                 !matches!(
                     reason,
@@ -272,6 +340,13 @@ impl Counters {
     }
     /// Count host-reported results by stage only. Duplicates are not new work.
     pub(super) fn result(&mut self, event: &ResultEvent) {
+        if let Some(fresh) = self.current_fresh() {
+            fresh.result(event);
+            return;
+        }
+        if self.request_attempt != Some(self.current_attempt) {
+            return;
+        }
         if let ResultEvent::Completed(result) | ResultEvent::Pointer(result) = event {
             self.results = self.results.saturating_add(1);
             if matches!(result.outcome, InputOutcome::SubmittedToOs) {
@@ -283,25 +358,29 @@ impl Counters {
     /// supervisor still owns error classification and cleanup-before-retry;
     /// allowing its retry restores viewing only, never another request.
     pub(super) fn cleaning(&mut self, failure: Option<Failure>) {
-        if self.requested {
+        if let Some(fresh) = self.current_fresh() {
+            fresh.ended.get_or_insert(failure.map_or(Ok(()), Err));
+        } else if self.request_attempt == Some(self.current_attempt) {
             self.ended.get_or_insert(failure.map_or(Ok(()), Err));
         }
     }
 }
 
-/// The local user's one control decision is consumed by the first request,
-/// including a request whose reply was lost. Later attempts can only view.
+/// The command-line decision is consumed once, even when its reply was lost.
+/// Every recovery starts viewing; only a fresh native gesture can change that.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttemptMode {
     #[default]
     Control,
     ViewingOnly,
+    ExplicitControl,
 }
 impl AttemptMode {
     pub(super) const fn name(self) -> &'static str {
         match self {
             Self::Control => "control_capable",
             Self::ViewingOnly => "view_only",
+            Self::ExplicitControl => "explicit_control",
         }
     }
 }
@@ -319,10 +398,14 @@ pub(super) struct Attempt {
 }
 impl Attempt {
     pub(super) fn new(desktop: &Desktop, mode: AttemptMode) -> Option<Self> {
+        let window = desktop.window()?;
+        if mode == AttemptMode::ViewingOnly {
+            window.enable_control_request().ok()?;
+        }
         Some(Self {
             mode,
             display: desktop.display()?,
-            window: desktop.window()?,
+            window,
             mapped: false,
             shown: None,
             attached: false,
@@ -427,6 +510,7 @@ impl Attempt {
                     .presentation()
                     .is_some_and(|p| p.stage == PresentationStage::SubmittedToCompositor);
                 if !submitted || self.window.status() != WindowStatus::Mapped {
+                    self.window.take_control_request(false);
                     return Ok(None);
                 }
                 if !self.mapped {
@@ -439,11 +523,15 @@ impl Attempt {
                     let result = view.visible(frame);
                     self.witness(frame, &result);
                 }
-                if self.mode == AttemptMode::Control
-                    && !counters.requested
-                    && view.evidence().is_ok()
-                {
+                let ready = view.evidence().is_ok();
+                if self.mode == AttemptMode::Control && !counters.requested && ready {
                     counters.spend_request();
+                    view.request_control().map_err(|_| CallbackError)?;
+                } else if self.mode == AttemptMode::ViewingOnly
+                    && self.window.take_control_request(ready)
+                {
+                    counters.spend_fresh_request()?;
+                    self.mode = AttemptMode::ExplicitControl;
                     view.request_control().map_err(|_| CallbackError)?;
                 }
                 Ok(None)
@@ -456,10 +544,7 @@ impl Attempt {
                 Ok(None)
             }
             InteractiveViewerState::Controlled(viewer) => {
-                counters.granted = true;
-                counters.capabilities = Some(viewer.granted_capabilities());
-                (counters.suspensions, counters.suspended_us) = viewer.suspension_totals();
-                counters.dropped_aged = viewer.input_dropped_aged();
+                counters.control_metrics(viewer)?;
                 if let Some(frame) = self.candidate(frame) {
                     // The controlled clock is already correlated; a refusal
                     // only withholds evidence and new input stays gated.
@@ -730,5 +815,112 @@ mod tests {
                 "{reason:?}"
             );
         }
+    }
+    fn result_event(lease: u128) -> ResultEvent {
+        use fr_core::ids::{InputLeaseId, RemoteSessionId};
+        use fr_wire::input_result::{InputResult, ResultBinding, SequenceSpace, Stage};
+        ResultEvent::Completed(InputResult {
+            binding: ResultBinding {
+                channel: 7,
+                session: RemoteSessionId::from_raw(9),
+                lease: InputLeaseId::from_raw(lease),
+            },
+            sequence: 1,
+            space: SequenceSpace::Action,
+            stage: Stage::SubmittedToOs,
+            outcome: InputOutcome::SubmittedToOs,
+            submitted_operations: 1,
+            unknown_next_operation: false,
+            reason: None,
+        })
+    }
+
+    #[test]
+    fn a_fresh_choice_keeps_original_effects_and_terminal_cleanup_separate() {
+        use fr_native::viewer_input::StopReason;
+        let mut counters = Counters::default();
+        counters.begin_attempt(1);
+        assert_eq!(counters.spend_fresh_request(), Err(CallbackError));
+        counters.spend_request();
+        counters.granted = true;
+        counters.result(&result_event(101));
+        let original = CleanupSummary {
+            disconnect: None,
+            control_disconnect: None,
+            input_stop: Some(StopReason::Local),
+            failure: None,
+        };
+        counters.retain_cleanup(1, original);
+        counters.cleaning(Some(Failure::Cancelled));
+
+        counters.begin_attempt(2);
+        assert_eq!(counters.opened(), AttemptMode::ViewingOnly);
+        // Unrequested later result callbacks cannot mutate the original report.
+        counters.result(&result_event(202));
+        assert_eq!((counters.results, counters.submitted), (1, 1));
+        counters.spend_fresh_request().unwrap();
+        assert_eq!(counters.spend_fresh_request(), Err(CallbackError));
+        counters.result(&result_event(202));
+        counters.result(&ResultEvent::Unretained);
+        let fresh_cleanup = CleanupSummary {
+            input_stop: Some(StopReason::FocusLost),
+            ..original
+        };
+        counters.retain_cleanup(2, fresh_cleanup);
+        counters.cleaning(None);
+        assert!(counters.retry_stopped());
+        assert_eq!(counters.latest_cleanup(), Some(fresh_cleanup));
+        assert_eq!(counters.cleanup, Some(original));
+        assert_eq!(counters.request_attempt, Some(1));
+        assert_eq!(counters.ended, Some(Err(Failure::Cancelled)));
+        assert_eq!((counters.results, counters.submitted), (1, 1));
+        let fresh = counters.current_fresh().unwrap();
+        assert_eq!((fresh.results, fresh.submitted), (1, 1));
+        assert_eq!(fresh.ended, Some(Ok(())));
+        let json: serde_json::Value = serde_json::from_str(&format!(
+            "{{\"original\":true{}}}",
+            counters.fresh_history().json
+        ))
+        .unwrap();
+        assert_eq!(json["explicit_control_requests"][0]["attempt"], 2);
+        assert_eq!(
+            json["explicit_control_requests"][0]["input_submitted_to_os"],
+            1
+        );
+    }
+
+    #[test]
+    fn fresh_request_history_is_bounded_by_the_real_reconnect_policy() {
+        use frd::native_connection::reconnect::Policy;
+        let mut counters = Counters::default();
+        counters.begin_attempt(1);
+        counters.spend_request();
+        for attempt in 2..=32 {
+            counters.begin_attempt(attempt);
+            assert_eq!(counters.opened(), AttemptMode::ViewingOnly);
+            counters.spend_fresh_request().unwrap();
+            assert_eq!(counters.mode, AttemptMode::ExplicitControl);
+            counters.cleaning(Some(Failure::Cancelled));
+        }
+        assert_eq!(counters.fresh.iter().flatten().count(), 31);
+        assert!(
+            Policy {
+                max_attempts: 32,
+                ..Policy::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            Policy {
+                max_attempts: 33,
+                ..Policy::default()
+            }
+            .validate()
+            .is_err()
+        );
+        counters.begin_attempt(33);
+        assert_eq!(counters.spend_fresh_request(), Err(CallbackError));
+        assert_eq!(counters.request_attempt, Some(1));
     }
 }

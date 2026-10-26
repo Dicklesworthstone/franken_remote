@@ -14,10 +14,15 @@ enum { FR_CLIPBOARD_WIDTH = 640, FR_CLIPBOARD_HEIGHT = 96,
 struct fr_viewer_window {
     xcb_connection_t *c;
     xcb_window_t window;
-    xcb_atom_t protocols, close;
+    xcb_atom_t protocols, close, net_name, utf8;
     uint16_t width, height;
+    uint8_t control_key, control_pressed, control_blocked, control_ready, control_barrier_kind;
+    uint16_t control_locks;
+    xcb_atom_t control_clock;
+    uint32_t control_sequence, control_baseline, control_press_at, control_release_at, control_age;
 };
-enum { IGNORE, MAPPED, HIDDEN, LOST, RESIZED, STOP };
+enum { IGNORE, MAPPED, HIDDEN, LOST, RESIZED, STOP, CONTROL_CHOSEN,
+       CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK };
 static int checked(struct fr_viewer_window *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -79,7 +84,8 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
         XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, values))) goto fail;
     h->protocols = atom(h, "WM_PROTOCOLS");
     h->close = atom(h, "WM_DELETE_WINDOW");
-    xcb_atom_t utf8 = atom(h, "UTF8_STRING");
+    h->utf8 = atom(h, "UTF8_STRING");
+    h->net_name = atom(h, "_NET_WM_NAME");
     const char title[] = "FrankenRemote";
     const char class[] = "franken-remote\0FrankenRemote\0";
     /* This first layout is immutable. Clipboard layout may have selected a
@@ -92,10 +98,10 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
         size[1] = size[2] = (uint32_t)origin;
     }
     size[5] = size[7] = width; size[6] = size[8] = height;
-    if (!h->close || !utf8 ||
+    if (!h->close || !h->utf8 || !h->net_name ||
         !property(h, h->protocols, XCB_ATOM_ATOM, 32, 1, &h->close) ||
         !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, sizeof(title)-1, title) ||
-        !property(h, atom(h, "_NET_WM_NAME"), utf8, 8, sizeof(title)-1, title) ||
+        !property(h, h->net_name, h->utf8, 8, sizeof(title)-1, title) ||
         !property(h, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(class)-1, class) ||
         !property(h, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, size) ||
         !checked(h, xcb_map_window_checked(h->c, h->window))) goto fail;
@@ -113,10 +119,137 @@ struct fr_viewer_window *fr_viewer_window_open_with_controls(const char *display
         uint32_t *actual_width, uint32_t *actual_height) {
     return viewer_window_open(display, width, height, 1, window, actual_width, actual_height);
 }
+/* A server timestamp barrier, following the existing viewer input boundary.
+ * Its exact request sequence excludes another local client's property write. */
+static int control_barrier(struct fr_viewer_window *h, uint8_t kind) {
+    if (h->control_sequence) return 0;
+    uint32_t value = kind;
+    xcb_void_cookie_t request = xcb_change_property_checked(h->c, XCB_PROP_MODE_REPLACE,
+        h->window, h->control_clock, XCB_ATOM_CARDINAL, 32, 1, &value);
+    h->control_sequence = request.sequence; h->control_barrier_kind = kind;
+    return request.sequence && xcb_flush(h->c) > 0;
+}
+static int control_held(struct fr_viewer_window *h) {
+    xcb_generic_error_t *e = NULL;
+    xcb_query_keymap_reply_t *keys = xcb_query_keymap_reply(h->c,
+        xcb_query_keymap(h->c), &e);
+    int valid = keys && !e, held = 0;
+    if (valid) for (unsigned i = 0; i < sizeof(keys->keys); ++i) held |= keys->keys[i];
+    free(keys); free(e);
+    return !valid || xcb_connection_has_error(h->c) ? -1 : !!held;
+}
+/* Locks may remain active with no physical key held. Accept only modifier
+ * slots whose actual mapping contains exclusively known lock keys. */
+static int control_lock_mask(struct fr_viewer_window *h, const xcb_setup_t *s,
+        const xcb_get_keyboard_mapping_reply_t *map) {
+    xcb_generic_error_t *e = NULL;
+    xcb_get_modifier_mapping_reply_t *r = xcb_get_modifier_mapping_reply(h->c,
+        xcb_get_modifier_mapping(h->c), &e);
+    if (!r || e || r->keycodes_per_modifier > 32 ||
+        xcb_get_modifier_mapping_keycodes_length(r) != 8 * r->keycodes_per_modifier) {
+        free(r); free(e); return 0;
+    }
+    xcb_keycode_t *codes = xcb_get_modifier_mapping_keycodes(r);
+    xcb_keysym_t *symbols = xcb_get_keyboard_mapping_keysyms(map);
+    h->control_locks = 0;
+    for (unsigned slot = 0; slot < 8; ++slot) {
+        int found = 0, only_locks = 1;
+        for (unsigned i = 0; i < r->keycodes_per_modifier; ++i) {
+            unsigned code = codes[slot * r->keycodes_per_modifier + i];
+            if (!code) continue;
+            found = 1;
+            if (code < s->min_keycode || code > s->max_keycode) { only_locks = 0; break; }
+            uint32_t symbol = symbols[(code - s->min_keycode) * map->keysyms_per_keycode];
+            if (symbol != 0xffe5 && symbol != 0xff7f && symbol != 0xff14) only_locks = 0;
+        }
+        if (found && only_locks) h->control_locks |= (uint16_t)(1u << slot);
+    }
+    free(r); free(e); return 1;
+}
+/* Local UI only: no grab, pixel overlay, viewport change or input grant. */
+int fr_viewer_window_control_offer(struct fr_viewer_window *h, int enabled) {
+    if (!h || xcb_connection_has_error(h->c)) return -1;
+    h->control_key = h->control_pressed = h->control_ready = 0;
+    h->control_sequence = h->control_barrier_kind = 0;
+    h->control_age = UINT32_MAX;
+    if (enabled) {
+        const xcb_setup_t *s = xcb_get_setup(h->c);
+        unsigned count = (unsigned)s->max_keycode - s->min_keycode + 1;
+        if (!count || count > 248) return -1;
+        xcb_generic_error_t *e = NULL;
+        xcb_get_keyboard_mapping_reply_t *r = xcb_get_keyboard_mapping_reply(h->c,
+            xcb_get_keyboard_mapping(h->c, s->min_keycode, (uint8_t)count), &e);
+        if (!r || e || !r->keysyms_per_keycode || r->keysyms_per_keycode > 32 ||
+            xcb_get_keyboard_mapping_keysyms_length(r) != (int)(count * r->keysyms_per_keycode)) {
+            free(r); free(e); return -1;
+        }
+        xcb_keysym_t *symbols = xcb_get_keyboard_mapping_keysyms(r);
+        unsigned matches = 0;
+        for (unsigned k = 0; k < count; ++k) {
+            if (symbols[k * r->keysyms_per_keycode] == 0xffc5) {
+                h->control_key = (uint8_t)(s->min_keycode + k); ++matches;
+            }
+        }
+        int locks = control_lock_mask(h, s, r);
+        free(r); free(e);
+        if (!locks) return -1;
+        if (matches != 1) h->control_key = 0;
+        int held = control_held(h);
+        if (held < 0) return -1;
+        h->control_blocked = (uint8_t)held;
+        if (!h->control_clock) h->control_clock = atom(h, "_FR_VIEWER_CONTROL_CLOCK");
+        if (!h->control_clock) return -1;
+    }
+    const char *title = !enabled ? "FrankenRemote" : h->control_key ?
+        "FrankenRemote - View only - F8 requests control" :
+        "FrankenRemote - View only - F8 unavailable";
+    uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE;
+    if (h->control_key) mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE |
+        XCB_EVENT_MASK_PROPERTY_CHANGE;
+    if (!checked(h, xcb_change_window_attributes_checked(h->c, h->window,
+        XCB_CW_EVENT_MASK, &mask)) ||
+        !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) ||
+        !property(h, h->net_name, h->utf8, 8, (uint32_t)strlen(title), title)) return -1;
+    if (h->control_key && !control_barrier(h, 1)) return -1;
+    return !enabled || h->control_key ? 1 : 0;
+}
+void fr_viewer_window_control_reset(struct fr_viewer_window *h) {
+    if (!h) return;
+    h->control_pressed = 0; h->control_age = UINT32_MAX;
+    if (h->control_barrier_kind == 2) h->control_barrier_kind = 0;
+}
+uint32_t fr_viewer_window_control_age(struct fr_viewer_window *h) {
+    return h ? h->control_age : UINT32_MAX;
+}
+/* Called after the whole bounded event batch. Core autorepeat still reports a
+ * held F8 through QueryKeymap and cannot become a request before real release. */
+int fr_viewer_window_control_released(struct fr_viewer_window *h) {
+    if (!h || !h->control_key || xcb_connection_has_error(h->c)) return -1;
+    if (h->control_age >= 250 || h->control_blocked) return 0;
+    xcb_generic_error_t *e = NULL;
+    xcb_get_input_focus_reply_t *f = xcb_get_input_focus_reply(h->c,
+        xcb_get_input_focus(h->c), &e);
+    int valid = f && !e, focused = valid && f->focus == h->window;
+    free(f); free(e);
+    if (!valid) return -1;
+    if (!focused) return 0;
+    int held = control_held(h);
+    return held < 0 ? -1 : !held;
+}
 int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     if (!h || !kind || xcb_connection_has_error(h->c)) return -1;
     xcb_generic_event_t *e = xcb_poll_for_event(h->c);
-    if (!e) return xcb_connection_has_error(h->c) ? -1 : 0;
+    if (!e) {
+        if (h->control_key && h->control_blocked && !h->control_sequence) {
+            int held = control_held(h);
+            if (held < 0) return -1;
+            if (!held) {
+                h->control_blocked = h->control_ready = 0;
+                if (!control_barrier(h, 1)) return -1;
+            }
+        }
+        return xcb_connection_has_error(h->c) ? -1 : 0;
+    }
     *kind = IGNORE;
     uint8_t type = e->response_type & 0x7f;
     int synthetic = (e->response_type & 0x80) != 0;
@@ -138,6 +271,63 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
             *kind = RESIZED;
         break;
     }
+    case XCB_PROPERTY_NOTIFY: {
+        xcb_property_notify_event_t *v = (xcb_property_notify_event_t *)e;
+        if (!synthetic && h->control_key && v->window == h->window &&
+            v->atom == h->control_clock && v->state == XCB_PROPERTY_NEW_VALUE &&
+            h->control_sequence && e->full_sequence == h->control_sequence) {
+            uint8_t pending = h->control_barrier_kind;
+            h->control_sequence = h->control_barrier_kind = 0;
+            if (pending == 1) {
+                /* Fence a press racing offer setup too: the pre-arm key query
+                 * alone cannot exclude a key held before this server baseline. */
+                int held = control_held(h);
+                if (held < 0) { free(e); return -1; }
+                h->control_baseline = v->time;
+                h->control_blocked = (uint8_t)held;
+                h->control_ready = !held;
+            } else if (pending == 2) {
+                uint32_t age = v->time - h->control_release_at;
+                uint32_t press_age = v->time - h->control_press_at;
+                if (age < 249 && press_age < 249) {
+                    h->control_age = age + 1; *kind = CONTROL_CHOSEN;
+                }
+            }
+        }
+        break;
+    }
+    case XCB_KEY_PRESS: case XCB_KEY_RELEASE: {
+        xcb_key_press_event_t *v = (xcb_key_press_event_t *)e;
+        if (v->event != h->window || !h->control_key) break;
+        if (synthetic || !v->same_screen || (v->state & ~h->control_locks)) {
+            fr_viewer_window_control_reset(h); *kind = CONTROL_RESET; break;
+        }
+        if (!h->control_ready || h->control_blocked) break;
+        if (type == XCB_KEY_PRESS) {
+            fr_viewer_window_control_reset(h);
+            uint32_t since = v->time - h->control_baseline;
+            if (v->detail == h->control_key && since && since < (1u << 31)) {
+                h->control_pressed = 1; h->control_press_at = v->time;
+            }
+        } else {
+            if (h->control_pressed && v->detail == h->control_key &&
+                !h->control_sequence && v->time - h->control_press_at < 250) {
+                h->control_release_at = v->time;
+                if (!control_barrier(h, 2)) { free(e); return -1; }
+                *kind = CONTROL_CLOCK;
+            }
+            h->control_pressed = 0;
+        }
+        break;
+    }
+    case XCB_FOCUS_OUT:
+        if (((xcb_focus_out_event_t *)e)->event == h->window) {
+            fr_viewer_window_control_reset(h); *kind = CONTROL_RESET;
+        }
+        break;
+    case XCB_MAPPING_NOTIFY:
+        fr_viewer_window_control_reset(h);
+        h->control_ready = 0; *kind = CONTROL_REMAP; break;
     case XCB_CLIENT_MESSAGE: {
         xcb_client_message_event_t *v = (xcb_client_message_event_t *)e;
         if (v->window == h->window && v->format == 32 &&

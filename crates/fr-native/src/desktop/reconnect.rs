@@ -12,7 +12,7 @@ use asupersync::{
 use fr_client::{input, startup::ApprovalNotice};
 use fr_core::input_submission::Capabilities;
 use fr_media::freshness::ClockPolicy;
-use fr_wire::display::Catalog;
+use fr_wire::{display::Catalog, negotiation::Offer};
 use frd::{
     native_connection::reconnect::{Application, CallbackError, Status},
     session_startup::{
@@ -53,6 +53,13 @@ pub struct CleanupSummary {
 /// on native work. The observer's original mapping/visibility requirements apply
 /// unchanged; a map notification or decoder receipt is not a visibility proof.
 pub trait Ui {
+    /// Narrow this fresh attempt's advertisement by omitting optional
+    /// capabilities whose original local choice has already been spent.
+    /// The canonical supervisor rejects any other change. This callback runs
+    /// before discovery/dial and creates no desktop, input or auxiliary owner.
+    fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        Ok(original.clone())
+    }
     fn choose(&mut self, attempt: u8, catalog: &Catalog) -> Result<Option<u128>, CallbackError>;
     fn approval(&mut self, attempt: u8, notice: ApprovalNotice) -> Result<(), CallbackError>;
     /// Retain content-free window/clipboard handles and configure this NEW
@@ -257,6 +264,12 @@ async fn serve_control(
 }
 impl<U: Ui> Application for Session<U> {
     type Output = ();
+    fn offer(&mut self, attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        if !(1..=32).contains(&attempt) || attempt <= self.last_attempt || self.desktop.is_some() {
+            return Err(CallbackError);
+        }
+        self.ui.offer(attempt, original)
+    }
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
         let configuration = self.configuration(attempt)?;
         let stop = viewer.control();
