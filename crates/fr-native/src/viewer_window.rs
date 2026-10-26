@@ -6,6 +6,11 @@
 //! observation permission, or an input grant. The local clipboard-space policy
 //! may choose a smaller initial target; later geometry changes remain terminal.
 mod choice;
+pub(crate) mod file_drop;
+pub(crate) mod file_send;
+pub use file_send::{
+    BatchStatus as DroppedBatchStatus, Control as FileDropControl, Error as FileDropError,
+};
 use fr_media::worker::{Role, presentation::X11Target};
 use frd::{session_startup::StreamingViewerControl, worker::Launch};
 use std::{
@@ -52,6 +57,11 @@ unsafe extern "C" {
     fn fr_viewer_window_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_viewer_window_control_offer(handle: *mut c_void, enabled: c_int) -> c_int;
     fn fr_viewer_window_control_released(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_drop_offer(handle: *mut c_void, enabled: c_int) -> c_int;
+    fn fr_viewer_window_drop_cancel(handle: *mut c_void);
+    fn fr_viewer_window_drop_age(handle: *mut c_void) -> u32;
+    fn fr_viewer_window_drop_read(handle: *mut c_void, out: *mut u8, capacity: u32) -> u32;
+    fn fr_viewer_window_drop_complete(handle: *mut c_void, accepted: c_int);
     fn fr_viewer_window_control_age(handle: *mut c_void) -> u32;
     fn fr_viewer_window_control_reset(handle: *mut c_void);
 }
@@ -111,6 +121,7 @@ struct Shared {
     state: AtomicU8,
     orderly_close: AtomicU8,
     control_choice: choice::Choice,
+    file_drops: file_drop::Inbox,
     target: OnceLock<X11Target>,
     width: u32,
     height: u32,
@@ -133,6 +144,7 @@ impl Shared {
         // No native lock, codec call, network round trip, or replacement grant.
         // Fence first; publishing Stopped never claims cleanup has completed.
         self.session.stop();
+        self.file_drops.close();
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
@@ -158,6 +170,9 @@ pub struct WindowControl(Arc<Shared>);
 impl WindowControl {
     pub fn stop(&self) {
         self.0.stop(StopReason::User);
+    }
+    pub(crate) fn file_drop_inbox(&self) -> file_drop::Inbox {
+        self.0.file_drops.clone()
     }
     /// Whether this original window published a window-manager close request.
     /// The latch survives session cancellation and native retirement. Reading
@@ -294,6 +309,7 @@ impl ViewerWindow {
             state: AtomicU8::new(0),
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
             control_choice: choice::Choice::default(),
+            file_drops: file_drop::Inbox::default(),
             target: OnceLock::new(),
             width,
             height,
@@ -520,6 +536,101 @@ impl ControlGesture {
         Ok(())
     }
 }
+/// Local drag intent stays separate from the existing input-capture owner.
+/// A server timestamp barrier fixes the original age; neither a late selection
+/// reply nor polling the mailbox gives a drop another lifetime.
+#[derive(Default)]
+struct FileGesture {
+    offered: bool,
+    clock_at: Option<Instant>,
+    captured: Option<Instant>,
+    data: bool,
+    buffer: Option<Box<[u8]>>,
+}
+impl FileGesture {
+    fn cancel(&mut self, native: &Native<'_>) {
+        // SAFETY: the original native window thread exclusively owns the handle.
+        unsafe { fr_viewer_window_drop_cancel(native.handle.as_ptr()) };
+        self.clock_at = None;
+        self.captured = None;
+        self.data = false;
+    }
+    fn tick(&mut self, native: &Native<'_>, fresh: bool) {
+        if !fresh
+            || self
+                .clock_at
+                .is_some_and(|at| at.elapsed() >= file_drop::MAX_AGE)
+        {
+            self.cancel(native);
+        }
+        let ready = fresh && native.shared.file_drops.ready() && native.shared.live();
+        if ready != self.offered {
+            // SAFETY: atom/property setup remains on this sole XCB owner.
+            if unsafe { fr_viewer_window_drop_offer(native.handle.as_ptr(), i32::from(ready)) } == 1
+            {
+                self.offered = ready;
+            } else {
+                native.shared.file_drops.close();
+                self.offered = false;
+            }
+        }
+    }
+    fn event(&mut self, native: &Native<'_>, kind: u32, before: Instant) {
+        match kind {
+            10 => {
+                self.clock_at = Some(before);
+                self.captured = None;
+                self.data = false;
+            }
+            11 => {
+                // SAFETY: a scalar from this exact drop's checked server barrier.
+                let age = unsafe { fr_viewer_window_drop_age(native.handle.as_ptr()) };
+                self.captured = self
+                    .clock_at
+                    .and_then(|at| at.checked_sub(Duration::from_millis(u64::from(age))));
+            }
+            12 => self.data = true,
+            _ => {}
+        }
+    }
+    fn finish(&mut self, native: &Native<'_>, fresh: bool) {
+        if !self.data {
+            return;
+        }
+        let mut accepted = false;
+        if fresh
+            && native.shared.live()
+            && native.shared.file_drops.ready()
+            && let Some(captured) = self.captured.filter(|at| at.elapsed() < file_drop::MAX_AGE)
+        {
+            let buffer = self
+                .buffer
+                .get_or_insert_with(|| vec![0; file_drop::MAX_BYTES].into_boxed_slice());
+            // SAFETY: fixed-size owned byte storage; C checks the supplied cap,
+            // writes only the retained property and never retains this pointer.
+            let length = unsafe {
+                fr_viewer_window_drop_read(
+                    native.handle.as_ptr(),
+                    buffer.as_mut_ptr(),
+                    file_drop::MAX_BYTES as u32,
+                )
+            } as usize;
+            if length <= buffer.len()
+                && let Ok(paths) = file_drop::paths(&buffer[..length])
+            {
+                accepted = native.shared.file_drops.publish(paths, captured);
+            }
+            buffer.fill(0);
+        }
+        // This acknowledges only local selection admission. The upload panel
+        // and original sender's receipts report preparation and host publication.
+        // SAFETY: finish the same bounded native drop after the whole event batch.
+        unsafe { fr_viewer_window_drop_complete(native.handle.as_ptr(), i32::from(accepted)) };
+        self.clock_at = None;
+        self.captured = None;
+        self.data = false;
+    }
+}
 fn lifecycle_event(
     shared: &Shared,
     mapped: &mut bool,
@@ -561,6 +672,65 @@ fn lifecycle_event(
         _ => Some(StopReason::NativeFailure),
     }
 }
+/// Publish neither gesture until the complete native batch passes lifecycle
+/// and flood checks. Every refusal fences the same original window owner.
+fn drain_events(
+    native: &Native<'_>,
+    gesture: &mut ControlGesture,
+    files: &mut FileGesture,
+    mapped: &mut bool,
+    close_started: &mut Option<Instant>,
+    turn: Instant,
+) -> Option<(bool, bool)> {
+    let shared = native.shared;
+    let mut chosen = false;
+    let mut invalidated = false;
+    for _ in 0..TURN_EVENTS {
+        if !shared.live() {
+            return None;
+        }
+        let mut kind = 0;
+        let before = Instant::now();
+        // SAFETY: single thread exclusively owns the handle; writable scalar.
+        match unsafe { fr_viewer_window_next(native.handle.as_ptr(), &raw mut kind) } {
+            0 => return Some((chosen, invalidated)),
+            1 => {}
+            _ => {
+                shared.stop(StopReason::NativeFailure);
+                return None;
+            }
+        }
+        let reason = match kind {
+            6 => {
+                chosen = true;
+                None
+            }
+            7 | 8 => {
+                chosen = false;
+                invalidated = true;
+                gesture
+                    .invalidate(native, kind == 8)
+                    .err()
+                    .map(|()| StopReason::NativeFailure)
+            }
+            9 => {
+                gesture.barrier_at = Some(turn);
+                None
+            }
+            10..=12 => {
+                files.event(native, kind, before);
+                None
+            }
+            _ => lifecycle_event(shared, mapped, close_started, kind),
+        };
+        if let Some(reason) = reason {
+            shared.stop(reason);
+            return None;
+        }
+    }
+    shared.stop(StopReason::EventFlood);
+    None
+}
 fn run(shared: &Shared, display: &CString, started: Instant) {
     let Some(native) = open_native(shared, display) else {
         return;
@@ -568,6 +738,7 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     let mut mapped = false;
     let mut close_started: Option<Instant> = None;
     let mut gesture = ControlGesture::default();
+    let mut files = FileGesture::default();
     let mut previous_turn = Instant::now();
     loop {
         if !shared.live() {
@@ -587,54 +758,17 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             shared.stop(StopReason::NativeFailure);
             return;
         }
-        let mut chosen = false;
-        let mut invalidated = false;
-        let mut drained = false;
-        for _ in 0..TURN_EVENTS {
-            if !shared.live() {
-                return;
-            }
-            let mut kind = 0;
-            // SAFETY: single thread exclusively owns the handle; writable scalar.
-            match unsafe { fr_viewer_window_next(native.handle.as_ptr(), &raw mut kind) } {
-                0 => {
-                    drained = true;
-                    break;
-                }
-                1 => {}
-                _ => {
-                    shared.stop(StopReason::NativeFailure);
-                    return;
-                }
-            }
-            let reason = match kind {
-                6 => {
-                    chosen = true;
-                    None
-                }
-                7 | 8 => {
-                    chosen = false;
-                    invalidated = true;
-                    gesture
-                        .invalidate(&native, kind == 8)
-                        .err()
-                        .map(|()| StopReason::NativeFailure)
-                }
-                9 => {
-                    gesture.barrier_at = Some(turn);
-                    None
-                }
-                _ => lifecycle_event(shared, &mut mapped, &mut close_started, kind),
-            };
-            if let Some(reason) = reason {
-                shared.stop(reason);
-                return;
-            }
-        }
-        if !drained {
-            shared.stop(StopReason::EventFlood);
+        files.tick(&native, fresh);
+        let Some((chosen, invalidated)) = drain_events(
+            &native,
+            &mut gesture,
+            &mut files,
+            &mut mapped,
+            &mut close_started,
+            turn,
+        ) else {
             return;
-        }
+        };
         if gesture
             .finish(&native, chosen, fresh && !invalidated)
             .is_err()
@@ -642,6 +776,7 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             shared.stop(StopReason::NativeFailure);
             return;
         }
+        files.finish(&native, fresh && turn.elapsed() < choice::MAX_AGE);
         previous_turn = turn;
         if mapped
             && shared.live()

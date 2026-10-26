@@ -4,6 +4,7 @@ mod audio;
 mod clipboard;
 mod duplex;
 mod receive;
+mod replacement;
 use super::*;
 use frd::native_files::{SendPhase, SendSnapshot, SendStatus};
 use std::{
@@ -24,6 +25,7 @@ impl Panel {
                 control: Control {
                     state: Arc::new(AtomicU8::new(1)),
                     privacy: None,
+                    upload: None,
                 },
                 task: Some(task),
                 watchdog: None,

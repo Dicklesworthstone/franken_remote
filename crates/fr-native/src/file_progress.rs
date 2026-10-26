@@ -8,7 +8,7 @@ pub(crate) mod clipboard;
 mod model;
 use fr_client::audio::AudioVolumeControl;
 use frd::{
-    native_files::{ReceiveControl, ReceiveStatus, SendControl, SendSnapshot},
+    native_files::{ReceiveControl, ReceiveStatus, SendControl, SendPhase, SendSnapshot},
     session_startup::StreamingViewerControl,
 };
 use model::Frame;
@@ -16,7 +16,7 @@ use std::{
     ffi::{CString, c_char, c_int, c_void},
     ptr::NonNull,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU8, Ordering},
     },
     thread::{self, JoinHandle},
@@ -193,12 +193,60 @@ fn stop(state: &AtomicU8, reason: StopReason) {
         (old < 2).then_some(reason as u8)
     });
 }
-/// Status/hide only. Hiding a clipboard privacy panel synchronously turns off
-/// its original clipboard. This never acquires input or selects a replacement.
+trait UploadStatus: Clone {
+    fn finished(&self) -> bool;
+}
+impl UploadStatus for SendControl {
+    fn finished(&self) -> bool {
+        self.status().phase == SendPhase::Finished
+    }
+}
+/// One current selection and at most one already-admitted successor. The native
+/// thread consumes the successor only AFTER destroying the old native window.
+struct UploadSwap<T = SendControl> {
+    current: T,
+    pending: Option<T>,
+}
+impl<T: UploadStatus> UploadSwap<T> {
+    fn queue(&mut self, state: &AtomicU8, next: T) -> bool {
+        if !self.current.finished() || self.pending.is_some() {
+            return false;
+        }
+        // Linearize against hide/failure without reopening any terminal panel.
+        if state
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                (old < 2).then_some(0)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.pending = Some(next);
+        true
+    }
+    fn take(&mut self, state: &AtomicU8) -> Result<T, StopReason> {
+        if state.load(Ordering::Acquire) >= 2 {
+            return Err(StopReason::OwnerStopped);
+        }
+        let next = self.pending.take().ok_or(StopReason::NativeFailure)?;
+        self.current = next.clone();
+        Ok(next)
+    }
+    fn ready(&self, state: &AtomicU8) {
+        // This is called under the SAME mutex as queue. An old native window
+        // cannot restore Running after a successor changed it to Opening.
+        if self.pending.is_none() {
+            mark_running(state);
+        }
+    }
+}
+/// Status/hide and bounded upload-panel replacement. Hiding a clipboard panel
+/// synchronously turns off its original clipboard; no method creates authority.
 #[derive(Clone)]
 pub struct Control {
     state: Arc<AtomicU8>,
     privacy: Option<Arc<clipboard::Privacy>>,
+    upload: Option<Arc<Mutex<UploadSwap>>>,
 }
 impl Control {
     pub fn status(&self) -> Status {
@@ -206,6 +254,25 @@ impl Control {
     }
     pub fn hide(&self) {
         self.stop(StopReason::Hidden);
+    }
+    /// The selection already belongs to the original SendIntake. This only
+    /// replaces a finished upload's UI, without starting work or retargeting
+    /// native events queued against its old window. Hidden/failed panels stay
+    /// terminal, and only one replacement may wait for native cleanup.
+    pub(crate) fn replace_upload(&self, source: SendControl) -> bool {
+        self.upload.as_ref().is_some_and(|upload| {
+            upload
+                .lock()
+                .is_ok_and(|mut swap| swap.queue(&self.state, source))
+        })
+    }
+    fn take_upload(&self) -> Result<SendControl, StopReason> {
+        self.upload
+            .as_ref()
+            .ok_or(StopReason::NativeFailure)?
+            .lock()
+            .map_err(|_| StopReason::NativeFailure)?
+            .take(&self.state)
     }
     fn stop(&self, reason: StopReason) {
         if let Some(privacy) = &self.privacy {
@@ -346,9 +413,17 @@ impl Panel {
             Transfer::Clipboard(source) => Some(Arc::new(clipboard::Privacy::new(source.clone()))),
             _ => None,
         };
+        let upload = match &source {
+            Transfer::Upload(source) => Some(Arc::new(Mutex::new(UploadSwap {
+                current: source.clone(),
+                pending: None,
+            }))),
+            _ => None,
+        };
         let control = Control {
             state: Arc::new(AtomicU8::new(0)),
             privacy: privacy.clone(),
+            upload: upload.clone(),
         };
         let shared = control.clone();
         let task = thread::Builder::new()
@@ -360,15 +435,16 @@ impl Panel {
             })
             .spawn(move || {
                 let _fence = Fence(shared.clone());
-                let reason = run(
+                let reason = run_transfers(
                     &display,
                     parent,
-                    &shared.state,
-                    &NativeTarget {
+                    &shared,
+                    NativeTarget {
                         session,
                         source,
                         privacy,
                         placement,
+                        upload,
                     },
                 );
                 shared.stop(reason);
@@ -472,12 +548,19 @@ trait Target {
     fn action(&self, action: Action);
     fn panel_stopped(&self) {}
     fn progress(&self) {}
+    fn replacement_pending(&self) -> Result<bool, StopReason> {
+        Ok(false)
+    }
+    fn ready(&self, state: &AtomicU8) {
+        mark_running(state);
+    }
 }
 struct NativeTarget {
     session: StreamingViewerControl,
     source: Transfer,
     privacy: Option<Arc<clipboard::Privacy>>,
     placement: FilePlacement,
+    upload: Option<Arc<Mutex<UploadSwap>>>,
 }
 impl Target for NativeTarget {
     fn stopped(&self) -> bool {
@@ -505,6 +588,60 @@ impl Target for NativeTarget {
             privacy.progress();
         }
     }
+    fn replacement_pending(&self) -> Result<bool, StopReason> {
+        self.upload.as_ref().map_or(Ok(false), |upload| {
+            upload
+                .lock()
+                .map(|swap| swap.pending.is_some())
+                .map_err(|_| StopReason::NativeFailure)
+        })
+    }
+    fn ready(&self, state: &AtomicU8) {
+        if let Some(upload) = &self.upload {
+            match upload.lock() {
+                Ok(swap) => swap.ready(state),
+                Err(_) => stop(state, StopReason::NativeFailure),
+            }
+        } else {
+            mark_running(state);
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunEnd {
+    Stopped(StopReason),
+    Replace,
+}
+impl From<StopReason> for RunEnd {
+    fn from(reason: StopReason) -> Self {
+        Self::Stopped(reason)
+    }
+}
+fn run_transfers(
+    display: &CString,
+    parent: crate::viewer_input::Window,
+    control: &Control,
+    mut target: NativeTarget,
+) -> StopReason {
+    if control.upload.is_none() {
+        return run(display, parent, &control.state, &target);
+    }
+    loop {
+        match run_window(display, parent, &control.state, &target) {
+            RunEnd::Stopped(reason) => return reason,
+            RunEnd::Replace => {
+                // run_window has returned and its Native has been destroyed.
+                // No event from that connection can reach the new selection.
+                if target.stopped() {
+                    return StopReason::SessionEnded;
+                }
+                match control.take_upload() {
+                    Ok(source) => target.source = Transfer::Upload(source),
+                    Err(reason) => return reason,
+                }
+            }
+        }
+    }
 }
 fn run(
     display: &CString,
@@ -512,12 +649,26 @@ fn run(
     state: &AtomicU8,
     target: &impl Target,
 ) -> StopReason {
+    match run_window(display, parent, state, target) {
+        RunEnd::Stopped(reason) => reason,
+        RunEnd::Replace => {
+            stop(state, StopReason::NativeFailure);
+            StopReason::NativeFailure
+        }
+    }
+}
+fn run_window(
+    display: &CString,
+    parent: crate::viewer_input::Window,
+    state: &AtomicU8,
+    target: &impl Target,
+) -> RunEnd {
     let _target_fence = TargetFence(target);
     if target.stopped() {
-        return StopReason::SessionEnded;
+        return StopReason::SessionEnded.into();
     }
     if state.load(Ordering::Acquire) >= 2 {
-        return StopReason::OwnerStopped;
+        return StopReason::OwnerStopped.into();
     }
     // SAFETY: live NUL string, scalars only; the C owner retains no Rust pointer.
     let Some(native) = NonNull::new(unsafe {
@@ -540,15 +691,36 @@ fn run(
             )
         }
     }) else {
-        return StopReason::NativeFailure;
+        return StopReason::NativeFailure.into();
     };
     let native = Native(native);
     // Record terminal state BEFORE native disconnect, including unwind.
-    let _fence = NativeFence { state, target };
-    let reason = events(&native, state, target);
-    target.panel_stopped();
-    stop(state, reason);
-    reason
+    let mut fence = NativeFence {
+        state,
+        target,
+        replacing: false,
+    };
+    match events(&native, state, target) {
+        RunEnd::Stopped(reason) => {
+            target.panel_stopped();
+            stop(state, reason);
+            RunEnd::Stopped(reason)
+        }
+        RunEnd::Replace => {
+            if state
+                .try_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                    (old < 2).then_some(0)
+                })
+                .is_err()
+            {
+                return StopReason::OwnerStopped.into();
+            }
+            // Only deliberate replacement avoids a terminal fence. Opening is
+            // already visible before native cleanup, which may itself block.
+            fence.replacing = true;
+            RunEnd::Replace
+        }
+    }
 }
 struct TargetFence<'a, T: Target>(&'a T);
 impl<T: Target> Drop for TargetFence<'_, T> {
@@ -559,12 +731,18 @@ impl<T: Target> Drop for TargetFence<'_, T> {
 struct NativeFence<'a, T: Target> {
     state: &'a AtomicU8,
     target: &'a T,
+    replacing: bool,
 }
 impl<T: Target> Drop for NativeFence<'_, T> {
     fn drop(&mut self) {
-        self.target.panel_stopped();
-        stop(self.state, StopReason::NativeFailure);
+        if !self.replacing {
+            self.target.panel_stopped();
+            stop(self.state, StopReason::NativeFailure);
+        }
     }
+}
+fn mark_running(state: &AtomicU8) {
+    let _ = state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
 }
 fn mark_ready(native: &Native, state: &AtomicU8, target: &impl Target) {
     // Positive mapping/drawing evidence; clipboard also requires server-authored
@@ -572,19 +750,27 @@ fn mark_ready(native: &Native, state: &AtomicU8, target: &impl Target) {
     // SAFETY: thread-confined native owner, no retained Rust pointer.
     if unsafe { fr_upload_mapped(native.0.as_ptr()) } == 1 {
         target.progress();
-        let _ = state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
+        target.ready(state);
     }
 }
-fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason {
+fn validate_window(native: &Native) -> Result<(), StopReason> {
+    // SAFETY: same live, thread-confined native owner; no Rust pointers.
+    match unsafe { fr_upload_validate(native.0.as_ptr()) } {
+        1 => Ok(()),
+        0 => Err(StopReason::Hidden),
+        _ => Err(StopReason::NativeFailure),
+    }
+}
+fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> RunEnd {
     let mut previous: Option<Frame> = None;
     let mut refreshed = Instant::now();
     let mut turn = refreshed;
     loop {
         if target.stopped() {
-            return StopReason::SessionEnded;
+            return StopReason::SessionEnded.into();
         }
         if state.load(Ordering::Acquire) >= 2 {
-            return StopReason::OwnerStopped;
+            return StopReason::OwnerStopped.into();
         }
         let now = Instant::now();
         // A stalled native turn does not freshen queued clicks. Drain them,
@@ -608,37 +794,50 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason
                         damage = true;
                         redraw = true;
                     }
-                    2 => return StopReason::Hidden,
+                    2 => return StopReason::Hidden.into(),
                     3 => {
                         actions[used] = Action::from_raw(action);
                         used += 1;
                     }
                     _ => {}
                 },
-                _ => return StopReason::NativeFailure,
+                _ => return StopReason::NativeFailure.into(),
             }
         }
         // Lifecycle/flood checks cover the WHOLE native batch before commands.
         if !drained {
-            return StopReason::EventFlood;
+            return StopReason::EventFlood.into();
         }
+        let replacing = match target.replacement_pending() {
+            Ok(pending) => pending,
+            Err(reason) => return reason.into(),
+        };
         // Refresh geometry even when the content-free frame did not change.
         // A WM can move a reparenting ancestor without an event on our client.
-        if redraw || used != 0 {
-            // SAFETY: same live, thread-confined native owner; no Rust pointers.
-            match unsafe { fr_upload_validate(native.0.as_ptr()) } {
-                1 => {}
-                0 => return StopReason::Hidden,
-                _ => return StopReason::NativeFailure,
-            }
+        if (redraw || used != 0 || replacing)
+            && let Err(reason) = validate_window(native)
+        {
+            return reason.into();
+        }
+        // A queued close, hidden parent or invalid native window wins over a
+        // replacement. Do not discard lifecycle events while retiring clicks.
+        if replacing {
+            return RunEnd::Replace;
         }
         if fresh && Instant::now().duration_since(now) < MAX_CLICK_AGE {
             for action in actions[..used].iter().flatten().copied() {
                 if target.stopped() {
-                    return StopReason::SessionEnded;
+                    return StopReason::SessionEnded.into();
                 }
                 if state.load(Ordering::Acquire) >= 2 {
-                    return StopReason::OwnerStopped;
+                    return StopReason::OwnerStopped.into();
+                }
+                match target.replacement_pending() {
+                    // Drain the next whole batch before replacing, so a close
+                    // already queued on this window still has priority.
+                    Ok(true) => break,
+                    Ok(false) => {}
+                    Err(reason) => return reason.into(),
                 }
                 // Recheck both what was displayed and the original CURRENT
                 // snapshot: a shortcut or terminal receipt can race a click.
@@ -658,13 +857,13 @@ fn events(native: &Native, state: &AtomicU8, target: &impl Target) -> StopReason
         }
         if redraw {
             if target.stopped() {
-                return StopReason::SessionEnded;
+                return StopReason::SessionEnded.into();
             }
             let frame = Frame::snapshot(&target.snapshot());
             if damage || previous.as_ref() != Some(&frame) {
                 // SAFETY: fixed C-compatible record, borrowed only for this call.
                 if unsafe { fr_upload_draw(native.0.as_ptr(), &raw const frame) } != 1 {
-                    return StopReason::NativeFailure;
+                    return StopReason::NativeFailure.into();
                 }
             }
             previous = Some(frame);

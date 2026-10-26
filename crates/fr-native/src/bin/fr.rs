@@ -142,12 +142,21 @@ pause intent and local cleanup, with Pause / Resume / Cancel upload buttons.
 It requests no keyboard focus. Closing it only hides progress; the upload and
 keyboard controls continue. Panel failure does not cancel the desktop or files.
 A full progress bar is not a publication receipt, and an unknown size is not zero.
+After the initial upload finishes successfully, copy local files or directories
+from an X11 file manager onto the viewer to send another selection on this same
+session. Keep the upload panel open. Each drop accepts up to 8 selections; at
+most 8 additional batches are retained, under the host's original cumulative
+limits. Wait for each batch to finish before dropping more. Only local file URIs
+and the Copy action are accepted; remote URLs and Move actions are refused.
+Each new batch gets fresh progress buttons. Hiding the panel stops future drops
+without cancelling an accepted upload; no drop is replayed after reconnect.
 While controlling a configured --send selection, physical Ctrl+Alt+Shift+F8
 requests pause, F9 requests resume, and F10 cancels that upload selection only.
 Keep the viewer focused. Release the function key between requests. Its press,
 repeat and release stay local; modifier keys still follow ordinary input rules.
 Original transfer deadlines continue while paused; resume never retries ended
-work. Downloads are not controlled by these keys. Ctrl+Alt+Shift+Escape remains
+work. These keys stay bound to the original --send selection; use the new panel's
+buttons for later drops. Downloads are not controlled by these keys. Ctrl+Alt+Shift+Escape remains
 an immediate local stop. Missing/ambiguous physical keys disable these shortcuts.
 --receive DIR (with --control) accepts the host's explicit selections into an
 existing absolute local directory owned by you and not writable by other users

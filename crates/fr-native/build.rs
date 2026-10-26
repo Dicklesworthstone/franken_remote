@@ -324,6 +324,7 @@ fn build_viewer_input() {
 
 fn build_viewer_window() {
     println!("cargo:rerun-if-changed=src/viewer_window.c");
+    println!("cargo:rerun-if-changed=src/viewer_drop.c");
     println!("cargo:rerun-if-changed=src/file_progress.c");
     if env::var_os("CARGO_FEATURE_LINUX_VIEWER_WINDOW").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")

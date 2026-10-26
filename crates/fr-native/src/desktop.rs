@@ -183,6 +183,8 @@ pub struct Desktop {
     // Status/intent only, not another source, queue, lease or lifetime. Never
     // copied into a new Desktop when the reconnect supervisor opens an attempt.
     file_controls: Option<frd::native_files::SendControl>,
+    file_intake: Option<frd::native_files::SendIntake>,
+    file_drops: Option<viewer_window::file_send::Manager>,
     // Optional local UI, never a file/source owner. Retain even a hidden panel
     // until its native thread is joined; reconnect cannot inherit this handle.
     file_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
@@ -204,6 +206,8 @@ impl Desktop {
             stop: None,
             input: None,
             file_controls: None,
+            file_intake: None,
+            file_drops: None,
             file_progress: None,
             receive_progress: None,
             first_file_panel_reserves_clipboard: false,
@@ -404,6 +408,7 @@ impl Desktop {
             self.first_file_panel_reserves_clipboard = placement.clipboard;
         }
         self.file_controls = Some(controls.clone());
+        self.file_intake = intake.clone();
         // The original observer accepted the selection once BEFORE optional UI.
         // No peer XID, alternative session, source read or permission is created.
         let panel = self
@@ -421,6 +426,37 @@ impl Desktop {
             });
         self.file_progress = Some(panel);
         Ok((controls, intake))
+    }
+    /// Enable copy-only local file drops after a successful initial selection.
+    /// The original intake and native window are taken from THIS Desktop; no
+    /// caller can attach another desktop's file lane. Each later selection gets
+    /// separate progress controls and remains subject to the original grant.
+    /// Hiding/failing the upload panel disables further drops without undoing a
+    /// transfer already admitted. The selection worker is retained for cleanup.
+    pub fn enable_file_drops(
+        &mut self,
+    ) -> Result<viewer_window::FileDropControl, viewer_window::FileDropError> {
+        if self.file_drops.is_some() {
+            return Err(viewer_window::FileDropError::AlreadyEnabled);
+        }
+        if self.state() != State::Viewing {
+            return Err(viewer_window::FileDropError::Unavailable);
+        }
+        let intake = self
+            .file_intake
+            .clone()
+            .ok_or(viewer_window::FileDropError::Unavailable)?;
+        let window = self
+            .window()
+            .ok_or(viewer_window::FileDropError::Unavailable)?;
+        let panel = self
+            .upload_progress()
+            .and_then(Result::ok)
+            .ok_or(viewer_window::FileDropError::Unavailable)?;
+        let drops = viewer_window::file_send::Manager::start(window, intake, panel)?;
+        let control = drops.control();
+        self.file_drops = Some(drops);
+        Ok(control)
     }
     /// Receive the host's explicit selections into this locally pinned directory.
     /// This is consent for the original control lease, not another input grant.
@@ -936,6 +972,9 @@ impl Desktop {
         if let Some(observer) = &mut self.observer {
             observer.close();
         }
+        if let Some(drops) = &self.file_drops {
+            drops.stop();
+        }
         if let Some(Ok(panel)) = &self.file_progress {
             panel.stop();
         }
@@ -965,6 +1004,11 @@ impl Desktop {
                     .finish()
                     .map_or(WindowCleanup::Pending, WindowCleanup::Complete)
             });
+        if let Some(drops) = &mut self.file_drops
+            && !drops.finish()
+        {
+            return WindowCleanup::Pending;
+        }
         if let Some(Ok(panel)) = &mut self.file_progress
             && !panel.finish()
         {

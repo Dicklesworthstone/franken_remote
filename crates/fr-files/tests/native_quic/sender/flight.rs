@@ -2,6 +2,22 @@
 //! proves the queued content cannot have been acknowledged by the peer.
 use super::*;
 
+fn bulk_flight(link: &native_support::Link) -> (usize, usize) {
+    let usage = link.c.usage();
+    // Usage includes the separately reserved critical lane. Only the original
+    // bulk sender's retained bytes/records prove custody of this file flight.
+    (
+        usage
+            .retained_send_upper_bound
+            .checked_sub(usage.critical_send_bytes)
+            .expect("critical bytes belong to total retained custody"),
+        usage
+            .retained_send_records
+            .checked_sub(usage.critical_send_records)
+            .expect("critical records belong to total retained custody"),
+    )
+}
+
 async fn accepted_without_payload(
     sender: &mut Sender<'_>,
     host: &mut HostReceiver,
@@ -33,11 +49,12 @@ async fn accepted_without_payload(
 
 fn fill_without_network(sender: &mut Sender<'_>, link: &mut native_support::Link, cx: &Cx) {
     let until = clock(cx) + 300_000;
-    while link.c.usage().retained_send_records < 8 {
+    while bulk_flight(link).1 < 8 {
         assert!(clock(cx) < until, "sender still waits for each chunk's ACK");
         sender.service(&mut link.c, || true).unwrap();
-        assert!(link.c.usage().retained_send_records <= 8);
-        assert!(link.c.usage().retained_send_bytes <= 128 * 1024);
+        let (bytes, records) = bulk_flight(link);
+        assert!(records <= 8);
+        assert!(bytes <= 128 * 1024);
         std::thread::yield_now();
     }
 }
@@ -63,9 +80,7 @@ fn eight_chunks_can_wait_for_acks_then_publish_once_on_the_original_lane() {
         let filled = sender.progress().unwrap();
         assert!(filled.queued_bytes > record_bytes as u64);
         assert!(filled.queued_bytes < data.len() as u64);
-        assert!(
-            f.link.c.usage().retained_send_bytes > usize::try_from(filled.queued_bytes).unwrap()
-        );
+        assert!(bulk_flight(&f.link).0 > usize::try_from(filled.queued_bytes).unwrap());
         assert_eq!(sender.stage(), Stage::Streaming);
         assert!(!f.path.join("received").exists());
 
@@ -75,7 +90,7 @@ fn eight_chunks_can_wait_for_acks_then_publish_once_on_the_original_lane() {
             for _ in 0..16 {
                 sender.service(&mut f.link.c, || true).unwrap();
                 assert_eq!(sender.progress(), Some(filled));
-                assert_eq!(f.link.c.usage().retained_send_records, 8);
+                assert_eq!(bulk_flight(&f.link).1, 8);
             }
         }
         let receipt = result(&mut sender, &mut f.host, &mut f.link, &cx).await;
@@ -123,7 +138,7 @@ fn verified_source_eof_cannot_commit_before_its_content_drains() {
             sender.service(&mut f.link.c, || true).unwrap();
             assert_eq!(sender.progress().unwrap().queued_bytes, 8);
             assert_eq!(sender.stage(), Stage::Streaming);
-            assert_eq!(f.link.c.usage().retained_send_records, 1);
+            assert_eq!(bulk_flight(&f.link).1, 1);
             assert!(sender.result().is_none());
         }
         assert!(!f.path.join("received").exists());

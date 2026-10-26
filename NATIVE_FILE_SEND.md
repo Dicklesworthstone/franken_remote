@@ -219,8 +219,9 @@ selection or local permission, the immutable pre-poll deadline, and another
 selected display's authenticated offer. Native input effects and presentation
 are explicit fixtures, not hardware or live-tailnet qualification. This removes
 the pre-agreed numeric-scope prerequisite for the drop APIs. Native command-line
-uploads and downloads use these same scope and authority boundaries; graphical
-selection, resume and folder sync remain separate work.
+uploads and downloads use these same scope and authority boundaries. Repeated
+native copy drops use the same upload lane as described below; a general picker,
+resume and folder sync remain separate work.
 
 ## Explicit portable directories
 
@@ -284,3 +285,57 @@ combine `--send` and `--receive`, and a one-shot host may combine `--files` and
 keep cancellation, byte budgets, receipts and cleanup independent; ordinary input
 and lease renewal still run first. A legacy peer selects only its existing
 explicit direction. Neither selection is replayed after reconnect.
+
+## Additional selections during a native desktop session
+
+Start the Linux X11 viewer with `--control --send PATH...` and a host configured
+with `--files DIR`. After that initial batch publishes successfully and its
+source cleanup finishes, copy local files or directories from an X11 file
+manager onto the viewer window. Keep the upload progress panel open and wait
+for each batch to finish before selecting another. Each drop accepts at most
+eight paths; the desktop retains at most eight additional batches. The host's
+original cumulative byte and transfer-attempt limits still apply.
+
+`NativeObserver::configure_file_send_with_intake` and
+`Desktop::configure_file_send_with_intake` retain a bounded `SendIntake` for the
+original authenticated upload. `Desktop::enable_file_drops()` uses only that
+Desktop's own intake, viewer window and upload panel. Successful batches collect
+their original report before another selection starts. Later selections reuse
+the same sender, completed attachment, transfer-ID sequence and control lease;
+they do not negotiate another file lane or renew authority. Each submitted
+selection has a fresh status/cancellation handle and an absolute submission-time
+deadline. Earlier receipts remain available after later failures.
+
+The X11 bridge accepts copy-only XDND version 3–5 `text/uri-list` drops: at most
+32 KiB and eight absolute local paths, with empty authority or `localhost`.
+Remote URLs, move actions, malformed escapes, duplicate paths, oversized and
+incremental properties are refused. The local X server remains trusted. A
+checked server timestamp and an unchanged two-second local intent deadline
+bound selection delivery and preparation. Delayed replies never refresh the
+original gesture. One owned worker performs metadata/open operations off the
+window and session threads, then rechecks the original session and intake before
+submission. Selected file bytes are still read only by the existing authorized
+sender. Symlink, portable-name and special-file checks remain in `Selection`.
+
+Each subsequent upload gets a fresh native progress window on the original panel
+thread. The old window is destroyed before its immutable control is replaced;
+queued clicks and the original `--send` keyboard shortcuts cannot address the
+new selection. Use the new panel's Pause / Resume / Cancel buttons. Hiding or
+losing progress disables further drops while an already accepted transfer keeps
+its own outcome. Completion summaries retain all requested indexes, including
+accepted drops that expire or retire before preparation, without names or paths.
+
+Closing the desktop fences the original session first, discards pending paths,
+and retains the preparation worker until it finishes and joins. No selected path,
+control, pending drop or old native window crosses a reconnect. A failed batch
+closes the intake; this adds no automatic retry, cross-connection resumption,
+remote browsing or folder synchronization.
+
+The production URI/inbox module has passing pinned-compiler tests, and the
+production C bridge passes `-std=c11 -Wall -Wextra -Werror -fsyntax-only`.
+Committed core regressions exercise two selections through the original
+UDP/TLS/ATP owners, preserved receipts, monotonically increasing IDs and expired
+submission. Native panel and CLI regressions cover replacement lifecycle and
+combined result reporting. Those runtime-dependent Rust targets and an actual
+file-manager/X11 drop have not yet been executed in this change's workspace;
+the parser and C checks do not qualify the complete desktop workflow.

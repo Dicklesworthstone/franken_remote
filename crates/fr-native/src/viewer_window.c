@@ -11,7 +11,9 @@
 enum { FR_CLIPBOARD_WIDTH = 640, FR_CLIPBOARD_HEIGHT = 96,
        FR_CLIPBOARD_GAP = 24, FR_CLIPBOARD_MARGIN = 24 };
 
+struct fr_viewer_drop;
 struct fr_viewer_window {
+    struct fr_viewer_drop *files;
     xcb_connection_t *c;
     xcb_window_t window;
     xcb_atom_t protocols, close, net_name, utf8;
@@ -40,11 +42,16 @@ static int property(struct fr_viewer_window *h, xcb_atom_t name, xcb_atom_t type
     return name && checked(h, xcb_change_property_checked(h->c,
         XCB_PROP_MODE_REPLACE, h->window, name, type, format, count, data));
 }
+#include "viewer_drop.c"
 void fr_viewer_window_close(struct fr_viewer_window *h) {
     if (!h) return;
     /* Destroy only our resources. The Rust owner fences the original session
      * first. Disconnect cannot collect or prove another worker's cleanup. */
-    if (h->c) xcb_disconnect(h->c);
+    if (h->c) {
+        fr_viewer_window_drop_cancel(h);
+        xcb_disconnect(h->c);
+    }
+    free(h->files);
     free(h);
 }
 static struct fr_viewer_window *viewer_window_open(const char *display,
@@ -206,6 +213,7 @@ int fr_viewer_window_control_offer(struct fr_viewer_window *h, int enabled) {
     uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE;
     if (h->control_key) mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE |
         XCB_EVENT_MASK_PROPERTY_CHANGE;
+    if (h->files) mask |= XCB_EVENT_MASK_PROPERTY_CHANGE;
     if (!checked(h, xcb_change_window_attributes_checked(h->c, h->window,
         XCB_CW_EVENT_MASK, &mask)) ||
         !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) ||
@@ -251,6 +259,7 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
         return xcb_connection_has_error(h->c) ? -1 : 0;
     }
     *kind = IGNORE;
+    if (drop_event(h, e, kind)) { free(e); return 1; }
     uint8_t type = e->response_type & 0x7f;
     int synthetic = (e->response_type & 0x80) != 0;
     if (!type) { free(e); return -1; }

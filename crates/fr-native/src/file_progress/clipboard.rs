@@ -236,6 +236,7 @@ mod tests {
         let control = Control {
             state: Arc::new(AtomicU8::new(0)),
             privacy: None,
+            upload: None,
         };
         let (native_release, native_wait) = mpsc::sync_channel::<()>(1);
         let (watch_release, watch_wait) = mpsc::sync_channel::<()>(1);

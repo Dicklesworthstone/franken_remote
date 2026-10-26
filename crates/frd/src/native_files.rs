@@ -10,7 +10,8 @@
 //! A batch is consumed once, in order, and stops at its first failure. Clipboard
 //! and files have independent consent, tickets, workers and cancellation. Neither
 //! grants authority to the other. There is no automatic replay, resumption,
-//! browsing, synchronization or picker UI. Status retains actual publication
+//! browsing, synchronization or picker UI. Native copy drops can submit fresh
+//! selections on the original upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
 use fr_files::{
     receive::{DropDirectory, Limits as DirectoryLimits},
@@ -30,7 +31,7 @@ use std::{
 pub use fr_files::receive::{ConflictPolicy, Publication};
 pub use fr_files::sender::batch::Report;
 
-/// At most this many `--send` selections per connection (the batch owner's
+/// At most this many selections in an initial `--send` or later native drop (the batch owner's
 /// own bound is 32; the command line stays well inside its argument limit).
 pub const MAX_SENDS: usize = 8;
 /// One absolute budget for the whole selection: queueing, hashing, sending,

@@ -690,7 +690,7 @@ fn parse_command(
         if send.len() > MAX_SENDS {
             return Err(Failure::new(
                 "send_too_many",
-                "At most 8 --send files per connection; send the rest in another connection.",
+                "At most 8 initial --send selections; after they finish, copy another selection onto the viewer while its upload panel is open.",
                 2,
             ));
         }

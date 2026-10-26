@@ -105,6 +105,17 @@ as completed native cleanup.
 
 ## Scope and validation
 
+An upload configured with the original session's `SendIntake` can display later
+explicit file drops after successful publication and source cleanup. Each batch
+keeps a separate `SendControl`. The same panel thread destroys its old native
+window before opening a successor with that new immutable control, original
+placement and fresh mapping evidence. It drains lifecycle events first, so a
+queued close, unmap or parent loss suppresses replacement. Hidden or failed
+panels never reopen. Hiding progress after a selection was accepted leaves that
+transfer running and disables future drops. Earlier completion receipts remain
+in the CLI's bounded content-free history. See
+[NATIVE_FILE_SEND.md](NATIVE_FILE_SEND.md#additional-selections-during-a-native-desktop-session).
+
 This is the existing XCB shell's fixed 640-by-310 utility surface, with the core
 X11 fixed font, on a local 24-bit X11 screen with room beside the viewer. A stale,
 unmapped or resized parent is refused. The local X server and window manager

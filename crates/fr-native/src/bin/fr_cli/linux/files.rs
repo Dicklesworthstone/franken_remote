@@ -6,12 +6,16 @@
 //! request is spent, each opened attempt hands frd a fresh duplicate; only a
 //! granted controller ever reads it. After that request, viewing-only retries
 //! skip setup and preserve the original handle/results, so a selection is never
-//! resent. The completion record is content-free: indices, local sizes,
-//! host-reported outcomes and typed reasons.
+//! resent. Later explicit drops keep that original lane and have separate
+//! immutable result handles. The completion record is content-free: indices,
+//! local sizes, host-reported outcomes and typed reasons from every selection.
 #[path = "files/download.rs"]
 pub(super) mod download;
 use super::Failure;
-use fr_native::desktop::{Desktop, Error as DesktopError};
+use fr_native::{
+    desktop::{Desktop, Error as DesktopError},
+    viewer_window::{DroppedBatchStatus, FileDropControl},
+};
 use fr_wire::files::Reason;
 use frd::native_files::{
     Absence, Publication, SelectReason, Selection, SendControl, SendPhase, SendStatus,
@@ -38,7 +42,10 @@ pub(super) struct Local {
     attempt: Option<Attempt>,
 }
 enum Attempt {
-    Configured(SendControl),
+    Configured {
+        control: SendControl,
+        drops: Option<FileDropControl>,
+    },
     Absent(&'static str),
 }
 
@@ -90,22 +97,38 @@ impl Local {
     /// At each opened attempt, before service. Absence is typed, never fatal:
     /// control proceeds without files.
     pub(super) fn configure(&mut self, desktop: &mut Desktop) {
+        // ready invokes this only before the original control decision is
+        // spent. A pre-request startup retry still needs fresh descriptors;
+        // later viewing/explicit-control attempts retain the original result.
         self.attempt = Some(match self.selection.request() {
             Err(_) => Attempt::Absent("local_selection_unavailable"),
-            Ok(request) => match desktop.configure_file_send(request) {
-                Ok(control) => Attempt::Configured(control),
+            Ok(request) => match desktop.configure_file_send_with_intake(request) {
+                Ok((control, _intake)) => Attempt::Configured {
+                    control,
+                    // The initial selection was accepted independently of
+                    // this optional UI; a failure cannot undo or replay it.
+                    drops: desktop.enable_file_drops().ok(),
+                },
                 Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
                 Err(_) => Attempt::Absent("files_unavailable"),
             },
         });
     }
     pub(super) fn summary(&self) -> Summary {
-        let status = match &self.attempt {
-            None => Err("files_not_started"),
-            Some(Attempt::Absent(code)) => Err(*code),
-            Some(Attempt::Configured(control)) => Ok(control.status()),
+        let (status, drops) = match &self.attempt {
+            None => (Err("files_not_started"), None),
+            Some(Attempt::Absent(code)) => (Err(*code), None),
+            Some(Attempt::Configured { control, drops }) => (Ok(control.status()), drops.as_ref()),
         };
-        summary(&self.sizes, status.as_ref().map_err(|code| *code))
+        let mut out = summary(&self.sizes, status.as_ref().map_err(|code| *code));
+        if let Some(drops) = drops {
+            // The original owner bounds this to eight additional batches,
+            // each with at most eight selections. No path is retained here.
+            for batch in drops.batches() {
+                out.append_dropped(&batch);
+            }
+        }
+        out
     }
 }
 fn absence_code(absence: Absence) -> &'static str {
@@ -163,7 +186,7 @@ pub(super) struct Summary {
     pub(super) sent: Vec<(usize, u64, bool)>,
     /// (index, known local size, typed reason); unmeasured directory sizes are None.
     pub(super) refused: Vec<(usize, Option<u64>, &'static str)>,
-    /// Why no lane carried the selection; `None` once the batch started.
+    /// Why no batch produced a report; `None` once any batch has one.
     pub(super) absence: Option<&'static str>,
 }
 fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> Summary {
@@ -197,9 +220,15 @@ fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> 
             return out;
         }
     };
-    let mut receipts = report.receipts();
+    reported(sizes, report.receipts().map(|receipt| receipt.outcome))
+}
+fn reported(sizes: &[Option<u64>], mut outcomes: impl Iterator<Item = FileSendOutcome>) -> Summary {
+    let mut out = Summary {
+        requested: sizes.len(),
+        ..Summary::default()
+    };
     for (index, &size) in sizes.iter().enumerate() {
-        match receipts.next().map(|receipt| receipt.outcome) {
+        match outcomes.next() {
             Some(
                 FileSendOutcome::HostPublished { bytes, publication }
                 | FileSendOutcome::ControllerPublished { bytes, publication },
@@ -219,6 +248,40 @@ fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> 
     out
 }
 impl Summary {
+    fn append_dropped(&mut self, batch: &DroppedBatchStatus) {
+        let mut next = summary(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
+        if let Some(reason) = next.absence {
+            // An admitted successor awaits its original controller turn; it
+            // does not request a new control grant. Preserve other typed local
+            // selection/refusal reasons per index even after an earlier send.
+            let reason = if reason == "control_not_granted" {
+                "files_queued"
+            } else {
+                reason
+            };
+            for (_, _, refusal) in &mut next.refused {
+                *refusal = reason;
+            }
+        }
+        self.append(next);
+    }
+    fn append(&mut self, next: Self) {
+        if next.absence.is_none() {
+            self.absence = None;
+        }
+        let offset = self.requested;
+        self.requested += next.requested;
+        self.sent.extend(
+            next.sent
+                .into_iter()
+                .map(|(index, bytes, durable)| (offset + index, bytes, durable)),
+        );
+        self.refused.extend(
+            next.refused
+                .into_iter()
+                .map(|(index, bytes, reason)| (offset + index, bytes, reason)),
+        );
+    }
     pub(super) fn not_requested() -> Self {
         Self {
             absence: Some("not_requested"),
@@ -272,6 +335,10 @@ impl Summary {
         text
     }
 }
+
+#[cfg(test)]
+#[path = "files/repeated_tests.rs"]
+mod repeated_tests;
 
 #[cfg(test)]
 mod tests {
