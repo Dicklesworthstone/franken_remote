@@ -105,6 +105,7 @@ impl Drop for ParkedClipboard {
 const PEER: &str = r#"
 sig(x.XInternAtom, W, D, c.c_char_p, I)
 sig(x.XCreateSimpleWindow, W, D, W, I, I, U, U, U, W, W)
+sig(x.XDestroyWindow, I, D, W)
 sig(x.XSetSelectionOwner, I, D, W, W, W)
 sig(x.XGetSelectionOwner, W, D, W)
 sig(x.XConvertSelection, I, D, W, W, W, W, W)
@@ -132,7 +133,8 @@ def atom(name):
     return x.XInternAtom(d, name, 0)
 CLIPBOARD, UTF8, TARGETS, TIMESTAMP = (atom(n) for n in
     (b"CLIPBOARD", b"UTF8_STRING", b"TARGETS", b"TIMESTAMP"))
-INBOX, TICK = atom(b"FR_E2E_INBOX"), atom(b"FR_E2E_TICK")
+INBOX, TICK, INCR = atom(b"FR_E2E_INBOX"), atom(b"FR_E2E_TICK"), atom(b"INCR")
+MAX_READ_BYTES = 1 << 20
 w = x.XCreateSimpleWindow(d, root, 0, 0, 1, 1, 0, 0, 0)
 x.XSelectInput(d, w, 1 << 22)
 x.XSync(d, 0)
@@ -164,23 +166,117 @@ def event(e):
         x.XFlush(d)
     elif v.type == 29 and v.clear.selection == CLIPBOARD:
         state["text"] = None
-def wait(match, limit):
-    until = time.monotonic() + limit
+def wait_until(match, until):
     while time.monotonic() < until:
         while x.XPending(d) > 0:
+            if time.monotonic() >= until:
+                return None
             e = Event()
             x.XNextEvent(d, c.byref(e))
             if match(CEvent.from_buffer(e)):
                 return CEvent.from_buffer(e)
             event(e)
-        time.sleep(0.005)
+        time.sleep(min(0.005, max(0, until - time.monotonic())))
     return None
-def server_time():
+def server_time(until=None):
     # ICCCM: a zero-length append yields a PropertyNotify with the server time.
+    if until is None:
+        until = time.monotonic() + 3
     x.XChangeProperty(d, w, TICK, 19, 32, 2, (W * 1)(0), 0)
     x.XFlush(d)
-    v = wait(lambda v: v.type == 28 and v.prop.window == w and v.prop.atom == TICK, 3)
+    v = wait_until(lambda v: v.type == 28 and v.prop.window == w and v.prop.atom == TICK, until)
     return v.prop.time if v else 0
+def read_property(window):
+    kind, fmt, n, after, data = W(), I(), W(), W(), c.c_void_p()
+    # XGetWindowProperty's length is in 32-bit units, not bytes. Never allocate
+    # from the INCR size hint or fetch an unbounded property.
+    result = x.XGetWindowProperty(d, window, INBOX, 0, MAX_READ_BYTES // 4, 0, 0,
+                                 c.byref(kind), c.byref(fmt), c.byref(n),
+                                 c.byref(after), c.byref(data))
+    try:
+        if result != 0 or after.value != 0 or n.value > MAX_READ_BYTES:
+            return None
+        if n.value and not data.value:
+            return None
+        if fmt.value == 8:
+            value = c.string_at(data.value, n.value) if n.value else b""
+        elif fmt.value == 32 and n.value == 1:
+            # Xlib exposes format-32 values as native unsigned longs.
+            value = c.cast(data, c.POINTER(W))[0]
+        else:
+            value = None
+        return kind.value, fmt.value, n.value, value
+    finally:
+        if data.value:
+            x.XFree(data)
+def text_reply(value):
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError:
+        return ("INVALID",)
+    return ("TEXT", value.hex() or "-")
+def read_selection():
+    # One deadline includes the timestamp request, initial reply and EVERY INCR
+    # chunk. A fresh requestor isolates retries from abandoned or late chunks.
+    until = time.monotonic() + 3
+    requestor = x.XCreateSimpleWindow(d, root, 0, 0, 1, 1, 0, 0, 0)
+    if not requestor:
+        return ("INVALID",)
+    x.XSelectInput(d, requestor, 1 << 22)
+    try:
+        t = server_time(until)
+        if not t:
+            return ("TIMEOUT",)
+        x.XConvertSelection(d, CLIPBOARD, UTF8, INBOX, requestor, t)
+        x.XFlush(d)
+        v = wait_until(lambda v: v.type == 31 and v.sel.requestor == requestor
+                       and v.sel.selection == CLIPBOARD and v.sel.target == UTF8
+                       and v.sel.time == t, until)
+        if v is None:
+            return ("TIMEOUT",)
+        if v.sel.property == 0:
+            return ("NONE",)
+        if v.sel.property != INBOX:
+            return ("INVALID",)
+        prop = read_property(requestor)
+        if time.monotonic() >= until:
+            return ("TIMEOUT",)
+        if prop is None:
+            return ("INVALID",)
+        kind, fmt, count, value = prop
+        if kind == UTF8 and fmt == 8:
+            return text_reply(value)
+        if kind != INCR or fmt != 32 or count != 1 or value > MAX_READ_BYTES:
+            return ("INVALID",)
+        minimum = value
+        received = bytearray()
+        while True:
+            # Deletion acknowledges this property and asks for the NEXT chunk.
+            x.XDeleteProperty(d, requestor, INBOX)
+            x.XFlush(d)
+            v = wait_until(lambda v: v.type == 28 and v.prop.window == requestor
+                           and v.prop.atom == INBOX and v.prop.state == 0, until)
+            if v is None:
+                return ("TIMEOUT",)
+            prop = read_property(requestor)
+            if time.monotonic() >= until:
+                return ("TIMEOUT",)
+            if prop is None:
+                return ("INVALID",)
+            kind, fmt, count, chunk = prop
+            if kind != UTF8 or fmt != 8 or len(received) + count > MAX_READ_BYTES:
+                return ("INVALID",)
+            if not count:
+                # Complete only at a typed terminator meeting the size hint.
+                if len(received) < minimum:
+                    return ("INVALID",)
+                x.XDeleteProperty(d, requestor, INBOX)
+                x.XFlush(d)
+                return text_reply(bytes(received))
+            received.extend(chunk)
+    finally:
+        x.XDestroyWindow(d, requestor)
+        x.XFlush(d)
 def command(cmd):
     if cmd[0] == "own":
         t = server_time()
@@ -189,26 +285,7 @@ def command(cmd):
         x.XSync(d, 0)
         say("OWNED" if t and x.XGetSelectionOwner(d, CLIPBOARD) == w else "NOTOWNED")
     elif cmd[0] == "read":
-        t = server_time()
-        x.XDeleteProperty(d, w, INBOX)
-        x.XConvertSelection(d, CLIPBOARD, UTF8, INBOX, w, t)
-        x.XFlush(d)
-        v = wait(lambda v: v.type == 31 and v.sel.requestor == w and v.sel.selection == CLIPBOARD, 3)
-        if v is None:
-            say("TIMEOUT")
-        elif v.sel.property == 0:
-            say("NONE")
-        else:
-            kind, fmt, n, after, data = W(), I(), W(), W(), c.c_void_p()
-            x.XGetWindowProperty(d, w, INBOX, 0, 1 << 20, 1, 0, c.byref(kind), c.byref(fmt),
-                                 c.byref(n), c.byref(after), c.byref(data))
-            value = c.string_at(data.value, n.value) if data.value else b""
-            if data.value:
-                x.XFree(data)
-            if kind.value == UTF8:
-                say("TEXT", value.hex() or "-")
-            else:
-                say("TYPE", kind.value)
+        say(*read_selection())
     elif cmd[0] == "owner":
         o = x.XGetSelectionOwner(d, CLIPBOARD)
         say("OWNER", "self" if o == w else ("none" if o == 0 else "other"))
