@@ -872,18 +872,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
         )
         .map_err(|error| failure.map_or(Error::Transport(error), Error::MediaTransport))?;
         let observation = self.collect_capture(&cx)?;
-        if let Some(presentation) = &mut self.presentation {
-            presentation
-                .check_connection(q)
-                .map_err(Error::PresentedState)?;
-            presentation
-                .observe(
-                    self.sender
-                        .source_progress()
-                        .map_err(Error::MediaTransport)?,
-                )
-                .map_err(Error::PresentedState)?;
-        }
+        observe_source_after_dispatch(self.sender, self.presentation.as_deref_mut(), q)?;
         let mut idle = 0;
         let mut send = Availability::Ready;
         for _ in 0..self.policy.records_per_turn {
@@ -959,6 +948,28 @@ impl<S: Services> Services for VideoServices<'_, S> {
             self.other.receive(route, bytes)
         }
     }
+}
+
+/// Repair dispatch can discover an expired reference after this turn's first
+/// sender check. Consume the valid request, then surface the failed chain to
+/// the negotiated recovery owner BEFORE asking presentation to observe it.
+/// A missing source snapshot alone is not a fresh observation or a reason to
+/// bypass that owner's original recovery deadline and allowance.
+fn observe_source_after_dispatch(
+    sender: &mut QuicEgress,
+    presentation: Option<&mut HostPresentation>,
+    q: &QuicRecords,
+) -> Result<(), Error> {
+    sender.stream_check(q).map_err(Error::MediaTransport)?;
+    if let Some(presentation) = presentation {
+        presentation
+            .check_connection(q)
+            .map_err(Error::PresentedState)?;
+        presentation
+            .observe(sender.source_progress().map_err(Error::MediaTransport)?)
+            .map_err(Error::PresentedState)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

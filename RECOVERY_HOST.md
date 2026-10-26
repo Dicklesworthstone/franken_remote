@@ -60,6 +60,22 @@ owners begin with unknown evidence; only lifetime report counters survive.
 not physical visibility or input authorization. The original local stop handle,
 connection proof, capture worker and viewer decoder survive successful recovery.
 
+### Reference expiry discovered during repair dispatch
+
+A valid selective-repair request can discover an expired reference after the
+host turn's initial sender check. The request is consumed, but the sender's
+failed chain must reach the negotiated recovery owner before presentation
+tries to observe its now-missing source snapshot. The post-dispatch step
+therefore rechecks the same sender. It retains the typed reference failure,
+original recovery deadline and allowance, and the open connection; it does
+not turn the missing snapshot into a terminal presentation failure.
+
+The dispatch regression explicitly places the cache/repair failure between
+the successful initial check and the production post-dispatch operation,
+then runs both canonical peers through replacement on their original workers
+and connection. TLS/UDP and subprocess IPC are real; the capture/decoder data
+and injected scheduling boundary remain fixtures, not live-tailnet evidence.
+
 ## Validation
 
 Eight new tests cover real capture-in-flight admission, foreign source refusal,

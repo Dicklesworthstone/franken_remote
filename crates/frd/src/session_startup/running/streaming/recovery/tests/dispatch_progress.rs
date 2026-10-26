@@ -5,7 +5,7 @@ use super::*;
 
 #[test]
 #[allow(clippy::too_many_lines)]
-fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners() {
+fn repair_discovered_failure_reaches_recovery_before_presentation_observes_the_source() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
         let Fixture {
@@ -21,6 +21,16 @@ fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners
         let original_viewer = presenter.worker_id();
         let connection = host.host.session().unwrap().opened.transport.binding();
         let before = host.stream.sender.source_progress().unwrap().unwrap();
+        assert!(host.presentation.is_some());
+        // The turn's initial sender/presentation check succeeds. Model the
+        // source's deadline being discovered only in the subsequent repair
+        // callback, without relying on a microsecond scheduler race.
+        observe_source_after_dispatch(
+            &mut host.stream.sender,
+            host.presentation.as_mut(),
+            &host.host.session().unwrap().opened.transport,
+        )
+        .unwrap();
         let update = host
             .stream
             .source
@@ -60,6 +70,23 @@ fn already_fenced_sender_notifies_a_healthy_peer_and_recovers_on_original_owners
         assert!(!control.view_ready().unwrap());
         assert_eq!(host.stream.sender.cache_usage().bytes, 0);
         assert_eq!(host.stream.source.next_recovery_deadline(), None);
+
+        // This is the post-dispatch operation of VideoServices::maintain.
+        // Before the recheck it returns PresentedState(Closed): that terminal
+        // error bypasses Admission's negotiated reference-recovery handoff.
+        // Keeping the original typed sender failure lets the same session
+        // notify the peer, fence input and complete the bounded replacement.
+        let result = observe_source_after_dispatch(
+            &mut host.stream.sender,
+            host.presentation.as_mut(),
+            &host.host.session().unwrap().opened.transport,
+        );
+        assert!(
+            matches!(result, Err(Error::MediaTransport(error)) if error.is_reference_failure()),
+            "repair expiry lost its recoverable cause: {result:?}"
+        );
+        assert!(!host.stream.sender.is_closed());
+        assert!(!host.host.session().unwrap().opened.transport.is_closed());
 
         // The peer is still healthy and received no announcement of the rejected
         // picture. Only the normal host's Failed notification can elicit recovery.
