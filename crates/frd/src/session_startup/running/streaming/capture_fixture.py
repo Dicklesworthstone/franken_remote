@@ -30,7 +30,7 @@ try:
         if last is not None and MODE == 'crash': sys.exit(3)
         if last is not None and MODE == 'crash-late' and time.monotonic() - start > 1.0: sys.exit(3)
         if last is not None and MODE == 'slow': time.sleep(.06)
-        if last is not None and MODE == 'overloaded': time.sleep(.18)
+        if last is not None and (MODE == 'overloaded' or (MODE == 'recover-load' and time.monotonic() - start < .8)): time.sleep(.18)
         if last is not None and (MODE in ('unchanged', 'crash-late') or (MODE == 'wake' and time.monotonic() - start < 1.65)) and not forced:
             reply(h,265,struct.pack('>QQQ',frame,last,observed)); continue
         reference = 0 if last is None or forced else last

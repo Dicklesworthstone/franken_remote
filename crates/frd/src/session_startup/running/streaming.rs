@@ -6,6 +6,7 @@ pub(super) mod acquisition;
 mod cursor;
 pub(in crate::session_startup) mod files;
 mod recovery;
+mod send_evidence;
 use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
     input_watchdog::{Control, StopReason},
@@ -525,6 +526,7 @@ impl StreamingHost {
                 credit,
                 results,
                 in_flight: None,
+                send_evidence: send_evidence::SendEvidence::default(),
                 pacing: stream.pacing.as_mut(),
                 last_work: None,
                 last_capture,
@@ -731,6 +733,7 @@ struct VideoServices<'a, S> {
     credit: mpsc::Sender<()>,
     results: mpsc::Receiver<CaptureUpdate>,
     in_flight: Option<u64>,
+    send_evidence: send_evidence::SendEvidence,
     pacing: Option<&'a mut pacing::Controller>,
     last_work: Option<(u64, u64)>,
     last_capture: Option<u64>,
@@ -803,11 +806,14 @@ impl<S> VideoServices<'_, S> {
     fn capture_interval(
         &mut self,
         current: u64,
-        send: Availability,
         credit: bool,
         observation: Option<Observation>,
     ) -> Result<u64, Error> {
         let interval = if let Some(controller) = &mut self.pacing {
+            let view = self.sender.feedback_view().map_err(Error::MediaTransport)?;
+            let send = self
+                .send_evidence
+                .current(view, current, controller.interval_us());
             let elapsed = self.in_flight.map(|start| current - start);
             let completed = self
                 .last_work
@@ -889,7 +895,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
         let observation = self.collect_capture(&cx)?;
         observe_source_after_dispatch(self.sender, self.presentation.as_deref_mut(), q)?;
         let mut idle = 0;
-        let mut send = Availability::Ready;
+        let view = self.sender.feedback_view().map_err(Error::MediaTransport)?;
         for _ in 0..self.policy.records_per_turn {
             if !self.permitted() {
                 return Err(Error::Authority);
@@ -906,10 +912,11 @@ impl<S: Services> Services for VideoServices<'_, S> {
                 .map_err(Error::MediaTransport)?
             {
                 Progress::Pending(_) => {
-                    send = Availability::Blocked;
+                    self.send_evidence.blocked(view, now(&cx)?);
                     break;
                 }
                 Progress::Accepted(_) => {
+                    self.send_evidence.accepted(view, now(&cx)?);
                     idle = 0;
                     self.statistics.admitted_records =
                         self.statistics.admitted_records.saturating_add(1);
@@ -924,7 +931,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
         }
         let current = self.service_lanes(q, &cx)?;
         let credit = self.sender.stream_credit(self.capacity);
-        let interval = self.capture_interval(current, send, credit, observation)?;
+        let interval = self.capture_interval(current, credit, observation)?;
         let wake = self.input_wake.due(
             current,
             self.last_capture,

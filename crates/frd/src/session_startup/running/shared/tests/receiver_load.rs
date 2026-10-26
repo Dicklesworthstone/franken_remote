@@ -92,11 +92,16 @@ fn shared_decoder_load_reduces_capture_then_probes_after_the_original_decoder_ca
     let rt = support::runtime();
     let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);
     rt.block_on(Box::pin(async {
-        let mut group = Box::pin(group_with_capabilities(
+        // The one-off source consent starts before worker/bootstrap readiness.
+        // Cover that bounded startup plus the full slowdown/probe/renewal run;
+        // each peer still uses its original three-second renewable authority.
+        let mut group = Box::pin(group_with_source_lifetime(
             &rt,
             1,
             &[fr_wire::receiver_metrics::CAPABILITY],
             true,
+            SendPolicy::default(),
+            HostDuration::from_micros(8_000_000),
         ))
         .await;
         ready(&mut group).await;

@@ -48,6 +48,14 @@ stale, absent, future or old-generation evidence remains unknown. A viewer that
 did not negotiate metrics retains the existing local-only policy. Neither
 enqueue success, capture credit nor decoder load is a bandwidth estimate.
 
+The private/controlled capture loop also retains only actual `Accepted` or
+`Pending` send outcomes. An empty sender poll is unknown unless a recent real
+outcome remains valid; it never creates or refreshes successful-send evidence.
+Each outcome belongs to the full original media binding, expires after one
+bounded capture interval (100–250 ms), and starts unknown on a new service owner.
+This prevents idle polling from justifying an upward probe while still allowing
+a slowed source to recover at its actual capture cadence.
+
 The `--fps` setting remains the maximum capture rate. The adaptive maximum is
 200 ms unless the configured capture interval is already slower; a `--fps` value
 below 5 then keeps that slower interval fixed. The host never speeds up a low-fps
@@ -75,6 +83,18 @@ work is that measured elapsed wait. They exercise slowdown followed by a
 headroom probe when decoding catches up, original-session renewal, and a healthy
 viewer continuing after a slower sibling leaves. The codec and completion are
 explicit fixtures, not hardware decoder or physical presentation measurements.
+
+Private-capture regressions cover an empty original egress before capture
+admission and an actual delayed-then-healthy supervised capture child on the
+same renewed session and worker. Pure replay tests exercise expiry, every media
+binding component, silence without fabricated headroom, and recovery with real
+capture-cadence sends. The long shared decoder-recovery fixture has an explicit
+8-second source consent budget to cover its bounded startup plus 3.8-second
+probe/renewal scenario; peer renewal, query expiry and reference deadlines are
+unchanged. The four exact-source send-evidence tests passed with the pinned
+toolchain and real core/wire/media libraries. These new daemon scenarios still
+require runtime execution; source review and formatting are not a passing
+hardware or integration result.
 
 ## Enabling the implemented path
 

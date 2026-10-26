@@ -141,6 +141,126 @@ fn source_work_pressure_reduces_future_capture_without_blocking_session_service(
 }
 
 #[test]
+fn private_capture_recovers_after_source_pressure_on_the_original_session_and_worker() {
+    run(|c, h| async move {
+        let (mut host, mut viewer, channels, mut receiver) =
+            Box::pin(fixture(&c, &h, "recover-load", SendPolicy::default())).await;
+        host.enable_adaptive_capture(Duration::from_millis(200))
+            .unwrap();
+        let original_worker = host.worker_id();
+        let stop = host.stream.control.clone();
+        let until = now(&c).unwrap() + 3_800_000;
+        let mut n = 2000;
+        let (result, frames) = Box::pin(support::both(
+            host.serve(|| nonce(&mut n), || None, block),
+            async {
+                let mut frames = 0;
+                while now(&c).unwrap() < until {
+                    frames += receive(&mut viewer, &channels, &mut receiver, &c).await;
+                }
+                assert!(stop.check().is_ok(), "slowdown/recovery must keep renewing");
+                stop.revoke();
+                frames
+            },
+        ))
+        .await;
+        assert!(result.is_err());
+        assert!(frames > 10);
+        assert_eq!(host.worker_id(), original_worker);
+        let controller = host.pacing().unwrap();
+        let reduced = controller
+            .decisions()
+            .filter(|report| report.reason == Reason::SourceWork)
+            .map(|report| report.interval_us)
+            .max()
+            .expect("the actual delayed worker must reduce capture admission");
+        assert!(reduced >= 133_336);
+        assert!(
+            controller
+                .decisions()
+                .any(|report| report.reason == Reason::HeadroomProbe)
+        );
+        assert!(controller.interval_us() < reduced);
+        host.reap_media(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
+fn empty_original_egress_does_not_report_ready_before_raw_capture_admission() {
+    run(|c, h| async move {
+        let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
+        let Media { mut stream, .. } = Box::pin(media(
+            &mut host,
+            &mut viewer,
+            &c,
+            &h,
+            "healthy",
+            SendPolicy::default(),
+        ))
+        .await;
+        stream
+            .enable_adaptive_capture(Duration::from_millis(200))
+            .unwrap();
+        let worker = stream.worker_id();
+        let control = stream.control.clone();
+        let (credit, mut requests) = mpsc::channel(1);
+        let (_completed, results) = mpsc::channel(1);
+        let current = now(&h).unwrap();
+        let mut other = block;
+        let mut services = VideoServices {
+            control: &control,
+            sender: &mut stream.sender,
+            statistics: &mut stream.statistics,
+            policy: stream.policy,
+            capacity: stream.capacity,
+            credit,
+            results,
+            in_flight: None,
+            send_evidence: send_evidence::SendEvidence::default(),
+            pacing: stream.pacing.as_mut(),
+            last_work: None,
+            last_capture: None,
+            next_capture: current + 100_000,
+            input_wake: super::super::super::input_wake::Wake::default(),
+            repair_turn: false,
+            feedback: None,
+            presentation: None,
+            cursor: None,
+            media: None,
+            other: &mut other,
+        };
+        let mut n = 2000;
+        services
+            .maintain(host.io().unwrap().0, &mut || nonce(&mut n))
+            .unwrap();
+        assert_eq!(services.statistics.admitted_records, 0);
+        assert_eq!(
+            services
+                .pacing
+                .as_deref()
+                .unwrap()
+                .report()
+                .unwrap()
+                .sample
+                .send,
+            Availability::Unknown,
+            "empty sender polls cannot claim a successful transport admission"
+        );
+        assert!(matches!(requests.try_recv(), Err(mpsc::RecvError::Empty)));
+        drop(services);
+        assert_eq!(stream.worker_id(), worker);
+        host.close();
+        stream.close();
+        stream
+            .reap(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 fn retained_reference_credit_is_not_reported_as_idle_or_network_capacity() {
     run(|c, h| async move {
         let (mut host, mut viewer, channels, mut receiver) = Box::pin(fixture(

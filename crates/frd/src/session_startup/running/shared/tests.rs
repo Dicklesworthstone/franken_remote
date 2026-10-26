@@ -95,11 +95,14 @@ async fn source(control: &ObservationControl, changing: bool) -> CaptureSource {
     .unwrap()
 }
 fn source_control(rt: &Runtime) -> ObservationControl {
+    source_control_with_lifetime(rt, HostDuration::from_micros(5_000_000))
+}
+fn source_control_with_lifetime(rt: &Runtime, lifetime: HostDuration) -> ObservationControl {
     let cx = rt.request_cx_with_budget(Budget::INFINITE);
     let mut a = SessionAuthority::new(
         RemoteSessionId::from_raw(1),
         AuthorityPolicy {
-            authorization_lifetime: HostDuration::from_micros(5_000_000),
+            authorization_lifetime: lifetime,
             ticket_lifetime: HostDuration::from_micros(1_000_000),
         },
     );
@@ -293,6 +296,24 @@ async fn group_with_policy(
     changing: bool,
     policy: SendPolicy,
 ) -> Box<Group> {
+    group_with_source_lifetime(
+        rt,
+        count,
+        extra,
+        changing,
+        policy,
+        HostDuration::from_micros(5_000_000),
+    )
+    .await
+}
+async fn group_with_source_lifetime(
+    rt: &Runtime,
+    count: usize,
+    extra: &[&str],
+    changing: bool,
+    policy: SendPolicy,
+    source_lifetime: HostDuration,
+) -> Box<Group> {
     let mut peers = Vec::new();
     for i in 0..count {
         peers.push(
@@ -305,7 +326,7 @@ async fn group_with_policy(
             .await,
         );
     }
-    let owner = source_control(rt);
+    let owner = source_control_with_lifetime(rt, source_lifetime);
     let mut src = source(&owner, changing).await;
     let pool = SharedFramePool::new(ProtocolLimits::ABSOLUTE, 32 * 1024 * 1024, 8).unwrap();
     let initial = src
