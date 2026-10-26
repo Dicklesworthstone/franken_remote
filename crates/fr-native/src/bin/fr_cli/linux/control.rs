@@ -20,6 +20,7 @@
 //! local display, a separate XCB connection). Completion reports content-free
 //! tallies only: whether it became active, how many host items were published
 //! to the local CLIPBOARD, or the typed reason it never became active.
+#[path = "control/renewal.rs"]
 mod renewal;
 use fr_client::input::{self, ResultEvent, viewport::SurfaceRect};
 use fr_core::{
