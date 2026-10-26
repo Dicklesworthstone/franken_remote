@@ -460,6 +460,15 @@ impl<'a> Sender<'a> {
         self.fail(Error::Cancelled);
         self.settle_batch();
     }
+    /// Fence the original source, then request this exact lane's retirement.
+    /// Safe inside the parent's I/O authorization callback: no connection is
+    /// borrowed and no replacement source, permission or deadline is created.
+    /// Retained/uncertain native payload still fences the parent. Once custody
+    /// returns, finish with `cancel` and collect the original cleanup/receipts.
+    pub fn request_cancel(&mut self) {
+        self.stop();
+        self.lane.request_retirement();
+    }
     /// Local file-only cancellation is out of band from bulk queue capacity.
     /// The caller can keep servicing the original desktop connection normally.
     pub fn cancel(&mut self, q: &mut QuicRecords) -> Result<(), Error> {

@@ -50,9 +50,9 @@ jobs:
           assert set(binaries) == {'fr_tailnet', 'frd'}, 'both committed test binaries required'
           original = os.readlink('/proc/self/ns/net')
           for name, script in [('fr_tailnet', 'scripts/verify-native-dial.sh'), ('frd', 'scripts/verify-native-session.sh')]:
-              # Privilege is confined to creating a separate test namespace.
-              # No network address is added before unshare; no repository writes.
-              subprocess.run(['sudo', '-n', 'unshare', '--user', '--map-root-user', '--net',
+              # Match FR_NS_SUDO: real root retains access to the checkout.
+              # Every address change remains inside a fresh network namespace.
+              subprocess.run(['sudo', '-n', 'unshare', '--net', '--',
                   'env', 'FR_DIAL_TEST_NAMESPACE=isolated', 'FR_SESSION_TEST_NAMESPACE=isolated',
                   f'FR_SESSION_ORIGINAL_NETNS={original}', 'bash', script, '--inside', binaries[name]], check=True)
           PY

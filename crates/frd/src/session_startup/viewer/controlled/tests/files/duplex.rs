@@ -47,11 +47,12 @@ fn start(
     viewer_dest: &Disk,
     host_source: &Disk,
     download: &[u8],
-) {
+) -> Permission {
+    let permission = Permission::new(true);
     state
         .viewer
         .expect_file_drop(
-            Permission::new(true),
+            permission.clone(),
             fr_files::sender::Policy::default(),
             Duration::from_secs(2),
         )
@@ -79,6 +80,7 @@ fn start(
     assert!(state.viewer.file_send_negotiating() && state.viewer.file_receive_negotiating());
     assert!(state.host.file_receive_negotiating() && state.host.file_send_negotiating());
     assert!(state.viewer.file_stage().is_none() && state.viewer.file_receive_state().is_none());
+    permission
 }
 async fn attached(state: &mut Fixture, c: &Cx, h: &Cx, n: &mut u128, t: &mut u128, until: u64) {
     while state.viewer.file_send_negotiating()
@@ -359,3 +361,5 @@ fn cancelling_either_partial_direction_preserves_the_other_and_input() {
         });
     }
 }
+
+mod permission;

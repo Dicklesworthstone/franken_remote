@@ -191,9 +191,9 @@ jobs:
           listed = subprocess.check_output(
               [binaries[0], '--list', '--ignored', '--exact', test], text=True)
           assert listed.splitlines().count(f'{test}: test') == 1, 'native dial fallback regression must be present'
-          # Reuse the daily connection lane's isolated sudo path. The script
-          # runs all native_dial cases, including this exact fallback regression.
-          subprocess.run(['sudo', '-n', 'unshare', '--user', '--map-root-user', '--net',
+          # Match FR_NS_SUDO: keep real-root checkout access inside a fresh
+          # network namespace. Run every native_dial case, including fallback.
+          subprocess.run(['sudo', '-n', 'unshare', '--net', '--',
               'env', 'FR_DIAL_TEST_NAMESPACE=isolated', 'bash', 'scripts/verify-native-dial.sh',
               '--inside', binaries[0]], check=True, timeout=120)
           PYTHON

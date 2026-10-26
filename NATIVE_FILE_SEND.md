@@ -68,6 +68,28 @@ read is not declared cleaned; a dropped/expired cleanup future retains the owner
 Receipts remain collectable after controller closure, including unknown effects
 and already-published files. No retry or new controller is created.
 
+Revoking an established upload's separate local `Permission` during a native I/O
+wait now fences the original source and requests retirement of only its completed
+file pair. The request runs inside the existing authorization callback, before any
+later application staging; it cannot renew consent, attachment identity or a
+deadline. If that exact native operation entered without application payload or
+uncertain protected output, it may finish under the same parent authority and
+original deadlines. The next connection check retires the pair before another
+application record, and the ordinary file-service turn finishes the same slot's
+cancellation so its original cleanup and receipts remain collectable. The
+independent download and desktop can continue. Retained native payload or
+uncertain protected output still closes the parent; cancellation does not claim
+to retract bytes already in flight. An unfinished attachment retains its existing
+parent fence. Direct file/directory/batch requests after revocation still refuse
+with `Cancelled` before a source can start.
+
+The new regressions exercise a genuinely pending native receive during a partial
+upload, subsequent sibling download publication and input, the conservative
+post-staging refusal, and repeated cancellation after an actual publication.
+They use the real TLS/UDP and ATP owners with explicit desktop/input fixtures;
+they are not native desktop or live-tailnet qualification. Their execution remains
+unverified in this change's resource-constrained workspace.
+
 The running-viewer tests use both ordinary controller loops and real TLS/UDP,
 ATP hashing and filesystem publication. They cover successive 120,007-byte and
 empty files, input and renewal beyond the initial lease, partial cancellation,

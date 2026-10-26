@@ -52,11 +52,25 @@ impl Slot {
         }
         Ok(())
     }
+    fn permits_source(&self) -> bool {
+        self.receiver.is_some() || self.permission.as_ref().is_none_or(Permission::is_approved)
+    }
     pub(super) fn permits_io(&mut self) -> bool {
-        self.check_pending().is_ok()
-            && (self.receiver.is_some()
-                || self.stopped
-                || self.permission.as_ref().is_none_or(Permission::is_approved))
+        if self.check_pending().is_err() {
+            return false;
+        }
+        if self.stopped || self.permits_source() {
+            return true;
+        }
+        let Some(sender) = &mut self.sender else {
+            return false;
+        };
+        // Only the completed original sender can narrow this lane while native
+        // I/O owns the connection. Fence source work BEFORE requesting retirement;
+        // the transport keeps its own payload/authority/deadline checks intact.
+        self.failure.get_or_insert(Error::Cancelled);
+        sender.request_cancel();
+        true
     }
     pub(super) fn stop(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
         self.stop_on(q, None)
@@ -156,8 +170,10 @@ impl Slot {
                 }
             }
         }
-        if !self.permits_io() {
+        if !self.permits_source() {
             self.failure.get_or_insert(Error::Cancelled);
+            // A prior I/O check may already have stopped the source and retired
+            // the pair. Finish this same slot so its cleanup remains collectable.
             return self.stop(q);
         }
         if self.stopped {
@@ -340,7 +356,7 @@ impl ControlledViewer {
         if self.files.upload.pending.is_some() {
             return Err(Error::Busy);
         }
-        if !self.files.upload.permits_io() || self.files.upload.stopped {
+        if !self.files.upload.permits_source() || self.files.upload.stopped {
             self.cancel_file_send()?;
             return Err(Error::Cancelled);
         }

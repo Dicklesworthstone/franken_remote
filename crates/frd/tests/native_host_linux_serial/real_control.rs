@@ -1636,7 +1636,9 @@ assert d
 root = x.XDefaultRootWindow(d)
 gc = x.XDefaultGC(d, x.XDefaultScreen(d))
 # Its own raised window: other host clients' windows would clip root drawing.
-w = x.XCreateSimpleWindow(d, root, 420, 330, 200, 120, 0, 0, 0)
+# Keep the host control indicator above and clipboard privacy strip below visible.
+# Covering either surface correctly stops its owner instead of testing recovery.
+w = x.XCreateSimpleWindow(d, root, 420, 180, 200, 120, 0, 0, 0)
 attributes = Attributes(override_redirect=1)
 x.XChangeWindowAttributes(d, w, 1 << 9, c.byref(attributes))
 x.XMapRaised(d, w)

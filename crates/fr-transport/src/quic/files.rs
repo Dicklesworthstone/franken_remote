@@ -132,6 +132,14 @@ impl FilesChannel {
         }
         Ok(())
     }
+    /// Request retirement of this original completed pair without borrowing its
+    /// connection. The next checked operation retires it before new application
+    /// work. During native I/O, only an immutable payload-empty entry proof can
+    /// preserve the parent; retained or uncertain payload still fences it.
+    /// Keep this owner until ordinary retirement/cleanup can finish.
+    pub fn request_retirement(&self) {
+        self.attachment.request_retirement();
+    }
     /// Removes only file send/receive state; never renews input or recycles IDs.
     pub fn retire(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         self.attachment.retire_files(q, cx)

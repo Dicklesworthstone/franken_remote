@@ -118,6 +118,10 @@ enum Phase {
 }
 /// Non-cloneable exchange owner. Abandonment fences the connection on its next
 /// checked operation, including idle ticks; no detached task or timer is needed.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "peer side, receive arming and independent negotiated capabilities are orthogonal"
+)]
 pub struct MediaChannel {
     connection: ConnectionBinding,
     state: Arc<AtomicU8>,

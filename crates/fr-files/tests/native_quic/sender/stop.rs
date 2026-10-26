@@ -58,7 +58,7 @@ fn stop_fences_idle_queued_and_preparing_sources_without_resetting_control() {
 }
 
 #[test]
-fn stop_preserves_the_actual_publication_receipt_and_original_connection() {
+fn requested_cancel_preserves_publication_and_finishes_already_retired_original_pair() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut f = Running::new(&cx).await;
@@ -83,9 +83,15 @@ fn stop_preserves_the_actual_publication_receipt_and_original_connection() {
             }
         );
         let before = f.link.c.usage();
-        sender.stop();
+        sender.request_cancel();
+        sender.request_cancel();
         assert_eq!(f.link.c.usage(), before);
         assert_eq!(sender.result(), Some(actual));
+        // The next original connection check services the request. Finishing
+        // cancellation must accept that tombstone without resetting the parent.
+        f.link.c.tick(&cx, || true).unwrap();
+        sender.cancel(&mut f.link.c).unwrap();
+        assert!(!f.link.c.is_closed());
         assert_eq!(cleanup(&mut sender), actual);
         assert_eq!(fs::read(f.path.join("received")).unwrap(), b"durable");
         drop(sender);
