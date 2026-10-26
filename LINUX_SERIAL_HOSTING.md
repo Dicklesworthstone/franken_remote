@@ -68,6 +68,31 @@ Polling an already spent service refuses rather than polling original work again
 An escaped transport is still independently owned and continues to prevent rule
 removal; eager local retirement does not assert that every external owner is gone.
 
+## Recovering after bounded source retirement
+
+The `frd run` share owner gives source reaping a five-second bound, then gives
+its retained launch retirement three seconds to collect the original child.
+If the source reports `ReapPending` but that exact retained launch subsequently
+returns a positive OS exit receipt, cleanup records `source_forced_retirement`
+and may continue toward a fresh share. A non-success process exit still proves
+the aborted process is gone; it does not claim graceful worker completion.
+
+Missing custody, a never-spawned `Ok(None)` receipt, or failed collection cannot
+clear the source timeout. Every other source error remains fatal. Audio has its
+own three-second stage bound after launch collection; source teardown cannot
+spend it. Launch, audio and ingress failures still prevent replacement. The
+existing driver release drops old transports before ingress retirement, and the
+next share must obtain fresh session, identity, consent and source ownership.
+
+Four new child-custody regressions use real supervised subprocesses and OS exit
+receipts while explicitly injecting the source-stage `ReapPending` result. They
+cover confirmation, absent custody, expired/cancelled collection, and preservation
+of other source errors. The existing namespace policy-revision case separately
+checks that the old PID and ingress retire before a different source child serves
+frame zero to a fresh viewer. These tests have not been executed in this session;
+they do not qualify a physical NVENC driver's delayed teardown or the five-session
+hardware acceptance gate in `fr-kiao`.
+
 ## Focused lifecycle verification
 
 Build the integration test and the shipped client with the repository's pinned

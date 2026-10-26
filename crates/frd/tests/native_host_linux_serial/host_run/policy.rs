@@ -178,6 +178,13 @@ fn update_active(update: Update) {
                     Approval::Local,
                     "process override never writes saved policy"
                 );
+                assert_eq!(tools.state()["deleted"], 1, "old ingress retired");
+                // Actual next-share availability after the preceding source's
+                // positive retirement. This normal synthetic source does not
+                // reproduce a physical NVENC process's delayed exit; the forced
+                // receipt classification has separate deterministic tests.
+                let next = runtime.request_cx_with_budget(Budget::INFINITE);
+                next_viewer_receives_frames(next, &trace, &pid, &stop).await;
             } else {
                 assert!(
                     host.is_finished(),
@@ -202,6 +209,35 @@ fn update_active(update: Update) {
             1
         },
     );
+}
+
+async fn next_viewer_receives_frames(
+    next: Cx,
+    trace: &std::path::Path,
+    old_pid: &str,
+    stop: &StopHandle,
+) {
+    let native = fixture::client(&next, address()).await;
+    let viewer = Viewer::new(
+        next.clone(),
+        native,
+        super::super::persistent_desktop::offer(),
+        fr_transport::quic::Policy::default(),
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    let mut fresh = Box::pin(Client::start(next, viewer)).await;
+    fresh.ready().await;
+    assert_eq!(fresh.frames.first(), Some(&0));
+    assert_ne!(
+        fs::read_to_string(trace).unwrap(),
+        old_pid,
+        "new source child"
+    );
+    assert!(!PathBuf::from(format!("/proc/{old_pid}")).exists());
+    // Keep the new viewer alive through the stop request, so a third lazy
+    // share cannot race the final cleanup assertions.
+    stop.request();
 }
 
 #[test]

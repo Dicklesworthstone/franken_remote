@@ -245,6 +245,10 @@ pub enum Event {
     ShareEnded {
         outcome: String,
     },
+    /// The source's bounded reap expired, but its original launch custody
+    /// subsequently collected the exact child exit. A new share may proceed
+    /// only after the remaining cleanup stages also succeed.
+    SourceForcedRetirement,
     CleanupFailed {
         stage: &'static str,
     },
@@ -252,6 +256,31 @@ pub enum Event {
 }
 
 pub type Reporter = Arc<dyn Fn(Event) + Send + Sync>;
+
+type ReapResult = Result<Option<asupersync::process::ExitStatus>, crate::worker::Error>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceRetirement {
+    Complete,
+    Forced,
+}
+
+/// Reconcile only the original source result and its retained launch receipt.
+/// A launch that never spawned (`Ok(None)`) cannot prove a timed-out source
+/// dead. Nor can a PID check, missing custody or any failed collection. An
+/// abort's non-success exit status is still positive OS evidence of death.
+fn source_retirement(
+    source: ReapResult,
+    launch: Option<ReapResult>,
+) -> Result<SourceRetirement, crate::worker::Error> {
+    match source {
+        Ok(_) => Ok(SourceRetirement::Complete),
+        Err(crate::worker::Error::ReapPending) if matches!(launch, Some(Ok(Some(_)))) => {
+            Ok(SourceRetirement::Forced)
+        }
+        Err(error) => Err(error),
+    }
+}
 
 fn random_bytes<const N: usize>() -> Result<[u8; N], Error> {
     let mut bytes = [0; N];
@@ -1088,12 +1117,10 @@ impl Share<'_> {
         // launch and firewall stages' time. A hardware encoder's worker can
         // take seconds to tear down: ~3.8 s measured live for NVENC (GTX 1070,
         // host load ~75), past the former shared 3 s.
-        let source =
+        let deadline =
             Deadline::after(&cleanup, Duration::from_secs(5)).map_err(|_| Error::Runtime)?;
-        let mut failure = None;
-        if driver.reap(&cleanup, source).await.is_err() {
-            (self.report)(Event::CleanupFailed { stage: "source" });
-            failure = Some(Error::Cleanup("source"));
+        let source = driver.reap(&cleanup, deadline).await;
+        if source.is_err() {
             // The failed reap aborted the worker. Release the desktop so its
             // transports drop their ingress leases; otherwise the firewall
             // owner refuses removal (InUse) and the rule outlives the run, and
@@ -1103,13 +1130,29 @@ impl Share<'_> {
         let deadline =
             Deadline::after(&cleanup, Duration::from_secs(3)).map_err(|_| Error::Runtime)?;
         let pending = retirement.lock().ok().and_then(|mut slot| slot.take());
-        if let Some(mut retirement) = pending
-            && retirement.reap(&cleanup, deadline).await.is_err()
-        {
+        let launch = match pending {
+            Some(mut retirement) => Some(retirement.reap(&cleanup, deadline).await),
+            None => None,
+        };
+        let mut failure = match source_retirement(source, launch) {
+            Ok(SourceRetirement::Complete) => None,
+            Ok(SourceRetirement::Forced) => {
+                (self.report)(Event::SourceForcedRetirement);
+                None
+            }
+            Err(_) => {
+                (self.report)(Event::CleanupFailed { stage: "source" });
+                Some(Error::Cleanup("source"))
+            }
+        };
+        if launch.is_some_and(|result| result.is_err()) {
             (self.report)(Event::CleanupFailed { stage: "launch" });
             failure.get_or_insert(Error::Cleanup("launch"));
         }
         // The share's last audio child (already killed with the share).
+        // A slow source launch collection must not spend audio's own bound.
+        let deadline =
+            Deadline::after(&cleanup, Duration::from_secs(3)).map_err(|_| Error::Runtime)?;
         let pending = audio_retired.lock().ok().and_then(|mut slot| slot.take());
         if let Some(mut retirement) = pending
             && retirement.reap(&cleanup, deadline).await.is_err()
@@ -1266,6 +1309,10 @@ impl Share<'_> {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "host_run/cleanup_tests.rs"]
+mod cleanup_tests;
 
 #[cfg(test)]
 mod tests {
