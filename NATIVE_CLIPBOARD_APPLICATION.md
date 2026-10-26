@@ -18,6 +18,22 @@ during protected native I/O with retained payload still closes the connection:
 the pinned transport cannot selectively retract that packet. This privacy fence
 remains mandatory. Missing support, permission or UI reports typed absence.
 
+Before decoder startup, a control client requesting clipboard sharing reserves
+room for its compact 640-by-96-pixel local control strip. The original viewer
+window is capped to the local screen with space below it and margins for local
+window decorations; an explicit `--fit` remains an upper bound and no image is upscaled. The existing aspect-fit renderer
+and input viewport use the same immutable target and letterbox rectangle. There
+is no later resize or renewed input mapping when clipboard starts or stops.
+View-only and `--no-clipboard` retain their existing window-size policy.
+
+The panel independently verifies actual placement after window-manager handling,
+including the full viewer and panel frames being on screen and separate.
+A local screen too small for the strip, ignored placement hints, covering,
+resizing, or hiding it still produces optional clipboard refusal or shutdown;
+reserved space never substitutes for mapped, drawn, unobscured evidence. Native
+API callers select this policy with `Configuration::with_clipboard_space()`
+before opening their Desktop, then configure the original clipboard as usual.
+
 Full Cargo/session execution remains blocked locally by shared storage and
 memory exhaustion. Focused native checks are separate evidence; new CLI and
 session regressions are retained for execution on a provisioned builder.
@@ -56,11 +72,13 @@ metadata when control becomes available; it never opens a clipboard or strands
 the peer's handshake. That one-use setup stays declined even after re-enabling.
 The switch fences final OS publication immediately. Network retirement occurs in
 the original service turn. A stopped/closed session cannot be re-enabled through
-an old handle. Clipboard lane retirement preserves input and viewing, both
-between I/O turns and when authority loss, an item deadline, a local change, a
-switch or a worker stop is first seen during active native QUIC I/O (the
-connection retires the pair in that checked operation). Task cancellation
-during that I/O and incomplete attachment cancellation remain connection-wide.
+an old handle. Between I/O turns, clipboard lane retirement preserves input and viewing.
+During active native QUIC I/O, a terminal clipboard loss can wait for the next
+maintenance turn only when no outgoing clipboard payload remains retained.
+Otherwise the original connection closes before another native poll: the pinned
+transport cannot selectively retract an already protected packet. Task
+cancellation during that I/O and incomplete attachment cancellation also remain
+connection-wide.
 
 `Cleanup::Pending` is distinct from stopped admission. Closing a service fences
 its native worker but does not block on a foreign call or claim the thread ended.

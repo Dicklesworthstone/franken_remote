@@ -74,8 +74,13 @@ framed = len(sys.argv) > 3 and sys.argv[3] == "framed"
 root_attrs = Attributes()
 assert attributes(d, root, C.byref(root_attrs))
 parent_width, parent_height = (root_attrs.width, root_attrs.height) if full_screen else (320, 240)
+if len(sys.argv) > 3 and sys.argv[3] == "reserved":
+    parent_width = (root_attrs.width - 48) & ~1
+    parent_height = (root_attrs.height - 168) & ~1
+    assert root_attrs.width >= 640 and parent_width >= 16 and parent_height >= 16
 frame = create(d, root, 680, 20, parent_width, parent_height, 0, 0, 0xffffff) if framed else 0
-parent = create(d, frame or root, 0 if full_screen or framed else 680, 0 if full_screen or framed else 20,
+parent = create(d, frame or root, 0 if full_screen or framed or sys.argv[-1] == "reserved" else 680,
+                0 if full_screen or framed or sys.argv[-1] == "reserved" else 20,
                 parent_width, parent_height, 0, 0, 0xffffff)
 # Match the real fixed-size viewer rather than an unconstrained toy parent.
 size = (C.c_long * 18)(); size[0] = (1 << 4) | (1 << 5)
@@ -142,6 +147,9 @@ def panel(window=None, depth=0):
     return 0
 
 def point(name):
+    if direction == "clipboard":
+        return {"pause": (100, 24), "resume": (304, 24), "cancel": (200, 72),
+                "off": (508, 24), "outside": (200, 72)}[name]
     return {"pause": (100, 250), "resume": (304, 250), "cancel": (508, 250),
             "off": (508, 250), "outside": (200, 220)}[name]
 
@@ -155,6 +163,9 @@ for raw in sys.stdin:
     if command == "exists": result = "yes" if w else "no"
     elif command == "mapped": result = "yes" if viewable(w) else "no"
     elif command == "title": result = prop(w, b"_NET_WM_NAME").decode("ascii")
+    elif command == "size":
+        a = Attributes(); assert attributes(d, w, C.byref(a))
+        result = f"{a.width} {a.height}"
     elif command == "focus":
         f, revert = U(), I(); get_focus(d, C.byref(f), C.byref(revert))
         result = "parent" if f.value == parent else "other"
@@ -164,11 +175,12 @@ for raw in sys.stdin:
     elif command == "placement":
         px, py, pw, ph = rectangle(w)
         result = "separate" if separate(rectangle(parent), (px, py, pw, ph)) and px >= 0 and py >= 0 and px + pw <= root_attrs.width and py + ph <= root_attrs.height else "invalid"
-    elif command in ("parent_overlap", "panel_overlap", "panel_offscreen"):
+    elif command in ("parent_overlap", "panel_overlap", "panel_offscreen", "parent_offscreen"):
         if command == "parent_overlap":
             xx, yy, _, _ = rectangle(w); target = outer(parent)
         elif command == "panel_overlap":
             xx, yy, _, _ = rectangle(parent); target = outer(w)
+        elif command == "parent_offscreen": xx, yy, target = -100, -100, outer(parent)
         else: xx, yy, target = -100, -100, outer(w)
         move(d, target, xx, yy)
     elif command in ("cover", "cover_partial"):

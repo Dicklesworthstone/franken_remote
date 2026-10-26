@@ -196,6 +196,7 @@ impl<U> Session<U> {
         .map(|mut configuration| {
             configuration.display_picker = base.display_picker;
             configuration.fit_window = base.fit_window;
+            configuration.clipboard_space = base.clipboard_space;
             configuration.capture_system_shortcuts = base.capture_system_shortcuts;
             configuration
         })

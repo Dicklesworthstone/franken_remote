@@ -391,3 +391,54 @@ fn fitted_renderer_uses_the_original_ui_drawable_and_window_stop_owner() {
     finish(&mut window, StopReason::User);
     assert_eq!(desktop.peer(id, "exists"), "0");
 }
+
+#[test]
+fn clipboard_layout_reserves_space_before_publishing_one_immutable_target() {
+    let desktop = Desktop::start();
+    let runtime = support::runtime();
+    for (width, height, expected) in [
+        (640, 480, (592, 312)),
+        (1920, 1080, (592, 312)),
+        (320, 240, (320, 240)),
+    ] {
+        let session = viewer(&runtime);
+        let original = session.control();
+        let mut window = ViewerWindow::start_with_clipboard_space(
+            &desktop.display,
+            width,
+            height,
+            original.clone(),
+        )
+        .unwrap();
+        let (control, id) = mapped(&window);
+        let target = control.target().unwrap();
+        assert_eq!((target.width(), target.height()), expected);
+        let input = control.input_window().unwrap();
+        assert_eq!(
+            (input.id, input.width, input.height),
+            (id, expected.0, expected.1)
+        );
+        assert!(target.width() <= width && target.height() <= height);
+        assert!(
+            window
+                .fitted_decoder_launch(Path::new("/qualified/package/fr-media-worker"), None, 17,)
+                .is_ok()
+        );
+        desktop.peer(id, "move");
+        thread::sleep(Duration::from_millis(25));
+        assert_eq!(
+            control.target().unwrap(),
+            target,
+            "a move cannot select a new target"
+        );
+        assert!(!original.is_stopped());
+        desktop.peer(id, "resize");
+        wait(|| matches!(control.status(), Status::Stopped(_)));
+        assert!(
+            original.is_stopped(),
+            "later resizing must still fence the original owner"
+        );
+        assert_eq!(control.target(), Err(Error::NotReady));
+        finish(&mut window, StopReason::GeometryChanged);
+    }
+}

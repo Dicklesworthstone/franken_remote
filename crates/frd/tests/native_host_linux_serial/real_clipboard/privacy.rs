@@ -18,8 +18,8 @@ def command(cmd):
         # The client panel's Turn off button. XTest is an independent native
         # user harness here; it is not a physical-device qualification claim.
         w, px, py, width, height = found[0]
-        assert width == 640 and height == 310
-        t.XTestFakeMotionEvent(d, 0, px + 500, py + 250, 0)
+        assert width == 640 and height == 96
+        t.XTestFakeMotionEvent(d, 0, px + 500, py + 24, 0)
         t.XTestFakeButtonEvent(d, 1, 1, 0)
         t.XTestFakeButtonEvent(d, 1, 0, 0)
         x.XSync(d, 0)

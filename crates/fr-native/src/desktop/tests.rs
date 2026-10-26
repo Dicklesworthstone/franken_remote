@@ -106,6 +106,10 @@ fn fitted_input_matches_rendered_pixels_and_refuses_letterbox_or_stale_layouts()
         (320, 240, 160, 160),
         (240, 320, 160, 160),
         (320, 240, 162, 160),
+        // The startup clipboard-space policy on a 640x480 screen. The
+        // original full image is fitted into this exact reduced target.
+        (640, 480, 592, 312),
+        (1920, 1080, 592, 312),
     ] {
         let bounds = InputBounds::new(DesktopPoint { x: -320, y: -80 }, sw, sh).unwrap();
         let client = fitted_client(bounds);

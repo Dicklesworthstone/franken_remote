@@ -114,6 +114,7 @@ fn losing_privacy_surface_requests_clipboard_stop_without_requesting_desktop_sto
         "cover_partial",
         "panel_overlap",
         "panel_offscreen",
+        "parent_offscreen",
     ] {
         let Some((mut peer, display)) = Peer::new_direction("clipboard") else {
             return;
@@ -188,4 +189,24 @@ fn clipboard_frames_never_offer_transfer_or_audio_actions_or_private_text() {
             }
         }
     }
+}
+
+#[test]
+fn compact_privacy_surface_uses_reserved_strip_without_covering_the_viewer() {
+    let _serial = SERIAL.lock().unwrap();
+    let Some((mut peer, display)) = Peer::new_window("clipboard", "reserved") else {
+        return;
+    };
+    let (probe, _, task) = start_clipboard(display, peer.window);
+    assert_eq!(peer.command("size"), "640 96");
+    assert_eq!(peer.command("placement"), "separate");
+    assert_eq!(peer.command("focus"), "parent");
+    assert!(probe.enabled.load(Ordering::Acquire));
+    peer.command("click off");
+    wait(|| !probe.enabled.load(Ordering::Acquire));
+    assert_eq!(*probe.requests.lock().unwrap(), [Action::TurnOff]);
+    assert!(!probe.stopped());
+    peer.command("close");
+    wait(|| task.is_finished());
+    assert_eq!(task.join().unwrap(), StopReason::Hidden);
 }

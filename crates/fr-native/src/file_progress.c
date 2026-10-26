@@ -75,14 +75,15 @@ static int upload_position(struct fr_upload *p, int32_t width, int32_t height,
         int16_t *x, int16_t *y) {
     struct fr_upload_rect parent;
     if (!upload_rectangle(p, p->parent, p->parent_width, p->parent_height, &parent)) return 0;
-    int32_t px = upload_clamp(parent.x, width - UP_WIDTH);
-    int32_t py = upload_clamp(parent.y, height - UP_HEIGHT);
+    int32_t panel_width = p->base->width, panel_height = p->base->height;
+    int32_t px = upload_clamp(parent.x, width - panel_width);
+    int32_t py = upload_clamp(parent.y, height - panel_height);
     for (int32_t gap = 24; gap >= 0; gap -= 24) {
         struct fr_upload_rect choices[] = {
-            { parent.x + parent.width + gap, py, UP_WIDTH, UP_HEIGHT },
-            { parent.x - UP_WIDTH - gap, py, UP_WIDTH, UP_HEIGHT },
-            { px, parent.y + parent.height + gap, UP_WIDTH, UP_HEIGHT },
-            { px, parent.y - UP_HEIGHT - gap, UP_WIDTH, UP_HEIGHT },
+            { parent.x + parent.width + gap, py, panel_width, panel_height },
+            { parent.x - panel_width - gap, py, panel_width, panel_height },
+            { px, parent.y + parent.height + gap, panel_width, panel_height },
+            { px, parent.y - panel_height - gap, panel_width, panel_height },
         };
         for (unsigned i = 0; i < sizeof(choices) / sizeof(choices[0]); ++i) {
             if (upload_on_screen(&choices[i], width, height) && upload_separate(&choices[i], &parent)) {
@@ -98,12 +99,14 @@ static int upload_position(struct fr_upload *p, int32_t width, int32_t height,
 static int upload_layout_valid(struct fr_upload *p) {
     struct fr_upload_rect parent, panel;
     if (!upload_rectangle(p, p->parent, p->parent_width, p->parent_height, &parent) ||
-        !upload_rectangle(p, p->base->window, UP_WIDTH, UP_HEIGHT, &panel) ||
+        !upload_rectangle(p, p->base->window, p->base->width, p->base->height, &panel) ||
         !upload_separate(&parent, &panel)) return 0;
     xcb_generic_error_t *e = NULL;
     xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(p->base->c,
         xcb_get_geometry(p->base->c, p->root), &e);
-    int valid = g && !e && g->root == p->root && upload_on_screen(&panel, g->width, g->height);
+    int valid = g && !e && g->root == p->root &&
+        upload_on_screen(&parent, g->width, g->height) &&
+        upload_on_screen(&panel, g->width, g->height);
     free(g); free(e);
     return valid && !xcb_connection_has_error(p->base->c);
 }
@@ -130,13 +133,15 @@ struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
     p->base = calloc(1, sizeof(*p->base));
     if (!p->base) goto fail;
     struct fr_viewer_window *h = p->base;
+    h->width = direction == 3 ? FR_CLIPBOARD_WIDTH : UP_WIDTH;
+    h->height = direction == 3 ? FR_CLIPBOARD_HEIGHT : UP_HEIGHT;
     int screen = 0;
     h->c = xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);
     if (!it.rem || it.data->root_depth != 24 ||
-        it.data->width_in_pixels < UP_WIDTH || it.data->height_in_pixels < UP_HEIGHT) goto fail;
+        it.data->width_in_pixels < h->width || it.data->height_in_pixels < h->height) goto fail;
     /* Refuse a stale/mismatched local parent before creating any UI resource. */
     xcb_generic_error_t *e = NULL;
     xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(h->c, xcb_get_geometry(h->c, parent), &e);
@@ -155,13 +160,12 @@ struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
     uint32_t parent_events = XCB_EVENT_MASK_STRUCTURE_NOTIFY;
     if (!checked(h, xcb_change_window_attributes_checked(h->c, parent,
         XCB_CW_EVENT_MASK, &parent_events))) goto fail;
-    h->width = UP_WIDTH; h->height = UP_HEIGHT;
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { 0xffffff, XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_EXPOSURE |
         XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_LEAVE_WINDOW |
         XCB_EVENT_MASK_FOCUS_CHANGE | (direction == 3 ? XCB_EVENT_MASK_VISIBILITY_CHANGE : 0) };
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
-        h->window, it.data->root, x, y, UP_WIDTH, UP_HEIGHT, 0,
+        h->window, it.data->root, x, y, h->width, h->height, 0,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
         XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, values))) goto fail;
     h->protocols = atom(h, "WM_PROTOCOLS"); h->close = atom(h, "WM_DELETE_WINDOW");
@@ -172,7 +176,7 @@ struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
     uint32_t size[18] = {0};
     size[0] = (1u << 2) | (1u << 4) | (1u << 5); /* PPosition | PMinSize | PMaxSize */
     size[1] = (uint32_t)x; size[2] = (uint32_t)y;
-    size[5] = size[7] = UP_WIDTH; size[6] = size[8] = UP_HEIGHT;
+    size[5] = size[7] = h->width; size[6] = size[8] = h->height;
     const char *title = direction == 3 ? "FrankenRemote - shared clipboard" :
         direction == 2 ? "FrankenRemote - remote audio" :
         direction == 1 ? "FrankenRemote - download progress" : "FrankenRemote - upload progress";
@@ -230,6 +234,20 @@ int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
     p->actions = f->actions;
     struct fr_viewer_window *h = p->base;
     if (!checked(h, xcb_clear_area_checked(h->c, 0, h->window, 0, 0, 0, 0))) return 0;
+    if (p->direction == 3) {
+        /* A compact local strip, never an overlay on the remote drawable.
+         * Keep the actual state and off gesture visible; no transfer progress,
+         * private text or unrelated actions are rendered in this surface. */
+        const char heading[] = "Shared clipboard - this connection";
+        const char footer[] = "Closing or hiding this panel also turns text sharing off.";
+        return upload_text(p, 16, 23, heading, sizeof(heading)-1) &&
+            upload_text(p, 16, 45, (const char *)f->lines[0], sizes[0]) &&
+            upload_box(p, 456, 8, 168, 32, 0) &&
+            upload_text(p, 468, 29, "Turn off", 8) &&
+            ((p->actions & 64u) || upload_text(p, 570, 29, "(off)", 5)) &&
+            upload_text(p, 16, 67, (const char *)f->lines[3], sizes[3]) &&
+            upload_text(p, 16, 87, footer, sizeof(footer)-1);
+    }
     const char *heading = p->direction == 3 ? "Shared clipboard - this connection only" :
         p->direction == 2 ? "Remote audio - local volume controls" :
         p->direction == 1 ? "Download progress - original destination only" :
@@ -257,7 +275,9 @@ int fr_upload_draw(struct fr_upload *p, const struct fr_upload_frame *f) {
         "Buttons request changes. Closing this panel only hides progress.";
     return upload_text(p, 16, 290, footer, strlen(footer));
 }
-static uint32_t upload_hit(int16_t x, int16_t y) {
+static uint32_t upload_hit(const struct fr_upload *p, int16_t x, int16_t y) {
+    if (p->direction == 3)
+        return x >= 456 && x < 624 && y >= 8 && y < 40 ? 4u : 0u;
     if (y < 234 || y >= 266) return 0;
     for (unsigned i = 0; i < 3; ++i) {
         int left = 16 + (int)i * 204;
@@ -304,7 +324,7 @@ int fr_upload_next(struct fr_upload *p, uint32_t *kind, uint32_t *action) {
         break;
     case XCB_CONFIGURE_NOTIFY: {
         xcb_configure_notify_event_t *v = (xcb_configure_notify_event_t *)e;
-        if ((v->window == h->window && (v->width != UP_WIDTH || v->height != UP_HEIGHT)) ||
+        if ((v->window == h->window && (v->width != h->width || v->height != h->height)) ||
             (v->window == p->parent && (v->width != p->parent_width || v->height != p->parent_height))) *kind = 2;
         else if (p->mapped && (v->window == h->window || v->window == p->parent) &&
             !upload_layout_valid(p)) *kind = 2;
@@ -318,7 +338,7 @@ int fr_upload_next(struct fr_upload *p, uint32_t *kind, uint32_t *action) {
     case XCB_LEAVE_NOTIFY: case XCB_FOCUS_OUT: p->pressed = 0; break;
     case XCB_BUTTON_PRESS: case XCB_BUTTON_RELEASE: {
         xcb_button_press_event_t *v = (xcb_button_press_event_t *)e;
-        uint32_t hit = upload_hit(v->event_x, v->event_y);
+        uint32_t hit = upload_hit(p, v->event_x, v->event_y);
         hit = (p->direction == 3 ? (hit == 4u ? 64u : 0u) :
             hit << (p->direction == 2 ? 3u : 0u)) & p->actions;
         if (synthetic || v->event != h->window || v->detail != 1 || (v->state & 0xff)) { p->pressed = 0; break; }

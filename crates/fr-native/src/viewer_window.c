@@ -6,6 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Shared with the separately owned clipboard surface below. Reserve space
+ * before the immutable decoder/input drawable exists, never by resizing it. */
+enum { FR_CLIPBOARD_WIDTH = 640, FR_CLIPBOARD_HEIGHT = 96,
+       FR_CLIPBOARD_GAP = 24, FR_CLIPBOARD_MARGIN = 24 };
+
 struct fr_viewer_window {
     xcb_connection_t *c;
     xcb_window_t window;
@@ -37,26 +42,39 @@ void fr_viewer_window_close(struct fr_viewer_window *h) {
     if (h->c) xcb_disconnect(h->c);
     free(h);
 }
-struct fr_viewer_window *fr_viewer_window_open(const char *display,
-        uint32_t width, uint32_t height, uint32_t *window) {
-    if (!display || !window || width < 16 || height < 16 ||
+static struct fr_viewer_window *viewer_window_open(const char *display,
+        uint32_t width, uint32_t height, int clipboard_space,
+        uint32_t *window, uint32_t *actual_width, uint32_t *actual_height) {
+    if (!display || !window || !actual_width || !actual_height || width < 16 || height < 16 ||
         width > UINT16_MAX || height > UINT16_MAX || (width & 1) || (height & 1))
         return NULL;
-    *window = XCB_NONE;
+    *window = XCB_NONE; *actual_width = *actual_height = 0;
     struct fr_viewer_window *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
-    h->width = (uint16_t)width; h->height = (uint16_t)height;
     int screen = 0;
     h->c = xcb_connect(display, &screen);
     if (!h->c || xcb_connection_has_error(h->c)) goto fail;
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(h->c));
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);
-    if (!it.rem || it.data->root_depth != 24 ||
-        it.data->width_in_pixels < width || it.data->height_in_pixels < height) goto fail;
+    if (!it.rem || it.data->root_depth != 24) goto fail;
+    int16_t origin = 0;
+    if (clipboard_space && it.data->width_in_pixels >= FR_CLIPBOARD_WIDTH &&
+        it.data->height_in_pixels >= FR_CLIPBOARD_HEIGHT + FR_CLIPBOARD_GAP + 2 * FR_CLIPBOARD_MARGIN + 16) {
+        uint32_t max_width = ((uint32_t)it.data->width_in_pixels - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
+        uint32_t max_height = ((uint32_t)it.data->height_in_pixels -
+            FR_CLIPBOARD_HEIGHT - FR_CLIPBOARD_GAP - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
+        origin = FR_CLIPBOARD_MARGIN;
+        if (width > max_width) width = max_width;
+        if (height > max_height) height = max_height;
+    }
+    /* An unsupported local screen keeps the ordinary viewing policy. The
+     * optional clipboard may refuse independently; it never creates overlap. */
+    if (it.data->width_in_pixels < width || it.data->height_in_pixels < height) goto fail;
+    h->width = (uint16_t)width; h->height = (uint16_t)height;
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { it.data->black_pixel, XCB_EVENT_MASK_STRUCTURE_NOTIFY };
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
-        h->window, it.data->root, 0, 0, h->width, h->height, 0,
+        h->window, it.data->root, origin, origin, h->width, h->height, 0,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
         XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, values))) goto fail;
     h->protocols = atom(h, "WM_PROTOCOLS");
@@ -64,10 +82,15 @@ struct fr_viewer_window *fr_viewer_window_open(const char *display,
     xcb_atom_t utf8 = atom(h, "UTF8_STRING");
     const char title[] = "FrankenRemote";
     const char class[] = "franken-remote\0FrankenRemote\0";
-    /* The first qualified layout is exactly native pixels. A resize is terminal,
-     * not an invitation to scale pixels independently of input coordinates. */
+    /* This first layout is immutable. Clipboard layout may have selected a
+     * smaller target before creation; Rust must use fitted decoding AND its
+     * matching viewport. A later resize is terminal, never an implicit remap. */
     uint32_t size[18] = {0};
     size[0] = (1u << 4) | (1u << 5); /* ICCCM PMinSize | PMaxSize */
+    if (origin) {
+        size[0] |= 1u << 2; /* PPosition: initial space for local decorations */
+        size[1] = size[2] = (uint32_t)origin;
+    }
     size[5] = size[7] = width; size[6] = size[8] = height;
     if (!h->close || !utf8 ||
         !property(h, h->protocols, XCB_ATOM_ATOM, 32, 1, &h->close) ||
@@ -76,9 +99,19 @@ struct fr_viewer_window *fr_viewer_window_open(const char *display,
         !property(h, XCB_ATOM_WM_CLASS, XCB_ATOM_STRING, 8, sizeof(class)-1, class) ||
         !property(h, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, size) ||
         !checked(h, xcb_map_window_checked(h->c, h->window))) goto fail;
-    *window = h->window; return h;
+    *window = h->window; *actual_width = width; *actual_height = height; return h;
 fail:
     fr_viewer_window_close(h); return NULL;
+}
+struct fr_viewer_window *fr_viewer_window_open(const char *display,
+        uint32_t width, uint32_t height, uint32_t *window) {
+    uint32_t actual_width, actual_height;
+    return viewer_window_open(display, width, height, 0, window, &actual_width, &actual_height);
+}
+struct fr_viewer_window *fr_viewer_window_open_with_controls(const char *display,
+        uint32_t width, uint32_t height, uint32_t *window,
+        uint32_t *actual_width, uint32_t *actual_height) {
+    return viewer_window_open(display, width, height, 1, window, actual_width, actual_height);
 }
 int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     if (!h || !kind || xcb_connection_has_error(h->c)) return -1;

@@ -3,7 +3,8 @@
 //! Retain the ORIGINAL viewer stop handle before starting this window or its
 //! decoder. One locally created drawable is shared with the supervised decoder
 //! and the existing input capture adapter. Mapping is not optical visibility,
-//! observation permission, or an input grant. No implicit scaling is performed.
+//! observation permission, or an input grant. The local clipboard-space policy
+//! may choose a smaller initial target; later geometry changes remain terminal.
 use fr_media::worker::{Role, presentation::X11Target};
 use frd::{session_startup::StreamingViewerControl, worker::Launch};
 use std::{
@@ -14,8 +15,8 @@ use std::{
     pin::Pin,
     ptr::NonNull,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU8, AtomicU32, Ordering},
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU8, Ordering},
     },
     task::{Context, Poll, Waker},
     thread::{self, JoinHandle},
@@ -37,6 +38,14 @@ unsafe extern "C" {
         width: u32,
         height: u32,
         window: *mut u32,
+    ) -> *mut c_void;
+    fn fr_viewer_window_open_with_controls(
+        display: *const c_char,
+        width: u32,
+        height: u32,
+        window: *mut u32,
+        actual_width: *mut u32,
+        actual_height: *mut u32,
     ) -> *mut c_void;
     fn fr_viewer_window_close(handle: *mut c_void);
     fn fr_viewer_window_next(handle: *mut c_void, kind: *mut u32) -> c_int;
@@ -96,9 +105,10 @@ struct Shared {
     session: StreamingViewerControl,
     state: AtomicU8,
     orderly_close: AtomicU8,
-    window: AtomicU32,
+    target: OnceLock<X11Target>,
     width: u32,
     height: u32,
+    clipboard_space: bool,
     waiter: Mutex<Option<Waker>>,
 }
 impl Shared {
@@ -176,12 +186,7 @@ impl WindowControl {
         if self.status() != Status::Mapped {
             return Err(Error::NotReady);
         }
-        X11Target::new(
-            self.0.window.load(Ordering::Acquire),
-            self.0.width,
-            self.0.height,
-        )
-        .map_err(|_| Error::NotReady)
+        self.0.target.get().copied().ok_or(Error::NotReady)
     }
     /// Feed the SAME target to the original viewer's owned native input capture.
     /// The capture adapter still requires its actual Layout/focus/lease checks.
@@ -221,6 +226,29 @@ impl ViewerWindow {
         height: u32,
         session: StreamingViewerControl,
     ) -> Result<Self, Error> {
+        Self::start_policy(display, width, height, session, false)
+    }
+    /// Reserve local space for the separate clipboard off surface BEFORE the
+    /// original target is created. Dimensions can only shrink from this upper
+    /// bound. Use `fitted_decoder_launch` and the matching validated input
+    /// viewport even if a particular screen did not need a smaller target.
+    /// Window-manager placement is still checked by the independent panel;
+    /// this policy never permits it to cover remote pixels or remain obscured.
+    pub fn start_with_clipboard_space(
+        display: &str,
+        width: u32,
+        height: u32,
+        session: StreamingViewerControl,
+    ) -> Result<Self, Error> {
+        Self::start_policy(display, width, height, session, true)
+    }
+    fn start_policy(
+        display: &str,
+        width: u32,
+        height: u32,
+        session: StreamingViewerControl,
+        clipboard_space: bool,
+    ) -> Result<Self, Error> {
         let refused = |error| {
             session.stop();
             error
@@ -237,9 +265,10 @@ impl ViewerWindow {
             session,
             state: AtomicU8::new(0),
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
-            window: AtomicU32::new(0),
+            target: OnceLock::new(),
             width,
             height,
+            clipboard_space,
             waiter: Mutex::new(None),
         }));
         let shared = control.0.clone();
@@ -347,26 +376,57 @@ pub(crate) fn local_display(display: &str) -> bool {
     let valid = |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
     pieces.next().is_some_and(valid) && pieces.next().is_none_or(valid) && pieces.next().is_none()
 }
-fn run(shared: &Shared, display: &CString, started: Instant) {
+fn open_native<'a>(shared: &'a Shared, display: &CString) -> Option<Native<'a>> {
     if !shared.live() {
-        return;
+        return None;
     }
     let mut window = 0;
+    let (mut width, mut height) = (shared.width, shared.height);
     // SAFETY: valid display and scalar pointers retained for the call only;
     // returned C resources are unique and never leave this thread.
     let Some(handle) = NonNull::new(unsafe {
-        fr_viewer_window_open(
-            display.as_ptr(),
-            shared.width,
-            shared.height,
-            &raw mut window,
-        )
+        if shared.clipboard_space {
+            fr_viewer_window_open_with_controls(
+                display.as_ptr(),
+                shared.width,
+                shared.height,
+                &raw mut window,
+                &raw mut width,
+                &raw mut height,
+            )
+        } else {
+            fr_viewer_window_open(
+                display.as_ptr(),
+                shared.width,
+                shared.height,
+                &raw mut window,
+            )
+        }
     }) else {
         shared.stop(StopReason::NativeFailure);
-        return;
+        return None;
     };
     let native = Native { handle, shared };
-    shared.window.store(window, Ordering::Release);
+    let Ok(target) = X11Target::new(window, width, height) else {
+        shared.stop(StopReason::NativeFailure);
+        return None;
+    };
+    if width > shared.width
+        || height > shared.height
+        || (!shared.clipboard_space && (width != shared.width || height != shared.height))
+        || shared.target.set(target).is_err()
+    {
+        shared.stop(StopReason::NativeFailure);
+        return None;
+    }
+    // Publish one target before Mapped. Decoder, input and privacy UI borrow
+    // these exact dimensions; neither reconnect nor a later WM event replaces it.
+    Some(native)
+}
+fn run(shared: &Shared, display: &CString, started: Instant) {
+    let Some(native) = open_native(shared, display) else {
+        return;
+    };
     let mut mapped = false;
     let mut close_started: Option<Instant> = None;
     loop {

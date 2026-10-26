@@ -480,6 +480,11 @@ fn desktop_configuration(
             })?,
         None => configuration,
     };
+    let configuration = if connection.control && connection.clipboard {
+        configuration.with_clipboard_space()
+    } else {
+        configuration
+    };
     let configuration = if connection.capture_system_shortcuts {
         configuration.with_system_shortcut_capture()
     } else {

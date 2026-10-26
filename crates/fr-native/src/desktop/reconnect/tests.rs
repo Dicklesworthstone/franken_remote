@@ -166,10 +166,16 @@ fn a_file_cleanup_failure_blocks_next_attempt_and_keeps_its_original_receipt() {
 fn fit_policy_survives_reconnect_without_reusing_native_owners_or_input() {
     let mut original = session(71);
     assert_eq!(original.configuration(1).unwrap().fit_window, None);
-    original.configuration = original.configuration.with_fitted_window(960, 540).unwrap();
+    assert!(!original.configuration(1).unwrap().clipboard_space);
+    original.configuration = original
+        .configuration
+        .with_fitted_window(960, 540)
+        .unwrap()
+        .with_clipboard_space();
     for attempt in [1, 2, 32] {
         let next = original.configuration(attempt).unwrap();
         assert_eq!(next.fit_window, Some((960, 540)));
+        assert!(next.clipboard_space);
         assert_eq!(next.worker_epoch, 70 + u128::from(attempt));
         let desktop = Desktop::new(next);
         assert!(desktop.window().is_none());

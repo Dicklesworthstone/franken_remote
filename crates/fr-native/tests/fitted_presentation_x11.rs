@@ -19,7 +19,7 @@ impl Server {
                 "1",
                 "-screen",
                 "0",
-                "128x128x24",
+                "640x480x24",
                 "-nolisten",
                 "tcp",
                 "-noreset",
@@ -53,6 +53,9 @@ fn borrowed_window_contains_the_exact_fitted_image_and_opaque_bars() {
         (32, 64, 32, 32),
         (64, 32, 34, 32),
         (64, 64, 32, 32),
+        // Actual initial viewer dimensions after reserving the compact
+        // clipboard strip on an equally sized local/remote display.
+        (640, 480, 592, 312),
     ] {
         let mut window =
             X11Surface::presenter(Some(&server.display), target_width, target_height, limits)
@@ -66,8 +69,8 @@ fn borrowed_window_contains_the_exact_fitted_image_and_opaque_bars() {
             for y in 0..source_height {
                 for x in 0..source_width {
                     bytes.extend_from_slice(&[
-                        u8::try_from(x).unwrap(),
-                        u8::try_from(y).unwrap(),
+                        u8::try_from(x % 256).unwrap(),
+                        u8::try_from(y % 256).unwrap(),
                         frame,
                         255,
                     ]);
@@ -85,10 +88,14 @@ fn borrowed_window_contains_the_exact_fitted_image_and_opaque_bars() {
                         && (placement.y..placement.y + placement.height).contains(&y)
                     {
                         [
-                            u8::try_from((x - placement.x) * source_width / placement.width)
-                                .unwrap(),
-                            u8::try_from((y - placement.y) * source_height / placement.height)
-                                .unwrap(),
+                            u8::try_from(
+                                ((x - placement.x) * source_width / placement.width) % 256,
+                            )
+                            .unwrap(),
+                            u8::try_from(
+                                ((y - placement.y) * source_height / placement.height) % 256,
+                            )
+                            .unwrap(),
                             frame,
                             255,
                         ]

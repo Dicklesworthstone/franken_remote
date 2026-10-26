@@ -39,6 +39,7 @@ pub struct Configuration {
     worker_epoch: u128,
     display_picker: bool,
     fit_window: Option<(u32, u32)>,
+    clipboard_space: bool,
     capture_system_shortcuts: bool,
 }
 impl Configuration {
@@ -57,6 +58,7 @@ impl Configuration {
             worker_epoch,
             display_picker: false,
             fit_window: None,
+            clipboard_space: false,
             capture_system_shortcuts: false,
         })
     }
@@ -69,6 +71,16 @@ impl Configuration {
             .map_err(|_| Error::Window(viewer_window::Error::InvalidSize))?;
         self.fit_window = Some((width, height));
         Ok(self)
+    }
+    /// Reserve screen space for the mandatory local clipboard off control.
+    /// The original viewer target may be smaller than the remote display or
+    /// explicit fit maximum. This selects the existing aspect-fit renderer and
+    /// matching validated input mapping before decoder startup, never a resize
+    /// under an active lease. It does not configure or authorize clipboard.
+    #[must_use]
+    pub const fn with_clipboard_space(mut self) -> Self {
+        self.clipboard_space = true;
+        self
     }
     /// Use a fresh native choice surface in THIS approved selection exchange.
     /// The callback passed to `open` is not used to choose in this mode. No
@@ -488,27 +500,32 @@ impl Desktop {
                         .map_or((display.pixel_width, display.pixel_height), |(w, h)| {
                             (w.min(display.pixel_width), h.min(display.pixel_height))
                         });
-                    *window = Some(ViewerWindow::start(
-                        &configuration.display,
-                        width,
-                        height,
-                        original,
-                    )?);
-                    let window = window.as_mut().ok_or(viewer_window::Error::NotReady)?;
-                    window.ready().await?;
-                    let launch = if configuration.fit_window.is_some() {
-                        window.fitted_decoder_launch(
-                            &configuration.image,
-                            configuration.xauthority.as_deref(),
-                            configuration.worker_epoch,
+                    *window = Some(if configuration.clipboard_space {
+                        ViewerWindow::start_with_clipboard_space(
+                            &configuration.display,
+                            width,
+                            height,
+                            original,
                         )?
                     } else {
-                        window.decoder_launch(
-                            &configuration.image,
-                            configuration.xauthority.as_deref(),
-                            configuration.worker_epoch,
-                        )?
-                    };
+                        ViewerWindow::start(&configuration.display, width, height, original)?
+                    });
+                    let window = window.as_mut().ok_or(viewer_window::Error::NotReady)?;
+                    window.ready().await?;
+                    let launch =
+                        if configuration.fit_window.is_some() || configuration.clipboard_space {
+                            window.fitted_decoder_launch(
+                                &configuration.image,
+                                configuration.xauthority.as_deref(),
+                                configuration.worker_epoch,
+                            )?
+                        } else {
+                            window.decoder_launch(
+                                &configuration.image,
+                                configuration.xauthority.as_deref(),
+                                configuration.worker_epoch,
+                            )?
+                        };
                     let (launch, owner) = launch
                         .retain_cleanup()
                         .map_err(viewer_window::Error::Launch)?;
@@ -654,7 +671,7 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        let fitted = self.configuration.fit_window.is_some();
+        let fitted = self.configuration.fit_window.is_some() || self.configuration.clipboard_space;
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let window = self.window().ok_or(Error::NotViewing)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
@@ -747,7 +764,7 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        let fitted = self.configuration.fit_window.is_some();
+        let fitted = self.configuration.fit_window.is_some() || self.configuration.clipboard_space;
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let window = self.window().ok_or(Error::NotViewing)?;
         window.enable_orderly_close().map_err(Error::Window)?;
