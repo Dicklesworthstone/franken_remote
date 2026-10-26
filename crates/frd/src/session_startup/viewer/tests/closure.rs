@@ -4,6 +4,8 @@ use super::*;
 use crate::session_startup::HostSession;
 use fr_wire::closure::{self, Cleanup, Closed, ClosedReason, OutstandingEffects};
 
+mod pregrant;
+
 fn with_cleanup<F, Fut>(f: F)
 where
     F: FnOnce(Cx, Cx, Cx) -> Fut,
@@ -24,6 +26,14 @@ where
     }));
 }
 async fn opened(c: &Cx, h: &Cx, role: Role) -> (HostSession, ViewerSession) {
+    Box::pin(opened_reporting(c, h, role, None)).await
+}
+async fn opened_reporting(
+    c: &Cx,
+    h: &Cx,
+    role: Role,
+    reporting: Option<crate::session_startup::closure_reporting::Configuration>,
+) -> (HostSession, ViewerSession) {
     let mut cfg = config(false);
     cfg.offer.role = role;
     cfg.transport.critical_send_records = 4;
@@ -42,6 +52,9 @@ async fn opened(c: &Cx, h: &Cx, role: Role) -> (HostSession, ViewerSession) {
     )
     .unwrap();
     let mut host = Host::start(h.clone(), server.unwrap(), peer, cfg).unwrap();
+    if let Some(reporting) = reporting {
+        host.retain_observation_reporting(reporting).unwrap();
+    }
     ready(&mut host, &mut client, false).await;
     let mut host = host.finish().unwrap().into_running().unwrap();
     let mut viewer = client.finish().unwrap();

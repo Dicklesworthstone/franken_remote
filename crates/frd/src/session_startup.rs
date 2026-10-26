@@ -780,6 +780,7 @@ impl Host {
             selected: self.selected.take().ok_or(Error::Order)?,
             closed: false,
             closure_reason: None,
+            pregrant_reporting: None,
         };
         if let Some(reporting) = self.observation_reporting.take() {
             reporting.arm(&mut result)?;
@@ -839,6 +840,7 @@ pub struct OpenedSession {
     selected: Selection,
     closed: bool,
     closure_reason: Option<Arc<AtomicU8>>,
+    pregrant_reporting: Option<quic::ClosedRegistration>,
 }
 impl OpenedSession {
     pub fn check(&mut self) -> Result<(), Error> {

@@ -44,6 +44,15 @@ fn decode(bytes: &[u8]) -> Result<Revoked, WireError> {
         InputDelivery::Reliable,
     )
 }
+fn decode_before_grant(bytes: &[u8]) -> Result<Revoked, WireError> {
+    lease_revoked::decode_before_grant(
+        bytes,
+        binding(),
+        &ProtocolLimits::ABSOLUTE,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+}
 fn encode(value: Revoked, out: &mut [u8]) -> Result<usize, WireError> {
     lease_revoked::encode(
         value,
@@ -59,6 +68,7 @@ fn independent_fixture_in_both_directions() {
     let expected = fixture();
     assert_eq!(expected.len(), REVOKED_BYTES);
     assert_eq!(decode(&expected), Ok(message()));
+    assert_eq!(decode_before_grant(&expected), Ok(message()));
     let mut out = [0; REVOKED_BYTES];
     assert_eq!(encode(message(), &mut out), Ok(REVOKED_BYTES));
     assert_eq!(out.as_slice(), expected);
@@ -68,6 +78,10 @@ fn every_truncation_and_short_output_refuse() {
     let bytes = fixture();
     for end in 0..bytes.len() {
         assert!(decode(&bytes[..end]).is_err(), "prefix {end}");
+        assert!(
+            decode_before_grant(&bytes[..end]).is_err(),
+            "pre-grant prefix {end}"
+        );
         let mut out = vec![0; end];
         assert_eq!(encode(message(), &mut out), Err(WireError::BufferTooSmall));
     }
@@ -109,6 +123,16 @@ fn wrong_direction_and_delivery_refuse() {
             ),
             Err(error)
         );
+        assert_eq!(
+            lease_revoked::decode_before_grant(
+                &fixture(),
+                binding(),
+                &ProtocolLimits::ABSOLUTE,
+                direction,
+                delivery,
+            ),
+            Err(error)
+        );
     }
 }
 #[test]
@@ -136,6 +160,7 @@ fn invalid_reason_cleanup_and_effects_refuse() {
         let mut bytes = fixture();
         bytes[offset] = value;
         assert_eq!(decode(&bytes), Err(WireError::InvalidValue));
+        assert_eq!(decode_before_grant(&bytes), Err(WireError::InvalidValue));
     }
 }
 #[test]
@@ -170,6 +195,7 @@ fn every_defined_reason_and_stage_round_trips_without_losing_information() {
                 let mut out = [0; REVOKED_BYTES];
                 encode(value, &mut out).expect("valid stage");
                 assert_eq!(decode(&out), Ok(value));
+                assert_eq!(decode_before_grant(&out), Ok(value));
                 assert_ne!(reason.code(), "");
             }
         }
@@ -212,11 +238,13 @@ fn trailing_bytes_and_oversize_records_refuse() {
     let mut bytes = fixture();
     bytes.push(0);
     assert_eq!(decode(&bytes), Err(WireError::TrailingBytes));
+    assert_eq!(decode_before_grant(&bytes), Err(WireError::TrailingBytes));
     bytes.resize(
         ProtocolLimits::ABSOLUTE.max_control_message_bytes() as usize + 1,
         0,
     );
     assert_eq!(decode(&bytes), Err(WireError::ResourceLimit));
+    assert_eq!(decode_before_grant(&bytes), Err(WireError::ResourceLimit));
 }
 #[test]
 fn optional_extensions_are_bounded_and_required_extensions_refuse() {
@@ -225,11 +253,62 @@ fn optional_extensions_are_bounded_and_required_extensions_refuse() {
     bytes[23] = 8;
     bytes.extend_from_slice(&[0, 1, 0, 0, 0, 0, 0, 0]);
     assert_eq!(decode(&bytes), Ok(message()));
+    assert_eq!(decode_before_grant(&bytes), Ok(message()));
     bytes[63] = 1;
     assert_eq!(decode(&bytes), Err(WireError::RequiredExtension));
+    assert_eq!(
+        decode_before_grant(&bytes),
+        Err(WireError::RequiredExtension)
+    );
     bytes[63] = 0;
     bytes[67] = 1;
     assert_eq!(decode(&bytes), Err(WireError::Truncated));
+    assert_eq!(decode_before_grant(&bytes), Err(WireError::Truncated));
+}
+#[test]
+fn an_unseen_nonzero_lease_is_metadata_only_before_a_grant() {
+    let mut bytes = fixture();
+    bytes[55] = 19;
+    let report = Revoked {
+        lease: InputLeaseId::from_raw(19),
+        ..message()
+    };
+    assert_eq!(decode_before_grant(&bytes), Ok(report));
+    assert_eq!(decode(&bytes), Err(WireError::InvalidBinding));
+    bytes[40..56].fill(0);
+    assert_eq!(decode_before_grant(&bytes), Err(WireError::InvalidBinding));
+}
+
+#[test]
+fn before_grant_decoding_still_requires_original_session_channel_and_canonical_record() {
+    for offset in [0, 4, 7, 8, 19, 39] {
+        let mut bytes = fixture();
+        bytes[offset] ^= 1;
+        let strict = decode(&bytes);
+        assert!(strict.is_err(), "invalid canonical byte at {offset}");
+        assert_eq!(decode_before_grant(&bytes), strict);
+    }
+    for invalid in [
+        Binding {
+            channel: 0,
+            ..binding()
+        },
+        Binding {
+            session: RemoteSessionId::from_raw(0),
+            ..binding()
+        },
+    ] {
+        assert_eq!(
+            lease_revoked::decode_before_grant(
+                &fixture(),
+                invalid,
+                &ProtocolLimits::ABSOLUTE,
+                InputDirection::HostToViewer,
+                InputDelivery::Reliable,
+            ),
+            Err(WireError::InvalidBinding)
+        );
+    }
 }
 #[test]
 fn diagnostic_output_does_not_expose_identifiers() {

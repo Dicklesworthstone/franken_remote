@@ -5,7 +5,7 @@ mod recovery;
 use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US, ticket_bytes};
 use crate::{
     input_agent::{self, AdmissionGate, Driver, Phase, Seat},
-    input_watchdog::StopReason,
+    input_watchdog::{Control, StopReason},
     media::{Error as MediaError, ObservationControl, host_now},
 };
 use asupersync::{cx::Cx, net::quic_native::StreamRole};
@@ -643,6 +643,21 @@ impl GrantBroker {
             return Err(Error::TargetChanged);
         }
         Ok(self.native.take().ok_or(Error::NativeNotReady)?.input)
+    }
+    /// Reporting may bind only this initialized, locally granted owner after
+    /// its original grant bytes are queued. This stop handle cannot submit
+    /// input or move the native owner out before the normal finish checks.
+    pub(crate) fn queued_lease(
+        &mut self,
+        connection: &QuicRecords,
+    ) -> Result<(InputLeaseId, Control), Error> {
+        self.bound(connection)?;
+        self.live(connection)?;
+        let native = self.native.as_ref().ok_or(Error::NativeNotReady)?;
+        if !native.queued || native.input.status().phase != Phase::Running {
+            return Err(Error::NativeNotReady);
+        }
+        Ok((native.record.lease, native.input.control()))
     }
     /// Drive only this same connection while initialization/sending waits. Poll
     /// the native Driver independently. Even dropping an UNPOLLED future fences

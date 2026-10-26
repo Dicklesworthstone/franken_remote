@@ -11,7 +11,7 @@ use crate::{
         ControlledHost, HostSession,
         running::{
             controlled::tests::attach,
-            tests::{pair_initialized, run},
+            tests::{pair_initialized_with_transport, run},
         },
         tests::support,
     },
@@ -81,8 +81,19 @@ struct Fixture {
     video: Route,
     feedback: Route,
 }
-#[allow(clippy::too_many_lines)]
 async fn fixture(c: &Cx, h: &Cx) -> Fixture {
+    Box::pin(fixture_with_transport(
+        c,
+        h,
+        quic::Policy {
+            critical_send_records: 1,
+            ..quic::Policy::default()
+        },
+    ))
+    .await
+}
+#[allow(clippy::too_many_lines)]
+async fn fixture_with_transport(c: &Cx, h: &Cx, transport: quic::Policy) -> Fixture {
     let mut capabilities: Vec<_> = [
         clock::CAPABILITY,
         decoder::CAPABILITY,
@@ -99,14 +110,15 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
     })
     .collect();
     capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    let (mut host, mut viewer) = pair_initialized(c, h, capabilities, |host| {
-        host.authority
-            .as_mut()
-            .unwrap()
-            .mark_view_ready(HostInstant::from_micros(now(h).unwrap()))
-            .unwrap();
-    })
-    .await;
+    let (mut host, mut viewer) =
+        pair_initialized_with_transport(c, h, capabilities, transport, |host| {
+            host.authority
+                .as_mut()
+                .unwrap()
+                .mark_view_ready(HostInstant::from_micros(now(h).unwrap()))
+                .unwrap();
+        })
+        .await;
     let (hc, vc) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 8).await;
     let (hr, vr) = attach(&mut host, &mut viewer, c, h, MediaRole::Recovery, 9).await;
     let (hi, vi) = attach(&mut host, &mut viewer, c, h, MediaRole::Input, 10).await;

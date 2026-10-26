@@ -24,7 +24,7 @@ fn arm(pair: &mut Pair, cleanup: &Cx) -> (RevocationReport, Arc<AtomicBool>) {
     (reporting, fenced)
 }
 
-async fn delivered(pair: &mut Pair, cleanup: &Cx, reporting: RevocationReport) {
+pub(super) async fn delivered(pair: &mut Pair, cleanup: &Cx, reporting: RevocationReport) {
     assert!(pair.server.is_closed());
     let done = Cell::new(false);
     let mut messages = Vec::new();

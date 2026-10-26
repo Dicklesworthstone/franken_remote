@@ -1,6 +1,7 @@
 //! Live grant acquisition on the original capture/session service. Native input
 //! initialization and cleanup stay with the independently polled Driver.
 use super::{Error, Fence, Guarded, Host, Operation, Services, StreamingHost};
+use crate::session_startup::running::controlled::revocation::GrantReporting;
 use crate::{
     input_agent::{Driver, Seat, Status},
     input_quic::{
@@ -76,6 +77,7 @@ impl PendingControl<'_> {
 
 pub(super) struct Acquisition {
     broker: Option<GrantBroker>,
+    reporting: Option<GrantReporting>,
     request: Option<Request>,
     active: Option<Control>,
     current: Option<Target>,
@@ -105,8 +107,10 @@ impl Acquisition {
         let broker = session
             .negotiated_control_broker(seat, channels)
             .map_err(Error::ControlGrant)?;
+        let reporting = GrantReporting::take(session)?;
         Ok(Self {
             broker: Some(broker),
+            reporting,
             request: None,
             active: None,
             current: None,
@@ -144,6 +148,7 @@ impl Acquisition {
                 return Err(Error::Order);
             };
             session.check()?;
+            session.revocation_reporting = self.reporting.take().map(GrantReporting::finish);
             let input = self
                 .broker
                 .take()
@@ -254,6 +259,14 @@ where
                     connection: q,
                 }))?;
                 a.ready = broker.service(q, a.current)? == Event::GrantQueued;
+                if a.ready
+                    && let Some(reporting) = &mut a.reporting
+                {
+                    // service only queues application bytes. Install the exact
+                    // lease fence before this turn can flush LeaseGranted,
+                    // including turns inside admission refresh.
+                    reporting.queued(broker, q)?;
+                }
             } else {
                 let request = a.request.ok_or(GrantError::NoRequest)?;
                 let control = a.active.clone().ok_or(GrantError::NativeNotReady)?;

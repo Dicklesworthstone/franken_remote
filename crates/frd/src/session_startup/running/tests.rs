@@ -48,7 +48,35 @@ pub(in crate::session_startup) async fn pair_initialized(
     capabilities: Vec<fr_wire::negotiation::Capability>,
     initialize: impl FnOnce(&mut Host),
 ) -> (HostSession, ViewerSession) {
-    let (mut host, viewer) = pair_before_finish(c, h, capabilities).await;
+    Box::pin(pair_initialized_with_transport(
+        c,
+        h,
+        capabilities,
+        Policy {
+            critical_send_records: 1,
+            ..Policy::default()
+        },
+        initialize,
+    ))
+    .await
+}
+/// A test-local bounded transport budget, installed before native construction.
+/// Ordinary fixtures retain their single critical-send slot above.
+pub(in crate::session_startup) async fn pair_initialized_with_transport(
+    c: &Cx,
+    h: &Cx,
+    capabilities: Vec<fr_wire::negotiation::Capability>,
+    transport: Policy,
+    initialize: impl FnOnce(&mut Host),
+) -> (HostSession, ViewerSession) {
+    let (mut host, viewer) = Box::pin(pair_before_finish_with_transport(
+        c,
+        h,
+        capabilities,
+        transport,
+        |_| {},
+    ))
+    .await;
     initialize(&mut host);
     (
         host.finish().unwrap().into_running().unwrap(),
@@ -61,6 +89,33 @@ pub(in crate::session_startup) async fn pair_before_finish(
     c: &Cx,
     h: &Cx,
     capabilities: Vec<fr_wire::negotiation::Capability>,
+) -> (Host, Viewer) {
+    Box::pin(pair_before_finish_initialized(c, h, capabilities, |_| {})).await
+}
+pub(in crate::session_startup) async fn pair_before_finish_initialized(
+    c: &Cx,
+    h: &Cx,
+    capabilities: Vec<fr_wire::negotiation::Capability>,
+    initialize: impl FnOnce(&mut Host),
+) -> (Host, Viewer) {
+    Box::pin(pair_before_finish_with_transport(
+        c,
+        h,
+        capabilities,
+        Policy {
+            critical_send_records: 1,
+            ..Policy::default()
+        },
+        initialize,
+    ))
+    .await
+}
+async fn pair_before_finish_with_transport(
+    c: &Cx,
+    h: &Cx,
+    capabilities: Vec<fr_wire::negotiation::Capability>,
+    transport: Policy,
+    initialize: impl FnOnce(&mut Host),
 ) -> (Host, Viewer) {
     let cfg = Configuration {
         offer: Offer {
@@ -80,10 +135,7 @@ pub(in crate::session_startup) async fn pair_before_finish(
         require_approval: false,
         startup_timeout: Duration::from_secs(2),
         authority: AuthorityPolicy::plan_defaults(),
-        transport: Policy {
-            critical_send_records: 1,
-            ..Policy::default()
-        },
+        transport,
     };
     let (client, host) = support::native_pair(c, "localhost", quic::ALPN).await;
     let peer = Peer::Fixture {
@@ -100,6 +152,7 @@ pub(in crate::session_startup) async fn pair_before_finish(
     )
     .unwrap();
     let mut h = Host::start(h.clone(), host.unwrap(), peer, cfg).unwrap();
+    initialize(&mut h);
     while !viewer.is_complete() || !h.is_complete() {
         let (a, b) = Box::pin(support::both(
             h.drive(Duration::from_millis(1)),

@@ -291,6 +291,7 @@ impl StreamingHost {
         session.revocation_reporting = Some(super::controlled::revocation::Configuration {
             cleanup: cleanup.clone(),
             registration: report.registration(),
+            armed: false,
         });
         Ok(report)
     }

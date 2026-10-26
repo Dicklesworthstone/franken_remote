@@ -39,11 +39,33 @@ uncertain native effect. Cleanup and receipt completion are independent.
 
 The receiver checks authenticated host-to-viewer direction, reliable delivery,
 record and extension limits, and exact current session/channel/lease before
-acting. A stale lease report cannot revoke its replacement. A valid report is
+acting on an input owner. A stale lease report cannot revoke its replacement. A valid report is
 terminal for that input owner: queued unsent actions and renewal responses must
 not be sent, while already committed action receipts remain reportable. It does
 not authorize an automatic control reacquisition. An absent report means closure
 status is unknown, never "cleanup succeeded".
+
+## Pending request before the grant arrives
+
+The host can fence an initialized lease after queuing LeaseGranted but before
+that grant reaches the viewer. Terminal transport custody discards those
+unstaged grant bytes, so a pending viewer can receive LeaseRevoked without ever
+receiving a grant or constructing an input owner.
+
+Only in that pending-request phase, the original authenticated host control
+route and exact current channel/full remote-session binding may admit a
+canonical report with a nonzero lease ID as terminal metadata. Direction,
+reliable delivery, size/extension bounds, reasons and stages still receive the
+same strict validation. The lease ID is the host's reported terminated lease;
+it does not become an expected or current lease, prove that the viewer acquired
+control, or construct an input owner. Once a grant or input owner exists, the
+exact expected-lease check remains mandatory.
+
+The valid report terminates that original pending request and receive batch.
+It cannot authorize input, renew a deadline, replay a request, reacquire
+control, or replace another input owner. A later grant or duplicate terminal
+record cannot revive the request. Cleanup/effect stages remain the reported
+stages; this path cannot invent local cleanup completion or InputResult receipts.
 
 ## Independent fixture
 

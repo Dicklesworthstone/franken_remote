@@ -159,8 +159,8 @@ native/publisher owner still performs and confirms its own ordered cleanup.
 
 This session owner always reports Unconfirmed cleanup and Unknown effects. It
 cannot certify a shared worker's exit or invent counts for missing input receipts.
-Control-intent sessions refuse this reporting path and retain their existing
-lease-specific shutdown owner. An armed revocation report takes precedence.
+Control-intent sessions refuse this explicit observation-only API and retain
+their phase-specific shutdown owner described below. An armed revocation report takes precedence.
 A failed, cancelled or unpolled reporting attempt never reopens ordinary I/O.
 
 The ordinary viewer dispatcher consumes Closed on its exact reliable control
@@ -172,6 +172,64 @@ successful cleanup result. Existing cancellation, renewal-stop and native/input
 teardown guards still run. A malformed report closes without a retained success
 record; absence of a report remains None. Known uncertain effects remain uncertain even
 when the host reports completed cleanup. Per-action receipt ledgers are untouched.
+
+### Control-capable sessions before a grant
+
+The listener-provisioned deferred closure owner now arms after `SessionOpened`
+for both Observe and RequestControl selections. A control-capable viewer has
+observation authority at that point; it need not request control, acquire a
+lease, or finish decoder startup to receive a typed terminal `Closed` report.
+The original host's recorded source failure is retained as HostFailure. Cleanup
+remains Unconfirmed and effects Unknown; reporting itself creates no request,
+lease, readiness, or native-cleanup receipt.
+
+Once the managed grant broker has initialized its approved input owner and
+queued the original LeaseGranted, `QuicRecords::promote_closed_report` transfers
+the sole terminal slot to that lease's RevocationReport. This happens before
+the queued grant can enter native I/O, including during admission refresh.
+The original connection identity, exact prior weak
+registration, control route, full session binding, still-armed old consumer and
+unused new consumer must all match. The old observation callback is retired
+only after these checks complete. The old Closed consumer becomes superseded
+and finishes with None, so the listener cannot publish a second session report
+after the lease report. The existing independent cleanup context and original
+timer driver remain in the slot; promotion does not mint a replacement clock,
+socket, security gate or cleanup deadline. Ordinary `arm_revocation_report`
+still cannot replace any occupied slot.
+
+After the broker hands its exact input owner to `into_controlled`, the session
+revalidates the native/observation custody and uses a separate strict
+`confirm_revocation_report` check. It must find the same original connection,
+route, full session binding, prior closure registration, new revocation
+registration and lease. Confirmation cannot arm or replace a slot, replace its
+fence, restart a deadline or recover a captured socket. Cancellation after grant
+queueing but before this final handoff therefore belongs to the lease reporter,
+with the superseded Closed consumer still returning None.
+
+If those unstaged grant bytes never reached the viewer, its pending acquisition
+accepts the canonical original-session lease report as terminal metadata only,
+as specified in [PROTOCOL_LEASE_REVOKED.md](PROTOCOL_LEASE_REVOKED.md). It remains
+ungranted; no input owner, request replay or renewed authority is created.
+
+A foreign or stale transfer leaves the old fence in custody. Failed grant
+installation still drops/fences the consumed session and input owners; it does
+not free the OS seat before its native driver finishes cleanup. A session with
+a pre-grant registration also refuses installation when its lease-report
+consumer was never provisioned. Sessions without listener reporting retain
+their existing explicit terminal API behavior.
+
+Source regressions exercise actual TLS/UDP pre-grant HostFailure dispatch,
+cancelled and unpolled service teardown, no emission before SessionOpened,
+single-report promotion, foreign/stale registration refusal, original cleanup
+cancellation and terminal security, and the real managed-control handoff with
+both normal and consumed reporting owners. A grant-boundary regression closes
+from the production acquisition maintenance path after GrantQueued and before
+broker finish; only the original lease's report is deliverable. Lease, identity, media and native
+sink fixtures remain labelled fixtures. These added/extended regressions are
+not yet executed in this checkout: local Cargo compilation is blocked by full
+shared storage and the pinned Asupersync compiler process being killed. The
+previous execution counts below describe the earlier explicit closure slice,
+not validation of this new phase transition.
 
 Five new session regressions exercise actual negotiated TLS/UDP host/viewer
 owners, call-time authority fencing, independent cleanup contexts, unknown and

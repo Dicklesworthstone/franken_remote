@@ -45,6 +45,7 @@ enum State {
     #[default]
     Unarmed,
     Armed,
+    Superseded,
     Ready(Result<Prepared, Error>),
     Finished,
 }
@@ -80,7 +81,7 @@ impl RevocationReport {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match std::mem::replace(&mut *state, State::Finished) {
-            State::Unarmed => None,
+            State::Unarmed | State::Superseded => None,
             State::Ready(result) => Some(result),
             State::Armed | State::Finished => Some(Err(Error::Closed)),
         }
@@ -95,7 +96,8 @@ impl RevocationReport {
 pub struct ClosedReport(RevocationReport);
 
 /// Weak one-use session-closure registration. It grants neither normal traffic
-/// nor cleanup success, and cannot replace an armed lease-revocation consumer.
+/// nor cleanup success. Its exact original slot may transfer to a granted
+/// lease's revocation owner; it cannot replace a lease-revocation consumer.
 #[derive(Clone)]
 pub struct ClosedRegistration(RevocationRegistration);
 
@@ -108,6 +110,8 @@ impl ClosedReport {
     /// native cleanup or receipt counts. The original 250-ms closure deadline
     /// includes time already spent cleaning up. Late completion cannot renew it.
     /// No registered/captured socket means no report, never a reconnect or retry.
+    /// A validated transfer to the original session's lease-revocation owner
+    /// also returns `None`: this superseded consumer cannot report twice.
     /// A native-backlog fallback carries only this final reason, never guessed
     /// cleanup/effect stages, and cannot return a successful report receipt.
     pub fn finish(self, report: Closed) -> impl Future<Output = Option<Result<(), Error>>> + use<> {
@@ -175,6 +179,7 @@ pub(in crate::quic) struct ArmedReport {
     route: StreamRoute,
     binding: Binding,
     registration: RevocationRegistration,
+    promoted_from: Option<ClosedRegistration>,
     fence: Option<Fence>,
 }
 impl Drop for ArmedReport {
@@ -232,7 +237,9 @@ impl QuicRecords {
     /// bounded callback, then finish the report AFTER its ordered teardown.
     /// `cleanup` has the same independent-clock/security requirements as the
     /// lease-specific registration. No callback executes native I/O or awaits.
-    /// A control-capable owner must retain lease-specific reporting instead.
+    /// This also covers a control-capable session before any lease exists.
+    /// Its original registration must transfer to lease-specific reporting
+    /// with `promote_closed_report` when the actual granted owner is installed.
     #[allow(clippy::too_many_arguments)]
     pub fn arm_closed_report(
         &mut self,
@@ -251,6 +258,130 @@ impl QuicRecords {
             registration.0,
             Fence::Closed(Box::new(fence)),
         )
+    }
+
+    /// Transfer an armed pre-grant closure slot to its actual granted lease.
+    /// The caller must already have validated the input owner's authority and
+    /// connection custody; this operation itself never grants or renews input.
+    ///
+    /// Both the original connection proof and the exact closure registration,
+    /// route and full session binding must match. The old consumer must still
+    /// be armed and the new consumer unused. Refusal leaves its fence armed;
+    /// consumed session/input owners must still perform their ordinary teardown.
+    /// A successful transfer retires the old consumer without running its
+    /// observation fence. Only the replacement lease fence can capture a socket.
+    ///
+    /// The original cleanup context, clock, immutable security gate and close
+    /// deadline policy are retained. No second socket, detached drain or fresh
+    /// cleanup budget is created by promotion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn promote_closed_report(
+        &mut self,
+        original: &ConnectionBinding,
+        route: StreamRoute,
+        binding: Binding,
+        lease: InputLeaseId,
+        previous: &ClosedRegistration,
+        registration: RevocationRegistration,
+        fence: impl Fn() -> Reason + Send + Sync + 'static,
+    ) -> Result<(), Error> {
+        if !self.is_bound_to(original) {
+            return Err(Error::WrongRoute);
+        }
+        if lease.as_raw() == 0 {
+            return Err(Error::Malformed);
+        }
+        let Some(Armed::Report(armed)) = self.deferred_revocation.as_deref() else {
+            return Err(Error::InvalidPolicy);
+        };
+        if !matches!(armed.fence.as_ref(), Some(Fence::Closed(_))) {
+            return Err(Error::InvalidPolicy);
+        }
+        if armed.route != route
+            || armed.binding != binding
+            || !Weak::ptr_eq(&armed.registration.0, &previous.0.0)
+        {
+            return Err(Error::WrongRoute);
+        }
+        let cleanup = armed.cleanup.clone();
+        let previous_shared = previous.0.0.upgrade().ok_or(Error::Closed)?;
+        let shared = registration.0.upgrade().ok_or(Error::Closed)?;
+        if Arc::ptr_eq(&previous_shared, &shared) {
+            return Err(Error::InvalidPolicy);
+        }
+        // These checks may close/fence on cancellation or lifetime loss. Never
+        // hold either reporting lock while a transport check can run a fence.
+        self.check(&cleanup, &mut || true)?;
+        self.terminal_route(route, binding, REVOKED_BYTES)?;
+        let mut previous_state = previous_shared.lock().map_err(|_| Error::Native)?;
+        let mut state = shared.lock().map_err(|_| Error::Native)?;
+        if !matches!(*previous_state, State::Armed) || !matches!(*state, State::Unarmed) {
+            return Err(Error::InvalidPolicy);
+        }
+        let Some(Armed::Report(armed)) = self.deferred_revocation.as_deref_mut() else {
+            return Err(Error::InvalidPolicy);
+        };
+        // All fallible custody checks have completed under the two consumer
+        // locks. Retire the old callback only inside this one-way handoff.
+        *previous_state = State::Superseded;
+        *state = State::Armed;
+        armed.registration = registration;
+        armed.promoted_from = Some(previous.clone());
+        let retired = armed.fence.replace(Fence::Revocation {
+            lease,
+            stop: Box::new(fence),
+        });
+        drop(state);
+        drop(previous_state);
+        drop(retired);
+        Ok(())
+    }
+
+    /// Confirm the exact already-armed lease slot when its original input owner
+    /// moves from grant publication into steady-state service. This never arms
+    /// a slot, replaces a callback, renews a budget or recovers a closed socket.
+    /// `previous` must name the original pre-grant slot if one was promoted.
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirm_revocation_report(
+        &mut self,
+        original: &ConnectionBinding,
+        route: StreamRoute,
+        binding: Binding,
+        lease: InputLeaseId,
+        previous: Option<&ClosedRegistration>,
+        registration: &RevocationRegistration,
+    ) -> Result<(), Error> {
+        if !self.is_bound_to(original) {
+            return Err(Error::WrongRoute);
+        }
+        let Some(Armed::Report(armed)) = self.deferred_revocation.as_deref() else {
+            return Err(Error::InvalidPolicy);
+        };
+        let Some(Fence::Revocation { lease: granted, .. }) = &armed.fence else {
+            return Err(Error::InvalidPolicy);
+        };
+        let same_previous = match (armed.promoted_from.as_ref(), previous) {
+            (Some(owned), Some(expected)) => Weak::ptr_eq(&owned.0.0, &expected.0.0),
+            (None, None) => true,
+            _ => false,
+        };
+        if *granted != lease
+            || armed.route != route
+            || armed.binding != binding
+            || !same_previous
+            || !Weak::ptr_eq(&armed.registration.0, &registration.0)
+        {
+            return Err(Error::WrongRoute);
+        }
+        let cleanup = armed.cleanup.clone();
+        let shared = registration.0.upgrade().ok_or(Error::Closed)?;
+        self.check(&cleanup, &mut || true)?;
+        self.terminal_route(route, binding, REVOKED_BYTES)?;
+        let state = shared.lock().map_err(|_| Error::Native)?;
+        if !matches!(*state, State::Armed) {
+            return Err(Error::InvalidPolicy);
+        }
+        Ok(())
     }
 
     fn arm_terminal(
@@ -286,6 +417,7 @@ impl QuicRecords {
             route,
             binding,
             registration,
+            promoted_from: None,
             fence: Some(fence),
         })));
         Ok(())

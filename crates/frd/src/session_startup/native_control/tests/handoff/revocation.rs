@@ -9,6 +9,8 @@ use crate::{
 };
 use fr_wire::lease_revoked::{CleanupStage, EffectStage, Reason};
 
+mod pregrant;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
     Native,
@@ -20,7 +22,15 @@ async fn exercise(c: Cx, h: Cx, end: End) {
     let cleanup = Cx::current().unwrap();
     // Use the caller's separate context, never the revoked session context.
     let report_cx = cleanup.clone();
-    let (mut host, mut viewer) = Box::pin(prepare(&c, &h, "unchanged", keys())).await;
+    let (closed, configuration) = session_startup::closure_reporting::Reporting::new(&cleanup);
+    let (mut host, mut viewer) = Box::pin(prepare_with_reporting(
+        &c,
+        &h,
+        "unchanged",
+        keys(),
+        Some(configuration),
+    ))
+    .await;
     let target = host.control_target(keys()).unwrap();
     let request = viewer.control_request(1, keys()).unwrap();
     let stop = host.control();
@@ -173,6 +183,13 @@ async fn exercise(c: Cx, h: Cx, end: End) {
     }
     assert_eq!(revoked.cleanup, CleanupStage::Fenced);
     assert_eq!(revoked.effects, EffectStage::Unknown);
+    assert_eq!(
+        closed
+            .finish(fr_wire::closure::ClosedReason::HostFailure)
+            .await,
+        None,
+        "actual granted custody supersedes the pre-grant closure consumer"
+    );
     assert!(h.is_cancel_requested());
     assert!(
         !cleanup.is_cancel_requested(),

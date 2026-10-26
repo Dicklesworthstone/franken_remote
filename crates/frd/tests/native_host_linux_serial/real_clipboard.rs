@@ -12,6 +12,7 @@
 //! existing namespace fixtures, and the viewer harness plays the window manager
 //! and the user as in `real_control`. Xvfb selections in a namespace are not a
 //! desktop clipboard manager, Wayland, or a live tailnet.
+#[path = "real_clipboard/privacy.rs"]
 mod privacy;
 
 use super::real_control::{Controlled, Harness, PRELUDE, eventually, indicator, signal};

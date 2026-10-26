@@ -4,6 +4,9 @@ use super::*;
 use fr_wire::closure::{self, Cleanup, Closed, ClosedReason, OutstandingEffects};
 use std::{future::Future, pin::pin, task::Poll};
 
+#[path = "closed_deferred/promotion.rs"]
+mod promotion;
+
 fn outcome() -> Closed {
     Closed {
         reason: ClosedReason::ClientRequested,

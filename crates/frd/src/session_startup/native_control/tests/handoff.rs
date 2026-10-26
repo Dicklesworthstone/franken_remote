@@ -202,7 +202,33 @@ async fn prepare(
     session_startup::NativePublisher,
     session_startup::NativeObserver,
 ) {
-    let (mut host, viewer) = pair_initialized(c, h, capabilities(), |_| {}).await;
+    Box::pin(prepare_with_reporting(c, h, mode, requested, None)).await
+}
+async fn prepare_with_reporting(
+    c: &Cx,
+    h: &Cx,
+    mode: &str,
+    requested: Capabilities,
+    reporting: Option<session_startup::closure_reporting::Configuration>,
+) -> (
+    session_startup::NativePublisher,
+    session_startup::NativeObserver,
+) {
+    let (host, viewer) = Box::pin(
+        session_startup::running::tests::pair_before_finish_initialized(
+            c,
+            h,
+            capabilities(),
+            |host| {
+                if let Some(reporting) = reporting {
+                    host.retain_observation_reporting(reporting).unwrap();
+                }
+            },
+        ),
+    )
+    .await;
+    let mut host = host.finish().unwrap().into_running().unwrap();
+    let viewer = viewer.finish().unwrap();
     let authority = host.observation().unwrap();
     assert!(!authority.view_ready().unwrap(), "manual readiness bypass");
     let chosen = Cell::new(0);

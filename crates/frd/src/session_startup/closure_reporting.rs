@@ -1,6 +1,6 @@
 //! The listener owns final reporting outside the already-fenced application.
 //! This owner never certifies another task's native cleanup or action receipts.
-use super::{Error, Host, OpenedSession, Phase, Role};
+use super::{Error, Host, OpenedSession, Phase};
 use asupersync::cx::Cx;
 use fr_transport::quic::{self, ClosedRegistration, ClosedReport};
 use fr_wire::{
@@ -85,11 +85,9 @@ impl Host {
 }
 impl Configuration {
     pub(super) fn arm(self, session: &mut OpenedSession) -> Result<(), Error> {
-        // Negotiated role, not the host's maximum offer. Never occupy the
-        // terminal slot needed by this connection's eventual granted lease.
-        if session.selected.role != Role::Observe {
-            return Ok(());
-        }
+        // SessionOpened grants observation for either negotiated role. No
+        // input lease exists yet, so a control-capable viewer needs this same
+        // terminal report throughout startup and interactive viewing.
         let control = session.control.clone();
         session
             .transport
@@ -101,10 +99,11 @@ impl Configuration {
                     channel: session.binding.id,
                     session: session.binding.remote_session,
                 },
-                self.registration,
+                self.registration.clone(),
                 move || control.revoke(),
             )
             .map_err(Error::Transport)?;
+        session.pregrant_reporting = Some(self.registration);
         session.closure_reason = Some(self.reason);
         Ok(())
     }

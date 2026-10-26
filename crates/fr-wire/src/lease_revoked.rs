@@ -123,13 +123,24 @@ fn route(
     direction: InputDirection,
     delivery: InputDelivery,
 ) -> Result<(), WireError> {
+    session_route(binding, direction, delivery)?;
+    if lease.as_raw() == 0 {
+        return Err(WireError::InvalidBinding);
+    }
+    Ok(())
+}
+fn session_route(
+    binding: Binding,
+    direction: InputDirection,
+    delivery: InputDelivery,
+) -> Result<(), WireError> {
     if direction != InputDirection::HostToViewer {
         return Err(WireError::WrongRole);
     }
     if delivery != InputDelivery::Reliable {
         return Err(WireError::WrongChannel);
     }
-    if binding.channel == 0 || binding.session.as_raw() == 0 || lease.as_raw() == 0 {
+    if binding.channel == 0 || binding.session.as_raw() == 0 {
         return Err(WireError::InvalidBinding);
     }
     Ok(())
@@ -169,6 +180,32 @@ pub fn decode(
     delivery: InputDelivery,
 ) -> Result<Revoked, WireError> {
     route(binding, lease, direction, delivery)?;
+    decode_record(bytes, binding, Some(lease), limits)
+}
+
+/// Decode terminal metadata while the original control request is pending and
+/// NO grant/input owner has been received. The authenticated control stream and
+/// full session binding still must match. The reported nonzero lease is only
+/// metadata: it cannot create an input owner, authorize input, renew a deadline
+/// or select a replacement lease. The caller must end that pending request.
+/// Once a grant exists, use `decode` with its exact immutable lease instead.
+pub fn decode_before_grant(
+    bytes: &[u8],
+    binding: Binding,
+    limits: &ProtocolLimits,
+    direction: InputDirection,
+    delivery: InputDelivery,
+) -> Result<Revoked, WireError> {
+    session_route(binding, direction, delivery)?;
+    decode_record(bytes, binding, None, limits)
+}
+
+fn decode_record(
+    bytes: &[u8],
+    binding: Binding,
+    expected_lease: Option<InputLeaseId>,
+    limits: &ProtocolLimits,
+) -> Result<Revoked, WireError> {
     let record = Record::decode_bounded(
         bytes,
         limits.max_control_message_bytes() as usize,
@@ -176,9 +213,16 @@ pub fn decode(
         None,
     )?;
     let mut reader = record.reader(Kind::LeaseRevoked)?;
-    if reader.take(16)? != binding.session.as_raw().to_be_bytes()
-        || reader.take(16)? != lease.as_raw().to_be_bytes()
-    {
+    if reader.take(16)? != binding.session.as_raw().to_be_bytes() {
+        return Err(WireError::InvalidBinding);
+    }
+    let lease = InputLeaseId::from_raw(u128::from_be_bytes(
+        reader
+            .take(16)?
+            .try_into()
+            .map_err(|_| WireError::Truncated)?,
+    ));
+    if lease.as_raw() == 0 || expected_lease.is_some_and(|expected| expected != lease) {
         return Err(WireError::InvalidBinding);
     }
     let revoked = Revoked {

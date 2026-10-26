@@ -50,6 +50,7 @@ impl HostSession {
         if self.opened.selected.role != Role::RequestControl
             || input.routes().results().messages != Messages::InputFeedback
             || input.protocol_limits() != self.opened.selected.limits
+            || (self.opened.pregrant_reporting.is_some() && self.revocation_reporting.is_none())
         {
             return Err(Error::Order);
         }

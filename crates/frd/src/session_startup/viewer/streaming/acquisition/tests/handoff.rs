@@ -2,6 +2,7 @@
 //! UDP/TLS routes. The early ticket uses codec-valid fixture bytes without an
 //! issued grant; grant, renewal and revocation use the real broker and driver.
 //! Native sink and presentation retain the parent module's documented fixtures.
+mod terminal;
 use super::*;
 use crate::input_watchdog::StopReason as HostStop;
 use fr_transport::quic::{QuicRecords, StreamRoute};

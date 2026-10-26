@@ -42,6 +42,8 @@ use std::{
     task::Poll,
 };
 
+mod reporting;
+
 struct Sink(Arc<Mutex<Vec<NativeOperation>>>);
 impl InputSink for Sink {
     fn prepare(&mut self, _: NativeOperation) -> Result<(), PlatformError> {

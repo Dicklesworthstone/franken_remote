@@ -1,5 +1,7 @@
 //! Terminal reporting owns no input authority and never waits for native cleanup.
-use super::{ControlledHost, StopReason};
+use super::{ControlledHost, HostSession, StopReason};
+use crate::{input_quic::grant::GrantBroker, input_watchdog::Control};
+use fr_core::ids::InputLeaseId;
 use fr_transport::quic;
 use fr_wire::{
     authority::Binding,
@@ -97,33 +99,135 @@ impl Drop for Closing<'_> {
 pub(in crate::session_startup::running) struct Configuration {
     pub cleanup: asupersync::cx::Cx,
     pub registration: quic::RevocationRegistration,
+    pub armed: bool,
+}
+/// The same session's reporting configuration accompanies the provisional
+/// native owner, so a queued grant cannot leave before its lease fence owns
+/// terminal reporting. No socket or input submission authority is moved here.
+pub(in crate::session_startup::running) struct GrantReporting {
+    configuration: Configuration,
+    original: quic::ConnectionBinding,
+    route: quic::StreamRoute,
+    binding: Binding,
+    previous: Option<quic::ClosedRegistration>,
+}
+impl GrantReporting {
+    pub(in crate::session_startup::running) fn take(
+        session: &mut HostSession,
+    ) -> Result<Option<Self>, super::Error> {
+        if session.opened.pregrant_reporting.is_some() && session.revocation_reporting.is_none() {
+            return Err(super::Error::Order);
+        }
+        Ok(session
+            .revocation_reporting
+            .take()
+            .map(|configuration| Self {
+                configuration,
+                original: session.opened.connection.clone(),
+                route: session.opened.routes.outbound,
+                binding: Binding {
+                    channel: session.opened.binding.id,
+                    session: session.opened.binding.remote_session,
+                },
+                previous: session.opened.pregrant_reporting.clone(),
+            }))
+    }
+    pub(in crate::session_startup::running) fn queued(
+        &mut self,
+        broker: &mut GrantBroker,
+        transport: &mut quic::QuicRecords,
+    ) -> Result<(), crate::input_quic::grant::Error> {
+        let (lease, control) = broker.queued_lease(transport)?;
+        self.configuration
+            .install(
+                transport,
+                &self.original,
+                self.route,
+                self.binding,
+                lease,
+                self.previous.as_ref(),
+                control,
+            )
+            .map_err(crate::input_quic::grant::Error::Transport)
+    }
+    pub(in crate::session_startup::running) fn finish(self) -> Configuration {
+        self.configuration
+    }
+}
+impl Configuration {
+    #[allow(clippy::too_many_arguments)]
+    fn install(
+        &mut self,
+        transport: &mut quic::QuicRecords,
+        original: &quic::ConnectionBinding,
+        route: quic::StreamRoute,
+        binding: Binding,
+        lease: InputLeaseId,
+        previous: Option<&quic::ClosedRegistration>,
+        control: Control,
+    ) -> Result<(), quic::Error> {
+        if self.armed {
+            return transport.confirm_revocation_report(
+                original,
+                route,
+                binding,
+                lease,
+                previous,
+                &self.registration,
+            );
+        }
+        let fence = move || {
+            // Preserve a watchdog/platform/local reason which already won.
+            control.stop(StopReason::ClientDisconnected);
+            wire_reason(control.reason().unwrap_or(StopReason::ClientDisconnected))
+        };
+        if let Some(previous) = previous {
+            transport.promote_closed_report(
+                original,
+                route,
+                binding,
+                lease,
+                previous,
+                self.registration.clone(),
+                fence,
+            )
+        } else {
+            transport.arm_revocation_report(
+                &self.cleanup,
+                original,
+                route,
+                binding,
+                lease,
+                self.registration.clone(),
+                fence,
+            )
+        }?;
+        self.armed = true;
+        Ok(())
+    }
 }
 impl ControlledHost {
     pub(super) fn arm_revocation_reporting(
         &mut self,
-        reporting: Configuration,
+        mut reporting: Configuration,
     ) -> Result<(), super::Error> {
-        let control = self.input.control();
-        self.session
-            .opened
-            .transport
-            .arm_revocation_report(
-                &reporting.cleanup,
+        let opened = &mut self.session.opened;
+        let binding = Binding {
+            channel: opened.binding.id,
+            session: opened.binding.remote_session,
+        };
+        reporting
+            .install(
+                &mut opened.transport,
                 self.renewal.original_connection(),
-                self.session.opened.routes.outbound,
-                Binding {
-                    channel: self.session.opened.binding.id,
-                    session: self.session.opened.binding.remote_session,
-                },
+                opened.routes.outbound,
+                binding,
                 self.renewal.lease_id(),
-                reporting.registration,
-                move || {
-                    // Preserve a watchdog/platform/local reason which already won.
-                    control.stop(StopReason::ClientDisconnected);
-                    wire_reason(control.reason().unwrap_or(StopReason::ClientDisconnected))
-                },
+                opened.pregrant_reporting.as_ref(),
+                self.input.control(),
             )
             .map_err(super::Error::Transport)?;
+        opened.pregrant_reporting = None;
         self.terminal_registered = true;
         Ok(())
     }

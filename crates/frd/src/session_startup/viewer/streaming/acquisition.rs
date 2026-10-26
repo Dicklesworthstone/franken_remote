@@ -76,6 +76,7 @@ pub struct PendingControl {
     policy: Policy,
     local: LocalView,
     grant: Option<(Granted, InputClient)>,
+    terminal: bool,
 }
 fn input_error(error: fr_client::input::Error) -> Error {
     Error::Control(ControlError::View(
@@ -137,6 +138,7 @@ impl PendingControl {
             policy,
             local: LocalView::default(),
             grant: None,
+            terminal: false,
         })
     }
     pub(super) fn from_viewing(
@@ -152,11 +154,15 @@ impl PendingControl {
             policy: viewing.policy,
             local: viewing.local,
             grant: None,
+            terminal: false,
         };
         pending.current()?;
         Ok(pending)
     }
     fn current(&self) -> Result<u64, Error> {
+        if self.terminal {
+            return Err(Error::Closed);
+        }
         let at = now(&self.cx).map_err(Error::Session)?;
         if at >= self.pending.deadline().0
             || self
@@ -262,26 +268,46 @@ impl PendingControl {
         }
         Ok(sample)
     }
-    fn revoked(&mut self, bytes: &[u8]) -> Error {
-        let Some((granted, input)) = &mut self.grant else {
+    fn revoked(&mut self, route: Route, inbound: Route, bytes: &[u8]) -> Error {
+        if std::mem::replace(&mut self.terminal, true) {
+            return Error::Closed;
+        }
+        // A terminal record consumes the original request even if malformed.
+        // It cannot leave a retryable request or manufacture an InputClient.
+        self.pending.stop();
+        if let Some((_, input)) = &mut self.grant {
+            input.stop(fr_client::input::StopReason::Disconnected);
+        }
+        if route != inbound {
             return Error::Control(ControlError::WrongBinding);
-        };
+        }
         let binding = fr_wire::authority::Binding {
             channel: self.request.parent.id,
             session: self.request.parent.remote_session,
         };
-        match fr_wire::lease_revoked::decode(
-            bytes,
-            binding,
-            granted.lease,
-            &self.channels.limits(),
-            fr_wire::input::InputDirection::HostToViewer,
-            fr_wire::input::InputDelivery::Reliable,
-        ) {
-            Ok(revoked) => {
-                input.stop(fr_client::input::StopReason::Disconnected);
-                Error::Control(ControlError::LeaseRevoked(revoked))
-            }
+        let revoked = if let Some((granted, _)) = &self.grant {
+            fr_wire::lease_revoked::decode(
+                bytes,
+                binding,
+                granted.lease,
+                &self.channels.limits(),
+                fr_wire::input::InputDirection::HostToViewer,
+                fr_wire::input::InputDelivery::Reliable,
+            )
+        } else {
+            // The host may have fenced a locally created lease before its
+            // queued grant reached us. Retain only terminal metadata; there is
+            // still no grant, ticket, input owner or mapping acknowledgement.
+            fr_wire::lease_revoked::decode_before_grant(
+                bytes,
+                binding,
+                &self.channels.limits(),
+                fr_wire::input::InputDirection::HostToViewer,
+                fr_wire::input::InputDelivery::Reliable,
+            )
+        };
+        match revoked {
+            Ok(revoked) => Error::Control(ControlError::LeaseRevoked(revoked)),
             Err(error) => input_error(fr_client::input::Error::Wire(error)),
         }
     }
@@ -323,10 +349,8 @@ impl PendingControl {
                             );
                             return Ok(Disposition::Consumed);
                         }
-                        if route == inbound
-                            && bytes.get(6..8) == Some(&(Kind::LeaseRevoked as u16).to_be_bytes())
-                        {
-                            return Err(self.revoked(bytes));
+                        if bytes.get(6..8) == Some(&(Kind::LeaseRevoked as u16).to_be_bytes()) {
+                            return Err(self.revoked(route, inbound, bytes));
                         }
                         // The host can queue renewal and optional attachment records
                         // immediately after the grant. Input feedback uses another
