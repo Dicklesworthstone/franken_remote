@@ -262,6 +262,152 @@ fn a_download_conflict_preserves_existing_content_and_the_live_controller() {
 }
 
 #[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real frd/fr CLIs, input agent and file lane"]
+fn local_keep_both_download_policy_preserves_files_and_whole_trees() {
+    let source = Dir::new("download-keep-both-source");
+    let destination = Dir::new("download-keep-both-destination");
+    let original = b"local original remains";
+    let incoming = random(32 * 1024);
+    let names = [
+        "private-document.txt",
+        "private-project",
+        "last-selection.bin",
+    ];
+    fs::write(source.0.join(names[0]), &incoming).unwrap();
+    fs::create_dir(source.0.join(names[1])).unwrap();
+    fs::write(source.0.join(names[1]).join("remote-only"), &incoming).unwrap();
+    fs::create_dir(source.0.join(names[1]).join("empty-folder")).unwrap();
+    fs::write(source.0.join(names[2]), []).unwrap();
+    fs::write(destination.0.join(names[0]), original).unwrap();
+    fs::create_dir(destination.0.join(names[1])).unwrap();
+    fs::write(destination.0.join(names[1]).join("local-only"), original).unwrap();
+    let selected: Vec<_> = names.iter().map(|name| source.0.join(name)).collect();
+    let mut s = Controlled::start_downloads_with_options(
+        false,
+        false,
+        &selected,
+        Some(&destination.0),
+        &["--receive-conflict", "keep-both"],
+    );
+    assert!(
+        eventually(Duration::from_secs(60), || destination
+            .0
+            .join(names[2])
+            .exists()),
+        "keep-both batch did not finish: {}; host: {}",
+        client_state(&mut s.client),
+        s.daemon.dump()
+    );
+    assert_file(&destination.0.join(names[0]), original);
+    assert_entries(&destination.0.join(names[1]), &["local-only"]);
+    assert_file(&destination.0.join(names[1]).join("local-only"), original);
+    let entries = destination.entries();
+    assert_eq!(entries.len(), 5);
+    let conflicts: Vec<_> = entries
+        .iter()
+        .filter(|name| name.contains(".fr-conflict-"))
+        .collect();
+    assert_eq!(conflicts.len(), 2);
+    for name in conflicts {
+        let path = destination.0.join(name);
+        if path.is_dir() {
+            assert_entries(&path, &["empty-folder", "remote-only"]);
+            assert_file(&path.join("remote-only"), &incoming);
+            assert_entries(&path.join("empty-folder"), &[]);
+        } else {
+            assert_file(&path, &incoming);
+        }
+    }
+    assert!(s.pointer_follows((170, 170), Duration::from_secs(10)));
+    s.close_viewer();
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let host = s.daemon.finish_once();
+    let report = completion(&output, &host);
+    assert_download_report(&report);
+    assert_eq!(
+        report["files_received"],
+        serde_json::json!([
+            {"index": 0, "bytes": incoming.len(), "durable": true},
+            {"index": 1, "bytes": incoming.len(), "durable": true},
+            {"index": 2, "bytes": 0, "durable": true},
+        ]),
+        "{report}"
+    );
+    assert_eq!(
+        report["files_receive_refused"],
+        serde_json::json!([]),
+        "{report}"
+    );
+    assert_eq!(report["files_receive_cleanup"], "finished", "{report}");
+    assert_private(&output, &host, &[&source.0, &destination.0], &names);
+    assert_private(
+        &output,
+        &host,
+        &[],
+        &entries.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real frd/fr CLIs, input agent and file lane"]
+fn local_download_limits_bound_each_object_and_cumulative_session_admission() {
+    // The same shipped options must reach both the pre-staging file bound and
+    // the non-refundable aggregate session bound. A later refusal keeps the
+    // first publication and the controller alive, and never starts item three.
+    for (second_bytes, file_limit, session_limit) in [(7, "6", "20"), (4, "4", "7")] {
+        let source = Dir::new("download-limits-source");
+        let destination = Dir::new("download-limits-destination");
+        let names = ["first-private.bin", "over-budget.bin", "never-started.bin"];
+        fs::write(source.0.join(names[0]), b"firs").unwrap();
+        fs::write(source.0.join(names[1]), random(second_bytes)).unwrap();
+        fs::write(source.0.join(names[2]), []).unwrap();
+        let selected: Vec<_> = names.iter().map(|name| source.0.join(name)).collect();
+        let mut s = Controlled::start_downloads_with_options(
+            false,
+            false,
+            &selected,
+            Some(&destination.0),
+            &[
+                "--receive-max-file-bytes",
+                file_limit,
+                "--receive-max-session-bytes",
+                session_limit,
+            ],
+        );
+        assert!(
+            eventually(Duration::from_secs(60), || destination
+                .0
+                .join(names[0])
+                .exists()),
+            "first bounded download missing: {}; host: {}",
+            client_state(&mut s.client),
+            s.daemon.dump()
+        );
+        thread::sleep(Duration::from_secs(3));
+        assert!(s.pointer_follows((160, 160), Duration::from_secs(10)));
+        s.close_viewer();
+        let output = wait_for(s.client, Duration::from_secs(30));
+        let host = s.daemon.finish_once();
+        let report = completion(&output, &host);
+        assert_download_report(&report);
+        assert_eq!(
+            report["files_received"],
+            serde_json::json!([{"index": 0, "bytes": 4, "durable": true}]),
+            "{report}"
+        );
+        assert_eq!(
+            report["files_receive_refused"],
+            serde_json::json!([{"index": 1, "reason": "receive_limit"}]),
+            "{report}"
+        );
+        assert_eq!(report["files_receive_cleanup"], "finished", "{report}");
+        assert_entries(&destination.0, &[names[0]]);
+        assert_file(&destination.0.join(names[0]), b"firs");
+        assert_private(&output, &host, &[&source.0, &destination.0], &names);
+    }
+}
+
+#[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real frd/fr CLIs and input agent"]
 fn no_host_selection_reports_download_absence_and_preserves_control() {
     let destination = Dir::new("download-unavailable");

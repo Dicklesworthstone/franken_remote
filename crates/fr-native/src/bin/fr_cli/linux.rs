@@ -340,7 +340,7 @@ fn connect(
     }
     // Classify every --send path by type before any network I/O.
     let sends = files::select(&connection.send)?;
-    let downloads = files::download::select(connection.receive.as_deref())?;
+    let downloads = files::download::select(connection.receive.as_ref())?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
     let state = Rc::new(RefCell::new(Progress {

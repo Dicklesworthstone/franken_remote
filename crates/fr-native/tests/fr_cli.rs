@@ -17,6 +17,12 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+const MAX_CLI_OUTPUT_BYTES: usize = 8 * 1024;
+// The static help lists the supported command/capability contracts and exceeds
+// 8 KiB. Keep it finite without relaxing the tighter discovery/refusal bound.
+const MAX_HELP_OUTPUT_BYTES: usize = 16 * 1024;
+
 fn path(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     std::env::temp_dir().join(format!(
@@ -36,7 +42,10 @@ fn command(args: &[&str]) -> Command {
         .stderr(Stdio::piped());
     command
 }
-fn wait(mut child: Child) -> Output {
+fn wait(child: Child) -> Output {
+    wait_with_output_limit(child, MAX_CLI_OUTPUT_BYTES)
+}
+fn wait_with_output_limit(mut child: Child, max_stdout_bytes: usize) -> Output {
     let until = Instant::now() + Duration::from_secs(5);
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= until {
@@ -47,7 +56,10 @@ fn wait(mut child: Child) -> Output {
         thread::sleep(Duration::from_millis(5));
     }
     let output = child.wait_with_output().unwrap();
-    assert!(output.stdout.len() < 8192, "test fixture output bound");
+    assert!(
+        output.stdout.len() < max_stdout_bytes,
+        "test fixture stdout exceeded its {max_stdout_bytes} byte bound"
+    );
     assert!(
         output.stderr.is_empty(),
         "unexpected stderr: {}",
@@ -56,7 +68,12 @@ fn wait(mut child: Child) -> Output {
     output
 }
 fn run_cli(args: &[&str]) -> Output {
-    wait(command(args).spawn().unwrap())
+    let limit = if args.is_empty() || args == ["--help"] || args == ["help"] {
+        MAX_HELP_OUTPUT_BYTES
+    } else {
+        MAX_CLI_OUTPUT_BYTES
+    };
+    wait_with_output_limit(command(args).spawn().unwrap(), limit)
 }
 fn cli(cmd: &str) -> Output {
     let args: Vec<&str> = cmd.split_whitespace().collect();
@@ -86,6 +103,9 @@ fn help_is_usable_without_a_display_daemon_or_credentials() {
             && help.contains("--view-only")
             && help.contains("--control")
             && help.contains("--experimental-native")
+            && help.contains("--receive-conflict reject|keep-both")
+            && help.contains("--receive-max-file-bytes")
+            && help.contains("--receive-max-session-bytes")
     );
 }
 #[test]

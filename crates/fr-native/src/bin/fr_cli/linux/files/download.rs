@@ -1,7 +1,7 @@
 //! Explicit local download consent and content-free, actual disk outcomes.
 //! A pinned directory is selected before network I/O. The original controlled
 //! desktop owns the receive worker; this CLI keeps only its bounded status.
-use crate::{Failure, FileReceiveReport};
+use crate::{Failure, FileReceiveReport, options::ReceiveOptions};
 use fr_files::{
     receive::Publication,
     session,
@@ -10,9 +10,9 @@ use fr_files::{
 };
 use fr_native::desktop::{Desktop, Error as DesktopError};
 use frd::native_files::{
-    Absence, Directory, Limits, ReceiveControl, ReceivePhase, ReceiveRequest, ReceiveStatus,
+    Absence, Directory, ReceiveControl, ReceivePhase, ReceiveRequest, ReceiveStatus,
 };
-use std::{fmt::Write as _, path::Path};
+use std::fmt::Write as _;
 
 /// The native owner retains at most 64 terminal receipts and one final result.
 /// Enforce the same bound when projecting its status into terminal output.
@@ -27,17 +27,11 @@ enum Attempt {
     Absent(&'static str),
 }
 
-pub(in crate::linux) fn select(destination: Option<&Path>) -> Result<Option<Local>, Failure> {
-    let Some(destination) = destination else {
+pub(in crate::linux) fn select(options: Option<&ReceiveOptions>) -> Result<Option<Local>, Failure> {
+    let Some(options) = options else {
         return Ok(None);
     };
-    let directory = Directory::open(destination, Limits::default()).map_err(|reason| {
-        Failure::new(
-            reason.code(),
-            "Choose an existing absolute --receive directory owned by you, not writable by other users or groups, with no symlink components. Nothing was received and no connection was made.",
-            2,
-        )
-    })?;
+    let directory = options.open()?;
     Ok(Some(Local {
         directory,
         attempt: None,

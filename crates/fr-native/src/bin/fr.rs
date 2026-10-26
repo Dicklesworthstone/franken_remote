@@ -61,6 +61,8 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--clipboard]
     [--capture-system-shortcuts]
     [--send /absolute/file-or-directory]... | [--receive /absolute/private-directory]
+    [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
+    [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
      [--audio-volume 0..100] [--audio-muted]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -133,6 +135,15 @@ or groups. No path component may be a symlink. The host must run frd run --once
 --input-agent PATH --send PATH... . Each complete file or portable directory is
 published atomically without overwriting an existing name; empty files and
 empty roots and nested empty folders are supported. No received item is opened or run.
+Receive defaults are 256 MiB per selection and 1 GiB cumulatively per session.
+--receive-max-file-bytes and --receive-max-session-bytes set positive byte limits;
+the session limit must be at least the per-file limit. A directory counts by its
+total file content, and admitted attempts consume the session budget even if
+cancelled. These options require --receive and do not increase memory queues.
+--receive-conflict keep-both publishes a colliding file or whole directory under
+a bounded .fr-conflict- name, preserving the original. The default is reject.
+Neither choice overwrites or merges existing content, retries a transfer, or
+resumes it after reconnect. Filenames remain absent from diagnostics.
 A download progress panel shows privately staged bytes separately from actual
 publication receipts and cleanup. Cancel download requests file-only cancellation;
 closing the panel only hides it. The panel never retries or resumes a download.

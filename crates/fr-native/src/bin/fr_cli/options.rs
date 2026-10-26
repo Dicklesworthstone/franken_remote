@@ -1,6 +1,10 @@
 use super::Failure;
 use std::{collections::BTreeSet, path::PathBuf};
 
+#[path = "options/receive.rs"]
+mod receive;
+pub use receive::ReceiveOptions;
+
 pub struct Options {
     pub command: Command,
     pub json: bool,
@@ -103,7 +107,7 @@ pub struct Connection {
     pub send: Vec<PathBuf>,
     /// `--receive DIR`: the explicit local destination for host-selected files.
     /// This requires control and excludes `--send`; neither direction is implicit.
-    pub receive: Option<PathBuf>,
+    pub receive: Option<ReceiveOptions>,
 }
 /// At most this many `--send` files per connection (frd's native bound).
 pub const MAX_SENDS: usize = 8;
@@ -563,6 +567,8 @@ fn parse_command(
     let mut fit_window = None;
     let mut send = Vec::new();
     let mut receive = None;
+    let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
+        (None, None, None);
     while index < args.len() {
         let flag = args[index].as_str();
         index += 1;
@@ -615,9 +621,24 @@ fn parse_command(
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             "--send" if connect => send.push(next_path(args, &mut index)?),
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
+            "--receive-max-file-bytes" if connect => {
+                receive_max_file_bytes = Some(receive::bytes(next_arg(args, &mut index)?)?);
+            }
+            "--receive-max-session-bytes" if connect => {
+                receive_max_session_bytes = Some(receive::bytes(next_arg(args, &mut index)?)?);
+            }
+            "--receive-conflict" if connect => {
+                receive_keep_both = Some(receive::keep_both(next_arg(args, &mut index)?)?);
+            }
             _ => return Err(usage()),
         }
     }
+    let receive = ReceiveOptions::new(
+        receive,
+        receive_max_file_bytes,
+        receive_max_session_bytes,
+        receive_keep_both,
+    )?;
     let command = if let Some(node) = node {
         if connect && view_only == control {
             return Err(Failure::new(
@@ -1055,7 +1076,13 @@ mod tests {
         else {
             unreachable!("connection required");
         };
-        assert_eq!(selected.receive, Some(PathBuf::from("/home/u/downloads")));
+        assert_eq!(
+            selected
+                .receive
+                .as_ref()
+                .map(|request| request.directory.as_path()),
+            Some(std::path::Path::new("/home/u/downloads"))
+        );
         assert!(selected.control && selected.clipboard && selected.audio.is_some());
         assert_eq!(selected.send, [] as [PathBuf; 0]);
         for (flags, code) in [

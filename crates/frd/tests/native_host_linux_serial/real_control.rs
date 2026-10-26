@@ -760,6 +760,7 @@ exec \"$@\"
 struct Downloads<'a> {
     sources: &'a [PathBuf],
     destination: Option<&'a Path>,
+    options: &'a [&'a str],
 }
 
 #[derive(Clone, Copy, Default)]
@@ -811,6 +812,21 @@ impl Controlled {
         sources: &[PathBuf],
         destination: Option<&Path>,
     ) -> Self {
+        Self::start_downloads_with_options(
+            host_clipboard,
+            client_clipboard,
+            sources,
+            destination,
+            &[],
+        )
+    }
+    pub(super) fn start_downloads_with_options(
+        host_clipboard: bool,
+        client_clipboard: bool,
+        sources: &[PathBuf],
+        destination: Option<&Path>,
+        options: &[&str],
+    ) -> Self {
         Self::start_all(
             host_clipboard,
             client_clipboard,
@@ -821,6 +837,7 @@ impl Controlled {
             Some(Downloads {
                 sources,
                 destination,
+                options,
             }),
         )
     }
@@ -933,8 +950,11 @@ impl Controlled {
             client_clipboard,
             send,
         );
-        if let Some(destination) = downloads.and_then(|files| files.destination) {
-            command.arg("--receive").arg(destination);
+        if let Some(downloads) = downloads {
+            if let Some(destination) = downloads.destination {
+                command.arg("--receive").arg(destination);
+            }
+            command.args(downloads.options);
         }
         if input.capture_system_shortcuts {
             command.arg("--capture-system-shortcuts");

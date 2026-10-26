@@ -47,6 +47,36 @@ The one Files lane has one direction per connection. Host `--send` and `--files`
 are mutually exclusive; client `--receive` and `--send` are mutually exclusive.
 Clipboard and playback audio keep their own independent opt-ins.
 
+## Choose download limits and conflict behavior
+
+The receiving client owns these choices before it connects. By default it admits
+at most **256 MiB per selection** and **1 GiB of declared content per session**.
+A selected directory counts as one object, with all of its file content charged
+to both limits. To accept larger selections within the existing transfer bounds:
+
+```bash
+fr connect NODE_ID --control --experimental-native --display only \
+  --receive /home/bob/received \
+  --receive-max-file-bytes 2147483648 \
+  --receive-max-session-bytes 4294967296 \
+  --receive-conflict keep-both --json
+```
+
+The numbers are positive byte counts. Omitted values use the native receiver's
+defaults; the effective session limit must be at least the effective object
+limit. Invalid values and settings without `--receive` refuse before connection.
+The per-object limit is checked before staging, and admitted attempts consume
+the cumulative session budget even if later cancelled or refused. These options
+do not raise queue, chunk, concurrency, rate, source-selection or deadline bounds.
+
+`--receive-conflict reject` is the default. `keep-both` atomically publishes a
+colliding file or **whole directory tree** under a bounded `.fr-conflict-` name.
+It preserves the existing entry, including directories and symbolic links, and
+never merges trees or overwrites a name. A successful renamed publication lets
+the remaining explicit selections continue. The finite conflict-name search can
+still refuse if all candidates are occupied. Names and paths remain private;
+JSON reports actual publication by index, bytes and durability.
+
 ## Watch or cancel a download
 
 An accepted `--receive` configuration opens an optional **Download progress**
@@ -85,7 +115,9 @@ work and final publication. Numeric session IDs alone cannot create this owner.
 
 The destination stages privately, verifies the ATP content commitments, and
 publishes with the existing atomic no-replace operation. A conflict preserves
-the existing destination. No received item is automatically opened or executed.
+the existing destination, either refusing or keeping the new object under a
+conflict name according to the client's local policy. No received item is
+automatically opened or executed.
 The sender reports `ControllerPublished` only after validating the receiver's
 actual completion proof. Durable publication, uncertain durability, refusal,
 interruption before a completion request, and unknown publication remain
@@ -155,6 +187,10 @@ Regression targets cover real ATP, TLS/UDP, filesystem publication and both
 controller loops, plus the isolated native CLI harness in
 `crates/frd/tests/native_host_linux_serial/real_downloads.rs`. Their synthetic
 admission, Xvfb and input-fixture boundaries do not establish physical-desktop or
-live-tailnet qualification. Downloads use full-object transfer; reconnect
+live-tailnet qualification. The receive-policy cases cover default conflict
+refusal, preserving colliding files and complete trees with keep-both, and
+per-object and cumulative byte limits while the original controller remains
+usable. Parser tests reject orphaned settings, overflow, zero, duplicate flags,
+and attempts to select overwrite/merge/resume. Downloads use full-object transfer; reconnect
 resumption, synchronization jobs, graphical pickers and drag-and-drop remain
 separate work.
