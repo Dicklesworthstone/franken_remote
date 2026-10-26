@@ -5,6 +5,9 @@
 use super::*;
 use fr_core::limits::LimitOverrides;
 
+#[path = "bulk/recovery.rs"]
+mod recovery;
+
 async fn link(cx: &Cx, host: Policy, client: Policy) -> Link {
     let (c, h) = support::native_pair(cx, "localhost", ALPN).await;
     let (mut c, cr) = QuicRecords::bootstrap(c.unwrap(), cx, client).unwrap();

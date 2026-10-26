@@ -349,7 +349,7 @@ async fn bounded<T, E: From<Error>>(
         // A foreign poll can consume time or coincide with revocation even if
         // it returns Pending. Recheck the same owner before retaining its work.
         let (current, until) = match live_deadline(cx, deadline, &mut previous, &mut live) {
-            Ok(times) => times,
+            Ok(bounds) => bounds,
             Err(error) => return Poll::Ready(Err(error)),
         };
         if let Poll::Ready(result) = result {

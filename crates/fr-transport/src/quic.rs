@@ -790,6 +790,9 @@ impl QuicRecords {
                 if !self.metadata_admission_ready(r, bytes, used_bytes, used_records) {
                     return Err(Error::Backpressure);
                 }
+                if !self.recovery_admission_ready(r, bytes.len(), used_bytes, used_records) {
+                    return Err(Error::Backpressure);
+                }
             }
             Route::Datagram(r) => {
                 if !r.outbound || !self.datagrams.contains(&r) {

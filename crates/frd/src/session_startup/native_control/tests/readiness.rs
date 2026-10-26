@@ -1,4 +1,4 @@
-//! Real public bootstrap, StreamingViewer report admission, native mailbox,
+//! Real public bootstrap, `StreamingViewer` report admission, native mailbox,
 //! QUIC feedback and post-renewal input. Source, visibility and native effects
 //! retain the parent fixture's explicit scope; this is not hardware evidence.
 use super::*;

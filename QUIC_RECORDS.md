@@ -76,6 +76,28 @@ datagram queue are additional resources; the containing broker must account for
 them as well as TLS, media caches and decoder surfaces. These are not process-RSS
 measurements or a claim that all native allocator overhead fits the payload cap.
 
+Recovery admission headroom (2026-10-26, `fr-cf5w`). While an outbound reliable
+recovery route is live, non-recovery Bulk admission leaves one record slot and
+the largest live recovery route's negotiated maximum inside the existing Bulk
+pool (normally 8 KiB within 128 KiB). All retained Bulk bytes and records count,
+including recovery records and unacknowledged native epochs. Inbound-only,
+retired, finished, reset and stopped recovery senders reserve nothing. Retiring
+the last recovery route releases its reservation without clearing unrelated
+data. The reservation covers one largest record, rather than the sum of every
+recovery lane; the ordinary full quotas still apply to recovery and data alike.
+
+A record that cannot coexist with the reservation may borrow it only when both
+retained Bulk bytes and records are zero. This permits progress with a tiny or
+custom profile while keeping the original quotas, caller send-by and admitted
+delivery deadline. Further non-recovery data cannot also borrow the reserve.
+The rule isolates admission capacity; it cannot preempt admitted data or guarantee
+congestion throughput. Fifteen exact-source admission unit tests pass on the
+pinned nightly (six existing critical tests and nine recovery tests). Five new
+real UDP/TLS attachment regressions cover byte/slot saturation, route direction,
+retirement and the minimum valid attachment profile; they have not been built
+or executed in this resource-constrained session. Their synthetic record
+payloads test transport ownership, not typed application delivery or WAN loss.
+
 Reliable bytes stay charged after native packet assembly. Merely draining
 `pending_stream_data_bytes` is not evidence that retransmission copies died.
 The pinned API has no public retained-buffer count: this adapter saves an EMPTY

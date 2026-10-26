@@ -36,6 +36,86 @@ impl QuicRecords {
         !limited_metadata(route, bytes, &self.streams)
             || metadata_fits(self.policy, (used_bytes, used_records), bytes.len())
     }
+
+    /// Leave one complete recovery record inside the existing Bulk allowance.
+    /// Retained recovery records count against the same allowance as files and
+    /// clipboard data; prefix flushing is not acknowledgement or free capacity.
+    pub(super) fn recovery_admission_ready(
+        &self,
+        route: StreamRoute,
+        length: usize,
+        used_bytes: usize,
+        used_records: usize,
+    ) -> bool {
+        if route.priority != Priority::Bulk || recovery_route(route) {
+            return true;
+        }
+        let maximum = recovery_maximum(&self.streams, |stream| {
+            self.has_route(super::Route::Stream(stream))
+                && self.native.as_ref().is_some_and(|native| {
+                    native
+                        .connection()
+                        .inner()
+                        .streams()
+                        .stream(stream.stream)
+                        .is_ok_and(|live| {
+                            live.send_final_size.is_none()
+                                && live.send_reset.is_none()
+                                && live.stop_sending_error_code.is_none()
+                        })
+                })
+        });
+        bulk_recovery_fits(self.policy, (used_bytes, used_records), length, maximum)
+    }
+}
+
+fn recovery_route(route: StreamRoute) -> bool {
+    route.outbound
+        && route.priority == Priority::Bulk
+        && route.messages == Messages::Exact(Kind::Recovery as u16)
+}
+
+fn recovery_maximum(
+    streams: &[StreamRoute],
+    mut live: impl FnMut(StreamRoute) -> bool,
+) -> Option<usize> {
+    // The route list retains retired attachment tombstones. Reserve only for
+    // live senders, and only for ONE largest record, not every recovery lane.
+    streams
+        .iter()
+        .copied()
+        .filter(|route| recovery_route(*route) && live(*route))
+        .map(|route| route.maximum)
+        .max()
+}
+
+fn bulk_recovery_fits(
+    policy: Policy,
+    used: (usize, usize),
+    length: usize,
+    recovery_maximum: Option<usize>,
+) -> bool {
+    let (bytes, records) = used;
+    let Some(total) = bytes.checked_add(length) else {
+        return false;
+    };
+    if records >= policy.retained_send_records || total > policy.retained_send_bytes {
+        return false;
+    }
+    let Some(maximum) = recovery_maximum else {
+        return true;
+    };
+    // A large record or tiny/custom profile may borrow the reserve to start
+    // an EMPTY flight. This prevents permanent backpressure without raising a
+    // quota, admitting a second borrower, or extending any original deadline.
+    // Admission isolation cannot preempt already retained records or promise
+    // congestion throughput while this bounded flight awaits acknowledgement.
+    if bytes == 0 && records == 0 {
+        return true;
+    }
+    let byte_limit = policy.retained_send_bytes - maximum.min(policy.retained_send_bytes);
+    let record_limit = policy.retained_send_records.saturating_sub(1);
+    total <= byte_limit && records < record_limit
 }
 
 fn limited_metadata(route: StreamRoute, bytes: &[u8], streams: &[StreamRoute]) -> bool {
@@ -205,5 +285,206 @@ mod tests {
         assert!(!metadata_fits(policy, (0, 1), 8192));
         assert!(!metadata_fits(policy, (24, 0), 8168));
         assert!(!metadata_fits(policy, (0, usize::MAX), 24));
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    use crate::quic::StreamId;
+
+    fn route(binding: u32, maximum: usize) -> StreamRoute {
+        StreamRoute {
+            stream: StreamId(3),
+            binding,
+            messages: Messages::Exact(Kind::Recovery as u16),
+            priority: Priority::Bulk,
+            outbound: true,
+            maximum,
+        }
+    }
+
+    #[test]
+    fn only_exact_outbound_bulk_recovery_owns_headroom() {
+        let recovery = route(1, 8192);
+        for kind in 0..=u16::MAX {
+            assert_eq!(
+                recovery_route(StreamRoute {
+                    messages: Messages::Exact(kind),
+                    ..recovery
+                }),
+                kind == Kind::Recovery as u16
+            );
+        }
+        for other in [
+            StreamRoute {
+                outbound: false,
+                ..recovery
+            },
+            StreamRoute {
+                priority: Priority::Critical,
+                ..recovery
+            },
+            StreamRoute {
+                messages: Messages::Files,
+                ..recovery
+            },
+            StreamRoute {
+                messages: Messages::Clipboard,
+                ..recovery
+            },
+        ] {
+            assert!(!recovery_route(other));
+        }
+    }
+
+    #[test]
+    fn reserve_tracks_largest_live_route_without_summing_or_retaining_tombstones() {
+        let small = route(1, 1024);
+        let large = route(2, 4096);
+        let retired = route(3, 65_536);
+        let inbound = StreamRoute {
+            outbound: false,
+            ..route(4, 65_536)
+        };
+        let critical = StreamRoute {
+            priority: Priority::Critical,
+            ..route(5, 65_536)
+        };
+        let streams = [small, large, retired, inbound, critical];
+        assert_eq!(
+            recovery_maximum(&streams, |r| r.binding != retired.binding),
+            Some(4096)
+        );
+        assert_eq!(
+            recovery_maximum(&[small, large, large], |_| true),
+            Some(4096)
+        );
+        assert_eq!(recovery_maximum(&streams, |_| false), None);
+        assert_eq!(recovery_maximum(&[inbound, critical], |_| true), None);
+        assert_eq!(recovery_maximum(&[], |_| true), None);
+    }
+
+    #[test]
+    fn default_byte_reserve_has_an_exact_boundary_independent_of_record_room() {
+        let policy = Policy::default();
+        let reserve = Some(8192);
+        let used = (policy.retained_send_bytes - 8192 - 24, 3);
+        assert!(bulk_recovery_fits(policy, used, 24, reserve));
+        assert!(!bulk_recovery_fits(policy, used, 25, reserve));
+        for _ in 0..1000 {
+            assert!(!bulk_recovery_fits(
+                policy,
+                (policy.retained_send_bytes - 8192, 1),
+                24,
+                reserve
+            ));
+        }
+        assert!(bulk_recovery_fits(policy, used, 24, reserve));
+    }
+
+    #[test]
+    fn one_record_slot_is_reserved_from_all_retained_bulk_records() {
+        let policy = Policy::default();
+        for records in 0..policy.retained_send_records - 1 {
+            assert!(bulk_recovery_fits(
+                policy,
+                (records * 24, records),
+                24,
+                Some(8192)
+            ));
+        }
+        for records in policy.retained_send_records - 1..=policy.retained_send_records {
+            assert!(!bulk_recovery_fits(
+                policy,
+                (records * 24, records),
+                24,
+                Some(8192)
+            ));
+        }
+        // A recovery record already retained is not subtracted from the used
+        // totals. The next data record must still leave one original slot.
+        assert!(!bulk_recovery_fits(
+            policy,
+            (8192 + 126 * 24, 127),
+            24,
+            Some(8192)
+        ));
+    }
+
+    #[test]
+    fn no_live_recovery_route_restores_full_original_capacity() {
+        let policy = Policy::default();
+        let used = (
+            policy.retained_send_bytes - 24,
+            policy.retained_send_records - 1,
+        );
+        assert!(bulk_recovery_fits(policy, used, 24, None));
+        assert!(!bulk_recovery_fits(policy, used, 25, None));
+        assert!(!bulk_recovery_fits(
+            policy,
+            (0, policy.retained_send_records),
+            24,
+            None
+        ));
+    }
+
+    #[test]
+    fn negotiated_recovery_size_changes_only_reserved_space() {
+        let policy = Policy::default();
+        for maximum in [24, 4096, 8192, 65_536] {
+            let used = (policy.retained_send_bytes - maximum - 24, 1);
+            assert!(bulk_recovery_fits(policy, used, 24, Some(maximum)));
+            assert!(!bulk_recovery_fits(policy, used, 25, Some(maximum)));
+        }
+    }
+
+    #[test]
+    fn tiny_profiles_admit_one_empty_flight_borrower_without_permanent_backpressure() {
+        for records in 1..=3 {
+            let policy = Policy {
+                retained_send_bytes: 128,
+                retained_send_records: records,
+                ..Policy::default()
+            };
+            assert!(bulk_recovery_fits(policy, (0, 0), 128, Some(128)));
+            assert!(!bulk_recovery_fits(policy, (0, 0), 129, Some(128)));
+            assert!(!bulk_recovery_fits(policy, (24, 1), 24, Some(128)));
+            assert!(!bulk_recovery_fits(policy, (128, 1), 24, Some(128)));
+            // Both dimensions, not merely the record count, must be empty.
+            assert!(!bulk_recovery_fits(policy, (24, 0), 24, Some(128)));
+            assert!(!bulk_recovery_fits(policy, (0, 1), 128, Some(128)));
+        }
+    }
+
+    #[test]
+    fn single_record_profiles_cannot_borrow_a_second_slot() {
+        let policy = Policy {
+            retained_send_records: 1,
+            ..Policy::default()
+        };
+        assert!(bulk_recovery_fits(policy, (0, 0), 24, Some(8192)));
+        assert!(!bulk_recovery_fits(policy, (24, 1), 24, Some(8192)));
+    }
+
+    #[test]
+    fn arithmetic_faults_or_reservation_sizes_never_raise_original_quotas() {
+        let policy = Policy::default();
+        for reserve in [None, Some(24), Some(8192), Some(usize::MAX)] {
+            assert!(!bulk_recovery_fits(policy, (usize::MAX, 1), 24, reserve));
+            assert!(!bulk_recovery_fits(policy, (0, usize::MAX), 24, reserve));
+            assert!(!bulk_recovery_fits(
+                policy,
+                (0, 0),
+                policy.retained_send_bytes + 1,
+                reserve
+            ));
+            assert!(!bulk_recovery_fits(
+                policy,
+                (policy.retained_send_bytes, 1),
+                24,
+                reserve
+            ));
+        }
     }
 }

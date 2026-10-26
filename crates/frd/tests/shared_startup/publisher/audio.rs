@@ -140,10 +140,20 @@ impl Probe {
                 |route, bytes| Ok(subscriber.audio_record(route, bytes).unwrap().unwrap()),
             )
             .unwrap();
+        // Match SharedHost::serve: a ready QUIC turn need not suspend. Let the
+        // sibling audio source run even while the two peers keep each other
+        // readable; awaiting socket I/O alone is not cooperative scheduling.
+        asupersync::runtime::yield_now().await;
     }
 }
 
-async fn more_packets(cx: &Cx, peers: &mut [Peer], probes: &mut [Probe]) {
+async fn more_packets(
+    cx: &Cx,
+    peers: &mut [Peer],
+    probes: &mut [Probe],
+    phase: &str,
+    polls: &AtomicU64,
+) {
     let targets: Vec<_> = probes.iter().map(|probe| probe.packets + 2).collect();
     let until = clock(cx) + 1_000_000;
     while probes
@@ -151,7 +161,15 @@ async fn more_packets(cx: &Cx, peers: &mut [Peer], probes: &mut [Probe]) {
         .zip(&targets)
         .any(|(probe, target)| probe.packets < *target)
     {
-        assert!(clock(cx) < until, "audio stopped during video recovery");
+        assert!(
+            clock(cx) < until,
+            "audio stopped during {phase}; source polls: {}, packets/configured: {:?}, targets: {targets:?}",
+            polls.load(Ordering::Relaxed),
+            probes
+                .iter()
+                .map(|probe| (probe.packets, probe.configuration.is_some()))
+                .collect::<Vec<_>>()
+        );
         for (peer, probe) in peers.iter_mut().zip(probes.iter_mut()) {
             probe.turn(cx, peer).await;
         }
@@ -266,8 +284,9 @@ async fn continuity(rt: &Runtime, keep_healthy: bool) {
     )
     .unwrap();
     let source = AudioSource::new(profile, cohort.publisher.audio_feed());
+    let polls = AtomicU64::new(0);
     let scenario = async {
-        more_packets(&cx, &mut cohort.peers, &mut probes).await;
+        more_packets(&cx, &mut cohort.peers, &mut probes, "startup", &polls).await;
         let failed = cohort.peers.remove(0);
         let mut probe = probes.remove(0);
         let recovered = Box::pin(replace_video(
@@ -281,7 +300,7 @@ async fn continuity(rt: &Runtime, keep_healthy: bool) {
         cohort.peers.insert(0, recovered);
         probes.insert(0, probe);
         // No new video capture or decoder acknowledgement has occurred yet.
-        more_packets(&cx, &mut cohort.peers, &mut probes).await;
+        more_packets(&cx, &mut cohort.peers, &mut probes, "recovery", &polls).await;
         assert_eq!(launches.load(Ordering::SeqCst), 1);
         if keep_healthy {
             assert_eq!(cohort.peers[1].media.binding(), healthy_view);
@@ -289,7 +308,14 @@ async fn continuity(rt: &Runtime, keep_healthy: bool) {
             probes.remove(0);
             revoked.control.revoke();
             assert!(revoked.service(&cx, 8).is_err());
-            more_packets(&cx, &mut cohort.peers, &mut probes).await;
+            more_packets(
+                &cx,
+                &mut cohort.peers,
+                &mut probes,
+                "sibling revoke",
+                &polls,
+            )
+            .await;
             cohort.peers[0].control.check().unwrap();
             cohort.owner.check().unwrap();
             cohort.peers.push(revoked);
@@ -300,7 +326,12 @@ async fn continuity(rt: &Runtime, keep_healthy: bool) {
         }
         stop_cohort(&mut cohort, &cx).await;
     };
-    let (result, ()) = Box::pin(crate::support::net::both(source.serve(), scenario)).await;
+    let mut source = pin!(source.serve());
+    let counted_source = poll_fn(|task| {
+        polls.fetch_add(1, Ordering::Relaxed);
+        source.as_mut().poll(task)
+    });
+    let (result, ()) = Box::pin(crate::support::net::both(counted_source, scenario)).await;
     assert!(result.is_err()); // The original share was explicitly closed.
     let mut retirement = retired.lock().unwrap().take().unwrap();
     assert!(

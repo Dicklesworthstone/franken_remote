@@ -350,7 +350,7 @@ impl ViewerPresentation {
         self.reporter.admitted_cursor()
     }
     /// Establish a mandatory causal barrier for a newly observed local lapse.
-    /// The returned sequence is reserved; only service_reported can admit it.
+    /// The returned sequence is reserved; only `service_reported` can admit it.
     pub(crate) fn force_unavailable(&mut self, now: u64) -> Result<u64, Error> {
         self.reporter.force_unavailable(now).map_err(Error::Proof)
     }

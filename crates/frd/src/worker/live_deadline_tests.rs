@@ -135,8 +135,8 @@ fn the_actual_authority_expiry_wakes_before_the_ten_millisecond_watchdog() {
                 3
             }));
             let polls = Cell::new(0);
-            let wakes = Arc::new(Wakes::default());
-            let waker = Waker::from(Arc::clone(&wakes));
+            let notifications = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&notifications));
             let mut task = Context::from_waker(&waker);
             let mut work = pin!(bounded(
                 &cx,
@@ -154,13 +154,13 @@ fn the_actual_authority_expiry_wakes_before_the_ten_millisecond_watchdog() {
                 authority_until.set(Time::from_millis(3));
                 assert!(work.as_mut().poll(&mut task).is_pending());
             }
-            let before = wakes.0.load(Ordering::SeqCst);
+            let before = notifications.0.load(Ordering::SeqCst);
             clock.advance_to(Time::from_millis(2));
             let _ = driver.process_timers();
-            assert_eq!(wakes.0.load(Ordering::SeqCst), before);
+            assert_eq!(notifications.0.load(Ordering::SeqCst), before);
             clock.advance_to(Time::from_millis(3));
             let _ = driver.process_timers();
-            assert!(wakes.0.load(Ordering::SeqCst) > before);
+            assert!(notifications.0.load(Ordering::SeqCst) > before);
             assert_eq!(
                 work.as_mut().poll(&mut task),
                 Poll::Ready(Err(GuardError::Worker(Error::Deadline)))
