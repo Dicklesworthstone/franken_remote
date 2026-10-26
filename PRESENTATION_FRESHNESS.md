@@ -67,13 +67,29 @@ as an unqualified visible picture: `evidence` reports `NotSubmitted` (input stay
 gated; the viewer sends neither a positive nor a negative report, so the host's
 existing deadline neither extends nor lapses early) until a strictly newer host
 observation of that exact picture arrives (`QualifiedUnchanged` from the host's
-idle verification). Observations known when it became visible are `Obsolete` and
-cannot qualify it. Without one within the source-age limit it is `SourceStale`,
-as any unverified view. Previously a late picture was dropped, so on a static
-desktop the viewer had no qualifiable view until the host's view deadline lapsed.
+idle verification). The tracker freezes a source-observation floor when the
+late picture becomes visible: at least its capture timestamp, or the newest
+known observation already accepted for that exact descriptor. Delayed original
+capture metadata and equal-time source or pipeline changes cannot qualify it.
+`Unknown` health updates cannot erase this floor or replace its known timestamp,
+even across hide and submit callbacks. A strictly newer known observation must
+also have a `Running` or `Idle` pipeline before it qualifies the picture.
+
+The original source-age grace deadline does not slide with these metadata
+updates. Without a qualifying observation within that limit it is `SourceStale`,
+as any unverified view. A later genuinely newer verification can recover source
+freshness while pixel age stays anchored to capture; input authority separately
+enforces its fixed suspension deadline. Previously a late picture was dropped,
+so on a static desktop the viewer had no qualifiable view until the host's view
+deadline lapsed.
 Evidence: fr-media `a_late_picture_is_qualified_only_by_a_newer_observation_of_itself`
 and `a_late_picture_never_verified_again_is_stale_after_the_source_age_limit`
-(planted negative: dropping the late picture fails both).
+(planted negative: dropping the late picture fails both). The seven
+`freshness::late_observation` regressions cover delayed capture progress,
+equal-time metadata changes, retained known observations across `Unknown` and
+hide/submit, pipeline readiness, fixed grace expiry, and newer unseen frames.
+Six fail against the original implementation; all pass with the frozen floor.
+These are deterministic metadata tests, not native presentation qualification.
 
 **Limit, measured 2026-09-27 (negative evidence):** this does not yet keep
 control alive after a late picture. A namespace e2e (real `frd run`

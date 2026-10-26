@@ -600,3 +600,6 @@ fn the_source_age_bound_follows_the_path_and_a_smaller_one_applies_at_once() {
     }
     assert_eq!(view.max_source_age_us(), 250_000);
 }
+
+#[path = "freshness/late_observation.rs"]
+mod late_observation;

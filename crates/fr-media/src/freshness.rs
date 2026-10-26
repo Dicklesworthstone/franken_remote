@@ -149,6 +149,12 @@ struct Candidate {
     display_until_us: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Unqualified {
+    until_us: u64,
+    observed_after_us: u64,
+}
+
 /// Read-only lifetime of the EXACT media receiver. Cloning retains identity,
 /// not liveness: closing/dropping that receiver invalidates every copy. This is
 /// not visibility, freshness, decoding success, or permission to grant control.
@@ -190,8 +196,12 @@ pub struct ViewTracker {
     visible_source: Option<(u64, SourceObservation)>,
     /// A picture that became visible after its display budget: it is what the
     /// screen shows, but it is NOT fresh evidence. Only a strictly newer host
-    /// observation of this exact picture can qualify it, before this deadline.
-    unqualified_until: Option<u64>,
+    /// observation of this exact picture can qualify it. The fixed grace ends
+    /// in `SourceStale`; genuinely newer verification can still recover the view.
+    unqualified: Option<Unqualified>,
+    // Unknown health updates cannot erase the last known source timestamp.
+    // One exact descriptor is retained, never an unbounded observation history.
+    known_observation: Option<(FrameDescriptor, u64)>,
     progress: Option<Progress>,
     serial: u64,
     closed: bool,
@@ -223,7 +233,8 @@ impl ViewTracker {
             pending: None,
             visible: None,
             visible_source: None,
-            unqualified_until: None,
+            unqualified: None,
+            known_observation: None,
             progress: None,
             serial: 0,
             closed: false,
@@ -371,12 +382,21 @@ impl ViewTracker {
                 }
             }
         }
-        if p.observation != SourceObservation::Unknown {
+        let known = p.observation != SourceObservation::Unknown;
+        if known {
             if p.observed_micros < p.descriptor.capture_micros
                 || (p.observation == SourceObservation::Captured
                     && p.observed_micros != p.descriptor.capture_micros)
             {
                 return self.fail(Error::InvalidProgress);
+            }
+            if self
+                .known_observation
+                .is_some_and(|(descriptor, observed)| {
+                    descriptor == p.descriptor && p.observed_micros < observed
+                })
+            {
+                return Err(Error::Obsolete);
             }
             self.clock.age_upper_us(p.observed_micros, now_us)?;
         }
@@ -389,12 +409,19 @@ impl ViewTracker {
         {
             return self.fail(Error::InvalidProgress);
         }
-        if self.visible == Some(p.descriptor) {
-            // Accepted progress for the same picture is strictly newer than any
-            // observation known when a late picture became visible (equal or
-            // older ones are Obsolete above), so it can qualify that picture.
+        let qualifies_visible = self.unqualified.is_none_or(|late| {
+            known
+                && matches!(p.pipeline, PipelineState::Running | PipelineState::Idle)
+                && p.observed_micros > late.observed_after_us
+        });
+        if self.visible == Some(p.descriptor) && qualifies_visible {
+            // Late original metadata, equal-time health changes and Unknown
+            // reports cannot qualify a late picture or slide its grace period.
             self.visible_source = Some((p.observed_micros, p.observation));
-            self.unqualified_until = None;
+            self.unqualified = None;
+        }
+        if known {
+            self.known_observation = Some((p.descriptor, p.observed_micros));
         }
         self.progress = Some(p);
         self.bump()?;
@@ -430,7 +457,7 @@ impl ViewTracker {
         if submitted {
             self.visible = None;
             self.visible_source = None;
-            self.unqualified_until = None;
+            self.unqualified = None;
         }
         self.pending = submitted.then_some(Candidate {
             descriptor,
@@ -450,18 +477,25 @@ impl ViewTracker {
         self.pending = None;
         self.visible = None;
         self.visible_source = None;
-        self.unqualified_until = None;
+        self.unqualified = None;
         if now_us >= candidate.display_until_us {
             // Too late to be fresh evidence, yet it IS the picture on screen: an
             // idle desktop sends no newer pixels, only host verifications that
             // the source still matches it. Keep it unqualified; nothing known
             // now (its arrival, its dequeue snapshot) can make it fresh.
             self.visible = Some(candidate.descriptor);
-            self.unqualified_until = Some(
-                now_us
+            let observed_after_us = self
+                .known_observation
+                .filter(|(descriptor, _)| *descriptor == candidate.descriptor)
+                .map_or(candidate.descriptor.capture_micros, |(_, observed)| {
+                    observed.max(candidate.descriptor.capture_micros)
+                });
+            self.unqualified = Some(Unqualified {
+                until_us: now_us
                     .checked_add(self.max_source_age_us)
                     .ok_or(Error::ClockOverflow)?,
-            );
+                observed_after_us,
+            });
             self.bump()?;
             return Err(Error::QueueExpired);
         }
@@ -486,10 +520,10 @@ impl ViewTracker {
     pub fn evidence(&mut self, now_us: u64) -> Result<ViewEvidence, Error> {
         self.tick(now_us)?;
         let shown = self.visible.ok_or(Error::NotSubmitted)?;
-        if let Some(until) = self.unqualified_until {
+        if let Some(late) = self.unqualified {
             // A late picture awaiting a newer observation of itself: input stays
             // gated (not yet shown as fresh), bounded by the source-age limit.
-            return Err(if now_us < until {
+            return Err(if now_us < late.until_us {
                 Error::NotSubmitted
             } else {
                 Error::SourceStale
@@ -545,11 +579,12 @@ impl ViewTracker {
         self.pending = None;
         self.visible = None;
         self.visible_source = None;
-        self.unqualified_until = None;
+        self.unqualified = None;
     }
     pub fn close(&mut self) {
         self.hide();
         self.progress = None;
+        self.known_observation = None;
         self.closed = true;
     }
     pub const fn is_closed(&self) -> bool {
