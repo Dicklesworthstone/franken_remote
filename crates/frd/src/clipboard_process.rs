@@ -58,6 +58,9 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
+mod privacy;
+use privacy::Monitor;
+
 /// Build the clipboard worker's native factory. Merely building it spawns
 /// nothing; the factory runs on the clipboard worker thread only after the
 /// original grant and bilateral clipboard readiness. `cx` must carry the host
@@ -67,6 +70,18 @@ pub fn factory(
     cx: Cx,
 ) -> impl FnOnce() -> Result<RemoteClipboard, PlatformError> + Send + 'static {
     move || RemoteClipboard::start(&launch, cx, process::MAX_ITEM_BYTES)
+}
+
+/// Production factory: the child's visible off switch fences this original
+/// application owner independently of command replies and native clipboard
+/// progress. This also invalidates text already queued for transport egress.
+pub fn factory_with_control(
+    launch: ProcessLaunch,
+    cx: Cx,
+) -> impl FnOnce(crate::native_clipboard::Control) -> Result<RemoteClipboard, PlatformError>
++ Send
++ 'static {
+    move |control| RemoteClipboard::start_inner(&launch, cx, process::MAX_ITEM_BYTES, Some(control))
 }
 
 /// Typed and content-free: a native failure the child reported, or a lost /
@@ -118,6 +133,8 @@ pub struct RemoteClipboard {
     /// exchange, so `revision()` needs no I/O).
     revision: u64,
     poisoned: bool,
+    /// Independently serviced, content-free native privacy stop channel.
+    privacy: Option<Monitor>,
 }
 impl fmt::Debug for RemoteClipboard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -129,11 +146,21 @@ impl fmt::Debug for RemoteClipboard {
 }
 impl RemoteClipboard {
     pub(crate) fn start(launch: &ProcessLaunch, cx: Cx, max: u32) -> Result<Self, PlatformError> {
+        Self::start_inner(launch, cx, max, None)
+    }
+    fn start_inner(
+        launch: &ProcessLaunch,
+        cx: Cx,
+        max: u32,
+        control: Option<crate::native_clipboard::Control>,
+    ) -> Result<Self, PlatformError> {
         if max == 0 || max > process::MAX_ITEM_BYTES {
             return Err(PlatformError::Unsupported);
         }
         input_watchdog::host_now(&cx).map_err(|_| PlatformError::Unavailable)?;
         let (command, child_command) =
+            UnixStream::pair().map_err(|_| PlatformError::Unavailable)?;
+        let (signals, child_signals) =
             UnixStream::pair().map_err(|_| PlatformError::Unavailable)?;
         let mut spawn = Command::new(&launch.image);
         spawn
@@ -143,7 +170,7 @@ impl RemoteClipboard {
             .arg("--parent-pid")
             .arg(std::process::id().to_string())
             .stdin(Stdio::from(OwnedFd::from(child_command)))
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(child_signals)))
             .stderr(Stdio::null())
             .process_group(0);
         if let Some(path) = &launch.xauthority {
@@ -164,7 +191,9 @@ impl RemoteClipboard {
             max,
             revision: 0,
             poisoned: false,
+            privacy: None,
         };
+        owner.privacy = Some(Monitor::start(signals, control)?);
         let hello = Request::Hello {
             epoch: launch.epoch,
             max_item_bytes: max,
@@ -190,12 +219,20 @@ impl RemoteClipboard {
         payload: Option<&[u8]>,
         timeout: Duration,
     ) -> Result<(Reply, Option<RemoteText>), ()> {
-        if self.poisoned || self.child.is_none() {
+        if self.poisoned
+            || self.child.is_none()
+            || self.privacy.as_ref().is_none_or(Monitor::stopped)
+        {
             return Err(());
         }
         let result = self.round_trip(request, payload, timeout);
-        if result.is_err() {
+        // The child may close its signal socket immediately after a terminal
+        // refusal or orderly Stop reply. Preserve that bounded typed result;
+        // it contains no text and never authorizes another native operation.
+        let terminal = matches!(&result, Ok((Reply::Refused(_) | Reply::Stopped, None)));
+        if result.is_err() || (!terminal && self.privacy.as_ref().is_none_or(Monitor::stopped)) {
             self.poison();
+            return Err(());
         }
         result
     }
@@ -247,6 +284,9 @@ impl RemoteClipboard {
     /// reaped by `close`/Drop; its unreaped group id cannot be reused before.
     fn poison(&mut self) {
         self.poisoned = true;
+        if let Some(privacy) = &self.privacy {
+            privacy.stop();
+        }
         if let Some(child) = &self.child {
             kill_group(child);
         }
@@ -417,6 +457,9 @@ impl NativeClipboard for RemoteClipboard {
         if let Some(mut child) = self.child.take() {
             kill_group(&child);
             let _ = child.wait();
+        }
+        if let Some(mut privacy) = self.privacy.take() {
+            privacy.finish();
         }
     }
 }

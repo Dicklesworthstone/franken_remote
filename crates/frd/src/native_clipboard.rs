@@ -20,7 +20,9 @@ use std::{
     time::Duration,
 };
 
-type Launch = Box<dyn FnOnce(WorkerSeed) -> Result<WorkerTask, Error> + Send>;
+type Setup = Box<dyn FnOnce(Control) -> Result<(), PlatformError> + Send>;
+type Launch =
+    Box<dyn FnOnce(WorkerSeed, Control, Option<Setup>) -> Result<WorkerTask, Error> + Send>;
 
 /// Separate native OS permission from the UI's enabled switch. Supplying this
 /// configuration does not confer control, select a protocol profile or read text.
@@ -29,6 +31,7 @@ pub struct Configuration {
     timeout: Duration,
     consent: bool,
     launch: Option<Launch>,
+    before_native: Option<Setup>,
 }
 impl Configuration {
     pub fn new<N, F, I>(
@@ -42,14 +45,61 @@ impl Configuration {
         F: FnOnce() -> Result<N, PlatformError> + Send + 'static,
         I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
     {
+        Self::new_with_control(consent, timeout, move |_| factory(), new_id)
+    }
+    /// The native factory receives this application's ORIGINAL privacy owner.
+    /// A native UI or process stop monitor can fence queued outgoing work even
+    /// while the native clipboard worker is blocked. No authority is created.
+    pub fn new_with_control<N, F, I>(
+        consent: bool,
+        timeout: Duration,
+        factory: F,
+        new_id: I,
+    ) -> Result<Self, Error>
+    where
+        N: NativeClipboard + 'static,
+        F: FnOnce(Control) -> Result<N, PlatformError> + Send + 'static,
+        I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
+    {
         if timeout.is_zero() || timeout > Duration::from_secs(2) || timeout.as_micros() == 0 {
             return Err(Error::Limit);
         }
         Ok(Self {
             timeout,
             consent,
-            launch: Some(Box::new(move |seed| seed.spawn(factory, new_id))),
+            launch: Some(Box::new(move |seed, control, before| {
+                seed.spawn(
+                    move || {
+                        if let Some(before) = before {
+                            before(control.clone())?;
+                        }
+                        if !control.status().enabled {
+                            return Err(PlatformError::Unavailable);
+                        }
+                        factory(control)
+                    },
+                    new_id,
+                )
+            })),
+            before_native: None,
         })
+    }
+    /// Run a local privacy-surface setup on the clipboard worker immediately
+    /// before the native factory. A failed setup never opens the clipboard.
+    /// The hook must bound its own native wait and retain its cleanup owner.
+    /// Repeated calls compose in order; none can replace an earlier fence.
+    pub fn before_native_setup(
+        mut self,
+        before: impl FnOnce(Control) -> Result<(), PlatformError> + Send + 'static,
+    ) -> Self {
+        let previous = self.before_native.take();
+        self.before_native = Some(Box::new(move |control| {
+            if let Some(previous) = previous {
+                previous(control.clone())?;
+            }
+            before(control)
+        }));
+        self
     }
 }
 impl fmt::Debug for Configuration {
@@ -60,7 +110,9 @@ impl fmt::Debug for Configuration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
     WaitingForControl,
+    /// Lane negotiation or original native/privacy setup is still pending.
     Negotiating,
+    /// The original worker confirmed successful native setup.
     Running,
     Retired,
     Closed,
@@ -197,6 +249,7 @@ impl Application {
                 timeout: Duration::from_secs(2),
                 consent: false,
                 launch: None,
+                before_native: None,
             }));
         }
     }
@@ -206,15 +259,26 @@ impl Application {
     pub(crate) fn close(&mut self) {
         self.control.stop();
         self.config.launch = None;
+        self.config.before_native = None;
         self.control.lock().status.phase = Phase::Closed;
         self.collect_cleanup();
     }
     fn collect_cleanup(&mut self) {
-        if let Some(task) = &mut self.task
-            && let Some(result) = task.finish()
-        {
-            self.control.lock().status.cleanup = Cleanup::Finished(result);
+        let Some(task) = &mut self.task else { return };
+        if let Some(result) = task.finish() {
+            let mut state = self.control.lock();
+            state.status.cleanup = Cleanup::Finished(result);
+            if let Err(error) = result
+                && matches!(state.status.reason, None | Some(Error::Closed))
+            {
+                state.status.reason = Some(error);
+            }
             self.task = None;
+        } else if task.is_ready() {
+            let mut state = self.control.lock();
+            if state.status.phase == Phase::Negotiating && !state.stopped {
+                state.status.phase = Phase::Running;
+            }
         }
     }
     /// Keep the original thread handle if cleanup times out, so a later cleanup
@@ -324,11 +388,10 @@ impl Application {
                 return Ok(());
             }
             let launch = self.config.launch.take().ok_or(Error::AlreadyAttached)?;
-            match launch(seed) {
+            match launch(seed, self.control.clone(), self.config.before_native.take()) {
                 Ok(task) => {
                     self.task = Some(task);
                     let mut s = self.control.lock();
-                    s.status.phase = Phase::Running;
                     s.status.cleanup = Cleanup::Pending;
                 }
                 Err(e) => {
@@ -343,6 +406,7 @@ impl Application {
     fn retired(&mut self, reason: Option<Error>) {
         self.control.stop();
         self.config.launch = None;
+        self.config.before_native = None;
         let mut s = self.control.lock();
         s.status.phase = Phase::Retired;
         if s.status.reason.is_none() {

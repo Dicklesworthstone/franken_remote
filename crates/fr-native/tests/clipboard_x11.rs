@@ -203,3 +203,6 @@ mod synchronize;
 
 #[path = "clipboard_x11/timestamp_optional.rs"]
 mod timestamp_optional;
+
+#[path = "clipboard_x11/privacy.rs"]
+mod privacy;

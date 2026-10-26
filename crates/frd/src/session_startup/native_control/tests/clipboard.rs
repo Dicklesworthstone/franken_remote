@@ -18,6 +18,7 @@ pub(super) struct Os {
     pub(super) published: Vec<String>,
     pub(super) opened: bool,
     pub(super) closed: bool,
+    native_control: Option<crate::native_clipboard::Control>,
     block: bool,
     entered: bool,
     release: bool,
@@ -131,6 +132,7 @@ enum Scenario {
     DisableBeforeControl(bool),
     FactoryFailure,
     FactoryPanic,
+    PrivacySetupFailure,
     BlockedFactory,
 }
 fn caps() -> Vec<WireCapability> {
@@ -156,15 +158,16 @@ pub(super) fn configured(
 ) -> ClipboardConfiguration {
     let os = os.clone();
     let mut id = 0u128;
-    ClipboardConfiguration::new(
+    ClipboardConfiguration::new_with_control(
         consent,
         Duration::from_secs(2),
-        move || {
+        move |control| {
             if let Some(panic) = failure {
                 assert!(!panic, "explicit fixture native initialization panic");
                 return Err(fr_core::clipboard::PlatformError::Unavailable);
             }
             // Explicit hung-driver fixture; the test owns an unwind-safe release.
+            os.lock().unwrap().native_control = Some(control);
             os.lock().unwrap().entered = true;
             while {
                 let os = os.lock().unwrap();
@@ -218,17 +221,22 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
     ];
     let release = Release(os[0].clone());
     os[0].lock().unwrap().block = scenario == Scenario::BlockedFactory;
-    let local = host
-        .configure_clipboard(configured(
-            &os[0],
-            scenario != Scenario::DeclineHost,
-            match scenario {
-                Scenario::FactoryFailure => Some(false),
-                Scenario::FactoryPanic => Some(true),
-                _ => None,
-            },
-        ))
-        .unwrap();
+    let mut configuration = configured(
+        &os[0],
+        scenario != Scenario::DeclineHost,
+        match scenario {
+            Scenario::FactoryFailure => Some(false),
+            Scenario::FactoryPanic => Some(true),
+            _ => None,
+        },
+    );
+    if scenario == Scenario::PrivacySetupFailure {
+        configuration = configuration.before_native_setup(|control| {
+            assert!(control.status().enabled);
+            Err(fr_core::clipboard::PlatformError::Unavailable)
+        });
+    }
+    let local = host.configure_clipboard(configuration).unwrap();
     let remote = viewer
         .configure_clipboard(configured(
             &os[1],
@@ -328,7 +336,14 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
                             let _=input.action(fr_client::input::Action::Key{key:PhysicalKey::new(4).unwrap(),transition:KeyTransition::Press}).unwrap();actions=1;
                         }
                         if actions==1 && receipts.get()==1 {
-                            if !matches!(scenario, Scenario::BlockedFactory | Scenario::RetainReceipts) { local.stop();retired=true; }
+                            if !matches!(scenario, Scenario::BlockedFactory | Scenario::RetainReceipts) {
+                                if scenario == Scenario::Transfer {
+                                    let native = os[0].lock().unwrap().native_control.clone().expect("factory received original owner");
+                                    native.stop();
+                                    assert!(!local.status().enabled, "native callback must stop the ORIGINAL owner");
+                                } else { local.stop(); }
+                                retired=true;
+                            }
                             if matches!(scenario, Scenario::BlockedFactory | Scenario::RetainReceipts) || input.clipboard_retired() {
                                 let _=input.action(fr_client::input::Action::Key{key:PhysicalKey::new(4).unwrap(),transition:KeyTransition::Release}).unwrap();actions=2;
                             }
@@ -343,18 +358,13 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
     )).await;
     assert!(hr.session.is_err() && vr.is_err(), "{hr:?} {vr:?}");
     assert!(requested);
-    let failed_factory = matches!(scenario, Scenario::FactoryFailure | Scenario::FactoryPanic);
-    // Foreign worker failure can race an active QUIC future. Its retained-byte
-    // authorization guard then closes the original session conservatively;
-    // an application must not promise clipboard-only isolation for this case.
-    if !failed_factory {
-        assert!(complete && retired);
-    }
+    // The lane's immediate retirement guard isolates native setup failure,
+    // including a missing privacy surface, even during active QUIC I/O.
+    // Require both real input actions to complete despite that optional loss.
+    assert!(complete && retired);
     assert!(hr.input.unwrap().handoff_safe());
     assert!(!seat.is_occupied());
-    if !failed_factory {
-        assert_eq!(effects.lock().unwrap().len(), 2);
-    }
+    assert_eq!(effects.lock().unwrap().len(), 2);
     assert_eq!((host.worker_id(), viewer.worker_id()), original);
     assert_eq!(local.status().phase, Phase::Closed);
     assert_eq!(remote.status().phase, Phase::Closed);
@@ -424,7 +434,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
                 host_cleanup
             );
         }
-        Scenario::FactoryFailure => assert_eq!(
+        Scenario::FactoryFailure | Scenario::PrivacySetupFailure => assert_eq!(
             host_cleanup,
             Cleanup::Finished(Err(ClipboardError::NativeSetup(
                 fr_core::clipboard::PlatformError::Unavailable
@@ -434,6 +444,13 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, scenario: Scenario) {
             host_cleanup,
             Cleanup::Finished(Err(ClipboardError::Panicked))
         ),
+    }
+    if scenario == Scenario::PrivacySetupFailure {
+        let os = os[0].lock().unwrap();
+        assert!(
+            !os.entered && !os.opened && os.native_control.is_none(),
+            "failed privacy setup must precede the native factory"
+        );
     }
     host.reap_media(
         &cleanup,
@@ -473,8 +490,12 @@ fn native_application_bilateral_decline_never_opens_clipboard_or_ends_control() 
     }
 }
 #[test]
-fn native_application_retains_failed_or_panicked_factory_cleanup_and_fences_input() {
-    for mode in [Scenario::FactoryFailure, Scenario::FactoryPanic] {
+fn native_application_retains_failed_or_panicked_factory_cleanup_and_keeps_input() {
+    for mode in [
+        Scenario::FactoryFailure,
+        Scenario::FactoryPanic,
+        Scenario::PrivacySetupFailure,
+    ] {
         run3(move |c, h, k| Box::pin(exercise(c, h, k, mode)));
     }
 }

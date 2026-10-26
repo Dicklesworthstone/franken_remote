@@ -92,6 +92,7 @@ impl X11Clipboard {
     /// cannot re-enter it. No payload is read, and no thread/runtime is started.
     /// Requires `XFixes` version 1; there is no silent content-polling fallback.
     pub fn start_watching(&mut self) -> Result<(), WatchError> {
+        self.privacy_allowed()?;
         if self.changes.active {
             return Err(WatchError::AlreadyWatching);
         }
@@ -107,6 +108,7 @@ impl X11Clipboard {
         }
         self.changes.active = true;
         let mut owner = 0;
+        self.privacy_allowed()?;
         // SAFETY: writable scalar output; subscription is established first so
         // owner changes during bootstrap remain queued, rather than being lost.
         if unsafe { ffi::fr_clip_owner(self.handle()?, &raw mut owner) } != 0 {

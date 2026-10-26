@@ -85,6 +85,12 @@ try:
             n = struct.unpack(">I", body[34:38])[0]
             text = read(n)
             log("PREPARE %d" % n)
+            if MODE == "privacy-stop-prepare":
+                # The native call remains stuck, but the UI's independent
+                # channel can already stop the original frd clipboard owner.
+                os.write(1, b"\0")
+                log("PRIVACY-STOP")
+                time.sleep(30)
             if has_rev and want != state["revision"]:
                 reply(seq, 0x86, rev() + b"\x04")
             else:

@@ -27,7 +27,7 @@ struct fr_indicator {
     uint32_t allow_time;
     int input_gate;
 };
-enum { MODE_SHARING = 0, MODE_CONTROL = 3 };
+enum { MODE_SHARING = 0, MODE_CONTROL = 3, MODE_CLIPBOARD = 4 };
 /* XI2 wire constants (XI2.h / XI2proto.h). Requests are sent raw through
  * xcbext so no libxcb-xinput dependency is added. */
 enum { XI_QUERY_VERSION = 47, XI_SELECT_EVENTS = 46, XI_QUERY_DEVICE = 48 };
@@ -188,8 +188,11 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     uint32_t values[] = { it.data->white_pixel,
         XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
         XCB_EVENT_MASK_VISIBILITY_CHANGE };
+    /* Keep the clipboard switch separate from the top-left control indicator.
+     * Obscuring either surface remains a terminal stop for its own owner. */
+    int16_t top = mode == MODE_CLIPBOARD ? (int16_t)(it.data->height_in_pixels - HEIGHT - 4) : 0;
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
-        h->window, it.data->root, 0, 0, WIDTH, HEIGHT, 2,
+        h->window, it.data->root, 0, top, WIDTH, HEIGHT, 2,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
         XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, values))) goto fail;
     h->font = xcb_generate_id(h->c);
@@ -204,6 +207,7 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     xcb_atom_t utf8 = atom(h, "UTF8_STRING");
     xcb_atom_t above = atom(h, "_NET_WM_STATE_ABOVE");
     const char *title = mode == MODE_CONTROL ? "FrankenRemote - Stop remote control"
+        : mode == MODE_CLIPBOARD ? "FrankenRemote - Clipboard sharing"
         : mode ? "FrankenRemote - Local approval" : "FrankenRemote - Stop sharing";
     const char class[] = "franken-remote\0FrankenRemote\0";
     uint32_t size[18] = {0};
@@ -229,6 +233,9 @@ struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
 struct fr_indicator *fr_indicator_open_control(const char *display, uint32_t *window) {
     return open_window(display, window, MODE_CONTROL);
 }
+struct fr_indicator *fr_indicator_open_clipboard(const char *display, uint32_t *window) {
+    return open_window(display, window, MODE_CLIPBOARD);
+}
 /* Role comes from Rust's original one-use Approval, never a remote UI string. */
 struct fr_indicator *fr_approval_open(const char *display, uint32_t role, uint32_t *window) {
     if (role > 1) return NULL;
@@ -237,7 +244,7 @@ struct fr_indicator *fr_approval_open(const char *display, uint32_t role, uint32
 int fr_indicator_draw(struct fr_indicator *h) {
     if (!h || xcb_connection_has_error(h->c)) return 0;
     xcb_clear_area(h->c, 0, h->window, 0, 0, WIDTH, HEIGHT);
-    if (h->mode && h->mode != MODE_CONTROL) {
+    if (h->mode == 1 || h->mode == 2) {
         const char *lines[] = {
             h->mode == 1 ? "Verified peer requests desktop viewing" : "Verified peer requests desktop CONTROL",
             "Only this request; no approval of future peers.",
@@ -257,7 +264,11 @@ int fr_indicator_draw(struct fr_indicator *h) {
     const char *control[] = {"A remote peer is CONTROLLING this desktop",
         "Closing or hiding this window stops control.",
         "STOP CONTROL", "Esc / Enter / Space: stop control"};
-    const char **lines = h->mode == MODE_CONTROL ? control : sharing;
+    const char *clipboard[] = {"Text clipboard sharing is ON",
+        "Closing or hiding turns off clipboard sharing.",
+        "TURN OFF", "Esc / Enter / Space: turn off clipboard"};
+    const char **lines = h->mode == MODE_CONTROL ? control
+        : h->mode == MODE_CLIPBOARD ? clipboard : sharing;
     const int16_t x[] = {16, 16, 204, 16}, y[] = {27, 53, 103, 138};
     xcb_rectangle_t border = {16, 73, 448, 46};
     xcb_poly_rectangle(h->c, h->window, h->gc, 1, &border);

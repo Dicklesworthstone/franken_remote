@@ -233,13 +233,13 @@ impl Bridge {
     }
     /// Called by a containing session's existing QUIC driver on every I/O poll.
     /// Between turns call `service` first so an optional stop can retire just
-    /// this lane. A clipboard loss DURING I/O (its authority, an item's
-    /// deadline, a newer local copy, a switch) is still fail-closed for the
-    /// clipboard: a terminal refusal retires this lane inside the same checked
-    /// operation, before any I/O, dropping its queued bytes and
-    /// retransmissions. Only cancellation and a missing clock still fence the
-    /// connection. Before, any of these closed the whole session, so one copy
-    /// that outlived its deadline on a slow path ended remote control.
+    /// this lane. Without retained outbound records, a terminal clipboard loss
+    /// can wait for that next maintenance turn: the native owner and new sends
+    /// are already fenced, and the native I/O operation has no clipboard bytes
+    /// to transmit. This keeps refused native/privacy setup clipboard-only.
+    /// If any original egress permit remains, request immediate retirement.
+    /// Inside an active native I/O operation that remains connection-terminal:
+    /// protected packets cannot be selectively retracted by resetting a stream.
     /// A held lease's temporary view pause stops new payload admission while
     /// control renewals and already admitted bounded transport work keep moving.
     pub(crate) fn permits_io(&self) -> bool {
@@ -248,6 +248,7 @@ impl Bridge {
             Ok(_) => true,
             Err(Error::Cancelled | Error::Clock) => false,
             Err(reason) if reason.is_suspended() => true,
+            Err(_) if self.inflight.iter().all(Option::is_none) => true,
             Err(_) => {
                 self.lane.request_retirement();
                 true
@@ -591,8 +592,9 @@ impl Bridge {
     }
     /// Drives the EXISTING connection. Keep the containing session's admission
     /// callback and service its other routes separately. Cancellation DURING an
-    /// active native QUIC future remains connection-wide fail-closed; a clipboard
-    /// loss retires only this lane (`permits_io`).
+    /// active native QUIC future remains connection-wide fail-closed. Clipboard
+    /// loss without retained egress waits for between-turn retirement; retained
+    /// protected bytes keep the connection fence (`permits_io`).
     /// Even dropping this future unpolled fences the original worker/connection.
     pub fn drive<'a>(
         &'a mut self,

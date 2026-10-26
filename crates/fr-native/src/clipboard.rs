@@ -68,6 +68,8 @@ pub struct X11Clipboard {
     readers: [Option<Reader>; READERS],
     capture: Option<read::Capture>,
     changes: changes::Changes,
+    privacy: Option<Box<dyn Fn() -> bool + Send + Sync>>,
+    privacy_closed: std::cell::Cell<bool>,
 }
 impl fmt::Debug for X11Clipboard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -120,7 +122,29 @@ impl X11Clipboard {
             readers: std::array::from_fn(|_| None),
             capture: None,
             changes: changes::Changes::default(),
+            privacy: None,
+            privacy_closed: std::cell::Cell::new(false),
         })
+    }
+    /// Retain the original application's content-free privacy fence through
+    /// this native owner's lifetime. Checked immediately before native reads,
+    /// conversion/chunk requests and publication, including after blocking
+    /// native preparation. Once false it is terminal for this owner. The
+    /// callback must be nonblocking and cannot call this clipboard recursively.
+    /// Existing gates are retained when this is composed more than once.
+    pub fn with_privacy_gate(mut self, gate: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        let previous = self.privacy.take();
+        self.privacy = Some(Box::new(move || {
+            previous.as_ref().is_none_or(|old| old()) && gate()
+        }));
+        self
+    }
+    fn privacy_allowed(&self) -> Result<(), PlatformError> {
+        if self.privacy_closed.get() || self.privacy.as_ref().is_some_and(|gate| !gate()) {
+            self.privacy_closed.set(true);
+            return Err(PlatformError::Unavailable);
+        }
+        Ok(())
     }
     fn handle(&self) -> Result<*mut core::ffi::c_void, PlatformError> {
         self.handle
@@ -133,6 +157,7 @@ impl X11Clipboard {
     /// Query current ownership before using a stamp as echo provenance. This
     /// says nothing about application paste or clipboard-manager history.
     pub fn current_origin(&mut self) -> Result<Option<Stamp>, PlatformError> {
+        self.privacy_allowed()?;
         let mut owner = 0;
         // SAFETY: live single-threaded handle and writable u32 output.
         if unsafe { ffi::fr_clip_owner(self.handle()?, &raw mut owner) } != 0 {
@@ -144,6 +169,7 @@ impl X11Clipboard {
         Ok(self.current.as_ref().map(|s| s.stamp))
     }
     fn next(&mut self) -> Result<Option<Event>, PlatformError> {
+        self.privacy_allowed()?;
         let mut event = Event::default();
         // SAFETY: a live uniquely accessed native owner and matching output.
         match unsafe { ffi::fr_clip_next(self.handle()?, &raw mut event) } {
@@ -153,6 +179,9 @@ impl X11Clipboard {
         }
     }
     fn watch(&self, window: u32, enabled: bool) -> bool {
+        if enabled && self.privacy_allowed().is_err() {
+            return false;
+        }
         let Ok(handle) = self.handle() else {
             return false;
         };
@@ -161,6 +190,9 @@ impl X11Clipboard {
         unsafe { ffi::fr_clip_watch(handle, window, i32::from(enabled)) == 0 }
     }
     fn property(&self, window: u32, property: u32, kind: u32, bytes: &[u8]) -> bool {
+        if self.privacy_allowed().is_err() {
+            return false;
+        }
         let Ok(handle) = self.handle() else {
             return false;
         };
@@ -181,6 +213,9 @@ impl X11Clipboard {
         }
     }
     fn words(&self, window: u32, property: u32, kind: u32, words: &[u32]) -> bool {
+        if self.privacy_allowed().is_err() {
+            return false;
+        }
         let Ok(handle) = self.handle() else {
             return false;
         };
@@ -433,6 +468,7 @@ impl X11Clipboard {
 }
 impl ClipboardSink for X11Clipboard {
     fn prepare(&mut self, text: &str, stamp: Stamp) -> Result<(), PlatformError> {
+        self.privacy_allowed()?;
         self.prepared = None;
         if text.len() > self.limit || !stamp.valid() {
             return Err(PlatformError::Unsupported);
@@ -493,7 +529,7 @@ impl X11Clipboard {
         let Ok(handle) = self.handle() else {
             return Publication::NotSubmitted(PlatformError::Unavailable);
         };
-        if !gate() {
+        if self.privacy_allowed().is_err() || !gate() {
             return Publication::NotSubmitted(PlatformError::Unavailable);
         }
         // SAFETY: final external operation uses the previously prepared server

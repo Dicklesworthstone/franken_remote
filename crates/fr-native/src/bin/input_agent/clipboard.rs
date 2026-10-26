@@ -4,7 +4,8 @@
 //! Launched only by frd's `clipboard_process` factory, on the clipboard worker
 //! thread, after the controller's input grant and bilateral clipboard
 //! readiness, with a cleared environment (DISPLAY, optional XAUTHORITY),
-//! `--parent-pid` and a private `SOCK_STREAM` command channel on stdin. It
+//! `--parent-pid` and private `SOCK_STREAM` channels: commands on stdin and a
+//! content-free clipboard privacy stop channel on stdout. It
 //! holds no lease, ticket, peer identity or network socket: frd's synchronizer
 //! performs every authority check. This child only executes one bounded native
 //! request at a time, and re-checks frd's publication deadline in its own
@@ -25,6 +26,10 @@ use std::{
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// frd reads every reply at once; a reader that stops is gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(feature = "linux-clipboard")]
+#[path = "clipboard/privacy.rs"]
+mod privacy;
 
 fn receive(command: &mut UnixStream) -> io::Result<[u8; process::FRAME_BYTES]> {
     let mut frame = [0; process::FRAME_BYTES];
@@ -62,6 +67,7 @@ fn hello(command: &mut UnixStream) -> Result<(u128, u32), i32> {
 
 #[cfg(feature = "linux-clipboard")]
 mod native {
+    use super::privacy::Privacy;
     use super::{
         Duration, EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED, Read, Reply, Request, UnixStream,
         hello, process, receive, send,
@@ -92,33 +98,64 @@ mod native {
             Ok(hello) => hello,
             Err(code) => return code,
         };
+        let Ok(display) = std::env::var("DISPLAY") else {
+            let _ = send(
+                &mut command,
+                1,
+                Reply::Refused(PlatformError::Unsupported),
+                &[],
+            );
+            return EXIT_REFUSED;
+        };
+        // A real mapped/responsive off switch must precede opening, watching
+        // or reading the native clipboard. No controller can enable it again.
+        let Ok(privacy) = Privacy::start(&display) else {
+            let _ = send(
+                &mut command,
+                1,
+                Reply::Refused(PlatformError::Unavailable),
+                &[],
+            );
+            return EXIT_REFUSED;
+        };
         let limits = ProtocolLimits::with_overrides(LimitOverrides {
             max_clipboard_item_bytes: Some(max),
             ..LimitOverrides::default()
         });
         // Only the explicit local display frd selected; no ambient fallback.
-        let opened = match (std::env::var("DISPLAY"), limits) {
-            (Ok(display), Ok(limits)) => X11Clipboard::open(&display, &limits, true),
+        let opened = match limits {
+            Ok(limits) if privacy.live() => X11Clipboard::open(&display, &limits, true),
             _ => Err(PlatformError::Unsupported),
         };
         let mut clipboard = match opened {
-            Ok(clipboard) => clipboard,
+            Ok(clipboard) => {
+                let original = privacy.gate();
+                clipboard.with_privacy_gate(move || original.live())
+            }
             Err(error) => {
                 let _ = send(&mut command, 1, Reply::Refused(error), &[]);
                 return EXIT_REFUSED;
             }
         };
+        if !privacy.live() {
+            return EXIT_REFUSED;
+        }
         if send(&mut command, 1, Reply::Ready { epoch }, &[]).is_err() {
             return EXIT_CHANNEL;
         }
-        let code = serve(&mut command, &mut clipboard, max);
+        let code = serve(&mut command, &mut clipboard, max, &privacy);
         // Erase private copies and close X11 on every exit path; no selection
         // reset is sent, so another application's newer copy is untouched.
         NativeClipboard::close(&mut clipboard);
         code
     }
 
-    fn serve(command: &mut UnixStream, clipboard: &mut X11Clipboard, max: u32) -> i32 {
+    fn serve(
+        command: &mut UnixStream,
+        clipboard: &mut X11Clipboard,
+        max: u32,
+        privacy: &Privacy,
+    ) -> i32 {
         let mut expected = 2_u64;
         loop {
             // EOF (frd gone or closed) ends here.
@@ -135,6 +172,15 @@ mod native {
                 return EXIT_PROTOCOL;
             };
             expected = next;
+            // Release-only cleanup remains possible. Any operation that can
+            // watch/read/prepare/publish requires the still-live local surface.
+            if !matches!(
+                request,
+                Request::Stop | Request::CancelPrepared | Request::CancelRead | Request::Suspend
+            ) && !privacy.live()
+            {
+                return EXIT_REFUSED;
+            }
             let mut payload = Secret(Vec::new());
             let reply = match request {
                 Request::Hello { .. } => return EXIT_PROTOCOL,
@@ -147,7 +193,7 @@ mod native {
                     stamp,
                     revision,
                     len,
-                } => match prepare(command, clipboard, stamp, revision, len) {
+                } => match prepare(command, clipboard, stamp, revision, len, privacy) {
                     Ok(reply) => reply,
                     Err(code) => return code,
                 },
@@ -157,7 +203,8 @@ mod native {
                 } => {
                     // The final executor check, immediately before XSetSelectionOwner.
                     let publication = clipboard.publish_checked(stamp, || {
-                        clock::monotonic_ns().is_some_and(|now| now < not_after_ns)
+                        privacy.live()
+                            && clock::monotonic_ns().is_some_and(|now| now < not_after_ns)
                     });
                     Reply::Published {
                         revision: clipboard.change_revision(),
@@ -188,7 +235,7 @@ mod native {
                     let result = NativeClipboard::begin_read(clipboard);
                     done(clipboard, result)
                 }
-                Request::PollRead => match poll_read(clipboard, max, &mut payload) {
+                Request::PollRead => match poll_read(clipboard, max, &mut payload, privacy) {
                     Ok(reply) => reply,
                     Err(code) => return code,
                 },
@@ -201,6 +248,11 @@ mod native {
                     done(clipboard, result)
                 }
             };
+            // A local stop during a native read erases the private result;
+            // no text is returned on the command channel after that stop.
+            if !payload.0.is_empty() && !privacy.live() {
+                return EXIT_REFUSED;
+            }
             if send(command, sequence, reply, &payload.0).is_err() {
                 return EXIT_CHANNEL;
             }
@@ -214,6 +266,7 @@ mod native {
         stamp: fr_core::clipboard::Stamp,
         revision: Option<u64>,
         len: u32,
+        privacy: &Privacy,
     ) -> Result<Reply, i32> {
         let mut text = Secret(Vec::new());
         text.0
@@ -227,6 +280,9 @@ mod native {
             return Err(EXIT_CHANNEL);
         }
         let text = std::str::from_utf8(&text.0).map_err(|_| EXIT_PROTOCOL)?;
+        if !privacy.live() {
+            return Err(EXIT_REFUSED);
+        }
         let prepared = match revision {
             Some(revision) => clipboard.prepare_for_revision(text, stamp, revision),
             None => ClipboardSink::prepare(clipboard, text, stamp),
@@ -243,12 +299,16 @@ mod native {
         clipboard: &mut X11Clipboard,
         max: u32,
         payload: &mut Secret,
+        privacy: &Privacy,
     ) -> Result<Reply, i32> {
         Ok(match NativeClipboard::poll_read(clipboard) {
             Ok(None) => Reply::ReadPending {
                 revision: clipboard.change_revision(),
             },
             Ok(Some(text)) => {
+                if !privacy.live() {
+                    return Err(EXIT_REFUSED);
+                }
                 let bytes = text.text().as_bytes();
                 let len = u32::try_from(bytes.len()).map_err(|_| EXIT_PROTOCOL)?;
                 if len > max || payload.0.try_reserve_exact(bytes.len()).is_err() {

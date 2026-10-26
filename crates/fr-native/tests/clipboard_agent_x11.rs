@@ -51,7 +51,7 @@ impl Server {
                 "1",
                 "-screen",
                 "0",
-                "320x240x24",
+                "800x600x24",
                 "-noreset",
                 "-nolisten",
                 "tcp",
@@ -160,11 +160,16 @@ fn the_real_child_reads_a_local_copy_and_publishes_a_peer_item_on_x11() {
 struct Raw {
     child: Child,
     command: UnixStream,
+    signals: UnixStream,
     sequence: u64,
 }
 impl Raw {
     fn start(display: &str) -> Self {
         let (command, theirs) = UnixStream::pair().unwrap();
+        let (signals, child_signals) = UnixStream::pair().unwrap();
+        signals
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
         command
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -175,13 +180,14 @@ impl Raw {
             .arg("--parent-pid")
             .arg(std::process::id().to_string())
             .stdin(Stdio::from(OwnedFd::from(theirs)))
-            .stdout(Stdio::null())
+            .stdout(Stdio::from(OwnedFd::from(child_signals)))
             .stderr(Stdio::inherit())
             .spawn()
             .unwrap();
         Self {
             child,
             command,
+            signals,
             sequence: 0,
         }
     }
@@ -198,6 +204,12 @@ impl Raw {
         let (echo, reply) = process::decode_reply(&frame, 64).unwrap();
         assert_eq!(echo, self.sequence);
         reply
+    }
+}
+impl Drop for Raw {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -325,3 +337,6 @@ fn a_launch_without_its_parent_or_role_arguments_is_refused_before_x11() {
         assert_eq!(status.code(), Some(64));
     }
 }
+
+#[path = "clipboard_agent_x11/privacy.rs"]
+mod privacy;

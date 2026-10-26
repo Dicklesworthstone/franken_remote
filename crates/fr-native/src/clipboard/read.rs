@@ -119,6 +119,7 @@ impl Capture {
         }
     }
     fn current(&self, clipboard: &X11Clipboard) -> Result<(), ReadError> {
+        clipboard.privacy_allowed()?;
         if Instant::now() >= self.deadline {
             return Err(ReadError::Expired);
         }
@@ -133,6 +134,7 @@ impl Capture {
         if owner != self.owner {
             return Err(ReadError::LocalChanged);
         }
+        clipboard.privacy_allowed()?;
         if Instant::now() >= self.deadline {
             return Err(ReadError::Expired);
         }
@@ -142,6 +144,7 @@ impl Capture {
         self.stage = stage;
         self.signal = None;
         let (target, property) = self.target(clipboard.atoms);
+        clipboard.privacy_allowed()?;
         // SAFETY: native scalar IDs belong to this live connection; C retains
         // no pointers. A distinct verification property fences delayed replies.
         if unsafe {
@@ -166,6 +169,7 @@ impl Capture {
         bytes: &mut [u8; CHUNK],
     ) -> Result<ffi::Property, ReadError> {
         let mut reply = ffi::Property::default();
+        clipboard.privacy_allowed()?;
         // SAFETY: C copies at most CHUNK bytes into the live stack allocation,
         // with an ABI-matching metadata output. No caller buffer is retained.
         if unsafe {
@@ -181,10 +185,14 @@ impl Capture {
         {
             return Err(PlatformError::Unavailable.into());
         }
+        clipboard.privacy_allowed()?;
         Ok(reply)
     }
     fn delete(&self, clipboard: &X11Clipboard) -> Result<u32, ReadError> {
         let mut sequence = 0;
+        // Deleting an INCR property requests the next text chunk from its
+        // owner; it is observation progress, not release-only cleanup.
+        clipboard.privacy_allowed()?;
         // SAFETY: live owned requestor, scalar atom and synchronous output.
         if unsafe {
             ffi::fr_clip_delete(
@@ -406,6 +414,7 @@ impl Capture {
             self.delete(clipboard)?;
             if self.revision.is_some() {
                 let mut sequence = 0;
+                clipboard.privacy_allowed()?;
                 // SAFETY: live thread-confined connection and writable scalar;
                 // the server creates the barrier, never an application reply.
                 if unsafe { ffi::fr_clip_tick(clipboard.handle()?, &raw mut sequence) } != 0 {
@@ -439,6 +448,7 @@ impl X11Clipboard {
     /// reselection invalidates them. Without a watch, the original before/after
     /// TIMESTAMP checks remain mandatory; there is no unfenced fallback.
     pub fn begin_read(&mut self) -> Result<(), ReadError> {
+        self.privacy_allowed()?;
         if self.capture.is_some() {
             return Err(ReadError::Busy);
         }
@@ -453,6 +463,7 @@ impl X11Clipboard {
         if owner == 0 {
             return Err(ReadError::NoSelection);
         }
+        self.privacy_allowed()?;
         let mut window = 0;
         // SAFETY: C creates one owned child and writes its scalar ID.
         if unsafe { ffi::fr_clip_requestor(handle, &raw mut window) } != 0 {
@@ -461,7 +472,9 @@ impl X11Clipboard {
         let mut sequence = 0;
         // SAFETY: live connection and writable scalar; timestamp comes from
         // its correlated real server notification, never CurrentTime.
-        if unsafe { ffi::fr_clip_tick(handle, &raw mut sequence) } != 0 {
+        if self.privacy_allowed().is_err()
+            || unsafe { ffi::fr_clip_tick(handle, &raw mut sequence) } != 0
+        {
             // SAFETY: this fresh child is uniquely owned and no longer used.
             unsafe {
                 ffi::fr_clip_destroy(handle, window);
@@ -495,6 +508,10 @@ impl X11Clipboard {
     /// and again after native calls. Errors retire the read and clear all bytes;
     /// partial or old-owner text is never exposed as a completed observation.
     pub fn poll_read(&mut self) -> Result<Option<ReadText>, ReadError> {
+        if let Err(error) = self.privacy_allowed() {
+            self.cancel_read();
+            return Err(error.into());
+        }
         if self.capture.is_none() {
             return Err(ReadError::NotReading);
         }
@@ -531,11 +548,12 @@ impl X11Clipboard {
                         ffi::fr_clip_destroy(handle, capture.window);
                     }
                 }
-                result.map(|_| {
-                    Some(ReadText {
+                result.and_then(|_| {
+                    self.privacy_allowed()?;
+                    Ok(Some(ReadText {
                         text: capture.text,
                         origin: capture.origin,
-                    })
+                    }))
                 })
             }
         }

@@ -6,7 +6,10 @@ use super::{
 };
 use fr_wire::clipboard::session::synchronize::SyncError;
 use shared::{Clock, Incoming, Shared, Sink, Turn};
-use std::thread::{self, JoinHandle};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    thread::{self, JoinHandle},
+};
 
 pub(super) enum Session {
     Host(ChannelSession),
@@ -92,11 +95,14 @@ impl WorkerSeed {
         I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
     {
         let shared = self.shared.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let opened = ready.clone();
         let thread = thread::Builder::new()
             .name("fr-clipboard".into())
             .spawn(move || {
                 let _ = self.shared.wake.set(thread::current());
                 let mut worker = self.open(factory)?;
+                opened.store(true, Ordering::Release);
                 while worker.shared.gate.is_open() {
                     worker.step(&mut new_id)?;
                     thread::park_timeout(Duration::from_millis(1));
@@ -111,6 +117,7 @@ impl WorkerSeed {
         Ok(WorkerTask {
             thread: Some(thread),
             shared,
+            ready,
         })
     }
 }
@@ -119,8 +126,14 @@ impl WorkerSeed {
 pub struct WorkerTask {
     thread: Option<JoinHandle<Result<(), Error>>>,
     shared: Arc<Shared>,
+    ready: Arc<AtomicBool>,
 }
 impl WorkerTask {
+    /// Positive evidence from THIS original worker, after native factory and
+    /// post-setup authority checks completed. Thread creation is not readiness.
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Acquire)
+    }
     pub fn stop(&self) {
         self.shared.stop();
     }

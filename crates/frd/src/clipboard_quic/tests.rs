@@ -151,6 +151,68 @@ fn an_obsolete_unsent_handoff_does_not_request_transport_retirement() {
 }
 
 #[test]
+fn native_setup_stop_during_io_without_retained_egress_retires_only_clipboard() {
+    for unsent in [false, true] {
+        runtime().block_on(async {
+            let mut f = Fixture::new().await;
+            if unsent {
+                f.offer(151);
+                assert_eq!(f.pump(), Pump::RecordAccepted);
+                f.hold_pending();
+            }
+            assert!(f.bridge.inflight.iter().all(Option::is_none));
+            let mut checks = 0;
+            // drive's first two checks precede native custody; its third is
+            // inside poll_io, where requesting retirement would close q.
+            f.link
+                .h
+                .drive(&f.cx, Duration::ZERO, || {
+                    checks += 1;
+                    if checks == 3 {
+                        f.bridge.stop();
+                    }
+                    f.bridge.permits_io()
+                })
+                .await
+                .unwrap();
+            assert!(checks >= 3);
+            assert!(!f.link.h.is_closed());
+            f.bridge.lane.check(&f.link.h).unwrap();
+            assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Retired));
+            assert!(f.bridge.pending.is_none());
+            assert!(!f.link.h.is_closed());
+            f.stop();
+        });
+    }
+}
+
+#[test]
+fn a_stop_during_io_with_retained_clipboard_bytes_still_fences_the_connection() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        f.offer(152);
+        assert_eq!(f.pump(), Pump::RecordAccepted);
+        assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        assert!(f.bridge.inflight.iter().any(Option::is_some));
+        let mut checks = 0;
+        let result = f
+            .link
+            .h
+            .drive(&f.cx, Duration::ZERO, || {
+                checks += 1;
+                if checks == 3 {
+                    f.bridge.stop();
+                }
+                f.bridge.permits_io()
+            })
+            .await;
+        assert!(checks >= 3);
+        assert_eq!(result, Err(quic::Error::OptionalRetirementDuringIo));
+        assert!(f.link.h.is_closed());
+    });
+}
+
+#[test]
 fn the_immediate_record_check_refuses_a_superseded_unsent_begin() {
     runtime().block_on(async {
         let mut f = Fixture::new().await;

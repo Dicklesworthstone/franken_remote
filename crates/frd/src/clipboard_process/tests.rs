@@ -295,3 +295,54 @@ fn debug_and_errors_never_contain_clipboard_text() {
     let log = std::fs::read_to_string(&log).unwrap();
     assert!(!log.contains("horse"), "{log}");
 }
+
+#[test]
+fn the_native_off_switch_fences_the_original_owner_during_a_blocked_prepare() {
+    use crate::native_clipboard::{Application, Configuration};
+    let runtime = runtime();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let app = Application::new(
+        Configuration::new::<RemoteClipboard, _, _>(
+            true,
+            Duration::from_secs(1),
+            || Err(PlatformError::Unavailable),
+            || Ok(1),
+        )
+        .unwrap(),
+    );
+    let original = app.control();
+    let (image, log) = fixture("privacy-stop-prepare");
+    let mut owner =
+        RemoteClipboard::start_inner(&launch(&image), cx, 4096, Some(original.clone())).unwrap();
+    owner.watch().unwrap();
+    let task = std::thread::spawn(move || {
+        let result = owner.prepare("private fixture item", stamp(1));
+        (owner, result)
+    });
+    let deadline = Instant::now() + Duration::from_millis(750);
+    while original.status().enabled {
+        assert!(
+            Instant::now() < deadline,
+            "stop waited for the blocked native reply"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        !task.is_finished(),
+        "the original owner is fenced before native cleanup completes"
+    );
+    assert_eq!(
+        original.set_enabled(true),
+        Err(crate::clipboard_quic::Error::Closed)
+    );
+    let (mut owner, result) = task.join().unwrap();
+    assert_eq!(result, Err(PlatformError::Unavailable));
+    assert!(owner.is_poisoned());
+    NativeClipboard::close(&mut owner);
+    assert!(
+        owner.child.is_none() && owner.privacy.is_none(),
+        "child and signal worker reaped"
+    );
+    assert!(line(&log, "PRIVACY-STOP").is_some());
+    assert!(line(&log, "PUBLISH ").is_none());
+}

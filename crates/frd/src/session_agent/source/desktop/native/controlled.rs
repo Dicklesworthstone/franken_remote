@@ -428,10 +428,10 @@ fn configure_clipboard(
         ids().ok()?,
     )
     .ok()?;
-    let configuration = crate::native_clipboard::Configuration::new(
+    let configuration = crate::native_clipboard::Configuration::new_with_control(
         true,
         Duration::from_secs(2),
-        clipboard_process::factory(launch, cx.clone()),
+        clipboard_process::factory_with_control(launch, cx.clone()),
         move || ids().map_err(|()| fr_wire::clipboard::session::synchronize::IdentifierFailure),
     )
     .ok()?;

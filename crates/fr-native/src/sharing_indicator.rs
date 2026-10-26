@@ -30,6 +30,7 @@ const PROGRESS_TIMEOUT: Duration = Duration::from_millis(250);
 unsafe extern "C" {
     fn fr_indicator_open(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_open_control(display: *const c_char, window: *mut u32) -> *mut c_void;
+    fn fr_indicator_open_clipboard(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_close(handle: *mut c_void);
     fn fr_indicator_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_indicator_draw(handle: *mut c_void) -> c_int;
@@ -116,6 +117,8 @@ enum Mode {
     /// Remote-control indicator: only `XInput2` events from non-XTEST source
     /// devices can stop it; the remote controller injects through `XTest`.
     Control,
+    /// Clipboard-only privacy switch; it never revokes desktop/input owners.
+    Clipboard,
 }
 struct Shared {
     owner: Owner,
@@ -342,6 +345,20 @@ pub fn start_observation_with(
         task: Some(task),
     })
 }
+/// A persistent, clipboard-only "Turn off" surface. The callback must fence
+/// the original clipboard owner on EVERY stop, including UI failure or hiding.
+/// Mapping and `responsive()` must be checked before any clipboard access.
+/// It has no enable/grant action and accepts the same real-device stop input.
+pub fn start_clipboard_with(
+    display: &str,
+    on_revoke: impl Fn(StopReason) + Send + Sync + 'static,
+) -> Result<LocalIndicator, Error> {
+    let (control, task) = launch(display, Owner::Local(Box::new(on_revoke)), Mode::Clipboard)?;
+    Ok(LocalIndicator {
+        control,
+        task: Some(task),
+    })
+}
 /// The executor's indicator owner; shown for the whole lease. Same explicit
 /// cleanup contract as `SharingIndicator`.
 #[must_use]
@@ -405,6 +422,7 @@ fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
         match mode {
             Mode::Sharing => fr_indicator_open(display.as_ptr(), &raw mut window),
             Mode::Control => fr_indicator_open_control(display.as_ptr(), &raw mut window),
+            Mode::Clipboard => fr_indicator_open_clipboard(display.as_ptr(), &raw mut window),
         }
     };
     let Some(handle) = NonNull::new(handle) else {
