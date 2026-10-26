@@ -42,6 +42,8 @@ instead of receiving a tree with missing folders. Directory profile limits are i
 one consumable selection. An interrupted session cannot silently send that batch
 again to a subsequent viewer. Use a new explicit host invocation to make another
 attempt after reviewing the previous result.
+A client's remaining `--attempts` may recover viewing if a new session is admitted;
+its original download consent and results are never replayed or replaced.
 
 The one Files lane has one direction per connection. Host `--send` and `--files`
 are mutually exclusive; client `--receive` and `--send` are mutually exclusive.

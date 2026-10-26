@@ -2,11 +2,12 @@
 //!
 //! Every path is classified by type BEFORE any network I/O: symbolic links
 //! and special files refuse (typed, by 1-based position, never by name).
-//! Regular files and portable directory roots stay open. Each opened attempt
-//! hands frd a fresh duplicate, and only an attempt that is granted
-//! control ever reads one (an attempt that asked for control ends
-//! reconnection, so a selection is never resent). The completion record is
-//! content-free: indices, local sizes, host-reported outcomes, typed reasons.
+//! Regular files and portable directory roots stay open. Before the one control
+//! request is spent, each opened attempt hands frd a fresh duplicate; only a
+//! granted controller ever reads it. After that request, viewing-only retries
+//! skip setup and preserve the original handle/results, so a selection is never
+//! resent. The completion record is content-free: indices, local sizes,
+//! host-reported outcomes and typed reasons.
 #[path = "files/download.rs"]
 pub(super) mod download;
 use super::Failure;

@@ -226,7 +226,10 @@ descriptors to the batch sender (`native_files::Selection`). The viewer installs
 offer never reaches a viewer that is not expecting it. Clipboard and files use
 independent lanes on the same controlling session. The host's disk worker is reaped
 with the controlled share. The CLI completion reports content-free per-index
-outcomes. Evidence: `crates/frd/tests/native_host_linux_serial/real_files.rs`
+outcomes. After the one control request is spent, a transient connection failure
+may recover viewing under the remaining `--attempts` budget. That later attempt
+skips file setup and retains the original sender results; it never resends the
+selection. Evidence: `crates/frd/tests/native_host_linux_serial/real_files.rs`
 (namespace e2e with real files, including a SIGSTOP mid-transfer and two planted
 negatives) and the unit tests in `crates/frd/src/native_files/tests.rs`. Not a
 live-tailnet, picker, drag-and-drop or resumption qualification. Explicit

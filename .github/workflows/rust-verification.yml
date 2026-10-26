@@ -101,7 +101,7 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
               '--exact', tree_test], check=True, env=env)
           PY
-      - name: Exercise native system-shortcut capture and local release
+      - name: Exercise native control release and viewing-only reconnect
         id: system_shortcuts
         continue-on-error: true
         timeout-minutes: 12
@@ -117,14 +117,18 @@ jobs:
                       and row.get('target', {}).get('name') == 'native_host_linux_serial'
                       and row.get('executable')):
                   binaries.append(os.path.abspath(row['executable']))
-          assert len(binaries) == 1, 'one exact native shortcut test binary required'
-          test = 'real_control::system_shortcuts::captured_system_shortcuts_reach_the_host_and_release_on_both_local_exits'
-          listed = subprocess.check_output(
-              [binaries[0], '--list', '--ignored', '--exact', test], text=True)
-          assert listed.splitlines().count(f'{test}: test') == 1, 'native system-shortcut regression must be present'
+          assert len(binaries) == 1, 'one exact native control test binary required'
+          tests = [
+              'real_control::system_shortcuts::captured_system_shortcuts_reach_the_host_and_release_on_both_local_exits',
+              'real_control::reconnect::transient_control_transport_loss_reconnects_fresh_viewing_without_reacquiring_input',
+          ]
           env = dict(os.environ, FR_NS_SUDO='1')
-          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
-              '--exact', test], check=True, env=env, timeout=600)
+          for test in tests:
+              listed = subprocess.check_output(
+                  [binaries[0], '--list', '--ignored', '--exact', test], text=True)
+              assert listed.splitlines().count(f'{test}: test') == 1, f'native control regression must be present: {test}'
+              subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+                  '--exact', test], check=True, env=env, timeout=600)
           PYTHON
       - name: Exercise dual-stack hosting and native IPv6 view/control
         id: native_dual_stack

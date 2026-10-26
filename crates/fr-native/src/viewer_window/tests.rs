@@ -154,3 +154,65 @@ fn negative_lifecycle_and_owner_drop_never_wait_for_orderly_closure() {
     assert!(viewer.control().is_stopped());
     assert_eq!(c.status(), Status::Stopped(StopReason::OwnerDropped));
 }
+
+#[test]
+fn close_intent_survives_session_cancellation_before_cleanup_sampling() {
+    let display = Display::new();
+    for requested in [false, true] {
+        let (_rt, viewer, mut window) = window(&display.name);
+        let control = window.control();
+        let id = control.target().unwrap().window();
+        control.enable_orderly_close().unwrap();
+        assert!(!control.close_requested());
+        if requested {
+            display.event(id, "close");
+            wait(|| control.close_requested());
+            assert_eq!(control.status(), Status::CloseRequested);
+        }
+
+        // The reconnect supervisor cancels the original viewer context before
+        // its Cleaning callback. Reproduce that real cancellation here, before
+        // the CLI can sample the original window's retained local intent.
+        viewer.control().stop();
+        assert_eq!(control.status(), Status::Stopped(StopReason::SessionEnded));
+        assert_eq!(control.close_requested(), requested);
+        wait(|| window.finish().is_some());
+        assert_eq!(window.finish(), Some(StopReason::SessionEnded));
+        // Reaping never turns cancellation into a request or erases a real one.
+        assert_eq!(control.close_requested(), requested);
+    }
+}
+
+#[test]
+fn unarmed_wm_close_retains_intent_but_programmatic_stop_does_not() {
+    let display = Display::new();
+    for requested in [false, true] {
+        let (_rt, viewer, mut window) = window(&display.name);
+        let control = window.control();
+        let id = control.target().unwrap().window();
+        assert!(!control.close_requested());
+        // Do not arm orderly close. The native WM branch must still publish
+        // its own intent before immediate cancellation and thread retirement.
+        if requested {
+            display.event(id, "close");
+            wait(|| control.close_requested());
+        } else {
+            control.stop();
+        }
+        wait(|| viewer.control().is_stopped());
+        wait(|| window.finish().is_some());
+        if requested {
+            // User publication and another thread observing cancellation can
+            // race. Neither legitimate terminal order starts a close grace.
+            assert!(matches!(
+                window.finish(),
+                Some(StopReason::User | StopReason::SessionEnded)
+            ));
+        }
+        // A programmatic cleanup stop cannot impersonate a WM request.
+        assert_eq!(control.close_requested(), requested);
+        viewer.control().stop();
+        let _ = control.status();
+        assert_eq!(control.close_requested(), requested);
+    }
+}

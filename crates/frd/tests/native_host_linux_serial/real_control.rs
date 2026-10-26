@@ -163,6 +163,11 @@ def command(cmd):
     elif cmd[0] == "indicator":
         found = mapped(INDICATOR)
         say("IND", *(found[0][:3] if found else ("none",)))
+    elif cmd[0] == "paint":
+        x.XSetForeground(d, gc, int(cmd[1], 0))
+        x.XFillRectangle(d, w, gc, 260, 180, 100, 100)
+        x.XSync(d, 0)
+        say("OK")
     elif cmd[0] == "click":
         # Core XTest, exactly like the controller's own injected input.
         t.XTestFakeMotionEvent(d, 0, int(cmd[1]), int(cmd[2]), 0)
@@ -218,6 +223,10 @@ def command(cmd):
         t.XTestFakeButtonEvent(d, int(cmd[1]), int(cmd[2]), 0)
     elif cmd[0] == "key":
         t.XTestFakeKeyEvent(d, x.XKeysymToKeycode(d, int(cmd[1], 0)), int(cmd[2]), 0)
+    elif cmd[0] == "tap":
+        key = x.XKeysymToKeycode(d, int(cmd[1], 0))
+        t.XTestFakeKeyEvent(d, key, 1, 0)
+        t.XTestFakeKeyEvent(d, key, 0, 0)
     x.XSync(d, 0)
     say("OK")
 say("WATCHING")
@@ -387,6 +396,7 @@ pub(super) fn connect(
     send: &[PathBuf],
 ) -> Child {
     connect_command(fr, api, roots, display, worker, clipboard, send)
+        .args(["--attempts", "1"])
         .spawn()
         .unwrap()
 }
@@ -409,7 +419,7 @@ fn connect_command(
             send.iter()
                 .flat_map(|path| [std::ffi::OsStr::new("--send"), path.as_os_str()]),
         )
-        .args(["--display", "only", "--attempts", "1", "--json"])
+        .args(["--display", "only", "--json"])
         .arg("--socket")
         .arg(api)
         .arg("--trust-roots")
@@ -795,6 +805,7 @@ struct InputSettings {
     unmap_wheel: bool,
     capture_system_shortcuts: bool,
     dual_stack: bool,
+    reconnect: bool,
 }
 
 pub(super) struct Controlled {
@@ -998,6 +1009,7 @@ impl Controlled {
             client_clipboard,
             send,
         );
+        command.args(["--attempts", if input.reconnect { "4" } else { "1" }]);
         if input.dual_stack {
             command.arg("--ipv6");
         }
@@ -1155,6 +1167,8 @@ impl Controlled {
     }
 }
 
+#[path = "real_control/reconnect.rs"]
+mod reconnect;
 #[path = "real_control/system_shortcuts.rs"]
 mod system_shortcuts;
 

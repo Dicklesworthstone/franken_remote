@@ -510,6 +510,9 @@ fn completed(
     // Name earlier attempts' ends too: a reconnect's own end can hide them.
     crate::closure::preserve(result, close_outcome(application)).map_err(|mut failure| {
         failure.earlier = progress.ended.before(progress.attempts);
+        if let Some(control) = progress.control {
+            failure.control_history = Some(Box::leak(Box::new(control_history(progress, control))));
+        }
         if let Some(downloads) = &progress.downloads {
             downloads.summary().preserve(&mut failure);
         }
@@ -536,6 +539,25 @@ fn close_outcome(
             .map(|outcome| outcome.exchange)
     })
 }
+/// The exact terminal evidence that can veto viewing after cleanup; partial
+/// acknowledgements without a report do not invent a host revocation.
+#[cfg(feature = "linux-desktop")]
+fn control_retry_stop(summary: fr_native::desktop::reconnect::CleanupSummary) -> Option<Failure> {
+    if let Some(named) = summary.input_stop.and_then(input_stopped) {
+        return Some(named);
+    }
+    if let Some(report) = summary
+        .control_disconnect
+        .and_then(|outcome| outcome.revocation)
+    {
+        return Some(crate::terminal::failure(report));
+    }
+    summary
+        .disconnect
+        .or_else(|| summary.control_disconnect.map(|outcome| outcome.exchange))
+        .and_then(|outcome| outcome.report)
+        .map(crate::closure::failure)
+}
 #[cfg(feature = "linux-desktop")]
 fn completed_result(
     application: &Session<Interface>,
@@ -544,12 +566,6 @@ fn completed_result(
     progress: &Progress,
     json: bool,
 ) -> Result<String, Failure> {
-    // A control attempt's cleanup notice deliberately ended reconnection;
-    // classify that attempt's ORIGINAL outcome, never the notice itself.
-    let result = match (result, progress.control.and_then(|c| c.ended)) {
-        (Err(reconnect::Failure::Notification), Some(original)) => original,
-        (result, _) => result,
-    };
     // A signal or UI close never conceals unsuccessful native cleanup.
     if application.cleanup_failure().is_some()
         || application.desktop().is_some()
@@ -591,11 +607,22 @@ fn completed_result(
             "Run fr displays to inspect the host; --display only requires exactly one currently offered display.",
         ));
     }
-    // Cleanup itself stops the window with User. Only intent recorded BEFORE
-    // cleanup may explain an otherwise failed observation as a normal UI exit.
+    // Cleanup itself may stop the window with User. Only a pre-cleanup status
+    // or the original WM-request latch retained through reap identifies intent.
     if let Err(error) = result
         && !progress.user_closed
     {
+        // The post-cleanup retry notice may be vetoed by the original native
+        // input stop or an authenticated host report. Name that exact evidence;
+        // a generic notification failure cannot inherit an older link error.
+        if error == reconnect::Failure::Notification
+            && let Some(named) = progress
+                .control
+                .and_then(|control| control.cleanup)
+                .and_then(control_retry_stop)
+        {
+            return Err(named);
+        }
         if let Some(refused) = refusal::reconnect(error).or_else(|| lapse::reconnect(error)) {
             return Err(refused);
         }
@@ -705,9 +732,20 @@ impl Progress {
         // The previous owner has already been reaped. Its stopped handle must
         // not classify a connection failure before this attempt opens a window.
         self.window = None;
+        if let Some(control) = &mut self.control {
+            control.begin_attempt(attempt);
+        }
+    }
+    /// A WM request can publish after the initial cleanup notice. Only that
+    /// retained latch, never a cleanup-generated status, is safe after reaping.
+    fn after_cleanup(&mut self, close_requested: bool) {
+        self.user_closed |= close_requested;
     }
     fn before_cleanup(&mut self, window: Option<WindowStatus>) -> Result<(), CallbackError> {
-        self.user_closed = window == Some(WindowStatus::Stopped(StopReason::User));
+        self.user_closed |= matches!(
+            window,
+            Some(WindowStatus::CloseRequested | WindowStatus::Stopped(StopReason::User))
+        );
         if self.user_closed {
             // Cleaning notification failure stops retries AFTER mandatory
             // cleanup. A user's close must never reconnect another window.
@@ -723,7 +761,7 @@ struct Interface {
     progress: Rc<RefCell<Progress>>,
     /// The current opened `--control` attempt; never carried to the next one.
     attempt: Option<control::Attempt>,
-    /// Default-on for control unless `--no-clipboard`; fresh on every attempt.
+    /// Default-on unless `--no-clipboard`; never reconfigured after a request.
     clipboard: Option<control::Clipboard>,
     /// `--audio`: the resolved local server and request for either role.
     audio: Option<(std::path::PathBuf, super::options::AudioRequest)>,
@@ -752,17 +790,22 @@ impl Ui for Interface {
         p.approval_pending = false;
         p.window = desktop.window();
         if let Some(counters) = p.control.as_mut() {
-            let mut attempt = control::Attempt::new(desktop).ok_or(CallbackError)?;
-            if let (Some(local), Some(clipboard)) = (&self.clipboard, counters.clipboard.as_mut()) {
-                attempt.configure_clipboard(desktop, local, clipboard);
+            let mode = counters.opened();
+            let mut attempt = control::Attempt::new(desktop, mode).ok_or(CallbackError)?;
+            if mode == control::AttemptMode::Control {
+                if let (Some(local), Some(clipboard)) =
+                    (&self.clipboard, counters.clipboard.as_mut())
+                {
+                    attempt.configure_clipboard(desktop, local, clipboard);
+                }
+                if let Some(files) = p.files.as_mut() {
+                    files.configure(desktop);
+                }
+                if let Some(downloads) = p.downloads.as_mut() {
+                    downloads.configure(desktop);
+                }
             }
             self.attempt = Some(attempt);
-        }
-        if let Some(files) = p.files.as_mut() {
-            files.configure(desktop);
-        }
-        if let Some(downloads) = p.downloads.as_mut() {
-            downloads.configure(desktop);
         }
         if let (Some((server, request)), Some(report)) = (&self.audio, &p.audio) {
             install_audio(desktop, server, request, report);
@@ -787,6 +830,21 @@ impl Ui for Interface {
     fn input_result(&mut self, _: u8, result: fr_client::input::ResultEvent) {
         if let Some(counters) = self.progress.borrow_mut().control.as_mut() {
             counters.result(&result);
+        }
+    }
+    fn cleanup_finished(
+        &mut self,
+        attempt: u8,
+        summary: fr_native::desktop::reconnect::CleanupSummary,
+    ) {
+        let mut progress = self.progress.borrow_mut();
+        let close_requested = progress
+            .window
+            .as_ref()
+            .is_some_and(WindowControl::close_requested);
+        progress.after_cleanup(close_requested);
+        if let Some(counters) = progress.control.as_mut() {
+            counters.retain_cleanup(attempt, summary);
         }
     }
     fn frame(&mut self, _: u8, frame: Option<Presentation>) -> Result<(), CallbackError> {
@@ -814,13 +872,31 @@ impl Ui for Interface {
                 ) {
                     attempt.clipboard_turn(counters);
                 }
-                let window = progress.window.as_ref().map(WindowControl::status);
+                // The supervisor cancels the original viewer before this
+                // notice. status() may therefore report SessionEnded even
+                // when a WM-close request was already published. Preserve that
+                // independent local intent before polling current liveness.
+                let window = progress.window.as_ref().map(|window| {
+                    if window.close_requested() {
+                        WindowStatus::CloseRequested
+                    } else {
+                        window.status()
+                    }
+                });
                 let closed = progress.before_cleanup(window);
-                let control = progress
-                    .control
-                    .as_mut()
-                    .map_or(Ok(()), |counters| counters.cleaning(failure));
-                return closed.and(control);
+                if let Some(counters) = progress.control.as_mut() {
+                    counters.cleaning(failure);
+                }
+                return closed;
+            }
+            Status::Reconnecting { .. } => {
+                if progress.user_closed
+                    || progress
+                        .control
+                        .is_some_and(|control| control.retry_stopped())
+                {
+                    return Err(CallbackError);
+                }
             }
             _ => {}
         }
@@ -1020,10 +1096,7 @@ fn control_completion(
     closure: Option<crate::closure::Report>,
     lease: Option<fr_wire::lease_revoked::Revoked>,
 ) -> String {
-    let files = progress
-        .files
-        .as_ref()
-        .map_or_else(files::Summary::not_requested, files::Local::summary);
+    let history = control_history(progress, control);
     let downloads = progress.downloads.as_ref().map_or_else(
         files::download::Summary::not_requested,
         files::download::Local::summary,
@@ -1034,32 +1107,116 @@ fn control_completion(
         downloads.text()
     };
     let audio = audio_completion(progress, json);
-    let clipboard = control.clipboard.unwrap_or_default();
-    let absence = control
-        .clipboard
-        .and_then(|c| c.absence())
-        .unwrap_or("not_requested");
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{}{}{downloads}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{}{}{downloads}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
             progress.presented,
             media_json(progress.media.as_ref()),
+            history.json,
+            closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
+            crate::terminal::lease_json(lease),
+        )
+    } else {
+        let close = closure.map_or_else(
+            || " No completed final close exchange; host cleanup and outstanding effects are unknown.".to_owned(),
+            |report| format!(" Final connection close: {}", report.text()),
+        );
+        let lease = lease.map_or_else(String::new, |report| {
+            format!(
+                " Final connection lease report: {}.",
+                crate::terminal::lease_text(report)
+            )
+        });
+        format!(
+            "Control session stopped; {} attempt(s), {} opened session(s).{} Local cleanup confirmed.{close}{lease}{downloads}{audio} Native transport/hardware remain unqualified.\n",
+            progress.attempts, progress.opened, history.text,
+        )
+    }
+}
+/// Historical effects are separate from the current attempt's role and closing
+/// exchange. Retain the same bounded projection when a later retry fails.
+#[cfg(feature = "linux-desktop")]
+#[allow(clippy::too_many_lines)] // One bounded history projection keeps both output formats aligned.
+fn control_history(progress: &Progress, control: control::Counters) -> crate::ControlHistory {
+    let files = progress
+        .files
+        .as_ref()
+        .map_or_else(files::Summary::not_requested, files::Local::summary);
+    let clipboard = control.clipboard.unwrap_or_default();
+    let absence = control
+        .clipboard
+        .and_then(|c| c.absence())
+        .unwrap_or("not_requested");
+    let ended = control
+        .ended
+        .map(|result| result.err().map_or("completed", end_code));
+    let exchange = control
+        .cleanup
+        .and_then(|summary| {
+            summary
+                .disconnect
+                .or_else(|| summary.control_disconnect.map(|outcome| outcome.exchange))
+        })
+        .map(crate::closure::Report::from);
+    let lease = control
+        .cleanup
+        .and_then(|summary| summary.control_disconnect)
+        .and_then(|outcome| outcome.revocation);
+    let granted = control.capabilities.map_or_else(
+        || "null".to_owned(),
+        |granted| {
+            format!(
+                "[{}]",
+                control::capability_names(granted)
+                    .iter()
+                    .map(|name| format!("\"{name}\""))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )
+        },
+    );
+    let control_text = match (control.requested, control.granted) {
+        (_, true) if control.wheel_unavailable() => {
+            "granted (the host cannot inject wheel scrolling: wheel unavailable)"
+        }
+        (_, true) => "granted",
+        (true, false) => "requested but not granted",
+        (false, false) => "not requested",
+    };
+    let clipboard_text = if clipboard.active {
+        let ended = clipboard
+            .ended
+            .map_or_else(String::new, |code| format!(", then ended: {code}"));
+        format!(
+            "active ({} host item(s) received{ended})",
+            clipboard.received
+        )
+    } else {
+        format!("absent: {absence}")
+    };
+    let viewing = if control.viewing_reconnects == 0 {
+        String::new()
+    } else {
+        format!(
+            " Viewing reconnected {} time(s) without another control request; final attempt mode {}.",
+            control.viewing_reconnects,
+            control.mode.name()
+        )
+    };
+    crate::ControlHistory {
+        json: format!(
+            ",\"last_attempt_mode\":\"{}\",\"viewing_reconnects\":{},\"control_request_attempt\":{},\"control_attempt_end\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{granted},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{},\"control_close_exchange\":{},\"control_lease_report\":{}{}",
+            control.mode.name(),
+            control.viewing_reconnects,
+            control
+                .request_attempt
+                .map_or_else(|| "null".to_owned(), |attempt| attempt.to_string()),
+            ended.map_or_else(|| "null".to_owned(), output::quoted),
             control.requested,
             control.granted,
-            control.capabilities.map_or_else(
-                || "null".to_owned(),
-                |granted| format!(
-                    "[{}]",
-                    control::capability_names(granted)
-                        .iter()
-                        .map(|name| format!("\"{name}\""))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-            ),
             control.wheel_unavailable(),
             control.results,
             control.submitted,
@@ -1072,43 +1229,33 @@ fn control_completion(
             if clipboard.active {
                 "null".to_owned()
             } else {
-                format!("\"{absence}\"")
+                output::quoted(absence)
             },
             clipboard
                 .ended
-                .map_or_else(|| "null".to_owned(), |code| format!("\"{code}\"")),
-            files.json(),
-            closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
+                .map_or_else(|| "null".to_owned(), output::quoted),
+            exchange.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
             crate::terminal::lease_json(lease),
-        )
-    } else {
-        format!(
-            "Control session stopped; {} attempt(s), {} opened session(s), control {}, {} host input result(s) ({} submitted to the host OS), clipboard {}, cleanup confirmed.{}{downloads}{audio} Native transport/hardware remain unqualified.\n",
-            progress.attempts,
-            progress.opened,
-            match (control.requested, control.granted) {
-                (_, true) if control.wheel_unavailable() => {
-                    "granted (the host cannot inject wheel scrolling: wheel unavailable)"
-                }
-                (_, true) => "granted",
-                (true, false) => "requested but not granted",
-                (false, false) => "not requested",
-            },
+            files.json(),
+        ),
+        text: format!(
+            " Original control {control_text}; {} host input result(s) ({} submitted to the host OS); clipboard {clipboard_text}.{}{}{}{}{}",
             control.results,
             control.submitted,
-            if clipboard.active {
-                let ended = clipboard
-                    .ended
-                    .map_or_else(String::new, |code| format!(", then ended: {code}"));
-                format!(
-                    "active ({} host item(s) received{ended})",
-                    clipboard.received
-                )
-            } else {
-                format!("absent: {absence}")
-            },
+            ended.map_or_else(String::new, |code| format!(
+                " Control attempt ended: {code}."
+            )),
+            viewing,
+            exchange.map_or_else(String::new, |report| format!(
+                " Original control close: {}",
+                report.text()
+            )),
+            lease.map_or_else(String::new, |report| format!(
+                " Original control lease report: {}.",
+                crate::terminal::lease_text(report)
+            )),
             files.text(),
-        )
+        ),
     }
 }
 #[cfg(test)]
@@ -1286,7 +1433,6 @@ mod tests {
             for before in [
                 None,
                 Some(WindowStatus::Mapped),
-                Some(WindowStatus::CloseRequested),
                 Some(WindowStatus::Stopped(StopReason::SessionEnded)),
                 Some(WindowStatus::Stopped(StopReason::NativeFailure)),
             ] {
@@ -1398,7 +1544,7 @@ mod tests {
         }
 
         #[test]
-        fn a_control_attempt_ends_reconnection_but_reports_its_original_outcome() {
+        fn transient_control_loss_reconnects_viewing_and_preserves_the_original_outcome() {
             let control = || Progress {
                 control: Some(control::Counters::default()),
                 ..Progress::default()
@@ -1410,6 +1556,7 @@ mod tests {
                 clipboard: None,
                 audio: None,
             };
+            ui.status(Status::Connecting { attempt: 1 }).unwrap();
             // No request yet: the ordinary reconnect policy still applies.
             assert_eq!(
                 ui.status(Status::Cleaning {
@@ -1418,7 +1565,12 @@ mod tests {
                 }),
                 Ok(())
             );
-            ui.progress.borrow_mut().control.as_mut().unwrap().requested = true;
+            ui.progress
+                .borrow_mut()
+                .control
+                .as_mut()
+                .unwrap()
+                .spend_request();
             let refusal = reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(
                 TailnetError::LocalApiUnavailable,
             ));
@@ -1427,11 +1579,30 @@ mod tests {
                     attempt: 1,
                     failure: Some(refusal)
                 }),
-                Err(CallbackError)
+                Ok(())
             );
+            assert!(reconnect::retryable(refusal));
+            ui.status(Status::Reconnecting {
+                attempt: 2,
+                delay: Duration::from_millis(250),
+                failure: refusal,
+            })
+            .unwrap();
+            ui.status(Status::Connecting { attempt: 2 }).unwrap();
+            {
+                let mut progress = ui.progress.borrow_mut();
+                let counters = progress.control.as_mut().unwrap();
+                assert_eq!(counters.opened(), control::AttemptMode::ViewingOnly);
+                assert_eq!(counters.ended, Some(Err(refusal)));
+            }
+            ui.status(Status::Cleaning {
+                attempt: 2,
+                failure: None,
+            })
+            .unwrap();
             let progress = ui.progress.borrow();
-            // The supervisor reports only its notice failure; the CLI keeps the
-            // attempt's own disposition instead of a generic session failure.
+            // A later callback failure is not relabeled as the original link
+            // error; historical control evidence is retained separately.
             assert_eq!(
                 completed(
                     &unused_session(),
@@ -1442,8 +1613,14 @@ mod tests {
                 )
                 .unwrap_err()
                 .code,
-                "tailscale_unavailable"
+                "native_session_failed"
             );
+            let recovered = completed(&unused_session(), Ok(()), false, &progress, true).unwrap();
+            let recovered: serde_json::Value = serde_json::from_str(&recovered).unwrap();
+            assert_eq!(recovered["last_attempt_mode"], "view_only");
+            assert_eq!(recovered["viewing_reconnects"], 1);
+            assert_eq!(recovered["control_request_attempt"], 1);
+            assert_eq!(recovered["control_attempt_end"], "native_session_failed");
             let mut ended = control();
             let counters = ended.control.as_mut().unwrap();
             counters.requested = true;
@@ -1452,14 +1629,7 @@ mod tests {
             counters.results = 3;
             counters.submitted = 2;
             counters.ended = Some(Ok(()));
-            let done = completed(
-                &unused_session(),
-                Err(reconnect::Failure::Notification),
-                false,
-                &ended,
-                true,
-            )
-            .unwrap();
+            let done = completed(&unused_session(), Ok(()), false, &ended, true).unwrap();
             for field in [
                 "\"role\":\"control\"",
                 "\"control_requested\":true",
@@ -1761,3 +1931,7 @@ mod controlled_audio_tests;
 #[cfg(all(test, feature = "linux-desktop"))]
 #[path = "linux/audio_overflow_tests.rs"]
 mod audio_overflow_tests;
+
+#[cfg(all(test, feature = "linux-desktop"))]
+#[path = "linux/control_reconnect_tests.rs"]
+mod control_reconnect_tests;

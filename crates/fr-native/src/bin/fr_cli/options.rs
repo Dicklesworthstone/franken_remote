@@ -502,7 +502,7 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
 
 /// Bounded argument grammar, no shell, URL, credential, arbitrary-command or
 /// remote-policy option. `connect` requires exactly one explicit role,
-/// `--view-only` or `--control`; it never silently substitutes one for the other.
+/// `--view-only` or `--control`; control is requested once per invocation.
 pub fn parse(args: &[String]) -> Result<Options, Failure> {
     if args.len() > 32
         || args
@@ -646,7 +646,7 @@ fn parse_command(
         if connect && view_only == control {
             return Err(Failure::new(
                 "connection_role_required",
-                "Choose exactly one of --view-only or --control; control is never silently requested or downgraded to viewing.",
+                "Choose exactly one of --view-only or --control. Control is requested once; transient reconnects after that request restore viewing only.",
                 2,
             ));
         }

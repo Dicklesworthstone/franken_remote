@@ -191,3 +191,62 @@ fn fit_policy_survives_reconnect_without_reusing_native_owners_or_input() {
         );
     }
 }
+
+#[derive(Default)]
+struct SummaryUi(Vec<(u8, CleanupSummary)>);
+impl Ui for SummaryUi {
+    fn choose(&mut self, _: u8, _: &Catalog) -> Result<Option<u128>, CallbackError> {
+        Ok(None)
+    }
+    fn approval(&mut self, _: u8, _: ApprovalNotice) -> Result<(), CallbackError> {
+        Ok(())
+    }
+    fn cleanup_finished(&mut self, attempt: u8, summary: CleanupSummary) {
+        self.0.push((attempt, summary));
+    }
+}
+
+#[test]
+fn cleanup_summary_is_informational_and_keeps_the_original_stop_on_failure() {
+    // No native owner is started. This checks the real callback ordering and
+    // exact metadata/result propagation, not an OS cleanup receipt.
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap();
+    for cancelled in [false, true] {
+        let mut session = Session::new(
+            Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap(),
+            ObserverPolicy::default(),
+            Mode::Observe,
+            SummaryUi::default(),
+        );
+        let configuration = session.configuration(4).unwrap();
+        session.last_attempt = 4;
+        session.input_stop = Some(crate::viewer_input::StopReason::LocalEscape);
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let deadline = Deadline::after(&cx, std::time::Duration::from_secs(1)).unwrap();
+        if cancelled {
+            session.desktop = Some(Desktop::new(configuration));
+            cx.cancel_fast(asupersync::types::CancelKind::User);
+        }
+        let result = runtime.block_on(session.cleanup(&cx, deadline));
+        assert_eq!(result.is_err(), cancelled);
+        assert_eq!(session.ui.0.len(), 1);
+        let (attempt, summary) = session.ui.0[0];
+        assert_eq!(attempt, 4);
+        assert_eq!(
+            summary.input_stop,
+            Some(crate::viewer_input::StopReason::LocalEscape)
+        );
+        assert_eq!(
+            summary.failure,
+            if cancelled {
+                Some(CleanupFailure::Cancelled)
+            } else {
+                None
+            }
+        );
+        assert_eq!(summary.failure, session.cleanup_failure());
+    }
+}

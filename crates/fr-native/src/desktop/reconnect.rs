@@ -38,6 +38,17 @@ pub enum Mode {
     ControlCapable(ControlPolicy),
 }
 
+/// Content-free evidence sampled from the original attempt after its native
+/// cleanup finishes (successfully or otherwise). It carries no reusable owner,
+/// input authority, layout, ticket or file permission.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CleanupSummary {
+    pub disconnect: Option<ViewerCloseOutcome>,
+    pub control_disconnect: Option<frd::session_startup::ControlCloseOutcome>,
+    pub input_stop: Option<crate::viewer_input::StopReason>,
+    pub failure: Option<CleanupFailure>,
+}
+
 /// Bounded synchronous callbacks on the session thread. No callback may block
 /// on native work. The observer's original mapping/visibility requirements apply
 /// unchanged; a map notification or decoder receipt is not a visibility proof.
@@ -63,6 +74,10 @@ pub trait Ui {
         Err(CallbackError)
     }
     fn input_result(&mut self, _attempt: u8, _result: input::ResultEvent) {}
+    /// Informational: never changes the cleanup result. A local application
+    /// can retain original terminal reports and veto a later Reconnecting
+    /// notification when a genuine input stop raced with transport failure.
+    fn cleanup_finished(&mut self, _attempt: u8, _summary: CleanupSummary) {}
     fn status(&mut self, _status: Status) -> Result<(), CallbackError> {
         Ok(())
     }
@@ -347,6 +362,13 @@ impl<U: Ui> Application for Session<U> {
             if let Some(statistics) = desktop.statistics() {
                 self.statistics = Some(statistics);
             }
+            // The attempt future may have been abandoned after receiving a
+            // terminal report but before copying it into Session. Preserve the
+            // original owner's evidence before close/reap can remove it.
+            self.disconnect = desktop.disconnect_outcome().or(self.disconnect);
+            self.control_disconnect = desktop
+                .control_disconnect_outcome()
+                .or(self.control_disconnect);
             // Sample BEFORE close: closing records its own local stop.
             if let Some(crate::viewer_input::Status::Stopped(reason)) =
                 desktop.input().map(|input| input.status())
@@ -358,6 +380,17 @@ impl<U: Ui> Application for Session<U> {
         async move {
             let result = self.finish_cleanup(cx, deadline).await;
             self.cleanup_failure = result.err();
+            if self.last_attempt != 0 {
+                self.ui.cleanup_finished(
+                    self.last_attempt,
+                    CleanupSummary {
+                        disconnect: self.disconnect,
+                        control_disconnect: self.control_disconnect,
+                        input_stop: self.input_stop,
+                        failure: self.cleanup_failure,
+                    },
+                );
+            }
             result.map_err(|_| CallbackError)
         }
     }

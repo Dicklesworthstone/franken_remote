@@ -83,6 +83,15 @@ Host options:
 
 For control, the viewer window must hold keyboard focus. A window manager gives it focus; without one, capture waits 30 s and then ends with `control_focus_lost`. The JSON completion names why a session ended. Typical causes: `host_not_answering` (the host is not running, is busy with another viewer, or UDP 8443 is blocked), `encoder_unavailable` (host startup), and `control_focus_lost`.
 
+The control request is made at most once per command. A transient link failure can
+use the remaining `--attempts` budget (five attempts by default) to reopen
+viewing after confirmed native cleanup. Input, clipboard and file requests are
+never repeated. User close, local release, explicit control revocation/refusal
+and input expiry remain terminal; start a new command to request control again. `--attempts 1`
+disables automatic retries. Completion distinguishes the final
+`last_attempt_mode` and `viewing_reconnects` from the original control and transfer
+outcomes; see [native recovery and reconnect](NATIVE_RECOVERY_RECONNECT.md).
+
 ---
 
 ## TL;DR

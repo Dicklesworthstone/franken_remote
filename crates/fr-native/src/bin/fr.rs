@@ -26,9 +26,16 @@ struct Failure {
     earlier: output::Earlier,
     /// Bounded receive evidence retained through every terminal error formatter.
     files_receive: Option<&'static FileReceiveReport>,
+    /// Original control/transfer outcomes survive a later viewing retry's end.
+    control_history: Option<&'static ControlHistory>,
 }
 #[derive(Debug, PartialEq, Eq)]
 struct FileReceiveReport {
+    json: String,
+    text: String,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct ControlHistory {
     json: String,
     text: String,
 }
@@ -42,6 +49,7 @@ impl Failure {
             closure: None,
             earlier: output::Earlier::NONE,
             files_receive: None,
+            control_history: None,
         }
     }
 }
@@ -85,8 +93,13 @@ Connect needs exactly one role. --view-only never requests control.
 --control requests input control ONCE, after the window shows a fresh frame; the
 host must run frd run --input-agent. Keys, buttons, absolute pointer and discrete
 line-wheel scrolling are available (no text or pixel-scroll input).
-Lost or refused control is never
-retried or reacquired: after a request, fr does not reconnect.
+Lost or refused control is never retried or reacquired. After a transient link
+failure, remaining --attempts may reconnect VIEWING ONLY, after confirmed native
+cleanup. Clipboard and file requests are not repeated; start a new command to
+request control again. User close, local release, explicit control
+revocation/refusal and input expiry remain terminal. Completion reports the last
+attempt's mode and number of viewing-only reconnects separately from historical
+control effects.
 --capture-system-shortcuts (with --control, Linux X11 only) requests a keyboard
 grab after control is granted, so shortcuts such as Alt+Tab can reach the host.
 On acquisition, the viewer title identifies this mode and

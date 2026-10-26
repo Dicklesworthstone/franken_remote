@@ -152,6 +152,12 @@ impl WindowControl {
     pub fn stop(&self) {
         self.0.stop(StopReason::User);
     }
+    /// Whether this original window published a window-manager close request.
+    /// The latch survives session cancellation and native retirement. Reading
+    /// it does not poll liveness, change terminal status, or grant authority.
+    pub fn close_requested(&self) -> bool {
+        self.0.orderly_close.load(Ordering::Acquire) == CLOSE_REQUESTED
+    }
     pub fn status(&self) -> Status {
         self.0.live();
         match self.0.state.load(Ordering::Acquire) {
@@ -482,7 +488,15 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
                     }
                     None
                 }
-                5 => Some(StopReason::User),
+                5 => {
+                    // Publish native WM intent before stop cancels the session:
+                    // another thread may observe cancellation before User.
+                    // This unarmed path still stops immediately, with no grace.
+                    shared
+                        .orderly_close
+                        .store(CLOSE_REQUESTED, Ordering::Release);
+                    Some(StopReason::User)
+                }
                 _ => Some(StopReason::NativeFailure),
             };
             if let Some(reason) = reason {

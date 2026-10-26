@@ -59,6 +59,7 @@ pub(super) fn closed_by_code(reason: Reason) -> Failure {
         closure: None,
         earlier: crate::output::Earlier::NONE,
         files_receive: None,
+        control_history: None,
     }
 }
 
@@ -84,6 +85,21 @@ pub(super) fn lease_json(value: Option<Revoked>) -> String {
     )
 }
 
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+pub(super) fn lease_text(value: Revoked) -> String {
+    let report = Report {
+        reason: value.reason,
+        cleanup: value.cleanup,
+        effects: value.effects,
+    };
+    format!(
+        "reason={}, cleanup={}, effects={}",
+        report.reason(),
+        report.cleanup(),
+        report.effects()
+    )
+}
+
 /// Call only after the original controlled viewer validated the exact session,
 /// control route and lease. Ordinary disconnects do not imply this report.
 pub(super) fn failure(value: Revoked) -> Failure {
@@ -100,6 +116,7 @@ pub(super) fn failure(value: Revoked) -> Failure {
         closure: None,
         earlier: crate::output::Earlier::NONE,
         files_receive: None,
+        control_history: None,
     }
 }
 
@@ -107,18 +124,28 @@ pub(super) fn failure(value: Revoked) -> Failure {
 /// output contract unchanged and never infer a host reason from connection loss.
 pub(super) fn output(error: Failure, json: bool) -> String {
     let mut rendered = failure_output(error, json);
-    if let Some(receive) = error.files_receive {
+    for (evidence_json, evidence_text) in [
+        error
+            .control_history
+            .map(|history| (&history.json, &history.text)),
+        error
+            .files_receive
+            .map(|receive| (&receive.json, &receive.text)),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if json {
             // Every terminal formatter produces one complete JSON object.
             // Append the already bounded, content-free publication evidence.
             if let Some(end) = rendered.rfind('}') {
-                rendered.insert_str(end, &receive.json);
+                rendered.insert_str(end, evidence_json);
             }
         } else {
             if rendered.ends_with('\n') {
                 rendered.pop();
             }
-            rendered.push_str(&receive.text);
+            rendered.push_str(evidence_text);
             rendered.push('\n');
         }
     }

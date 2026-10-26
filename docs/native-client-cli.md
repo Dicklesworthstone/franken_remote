@@ -198,16 +198,38 @@ when the presenter completed `SubmittedToCompositor` into the still-mapped
 window (unmapping stops the session). Occlusion by another local window is not
 detected, and `physical_visibility_proven` stays `false`.
 
-Control is requested at most once per invocation. A refused, expired or lost
-grant is never retried or reacquired: after a request, cleanup runs and the
-command does not reconnect, reporting that attempt's original outcome. A new
-grant needs a new `fr connect --control`. The completion record has
-`role: "control"`, `control_requested`, `control_granted`,
-`control_capabilities_granted` (the host's exact grant, e.g. `["keys",
-"repeat", "absolute_pointer", "buttons", "line_scroll"]`, or `null`),
-`wheel_unavailable`, and content-free counts of host input results
-(`input_results`, `input_submitted_to_os`); these are host-reported stages,
-not local proof of an effect.
+Control is requested at most once per invocation. The local decision is spent
+before submitting that request, even when its admission or reply is uncertain.
+After a retryable transport/media failure, the remaining `--attempts` budget
+(default five) may restore **viewing only**, after confirmed native cleanup.
+The new attempt repeats identity/admission/approval and creates a new decoder,
+window and mapping. It never requests control again, attaches native input,
+or configures another clipboard, upload or download owner. Existing transfer
+results remain available and no selection or consent is replayed. Use
+`--attempts 1` to disable automatic retries; a new grant needs a new
+`fr connect --control` command.
+
+Explicit control revocation/refusal and input expiry, user close, local escape,
+focus loss, native capture failure and unsuccessful cleanup remain terminal.
+A genuine native stop or authenticated host terminal report that races with a
+link failure still prevents reconnect. Existing observation-session expiration
+and renewal-timeout retries remain governed by the unchanged supervisor
+classifier; they cannot restore old control.
+
+The completion record keeps `role: "control"` for the invocation and distinguishes
+`last_attempt_mode` (`control_capable` or `view_only`),
+`viewing_reconnects` (new viewing desktops actually opened),
+`control_request_attempt` and `control_attempt_end`. `control_requested`,
+`control_granted`, `control_capabilities_granted` (the original host's exact
+grant, e.g. `["keys", "repeat", "absolute_pointer", "buttons", "line_scroll"]`,
+or `null`), `wheel_unavailable`, `input_results` and
+`input_submitted_to_os` describe historical control effects. They do not claim
+that the final viewing attempt owns input; the counts are host-reported stages,
+not local proof of an effect. `control_close_exchange` and
+`control_lease_report` retain the original controller's evidence separately
+from the final connection's `close_exchange` and `lease_report`. Both human
+output and terminal errors preserve that distinction and the original
+clipboard/file outcomes. See [native recovery and reconnect](../NATIVE_RECOVERY_RECONNECT.md).
 
 A stale or unknown view suspends control input instead of ending the session
 (plan 11.3).

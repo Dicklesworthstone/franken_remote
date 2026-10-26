@@ -1,7 +1,8 @@
 //! `fr connect --control`: at most ONE explicit control request per `fr`
 //! invocation. Passing `--control` is the local user's decision; nothing here
 //! retries a refused or expired request, reacquires control after loss, or
-//! carries input, a lease or held state into a later connection attempt.
+//! carries input, a lease or held state into a later connection attempt. A
+//! transient failure can reconnect viewing after confirmed native cleanup.
 //!
 //! Visibility witness, stated rather than overclaimed: this X11 slice has no
 //! compositor-independent optical proof. A frame is reported visible only when
@@ -11,7 +12,8 @@
 //! window is not detected, so completion keeps `physical_visibility_proven:
 //! false`. A refused report grants nothing: the session keeps its own gates.
 //!
-//! The default-on controller-only UTF-8 clipboard is configured per attempt at
+//! The default-on controller-only UTF-8 clipboard is configured only while the
+//! invocation still has its one explicit control request available, at
 //! `ready`, before service: nothing opens until the grant and the host's own
 //! readiness plus a mapped, responsive local Turn off panel. `--no-clipboard`
 //! declines this optional lane. The X11 owner runs on the clipboard worker thread (this
@@ -26,7 +28,10 @@ use fr_core::{
 };
 use fr_media::freshness::ClockPolicy;
 use fr_native::{
-    desktop::{Desktop, reconnect::ControlPolicy},
+    desktop::{
+        Desktop,
+        reconnect::{CleanupSummary, ControlPolicy},
+    },
     viewer_window::{Status as WindowStatus, WindowControl},
 };
 use fr_wire::{display::Display, negotiation::Offer};
@@ -209,12 +214,62 @@ pub(super) struct Counters {
     /// Captured local events dropped as obsolete after aging past their
     /// dispatch bound (counts only).
     pub(super) dropped_aged: u64,
-    /// The ORIGINAL outcome of the attempt whose cleanup ended reconnection.
+    /// The original request-bearing attempt's outcome, frozen at its cleanup.
+    /// Later viewing-only attempts cannot replace this evidence.
     pub(super) ended: Option<Result<(), Failure>>,
+    /// Intent for the current connection attempt, never a claim of authority.
+    pub(super) mode: AttemptMode,
+    /// Fresh viewing-only desktops actually opened after the request was spent.
+    pub(super) viewing_reconnects: u8,
+    pub(super) current_attempt: u8,
+    pub(super) request_attempt: Option<u8>,
+    /// Original request-bearing native owner, including late input-stop causes.
+    pub(super) cleanup: Option<CleanupSummary>,
     /// Some when this controller's clipboard policy is enabled.
     pub(super) clipboard: Option<ClipboardCounters>,
 }
 impl Counters {
+    pub(super) fn begin_attempt(&mut self, attempt: u8) {
+        self.current_attempt = attempt;
+        self.mode = if self.requested {
+            AttemptMode::ViewingOnly
+        } else {
+            AttemptMode::Control
+        };
+    }
+    pub(super) fn opened(&mut self) -> AttemptMode {
+        if self.mode == AttemptMode::ViewingOnly {
+            self.viewing_reconnects = self.viewing_reconnects.saturating_add(1);
+        }
+        self.mode
+    }
+    /// Spend the local decision before asking the session to admit it. Even an
+    /// uncertain or refused request cannot authorize another one on reconnect.
+    pub(super) fn spend_request(&mut self) {
+        self.requested = true;
+        self.request_attempt.get_or_insert(self.current_attempt);
+    }
+    pub(super) fn retain_cleanup(&mut self, attempt: u8, summary: CleanupSummary) {
+        if self.request_attempt == Some(attempt) {
+            self.cleanup = Some(summary);
+        }
+    }
+    pub(super) fn retry_stopped(&self) -> bool {
+        self.cleanup.is_some_and(|summary| {
+            summary.input_stop.is_some_and(|reason| {
+                !matches!(
+                    reason,
+                    fr_native::viewer_input::StopReason::Local
+                        | fr_native::viewer_input::StopReason::Closed
+                )
+            }) || summary
+                .disconnect
+                .is_some_and(|outcome| outcome.report.is_some())
+                || summary.control_disconnect.is_some_and(|outcome| {
+                    outcome.revocation.is_some() || outcome.exchange.report.is_some()
+                })
+        })
+    }
     /// Count host-reported results by stage only. Duplicates are not new work.
     pub(super) fn result(&mut self, event: &ResultEvent) {
         if let ResultEvent::Completed(result) | ResultEvent::Pointer(result) = event {
@@ -224,20 +279,36 @@ impl Counters {
             }
         }
     }
-    /// At each attempt's cleanup. Once a request was made, a reconnect that
-    /// asked again would be automatic reacquisition: refuse further attempts
-    /// AFTER mandatory cleanup and retain the attempt's own outcome.
-    pub(super) fn cleaning(&mut self, failure: Option<Failure>) -> Result<(), CallbackError> {
-        if !self.requested {
-            return Ok(());
+    /// Retain the first request-bearing attempt's own outcome. The canonical
+    /// supervisor still owns error classification and cleanup-before-retry;
+    /// allowing its retry restores viewing only, never another request.
+    pub(super) fn cleaning(&mut self, failure: Option<Failure>) {
+        if self.requested {
+            self.ended.get_or_insert(failure.map_or(Ok(()), Err));
         }
-        self.ended = Some(failure.map_or(Ok(()), Err));
-        Err(CallbackError)
+    }
+}
+
+/// The local user's one control decision is consumed by the first request,
+/// including a request whose reply was lost. Later attempts can only view.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AttemptMode {
+    #[default]
+    Control,
+    ViewingOnly,
+}
+impl AttemptMode {
+    pub(super) const fn name(self) -> &'static str {
+        match self {
+            Self::Control => "control_capable",
+            Self::ViewingOnly => "view_only",
+        }
     }
 }
 
 /// One opened attempt's local state, created at `ready` and never reused.
 pub(super) struct Attempt {
+    mode: AttemptMode,
     display: Display,
     window: WindowControl,
     mapped: bool,
@@ -247,8 +318,9 @@ pub(super) struct Attempt {
     clipboard: Option<frd::native_clipboard::Control>,
 }
 impl Attempt {
-    pub(super) fn new(desktop: &Desktop) -> Option<Self> {
+    pub(super) fn new(desktop: &Desktop, mode: AttemptMode) -> Option<Self> {
         Some(Self {
+            mode,
             display: desktop.display()?,
             window: desktop.window()?,
             mapped: false,
@@ -339,6 +411,13 @@ impl Attempt {
         frame: Option<Presentation>,
         counters: &mut Counters,
     ) -> Result<Option<Layout>, CallbackError> {
+        if self.mode == AttemptMode::ViewingOnly
+            && !matches!(&state, InteractiveViewerState::Viewing(_))
+        {
+            // No request was made on this connection. Never accept a stray
+            // grant, configure input capture, or inherit the old layout.
+            return Err(CallbackError);
+        }
         if let Some(clipboard) = counters.clipboard.as_mut() {
             self.clipboard_turn(clipboard);
         }
@@ -360,9 +439,12 @@ impl Attempt {
                     let result = view.visible(frame);
                     self.witness(frame, &result);
                 }
-                if !counters.requested && view.evidence().is_ok() {
+                if self.mode == AttemptMode::Control
+                    && !counters.requested
+                    && view.evidence().is_ok()
+                {
+                    counters.spend_request();
                     view.request_control().map_err(|_| CallbackError)?;
-                    counters.requested = true;
                 }
                 Ok(None)
             }
@@ -567,20 +649,86 @@ mod tests {
         assert_eq!(counters.absence(), None);
     }
     #[test]
-    fn a_made_request_ends_reconnection_and_keeps_the_original_outcome() {
+    fn the_spent_request_survives_uncertainty_and_later_viewing_cleanup() {
         let mut counters = Counters::default();
-        assert_eq!(counters.cleaning(Some(Failure::Cancelled)), Ok(()));
-        assert_eq!(
-            counters.ended, None,
-            "no request: ordinary reconnect policy"
-        );
-        counters.requested = true;
-        assert_eq!(
-            counters.cleaning(Some(Failure::Cancelled)),
-            Err(CallbackError)
-        );
+        counters.begin_attempt(1);
+        assert_eq!(counters.opened(), AttemptMode::Control);
+        counters.cleaning(Some(Failure::Cancelled));
+        assert_eq!(counters.ended, None, "no control request was spent");
+        counters.begin_attempt(2);
+        assert_eq!(counters.opened(), AttemptMode::Control);
+        counters.spend_request();
+        // The request is already spent if admission or its reply now fails.
+        assert!(counters.requested);
+        assert_eq!(counters.request_attempt, Some(2));
+        counters.cleaning(Some(Failure::Cancelled));
         assert_eq!(counters.ended, Some(Err(Failure::Cancelled)));
-        assert_eq!(counters.cleaning(None), Err(CallbackError));
-        assert_eq!(counters.ended, Some(Ok(())));
+        counters.results = 3;
+        counters.submitted = 2;
+        for attempt in [3, 4] {
+            counters.begin_attempt(attempt);
+            assert_eq!(counters.opened(), AttemptMode::ViewingOnly);
+            counters.cleaning(None);
+            assert_eq!(counters.request_attempt, Some(2));
+            assert_eq!(counters.ended, Some(Err(Failure::Cancelled)));
+            assert_eq!((counters.results, counters.submitted), (3, 2));
+        }
+        assert_eq!(counters.viewing_reconnects, 2);
+    }
+    #[test]
+    fn only_the_original_request_owner_can_supply_cleanup_evidence() {
+        use fr_native::viewer_input::StopReason;
+        let mut counters = Counters::default();
+        counters.begin_attempt(2);
+        counters.spend_request();
+        let mut summary = CleanupSummary {
+            disconnect: None,
+            control_disconnect: None,
+            input_stop: Some(StopReason::FocusLost),
+            failure: None,
+        };
+        counters.retain_cleanup(1, summary);
+        assert_eq!(counters.cleanup, None);
+        counters.retain_cleanup(2, summary);
+        assert!(counters.retry_stopped());
+        counters.begin_attempt(3);
+        summary.input_stop = Some(StopReason::Local);
+        counters.retain_cleanup(3, summary);
+        assert_eq!(
+            counters.cleanup.unwrap().input_stop,
+            Some(StopReason::FocusLost)
+        );
+        assert!(counters.retry_stopped());
+    }
+    #[test]
+    fn cleanup_generated_stops_allow_viewing_but_native_stop_intent_is_terminal() {
+        use fr_native::viewer_input::StopReason;
+        for reason in [
+            None,
+            Some(StopReason::Local),
+            Some(StopReason::Closed),
+            Some(StopReason::FocusLost),
+            Some(StopReason::LocalEscape),
+            Some(StopReason::WindowChanged),
+            Some(StopReason::Expired),
+        ] {
+            let mut counters = Counters::default();
+            counters.begin_attempt(1);
+            counters.spend_request();
+            counters.retain_cleanup(
+                1,
+                CleanupSummary {
+                    disconnect: None,
+                    control_disconnect: None,
+                    input_stop: reason,
+                    failure: None,
+                },
+            );
+            assert_eq!(
+                counters.retry_stopped(),
+                !matches!(reason, None | Some(StopReason::Local | StopReason::Closed)),
+                "{reason:?}"
+            );
+        }
     }
 }
