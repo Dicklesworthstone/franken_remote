@@ -55,6 +55,40 @@ connection. The parent still performs its normal input revocation and cleanup.
 A synchronous receive handler must not block on capture, decoding, presentation,
 or input injection; these already have separately owned native workers.
 
+Optional-lane retirement during native I/O (2026-10-26). A clipboard Off or
+other established optional-lane retirement discovered during an I/O poll can
+preserve the parent connection only when native application payload was proven
+empty at that operation's entry. The proof includes every known outbound
+stream's pending and retained retransmission state, the native DATAGRAM queue,
+complete stream accounting, and uncertainty retained from earlier incomplete
+native operations. This is connection-wide evidence: unrelated input, video or
+file payload also makes an entry ineligible. An application record still queued
+outside the native owner is not protected output and remains removable by the
+ordinary retirement path.
+
+With that immutable entry proof, the same exclusively borrowed native future
+finishes under its original cancellation, immutable lifetime, authorization,
+clock, attachment and delivery-deadline checks. Peer packets can generate
+transport replies and incoming data, but cannot turn queued FRD0 records into
+outgoing application bytes. Before further application staging or dispatch,
+the owner retires the exact optional pair and discards its receive state. This
+keeps idle Off actions from unnecessarily ending input, the display or another
+file direction. It neither extends the receive/drive budget nor drops a pending
+native future to pretend it completed.
+
+A staged stream prefix, retained retransmission, queued DATAGRAM or uncertain
+protected output keeps the existing terminal `OptionalRetirementDuringIo`
+fence. A post-return empty queue is not sufficient proof. Authority loss,
+cancellation, native failure and a dropped outer future remain terminal, and
+terminal-report drains retain their original conservative guard.
+
+The actual UDP/TLS attachment regressions in `clipboard/retire_io.rs` cover a
+pending empty receive with and without late peer clipboard bytes, continued
+input/control on the original connection, retained stream payload, queued native
+DATAGRAMs, lifetime denial and cancellation. These new runtime tests have not
+been executed in this resource-constrained session; source review of the pinned
+native implementation and formatting are separate evidence from a live pass.
+
 ## Bounded resources
 
 Default bounds are 64 KiB per native stream receive window, 512 KiB native

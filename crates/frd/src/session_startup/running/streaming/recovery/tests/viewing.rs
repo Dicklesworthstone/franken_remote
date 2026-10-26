@@ -80,7 +80,7 @@ fn pre_request_viewing_recovers_without_authority_then_grants_only_the_current_v
         .await;
         let (hi, vi) = input.unwrap();
         let request = Request {
-            parent: viewer.opened.binding,
+            parent: viewer.metadata().binding,
             sequence: 1,
             target: target(media.binding()),
         };
@@ -369,7 +369,7 @@ fn terminal(case: Terminal) {
         .await;
         let (hi, vi) = input.unwrap();
         let request = Request {
-            parent: viewer.opened.binding,
+            parent: viewer.metadata().binding,
             sequence: 1,
             target: target(media.binding()),
         };

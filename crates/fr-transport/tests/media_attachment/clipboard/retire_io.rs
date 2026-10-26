@@ -1,5 +1,5 @@
-//! Requests discovered after native staging cannot be reset before that same
-//! native poll. Exercise the real UDP/TLS owner and its original attachments.
+//! Retirement during native I/O needs an immutable application-empty entry
+//! proof. Exercise real UDP/TLS ownership, retained payload and original routes.
 use super::*;
 use std::{
     future::{Future, poll_fn},
@@ -70,7 +70,7 @@ fn retirement_after_staging_fences_before_native_flush() {
 }
 
 #[test]
-fn pending_native_io_rechecks_optional_retirement_before_resuming() {
+fn pending_native_io_with_unacknowledged_payload_still_fences_retirement() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut l = Link::new(&cx).await;
@@ -80,6 +80,10 @@ fn pending_native_io_rechecks_optional_retirement_before_resuming() {
         let h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
         let _c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
         quiet(&mut l, &cx).await;
+        h.send(&mut l.h, &cx, &chunk(&h), clock(&cx) + 1_000_000, || true)
+            .unwrap();
+        // The peer is not driven: stream payload remains unacknowledged even
+        // when native packet assembly empties its pending stream queue.
         let mut tested = false;
         for _ in 0..16 {
             let mut io = pin!(l.h.drive(&cx, Duration::from_millis(100), || true));
@@ -179,4 +183,174 @@ fn serviced_retirement_and_input_requests_leave_native_io_usable() {
         assert!(!l.h.is_closed());
         assert!(!l.c.is_closed());
     });
+}
+
+#[test]
+fn pending_payload_empty_io_retires_clipboard_and_preserves_input() {
+    for incoming in [false, true] {
+        runtime().block_on(async move {
+            let cx = Cx::current().unwrap();
+            let mut l = Link::new(&cx).await;
+            enable(&mut l);
+            let (_hi, _ci, hi, ci) = attach(&mut l, &cx, 8, MediaRole::Input).await;
+            let (hp, cp, ha, ca) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+            let h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+            let c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+            quiet(&mut l, &cx).await;
+            let original = l.h.binding();
+            let mut tested = false;
+            for _ in 0..16 {
+                let checks = Cell::new(0);
+                let mut io = pin!(l.h.drive(&cx, Duration::from_millis(100), || {
+                    checks.set(checks.get() + 1);
+                    true
+                }));
+                let pending = poll_fn(|task| match io.as_mut().poll(task) {
+                    Poll::Pending => Poll::Ready(true),
+                    Poll::Ready(result) => {
+                        result.unwrap();
+                        Poll::Ready(false)
+                    }
+                })
+                .await;
+                if pending {
+                    // The first native flush precedes the receive wait. Do not
+                    // abandon an earlier pending flush to manufacture a boundary.
+                    if checks.get() < 5 {
+                        io.await.unwrap();
+                        continue;
+                    }
+                    h.request_retirement();
+                    if incoming {
+                        c.send(&mut l.c, &cx, &chunk(&c), clock(&cx) + 1_000_000, || true)
+                            .unwrap();
+                        l.c.drive(&cx, Duration::ZERO, || true).await.unwrap();
+                    }
+                    io.await.unwrap();
+                    tested = true;
+                    break;
+                }
+            }
+            assert!(tested, "must finish a genuinely pending native receive");
+            assert!(l.h.is_bound_to(&original));
+            assert!(!l.h.is_closed());
+            assert!(!l.h.has_route(Route::Stream(ha.inbound)));
+            assert!(!l.h.has_route(Route::Stream(ha.outbound)));
+            assert_eq!(
+                l.h.receive_ready(
+                    &cx,
+                    || true,
+                    |route| route == Route::Stream(ha.inbound),
+                    |_, _| panic!("retired clipboard bytes must never be dispatched"),
+                )
+                .unwrap(),
+                0
+            );
+            peer_retired(&mut l, &cx, ca.outbound).await;
+            let hr = l.hr;
+            let cr = l.cr;
+            for (host, send, receive, kind, binding) in [
+                (true, hi.outbound, ci.inbound, 0x17, 8),
+                (false, ci.outbound, hi.inbound, 0x40, 8),
+                (true, hr.outbound, cr.inbound, 0x12, 7),
+            ] {
+                input::transfer(
+                    &mut l,
+                    &cx,
+                    host,
+                    Route::Stream(send),
+                    Route::Stream(receive),
+                    &record(kind, binding, 96),
+                )
+                .await;
+            }
+            assert!(!l.h.is_closed() && !l.c.is_closed());
+        });
+    }
+}
+
+#[test]
+fn queued_native_datagram_keeps_retirement_conservative() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let (_hi, _ci, _, ci) = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let (hp, cp, _, _) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+        let _h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+        let c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+        quiet(&mut l, &cx).await;
+        l.c.send(
+            &cx,
+            Route::Datagram(ci.datagram.unwrap()),
+            &record(0x42, 8, 96),
+            clock(&cx) + 1_000_000,
+            || true,
+        )
+        .unwrap();
+        let mut checks = 0;
+        assert_eq!(
+            l.c.drive(&cx, Duration::ZERO, || {
+                checks += 1;
+                if checks == 3 {
+                    c.request_retirement();
+                }
+                true
+            })
+            .await,
+            Err(Error::OptionalRetirementDuringIo)
+        );
+        assert_eq!(checks, 3, "must not poll native datagram protection");
+        assert!(l.c.is_closed());
+    });
+}
+
+#[test]
+fn empty_entry_retirement_never_overrides_lifetime_or_cancellation() {
+    use asupersync::types::CancelKind;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+    for denial in [Error::Unauthorized, Error::Cancelled] {
+        runtime().block_on(async move {
+            let cx = Cx::current().unwrap();
+            let mut l = Link::new(&cx).await;
+            let allowed = Arc::new(AtomicBool::new(true));
+            let gate = Arc::clone(&allowed);
+            l.h.retain_lifetime_check(&cx, Arc::new(move || gate.load(Ordering::Acquire)))
+                .unwrap();
+            enable(&mut l);
+            let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
+            let (hp, cp, _, _) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+            let h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+            let _c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+            quiet(&mut l, &cx).await;
+            let mut tested = false;
+            for _ in 0..16 {
+                let mut io = pin!(l.h.drive(&cx, Duration::from_millis(100), || true));
+                let pending = poll_fn(|task| match io.as_mut().poll(task) {
+                    Poll::Pending => Poll::Ready(true),
+                    Poll::Ready(result) => {
+                        result.unwrap();
+                        Poll::Ready(false)
+                    }
+                })
+                .await;
+                if pending {
+                    h.request_retirement();
+                    if denial == Error::Cancelled {
+                        cx.cancel_fast(CancelKind::User);
+                    } else {
+                        allowed.store(false, Ordering::Release);
+                    }
+                    assert_eq!(io.await, Err(denial));
+                    tested = true;
+                    break;
+                }
+            }
+            assert!(tested, "must test denial while native I/O is pending");
+            assert!(l.h.is_closed());
+        });
+    }
 }

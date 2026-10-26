@@ -932,12 +932,12 @@ impl QuicRecords {
             // Native ownership stays outside self across every await: dropping
             // or unwinding an in-flight operation cannot resume its queued data.
             let mut held = self.hold()?;
-            let (native, attachments) = held.io_parts();
-            let result = lifetime::poll_io(
+            let (native, boundary) = held.io_parts();
+            let result = lifetime::poll_io_at_boundary(
                 cx,
                 gate.as_deref(),
                 authorize,
-                attachments,
+                boundary,
                 current,
                 until,
                 native.flush(cx),
@@ -954,12 +954,12 @@ impl QuicRecords {
         let current = self.check(cx, authorize)?;
         let until = self.senders.iter().filter_map(|s| s.until).min();
         let mut held = self.hold()?;
-        let (native, attachments) = held.io_parts();
-        let result = lifetime::poll_io(
+        let (native, boundary) = held.io_parts();
+        let result = lifetime::poll_io_at_boundary(
             cx,
             gate.as_deref(),
             authorize,
-            attachments,
+            boundary,
             current,
             until,
             native.drive_io_once(cx, wait),
@@ -1393,10 +1393,16 @@ struct Held<'a> {
     native: Option<NativeQuicUdpConnection>,
 }
 impl Held<'_> {
-    fn io_parts(&mut self) -> (&mut NativeQuicUdpConnection, &[attachment::Reservation]) {
+    fn io_parts(&mut self) -> (&mut NativeQuicUdpConnection, lifetime::IoBoundary<'_>) {
         (
             self.native.as_mut().expect("held until released"),
-            &self.records.attachments,
+            lifetime::IoBoundary {
+                attachments: &self.records.attachments,
+                // hold() captured both current native payload and uncertainty
+                // retained from an earlier incomplete native operation. This
+                // witness is fixed before the native future's first poll.
+                payload_empty: !self.records.native_io_unsettled,
+            },
         )
     }
     fn release(mut self) -> NativeQuicUdpConnection {

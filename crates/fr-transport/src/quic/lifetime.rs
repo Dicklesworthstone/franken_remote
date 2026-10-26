@@ -57,11 +57,44 @@ impl QuicRecords {
     }
 }
 
-pub(super) async fn poll_io<T, E>(
+/// Immutable entry evidence from the exclusive native owner. Queued FRD0
+/// records remain outside that borrow; only this proof can permit an optional
+/// retirement to wait for the same native operation to finish.
+pub(super) struct IoBoundary<'a> {
+    pub(super) attachments: &'a [Reservation],
+    pub(super) payload_empty: bool,
+}
+
+/// Terminal drains retain their original conservative guard. They have no
+/// Held entry witness and cannot opt into ordinary payload-empty continuation.
+pub(super) fn poll_io<T, E>(
     cx: &Cx,
     gate: Option<&(dyn Fn() -> bool + Send + Sync)>,
     authorize: &mut impl FnMut() -> bool,
     attachments: &[Reservation],
+    started: u64,
+    until: Option<u64>,
+    io: impl Future<Output = Result<T, E>>,
+) -> impl Future<Output = Result<T, Error>> {
+    poll_io_at_boundary(
+        cx,
+        gate,
+        authorize,
+        IoBoundary {
+            attachments,
+            payload_empty: false,
+        },
+        started,
+        until,
+        io,
+    )
+}
+
+pub(super) async fn poll_io_at_boundary<T, E>(
+    cx: &Cx,
+    gate: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    authorize: &mut impl FnMut() -> bool,
+    boundary: IoBoundary<'_>,
     started: u64,
     until: Option<u64>,
     io: impl Future<Output = Result<T, E>>,
@@ -82,16 +115,28 @@ pub(super) async fn poll_io<T, E>(
             }
             Ok(at) => at,
         };
-        if attachments.iter().any(|r| r.expired(at)) {
+        if boundary.attachments.iter().any(|r| r.expired(at)) {
             return Poll::Ready(Err(Error::Expired));
         }
-        if attachments.iter().any(Reservation::retirement_pending) {
+        if !boundary.payload_empty
+            && boundary
+                .attachments
+                .iter()
+                .any(Reservation::retirement_pending)
+        {
             // check() cannot retire streams while this future owns the native
             // connection. Its private protected packets cannot be selectively
             // retracted, so do not poll or resume it after a late retirement.
             // Held returns custody only to close, never another ordinary turn.
             return Poll::Ready(Err(Error::OptionalRetirementDuringIo));
         }
+        // An operation entered with no native application payload or uncertain
+        // protected output can finish under the SAME authority/deadline gates.
+        // Its exclusive borrow cannot stage queued FRD0 records; peer traffic
+        // can generate transport replies but no application bytes. Completion
+        // returns custody to check(), which retires the pair before subsequent
+        // application staging or dispatch. Never drop this pending future to
+        // manufacture completion or substitute a post-return emptiness check.
         io.as_mut()
             .poll(task)
             .map(|result| result.map_err(|_| Error::Native))

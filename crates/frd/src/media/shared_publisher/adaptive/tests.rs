@@ -179,7 +179,7 @@ fn source_pressure_stays_distinct_from_shared_pool_or_send_pressure() {
 fn only_actual_unchanged_observations_establish_idle_and_actual_change_wakes_it() {
     let mut observed = pacing();
     let mut silent = pacing();
-    for now in (10_000..=1_300_000).step_by(10_000) {
+    for now in (10_000_u64..=1_300_000).step_by(10_000) {
         if now.is_multiple_of(100_000) {
             complete(&mut observed, now, false);
         }
@@ -211,7 +211,7 @@ fn missing_send_evidence_never_allows_an_upward_probe() {
     for now in (0..=150_000).step_by(10_000) {
         pacing.sample(now, false, Availability::Ready).unwrap();
     }
-    for now in (160_000..=3_000_000).step_by(10_000) {
+    for now in (160_000_u64..=3_000_000).step_by(10_000) {
         if now.is_multiple_of(100_000) {
             complete(&mut pacing, now, true);
         }
