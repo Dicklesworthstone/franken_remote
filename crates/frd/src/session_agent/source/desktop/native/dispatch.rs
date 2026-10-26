@@ -300,6 +300,7 @@ pub struct Driver {
     desktop: Option<Opened>,
     policy: Policy,
     interval: Duration,
+    shared_adaptive_capture: Option<Duration>,
     entropy: Entropy,
 }
 impl std::fmt::Debug for Driver {
@@ -342,12 +343,36 @@ impl SessionAgent {
                 desktop: None,
                 policy,
                 interval,
+                shared_adaptive_capture: None,
                 entropy,
             },
         ))
     }
 }
 impl Driver {
+    /// Pace the shared observation source using its measured work and bounded
+    /// capture credit. Configure before service; this starts no source and grants
+    /// no control. The exclusive controller keeps its own `ControlProfile` choice.
+    pub fn with_shared_adaptive_capture(mut self, maximum: Duration) -> Result<Self, Error> {
+        let invalid = || {
+            Error::from(super::super::Error::Capture(
+                crate::media::shared_publisher::Error::InvalidBudget,
+            ))
+        };
+        if self.first.is_none() || self.shared_adaptive_capture.is_some() {
+            return Err(invalid());
+        }
+        self.cx.checkpoint().map_err(|_| Error::Closed)?;
+        fr_media::pacing::Controller::new(fr_media::pacing::Policy {
+            minimum_interval_us: u64::try_from(self.interval.as_nanos().div_ceil(1000))
+                .map_err(|_| invalid())?,
+            maximum_interval_us: u64::try_from(maximum.as_micros()).map_err(|_| invalid())?,
+        })
+        .map_err(|_| invalid())?;
+        self.shared_adaptive_capture = Some(maximum);
+        Ok(self)
+    }
+
     /// Access this exact driver's authenticated-Host dispatcher. The handle is
     /// not permission and cannot keep the source alive after Driver stops.
     pub fn incoming(&self) -> Incoming {
@@ -502,6 +527,13 @@ impl Driver {
                         return controlled_outcome(result);
                     }
                 };
+                if let Some(maximum) = this.shared_adaptive_capture {
+                    desktop
+                        .prepared
+                        .publisher
+                        .enable_adaptive_capture(this.interval, maximum)
+                        .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
+                }
                 let service = desktop.first().into_service().map_err(Error::Viewers)?;
                 let admission = desktop.admissions();
                 let source = desktop
@@ -567,11 +599,11 @@ impl Driver {
     pub fn worker_id(&self) -> Option<u32> {
         self.desktop.as_ref().and_then(Opened::worker_id)
     }
-    /// Actual controlling-source pacing evidence; shared observers keep fixed cadence.
+    /// Actual pacing evidence from the original controlled or shared source.
     pub fn capture_pacing(&self) -> Option<&fr_media::pacing::Controller> {
         match self.desktop.as_ref()? {
             Opened::Controlled(desktop) => desktop.capture_pacing(),
-            Opened::Shared(_) => None,
+            Opened::Shared(desktop) => desktop.prepared.publisher.pacing(),
         }
     }
 }

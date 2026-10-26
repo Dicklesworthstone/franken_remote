@@ -7,24 +7,34 @@ resolution, end-to-end latency, or per-path aggregate-bandwidth controller.
 
 ## Local host selection
 
-The shipped Linux host exposes this pacing path for the first controlling viewer:
+The shipped Linux host exposes pacing for both an observation-only shared source
+and the first controlling viewer:
 
 ```sh
-frd run --encoder software --input-agent /usr/libexec/fr-input-agent --adaptive-capture
+frd run --encoder software --adaptive-capture
+# Add --input-agent /usr/libexec/fr-input-agent to offer control as well.
 ```
 
-The option is off by default and requires `--input-agent`. It is a local
-capture-policy choice, not a negotiated peer capability. The existing approval,
-input permission, mandatory control indicator, and lease still govern the share.
-Installed services preserve the choice through their `--` arguments and reject
-it without the input agent.
+The option is off by default. It is a local capture-policy choice, not a
+negotiated peer capability. The existing observation approval and source
+permission checks still govern the share; control additionally requires its
+input permission, indicator and lease. Installed services preserve the choice
+through their `--` arguments, including on hosts that do not offer control.
 
 The original controlled publisher receives the existing measured source-work,
 send-admission, retention-credit and negotiated decoder-load samples. Collected
 native input retains its existing bounded idle wake path. The encoder bitrate,
-resolution and configuration do not change. An observer-first share still uses
-its shared owner's fixed cadence; aggregate shared-source adaptation remains
-separate work.
+resolution and configuration do not change. An observer-first share now uses the
+same pacing state machine in its original shared publisher, with measured source
+work, genuine changed/unchanged observations and aggregate capture credit. A
+healthy eligible subscriber keeps the source eligible while a lagging subscriber
+retains its own existing expiry and retirement rules. Actual video enqueue
+samples also contribute: any recently ready streaming subscriber establishes
+local send readiness, while shared send pressure requires every eligible
+subscriber to have recent blocked evidence. Startup, recovery and failed
+subscribers do not vote; silent or stale samples remain unknown. Decoder and
+delivery measurements remain unknown for this shared-source controller, and
+neither enqueue success nor capture credit is treated as a bandwidth estimate.
 
 The `--fps` setting remains the maximum capture rate. The adaptive maximum is
 200 ms unless the configured capture interval is already slower; a `--fps` value
@@ -39,6 +49,12 @@ publisher. Codec output, native input effects and visible confirmation in that
 regression are explicit protocol fixtures, not hardware or physical presentation
 evidence. Separate parser, service-render, profile and low-fps-policy regressions
 cover the selection boundary.
+
+The shared-dispatch regression also follows first-viewer consent, the original
+capture child, source renewal and a later viewer through actual UDP/TLS/QUIC and
+supervised protocol-fixture IPC. The later viewer continues after the first
+connection departs, with pacing owned by the source rather than either viewer.
+This remains fixture-based integration evidence, not live-tailnet qualification.
 
 ## Enabling the implemented path
 
@@ -55,6 +71,15 @@ exceed 200 ms, except that an already slower fixed interval may be retained as
 both minimum and maximum (up to one second). Invalid limits, repeated configuration, and a stopped or already
 serving owner are refused without replacing the controller. Existing callers
 retain their fixed policy until they explicitly enable adaptation.
+
+For an independently owned shared source, call
+`Publisher::enable_adaptive_capture(capture_interval, maximum)` before its
+continuous service. The dispatch driver exposes the same selection through
+`Driver::with_shared_adaptive_capture(maximum)` and reports the original source's
+controller through `Driver::capture_pacing()`. The minimum interval must match
+the subsequent service cadence and the encoder's frame-rate ceiling.
+Shared cursor sampling keeps its original cadence when adaptive video slows;
+pointer motion does not create a video frame or source-freshness evidence.
 
 The pure state machine is `fr_media::pacing::Controller`. It keeps fixed-size
 state and the last sixteen adjustments, with no heap allocation or media bytes.

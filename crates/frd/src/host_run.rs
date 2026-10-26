@@ -99,8 +99,8 @@ pub struct Options {
     pub sharing: Scope,
     pub fps: u16,
     pub bitrate: u32,
-    /// Measured raw-capture pacing for the dedicated controlling session only.
-    /// Requires `input_agent`; observer-first shared capture retains its cadence.
+    /// Measured raw-capture pacing for controlled and shared observation sessions.
+    /// This local choice changes capture admission, never codec configuration.
     pub adaptive_capture: bool,
     /// Replacement nft/ip executables (root-owned); `None` uses /usr/sbin.
     pub ingress_tools: Option<(PathBuf, PathBuf)>,
@@ -802,7 +802,6 @@ fn check(options: &Options) -> Result<(), Error> {
             .input_agent
             .as_ref()
             .is_some_and(|p| !p.is_absolute())
-        || (options.adaptive_capture && options.input_agent.is_none())
         || (options.clipboard && options.input_agent.is_none())
         || (options.files.is_some() && options.input_agent.is_none())
         || (options.file_send.is_some()
@@ -964,6 +963,7 @@ impl Share<'_> {
         audio_retired: &Arc<Mutex<Option<Retirement>>>,
     ) -> Result<dispatch::Driver, Error> {
         let fps = self.options.fps;
+        let interval = capture_interval(fps).ok_or(Error::Configuration)?;
         let mut agent = SessionAgent::new(
             ApprovalMode::Unattended,
             PlatformKind::LinuxX11,
@@ -1015,15 +1015,21 @@ impl Share<'_> {
             )?);
         }
         let entropy: shared_viewers::Entropy = Arc::new(|| random_nonzero_u128().map_err(|_| ()));
-        agent
+        let (_, driver) = agent
             .native_incoming(
                 source.clone(),
                 shared_viewers::Policy::default(),
-                capture_interval(fps).ok_or(Error::Configuration)?,
+                interval,
                 entropy,
             )
-            .map(|(_, driver)| driver)
-            .map_err(Error::Desktop)
+            .map_err(Error::Desktop)?;
+        if self.options.adaptive_capture {
+            driver
+                .with_shared_adaptive_capture(interval.max(Duration::from_millis(200)))
+                .map_err(Error::Desktop)
+        } else {
+            Ok(driver)
+        }
     }
 
     /// The source is created only after consent and media negotiation, and its
@@ -1619,10 +1625,7 @@ mod tests {
         let mut adaptive_only = options.clone();
         adaptive_only.worker = PathBuf::from("/unprovisioned/fr-media-worker");
         adaptive_only.adaptive_capture = true;
-        assert_eq!(
-            run(&adaptive_only, &report, &stop),
-            Err(Error::Configuration)
-        );
+        assert_eq!(check(&adaptive_only), Ok(()));
         let mut relative_agent = options.clone();
         relative_agent.worker = PathBuf::from("/usr/bin/fr-media-worker");
         relative_agent.input_agent = Some(PathBuf::from("fr-input-agent"));

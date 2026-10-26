@@ -119,10 +119,10 @@ OPTIONS:
     --fps FPS       Maximum capture/codec frame rate, integer 1..240 (default 30).
                     Native backpressure skips opportunities; this is not measured
                     throughput. No queued catch-up frames
-    --adaptive-capture  With --input-agent: adapt the controlling session's raw
-                    capture cadence to measured source/send/decoder pressure and idle.
+    --adaptive-capture  Adapt raw capture cadence to measured source pressure and
+                    verified idle, for controlled and shared viewing sessions.
                     Normally bounded at 200 ms; a slower --fps remains fixed.
-                    Codec settings stay fixed; observer-first shares keep fixed cadence.
+                    Codec settings stay fixed. Per-viewer feedback applies to control.
                     Off by default; see ADAPTIVE_CAPTURE.md
     --bitrate BPS   Encoder target bits per second, integer 10000..200000000
                     (default 8000000). Not a hard network ceiling or automatic
@@ -371,7 +371,8 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "event": "listening",
                 "address": address.to_string(),
                 "control": profile.control,
-                "controlled_adaptive_capture": profile.adaptive_capture,
+                "controlled_adaptive_capture": profile.adaptive_capture && profile.control,
+                "shared_adaptive_capture": profile.adaptive_capture,
                 "observation_indicator": profile.observation_indicator,
                 "encoder_selection": profile.encoder.as_str(),
                 "video_fps_limit": profile.video.fps(),
@@ -417,7 +418,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 );
                 if profile.adaptive_capture {
                     println!(
-                        "frd: adaptive raw-capture cadence enabled for controlling sessions; codec settings and observer-first shared cadence stay fixed"
+                        "frd: adaptive raw-capture cadence enabled for controlling and shared viewing sessions; codec settings stay fixed"
                     );
                 }
                 if profile.encoder.is_hardware() {
@@ -515,14 +516,6 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(options) => options,
         Err(error) => return local_policy::refusal(error, json),
     };
-    if options.adaptive_capture && options.input_agent.is_none() {
-        return run_refusal(
-            json,
-            "adaptive_capture_requires_input_agent",
-            "--adaptive-capture paces a controlling session; it needs --input-agent",
-            2,
-        );
-    }
     let video = match options.video_profile() {
         Ok(video) => video,
         Err(error) => return local_policy::refusal(error, json),

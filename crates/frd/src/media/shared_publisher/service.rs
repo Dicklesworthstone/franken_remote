@@ -9,6 +9,7 @@ const MAINTENANCE_US: u64 = 10_000;
 struct Cadence {
     interval: u64,
     next: u64,
+    last: u64,
 }
 impl Cadence {
     fn new(interval: Duration, fps: u16, now: u64) -> Result<Self, Error> {
@@ -23,7 +24,18 @@ impl Cadence {
         let interval =
             u64::try_from(interval.as_nanos().div_ceil(1000)).map_err(|_| Error::InvalidBudget)?;
         let next = now.checked_add(interval).ok_or(Error::InvalidBudget)?;
-        Ok(Self { interval, next })
+        Ok(Self {
+            interval,
+            next,
+            last: now,
+        })
+    }
+    fn change_interval(&mut self, interval: u64) -> Result<(), Error> {
+        if interval != self.interval {
+            self.next = self.last.checked_add(interval).ok_or(Error::Closed)?;
+            self.interval = interval;
+        }
+        Ok(())
     }
     fn after_turn(&mut self, started: u64, completed: u64) -> Result<(), Error> {
         if started < self.next || completed < started {
@@ -40,6 +52,7 @@ impl Cadence {
             .ok_or(Error::Closed)?;
         let advance = self.interval.checked_mul(slots).ok_or(Error::Closed)?;
         self.next = started.checked_add(advance).ok_or(Error::Closed)?;
+        self.last = started;
         Ok(())
     }
     fn wake(&self, now: u64, media_deadline: Option<u64>) -> Result<u64, Error> {
@@ -74,9 +87,14 @@ impl Publisher {
         mut report: impl FnMut(CaptureReport) + 'a,
     ) -> impl Future<Output = Result<(), Error>> + 'a {
         // Established at CALL time, not inside the async block.
+        let already_served = self.served;
+        self.served = true;
         let operation = ServiceOperation { publisher: self };
         async move {
             let publisher = &mut *operation.publisher;
+            if already_served {
+                return Err(Error::InvalidBudget);
+            }
             let (owner, mut cadence) = {
                 let mut members = publisher.members.lock().map_err(|_| Error::Poisoned)?;
                 members.tick()?;
@@ -92,6 +110,19 @@ impl Publisher {
                     )?,
                 )
             };
+            // Cursor sampling retains the operator's original cadence while
+            // verified-idle video admission slows down. Cursor motion never
+            // fabricates a source observation or forces a video encode.
+            let mut cursor_cadence = if let Some(pacing) = publisher.pacing() {
+                if pacing.policy().minimum_interval_us != cadence.interval {
+                    return Err(Error::InvalidBudget);
+                }
+                let cursor = cadence;
+                cadence.change_interval(pacing.interval_us())?;
+                Some(cursor)
+            } else {
+                None
+            };
             loop {
                 let (now, deadline) = {
                     let mut members = publisher.members.lock().map_err(|_| Error::Poisoned)?;
@@ -105,8 +136,21 @@ impl Publisher {
                         .min();
                     (members.last, deadline)
                 };
+                if let Some(interval) = publisher.capture_interval(now)? {
+                    cadence.change_interval(interval)?;
+                }
                 if now < cadence.next {
-                    let wake = cadence.wake(now, deadline)?;
+                    if cursor_cadence.is_some_and(|cursor| now >= cursor.next) {
+                        publisher.sample_cursor().await?;
+                        cursor_cadence
+                            .as_mut()
+                            .expect("checked")
+                            .after_turn(now, owner.check().map_err(Error::Media)?.as_micros())?;
+                        continue;
+                    }
+                    let wake = cadence
+                        .wake(now, deadline)?
+                        .min(cursor_cadence.map_or(u64::MAX, |cursor| cursor.next));
                     let nanos = wake.checked_mul(1000).ok_or(Error::Closed)?;
                     // A fresh Sleep per wait, never repoll a completed timer.
                     sleep_until(Time::from_nanos(nanos)).await;
@@ -117,9 +161,16 @@ impl Publisher {
                     Err(Error::Media(MediaError::Backpressure)) => {}
                     Err(error) => return Err(error),
                 }
-                // Same cadence, separate from pixels: a moving pointer over a
-                // static desktop needs no new picture and is not freshness.
-                publisher.sample_cursor().await?;
+                let cursor_started = owner.check().map_err(Error::Media)?.as_micros();
+                if cursor_cadence.is_none_or(|cursor| cursor_started >= cursor.next) {
+                    publisher.sample_cursor().await?;
+                    if let Some(cursor) = &mut cursor_cadence {
+                        cursor.after_turn(
+                            cursor_started,
+                            owner.check().map_err(Error::Media)?.as_micros(),
+                        )?;
+                    }
+                }
                 cadence.after_turn(now, owner.check().map_err(Error::Media)?.as_micros())?;
             }
         }
@@ -180,6 +231,24 @@ mod tests {
         cadence.after_turn(99_999, 100_001).unwrap();
         assert_eq!(cadence.next, 149_999);
         assert_eq!(cadence.wake(100_001, None).unwrap(), 110_001);
+    }
+    #[test]
+    fn adaptive_video_neither_slows_cursor_sampling_nor_replays_missed_slots() {
+        let mut video = Cadence::new(Duration::from_millis(50), 30, 0).unwrap();
+        let mut cursor = video;
+        video.change_interval(200_000).unwrap();
+        for started in [50_000, 100_000, 150_000] {
+            assert_eq!(cursor.next, started);
+            cursor.after_turn(started, started + 1000).unwrap();
+            assert_eq!(video.next, 200_000);
+        }
+        video.after_turn(200_000, 450_000).unwrap();
+        assert_eq!(video.next, 600_000);
+        video.change_interval(100_000).unwrap();
+        assert_eq!(video.next, 300_000);
+        // Resume at actual current time, never replay the two elapsed slots.
+        video.after_turn(450_000, 451_000).unwrap();
+        assert_eq!(video.next, 550_000);
     }
     #[test]
     fn exact_expiry_and_long_native_stalls_skip_all_elapsed_slots() {

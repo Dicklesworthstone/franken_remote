@@ -120,6 +120,7 @@ impl JoinQueue {
             starting: None,
             cursor: super::cursor::EntryCursor::default(),
             audio: super::audio::EntryAudio::default(),
+            send_sample: None,
             join: Some(PendingJoin {
                 setup,
                 cfg,

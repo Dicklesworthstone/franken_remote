@@ -657,4 +657,5 @@ mod recovery;
 
 mod selected;
 
+mod adaptive;
 mod registered;

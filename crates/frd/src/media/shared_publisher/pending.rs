@@ -89,6 +89,7 @@ impl Publisher {
             }),
             cursor: super::cursor::EntryCursor::default(),
             audio: super::audio::EntryAudio::default(),
+            send_sample: None,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),

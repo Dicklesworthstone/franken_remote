@@ -34,11 +34,25 @@ async fn reap_driver(driver: &mut Driver, retirement: &mut crate::worker::Retire
     );
 }
 #[test]
-#[allow(clippy::too_many_lines)]
 fn native_dispatch_cold_consent_then_warm_sibling_survives_first_connection_drop() {
+    shared_dispatch(false);
+}
+
+#[test]
+fn adaptive_shared_dispatch_preserves_consent_source_renewal_and_sibling_ownership() {
+    shared_dispatch(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn shared_dispatch(adaptive: bool) {
     let rt = support::runtime();
     rt.block_on(Box::pin(async {
         let (incoming, mut driver, independent) = pair(&rt);
+        if adaptive {
+            driver = driver
+                .with_shared_adaptive_capture(Duration::from_millis(200))
+                .unwrap();
+        }
         let Fresh {
             c,
             h,
@@ -155,8 +169,60 @@ fn native_dispatch_cold_consent_then_warm_sibling_survives_first_connection_drop
         drop(clients);
         drop(running);
         assert!(driver.worker_id().is_some());
+        if adaptive {
+            let pacing = driver.capture_pacing().expect("original shared publisher");
+            assert_eq!(pacing.policy().minimum_interval_us, 50_000);
+            assert_eq!(pacing.policy().maximum_interval_us, 200_000);
+            assert!(pacing.report().is_some());
+        } else {
+            assert!(driver.capture_pacing().is_none());
+        }
         reap_driver(&mut driver, &mut retirement).await;
+        driver.release();
+        assert!(driver.capture_pacing().is_none());
     }));
+}
+
+#[test]
+fn shared_adaptive_dispatch_rejects_invalid_or_repeated_policy_before_source_creation() {
+    let rt = support::runtime();
+    for maximum in [
+        Duration::ZERO,
+        Duration::from_millis(49),
+        Duration::from_millis(201),
+        Duration::MAX,
+    ] {
+        let (_, driver, independent) = pair(&rt);
+        assert!(driver.worker_id().is_none());
+        assert!(driver.with_shared_adaptive_capture(maximum).is_err());
+        assert!(!independent.is_cancel_requested());
+    }
+    let (_, driver, _) = pair(&rt);
+    let driver = driver
+        .with_shared_adaptive_capture(Duration::from_millis(200))
+        .unwrap();
+    assert!(driver.worker_id().is_none());
+    assert!(
+        driver
+            .with_shared_adaptive_capture(Duration::from_millis(150))
+            .is_err()
+    );
+    // A deliberately slow operator ceiling is preserved, never sped up to fit
+    // the ordinary 200 ms adaptive limit.
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (_, driver) = agent()
+        .native_incoming(
+            cx,
+            service::Policy::default(),
+            Duration::from_secs(1),
+            entropy(),
+        )
+        .unwrap();
+    assert!(
+        driver
+            .with_shared_adaptive_capture(Duration::from_secs(1))
+            .is_ok()
+    );
 }
 #[test]
 fn native_dispatch_cold_queue_uses_original_deadline_without_polling_the_source_driver() {

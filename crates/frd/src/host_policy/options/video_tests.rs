@@ -231,7 +231,7 @@ fn adaptive_capture_is_an_explicit_boolean_and_does_not_change_the_codec_target(
 }
 
 #[test]
-fn installed_adaptive_control_retains_the_choice_and_refuses_an_observer_only_host() {
+fn installed_adaptive_capture_retains_the_choice_for_controlled_and_observer_only_hosts() {
     let mut options = InstallOptions {
         kind: ServiceKind::SystemdUser,
         exec_path: PathBuf::from("/usr/bin/frd"),
@@ -265,13 +265,19 @@ fn installed_adaptive_control_retains_the_choice_and_refuses_an_observer_only_ho
     assert_eq!(parsed.video_profile().unwrap().fps(), 1);
     assert_eq!(command.matches("--adaptive-capture").count(), 1);
     options.run_args = vec!["--adaptive-capture".into()];
-    assert!(matches!(
-        options.validate(),
-        Err(
-            crate::service_install::ServiceError::HostProfileUnavailable {
-                code: "adaptive_capture_requires_input_agent",
-                ..
-            }
-        )
-    ));
+    options.validate().unwrap();
+    let unit = render_systemd_unit(&options);
+    let command = unit
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart=:"))
+        .unwrap();
+    let args = command
+        .split_whitespace()
+        .skip(2)
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let parsed = RunOptions::parse(&args).unwrap();
+    assert!(parsed.adaptive_capture);
+    assert!(parsed.input_agent.is_none());
+    assert_eq!(command.matches("--adaptive-capture").count(), 1);
 }

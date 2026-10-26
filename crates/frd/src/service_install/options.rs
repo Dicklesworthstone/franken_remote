@@ -158,12 +158,6 @@ impl InstallOptions {
         {
             return Err(ServiceError::InvalidOptions);
         }
-        if run.adaptive_capture && run.input_agent.is_none() {
-            return Err(ServiceError::HostProfileUnavailable {
-                code: "adaptive_capture_requires_input_agent",
-                detail: "--adaptive-capture paces a controlling session; it needs --input-agent",
-            });
-        }
         if run.clipboard && run.input_agent.is_none() {
             return Err(ServiceError::HostProfileUnavailable {
                 code: "clipboard_requires_input_agent",

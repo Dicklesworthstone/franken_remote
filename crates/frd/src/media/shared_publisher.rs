@@ -64,6 +64,8 @@ struct Entry {
     cursor: cursor::EntryCursor,
     /// Present only in effect when this viewer selected audio-down.
     audio: audio::EntryAudio,
+    /// Actual video enqueue evidence, never a delivery/capacity estimate.
+    send_sample: Option<adaptive::SendSample>,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
@@ -181,6 +183,10 @@ pub struct Publisher {
     source: CaptureSource,
     pool: SharedFramePool,
     members: Arc<Mutex<Members>>,
+    /// Fixed-size controller/history allocated once, not inflated into every
+    /// future that owns a shared publication. Absent for the fixed-rate path.
+    adaptive: Option<Box<adaptive::CapturePacing>>,
+    served: bool,
 }
 impl std::fmt::Debug for Publisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -217,6 +223,8 @@ impl Publisher {
         Ok(Self {
             source,
             pool,
+            adaptive: None,
+            served: false,
             members: Arc::new(Mutex::new(Members {
                 entries: core::array::from_fn(|_| None),
                 owner,
@@ -306,6 +314,7 @@ impl Publisher {
             starting: None,
             cursor: cursor::EntryCursor::default(),
             audio: audio::EntryAudio::default(),
+            send_sample: None,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),
@@ -396,6 +405,9 @@ impl Publisher {
             .lock()
             .map_err(|_| Error::Poisoned)?
             .capture_credit(&prepared)?;
+        if let Some(adaptive) = &mut self.adaptive {
+            adaptive.start(owner.check().map_err(Error::Media)?.as_micros())?;
+        }
         // Declare the fencing guard AFTER the native future: Rust drops it
         // first on cancellation, before the existing IPC future aborts the child.
         let mut capture = pin!(async move {
@@ -419,6 +431,16 @@ impl Publisher {
             if let Err(error) = live {
                 return Poll::Ready(Err(error));
             }
+            if let Some(adaptive) = &mut self.adaptive {
+                let sample = self
+                    .members
+                    .lock()
+                    .map_err(|_| Error::Poisoned)
+                    .and_then(|m| adaptive.sample(m.last, false, m.send_evidence(m.last)));
+                if let Err(error) = sample {
+                    return Poll::Ready(Err(error));
+                }
+            }
             capture
                 .as_mut()
                 .poll(task)
@@ -427,6 +449,13 @@ impl Publisher {
         .await?;
         let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
         members.tick()?;
+        if let Some(adaptive) = &mut self.adaptive {
+            adaptive.finish(
+                members.last,
+                update.observed_micros(),
+                !update.is_unchanged(),
+            )?;
+        }
         let mut delivered = 0;
         for entry in members
             .entries
@@ -636,6 +665,7 @@ impl Subscriber {
                         return Ok(report);
                     }
                 };
+                entry.note_video_send(&progress, &owner)?;
                 match progress {
                     crate::media_egress::Progress::Accepted(_) => report.accepted += 1,
                     crate::media_egress::Progress::Pending(_) => {
@@ -771,6 +801,7 @@ impl Subscription {
     }
 }
 
+mod adaptive;
 mod audio;
 mod cursor;
 mod join;
