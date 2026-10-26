@@ -124,6 +124,12 @@ fn backoff_is_bounded_and_attempt_counter_does_not_reset_or_wrap() {
     }
 }
 #[test]
+fn local_native_route_io_allows_a_fresh_connection_attempt() {
+    assert!(retryable(Failure::Connection(ConnectionError::Tailnet(
+        fr_tailnet::Error::NativeRouteIo
+    ))));
+}
+#[test]
 fn denial_identity_protocol_codec_and_local_stop_never_retry() {
     use fr_tailnet::Error as T;
     for error in [
@@ -132,6 +138,8 @@ fn denial_identity_protocol_codec_and_local_stop_never_retry() {
         T::Revoked,
         T::KeyExpired,
         T::CertificateRejected,
+        T::PeerCertificateRejected,
+        T::InvalidTrustStore,
         T::NativeHandshake,
         T::UntrustedLocalApi,
         T::LocalApiDenied,

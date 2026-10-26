@@ -69,6 +69,9 @@ pub enum Error {
     CertificateNotDue,
     InvalidTrustStore,
     NativeBind,
+    /// The native handshake reported a local UDP send/receive failure. No
+    /// endpoint, OS diagnostic or peer-supplied text is retained.
+    NativeRouteIo,
     NativeHandshake,
     /// The dial deadline passed before the host completed the QUIC/TLS
     /// handshake (distinct from a local `LocalAPI` lookup `Timeout`).

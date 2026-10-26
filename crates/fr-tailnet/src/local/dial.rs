@@ -128,8 +128,9 @@ impl NativeClient {
     }
 
     /// Dial one preferred pair, optionally followed by the other address family
-    /// after a bind failure or handshake timeout. Both pairs must already belong
-    /// to the SAME verified local/remote nodes and use the same remote port.
+    /// after a bind failure, local UDP I/O failure or handshake timeout. Both
+    /// pairs must already belong to the SAME verified local/remote nodes and
+    /// use the same remote port.
     ///
     /// The preferred family has half the original timeout when an alternative
     /// exists; the alternative receives only the remaining original time. There
@@ -299,7 +300,10 @@ impl NativeClient {
 }
 
 fn may_try_alternate(error: Error) -> bool {
-    matches!(error, Error::NativeBind | Error::HandshakeTimeout)
+    matches!(
+        error,
+        Error::NativeBind | Error::NativeRouteIo | Error::HandshakeTimeout
+    )
 }
 
 /// A completed real TLS/UDP connection still tied to its fresh target snapshot.
@@ -347,9 +351,10 @@ impl ConnectedPeer {
     }
 }
 
-/// The peer's certificate failing verification keeps its own reason; every
-/// other handshake failure stays `NativeHandshake`. Only the TLS stack's typed,
-/// redaction-safe classification is read, never an error string.
+/// Keep certificate rejection and the pinned stack's local UDP I/O failures
+/// distinct. Only its typed, redaction-safe provider/code pair is read, never
+/// an OS diagnostic or peer error string. All other TLS/protocol errors remain
+/// terminal `NativeHandshake` failures.
 fn handshake_error(error: &NativeQuicUdpConnectionError) -> Error {
     match error {
         NativeQuicUdpConnectionError::Handshake(
@@ -357,6 +362,10 @@ fn handshake_error(error: &NativeQuicUdpConnectionError) -> Error {
             | QuicTlsError::ServerCertificateChainEmpty
             | QuicTlsError::ServerCertificateUnverified,
         ) => Error::PeerCertificateRejected,
+        NativeQuicUdpConnectionError::Handshake(QuicTlsError::CryptoProviderFailure {
+            provider: "rustls-quic-handshake",
+            code: "udp_send" | "udp_recv",
+        }) => Error::NativeRouteIo,
         _ => Error::NativeHandshake,
     }
 }
@@ -426,7 +435,7 @@ mod tests;
 
 #[cfg(test)]
 #[test]
-fn only_a_rejected_peer_certificate_is_named_apart_from_other_handshake_failures() {
+fn certificate_rejection_is_distinct_from_other_tls_failures() {
     for rejected in [
         QuicTlsError::ServerCertificateRejected {
             code: "server_certificate_invalid",

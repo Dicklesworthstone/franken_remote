@@ -62,6 +62,14 @@ explicit network cases inside a new user/network namespace. Namespace creation
 failure is a visible qualification failure, never permission to modify the
 caller's network. Native tests do not silently skip when explicitly selected.
 
+The route-I/O fallback regression adds an advertised but unrouted IPv4 peer
+address to this isolated fixture. It first requires a typed `NativeRouteIo`
+without an alternative, then reuses that dialer to complete actual IPv6 TLS
+within the original bounded attempt. It checks exclusive attempt ownership,
+exact endpoints, ALPN, empty application streams and slot reuse. The existing
+namespace script selects this new test; it is added coverage, not a claim of a
+completed native run in the current resource-limited environment.
+
 Local verification of this increment: 59 ordinary tests and all five explicit
 network tests pass; strict library/test Clippy, workspace formatting and
 documentation checks are separate gates. First-party sources were rebuilt using

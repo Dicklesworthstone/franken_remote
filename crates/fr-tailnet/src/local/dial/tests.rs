@@ -104,6 +104,7 @@ fn ipv6_route(port: u16) -> DialRoute {
 #[test]
 fn fallback_never_retries_identity_trust_protocol_or_authority_refusals() {
     assert!(may_try_alternate(Error::NativeBind));
+    assert!(may_try_alternate(Error::NativeRouteIo));
     assert!(may_try_alternate(Error::HandshakeTimeout));
     for refusal in [
         Error::InvalidPolicy,
@@ -144,6 +145,41 @@ fn fallback_never_retries_identity_trust_protocol_or_authority_refusals() {
             !may_try_alternate(refusal),
             "{refusal:?} must remain terminal"
         );
+    }
+}
+
+#[test]
+fn only_the_pinned_handshake_udp_io_codes_allow_family_fallback() {
+    for code in ["udp_send", "udp_recv"] {
+        let failure = QuicTlsError::CryptoProviderFailure {
+            provider: "rustls-quic-handshake",
+            code,
+        };
+        let classified = handshake_error(&NativeQuicUdpConnectionError::Handshake(failure));
+        assert_eq!(classified, Error::NativeRouteIo);
+        assert!(may_try_alternate(classified));
+        assert_eq!(classified.to_string(), "NativeRouteIo");
+        assert_eq!(
+            serde_json::to_string(&classified).unwrap(),
+            "\"NativeRouteIo\""
+        );
+    }
+    for (provider, code) in [
+        ("rustls", "udp_send"),
+        ("rustls", "udp_recv"),
+        ("rustls-quic-handshake ", "udp_send"),
+        ("", "udp_recv"),
+        ("rustls-quic-handshake", "udp_send_timeout"),
+        ("rustls-quic-handshake", "udp_receive"),
+        ("rustls-quic-handshake", "peer_closed"),
+        ("rustls-quic-handshake", "peer_closed_crypto_error"),
+        ("rustls-quic-handshake", "client_handshake_incomplete"),
+        ("rustls-quic-handshake", ""),
+    ] {
+        let failure = QuicTlsError::CryptoProviderFailure { provider, code };
+        let classified = handshake_error(&NativeQuicUdpConnectionError::Handshake(failure));
+        assert_eq!(classified, Error::NativeHandshake, "{provider}/{code}");
+        assert!(!may_try_alternate(classified));
     }
 }
 
@@ -555,7 +591,7 @@ fn native_dial_timeout_and_abandonment_release_socket_and_slot() {
             .await;
         assert!(matches!(
             r,
-            Err(Error::HandshakeTimeout | Error::NativeHandshake)
+            Err(Error::HandshakeTimeout | Error::NativeRouteIo)
         ));
         drop(
             dialer
@@ -649,6 +685,74 @@ fn native_dial_falls_back_to_ipv6_with_one_original_timeout_and_no_application_r
             "no application action exists to replay"
         );
         drop(silent);
+    });
+}
+
+#[test]
+#[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
+fn native_dial_falls_back_after_immediate_route_io_without_application_replay() {
+    let mut data = dual_stack_metadata();
+    // The isolated runner assigns only .1 and .2, with no route to .3.
+    // Bind succeeds locally; the real UDP send must report a route I/O error.
+    peer_mut(&mut data)["TailscaleIPs"] = json!(["100.64.0.3", "fd7a:115c:a1e0::2"]);
+    let server = Server::new(vec![response(&data, false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let dialer = client(&server, Duration::from_secs(6));
+        let alternate = QuicUdpEndpoint::bind(
+            &cx,
+            "[fd7a:115c:a1e0::2]:0".parse().unwrap(),
+            endpoint_config(),
+        )
+        .await
+        .unwrap();
+        let port = alternate.local_addr().port();
+        let preferred = DialRoute {
+            remote: SocketAddr::new("100.64.0.3".parse().unwrap(), port),
+            ..route(port)
+        };
+        assert!(matches!(
+            dialer
+                .dial(&cx, target(&server, &cx).await, preferred)
+                .unwrap()
+                .await,
+            Err(Error::NativeRouteIo)
+        ));
+        // The failed real attempt released its slot. The fallback operation
+        // owns the same shared slot from call time through both address pairs.
+        let selected = target(&server, &cx).await;
+        let started = now(&cx).unwrap();
+        let work = dialer
+            .dial_with_fallback(&cx, selected, preferred, Some(ipv6_route(port)))
+            .unwrap();
+        let contender = dialer.clone();
+        assert!(matches!(
+            contender.dial(&cx, target(&server, &cx).await, preferred),
+            Err(Error::Busy)
+        ));
+        let (result, remote) = Box::pin(timeout(
+            cx.now(),
+            Duration::from_secs(7),
+            both(work, accept(&cx, alternate, "leaf", Duration::ZERO)),
+        ))
+        .await
+        .unwrap();
+        let native = result.unwrap().into_connection(&cx).unwrap();
+        let remote = remote.unwrap();
+        assert_eq!(native.peer_addr(), ipv6_route(port).remote);
+        assert_eq!(native.peer_addr(), remote.local_addr());
+        assert_eq!(native.local_addr(), remote.peer_addr());
+        assert_eq!(native.local_addr().ip(), ipv6_route(port).local);
+        assert_eq!(native.negotiated_alpn(), b"fr-remote/0");
+        assert!(native.connection().can_send_app_data());
+        assert!(now(&cx).unwrap() - started < 6_000_000);
+        assert!(native.connection().inner().streams().is_empty());
+        assert!(remote.connection().inner().streams().is_empty());
+        drop(
+            contender
+                .dial(&cx, target(&server, &cx).await, preferred)
+                .unwrap(),
+        );
     });
 }
 

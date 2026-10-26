@@ -386,6 +386,7 @@ pub fn retryable(failure: Failure) -> bool {
         Failure::Connection(ConnectionError::Tailnet(
             fr_tailnet::Error::LocalApiUnavailable
             | fr_tailnet::Error::BackendNotRunning
+            | fr_tailnet::Error::NativeRouteIo
             | fr_tailnet::Error::Timeout,
         ))
         | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Recovery(

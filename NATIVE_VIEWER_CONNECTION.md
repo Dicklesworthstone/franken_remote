@@ -17,9 +17,9 @@ session Cx**, a `PeerSelector`, `Configuration`, the actual local capability
 The connector validates bounds before discovery, resolves exact node-owned
 addresses, and delegates TLS/QUIC to the already-published native dialer. The
 default address policy prefers a verified IPv4 pair and retains one verified
-IPv6 alternative. If the preferred socket cannot bind or its handshake times
-out, the alternate family gets a fresh handshake within the same original
-timeout. The first attempt receives half that timeout when both families are
+IPv6 alternative. If the preferred socket cannot bind, its local UDP send or
+receive fails, or its handshake times out, the alternate family gets a fresh
+handshake within the same original timeout. The first attempt receives half that timeout when both families are
 available; the alternative receives only the remaining time. One shared dial
 slot and one socket at a time prevent a connection race. Every attempt retains
 the same node identity, port and strict certificate/hostname checks, with fresh
@@ -34,11 +34,19 @@ profile's 64 KiB stream and 512 KiB connection windows must match the record pol
 before dialing.
 This is not permission to enlarge a negotiated application record or media budget.
 
-Fallback can recover a preferred local bind failure or a route whose packets
-never reach the host. The capacity-one host closes its other listening sockets
+Fallback can recover a preferred local bind or UDP I/O failure, or a route
+whose packets never reach the host. The capacity-one host closes its other listening sockets
 after selecting the first valid Initial. An alternate attempt may therefore
 arrive while the host is still occupied by a stalled preferred handshake;
 recovery from asymmetric handshake failures is not guaranteed.
+
+Local UDP I/O classification uses only the pinned handshake provider
+`rustls-quic-handshake` and its exact `udp_send` / `udp_recv` codes. It becomes
+`NativeRouteIo`; no operating-system diagnostic, endpoint or peer text is
+retained. Other TLS/protocol failures remain terminal. The optional reconnect
+supervisor may make a bounded fresh connection after this setup failure, with
+its existing cleanup and backoff; no application or input operation has started
+on the failed connection. The CLI reports `tailnet_route_unavailable`.
 
 After actual TLS and the dialer's post-handshake metadata revalidation,
 `ConnectedPeer::into_owned_connection` moves the original connection **and** its

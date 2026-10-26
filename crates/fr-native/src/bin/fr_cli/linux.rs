@@ -156,6 +156,10 @@ fn tailnet(error: TailnetError) -> Failure {
             "host_not_answering",
             "The host did not complete the connection in time: check that frd run is running there (it serves one viewer at a time, so another session may be active) and that tailnet policy allows UDP to its port; fr hosts shows the path.",
         ),
+        TailnetError::NativeRouteIo => failure(
+            "tailnet_route_unavailable",
+            "The local UDP path failed during connection setup. Check the installed Tailscale connection and routing; fr hosts shows the host path.",
+        ),
         TailnetError::KeyExpired => failure(
             "tailnet_key_expired",
             "Reauthenticate the affected Tailscale node locally.",
@@ -1128,6 +1132,13 @@ mod tests {
         assert!(offer.capabilities.iter().all(|c| !c.name.contains("input")
             && !c.name.contains("clipboard")
             && !c.name.contains("audio")));
+    }
+    #[test]
+    fn local_udp_route_failure_reports_network_guidance() {
+        let route = tailnet(TailnetError::NativeRouteIo);
+        assert_eq!(route.code, "tailnet_route_unavailable");
+        assert_eq!(route.exit, 1);
+        assert!(route.next.contains("Tailscale connection and routing"));
     }
     #[test]
     fn a_rejected_host_certificate_is_named_apart_from_other_tls_failures() {
