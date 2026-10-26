@@ -229,3 +229,159 @@ fn a_suspension_that_outlasts_its_limit_ends_control_even_with_renewals() {
         Err(AuthorityError::ViewUnready)
     );
 }
+
+// A report can acquire the authority lock before the next native-watchdog turn.
+// Keep both authorization scopes live without checking control_status at the
+// final sample: presentation itself must enforce the original suspension cap.
+fn renewed_suspension() -> (SessionAuthority, InputLeaseId, InputTicketId) {
+    let (mut authority, lease, ticket) = granted();
+    assert_eq!(
+        authority.authorize_submission(lease, ticket, at(250_000)),
+        Err(AuthorityError::ViewUnready)
+    );
+    for second in 1..=10_u64 {
+        let now = at(second * 1_000_000);
+        let nonce = u128::from(second) * 2;
+        authority.issue_observation_challenge(nonce, now).unwrap();
+        authority.respond_observation_challenge(nonce, now).unwrap();
+        authority.issue_control_challenge(nonce + 1, now).unwrap();
+        authority
+            .respond_control_challenge(lease, nonce + 1, now)
+            .unwrap();
+    }
+    (authority, lease, ticket)
+}
+
+#[test]
+fn fresh_presented_evidence_cannot_win_a_race_with_suspension_expiry() {
+    let limit = 250_000 + MAX_VIEW_SUSPENSION.as_micros();
+    for now in [limit, limit + 1, limit + 500_000] {
+        let (mut authority, lease, old_ticket) = renewed_suspension();
+        authority.confirm_suspension_release(lease).unwrap();
+        let sequence = std::num::NonZeroU64::new(17).unwrap();
+        assert_eq!(
+            authority.mark_presented_ready_until(sequence, at(now + 250_000), at(now)),
+            Err(AuthorityError::ViewUnready),
+            "a fresh report cannot erase the expired suspension at {now}"
+        );
+        assert_eq!(authority.readiness(), ViewReadiness::Stale);
+        assert_eq!(authority.presented_sequence(), None);
+        assert_eq!(authority.observation_deadline(at(now)), Ok(at(13_000_000)));
+        assert_eq!(
+            authority.authorize_submission(lease, old_ticket, at(now)),
+            Err(AuthorityError::ViewUnready)
+        );
+        assert_eq!(
+            authority.issue_presented_input_ticket(lease, InputTicketId::from_raw(9), at(now)),
+            Err(AuthorityError::ViewUnready)
+        );
+        // Repeated reports, ordinary readiness and confirmed cleanup cannot
+        // start another suspension window or bypass the same original fence.
+        authority.confirm_suspension_release(lease).unwrap();
+        assert_eq!(
+            authority.mark_view_ready_until(at(now + 250_001), at(now + 1)),
+            Err(AuthorityError::ViewUnready)
+        );
+        assert_eq!(
+            authority.control_status(at(now + 1)),
+            Err(AuthorityError::ViewUnready)
+        );
+    }
+}
+
+#[test]
+fn suspension_expiry_is_terminal_even_when_native_release_is_still_pending() {
+    let (mut authority, lease, _) = renewed_suspension();
+    let limit = 250_000 + MAX_VIEW_SUSPENSION.as_micros();
+    assert_eq!(
+        authority.mark_view_ready_until(at(limit + 250_000), at(limit - 1)),
+        Err(AuthorityError::ReleasePending)
+    );
+    assert_eq!(
+        authority.mark_view_ready_until(at(limit + 250_000), at(limit)),
+        Err(AuthorityError::ViewUnready)
+    );
+    authority.confirm_suspension_release(lease).unwrap();
+    assert_eq!(
+        authority.mark_view_ready_until(at(limit + 250_001), at(limit + 1)),
+        Err(AuthorityError::ViewUnready)
+    );
+    assert_eq!(
+        authority.grant_lease(InputLeaseId::from_raw(8), at(limit + 1)),
+        Err(AuthorityError::ViewUnready)
+    );
+    // The original lease stays fenced until its owner explicitly revokes it;
+    // only a separate grant after that cleanup may control the restored view.
+    authority.revoke_lease();
+    authority
+        .mark_view_ready_until(at(limit + 250_002), at(limit + 2))
+        .unwrap();
+    authority
+        .grant_lease(InputLeaseId::from_raw(8), at(limit + 2))
+        .unwrap();
+}
+
+#[test]
+fn confirmed_release_and_fresh_evidence_just_before_the_limit_resume_the_same_lease() {
+    let (mut authority, lease, old_ticket) = renewed_suspension();
+    let limit = 250_000 + MAX_VIEW_SUSPENSION.as_micros();
+    authority.confirm_suspension_release(lease).unwrap();
+    let sequence = std::num::NonZeroU64::new(17).unwrap();
+    authority
+        .mark_presented_ready_until(sequence, at(limit + 250_000), at(limit - 1))
+        .unwrap();
+    assert_eq!(authority.presented_sequence(), Some(sequence));
+    assert_eq!(authority.lease_deadline(), Ok(at(13_000_000)));
+    assert_eq!(
+        authority.authorize_submission(lease, old_ticket, at(limit)),
+        Err(AuthorityError::TicketInvalid)
+    );
+    let fresh = InputTicketId::from_raw(9);
+    authority
+        .issue_presented_input_ticket(lease, fresh, at(limit))
+        .unwrap();
+    authority
+        .authorize_submission(lease, fresh, at(limit + 1))
+        .unwrap();
+    assert_eq!(
+        authority.control_status(at(limit + 1)),
+        Ok(ControlStatus::Live {
+            until: at(limit + 250_000)
+        })
+    );
+}
+
+#[test]
+fn an_unrepresentable_suspension_limit_cannot_be_erased_by_fresh_evidence() {
+    let start = u64::MAX - 5_000_000;
+    let mut authority = SessionAuthority::new(
+        RemoteSessionId::from_raw(1),
+        AuthorityPolicy::plan_defaults(),
+    );
+    authority.mark_capabilities_checked().unwrap();
+    authority.authorize_observation(at(start)).unwrap();
+    authority.require_view_evidence(at(start)).unwrap();
+    authority
+        .mark_view_ready_until(at(start + 100_000), at(start))
+        .unwrap();
+    let lease = InputLeaseId::from_raw(2);
+    let ticket = InputTicketId::from_raw(3);
+    authority.grant_lease(lease, at(start)).unwrap();
+    authority
+        .issue_input_ticket(lease, ticket, at(start))
+        .unwrap();
+    assert_eq!(
+        authority.authorize_submission(lease, ticket, at(start + 100_000)),
+        Err(AuthorityError::ViewUnready)
+    );
+    authority.confirm_suspension_release(lease).unwrap();
+    assert_eq!(
+        authority.mark_view_ready_until(at(start + 300_000), at(start + 200_000)),
+        Err(AuthorityError::DeadlineOverflow)
+    );
+    assert_eq!(authority.readiness(), ViewReadiness::Stale);
+    assert_eq!(
+        authority.control_status(at(start + 200_000)),
+        Err(AuthorityError::DeadlineOverflow)
+    );
+}

@@ -380,10 +380,21 @@ impl SessionAuthority {
             return Err(AuthorityError::ViewUnready);
         }
         match self.suspension {
-            Some(suspension) if !suspension.released => {
-                return Err(AuthorityError::ReleasePending);
+            Some(suspension) => {
+                // A fresh presentation report may win the authority lock before
+                // the watchdog. It must enforce the same original suspension
+                // limit before clearing the fence, regardless of release state.
+                let limit = suspension
+                    .since
+                    .checked_add(MAX_VIEW_SUSPENSION)
+                    .ok_or(AuthorityError::DeadlineOverflow)?;
+                if now >= limit {
+                    return Err(AuthorityError::ViewUnready);
+                }
+                if !suspension.released {
+                    return Err(AuthorityError::ReleasePending);
+                }
             }
-            Some(_) => {}
             None => {
                 if self.bounded_view
                     && self.readiness != ViewReadiness::Ready

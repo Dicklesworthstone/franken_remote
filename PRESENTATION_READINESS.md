@@ -108,8 +108,12 @@ Host (`SessionAuthority`):
   key held across a frozen view can autorepeat unseen.
 - Revival never renews the lease and never revives an old ticket. Input resumes
   only with a newly issued ticket.
-- A suspension that outlasts `MAX_VIEW_SUSPENSION` (10 s), or lease or
-  observation expiry during one, ends control terminally.
+- A suspension that reaches `MAX_VIEW_SUSPENSION` (10 s), or lease or
+  observation expiry during one, ends control terminally. Fresh presentation
+  enforces this same original limit before clearing the suspension, even if it
+  acquires the authority lock before the watchdog. Confirmed held-input release
+  and continuing authorization renewals cannot restart that window. Checked
+  deadline overflow also refuses recovery.
 
 Client (`InputClient`):
 - A stale or unknown view suspends input: actions are refused
