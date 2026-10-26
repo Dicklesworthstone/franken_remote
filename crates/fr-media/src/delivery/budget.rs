@@ -64,6 +64,25 @@ impl MediaBudget {
         }
         Ok(())
     }
+    /// A configured receiver may retain early datagrams only while keeping
+    /// room for its not-yet-declared reliable bootstrap. This is a preflight,
+    /// not another allowance: actual allocations still reserve from this ledger.
+    pub(crate) fn has_headroom(&self, bytes: usize, pictures: usize) -> bool {
+        let ledger = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ledger
+            .used
+            .bytes
+            .checked_add(bytes)
+            .is_some_and(|total| total <= ledger.max_bytes)
+            && ledger
+                .used
+                .pictures
+                .checked_add(pictures)
+                .is_some_and(|total| total <= ledger.max_pictures)
+    }
     fn reserve(&self, bytes: usize) -> Result<Reservation, DeliveryError> {
         let mut ledger = self
             .0

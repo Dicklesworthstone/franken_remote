@@ -168,6 +168,7 @@ impl DirectoryManifest {
     }
 }
 fn validate_kind(entry: &ManifestEntry, structural: bool) -> Result<(), Error> {
+    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     let Some(metadata) = &entry.metadata else {
         return Ok(());
     };
@@ -181,7 +182,6 @@ fn validate_kind(entry: &ManifestEntry, structural: bool) -> Result<(), Error> {
     if !structural || *metadata != directory {
         return Err(Error::InvalidName);
     }
-    const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     if entry.size != 0 || entry.sha256_hex != EMPTY_SHA256 {
         return Err(Error::Integrity);
     }

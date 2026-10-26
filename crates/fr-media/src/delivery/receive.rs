@@ -132,6 +132,11 @@ pub enum ReceiveUpdate {
     Accepted,
     Duplicate,
     Obsolete,
+    /// A configured epoch's early datagram could not retain space for the
+    /// reliable bootstrap. No bytes were retained; its ordered announcement
+    /// still detects missing data after startup. This never admits a picture
+    /// before decoder configuration or enlarges the receiver's quotas.
+    Deferred,
     PictureComplete,
 }
 
@@ -783,6 +788,56 @@ impl ReceivePipeline {
         )?);
         Ok(index)
     }
+    /// Datagrams can overtake the reliable bootstrap/progress lanes after
+    /// configuration. Retain them within the original window, reserving one
+    /// picture and enough bytes for the largest admitted recovery AU until its
+    /// exact descriptor is known. Datagrams never choose the bootstrap frame.
+    fn datagram_slot(
+        &mut self,
+        descriptor: FrameDescriptor,
+        now: u64,
+    ) -> Result<Option<usize>, DeliveryError> {
+        if self.state != ReceiveState::AwaitingRecovery
+            || self.recovery_frame.is_some()
+            || self
+                .slots
+                .iter()
+                .flatten()
+                .any(|a| a.descriptor.frame == descriptor.frame)
+        {
+            return self.slot(descriptor, now, false).map(Some);
+        }
+        descriptor.validate(&self.config.limits)?;
+        let (length, _, metadata) = Assembly::storage(descriptor, false)?;
+        self.budget.check_allocation(length, metadata)?;
+        let recovery_bytes = usize::try_from(
+            self.config
+                .limits
+                .protocol()
+                .max_encoded_access_unit_bytes(),
+        )
+        .map_err(|_| DeliveryError::ResourceLimit)?
+        .checked_add(core::mem::size_of::<Assembly>() + core::mem::size_of::<ReceivedPicture>())
+        .ok_or(DeliveryError::ResourceLimit)?;
+        let required = length
+            .checked_add(metadata)
+            .and_then(|n| n.checked_add(recovery_bytes))
+            .ok_or(DeliveryError::ResourceLimit)?;
+        if self.slots.iter().flatten().count() >= self.active_slots - 1
+            || !self.budget.has_headroom(required, 2)
+        {
+            return Ok(None);
+        }
+        let index = self.slot(descriptor, now, false)?;
+        // Actual allocator capacity is charged by Assembly::new. If it exceeds
+        // the preflight, retire only this still-private candidate; do not spend
+        // the bootstrap's headroom or release another owner's reservation.
+        if !self.budget.has_headroom(recovery_bytes, 1) {
+            self.slots[index] = None;
+            return Ok(None);
+        }
+        Ok(Some(index))
+    }
     fn on_fragment(
         &mut self,
         fragment: Fragment<'_>,
@@ -791,10 +846,9 @@ impl ReceivePipeline {
         if self.obsolete(fragment.descriptor.frame) {
             return Ok(ReceiveUpdate::Obsolete);
         }
-        if self.state != ReceiveState::Streaming && self.recovery_frame.is_none() {
-            return Err(DeliveryError::WrongState);
-        }
-        let index = self.slot(fragment.descriptor, now, false)?;
+        let Some(index) = self.datagram_slot(fragment.descriptor, now)? else {
+            return Ok(ReceiveUpdate::Deferred);
+        };
         let update = self.slots[index].as_mut().expect("inserted").fragment(
             fragment,
             now,
@@ -855,19 +909,23 @@ impl ReceivePipeline {
             self.progress = Some(progress);
             return Ok(ReceiveUpdate::Obsolete);
         }
-        let reliable =
-            self.state == ReceiveState::AwaitingRecovery && progress.descriptor.reference.is_none();
-        if self.state != ReceiveState::Streaming && self.recovery_frame.is_none() && !reliable {
-            return Err(DeliveryError::WrongState);
-        }
-        if reliable
+        // The first independent announcement on this ordered reliable lane
+        // declares the bootstrap. A shared encoder's later IDR is ordinary
+        // datagram media; it cannot replace the outstanding reliable picture.
+        let reliable = self.state == ReceiveState::AwaitingRecovery
+            && progress.descriptor.reference.is_none()
             && self
                 .recovery_frame
-                .is_some_and(|frame| frame != progress.descriptor.frame)
-        {
-            return Err(DeliveryError::ConflictingPicture);
+                .is_none_or(|frame| frame == progress.descriptor.frame);
+        if reliable {
+            self.slot(progress.descriptor, now, true)?;
+        } else {
+            // Unlike a disposable early datagram, an ordered announcement must
+            // remain represented for final-frame loss detection. Impossible
+            // startup retention keeps its existing typed resource refusal.
+            self.datagram_slot(progress.descriptor, now)?
+                .ok_or(DeliveryError::ReferenceCapacityExceeded)?;
         }
-        self.slot(progress.descriptor, now, reliable)?;
         if reliable {
             self.recovery_frame = Some(progress.descriptor.frame);
         }

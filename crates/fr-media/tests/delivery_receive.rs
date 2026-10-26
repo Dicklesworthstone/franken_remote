@@ -682,3 +682,6 @@ mod independent;
 
 #[path = "delivery_receive/capacity.rs"]
 mod capacity;
+
+#[path = "delivery_receive/startup_reordering.rs"]
+mod startup_reordering;

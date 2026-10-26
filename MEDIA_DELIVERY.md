@@ -75,6 +75,20 @@ Construct a `ReceivePipeline` only inside an admitted subscription, with four di
 
 Steady-state fragments can arrive out of order. The receiver retains complete dependents until their declared previous reference has decoded. Duplicates do not allocate again; conflicting duplicates and mutable frame descriptors fence the subscription. Initial recovery chunks must be contiguous, have immutable metadata, and fit a bounded chunk count. There is no partial-picture decoder output.
 
+After decoder configuration, dependent datagrams may also arrive before the
+reliable startup picture or its announcement. The receiver retains them in the
+same bounded reassembly window, with their original arrival deadlines, while
+keeping one picture slot and maximum admitted recovery-picture headroom for
+startup. Only the reliable IDR can become the first decode; later independent
+frames cannot replace its identity. An early datagram that cannot leave this
+headroom returns `ReceiveUpdate::Deferred` without retaining bytes. Its ordered
+announcement still exposes missing data for ordinary selective repair. Reliable
+announcements which cannot fit retain their explicit resource refusal. No media
+is buffered before decoder configuration, and no deadline or authority grant is
+extended. `delivery_receive::startup_reordering` covers reorder, capacity,
+maximum-size recovery, duplicate/conflict, expiry and generation replacement
+through the production parsers; these are deterministic media-contract tests.
+
 Call `repair_request` when its `next_deadline` becomes due, and send the resulting bounded record through the admitted reliable control channel. The receiver emits one request per call, at a bounded per-picture cadence and attempt count. `tick` must also run on timers with no incoming traffic: an entirely lost final frame is announced on the reliable progress path, so loss before a static screen cannot hide forever. Repeated announcements/duplicates never extend a picture's original deadline.
 
 Repair scheduling distinguishes gaps before the highest received fragment from
