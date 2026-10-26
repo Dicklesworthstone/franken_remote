@@ -147,6 +147,10 @@ jobs:
               'dual_stack::successive_ipv6_and_ipv4_peers_keep_both_original_protections_renewed',
               'dual_stack::tampering_with_either_protection_fences_the_whole_idle_listener_set',
               'dual_stack::a_failed_second_bind_cleans_all_installed_protections_without_a_partial_listener',
+              'dual_stack::retained_ipv6_transport_prevents_either_original_protection_from_retiring',
+              'dual_stack::unpolled_drop_and_caught_panic_fence_both_original_protections',
+              'dual_stack::same_addresses_cannot_join_different_installed_node_identities',
+              'dual_stack::partial_setup_reports_cleanup_failure_and_still_removes_the_other_rule',
               'real_control::fr_connect_control_uses_ipv6_while_host_also_listens_on_ipv4',
           ]
           listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True)

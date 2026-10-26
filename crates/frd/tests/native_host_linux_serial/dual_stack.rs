@@ -201,3 +201,201 @@ fn a_failed_second_bind_cleans_all_installed_protections_without_a_partial_liste
         assert!(UdpSocket::bind(ipv6_address()).is_ok());
     });
 }
+
+#[test]
+#[ignore = "explicit synthetic sysfs/nft namespace runner"]
+fn retained_ipv6_transport_prevents_either_original_protection_from_retiring() {
+    run(async |broker, supervisor, client, handle| {
+        let tools = tools();
+        let api = fixture::Api::dual_stack();
+        let mut server = Server::new(api.client.clone(), api.identity(&broker).await)
+            .bind_linux_addresses(
+                &broker,
+                vec![
+                    tools.configuration(),
+                    tools.configuration_for(ipv6_address()),
+                ],
+                native_accept::Configuration::default(),
+            )
+            .await
+            .unwrap();
+        let mut app = App {
+            stop_after: 2,
+            retain: true,
+            ..App::default()
+        };
+        let (result, peer) = Box::pin(network::both(
+            server.serve_serial(
+                supervisor.clone(),
+                handle,
+                serial::Policy {
+                    retirement_timeout: Duration::from_millis(80),
+                    ..serial::Policy::default()
+                },
+                &mut app,
+            ),
+            negotiate_at(client, ipv6_address()),
+        ))
+        .await;
+        assert_eq!(
+            result,
+            Err(LinuxError::Serial(serial::Error::RetainedTransport))
+        );
+        assert_eq!(app.outcomes, [Ok(11)]);
+        assert_eq!(app.requests.load(Ordering::Acquire), 1);
+        assert!(supervisor.is_cancel_requested());
+        assert!(!broker.is_cancel_requested());
+        assert_eq!(server.stop(&broker).await, Err(ingress::Error::InUse));
+        assert_eq!(tools.state()["deleted"], 0);
+        assert_eq!(tools.state()["tables"].as_object().unwrap().len(), 2);
+        drop(app.retained.take());
+        drop(peer);
+        server.stop(&broker).await.unwrap();
+        assert_eq!(tools.state()["deleted"], 2);
+        assert_eq!(tools.state()["tables"], serde_json::json!({}));
+        for address in server.addresses() {
+            assert!(UdpSocket::bind(address).is_ok());
+        }
+    });
+}
+
+#[test]
+#[ignore = "explicit synthetic sysfs/nft namespace runner"]
+fn unpolled_drop_and_caught_panic_fence_both_original_protections() {
+    run(async |broker, supervisor, client, handle| {
+        for panic_request in [false, true] {
+            let tools = tools();
+            let api = fixture::Api::dual_stack();
+            let identity = api.identity(&broker).await;
+            let mut server = Server::new(api.client.clone(), identity.clone())
+                .bind_linux_addresses(
+                    &broker,
+                    vec![
+                        tools.configuration(),
+                        tools.configuration_for(ipv6_address()),
+                    ],
+                    native_accept::Configuration::default(),
+                )
+                .await
+                .unwrap();
+            let context = if panic_request {
+                client.clone()
+            } else {
+                supervisor.clone()
+            };
+            let mut app = App {
+                panic_request,
+                ..App::default()
+            };
+            let mut work = Box::pin(server.serve_serial(
+                context.clone(),
+                handle.clone(),
+                serial::Policy::default(),
+                &mut app,
+            ));
+            if panic_request {
+                poll_fn(|task| {
+                    assert!(
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work
+                            .as_mut()
+                            .poll(task)))
+                        .is_err()
+                    );
+                    // Even retaining the panicked future cannot retain either
+                    // socket after its original dedicated scope is fenced.
+                    assert!(context.is_cancel_requested());
+                    for address in [address(), ipv6_address()] {
+                        assert!(UdpSocket::bind(address).is_ok());
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            drop(work);
+            assert!(context.is_cancel_requested());
+            assert!(!broker.is_cancel_requested());
+            assert!(identity.status(&broker).is_ok());
+            assert_eq!(app.requests.load(Ordering::Acquire), 0);
+            for address in server.addresses() {
+                assert!(UdpSocket::bind(address).is_ok());
+            }
+            server.stop(&broker).await.unwrap();
+            assert_eq!(tools.state()["deleted"], 2);
+            assert_eq!(tools.state()["tables"], serde_json::json!({}));
+        }
+    });
+}
+
+#[test]
+#[ignore = "explicit synthetic sysfs/nft namespace runner"]
+fn same_addresses_cannot_join_different_installed_node_identities() {
+    run(async |broker, _, _, _| {
+        let tools = tools();
+        let api = fixture::Api::dual_stack();
+        let identity = api.identity(&broker).await;
+        *api.mode.lock().unwrap() = fixture::Mode::ChangeAfterTwoSnapshots;
+        let result = Server::new(api.client.clone(), identity)
+            .bind_linux_addresses(
+                &broker,
+                vec![
+                    tools.configuration(),
+                    tools.configuration_for(ipv6_address()),
+                ],
+                native_accept::Configuration::default(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(LinuxError::Ingress(ingress::Error::Identity(
+                fr_tailnet::Error::IdentityChanged
+            )))
+        ));
+        // The first two same-node snapshots were collected before installation;
+        // its read-back observes the changed identity and refuses. The uncertain
+        // first rule remains restrictive, with no usable socket or second rule.
+        // Independent per-address snapshots would instead admit a mixed set.
+        assert_eq!(tools.state()["created"], 1);
+        assert_eq!(tools.state()["deleted"], 0);
+        assert_eq!(tools.state()["tables"].as_object().unwrap().len(), 1);
+        assert!(!broker.is_cancel_requested());
+        assert_eq!(api.whois.load(Ordering::Acquire), 0);
+        assert!(UdpSocket::bind(address()).is_ok());
+        assert!(UdpSocket::bind(ipv6_address()).is_ok());
+    });
+}
+
+#[test]
+#[ignore = "explicit synthetic sysfs/nft namespace runner"]
+fn partial_setup_reports_cleanup_failure_and_still_removes_the_other_rule() {
+    run(async |broker, _, _, _| {
+        let tools = tools();
+        let api = fixture::Api::dual_stack();
+        fs::write(tools.0.join("fail_cleanup"), b"100.64.0.1").unwrap();
+        let occupied = UdpSocket::bind(ipv6_address()).unwrap();
+        let result = Server::new(api.client.clone(), api.identity(&broker).await)
+            .bind_linux_addresses(
+                &broker,
+                vec![
+                    tools.configuration(),
+                    tools.configuration_for(ipv6_address()),
+                ],
+                native_accept::Configuration::default(),
+            )
+            .await;
+        assert!(matches!(
+            result,
+            Err(LinuxError::Ingress(ingress::Error::CommandFailed))
+        ));
+        assert_eq!(tools.state()["created"], 2);
+        assert_eq!(tools.state()["deleted"], 1);
+        let state = tools.state();
+        let remaining = state["tables"].as_object().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining.values().next().unwrap()["address"], "100.64.0.1");
+        assert!(UdpSocket::bind(address()).is_ok());
+        assert!(!broker.is_cancel_requested());
+        assert_eq!(api.whois.load(Ordering::Acquire), 0);
+        drop(occupied);
+        assert!(UdpSocket::bind(ipv6_address()).is_ok());
+    });
+}

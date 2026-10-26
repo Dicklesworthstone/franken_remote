@@ -68,6 +68,7 @@ pub enum Mode {
     OtherUser,
     Unverifiable,
     ChangeAfterWhoIs,
+    ChangeAfterTwoSnapshots,
 }
 fn metadata(mode: Mode, changed: bool, dual_stack: bool) -> (Value, Value) {
     let key = format!("nodekey:{}", "2".repeat(64));
@@ -134,6 +135,7 @@ impl Api {
         );
         let worker = thread::spawn(move || {
             let mut changed = false;
+            let mut scripted_status_replies = 0_u8;
             let mut pair = fs::read(pki().join("host.key")).unwrap();
             pair.extend(fs::read(pki().join("host-chain.pem")).unwrap());
             while !ended.load(Ordering::Acquire) {
@@ -173,6 +175,16 @@ impl Api {
                     paths.push(path.to_string());
                 }
                 let mode = *state.lock().unwrap();
+                if mode == Mode::ChangeAfterTwoSnapshots && path.starts_with("/localapi/v0/status?")
+                {
+                    // Two complete status/status snapshots agree, then a new
+                    // host identity retains exactly the same IP addresses.
+                    if scripted_status_replies == 4 {
+                        changed = true;
+                    } else {
+                        scripted_status_replies += 1;
+                    }
+                }
                 let (status, who) = metadata(mode, changed, dual_stack);
                 let (body, kind) = if path.starts_with("/localapi/v0/status?") {
                     (serde_json::to_vec(&status).unwrap(), "application/json")

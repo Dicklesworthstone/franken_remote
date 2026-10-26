@@ -91,18 +91,34 @@ impl Server {
             .collect();
         let mut boundary = Boundaries(Vec::with_capacity(configurations.len()));
         let installed = async {
-            for configuration in configurations {
-                let node = self
-                    .api
-                    .node_identity(broker)
-                    .await
-                    .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
-                if !addresses
-                    .iter()
-                    .all(|address| node.addresses().contains(&address.ip()))
-                {
-                    return Err(Error::Ingress(ingress::Error::InvalidConfiguration));
-                }
+            let node = self
+                .api
+                .node_identity(broker)
+                .await
+                .map_err(|e| Error::Host(super::Error::Tailnet(e)))?;
+            if !addresses
+                .iter()
+                .all(|address| node.addresses().contains(&address.ip()))
+            {
+                return Err(Error::Ingress(ingress::Error::InvalidConfiguration));
+            }
+            // Matching addresses alone cannot join snapshots from different
+            // node keys, daemons or tailnets. Keep the first snapshot's original
+            // validity while acquiring one non-cloneable, same-node snapshot
+            // per sibling. No rule or socket opens before this set agrees.
+            let mut siblings = Vec::with_capacity(configurations.len() - 1);
+            for _ in 1..configurations.len() {
+                siblings.push(
+                    self.api
+                        .revalidate_node(broker, &node)
+                        .await
+                        .map_err(|e| Error::Host(super::Error::Tailnet(e)))?,
+                );
+            }
+            for (configuration, node) in configurations
+                .into_iter()
+                .zip(std::iter::once(node).chain(siblings))
+            {
                 boundary.0.push(
                     ingress::Boundary::install(broker, self.api.clone(), node, configuration)
                         .await
@@ -131,8 +147,9 @@ impl Server {
             Err(error) => {
                 // There is no admitted transport. Retire every successfully
                 // installed rule even when a later address/bind was refused.
-                // Cancellation may leave restrictive residue as before.
-                let _ = boundary.stop(broker).await;
+                // Cancellation may leave restrictive residue as before. Report
+                // failed cleanup instead of hiding it behind the setup error.
+                boundary.stop(broker).await.map_err(Error::Ingress)?;
                 return Err(error);
             }
         };

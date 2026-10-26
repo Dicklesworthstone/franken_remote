@@ -40,6 +40,9 @@ with (root / 'state.lock').open('a') as lock:
         else:
             match = re.fullmatch(r'delete table inet (frd_[0-9a-f]{32})\n', script)
             assert match and match[1] in state['tables'], script
+            failed_cleanup = root / 'fail_cleanup'
+            if failed_cleanup.exists() and failed_cleanup.read_text() == state['tables'][match[1]]['address']:
+                sys.exit(1)
             del state['tables'][match[1]]
             state['deleted'] += 1
     elif args == ['-j', 'list', 'tables', 'inet']:

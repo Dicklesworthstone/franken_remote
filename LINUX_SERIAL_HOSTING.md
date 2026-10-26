@@ -15,11 +15,20 @@ sockets close before TLS; the selected local address is rechecked against the
 original bind set, ingress protection and fresh identity evidence. After the
 peer's original transport retires, the full original set binds again.
 
+Setup anchors every address's non-cloneable node snapshot to the first snapshot
+with `LocalApi::revalidate_node` before installing any rule. Matching IPs cannot
+silently combine different node keys, daemon processes, certificate names or
+tailnets; the first snapshot's original validity must still hold. Each boundary
+then performs its ordinary installation and continuing identity checks.
+
 All original boundaries keep renewing while that one session runs. Losing any
 boundary fences the service; cancellation and completion fence every boundary
 before application resources are released. Cleanup attempts every installed
 rule and retains failed removals for explicit retry. This remains the same
 capacity-one service and desktop source owner.
+If setup fails, a failure to remove any known installed rule is returned as an
+ingress error instead of being hidden by the earlier bind/setup error. An
+uncertain installation retains the existing restrictive-residue behavior.
 
 Provision and service the original host credentials, optionally select a live
 policy monitor with `Server::with_live_policy`, then bind the explicit local
@@ -98,6 +107,17 @@ partial bind cleanup, and the shipped controlling client over IPv6 while the
 host also listens on IPv4. The control case checks real HEVC presentation and
 independently observed X11 pointer/key effects. These are namespace acceptance
 cases; their presence does not claim live-tailnet IPv6 qualification.
+
+Additional dual-stack lifetime regressions retain an IPv6 transport after its
+session ends and require both rules to refuse removal until the transport is
+destroyed. Unpolled abandonment and a caught request callback panic must release
+both sockets while preserving the independent credential context. These newly
+added regressions also change the installed identity without changing its IPs,
+and fail one partial-setup cleanup while requiring the other rule to be removed.
+They have not yet been executed in this session; their definitions do not
+establish a passing runtime result. The initial build stopped with no space
+left on the shared filesystem; the retry's pinned Asupersync compilation was
+killed by SIGKILL before application type checking.
 
 `host_run` drives the production `frd run` composition (`crates/frd/src/host_run.rs`)
 with a scripted capture worker: a real viewer receives frames for four seconds past

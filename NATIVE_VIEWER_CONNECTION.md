@@ -34,6 +34,12 @@ profile's 64 KiB stream and 512 KiB connection windows must match the record pol
 before dialing.
 This is not permission to enlarge a negotiated application record or media budget.
 
+Fallback can recover a preferred local bind failure or a route whose packets
+never reach the host. The capacity-one host closes its other listening sockets
+after selecting the first valid Initial. An alternate attempt may therefore
+arrive while the host is still occupied by a stalled preferred handshake;
+recovery from asymmetric handshake failures is not guaranteed.
+
 After actual TLS and the dialer's post-handshake metadata revalidation,
 `ConnectedPeer::into_owned_connection` moves the original connection **and** its
 original authenticated target into a renewable owner. A parked, expired result
