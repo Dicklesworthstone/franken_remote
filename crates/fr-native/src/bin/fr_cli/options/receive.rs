@@ -127,6 +127,10 @@ mod tests {
     fn explicit_receive_policy_is_local_and_independent_of_other_capabilities() {
         let absent = connection("").unwrap();
         assert!(absent.receive.is_none());
+        assert!(
+            absent.clipboard,
+            "controlled connections default to shared clipboard"
+        );
         let default = connection("--receive /private/destination")
             .unwrap()
             .receive
@@ -135,7 +139,12 @@ mod tests {
         assert_eq!(default.max_session_bytes, None);
         assert!(!default.keep_both);
         let configured = connection("--receive-conflict keep-both --receive-max-file-bytes 2147483648 --receive /private/destination --receive-max-session-bytes 4294967296").unwrap();
-        assert!(!configured.clipboard && configured.audio.is_none() && configured.send.is_empty());
+        assert_eq!(configured.clipboard, absent.clipboard);
+        assert!(configured.audio.is_none() && configured.send.is_empty());
+        let without_clipboard =
+            connection("--receive /private/destination --no-clipboard").unwrap();
+        assert!(!without_clipboard.clipboard);
+        assert_eq!(without_clipboard.receive, Some(default));
         let receive = configured.receive.unwrap();
         assert_eq!(receive.directory, PathBuf::from("/private/destination"));
         assert_eq!(receive.max_file_bytes, Some(2 * 1024 * 1024 * 1024));

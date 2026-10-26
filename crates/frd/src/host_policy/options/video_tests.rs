@@ -220,7 +220,20 @@ fn adaptive_capture_is_an_explicit_boolean_and_does_not_change_the_codec_target(
         Some(Encoder::SoftwareExplicit)
     );
     assert!(options.approval.is_none() && options.sharing.is_none());
-    assert!(!options.audio && !options.clipboard && options.files.is_none());
+    assert!(!options.audio && options.files.is_none());
+    assert!(
+        options.clipboard,
+        "the input-agent profile keeps its clipboard default"
+    );
+    let without_clipboard = parse(&[
+        "--adaptive-capture",
+        "--input-agent",
+        "/usr/libexec/fr-input-agent",
+        "--no-clipboard",
+    ])
+    .unwrap();
+    assert!(without_clipboard.adaptive_capture);
+    assert!(!without_clipboard.clipboard);
     for args in [
         &["--adaptive-capture", "--adaptive-capture"][..],
         &["--adaptive-capture=true"][..],

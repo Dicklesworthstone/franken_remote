@@ -8,14 +8,37 @@ use super::*;
 fn repair_discovered_failure_reaches_recovery_before_presentation_observes_the_source() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
-        let Fixture {
-            mut host,
-            viewer,
-            media,
-            receiver,
-            presenter,
-            initial,
-        } = Box::pin(fixture(&c, &h, "late-once", 2_000_000, Role::Observe, true)).await;
+        // The observation-only offer intentionally omits PresentedState. Use
+        // the canonical control-capable viewing bootstrap: clock and
+        // presentation are negotiated, but no input grant is requested.
+        let (
+            Fixture {
+                mut host,
+                viewer,
+                media,
+                receiver,
+                presenter,
+                initial,
+            },
+            input,
+        ) = Box::pin(fixture_with_input(
+            &c,
+            &h,
+            "late-once",
+            2_000_000,
+            Role::RequestControl,
+            true,
+            true,
+            true,
+        ))
+        .await;
+        // Retain both original, unused input attachment owners through cleanup.
+        let _input = input.expect("the presentation-capable profile attached input");
+        assert_eq!(
+            host.host.session().unwrap().selection().role,
+            Role::RequestControl
+        );
+        assert!(matches!(&host.host, Host::Observe(_)));
         let control = host.stream.control.clone();
         let original_host = host.worker_id();
         let original_viewer = presenter.worker_id();

@@ -63,7 +63,25 @@ fn selected_and_default_file_policies_survive_the_rendered_service() {
         assert_eq!(run.files_max_session_bytes, Some(6));
         assert_eq!(run.input_agent, Some(PathBuf::from("/input")));
         assert!(run.approval.is_none() && run.sharing.is_none());
-        assert!(!run.audio && !run.clipboard);
+        assert!(!run.audio);
+        assert!(
+            run.clipboard,
+            "the input-agent profile keeps its clipboard default"
+        );
+        args.push("--no-clipboard");
+        let without_clipboard = emitted(&install(&args).unwrap());
+        assert!(!without_clipboard.clipboard);
+        assert_eq!(without_clipboard.files, run.files);
+        assert_eq!(without_clipboard.files_conflict, run.files_conflict);
+        assert_eq!(
+            without_clipboard.files_max_file_bytes,
+            run.files_max_file_bytes
+        );
+        assert_eq!(
+            without_clipboard.files_max_session_bytes,
+            run.files_max_session_bytes
+        );
+        assert_eq!(without_clipboard.input_agent, run.input_agent);
     }
 }
 
