@@ -4,6 +4,7 @@
 //! from the peer is opened. Each transfer is offered once, and a lost publication
 //! proof is unknown, never an invitation to retry. Service before/after network I/O.
 pub mod batch;
+mod flight;
 mod flow;
 mod source;
 use crate::{
@@ -160,8 +161,6 @@ struct Transfer {
     chunk: usize,
     tokens: u128,
     token_time: u64,
-    waiting: bool,
-    waiting_until: u64,
     ready: Option<Event>,
     packet: Option<Packet>,
     completion_admitted: bool,
@@ -182,6 +181,7 @@ pub struct Sender<'a> {
     clock: TimerDriverHandle,
     policy: Policy,
     next: u64,
+    flight: flight::Flight,
     batch: Option<batch::Batch>,
     transfer: Option<Transfer>,
     closed: bool,
@@ -271,6 +271,7 @@ impl<'a> Sender<'a> {
             clock,
             policy,
             next: 1,
+            flight: flight::Flight::default(),
             batch: None,
             transfer: None,
             closed: false,
@@ -427,8 +428,6 @@ impl<'a> Sender<'a> {
             chunk: 0,
             tokens: 0,
             token_time: now,
-            waiting: false,
-            waiting_until: 0,
             ready: None,
             packet: None,
             completion_admitted: false,
@@ -529,7 +528,7 @@ impl<'a> Sender<'a> {
         let now = self.now();
         if let Some(t) = &self.transfer
             && t.result.is_none()
-            && (now >= t.deadline || (t.waiting && now >= t.waiting_until))
+            && now >= t.deadline
         {
             return Err(Error::Expired);
         }
@@ -552,6 +551,14 @@ impl<'a> Sender<'a> {
         if let Some(error) = refusal {
             return Err(error);
         }
+        // A real terminal receipt remains evidence even if a final ACK is late.
+        // All other work keeps EVERY earlier admitted record's original expiry.
+        if self.flight.expired(now) && self.transfer.as_ref().is_none_or(|t| t.result.is_none()) {
+            return Err(Error::Expired);
+        }
+        if !self.flight.is_empty() && self.lane.send_drained(q).map_err(Error::Transport)? {
+            self.flight.drained();
+        }
         let Some(t) = self.transfer.as_mut() else {
             return Ok(());
         };
@@ -571,12 +578,6 @@ impl<'a> Sender<'a> {
         t.tokens = (t.tokens + u128::from(now - t.token_time) * u128::from(t.rate))
             .min((MAX_CHUNK_BYTES as u128 + 128) * 1_000_000);
         t.token_time = now;
-        if t.waiting {
-            if !self.lane.send_drained(q).map_err(Error::Transport)? {
-                return Ok(());
-            }
-            t.waiting = false;
-        }
         // Drain admitted records and consume receipts above, but do not prepare
         // another record, admit payload/completion, or request a source read.
         if self.paused {
@@ -587,37 +588,44 @@ impl<'a> Sender<'a> {
             limits,
             now,
             self.policy.record_lifetime,
+            self.flight.is_empty(),
         )?;
         if let Some(p) = t.packet.as_ref() {
             if now >= p.deadline {
                 return Err(Error::Expired);
+            }
+            if !self.flight.permits(p.bytes.len()) {
+                return Ok(());
             }
             match self
                 .lane
                 .send(q, &self.cx, &p.bytes, p.deadline, &mut *authorize)
             {
                 Ok(()) => {
+                    // Completion is known admitted even if a local accounting
+                    // invariant ever fails. Never turn that into a retry receipt.
+                    t.completion_admitted |= p.completing;
+                    if !self.flight.record(p.bytes.len(), p.deadline) {
+                        return Err(Error::Limits);
+                    }
                     if p.cost == 0 {
                         t.stage = Stage::AwaitingAcceptance;
                     } else {
                         t.tokens -= u128::from(p.cost) * 1_000_000;
                         if p.completing {
-                            t.completion_admitted = true;
                             t.stage = Stage::AwaitingProof;
                         } else {
                             t.queued += p.cost - 128;
                         }
                     }
-                    t.waiting_until = p.deadline;
                     t.packet = None;
-                    t.waiting = true;
                 }
                 Err(quic::Error::Backpressure) => return Ok(()),
                 Err(error) => return Err(Error::Transport(error)),
             }
         }
         if t.stage == Stage::Streaming
-            && !t.waiting
+            && self.flight.permits(limits.record_bytes())
             && t.ready.is_none()
             && t.packet.is_none()
             && !t.source.pending()
@@ -735,6 +743,7 @@ impl Transfer {
         limits: files::Limits,
         now: u64,
         lifetime: Duration,
+        drained: bool,
     ) -> Result<(), Error> {
         if self.ready.is_none() && self.packet.is_none() {
             self.ready = self.source.poll()?;
@@ -769,7 +778,9 @@ impl Transfer {
         if self.packet.is_none() && self.stage == Stage::Streaming {
             let cost = match &self.ready {
                 Some(Event::Chunk { bytes, .. }) => bytes.len() as u64 + 128,
-                Some(Event::End) => 128,
+                // Keep the original commit discipline: all admitted content
+                // must drain before a completion record gets its own deadline.
+                Some(Event::End) if drained => 128,
                 _ => 0,
             };
             if cost != 0 && self.tokens >= u128::from(cost) * 1_000_000 {

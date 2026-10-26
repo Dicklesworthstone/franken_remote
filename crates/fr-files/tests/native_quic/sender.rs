@@ -454,3 +454,6 @@ mod directory;
 
 #[path = "sender/stop.rs"]
 mod stop;
+
+#[path = "sender/flight.rs"]
+mod flight;

@@ -18,10 +18,25 @@ once. The sender validates the host's exact size, requested graph root and
 full-object profile before reading transfer chunks. It applies both its local
 rate cap and the host's byte-rate/chunk limits, charges per-record overhead, and
 retains one prepared record under backpressure with its original deadline.
-Another source chunk is requested only after previous native file sends drain.
+Uploads and downloads may admit up to eight records and 128 KiB of serialized
+file records in one flight, subject to the connection's actual available bulk
+credit and existing recovery reserve. A later source chunk can therefore join
+the existing native bulk flight without waiting for the previous chunk's ACK.
+The source still has only one outstanding disk command/result; service admits
+at most one record per turn, and the original one-chunk rate bucket is unchanged.
+
+Every admitted offer, data chunk and completion record retains its original
+absolute deadline. Neither a later admission, partial acknowledgement, pause
+toggle nor starting another selected file releases its accounting. Only the
+original lane's exact native send-drained proof empties the flight. A full flight
+starts no further source read, and transport backpressure retains the same
+single prepared packet. This does not add resume, retry or a new ATP profile.
+
 The same selected descriptor is used throughout; source metadata and a second
-streaming hash are checked before emitting ObjectComplete. Files whose reported
-size disagrees with readable bytes refuse, rather than silently truncate.
+streaming hash are checked before emitting ObjectComplete. Completion is only
+prepared after all previously admitted content has positively drained, and still
+requires the recipient's verified publication proof. Files whose reported size
+disagrees with readable bytes refuse, rather than silently truncate.
 
 Call `service` before and after each ordinary connection I/O turn. The parent
 supplies its real session authorization callback and independently services
@@ -45,6 +60,13 @@ with actual selected descriptors and real filesystem publication. It exercises
 multiple 120,007-byte files, an empty file, replaced source paths, changed content,
 hostile acceptance, contradictory proofs, missing proof after real publication,
 no-overwrite conflicts, and queued record expiry without destroying control.
+The flight regressions withhold both native drives while eight real source
+chunks queue, verify that further producer turns and pause toggles cannot grow
+the flight, then resume real UDP/TLS/ATP receipt and check durable exact bytes.
+They also hold a verified source EOF behind undrained content and cancel a full
+flight before completion. Pure ledger tests cover independent byte/count bounds,
+integer overflow and immutable deadlines, including out-of-order deadlines.
+These are correctness checks, not a measured WAN throughput claim.
 These use explicit admission/controller fixtures, not live Tailscale or native
 file-picker authority. Running host/viewer optional-channel setup is described below; user-facing
 file and directory selection is integrated into the native commands. Resumption
