@@ -205,7 +205,7 @@ impl Peer {
     /// suppress original renewal, clocks or advisory reply cleanup.
     fn parent(&mut self) -> Result<&mut ViewerSession, Error> {
         match self {
-            Self::Observe { session, .. } => {
+            Self::Observe { session, .. } | Self::Viewing { session, .. } => {
                 session.check().map_err(Error::Session)?;
                 Ok(session)
             }
@@ -750,7 +750,7 @@ impl StreamingViewer {
                 viewer.enter_recovery().map_err(Error::Control)?;
             }
             if recovering
-                && matches!(self.peer, Peer::Observe { .. } | Peer::Control(_))
+                && recovery::enabled(&self.peer, self.recovery.as_deref())
                 && self.recovery_state() == Some(recovery_control::State::Requested)
             {
                 let event = self.resume_stream(ui, result, other).await?;

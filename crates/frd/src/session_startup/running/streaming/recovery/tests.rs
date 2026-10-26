@@ -2,6 +2,7 @@
 //! Only the source/decoder payloads are fixtures; no hardware/HEVC claim is made.
 mod dispatch_progress;
 mod sender_wait;
+mod viewing;
 use super::*;
 use crate::session_startup::running::{controlled::tests::attach, tests::run};
 use crate::session_startup::tests::support;
@@ -30,9 +31,14 @@ use std::{
     time::Instant,
 };
 
-fn capabilities(enabled: bool, metrics: bool) -> Vec<Capability> {
+fn capabilities(enabled: bool, metrics: bool, control: bool) -> Vec<Capability> {
     // Use the exact production desktop offer, not a test-only feature list.
-    let mut caps = fr_client::native::observation_offer().capabilities;
+    let mut caps = if control {
+        fr_client::native::control_offer()
+    } else {
+        fr_client::native::observation_offer()
+    }
+    .capabilities;
     caps.retain(|cap| {
         (enabled || cap.name != recovery_request::CAPABILITY)
             && (metrics || cap.name != fr_wire::receiver_metrics::CAPABILITY)
@@ -46,6 +52,7 @@ async fn pair(
     role: Role,
     enabled: bool,
     metrics: bool,
+    control: bool,
 ) -> (HostSession, ViewerSession) {
     let cfg = session_startup::Configuration {
         offer: Offer {
@@ -54,7 +61,7 @@ async fn pair(
             profile_version: 0,
             role,
             limits: ProtocolLimits::ABSOLUTE,
-            capabilities: capabilities(enabled, metrics),
+            capabilities: capabilities(enabled, metrics, control),
         },
         binding: ControlBinding {
             id: 7,
@@ -71,7 +78,11 @@ async fn pair(
         },
     };
     let (client, server) = support::native_pair(c, "localhost", fr_transport::quic::ALPN).await;
-    let mut offered = fr_client::native::observation_offer();
+    let mut offered = if control {
+        fr_client::native::control_offer()
+    } else {
+        fr_client::native::observation_offer()
+    };
     offered.role = role;
     let mut viewer = session_startup::Viewer::new(
         c.clone(),
@@ -158,11 +169,51 @@ async fn fixture_features(
     enabled: bool,
     metrics: bool,
 ) -> Fixture {
-    let (mut host, mut viewer) = pair(c, h, role, enabled, metrics).await;
+    Box::pin(fixture_with_input(
+        c, h, mode, budget, role, enabled, metrics, false,
+    ))
+    .await
+    .0
+}
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn fixture_with_input(
+    c: &Cx,
+    h: &Cx,
+    mode: &str,
+    budget: u64,
+    role: Role,
+    enabled: bool,
+    metrics: bool,
+    input: bool,
+) -> (
+    Fixture,
+    Option<(
+        crate::input_quic::NegotiatedInput,
+        crate::input_quic::NegotiatedInput,
+    )>,
+) {
+    let (mut host, mut viewer) = pair(c, h, role, enabled, metrics, input).await;
+    if input {
+        host.enable_clock_sync().unwrap();
+        viewer
+            .enable_clock_sync(fr_media::freshness::ClockPolicy::default())
+            .unwrap();
+    }
     let (hc, vc) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 18).await;
     let (hr, vr) = attach(&mut host, &mut viewer, c, h, MediaRole::Recovery, 19).await;
     let (hv, vv) = attach(&mut host, &mut viewer, c, h, MediaRole::Video, 20).await;
     let selected = host.selection().clone();
+    let channels = if input {
+        let (hi, vi) = attach(&mut host, &mut viewer, c, h, MediaRole::Input, 21).await;
+        Some((
+            crate::input_quic::NegotiatedInput::new(host.io().unwrap().0, &selected, &hc, hi)
+                .unwrap(),
+            crate::input_quic::NegotiatedInput::new(viewer.io().unwrap().0, &selected, &vc, vi)
+                .unwrap(),
+        ))
+    } else {
+        None
+    };
     let hm = NegotiatedMedia::new(host.io().unwrap().0, &selected, &hc, &hr, &hv).unwrap();
     let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selected, &vc, &vr, &vv).unwrap();
     let control = host.observation().unwrap();
@@ -226,7 +277,9 @@ async fn fixture_features(
             },
         )
         .unwrap();
-        if let Some(receipt) = presenter.present_next(c, &mut receiver).await.unwrap() {
+        if (!input || viewer.clock_correlation().unwrap().is_some())
+            && let Some(receipt) = presenter.present_next(c, &mut receiver).await.unwrap()
+        {
             break receipt;
         }
     };
@@ -295,14 +348,17 @@ async fn fixture_features(
     } else {
         assert!(enable.is_err());
     }
-    Fixture {
-        host,
-        viewer,
-        media: vm,
-        receiver,
-        presenter,
-        initial,
-    }
+    (
+        Fixture {
+            host,
+            viewer,
+            media: vm,
+            receiver,
+            presenter,
+            initial,
+        },
+        channels,
+    )
 }
 
 #[test]

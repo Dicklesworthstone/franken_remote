@@ -19,6 +19,32 @@ For a control grant (plan 11.3, 12.3):
   that view's fresh evidence plus a ticket naming it, as after any suspension.
 - A grant that is still being acquired keeps the terminal refusal.
 
+## Interactive viewing before a control request
+
+The control-capable `serve_interactive_control` and
+`serve_interactive_control_until` paths can retain `InteractiveState::Viewing`
+through the same negotiated recovery. This covers an embedding that continues
+watching before its explicit local decision to request control. It does not
+change the native CLI's separate focus wait after a grant.
+
+During that media gap, the original observation renewer, clock, input attachment,
+decoder process and receiver remain owned by the same session. No control request
+or request deadline is created, no native input seat is reserved, and no grant
+is implied. Mapping, visibility, evidence and request callbacks against the
+failed generation refuse. The UI keeps its `Viewing` state with no presentation
+until the recovery handshake completes.
+
+The completed media owner must be the exact reference-only successor on the
+original connection and receiver lineage. Its new configuration attachment and
+recovery generation update the selected target; parent, request sequence,
+display geometry, codec configuration, viewport, bounds and requested capabilities
+stay fixed. The existing physical coordinate-map confirmation survives those
+unchanged dimensions. Old presentation and source evidence do not: the real
+recovered decode receipt still needs an independent visibility callback. A later
+explicit user decision starts the ordinary request deadline against the current
+target. Once that decision has staged a request, recovery cannot rewrite it or
+restart its deadline; reference loss remains terminal for that pending request.
+
 ## One failure, one original deadline
 
 This path requires positive `reference-recovery` version 1 negotiation and the
@@ -69,6 +95,22 @@ a changed native configuration, and local stop during the recovery wait. The
 peer services real selective-repair requests before abandoning the reference
 chain; leaving those old reliable records blocked is not a valid renewal test.
 These are protocol/ownership/IPC checks, not native HEVC or hardware qualification.
+
+The 2026-10-26 pre-request-viewing regressions are in
+`crates/frd/src/session_startup/running/streaming/recovery/tests/viewing.rs`.
+They use both canonical loops, actual TLS/UDP and supervised media subprocesses,
+with explicitly synthetic codec, visibility, consent and OS-input fixtures. They
+check reference loss before a request, no implicit native owner, old-generation
+callback refusal, preservation of the confirmed map, a later current-generation
+grant and input receipts, local stop during recovery, and terminal failure once
+a request was explicitly staged. Source formatting and whitespace checks have
+passed. These new tests have **not been compiled or executed in this session**:
+the shared build filesystem and elevated temporary target mount exhausted their
+available capacity. The historical results below do not validate this change.
+
+```bash
+cargo test -p frd --lib session_startup::running::streaming::recovery::tests::viewing --locked -- --test-threads=1
+```
 
 ## Remaining integration
 

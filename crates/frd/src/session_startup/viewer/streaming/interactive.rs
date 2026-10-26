@@ -120,6 +120,7 @@ pub struct ViewingControl {
     pub(super) policy: Policy,
     pub(super) local: LocalView,
     pub(super) requested: Option<RequestControl>,
+    recovering: bool,
 }
 impl ViewingControl {
     fn new(
@@ -136,9 +137,12 @@ impl ViewingControl {
             policy,
             local: LocalView::default(),
             requested: None,
+            recovering: false,
         })
     }
-    /// Immutable selected target and intent, not a grant or wire request.
+    /// Current selected target and unchanged intent, not a grant or wire request.
+    /// Before requesting, exact reference recovery may advance the display
+    /// attachment and recovery generation; geometry and viewport stay fixed.
     pub const fn request(&self) -> Request {
         self.request
     }
@@ -151,7 +155,7 @@ impl ViewingControl {
         view: fr_core::input::InputView,
     ) -> Result<(), Error> {
         now(&self.cx).map_err(Error::Session)?;
-        if parent != self.request.parent || view != self.request.target.view {
+        if self.recovering || parent != self.request.parent || view != self.request.target.view {
             return Err(Error::Control(ControlError::WrongBinding));
         }
         self.local.mapped = true;
@@ -161,6 +165,7 @@ impl ViewingControl {
     /// Its original presentation deadline still applies, even before requesting.
     pub fn visible(&mut self, frame: u64) -> Result<ViewEvidence, Error> {
         let at = now(&self.cx).map_err(Error::Session)?;
+        self.check_view()?;
         self.local
             .view
             .as_mut()
@@ -172,6 +177,7 @@ impl ViewingControl {
     /// evidence (including stale/unknown source) grants control on its own.
     pub fn evidence(&mut self) -> Result<ViewEvidence, Error> {
         let at = now(&self.cx).map_err(Error::Session)?;
+        self.check_view()?;
         self.local
             .view
             .as_mut()
@@ -188,6 +194,7 @@ impl ViewingControl {
         if self.requested.is_some() {
             return Err(Error::RequestAlreadyStarted);
         }
+        self.check_view()?;
         let pending = RequestControl::new(
             self.request,
             self.channels.channel_binding(),
@@ -202,19 +209,91 @@ impl ViewingControl {
     pub fn stop(&self) {
         self.cx.cancel_fast(CancelKind::User);
     }
+    fn check_view(&self) -> Result<(), Error> {
+        if self.recovering {
+            return Err(Error::Control(ControlError::WrongBinding));
+        }
+        Ok(())
+    }
+    /// Recovery is still observation, with no pending consent or input owner.
+    /// Preserve the original attachment and physical coordinate confirmation,
+    /// but fence every old presentation and user callback before replacing it.
+    pub(super) fn begin_recovery(&mut self, session: &ViewerSession) -> Result<(), Error> {
+        if self.requested.is_some() {
+            return Err(Error::RequestAlreadyStarted);
+        }
+        if !self.recovering {
+            acquisition::validate(session, &self.channels, self.request)?;
+            self.channels
+                .begin_recovery(&session.transport)
+                .map_err(|e| Error::Control(ControlError::Input(e)))?;
+            self.recovering = true;
+            self.local.initial = None;
+            self.local.latest = None;
+            if let Some(view) = &mut self.local.view {
+                view.close();
+            }
+        }
+        self.channels
+            .viewer_routes(&session.transport)
+            .map_err(|e| Error::Control(ControlError::Input(e)))?;
+        Ok(())
+    }
+    /// Follow only the original receiver and the exact reference-only successor.
+    /// The unchanged geometry/viewport keeps its physical mapping confirmation;
+    /// source and visibility evidence must come from the new decoded generation.
+    /// No request deadline exists until a later explicit local decision.
+    pub(super) fn finish_recovery(
+        &mut self,
+        session: &ViewerSession,
+        media: &crate::media_quic::NegotiatedMedia,
+        receiver: &ReceivePipeline,
+        receipt: PresentationReceipt,
+    ) -> Result<(), Error> {
+        if !self.recovering || self.requested.is_some() {
+            return Err(Error::Control(ControlError::WrongBinding));
+        }
+        self.channels
+            .check_recovery(&session.transport, media)
+            .map_err(|e| Error::Control(ControlError::Input(e)))?;
+        if let Some(view) = &self.local.view {
+            view.check_recovery_receiver(receiver)
+                .map_err(Error::Freshness)?;
+        }
+        self.channels
+            .follow_recovery(&session.transport, media)
+            .map_err(|e| Error::Control(ControlError::Input(e)))?;
+        self.request.target.display_binding = media.binding().parent.id;
+        self.request.target.view.recovery = media.binding().recovery;
+        acquisition::validate(session, &self.channels, self.request)?;
+        self.local = LocalView {
+            mapped: self.local.mapped,
+            ..LocalView::default()
+        };
+        self.recovering = false;
+        self.decoded(receipt)
+    }
     pub(super) fn prepare(
         &mut self,
         session: &mut ViewerSession,
         receiver: &ReceivePipeline,
     ) -> Result<bool, Error> {
+        if self.recovering {
+            session.check().map_err(Error::Session)?;
+            return Ok(false);
+        }
         acquisition::validate(session, &self.channels, self.request)?;
         self.local.prepare(session, receiver, self.policy)
     }
     pub(super) fn decoded(&mut self, receipt: PresentationReceipt) -> Result<(), Error> {
+        self.check_view()?;
         self.local
             .decoded(receipt, now(&self.cx).map_err(Error::Session)?)
     }
     pub(super) fn sample(&mut self) -> Result<ViewSample, Error> {
+        if self.recovering {
+            return Ok(ViewSample::Pending);
+        }
         self.local.sample(now(&self.cx).map_err(Error::Session)?)
     }
     pub(super) async fn drive(
@@ -223,7 +302,13 @@ impl ViewingControl {
         wait: Duration,
         mut other: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
-        acquisition::validate(session, &self.channels, self.request)?;
+        if self.recovering {
+            self.channels
+                .viewer_routes(&session.transport)
+                .map_err(|e| Error::Control(ControlError::Input(e)))?;
+        } else {
+            acquisition::validate(session, &self.channels, self.request)?;
+        }
         let mut unsolicited = false;
         let result = session
             .drive(wait, |route, bytes| {

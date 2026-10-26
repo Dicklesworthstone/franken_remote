@@ -4,8 +4,8 @@
 //! a control grant stays suspended until the recovered view's evidence and a
 //! new ticket resume it (plan 11.3, 12.3).
 use super::{
-    Error, Presentation, Presenter, ViewerSession, acquisition, decoder_startup, feedback, now,
-    recovery_control,
+    Error, Presentation, Presenter, ViewerSession, acquisition, decoder_startup, feedback,
+    interactive::ViewingControl, now, recovery_control,
 };
 use crate::{
     media::PresentationReceipt, media_quic::NegotiatedMedia, session_startup::ControlledViewer,
@@ -24,10 +24,12 @@ use fr_wire::{
 use std::{cell::Cell, future::Future, pin::pin, time::Duration};
 
 /// The parent a recovery keeps serving while old media is fenced: an
-/// observation session, or a control grant whose suspended input keeps its
-/// renewals, tickets and results serviced through its own drive.
+/// observation session (including an interactive viewer before its explicit
+/// request), or a control grant whose suspended input keeps its renewals,
+/// tickets and results serviced through its own drive.
 enum Parent<'a> {
     Observe(&'a mut ViewerSession),
+    Viewing(&'a mut ViewerSession, &'a mut ViewingControl),
     Control(&'a mut ControlledViewer, &'a mut dyn FnMut(ResultEvent)),
 }
 /// The original parent and audio output stay together for EVERY recovery
@@ -41,7 +43,7 @@ pub(super) struct Link<'a> {
 impl Link<'_> {
     fn session(&mut self) -> &mut ViewerSession {
         match &mut self.parent {
-            Parent::Observe(session) => session,
+            Parent::Observe(session) | Parent::Viewing(session, _) => session,
             Parent::Control(viewer, _) => viewer.session_mut(),
         }
     }
@@ -56,7 +58,7 @@ impl Link<'_> {
             refused,
         } = self;
         let session = match parent {
-            Parent::Observe(session) => &mut **session,
+            Parent::Observe(session) | Parent::Viewing(session, _) => &mut **session,
             Parent::Control(viewer, _) => viewer.session_mut(),
         };
         // Playback depends on the original observation, not the fenced video
@@ -87,6 +89,7 @@ impl Link<'_> {
         );
         match parent {
             Parent::Observe(session) => session.drive(wait, routed).await.map_err(Error::Session),
+            Parent::Viewing(session, viewing) => viewing.drive(session, wait, routed).await,
             Parent::Control(viewer, result) => viewer
                 .drive(wait, &mut **result, routed)
                 .await
@@ -95,11 +98,11 @@ impl Link<'_> {
     }
     fn close(&mut self) {
         match &mut self.parent {
-            Parent::Observe(session) => session.close(),
+            Parent::Observe(session) | Parent::Viewing(session, _) => session.close(),
             Parent::Control(viewer, _) => viewer.close(),
         }
     }
-    /// An interactive embedding sees its grant, not an observer.
+    /// The embedding retains its exact viewing or granted state during recovery.
     fn notify(
         &mut self,
         budget: &Budget,
@@ -107,10 +110,13 @@ impl Link<'_> {
     ) -> Result<(), Error> {
         budget.remaining()?;
         let state = match &mut self.parent {
-            Parent::Observe(_) => acquisition::State::Observing,
-            Parent::Control(viewer, _) => acquisition::State::Controlled(viewer),
+            Parent::Observe(_) => acquisition::Dispatch::Existing(acquisition::State::Observing),
+            Parent::Viewing(_, viewing) => acquisition::Dispatch::Viewing(viewing),
+            Parent::Control(viewer, _) => {
+                acquisition::Dispatch::Existing(acquisition::State::Controlled(viewer))
+            }
         };
-        ui(acquisition::Dispatch::Existing(state), None).map_err(|()| Error::Application)?;
+        ui(state, None).map_err(|()| Error::Application)?;
         budget.remaining()?;
         Ok(())
     }
@@ -568,7 +574,7 @@ async fn during<T>(
     let control = super::StreamingViewerControl {
         cx: budget.cx.clone(),
         input: match &link.parent {
-            Parent::Observe(_) => None,
+            Parent::Observe(_) | Parent::Viewing(_, _) => None,
             Parent::Control(viewer, _) => Some(viewer.control()),
         },
     };
@@ -613,8 +619,9 @@ pub(super) fn lanes<'a>(
 
 impl super::StreamingViewer {
     /// Resume this stream on its recovered generation, on the same session:
-    /// an observer's, or a control grant's (suspended until resumed by the
-    /// recovered view's evidence and a new ticket).
+    /// an observer's, a pre-request interactive viewer's, or a control grant's
+    /// (suspended until resumed by the recovered view's evidence and a new ticket).
+    #[allow(clippy::too_many_lines)]
     pub(super) async fn resume_stream(
         &mut self,
         ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
@@ -714,6 +721,43 @@ impl super::StreamingViewer {
                     return Err(Error::Control(error));
                 }
                 self.peer = super::Peer::Control(viewer);
+                Ok(presentation)
+            }
+            super::Peer::Viewing {
+                mut session,
+                media,
+                mut viewing,
+            } => {
+                viewing.begin_recovery(&session)?;
+                let (media, receipt) = resume(
+                    Link {
+                        parent: Parent::Viewing(&mut session, &mut viewing),
+                        audio: self.audio.as_mut(),
+                        refused: &refused,
+                    },
+                    media,
+                    self.recovery.as_mut().ok_or(Error::Closed)?,
+                    &mut self.presenter,
+                    &mut self.receiver,
+                    ui,
+                    other,
+                    &refused,
+                )
+                .await
+                .map_err(named)?;
+                let presentation = self.reinstall(
+                    &mut session,
+                    &media,
+                    &receipt,
+                    feedback_sent,
+                    presentation_sent,
+                )?;
+                viewing.finish_recovery(&session, &media, &self.receiver, receipt)?;
+                self.peer = super::Peer::Viewing {
+                    session,
+                    media,
+                    viewing,
+                };
                 Ok(presentation)
             }
             other_peer => {

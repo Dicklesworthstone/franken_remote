@@ -15,9 +15,15 @@ pub(super) fn recoverable(error: DeliveryError) -> bool {
 
 /// A positively negotiated observation session or control grant retains its
 /// decoder across a failed chain; a grant's input stays suspended meanwhile
-/// (plan 11.3, 12.3). Acquiring/viewing peers still end on a failed chain.
+/// (plan 11.3, 12.3). A control-capable viewer without a request is still
+/// observing. An explicit pending request is never rewritten by recovery.
 pub(super) fn enabled(peer: &Peer, report: Option<&recovery_control::Receiver>) -> bool {
-    report.is_some() && matches!(peer, Peer::Observe { .. } | Peer::Control(_))
+    report.is_some()
+        && match peer {
+            Peer::Observe { .. } | Peer::Control(_) => true,
+            Peer::Viewing { viewing, .. } => viewing.requested.is_none(),
+            Peer::Acquiring { .. } | Peer::Closed => false,
+        }
 }
 
 /// Fences the real receiver before any new decode or transport work. A peer
@@ -38,7 +44,7 @@ pub(super) fn service(
             .map_err(Error::Delivery)?;
         return Ok(false);
     };
-    if !matches!(peer, Peer::Observe { .. } | Peer::Control(_)) {
+    if !enabled(peer, Some(report)) {
         receiver
             .tick(now(cx).map_err(Error::Session)?)
             .map_err(Error::Delivery)?;
@@ -57,6 +63,12 @@ pub(super) fn service(
     );
     if recovering {
         repair.clear();
+        if let Peer::Viewing {
+            session, viewing, ..
+        } = peer
+        {
+            viewing.begin_recovery(session)?;
+        }
     }
     Ok(recovering)
 }
