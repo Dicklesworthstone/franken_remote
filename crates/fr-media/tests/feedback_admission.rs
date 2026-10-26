@@ -339,6 +339,48 @@ fn admitted_records_are_never_resubmitted_and_evidence_keeps_the_original_query_
 }
 
 #[test]
+fn copied_samples_keep_query_expiry_across_repeated_reads_and_replayed_replies() {
+    let (mut host, _) = owners();
+    let issued = 10_000;
+    let until = issued + SAMPLE_LIFETIME_US;
+    host.transmit(issued, |_, _| Ok::<_, ()>(Admission::Accepted))
+        .unwrap();
+    let reply = encode(Message::Reply {
+        sequence: 1,
+        load: load(),
+    });
+    assert!(host.receive(&reply, until - 3).unwrap());
+    let original = host.sample(until - 3).unwrap().unwrap();
+    assert_eq!(original, (load(), until));
+    for at in [until - 2, until - 1] {
+        assert!(!host.receive(&reply, at).unwrap());
+        assert_eq!(host.sample(at).unwrap(), Some(original));
+        assert_eq!(
+            host.evidence(at).unwrap(),
+            ReceiverEvidence::Measured(load())
+        );
+    }
+    assert_eq!(host.sample(until).unwrap(), None);
+    assert!(!host.receive(&reply, until + 1).unwrap());
+    assert_eq!(host.sample(until + 1).unwrap(), None);
+    assert_eq!(host.evidence(until + 1).unwrap(), ReceiverEvidence::Unknown);
+}
+
+#[test]
+fn sample_reads_share_the_original_clock_floor_and_do_not_prepare_queries() {
+    let (mut host, _) = owners();
+    assert_eq!(host.sample(10).unwrap(), None);
+    assert!(host.pending(10).unwrap().is_none());
+    assert_eq!(host.sample(9), Err(Error::Clock));
+    host.transmit(10, |_, _| Ok::<_, ()>(Admission::Expired))
+        .unwrap();
+    let until = 10 + SAMPLE_LIFETIME_US;
+    assert_eq!(host.sample(until - 1), Err(Error::Clock));
+    assert_eq!(host.sample(until).unwrap(), None);
+    assert!(host.pending(until).unwrap().is_none());
+}
+
+#[test]
 fn regression_and_overflow_refuse_before_transport_or_new_state() {
     let (mut host, mut viewer) = owners();
     host.prepare(10).unwrap();

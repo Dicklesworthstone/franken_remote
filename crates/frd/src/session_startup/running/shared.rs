@@ -357,11 +357,29 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
             .subscriber
             .startup_complete(q)
             .map_err(Error::SharedPublication)?
-            && let Some(feedback) = &mut *self.feedback
         {
-            feedback
-                .service(q, &cx, now(&cx)?)
-                .map_err(Error::ReceiverFeedback)?;
+            let view = self
+                .subscriber
+                .bind_session(q, &self.control, self.parent)
+                .map_err(Error::SharedPublication)?;
+            if let Some(feedback) = &mut *self.feedback {
+                feedback
+                    .service(q, &cx, now(&cx)?)
+                    .map_err(Error::ReceiverFeedback)?;
+                // Admission may advance the requester's clock to an expired
+                // query's original deadline. Sample AFTER service on a fresh
+                // host reading, never reuse its earlier maintenance timestamp.
+                let sample = feedback
+                    .sample(now(&cx)?)
+                    .map_err(Error::ReceiverFeedback)?;
+                self.subscriber
+                    .receiver_sample(q, view, sample)
+                    .map_err(Error::SharedPublication)?;
+            } else if self.recovery.is_none() {
+                self.subscriber
+                    .receiver_unnegotiated(q, view)
+                    .map_err(Error::SharedPublication)?;
+            }
         }
         Ok(())
     }

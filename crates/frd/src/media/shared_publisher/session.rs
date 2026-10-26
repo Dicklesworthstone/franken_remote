@@ -1,5 +1,7 @@
 //! Join only the original subscription to its original running session.
+use super::adaptive::ReceiverSample;
 use super::{Error, ObservationControl, Subscriber};
+use crate::media::receiver_feedback::SharedSample;
 use fr_transport::quic::{Disposition, QuicRecords, Route};
 use fr_wire::{Progress, decoder::Binding, negotiation::ControlBinding};
 
@@ -36,6 +38,58 @@ impl Subscriber {
             }
         }
         self.with_entry(q, |entry| Ok(entry.view))
+    }
+    /// Copy the canonical selected feedback owner's content-free snapshot.
+    /// None is selected-but-unknown; it never means an unnegotiated peer. The
+    /// original query expiry and media binding travel unchanged with the load.
+    pub(crate) fn receiver_sample(
+        &mut self,
+        q: &QuicRecords,
+        view: Binding,
+        sample: Option<SharedSample>,
+    ) -> Result<(), Error> {
+        self.record_receiver(
+            q,
+            view,
+            sample.map_or(ReceiverSample::Unknown, ReceiverSample::Measured),
+        )
+    }
+    /// The original negotiated session alone records this explicit absence.
+    /// It is generation-bound just like a measured snapshot.
+    pub(crate) fn receiver_unnegotiated(
+        &mut self,
+        q: &QuicRecords,
+        view: Binding,
+    ) -> Result<(), Error> {
+        self.record_receiver(q, view, ReceiverSample::Unnegotiated(view))
+    }
+    fn record_receiver(
+        &mut self,
+        q: &QuicRecords,
+        view: Binding,
+        sample: ReceiverSample,
+    ) -> Result<(), Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
+        let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
+        // Identity preflight never mutates or revokes the original subscriber
+        // on a foreign connection, stale caller view or foreign snapshot.
+        if !q.is_bound_to(&entry.connection) {
+            return Err(Error::ForeignConnection);
+        }
+        if entry.view != view
+            || matches!(sample, ReceiverSample::Measured(incoming) if incoming.view != entry.view)
+        {
+            return Err(Error::WrongSource);
+        }
+        members.tick()?;
+        let entry = members.entries[self.slot].as_mut().ok_or(Error::Closed)?;
+        if let Some(error) = entry.failure {
+            return Err(error);
+        }
+        entry.check_media(q)?;
+        entry.receiver_sample = sample;
+        Ok(())
     }
     /// Check both source consent and this viewer between every native network
     /// wait. A dead source must also fence records already retained by QUIC.

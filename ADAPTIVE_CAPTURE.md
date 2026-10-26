@@ -32,9 +32,21 @@ retains its own existing expiry and retirement rules. Actual video enqueue
 samples also contribute: any recently ready streaming subscriber establishes
 local send readiness, while shared send pressure requires every eligible
 subscriber to have recent blocked evidence. Startup, recovery and failed
-subscribers do not vote; silent or stale samples remain unknown. Decoder and
-delivery measurements remain unknown for this shared-source controller, and
-neither enqueue success nor capture credit is treated as a bandwidth estimate.
+subscribers do not vote; silent or stale samples remain unknown. Actual enqueue
+evidence lasts for the current capture interval (at least 100 ms, at most the
+250 ms source-evidence bound), so a source slowed to 200 ms can accumulate real
+headroom again. Idle service never refreshes the original enqueue timestamp.
+
+Negotiated decoder reports now reach the same shared controller. A rate probe
+requires recent successful enqueue and fresh decoder headroom from the **same
+viewer**; two different viewers' partial successes cannot manufacture a healthy
+path. Receiver pressure slows the shared source only when every eligible viewer
+has a live report establishing pressure. One healthy sibling therefore keeps
+its independent progress. Reports retain the original query-created expiry and
+the exact installed media binding across the bridge from session to publisher;
+stale, absent, future or old-generation evidence remains unknown. A viewer that
+did not negotiate metrics retains the existing local-only policy. Neither
+enqueue success, capture credit nor decoder load is a bandwidth estimate.
 
 The `--fps` setting remains the maximum capture rate. The adaptive maximum is
 200 ms unless the configured capture interval is already slower; a `--fps` value
@@ -55,6 +67,14 @@ capture child, source renewal and a later viewer through actual UDP/TLS/QUIC and
 supervised protocol-fixture IPC. The later viewer continues after the first
 connection departs, with pacing owned by the source rather than either viewer.
 This remains fixture-based integration evidence, not live-tailnet qualification.
+
+The shared receiver-load regressions use the production feedback requester and
+responder on the original TLS/UDP sessions. An accepted receiver picture retains
+its actual charged bytes while its fixture decode completion waits; reported
+work is that measured elapsed wait. They exercise slowdown followed by a
+headroom probe when decoding catches up, original-session renewal, and a healthy
+viewer continuing after a slower sibling leaves. The codec and completion are
+explicit fixtures, not hardware decoder or physical presentation measurements.
 
 ## Enabling the implemented path
 

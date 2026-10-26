@@ -23,7 +23,9 @@ change capture pacing. A fixed-policy host can consume negotiated measurements
 without silently enabling adaptation. Existing local-only users of the capture
 controller retain their previous behavior.
 
-`frd run` does not enable it. Measured 2026-10-14 (namespace, controlled share,
+`frd run` enables adaptive capture only with the explicit `--adaptive-capture`
+option; it remains off by default for controlled and shared observation sessions.
+Measured 2026-10-14 (namespace, controlled share,
 the client pinned to one core shared with CPU hogs, busy host content, 60 s,
 debug builds):
 - 3 hogs: both survived. With pacing: 461 pictures instead of 901, presented
@@ -37,7 +39,7 @@ So for controlled shares, slowing capture does not protect an overloaded client;
 it trades frame rate for input suspensions.
 
 The previously published wire grammar, validation, `Requester`, `Responder` and
-`ReceiverEvidence` are reused unchanged. The runtime does not alter their
+`ReceiverEvidence` retain their existing sequence and lifetime rules. The runtime does not alter their
 original 50 ms host query cadence, 150 ms query/sample lifetime, 100 ms reply
 lifetime or 25 ms minimum reply sampling interval. Sample validity begins when
 the host creates the query, not when either side queues or receives its record.
@@ -86,6 +88,46 @@ are unchanged.
 `StreamingHost::receiver_feedback_reports` counts accepted new solicited reports.
 `StreamingViewer::receiver_feedback_reports` counts reply admissions into transport.
 Neither is an acknowledgement of delivery, presentation or application effects.
+
+## Shared observation sources
+
+Each original shared session still owns its requester, immutable pending query,
+transport routes and reply validation. After its startup handshake, it passes
+one bounded, content-free sample to its subscriber on the original connection.
+The publisher owns no requester, connection or additional queue. The snapshot
+contains the exact installed media view and the original query expiry; reading
+or copying it cannot create a new lifetime. The control-pair binding used on the
+wire and the media-configuration binding remain separate, validated scopes.
+
+The shared controller considers only active streaming members. Startup, late
+join, recovery and failed members do not vote. Recovery changes the complete
+media binding, immediately invalidating an old sample even before a replacement
+report arrives. Missing, stale or future evidence is unknown. Only the original
+session can explicitly record that metrics were not negotiated; an uninitialized
+member cannot claim that exemption.
+
+Upward probes require a single eligible viewer with both recent accepted video
+enqueue and current receiver headroom. A blocked sender's healthy decoder cannot
+combine with a different viewer's slow decoder and ready sender. Receiver-driven
+slowdown requires every eligible member to report positive pressure within its
+original lifetime. The representative is one complete measured report, never
+componentwise minima assembled from different viewers. The existing source-work,
+pool-credit and send-pressure causes remain independently authoritative.
+
+Recent enqueue evidence is bounded by the current capture interval, with a
+100 ms minimum and 250 ms maximum. This permits recovery from a 200 ms cadence
+without requiring an enqueue that the cadence itself forbids. Its timestamp is
+the actual enqueue attempt; idle maintenance does not refresh it. This does not
+extend the independent 150 ms query/sample deadline or prove network capacity.
+
+Two shared-source regressions use the original production feedback owners and
+real UDP/TLS plus supervised source IPC. One delays an actual accepted receiver
+obligation's fixture completion, observes raw-capture reduction, then resumes
+prompt completion and requires an upward probe across session renewal. The other
+keeps a healthy sibling progressing through the slow viewer's departure. Codec
+output and decode completion are explicit fixtures; no hardware or WAN result
+is implied. Pure regressions separately cover sample expiry, binding changes,
+mixed-viewer evidence, missing reports and cadence-limited probe recovery.
 
 ## Verification scope
 

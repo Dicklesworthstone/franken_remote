@@ -177,11 +177,20 @@ impl Requester {
         self.pending = None;
         Ok(true)
     }
-    pub fn evidence(&mut self, now: u64) -> Result<ReceiverEvidence, Error> {
+    /// Copy the current solicited sample with its ORIGINAL host-query expiry.
+    /// A caller transferring it to another bounded owner must preserve that
+    /// deadline: neither a read nor reply receipt buys a new sample lifetime.
+    /// Missing and expired evidence stays unknown; this never prepares a query.
+    pub fn sample(&mut self, now: u64) -> Result<Option<(Load, u64)>, Error> {
         self.tick(now)?;
-        Ok(self.sample.map_or(ReceiverEvidence::Unknown, |(load, _)| {
-            ReceiverEvidence::Measured(load)
-        }))
+        Ok(self.sample)
+    }
+    pub fn evidence(&mut self, now: u64) -> Result<ReceiverEvidence, Error> {
+        Ok(self
+            .sample(now)?
+            .map_or(ReceiverEvidence::Unknown, |(load, _)| {
+                ReceiverEvidence::Measured(load)
+            }))
     }
 }
 struct Reply {

@@ -90,6 +90,7 @@ impl Publisher {
             cursor: super::cursor::EntryCursor::default(),
             audio: super::audio::EntryAudio::default(),
             send_sample: None,
+            receiver_sample: super::adaptive::ReceiverSample::Unknown,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),

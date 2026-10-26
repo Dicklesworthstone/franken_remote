@@ -124,6 +124,9 @@ struct Member {
     first: Option<u64>,
     acknowledged: bool,
     frames: Vec<u64>,
+    feedback: Option<crate::media::receiver_feedback::ViewerFeedback>,
+    decode_delay_us: u64,
+    pending_decode: Option<(fr_media::delivery::ReceivedPicture, u64)>,
     nonce: u128,
 }
 async fn sessions(
@@ -261,6 +264,9 @@ async fn peer_with_capabilities(rt: &Runtime, id: u128, role: Role, extra: &[&st
         first: None,
         acknowledged: false,
         frames: vec![],
+        feedback: None,
+        decode_delay_us: 0,
+        pending_decode: None,
         nonce: 10000,
     }
 }
@@ -432,16 +438,8 @@ impl Member {
                 },
             )
             .unwrap();
-        while let Some(picture) = self.receiver.take_decodable(now(&self.c).unwrap()).unwrap() {
-            let frame = self
-                .receiver
-                .complete_decode(&picture, now(&self.c).unwrap())
-                .unwrap()
-                .descriptor()
-                .frame;
-            self.first.get_or_insert(frame);
-            self.frames.push(frame);
-        }
+        self.decode_pictures();
+        self.service_feedback();
         // These peers share one fixture task with Publisher::serve. Match the
         // production SharedHost::serve cooperative turn boundary so a constantly
         // ready socket cannot monopolize this manually joined parent future.
@@ -658,4 +656,5 @@ mod recovery;
 mod selected;
 
 mod adaptive;
+mod receiver_load;
 mod registered;

@@ -1,5 +1,25 @@
 use super::*;
 
+mod receiver;
+
+fn local(send: Availability) -> PeerEvidence {
+    PeerEvidence {
+        send,
+        receiver: ReceiverEvidence::Unobserved,
+    }
+}
+fn send_evidence(
+    now: u64,
+    samples: impl Iterator<Item = Option<(u64, Availability)>>,
+) -> Availability {
+    peer_evidence(
+        now,
+        100_000,
+        samples.map(|sample| (sample, ReceiverEvidence::Unknown)),
+    )
+    .send
+}
+
 fn pacing() -> CapturePacing {
     CapturePacing::new(Duration::from_millis(50), Duration::from_millis(200), 30).unwrap()
 }
@@ -118,17 +138,23 @@ fn own_capture_reservation_is_unknown_credit_and_live_work_age_is_measured() {
     let mut pacing = pacing();
     pacing.start(1000).unwrap();
     assert_eq!(pacing.start(1001), Err(Error::InvalidBudget));
-    pacing.sample(71_000, false, Availability::Ready).unwrap();
+    pacing
+        .sample(71_000, false, local(Availability::Ready))
+        .unwrap();
     let report = pacing.controller.report().unwrap();
     assert_eq!(report.sample.capture_credit, Availability::Unknown);
     assert_eq!(report.sample.source_work_us, Some(70_000));
     pacing.finish(81_000, 2000, true).unwrap();
-    pacing.sample(82_000, true, Availability::Ready).unwrap();
+    pacing
+        .sample(82_000, true, local(Availability::Ready))
+        .unwrap();
     assert_eq!(
         pacing.controller.report().unwrap().sample.source_work_us,
         Some(80_000)
     );
-    pacing.sample(331_001, true, Availability::Ready).unwrap();
+    pacing
+        .sample(331_001, true, local(Availability::Ready))
+        .unwrap();
     assert_eq!(
         pacing.controller.report().unwrap().sample.source_work_us,
         None
@@ -138,7 +164,9 @@ fn own_capture_reservation_is_unknown_credit_and_live_work_age_is_measured() {
 fn shared_pool_pressure_reduces_raw_work_after_dwell_within_the_operator_floor() {
     let mut pacing = pacing();
     for now in (0..=400_000).step_by(10_000) {
-        pacing.sample(now, false, Availability::Ready).unwrap();
+        pacing
+            .sample(now, false, local(Availability::Ready))
+            .unwrap();
     }
     assert_eq!(pacing.controller.interval_us(), 200_000);
     assert!(
@@ -159,7 +187,9 @@ fn source_pressure_stays_distinct_from_shared_pool_or_send_pressure() {
     let mut pacing = pacing();
     pacing.start(0).unwrap();
     for now in (0..=250_000).step_by(10_000) {
-        pacing.sample(now, false, Availability::Ready).unwrap();
+        pacing
+            .sample(now, false, local(Availability::Ready))
+            .unwrap();
     }
     assert_eq!(pacing.controller.interval_us(), 200_000);
     assert!(
@@ -183,8 +213,12 @@ fn only_actual_unchanged_observations_establish_idle_and_actual_change_wakes_it(
         if now.is_multiple_of(100_000) {
             complete(&mut observed, now, false);
         }
-        observed.sample(now, true, Availability::Ready).unwrap();
-        silent.sample(now, true, Availability::Ready).unwrap();
+        observed
+            .sample(now, true, local(Availability::Ready))
+            .unwrap();
+        silent
+            .sample(now, true, local(Availability::Ready))
+            .unwrap();
     }
     assert_eq!(
         observed.controller.report().unwrap().mode,
@@ -197,7 +231,7 @@ fn only_actual_unchanged_observations_establish_idle_and_actual_change_wakes_it(
     );
     complete(&mut observed, 1_310_000, true);
     observed
-        .sample(1_310_000, true, Availability::Ready)
+        .sample(1_310_000, true, local(Availability::Ready))
         .unwrap();
     assert_eq!(observed.controller.interval_us(), 100_000);
     assert_eq!(
@@ -209,13 +243,17 @@ fn only_actual_unchanged_observations_establish_idle_and_actual_change_wakes_it(
 fn missing_send_evidence_never_allows_an_upward_probe() {
     let mut pacing = pacing();
     for now in (0..=150_000).step_by(10_000) {
-        pacing.sample(now, false, Availability::Ready).unwrap();
+        pacing
+            .sample(now, false, local(Availability::Ready))
+            .unwrap();
     }
     for now in (160_000_u64..=3_000_000).step_by(10_000) {
         if now.is_multiple_of(100_000) {
             complete(&mut pacing, now, true);
         }
-        pacing.sample(now, true, Availability::Unknown).unwrap();
+        pacing
+            .sample(now, true, local(Availability::Unknown))
+            .unwrap();
     }
     assert_eq!(pacing.controller.interval_us(), 200_000);
     assert!(
@@ -235,7 +273,7 @@ fn source_clock_faults_and_impossible_observations_are_typed_refusals() {
     let mut pacing = pacing();
     pacing.start(100).unwrap();
     assert_eq!(
-        pacing.sample(99, true, Availability::Ready),
+        pacing.sample(99, true, local(Availability::Ready)),
         Err(pacing_error(pacing::Error::ClockRegression))
     );
 }

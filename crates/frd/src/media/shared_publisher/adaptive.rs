@@ -1,9 +1,10 @@
-//! One local raw-admission controller for the original shared source. Per-peer
+//! One raw-admission controller for the original shared source. Per-peer
 //! deadlines and retirement remain independent; one slow viewer never chooses
 //! the rate of a healthy viewer. No codec parameter or recovery policy changes.
 use super::{Entry, Error, MediaError, Members, ObservationControl, Publisher};
-use fr_media::pacing::{self, Availability, Controller, Observation, Sample};
-use fr_wire::decoder::Binding;
+use crate::media::receiver_feedback::SharedSample;
+use fr_media::pacing::{self, Availability, Controller, Observation, ReceiverEvidence, Sample};
+use fr_wire::{decoder::Binding, receiver_metrics::Load};
 use std::time::Duration;
 
 #[derive(Clone, Copy)]
@@ -52,6 +53,35 @@ impl Entry {
     }
 }
 
+/// Exactly one content-free snapshot. Only the original running session can
+/// explicitly record an unnegotiated peer; absence of a report is unknown.
+#[derive(Clone, Copy, Default)]
+pub(super) enum ReceiverSample {
+    #[default]
+    Unknown,
+    Unnegotiated(Binding),
+    Measured(SharedSample),
+}
+impl ReceiverSample {
+    fn current(self, view: Binding, now: u64) -> ReceiverEvidence {
+        match self {
+            Self::Unnegotiated(original) if original == view => ReceiverEvidence::Unobserved,
+            Self::Measured(sample)
+                if sample.view == view && sample.at_us <= now && now < sample.until_us =>
+            {
+                ReceiverEvidence::Measured(sample.load)
+            }
+            _ => ReceiverEvidence::Unknown,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PeerEvidence {
+    send: Availability,
+    receiver: ReceiverEvidence,
+}
+
 pub(super) struct CapturePacing {
     controller: Controller,
     in_flight: Option<u64>,
@@ -78,6 +108,9 @@ impl CapturePacing {
             last_work: None,
             observation: None,
         })
+    }
+    pub(super) fn interval_us(&self) -> u64 {
+        self.controller.interval_us()
     }
     pub(super) fn start(&mut self, now: u64) -> Result<(), Error> {
         if self.in_flight.is_some() {
@@ -108,7 +141,7 @@ impl CapturePacing {
         &mut self,
         now: u64,
         pool_ready: bool,
-        send: Availability,
+        peers: PeerEvidence,
     ) -> Result<u64, Error> {
         let running = self.in_flight.map(|at| elapsed(now, at)).transpose()?;
         let completed = self
@@ -127,13 +160,16 @@ impl CapturePacing {
             Availability::Blocked
         };
         self.controller
-            .update(Sample {
-                now_us: now,
-                source_work_us: running.into_iter().chain(completed).max(),
-                send,
-                capture_credit,
-                observation: self.observation.take(),
-            })
+            .update_with_receiver(
+                Sample {
+                    now_us: now,
+                    source_work_us: running.into_iter().chain(completed).max(),
+                    send: peers.send,
+                    capture_credit,
+                    observation: self.observation.take(),
+                },
+                peers.receiver,
+            )
             .map(|report| report.interval_us)
             .map_err(pacing_error)
     }
@@ -146,33 +182,73 @@ fn pacing_error(error: pacing::Error) -> Error {
     Error::Media(MediaError::Pacing(error))
 }
 
-/// Aggregate *actual video enqueue* samples. A healthy viewer can consume the
-/// shared source independently of a laggard. Pressure requires every eligible
-/// viewer to have recent blocked evidence; silence is never fabricated success.
-fn send_evidence(
+/// A probe needs one whole healthy path: this SAME viewer's accepted video
+/// enqueue and live decoder headroom (or explicit absence of negotiation).
+/// Otherwise receiver slowdown needs positive live pressure from EVERY eligible
+/// viewer. Pick one complete Load, in stable subscriber order; never synthesize
+/// a healthy receiver by combining counters from different viewers.
+fn peer_evidence(
     now: u64,
-    samples: impl Iterator<Item = Option<(u64, Availability)>>,
-) -> Availability {
+    interval: u64,
+    samples: impl Iterator<Item = (Option<(u64, Availability)>, ReceiverEvidence)>,
+) -> PeerEvidence {
     let mut any = false;
+    let mut any_ready = false;
     let mut all_blocked = true;
-    for sample in samples {
+    let mut healthy = None;
+    let mut pressured = None;
+    let mut all_pressured = true;
+    // At the slowest adaptive cadence a real enqueue occurs only every 200 ms.
+    // Keep that outcome across one admission interval, bounded by the canonical
+    // source-evidence horizon. Idle never refreshes the original timestamp.
+    let send_lifetime = interval.clamp(100_000, pacing::SOURCE_EVIDENCE_US);
+    for (send, receiver) in samples {
         any = true;
-        match sample.filter(|(at, _)| now.checked_sub(*at).is_some_and(|age| age <= 100_000)) {
-            Some((_, Availability::Ready)) => return Availability::Ready,
-            Some((_, Availability::Blocked)) => {}
-            _ => all_blocked = false,
+        let send = send
+            .filter(|(at, _)| now.checked_sub(*at).is_some_and(|age| age <= send_lifetime))
+            .map_or(Availability::Unknown, |(_, availability)| availability);
+        any_ready |= send == Availability::Ready;
+        all_blocked &= send == Availability::Blocked;
+        let headroom = match receiver {
+            ReceiverEvidence::Unobserved => true,
+            ReceiverEvidence::Measured(load) => receiver_headroom(load, interval),
+            ReceiverEvidence::Unknown => false,
+        };
+        if healthy.is_none() && send == Availability::Ready && headroom {
+            healthy = Some(receiver);
+        }
+        if let ReceiverEvidence::Measured(load) = receiver
+            && (load.retained_pictures > 1 || load.work_us.is_some_and(|work| work >= interval))
+        {
+            pressured.get_or_insert(receiver);
+        } else {
+            all_pressured = false;
         }
     }
-    if any && all_blocked {
-        Availability::Blocked
-    } else {
-        Availability::Unknown
+    PeerEvidence {
+        send: if any_ready {
+            Availability::Ready
+        } else if any && all_blocked {
+            Availability::Blocked
+        } else {
+            Availability::Unknown
+        },
+        receiver: healthy
+            .or(pressured.filter(|_| all_pressured))
+            .unwrap_or(ReceiverEvidence::Unknown),
     }
 }
+fn receiver_headroom(load: Load, interval: u64) -> bool {
+    // Match the canonical controller's measured-receiver headroom predicate.
+    !load.decoding
+        && load.retained_pictures <= 1
+        && load.work_us.is_some_and(|work| work <= interval * 3 / 4)
+}
 impl Members {
-    pub(super) fn send_evidence(&self, now: u64) -> Availability {
-        send_evidence(
+    pub(super) fn peer_evidence(&self, now: u64, interval: u64) -> PeerEvidence {
+        peer_evidence(
             now,
+            interval,
             self.entries
                 .iter()
                 .flatten()
@@ -183,9 +259,12 @@ impl Members {
                         && !entry.fenced()
                 })
                 .map(|entry| {
-                    entry
-                        .send_sample
-                        .and_then(|sample| sample.current(entry.view))
+                    (
+                        entry
+                            .send_sample
+                            .and_then(|sample| sample.current(entry.view)),
+                        entry.receiver_sample.current(entry.view, now),
+                    )
                 }),
         )
     }
@@ -223,12 +302,12 @@ impl Publisher {
             .and_then(|n| n.checked_add(fr_media::worker::UNIT_PREFIX_BYTES))
             .ok_or(Error::InvalidBudget)?;
         let ready = self.pool.can_share_capacity(capacity);
-        let send = self
+        let peers = self
             .members
             .lock()
             .map_err(|_| Error::Poisoned)?
-            .send_evidence(now);
-        adaptive.sample(now, ready, send).map(Some)
+            .peer_evidence(now, adaptive.controller.interval_us());
+        adaptive.sample(now, ready, peers).map(Some)
     }
 }
 

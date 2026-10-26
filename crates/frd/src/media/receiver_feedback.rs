@@ -29,6 +29,8 @@ pub enum Error {
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Setup {
+    /// Original installed media scope, before using the session-control ID on wire.
+    media_view: Binding,
     binding: Binding,
     limits: ProtocolLimits,
 }
@@ -58,9 +60,12 @@ impl Setup {
         {
             return Err(Error::Wire(WireError::ResourceLimit));
         }
+        view.validate().map_err(Error::Wire)?;
+        let media_view = view;
         view.parent = parent;
         view.validate().map_err(Error::Wire)?;
         Ok(Some(Self {
+            media_view,
             binding: view,
             limits: selected.limits,
         }))
@@ -69,9 +74,20 @@ impl Setup {
 pub(crate) fn is_feedback(bytes: &[u8]) -> bool {
     bytes.get(6..8) == Some(&(Kind::StageMetrics as u16).to_be_bytes())
 }
+/// Content-free copy for the shared source's bounded per-subscriber state.
+/// `at_us` is the local copy time, not a new measurement or validity period.
+/// Only `until_us`, fixed by the original host query, bounds this evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SharedSample {
+    pub(crate) view: Binding,
+    pub(crate) at_us: u64,
+    pub(crate) until_us: u64,
+    pub(crate) load: Load,
+}
 pub(crate) struct HostFeedback {
     inbound: Route,
     outbound: Route,
+    media_view: Binding,
     requester: Requester,
     pub(crate) accepted: u64,
 }
@@ -80,6 +96,7 @@ impl HostFeedback {
         Ok(Self {
             inbound,
             outbound,
+            media_view: setup.media_view,
             requester: Requester::new(setup.binding, setup.limits, 0).map_err(Error::Load)?,
             accepted: 0,
         })
@@ -95,6 +112,18 @@ impl HostFeedback {
     }
     pub(crate) fn evidence(&mut self, now: u64) -> Result<ReceiverEvidence, Error> {
         self.requester.evidence(now).map_err(Error::Load)
+    }
+    pub(crate) fn sample(&mut self, now: u64) -> Result<Option<SharedSample>, Error> {
+        Ok(self
+            .requester
+            .sample(now)
+            .map_err(Error::Load)?
+            .map(|(load, until_us)| SharedSample {
+                view: self.media_view,
+                at_us: now,
+                until_us,
+                load,
+            }))
     }
     pub(crate) fn service(&mut self, q: &mut QuicRecords, cx: &Cx, now: u64) -> Result<(), Error> {
         self.requester

@@ -66,6 +66,8 @@ struct Entry {
     audio: audio::EntryAudio,
     /// Actual video enqueue evidence, never a delivery/capacity estimate.
     send_sample: Option<adaptive::SendSample>,
+    /// Exact-view receiver evidence copied by the original session owner.
+    receiver_sample: adaptive::ReceiverSample,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
@@ -82,6 +84,7 @@ impl Entry {
         self.local_failure = None;
         self.media = None;
         self.join = None;
+        self.receiver_sample = adaptive::ReceiverSample::Unknown;
         self.failure.get_or_insert(error);
     }
 }
@@ -315,6 +318,7 @@ impl Publisher {
             cursor: cursor::EntryCursor::default(),
             audio: audio::EntryAudio::default(),
             send_sample: None,
+            receiver_sample: adaptive::ReceiverSample::Unknown,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),
@@ -436,7 +440,10 @@ impl Publisher {
                     .members
                     .lock()
                     .map_err(|_| Error::Poisoned)
-                    .and_then(|m| adaptive.sample(m.last, false, m.send_evidence(m.last)));
+                    .and_then(|m| {
+                        let peers = m.peer_evidence(m.last, adaptive.interval_us());
+                        adaptive.sample(m.last, false, peers)
+                    });
                 if let Err(error) = sample {
                     return Poll::Ready(Err(error));
                 }
