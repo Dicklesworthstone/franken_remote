@@ -234,4 +234,9 @@ selection. Evidence: `crates/frd/tests/native_host_linux_serial/real_files.rs`
 negatives) and the unit tests in `crates/frd/src/native_files/tests.rs`. Not a
 live-tailnet, picker, drag-and-drop or resumption qualification. Explicit
 directory selection uses the profile-2/profile-3 path above; downloads use the same ATP
-machinery in the direction described in NATIVE_FILE_DOWNLOAD.md.
+machinery in the direction described in NATIVE_FILE_DOWNLOAD.md. The client may
+combine `--send` and `--receive`, and a one-shot host may combine `--files` and
+`--send`, when both peers select `file-duplex` v1. Two fixed role-specific owners
+keep cancellation, byte budgets, receipts and cleanup independent; ordinary input
+and lease renewal still run first. A legacy peer selects only its existing
+explicit direction. Neither selection is replayed after reconnect.

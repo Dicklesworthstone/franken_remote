@@ -1,6 +1,7 @@
-//! One file sender carried by the original running controller, never a new grant.
+//! Fixed upload and download owners on the original controller, never new grants.
 mod download;
 mod negotiation;
+mod slots;
 use super::{ControlledViewer, permitted};
 use asupersync::cx::Cx;
 use fr_files::{
@@ -17,6 +18,7 @@ use fr_wire::{
     negotiation::{ControlBinding, Role},
 };
 use negotiation::{Advance, Pending};
+pub(super) use slots::Slots;
 use std::{fs::File, time::Duration};
 
 #[derive(Default)]
@@ -181,6 +183,30 @@ impl Slot {
         }
         Ok(())
     }
+    fn cleanup_finished(&self) -> bool {
+        self.receiver
+            .as_ref()
+            .is_none_or(|r| r.receiver.cleanup_finished())
+            && self.sender.as_ref().is_none_or(Sender::cleanup_finished)
+    }
+    fn try_finish_cleanup(&mut self) -> Option<Result<(), Error>> {
+        if !self.stopped || self.pending.is_some() {
+            return None;
+        }
+        let result = if let Some(receiving) = &mut self.receiver {
+            receiving
+                .collect()
+                .map(|result| result.map_err(|_| Error::Worker))
+        } else {
+            self.sender
+                .as_mut()
+                .map_or(Some(Ok(())), Sender::try_finish_cleanup)
+        };
+        if let Some(Err(error)) = result {
+            self.failure.get_or_insert(error);
+        }
+        result
+    }
 }
 impl ControlledViewer {
     /// Attach one completed file pair to THIS decoder-backed controller. `handle`
@@ -195,20 +221,25 @@ impl ControlledViewer {
         permission: Permission,
         policy: Policy,
     ) -> Result<(), Error> {
-        if self.files.used || self.files.stopped {
+        if self.files.upload.used
+            || self.files.upload.stopped
+            || (self.files.download.used
+                && !fr_wire::files::duplex_selected(&self.session.opened.selection))
+        {
             return Err(Error::Busy);
         }
         self.files_admitted(&permission)?;
-        if self
-            .session
-            .opened
-            .selection
-            .capabilities
-            .iter()
-            .any(|cap| {
-                cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
-                    && cap.version == fr_wire::files::DOWNLOAD_VERSION
-            })
+        if !fr_wire::files::duplex_selected(&self.session.opened.selection)
+            && self
+                .session
+                .opened
+                .selection
+                .capabilities
+                .iter()
+                .any(|cap| {
+                    cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                        && cap.version == fr_wire::files::DOWNLOAD_VERSION
+                })
         {
             return Err(Error::WrongRole);
         }
@@ -220,7 +251,8 @@ impl ControlledViewer {
             },
             ..self.media.as_ref().ok_or(Error::Closed)?.binding()
         };
-        if channel.completed_parent(q).map_err(Error::Transport)? != self.session.opened.binding
+        if channel.descriptor().role != attachment::MediaRole::Files
+            || channel.completed_parent(q).map_err(Error::Transport)? != self.session.opened.binding
             || channel.descriptor().binding != expected
         {
             return Err(Error::WrongConnection);
@@ -229,10 +261,10 @@ impl ControlledViewer {
             .map_err(Error::Transport)?;
         // The completed attachment has spent this single-use channel identity,
         // even if local sender configuration is subsequently refused.
-        self.files.used = true;
+        self.files.upload.used = true;
         let sender = Sender::owning(self.session.cx.clone(), q, lane, policy)?;
-        self.files.sender = Some(sender);
-        self.files.permission = Some(permission);
+        self.files.upload.sender = Some(sender);
+        self.files.upload.permission = Some(permission);
         Ok(())
     }
     fn files_admitted(&mut self, permission: &Permission) -> Result<(), Error> {
@@ -266,6 +298,7 @@ impl ControlledViewer {
     pub fn send_file(&mut self, file: File, name: &str) -> Result<u64, Error> {
         self.admit_file_send()?;
         self.files
+            .upload
             .sender
             .as_mut()
             .ok_or(Error::Closed)?
@@ -278,6 +311,7 @@ impl ControlledViewer {
     pub fn send_directory(&mut self, directory: File, name: &str) -> Result<u64, Error> {
         self.admit_file_send()?;
         self.files
+            .upload
             .sender
             .as_mut()
             .ok_or(Error::Closed)?
@@ -295,6 +329,7 @@ impl ControlledViewer {
     pub fn send_files(&mut self, selection: Selection, lifetime: Duration) -> Result<(), Error> {
         self.admit_file_send()?;
         self.files
+            .upload
             .sender
             .as_mut()
             .ok_or(Error::Closed)?
@@ -302,11 +337,11 @@ impl ControlledViewer {
     }
     fn admit_file_send(&mut self) -> Result<(), Error> {
         self.check().map_err(|_| Error::Closed)?;
-        if self.files.pending.is_some() {
+        if self.files.upload.pending.is_some() {
             return Err(Error::Busy);
         }
-        if !self.files.permits_io() || self.files.stopped {
-            self.cancel_files()?;
+        if !self.files.upload.permits_io() || self.files.upload.stopped {
+            self.cancel_file_send()?;
             return Err(Error::Cancelled);
         }
         if !permitted(&mut self.input, &self.control, &self.session.cx) {
@@ -318,12 +353,17 @@ impl ControlledViewer {
     /// Queued sources are not counted as started, and publication uncertainty is
     /// never reported as a rollback or used as a reason to resubmit a selection.
     pub fn file_batch_report(&self) -> Option<Report> {
-        self.files.sender.as_ref().and_then(Sender::batch_report)
+        self.files
+            .upload
+            .sender
+            .as_ref()
+            .and_then(Sender::batch_report)
     }
     /// Collect only a complete report after the original source has been joined.
     /// This remains usable after close and cannot reopen a retired file lane.
     pub fn take_file_batch_report(&mut self) -> Option<Report> {
         self.files
+            .upload
             .sender
             .as_mut()
             .and_then(Sender::take_batch_report)
@@ -332,10 +372,11 @@ impl ControlledViewer {
     /// This neither creates authority nor renews any transfer/record deadline.
     /// The next service turn still checks the original controller permission.
     pub fn set_files_paused(&mut self, paused: bool) -> Result<(), Error> {
-        if self.files.stopped {
+        if self.files.upload.stopped {
             return Err(Error::Closed);
         }
         self.files
+            .upload
             .sender
             .as_mut()
             .ok_or(Error::Closed)?
@@ -344,66 +385,78 @@ impl ControlledViewer {
     /// Last local admission gate, not proof that admitted bytes stopped or that
     /// a remote effect was rolled back. Read the original receipt for effects.
     pub fn file_is_paused(&self) -> Option<bool> {
-        self.files.sender.as_ref().map(Sender::is_paused)
+        self.files.upload.sender.as_ref().map(Sender::is_paused)
     }
     pub fn file_stage(&self) -> Option<Stage> {
-        self.files.sender.as_ref().map(Sender::stage)
+        self.files.upload.sender.as_ref().map(Sender::stage)
     }
     pub fn file_progress(&self) -> Option<Progress> {
-        self.files.sender.as_ref().and_then(Sender::progress)
+        self.files.upload.sender.as_ref().and_then(Sender::progress)
     }
     pub fn file_result(&self) -> Option<Receipt> {
-        self.files.sender.as_ref().and_then(Sender::result)
+        self.files.upload.sender.as_ref().and_then(Sender::result)
     }
+    /// Compatibility summary: the upload failure, or a download-only failure.
+    /// Native direction-specific status uses the corresponding accessor below.
     pub fn file_failure(&self) -> Option<Error> {
-        self.files.failure
+        self.files.upload.failure.or(self.files.download.failure)
+    }
+    pub fn file_send_failure(&self) -> Option<Error> {
+        self.files.upload.failure
     }
     /// This remains available after controller shutdown and never replays a file.
     pub fn take_file_result(&mut self) -> Option<Receipt> {
-        self.files.sender.as_mut().and_then(Sender::take_result)
-    }
-    pub fn file_cleanup_finished(&self) -> bool {
         self.files
-            .receiver
-            .as_ref()
-            .is_none_or(|r| r.receiver.cleanup_finished())
-            && self
-                .files
-                .sender
-                .as_ref()
-                .is_none_or(Sender::cleanup_finished)
+            .upload
+            .sender
+            .as_mut()
+            .and_then(Sender::take_result)
     }
-    /// A completed file lane retires independently. An unfinished attachment
-    /// instead fences the parent: a partially acknowledged pair is not clean.
+    /// Whether every original file worker has finished cleanup. This never
+    /// conflates a completed upload with a still-active download.
+    pub fn file_cleanup_finished(&self) -> bool {
+        self.files.upload.cleanup_finished() && self.files.download.cleanup_finished()
+    }
+    /// Stop the upload only. The native SendControl uses this entry point so
+    /// its Cancel action cannot revoke a separately accepted download.
+    pub fn cancel_file_send(&mut self) -> Result<(), Error> {
+        if self.files.upload.pending.is_some() {
+            self.close();
+            return Err(Error::Cancelled);
+        }
+        self.files.upload.stop(&mut self.session.transport)
+    }
+    /// Stop receipt only, retaining its actual publication/cleanup status.
+    pub fn cancel_file_receive(&mut self) -> Result<(), Error> {
+        if self.files.download.pending.is_some() {
+            self.close();
+            return Err(Error::Cancelled);
+        }
+        self.files.download.stop(&mut self.session.transport)
+    }
+    /// Retire all file work on this controller. An unfinished attachment still
+    /// fences the parent: a partial handshake cannot be reset independently.
     pub fn cancel_files(&mut self) -> Result<(), Error> {
-        if self.files.pending.is_some() {
+        if self.files.upload.pending.is_some() || self.files.download.pending.is_some() {
             self.close();
             return Err(Error::Cancelled);
         }
         self.files.stop(&mut self.session.transport)
     }
-    /// Poll cleanup of an already stopped file lane without stopping desktop
-    /// control, awaiting a worker or blocking on a kernel read. Keep this owner
-    /// until success; pending and failed cleanup never permit a replacement.
-    /// Completed receipts remain available, including publication uncertainty.
+    /// Collect only the original stopped upload source. A download may continue.
+    pub fn try_finish_file_send_cleanup(&mut self) -> Option<Result<(), Error>> {
+        self.files.upload.try_finish_cleanup()
+    }
+    /// Poll BOTH stopped file owners without waiting or dropping custody.
     pub fn try_finish_file_cleanup(&mut self) -> Option<Result<(), Error>> {
-        if !self.files.stopped || self.files.pending.is_some() {
-            return None;
+        let upload = self.files.upload.try_finish_cleanup();
+        let download = self.files.download.try_finish_cleanup();
+        // A joined worker's failure does not settle its sibling. Keep both
+        // original owners until both results exist or the caller's deadline ends.
+        match (upload, download) {
+            (Some(upload), Some(download)) => Some(upload.and(download)),
+            _ => None,
         }
-        let result = if let Some(receiving) = &mut self.files.receiver {
-            receiving
-                .collect()
-                .map(|result| result.map_err(|_| Error::Worker))
-        } else {
-            self.files
-                .sender
-                .as_mut()
-                .map_or(Some(Ok(())), Sender::try_finish_cleanup)
-        };
-        if let Some(Err(error)) = result {
-            self.files.failure.get_or_insert(error);
-        }
-        result
     }
     /// Stop files, then join the already-finished original disk source using a separate
     /// cleanup context. Expiry/cancellation/drop keep the sender and receipt here;
@@ -427,9 +480,6 @@ impl ControlledViewer {
             }
             previous = now;
             if let Some(result) = self.try_finish_file_cleanup() {
-                if let Err(error) = result {
-                    self.files.failure.get_or_insert(error);
-                }
                 return result;
             }
             asupersync::time::sleep_until(

@@ -468,6 +468,33 @@ reset, bounded per connection). No packet is sent before the matching
 `AudioConfigured`, and only audio captured after it; stale audio is dropped at
 the host rather than sent late.
 
+The native optional `file-duplex` v1 profile permits one upload and one
+download on the **same original controlled session**. Both endpoints must
+positively select `native-media-attachment`, `native-input-attachment`,
+`native-file-receive`, `file-atp-full`, `file-download`, `file-channel-scope`, and
+`file-duplex`, all version 1. The new attachment role `FilesDownload` (9,
+primary direction 1) carries host-to-controller data; the original `Files` (6,
+primary direction 2) carries controller-to-host data. Role 8 remains reserved
+for audio-up. Without the complete duplex profile, the existing sole Files
+lane retains its legacy direction selected by `file-download`; merely offering
+both endpoints does not authorize a second lane.
+
+Each file direction has a distinct one-use binding/ticket, channel-derived
+approved handle, local permission, finite selection, rate/byte budget and
+publication receipt. Neither transfer ID equality nor cancellation can cross
+those scopes. No role is reallocated after retirement on this connection.
+Cancellation of a completed attachment retires that direction alone; uncertain
+partial attachment still fences the parent connection. Input and lease renewal
+are serviced before bounded file work, and both file directions alternate first
+service under the original shared bulk queue limits. There is no increase to
+capability count, native stream ceilings or transport queue budgets. The fullest
+native clipboard/audio/duplex offer omits the optional attachment-credit
+extension if necessary to fit the existing 24-capability ceiling, using the
+existing bounded fixed-allowance attachment exchange. Reconnect requires fresh
+local choices and authority; no transfer is silently resumed. See
+[PROTOCOL_FILES.md](PROTOCOL_FILES.md) and
+[PROTOCOL_ATTACHMENT.md](PROTOCOL_ATTACHMENT.md).
+
 File messages are an authorization/stream envelope for **existing ATP**;
 they do not define a competing chunk-repair, hashing, resumption, or sync
 algorithm. The exact upstream ATP revision/profile and codecs must be selected

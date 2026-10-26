@@ -185,13 +185,20 @@ impl StreamingHost {
         directory: &crate::native_files::Directory,
     ) -> Result<(), crate::native_files::Absence> {
         use crate::native_files::Absence;
-        if self.stream.served || self.files.is_some() {
+        if self.stream.served || self.files.as_ref().is_some_and(files::Lane::has_upload) {
             return Err(Absence::Unavailable);
         }
         let session = self.host.session().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::files_lane(&session.opened.selected)?;
-        self.files = Some(files::Lane::new(directory));
+        if self.files.as_ref().is_some_and(files::Lane::has_download)
+            && !fr_wire::files::duplex_selected(&session.opened.selected)
+        {
+            return Err(Absence::NotNegotiated);
+        }
+        self.files
+            .get_or_insert_with(files::Lane::default)
+            .add_upload(directory);
         Ok(())
     }
     /// Consume one host-selected batch for this positively negotiated attempt.
@@ -202,13 +209,20 @@ impl StreamingHost {
         selection: &crate::native_files::HostSelection,
     ) -> Result<(), crate::native_files::Absence> {
         use crate::native_files::Absence;
-        if self.stream.served || self.files.is_some() {
+        if self.stream.served || self.files.as_ref().is_some_and(files::Lane::has_download) {
             return Err(Absence::Unavailable);
         }
         let session = self.host.session().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::file_download_lane(&session.opened.selected)?;
-        self.files = Some(files::Lane::download(selection.take_request()?));
+        if self.files.as_ref().is_some_and(files::Lane::has_upload)
+            && !fr_wire::files::duplex_selected(&session.opened.selected)
+        {
+            return Err(Absence::NotNegotiated);
+        }
+        self.files
+            .get_or_insert_with(files::Lane::default)
+            .add_download(selection.take_request()?);
         Ok(())
     }
     /// Fence at call time, then observe the ORIGINAL disk worker joined under
@@ -222,7 +236,7 @@ impl StreamingHost {
         let Host::Control(host) = &mut self.host else {
             return Ok(super::controlled::files::Cleanup::NotStarted);
         };
-        if host.file_receive_negotiating() {
+        if host.file_receive_negotiating() || host.file_send_negotiating() {
             host.close();
         }
         host.reap_files(cx, deadline).await

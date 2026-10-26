@@ -2,7 +2,7 @@
 
 A controlling Linux viewer can receive files and portable directories explicitly
 selected by the host operator. The transfer uses the existing ATP profiles on
-the original session's one-use Files attachment.
+the original session's independently admitted, one-use file attachment.
 
 ## Select a source and destination
 
@@ -45,9 +45,36 @@ attempt after reviewing the previous result.
 A client's remaining `--attempts` may recover viewing if a new session is admitted;
 its original download consent and results are never replayed or replaced.
 
-The one Files lane has one direction per connection. Host `--send` and `--files`
-are mutually exclusive; client `--receive` and `--send` are mutually exclusive.
-Clipboard and playback audio keep their own independent opt-ins.
+## Transfer in both directions
+
+The same original controlled connection can carry one upload and one download
+when both peers positively select `file-duplex` version 1. Select a host drop
+directory as well as the host source batch, and select client sources as well as
+the client destination:
+
+```bash
+frd run --software-explicit --display :0 \
+  --input-agent /opt/fr/fr-input-agent --once \
+  --files /home/alice/received --send /home/alice/report.pdf --json
+
+fr connect NODE_ID --control --experimental-native --display only \
+  --send /home/bob/reply.pdf --receive /home/bob/received --json
+```
+
+Each direction has its own fixed attachment, local permission, selected source
+and destination, byte accounting, receipt history and cleanup owner. Cancelling
+an established upload leaves the download running, and cancelling an established
+download leaves the upload running. Input and lease renewal are serviced before
+the bounded file work; first service alternates between the two directions.
+Closing the controlling session stops both. Cancellation during an unfinished
+attachment can still require the original parent fence; it never creates a new
+grant or retries an uncertain publication.
+
+An older peer selects only its original explicitly configured direction. The
+other requested direction reports that it was not negotiated, without inventing
+a remote endpoint or changing desktop control. Clipboard and playback audio
+retain their independent opt-ins. The original transfer, capability-count and
+queue ceilings remain in force.
 
 ## Choose download limits and conflict behavior
 
@@ -103,10 +130,12 @@ bounds.
 
 ## Authority, publication and results
 
-Both peers must positively select `file-download` version 1. This direction
-capability replaces the legacy upload scope in native offers. A source-only
-host never advertises an upload directory. Older peers can still negotiate
-desktop control and report that download support was not selected.
+Both peers must positively select `file-download` version 1. For download-only
+configuration this capability replaces the legacy upload scope in native offers.
+Selecting both directions additionally requires `file-duplex` v1 and the complete
+upload/download attachment profile; its absence never creates a second lane. A
+source-only host never advertises an upload directory. Older peers can still
+negotiate desktop control and report the unsupported direction as not selected.
 
 The host's source owner retains the original controlling input authority.
 The client's disk worker holds an opaque authority from its actual

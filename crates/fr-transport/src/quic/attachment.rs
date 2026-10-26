@@ -37,7 +37,8 @@ mod retire;
 const MAX_WAIT_US: u64 = 2_000_000;
 
 /// Retained through connection closure: consumed bindings and ticket identities
-/// never re-enter the allocation pool. At most seven auxiliary pairs exist.
+/// never re-enter the allocation pool. The fixed stream limit also bounds
+/// consumed recovery generations and both optional file directions.
 pub(super) struct Reservation {
     state: Arc<AtomicU8>,
     /// Set by the lane's owner to retire this optional pair at the
@@ -49,6 +50,7 @@ pub(super) struct Reservation {
     outbound: StreamId,
     retired_receive_accounted: u64,
     role: MediaRole,
+    files_duplex: bool,
     // True only after the host Binding entered the ordered control queue.
     offered: bool,
     pub(super) binding: u32,
@@ -139,6 +141,7 @@ pub struct MediaChannel {
     /// incoming layout or a generous generic protocol limit.
     credit: bool,
     pub(super) files_direction: FileDirection,
+    files_duplex: bool,
 }
 impl fmt::Debug for MediaChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -219,7 +222,11 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
                 attachment::CLIPBOARD_VERSION,
             )
         }
-        MediaRole::Files => {
+        MediaRole::Files | MediaRole::FilesDownload => {
+            if role == MediaRole::FilesDownload && !fr_wire::files::duplex_selected(scope.selection)
+            {
+                return Err(Error::WrongRoute);
+            }
             if scope.selection.role != fr_wire::negotiation::Role::RequestControl
                 || !scope.selection.capabilities.iter().any(|c| {
                     c.name == fr_wire::files::CAPABILITY && c.version == fr_wire::files::VERSION
@@ -271,12 +278,14 @@ fn datagram_route(role: MediaRole, host: bool) -> Option<(u16, bool)> {
         MediaRole::Configuration
         | MediaRole::Recovery
         | MediaRole::Clipboard
-        | MediaRole::Files => None,
+        | MediaRole::Files
+        | MediaRole::FilesDownload => None,
     }
 }
 
 fn priority(role: MediaRole, host_direction: bool) -> Priority {
-    if matches!(role, MediaRole::Clipboard | MediaRole::Files)
+    if role == MediaRole::Clipboard
+        || role.is_files()
         || (role == MediaRole::Recovery && host_direction)
     {
         Priority::Bulk
@@ -295,7 +304,7 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Input, true) => Messages::InputFeedback,
         (MediaRole::Input, false) => Messages::InputActions,
         (MediaRole::Clipboard, _) => Messages::Clipboard,
-        (MediaRole::Files, _) => Messages::Files,
+        (MediaRole::Files | MediaRole::FilesDownload, _) => Messages::Files,
         (MediaRole::AudioDown, true) => Messages::AudioControl,
         (MediaRole::AudioDown, false) => Messages::AudioReplies,
     }
@@ -355,16 +364,13 @@ impl QuicRecords {
         d: Descriptor,
         ticket: Option<Ticket>,
         allowance: u64,
+        files_duplex: bool,
     ) -> Result<(StreamRole, u64, u64), Error> {
         if self.streams.len() + 2 > MAX_STREAMS
             || self.attachments.len() >= (MAX_STREAMS - 2) / 2
             || self.attachments.iter().any(|r| {
                 matches!(r.state.load(Ordering::Acquire), PENDING | ARMED)
-                    && !matches!(
-                        (r.role, d.role),
-                        (MediaRole::Clipboard, MediaRole::Files)
-                            | (MediaRole::Files, MediaRole::Clipboard)
-                    )
+                    && !multiplex::optional_siblings(r.role, d.role)
             })
         {
             return Err(Error::Backpressure);
@@ -397,15 +403,27 @@ impl QuicRecords {
         // Clipboard is a single ordering domain for the original controller,
         // never a read-only observation route or a replacement sequence floor.
         // Retired reservations are deliberately not reusable on this connection.
-        if matches!(d.role, MediaRole::Clipboard | MediaRole::Files)
+        if (d.role == MediaRole::Clipboard || d.role.is_files())
             && (self.attachments.iter().any(|r| r.role == d.role)
-                || self
-                    .streams
-                    .iter()
-                    .any(|r| r.messages == messages(d.role, true))
+                || self.streams.iter().any(|stream| {
+                    stream.messages == messages(d.role, true)
+                        && !(d.role.is_files()
+                            && self.attachments.iter().any(|r| {
+                                r.binding == stream.binding && r.role.is_files() && r.role != d.role
+                            }))
+                })
                 || !self.attachments.iter().any(|r| {
                     r.role == MediaRole::Input && r.state.load(Ordering::Acquire) == ACTIVE
                 }))
+        {
+            return Err(Error::WrongRoute);
+        }
+        // A later call cannot invent duplex beside a legacy file reservation.
+        if d.role.is_files()
+            && self
+                .attachments
+                .iter()
+                .any(|r| r.role.is_files() && r.role != d.role && !(files_duplex && r.files_duplex))
         {
             return Err(Error::WrongRoute);
         }
@@ -448,8 +466,9 @@ impl QuicRecords {
         until: u64,
         ticket: Option<Ticket>,
         allowance: u64,
+        files_duplex: bool,
     ) -> Result<(ControlRoutes, Arc<AtomicU8>, Arc<AtomicBool>), Error> {
-        let (role, local, peer) = self.validate_reservation(d, ticket, allowance)?;
+        let (role, local, peer) = self.validate_reservation(d, ticket, allowance, files_duplex)?;
         self.streams
             .try_reserve_exact(2)
             .map_err(|_| Error::Allocation)?;
@@ -561,6 +580,7 @@ impl QuicRecords {
             outbound: outbound.stream,
             retired_receive_accounted: 0,
             role: d.role,
+            files_duplex,
             offered: false,
             binding: d.binding.parent.id,
             datagram_maximum: has_datagram(d.role).then_some(
@@ -619,8 +639,14 @@ impl QuicRecords {
             picture_allowance: 0,
             credit_epoch: u64::from(descriptor.binding.parent.id),
         };
-        let (pair, state, retire) =
-            self.reserve_pair(cx, descriptor, until, Some(request.ticket), allowance)?;
+        let (pair, state, retire) = self.reserve_pair(
+            cx,
+            descriptor,
+            until,
+            Some(request.ticket),
+            allowance,
+            fr_wire::files::duplex_selected(scope.selection),
+        )?;
         let mut owner = MediaChannel::new(
             self.binding(),
             (state, retire),
@@ -669,7 +695,14 @@ impl QuicRecords {
             .ok_or(Error::Clock)?;
         validate_role(&scope, d.role)?;
         let allowance = self.selected_attachment_allowance(scope.selection, d.role);
-        let (pair, state, retire) = self.reserve_pair(cx, d, until, None, allowance)?;
+        let (pair, state, retire) = self.reserve_pair(
+            cx,
+            d,
+            until,
+            None,
+            allowance,
+            fr_wire::files::duplex_selected(scope.selection),
+        )?;
         let mut owner = MediaChannel::new(
             self.binding(),
             (state, retire),
@@ -719,10 +752,13 @@ impl MediaChannel {
             receive_armed: !host,
             allowance,
             credit: attachment::credit::selected(scope.selection),
-            files_direction: if scope.selection.capabilities.iter().any(|c| {
-                c.name == fr_wire::files::DOWNLOAD_CAPABILITY
-                    && c.version == fr_wire::files::DOWNLOAD_VERSION
-            }) {
+            files_duplex: fr_wire::files::duplex_selected(scope.selection),
+            files_direction: if descriptor.role == MediaRole::FilesDownload
+                || (!fr_wire::files::duplex_selected(scope.selection)
+                    && scope.selection.capabilities.iter().any(|c| {
+                        c.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                            && c.version == fr_wire::files::DOWNLOAD_VERSION
+                    })) {
                 FileDirection::ToController
             } else {
                 FileDirection::ToHost
@@ -963,7 +999,7 @@ impl MediaChannel {
             (true, Phase::Attach) | (false, Phase::Attached) => self.pair.inbound,
             _ => return Ok(()),
         };
-        let sibling = self.pending_sibling(q);
+        let siblings = self.pending_siblings(q);
         let ready = Cell::new(true);
         let mut failure = None;
         let result = q.receive_ready(
@@ -979,7 +1015,7 @@ impl MediaChannel {
                     return Ok(Disposition::Blocked);
                 }
                 if incoming == self.control.inbound {
-                    match self.defer_sibling(bytes, sibling) {
+                    match self.defer_sibling(bytes, siblings) {
                         Ok(true) => return Ok(Disposition::Blocked),
                         Ok(false) => {}
                         Err(error) => {
@@ -1113,7 +1149,7 @@ impl MediaChannel {
             // native read suffix into Files; old partially framed bytes still fail.
             let download_suffix = !self.host
                 && self.files_direction == FileDirection::ToController
-                && self.descriptor.role == MediaRole::Files;
+                && self.descriptor.role.is_files();
             if receiving.fin
                 || receiving.framing.buffered_bytes() != 0
                 || (!download_suffix && !receiving.remainder.is_empty())
@@ -1123,7 +1159,7 @@ impl MediaChannel {
             // A Files viewer can send as soon as it receives Attached. Keep
             // those bytes native until its authenticated routes are installed;
             // the old handshake framing and remainder above must still be empty.
-            if self.host && self.descriptor.role != MediaRole::Files {
+            if self.host && !self.descriptor.role.is_files() {
                 let s = q
                     .native
                     .as_ref()

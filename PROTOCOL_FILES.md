@@ -129,12 +129,36 @@ content-free receipts and continued input on the original controlled session.
 
 ## Host-to-controller downloads
 
-The optional `file-download` v1 capability fixes an attached native Files lane's
-direction as `ToController`. Its absence retains the original `ToHost` direction.
-The retained capability selection determines direction before parsing any
-application payload; neither the sender's first record nor a caller-supplied role
-can change it. Native download offers replace `file-channel-scope` with this
-capability, and the application refuses simultaneous upload/download scope.
+Without duplex selection, the optional `file-download` v1 capability fixes an
+attached native Files lane's direction as `ToController`. Its absence retains
+the original `ToHost` direction. Download-only native offers replace
+`file-channel-scope` with this capability, preserving the existing behavior of
+older peers.
+
+The optional `file-duplex` v1 extension admits exactly two role-specific file
+attachments on the same original controller: `Files` is `ToHost`, and
+`FilesDownload` (role 9) is `ToController`. It requires positive selection of
+`file-atp-full`, `file-download`, `file-channel-scope`, `native-file-receive` and
+`native-input-attachment` and `native-media-attachment`, as well as the original
+control role. Both old direction
+capabilities without this complete profile do not authorize two attachments.
+The retained selection and exact authenticated attachment role determine direction
+before parsing any application payload; the first file record cannot change it.
+Each role spends its own binding, ticket and channel-derived handle once.
+
+Both owners preserve independent local permissions, finite source selections,
+destination quotas, publication receipts and cancellation. A completed role may
+retire without resetting its sibling. Ordinary controller turns service input
+and renewal first, then visit each bounded file owner once with alternating first
+service. Family shutdown retains both owners until their original cleanup has
+completed. Reconnect does not carry a source selection, accepted destination,
+permission or uncertain result into another attempt.
+
+The fullest native clipboard/audio/duplex offer stays within the existing 24
+capability ceiling by omitting only optional attachment-credit negotiation when
+necessary. That profile uses the existing bounded fixed-allowance attachment
+path; it does not enlarge queue, record, stream, rate or deadline ceilings. A
+peer whose actual limits cannot admit the optional attachment still refuses it.
 
 The host chooses a finite local source selection and the controller chooses a
 private local destination. Both derive the nonzero scope handle from the

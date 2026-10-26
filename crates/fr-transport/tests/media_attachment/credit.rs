@@ -83,7 +83,7 @@ fn kinds(role: MediaRole) -> (u16, Option<u16>) {
         MediaRole::Video => (0x37, Some(0x35)),
         MediaRole::Input => (0x48, Some(0x40)),
         MediaRole::Clipboard => (0x51, Some(0x51)),
-        MediaRole::Files => (0x72, Some(0x72)),
+        MediaRole::Files | MediaRole::FilesDownload => (0x72, Some(0x72)),
         MediaRole::AudioDown => (0x60, Some(0x61)),
     }
 }

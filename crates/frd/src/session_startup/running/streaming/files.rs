@@ -28,61 +28,44 @@ pub(super) fn between_turns(
     }
 }
 
+#[derive(Default)]
 pub(in crate::session_startup) struct Lane {
-    /// Taken by the one offer attempt; never re-offered after any outcome.
+    /// Taken by each direction's one offer attempt; never retried after outcome.
     configuration: Option<Configuration>,
     selection: Option<SendRequest>,
 }
 impl Lane {
-    pub(in crate::session_startup) fn new(directory: &Directory) -> Self {
-        Self {
-            configuration: Some(directory.configuration()),
-            selection: None,
-        }
+    pub(in crate::session_startup) fn has_upload(&self) -> bool {
+        self.configuration.is_some()
     }
-    pub(in crate::session_startup) fn download(selection: SendRequest) -> Self {
-        Self {
-            configuration: None,
-            selection: Some(selection),
-        }
+    pub(in crate::session_startup) fn has_download(&self) -> bool {
+        self.selection.is_some()
     }
-    /// Between complete network turns, never inside a transport callback.
-    /// A failed offer leaves desktop control untouched and is not retried.
+    pub(in crate::session_startup) fn add_upload(&mut self, directory: &Directory) {
+        self.configuration = Some(directory.configuration());
+    }
+    pub(in crate::session_startup) fn add_download(&mut self, selection: SendRequest) {
+        self.selection = Some(selection);
+    }
+    /// Between complete network turns. Both independent offers wait for the
+    /// original lease renewal; each consumes its own fresh ticket and binding.
     pub(in crate::session_startup) fn host(
         &mut self,
         host: &mut ControlledHost,
         view: Binding,
         nonce: &mut impl FnMut() -> Result<u128, ()>,
     ) {
-        if (self.configuration.is_none() && self.selection.is_none())
-            || host.control_renewed_until().is_none()
-        {
+        if host.control_renewed_until().is_none() {
             return;
         }
-        let configuration = self.configuration.take();
-        let selection = self.selection.take();
-        let id = match host.io() {
-            Ok((q, _)) => q.next_channel_binding().ok().filter(|&id| id != 0),
-            Err(_) => None,
-        };
-        let ticket = nonce().ok().filter(|&ticket| ticket != 0);
-        let (Some(id), Some(ticket)) = (id, ticket) else {
-            return;
-        };
-        let request = ChannelRequest {
-            binding: Binding {
-                parent: ControlBinding { id, ..view.parent },
-                ..view
-            },
-            ticket: Ticket(ticket),
-            timeout: SETUP_TIMEOUT,
-        };
-        // Refusals are typed on the ControlledHost (`file_receive_reason`);
-        // the local permission is fresh, so only transport/clock state or a
-        // missing selection can refuse here.
-        if let Some(configuration) = configuration {
+        if let Some(configuration) = self.configuration.take()
+            && let Some(request) = request(host, view, nonce)
+        {
             let _ = host.offer_file_drop(request, configuration);
-        } else if let Some(selection) = selection {
+        }
+        if let Some(selection) = self.selection.take()
+            && let Some(request) = request(host, view, nonce)
+        {
             let _ = host.offer_file_download(
                 request,
                 selection.selection,
@@ -92,4 +75,26 @@ impl Lane {
             );
         }
     }
+}
+fn request(
+    host: &mut ControlledHost,
+    view: Binding,
+    nonce: &mut impl FnMut() -> Result<u128, ()>,
+) -> Option<ChannelRequest> {
+    let id = host
+        .io()
+        .ok()?
+        .0
+        .next_channel_binding()
+        .ok()
+        .filter(|&id| id != 0)?;
+    let ticket = nonce().ok().filter(|&ticket| ticket != 0)?;
+    Some(ChannelRequest {
+        binding: Binding {
+            parent: ControlBinding { id, ..view.parent },
+            ..view
+        },
+        ticket: Ticket(ticket),
+        timeout: SETUP_TIMEOUT,
+    })
 }

@@ -36,6 +36,22 @@ enum Direction {
     Clipboard = 3,
 }
 
+/// Local layout intent only. Neither reservation opens a peer resource nor
+/// changes the original viewer's drawable or input mapping.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct FilePlacement {
+    pub(crate) secondary: bool,
+    pub(crate) clipboard: bool,
+    pub(crate) first_reserves_clipboard: bool,
+}
+impl FilePlacement {
+    fn flags(self) -> u32 {
+        u32::from(self.secondary)
+            | (u32::from(self.clipboard) << 1)
+            | (u32::from(self.secondary && self.first_reserves_clipboard) << 2)
+    }
+}
+
 // One coherent original-owner snapshot, never a download projected into a
 // fictitious sender. The larger fixed upload report has one bounded allocation
 // on this optional UI thread; no snapshot survives the current rendering turn.
@@ -222,7 +238,22 @@ impl Panel {
         session: StreamingViewerControl,
         source: SendControl,
     ) -> Result<Self, Error> {
-        Self::start_transfer(display, parent, session, Transfer::Upload(source))
+        Self::start_placed(display, parent, session, source, FilePlacement::default())
+    }
+    pub(crate) fn start_placed(
+        display: &str,
+        parent: crate::viewer_input::Window,
+        session: StreamingViewerControl,
+        source: SendControl,
+        placement: FilePlacement,
+    ) -> Result<Self, Error> {
+        Self::start_transfer(
+            display,
+            parent,
+            session,
+            Transfer::Upload(source),
+            placement,
+        )
     }
     /// Show this original receive attempt. Only file-only cancellation is
     /// supported; this never starts a disk worker or creates receiver authority.
@@ -232,7 +263,22 @@ impl Panel {
         session: StreamingViewerControl,
         source: ReceiveControl,
     ) -> Result<Self, Error> {
-        Self::start_transfer(display, parent, session, Transfer::Download(source))
+        Self::start_receive_placed(display, parent, session, source, FilePlacement::default())
+    }
+    pub(crate) fn start_receive_placed(
+        display: &str,
+        parent: crate::viewer_input::Window,
+        session: StreamingViewerControl,
+        source: ReceiveControl,
+        placement: FilePlacement,
+    ) -> Result<Self, Error> {
+        Self::start_transfer(
+            display,
+            parent,
+            session,
+            Transfer::Download(source),
+            placement,
+        )
     }
     /// Local preferences for this observer's actual playback owner, in either
     /// viewing role. This never touches the OS volume, microphone or host state.
@@ -242,7 +288,13 @@ impl Panel {
         session: StreamingViewerControl,
         volume: AudioVolumeControl,
     ) -> Result<Self, Error> {
-        Self::start_transfer(display, parent, session, Transfer::Audio(volume))
+        Self::start_transfer(
+            display,
+            parent,
+            session,
+            Transfer::Audio(volume),
+            FilePlacement::default(),
+        )
     }
     /// Mandatory visible off control for this original clipboard. A failed
     /// constructor also fences the source; readiness must precede native reads.
@@ -257,6 +309,7 @@ impl Panel {
             parent,
             session,
             Transfer::Clipboard(source.clone()),
+            FilePlacement::default(),
         );
         if result.is_err() {
             source.stop();
@@ -268,6 +321,7 @@ impl Panel {
         parent: crate::viewer_input::Window,
         session: StreamingViewerControl,
         source: Transfer,
+        placement: FilePlacement,
     ) -> Result<Self, Error> {
         let valid =
             |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
@@ -314,6 +368,7 @@ impl Panel {
                         session,
                         source,
                         privacy,
+                        placement,
                     },
                 );
                 shared.stop(reason);
@@ -382,6 +437,14 @@ unsafe extern "C" {
         height: u32,
         direction: u32,
     ) -> *mut c_void;
+    fn fr_upload_open_file(
+        display: *const c_char,
+        parent: u32,
+        width: u32,
+        height: u32,
+        direction: u32,
+        placement: u32,
+    ) -> *mut c_void;
     fn fr_upload_draw(native: *mut c_void, frame: *const Frame) -> c_int;
     fn fr_upload_validate(native: *mut c_void) -> c_int;
     fn fr_upload_mapped(native: *mut c_void) -> c_int;
@@ -402,6 +465,9 @@ impl Drop for Native {
 trait Target {
     fn stopped(&self) -> bool;
     fn direction(&self) -> Direction;
+    fn file_placement(&self) -> FilePlacement {
+        FilePlacement::default()
+    }
     fn snapshot(&self) -> Snapshot;
     fn action(&self, action: Action);
     fn panel_stopped(&self) {}
@@ -411,6 +477,7 @@ struct NativeTarget {
     session: StreamingViewerControl,
     source: Transfer,
     privacy: Option<Arc<clipboard::Privacy>>,
+    placement: FilePlacement,
 }
 impl Target for NativeTarget {
     fn stopped(&self) -> bool {
@@ -418,6 +485,9 @@ impl Target for NativeTarget {
     }
     fn direction(&self) -> Direction {
         self.source.direction()
+    }
+    fn file_placement(&self) -> FilePlacement {
+        self.placement
     }
     fn snapshot(&self) -> Snapshot {
         self.source.snapshot()
@@ -451,13 +521,24 @@ fn run(
     }
     // SAFETY: live NUL string, scalars only; the C owner retains no Rust pointer.
     let Some(native) = NonNull::new(unsafe {
-        fr_upload_open(
-            display.as_ptr(),
-            parent.id,
-            parent.width,
-            parent.height,
-            target.direction() as u32,
-        )
+        if matches!(target.direction(), Direction::Upload | Direction::Download) {
+            fr_upload_open_file(
+                display.as_ptr(),
+                parent.id,
+                parent.width,
+                parent.height,
+                target.direction() as u32,
+                target.file_placement().flags(),
+            )
+        } else {
+            fr_upload_open(
+                display.as_ptr(),
+                parent.id,
+                parent.width,
+                parent.height,
+                target.direction() as u32,
+            )
+        }
     }) else {
         return StopReason::NativeFailure;
     };

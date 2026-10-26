@@ -40,6 +40,7 @@ pub(super) struct Pending {
     parent: ControlBinding,
     selection: Selection,
     expected: Binding,
+    role: MediaRole,
     lease: InputLeaseId,
     handle: Option<u128>,
     permission: Permission,
@@ -176,10 +177,13 @@ impl Pending {
                 )
                 .map_err(|_| ())?;
                 let descriptor = match message {
-                    Message::Binding(d) if d.role == MediaRole::Files => d,
+                    Message::Binding(d) if d.role == self.role => d,
                     Message::Binding(d)
                     | Message::Ticket(attachment::Grant { descriptor: d, .. })
-                        if d.role == MediaRole::Clipboard =>
+                        if d.role == MediaRole::Clipboard
+                            || (fr_wire::files::duplex_selected(&self.selection)
+                                && d.role.is_files()
+                                && d.role != self.role) =>
                     {
                         return Ok(Disposition::Blocked);
                     }
@@ -192,7 +196,7 @@ impl Pending {
                     },
                     ..self.expected
                 };
-                if descriptor.role != MediaRole::Files
+                if descriptor.role != self.role
                     || descriptor.binding != expected
                     || bytes.len() != offer.len()
                 {
@@ -236,6 +240,9 @@ impl Pending {
         }
         let now = self.check()?;
         let channel = self.channel.take().ok_or(Error::Closed)?;
+        if channel.descriptor().role != self.role {
+            return Err(Error::WrongConnection);
+        }
         // The scope comes from the exact completed attachment, never a path.
         let id = channel.descriptor().binding.parent.id;
         let handle = self.handle.unwrap_or_else(|| u128::from(id));
@@ -325,16 +332,17 @@ impl ControlledViewer {
         policy: Policy,
         timeout: Duration,
     ) -> Result<(), Error> {
-        if self
-            .session
-            .opened
-            .selection
-            .capabilities
-            .iter()
-            .any(|cap| {
-                cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
-                    && cap.version == fr_wire::files::DOWNLOAD_VERSION
-            })
+        if !fr_wire::files::duplex_selected(&self.session.opened.selection)
+            && self
+                .session
+                .opened
+                .selection
+                .capabilities
+                .iter()
+                .any(|cap| {
+                    cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                        && cap.version == fr_wire::files::DOWNLOAD_VERSION
+                })
         {
             return Err(Error::WrongRole);
         }
@@ -347,7 +355,11 @@ impl ControlledViewer {
         destination: Destination,
         timeout: Duration,
     ) -> Result<(), Error> {
-        if self.files.used || self.files.stopped {
+        let download = matches!(destination, Destination::Receive(_, _));
+        let duplex = fr_wire::files::duplex_selected(&self.session.opened.selection);
+        let slot = self.files.slot(download);
+        let other = self.files.slot(!download);
+        if slot.used || slot.stopped || (!duplex && (other.used || other.stopped)) {
             return Err(Error::Busy);
         }
         self.files_admitted(&permission)?;
@@ -361,13 +373,19 @@ impl ControlledViewer {
         let cx = &self.session.cx;
         let last = cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000;
         let until = last.checked_add(lifetime).ok_or(Error::Clock)?;
-        self.files.pending = Some(Pending {
+        let slot = self.files.slot_mut(download);
+        slot.pending = Some(Pending {
             cx: cx.clone(),
             connection: self.session.transport.binding(),
             control: self.session.routes,
             parent: self.session.opened.binding,
             selection: self.session.opened.selection.clone(),
             expected: self.media.as_ref().ok_or(Error::Closed)?.binding(),
+            role: if download && duplex {
+                MediaRole::FilesDownload
+            } else {
+                MediaRole::Files
+            },
             lease: self.input.binding().lease,
             handle,
             permission,
@@ -376,10 +394,10 @@ impl ControlledViewer {
             last,
             channel: None,
         });
-        self.files.used = true;
+        slot.used = true;
         Ok(())
     }
     pub fn file_send_negotiating(&self) -> bool {
-        self.files.pending.is_some()
+        self.files.upload.pending.is_some()
     }
 }

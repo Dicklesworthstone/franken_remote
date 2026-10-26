@@ -136,28 +136,48 @@ impl ControlledViewer {
         )
     }
     pub fn file_receive_state(&self) -> Option<State> {
-        self.files.receiver.as_ref().map(|r| r.receiver.state())
+        self.files
+            .download
+            .receiver
+            .as_ref()
+            .map(|r| r.receiver.state())
     }
     pub fn file_receive_progress(&self) -> Option<fr_files::session::Progress> {
         self.files
+            .download
             .receiver
             .as_ref()
             .and_then(|r| r.receiver.progress())
     }
     pub fn file_receive_result(&self) -> Option<ResultReceipt> {
         self.files
+            .download
             .receiver
             .as_ref()
             .and_then(|r| r.receiver.last_result())
     }
     pub fn file_receive_status(&self) -> Option<ReceiveStatus> {
-        self.files.receiver.as_ref().map(|r| r.control.status())
+        self.files
+            .download
+            .receiver
+            .as_ref()
+            .map(|r| r.control.status())
     }
     pub fn file_receive_failure(&self) -> Option<quic::Error> {
-        self.files.receiver.as_ref().and_then(|r| r.failure)
+        self.files
+            .download
+            .receiver
+            .as_ref()
+            .and_then(|r| r.failure)
+    }
+    /// Setup/attachment failure for this receive owner only; an unrelated
+    /// upload failure cannot change this direction's status or cancellation.
+    pub fn file_receive_setup_failure(&self) -> Option<Error> {
+        self.files.download.failure
     }
     pub fn file_receive_negotiating(&self) -> bool {
         self.files
+            .download
             .pending
             .as_ref()
             .is_some_and(super::negotiation::Pending::is_download)
@@ -165,7 +185,7 @@ impl ControlledViewer {
     /// Nonblocking original-worker collection, including after parent closure.
     /// The actual result also updates the retained native `ReceiveControl`.
     pub fn try_finish_file_receive_cleanup(&mut self) -> Option<Result<(), worker::Error>> {
-        let receiving = self.files.receiver.as_mut()?;
+        let receiving = self.files.download.receiver.as_mut()?;
         if receiving.receiver.state() == State::Active {
             return None;
         }

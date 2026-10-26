@@ -35,15 +35,6 @@ fn download_selection_is_explicit_bounded_and_requires_one_controlled_share() {
             "--input-agent",
             "/local/agent",
             "--send",
-            "/local/file",
-            "--files",
-            "/local/drop",
-        ][..],
-        &[
-            "--once",
-            "--input-agent",
-            "/local/agent",
-            "--send",
             "relative",
         ][..],
         &[
@@ -83,14 +74,28 @@ fn programmatic_download_options_keep_the_same_scope_and_conflict_checks() {
     ));
     options.once = true;
     options.files = Some(PathBuf::from("/local/drop"));
-    assert!(matches!(
-        options.validate_file_send(),
-        Err(Error::InvalidArgument)
-    ));
+    assert!(options.validate_file_send().is_ok());
     options.files = None;
     options.input_agent = None;
     assert!(matches!(
         options.validate_file_send(),
         Err(Error::InvalidArgument)
     ));
+}
+
+#[test]
+fn host_can_select_a_source_and_drop_directory_for_one_controlled_share() {
+    let options = parse(&[
+        "--once",
+        "--input-agent",
+        "/local/agent",
+        "--send",
+        "/local/file",
+        "--files",
+        "/local/drop",
+    ])
+    .unwrap();
+    assert_eq!(options.send, [PathBuf::from("/local/file")]);
+    assert_eq!(options.files, Some(PathBuf::from("/local/drop")));
+    assert!(options.once);
 }

@@ -19,7 +19,10 @@ The original setup deadline covers pre-poll idle and transport backpressure.
 The explicit pre-agreed-handle APIs remain available for other application file
 scopes. Applications MUST use matching conventions on both endpoints; selecting
 this drop workflow requires no out-of-band numeric handle. It does not enable
-read-only transfer, remote browsing, source-path requests, downloads or resume.
+read-only transfer, remote browsing, source-path requests or resume. Downloads
+require their own positive direction capability and local source/destination
+choices. Selecting `file-duplex` v1 admits a separate `FilesDownload` attachment;
+this upload scope continues to name only the host drop endpoint.
 The convention is not advertised by a client/host workflow that cannot service it.
 
 

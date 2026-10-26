@@ -41,7 +41,9 @@ impl FilesChannel {
             let routes = attachment.completed_on(q)?;
             let parent = attachment.completed_parent(q)?;
             let protocol = attachment.completed_limits(q)?;
-            if routes.descriptor.role != MediaRole::Files
+            if !routes.descriptor.role.is_files()
+                || (routes.descriptor.role == MediaRole::FilesDownload
+                    && attachment.files_direction != files::Direction::ToController)
                 || routes.datagram.is_some()
                 || routes.outbound.messages != Messages::Files
                 || routes.inbound.messages != Messages::Files

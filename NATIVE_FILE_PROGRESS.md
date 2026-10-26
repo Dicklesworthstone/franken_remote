@@ -6,6 +6,11 @@ panel reads the original transfer owner's bounded status. Files and portable
 directory selections use the same panel; observation-only and unconfigured
 sessions do not open one.
 
+With the negotiated duplex file capability, `--send PATH --receive DIR` keeps
+both directions active on the same controlling connection. Each direction has
+its own progress panel, original cancellation handle and retained native owner.
+Opening or hiding one panel never replaces the other direction's owner.
+
 | Direction | Progress bar | Local controls |
 | --- | --- | --- |
 | Upload: `--send PATH` | Current-object bytes queued into the file channel | Pause, Resume, Cancel upload |
@@ -59,13 +64,30 @@ optional panel on the confirmed local viewer window. The panel receives no sourc
 or destination descriptor and grants no permission. Both interactive serving
 modes use these configuration paths. Panel creation failure cannot turn
 successful file configuration into a retry or discard its handle.
-`Desktop::file_progress()` exposes the panel's status/hide handle or a local
-startup refusal; `None` means no successful file configuration.
+`Desktop::upload_progress()` and `Desktop::receive_progress()` expose the exact
+direction's status/hide handle or local startup refusal; `None` means that
+direction has no successful configuration. Duplex callers use these explicit
+accessors. The existing `Desktop::file_progress()` remains compatible with
+single-direction callers: it returns upload when configured, otherwise download.
+It does not combine the directions' state or select a replacement owner.
 
 A private thread owns the panel's XCB connection. The decoder drawable, dimensions
 and input mapping are unchanged; no video pixels pass through this UI. A panel
 needs an available rectangle beside the original viewer. If no such rectangle
 fits, the optional panel is refused while the accepted transfer continues.
+When the Desktop has clipboard layout intent or has configured its clipboard,
+file panels reserve the clipboard's unchanged preferred rectangle. The second
+file panel also reserves the first file panel's original placement. Both
+configuration orders use this policy, including retaining the first panel's
+actual layout policy if clipboard is configured between the file directions.
+The bounded placement search never moves the viewer, moves the clipboard panel,
+or changes the decoder/input mapping. Real mapped file-panel frames are checked
+against the viewer, screen bounds and their original reserved rectangles before
+accepting commands and on refresh; the clipboard retains its independent actual
+unobscured-visibility requirement and watchdog. A window manager that ignores
+placement hints may still make an optional panel unusable.
+Reservations describe the initial positions; they do not track or automatically
+retile sibling panels subsequently moved by an operator or window manager.
 Viewer visibility and input fences remain active. The panel
 has fixed bounded text, a 64-event batch limit and a 100-ms snapshot refresh.
 Unchanged snapshots do not redraw. Full-batch lifecycle/flood checks precede
@@ -74,7 +96,7 @@ Clicks queued across a stalled native turn are discarded, not retimed as fresh.
 Displayed and current button availability are both checked before dispatch,
 including races with shortcuts, cancellation and terminal receipts.
 
-Original session termination stops the panel. Desktop closure fences the session
+Original session termination stops both panels. Desktop closure fences the session
 before stopping local UI. A hidden or failed panel is still retained until its
 thread is joined: `window_cleanup()` stays pending while any panel cleanup is
 pending, so reconnect cannot reuse an old UI owner. A stalled foreign X call does
@@ -96,6 +118,9 @@ include button requests without focus transfer, staged-byte pixel readback,
 publication and cleanup uncertainty, terminal races, stale clicks,
 synthetic/invalid gestures, event floods, parent loss and cleanup. Their session
 and transfer-result fixtures are explicit.
+Concurrent-panel regressions exercise either file configuration order, distinct
+native button routing, preserved clipboard visibility and off control, hiding
+one direction while the other remains usable, and both native cleanup barriers.
 
 The native download CLI target in
 `crates/frd/tests/native_host_linux_serial/real_downloads/progress.rs` also checks

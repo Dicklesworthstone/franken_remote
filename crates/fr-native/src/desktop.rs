@@ -186,6 +186,8 @@ pub struct Desktop {
     // Optional local UI, never a file/source owner. Retain even a hidden panel
     // until its native thread is joined; reconnect cannot inherit this handle.
     file_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
+    receive_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
+    first_file_panel_reserves_clipboard: bool,
     audio_controls: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
     clipboard_controls: Option<crate::file_progress::clipboard::Owner>,
 }
@@ -203,6 +205,8 @@ impl Desktop {
             input: None,
             file_controls: None,
             file_progress: None,
+            receive_progress: None,
+            first_file_panel_reserves_clipboard: false,
             audio_controls: None,
             clipboard_controls: None,
         }
@@ -257,13 +261,32 @@ impl Desktop {
     pub fn input(&self) -> Option<crate::viewer_input::CaptureControl> {
         self.input.clone()
     }
-    /// This attempt's optional transfer panel: status/hide only, or its local
-    /// startup refusal. None means no successful file configuration. Native
-    /// failure remains visible through the handle and never cancels the transfer.
+    /// This attempt's optional transfer panel: prefer upload when both directions
+    /// are configured, otherwise expose the sole direction's original panel.
+    /// Use the direction-specific accessors for concurrent transfers.
     pub fn file_progress(
         &self,
     ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
+        self.upload_progress().or_else(|| self.receive_progress())
+    }
+    /// Status/hide or startup refusal for this original upload only. Native
+    /// failure never cancels the transfer; no handle crosses a reconnect.
+    pub fn upload_progress(
+        &self,
+    ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
         self.file_progress.as_ref().map(|panel| {
+            panel
+                .as_ref()
+                .map(crate::file_progress::Panel::control)
+                .map_err(|error| *error)
+        })
+    }
+    /// Status/hide or startup refusal for this original download only. Its owner
+    /// is retained independently of an upload through native cleanup.
+    pub fn receive_progress(
+        &self,
+    ) -> Option<Result<crate::file_progress::Control, crate::file_progress::Error>> {
+        self.receive_progress.as_ref().map(|panel| {
             panel
                 .as_ref()
                 .map(crate::file_progress::Panel::control)
@@ -327,11 +350,19 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
+        let placement = crate::file_progress::FilePlacement {
+            secondary: self.receive_progress.is_some(),
+            clipboard: self.configuration.clipboard_space || self.clipboard_controls.is_some(),
+            first_reserves_clipboard: self.first_file_panel_reserves_clipboard,
+        };
         let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
         let controls = observer
             .configure_file_send(request)
             .map_err(Error::Files)?;
         let session = observer.control();
+        if !placement.secondary {
+            self.first_file_panel_reserves_clipboard = placement.clipboard;
+        }
         self.file_controls = Some(controls.clone());
         // The original observer accepted the selection once BEFORE optional UI.
         // No peer XID, alternative session, source read or permission is created.
@@ -340,11 +371,12 @@ impl Desktop {
             .and_then(|window| window.input_window().ok())
             .ok_or(crate::file_progress::Error::InvalidParent)
             .and_then(|parent| {
-                crate::file_progress::Panel::start(
+                crate::file_progress::Panel::start_placed(
                     &self.configuration.display,
                     parent,
                     session,
                     controls.clone(),
+                    placement,
                 )
             });
         self.file_progress = Some(panel);
@@ -363,6 +395,11 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
+        let placement = crate::file_progress::FilePlacement {
+            secondary: self.file_progress.is_some(),
+            clipboard: self.configuration.clipboard_space || self.clipboard_controls.is_some(),
+            first_reserves_clipboard: self.first_file_panel_reserves_clipboard,
+        };
         let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
         let controls = observer
             .request_receive_files(request)
@@ -370,19 +407,23 @@ impl Desktop {
         let session = observer.control();
         // Consent was accepted once by the original observer before native UI.
         // The panel gets status/cancel handles, never a directory or disk owner.
+        if !placement.secondary {
+            self.first_file_panel_reserves_clipboard = placement.clipboard;
+        }
         let panel = self
             .window()
             .and_then(|window| window.input_window().ok())
             .ok_or(crate::file_progress::Error::InvalidParent)
             .and_then(|parent| {
-                crate::file_progress::Panel::start_receive(
+                crate::file_progress::Panel::start_receive_placed(
                     &self.configuration.display,
                     parent,
                     session,
                     controls.clone(),
+                    placement,
                 )
             });
-        self.file_progress = Some(panel);
+        self.receive_progress = Some(panel);
         Ok(controls)
     }
     /// Install the local playback output for this observer's attached
@@ -858,6 +899,9 @@ impl Desktop {
         if let Some(Ok(panel)) = &self.file_progress {
             panel.stop();
         }
+        if let Some(Ok(panel)) = &self.receive_progress {
+            panel.stop();
+        }
         if let Some(Ok(panel)) = &self.audio_controls {
             panel.stop();
         }
@@ -882,6 +926,11 @@ impl Desktop {
                     .map_or(WindowCleanup::Pending, WindowCleanup::Complete)
             });
         if let Some(Ok(panel)) = &mut self.file_progress
+            && !panel.finish()
+        {
+            return WindowCleanup::Pending;
+        }
+        if let Some(Ok(panel)) = &mut self.receive_progress
             && !panel.finish()
         {
             return WindowCleanup::Pending;

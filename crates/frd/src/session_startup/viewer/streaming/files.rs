@@ -11,41 +11,66 @@ use fr_files::{
 
 mod download;
 
-/// One selected direction on the original one-use Files attachment.
-pub(in crate::session_startup) enum Lane {
-    Send(Box<Sending>),
-    Receive(Box<download::Lane>),
+/// At most one explicitly selected source and destination on this controller.
+/// Requests and status handles are independent; neither creates the other.
+#[derive(Default)]
+pub(in crate::session_startup) struct Lane {
+    send: Option<Box<Sending>>,
+    receive: Option<Box<download::Lane>>,
 }
 impl Lane {
-    pub(in crate::session_startup) fn new(request: SendRequest, control: SendControl) -> Self {
-        Self::Send(Box::new(Sending::new(request, control)))
+    pub(in crate::session_startup) fn has_send(&self) -> bool {
+        self.send.is_some()
     }
-    pub(in crate::session_startup) fn download(
+    pub(in crate::session_startup) fn has_receive(&self) -> bool {
+        self.receive.is_some()
+    }
+    pub(in crate::session_startup) fn add_send(
+        &mut self,
+        request: SendRequest,
+        control: SendControl,
+    ) -> Result<(), Absence> {
+        if self.send.is_some() {
+            return Err(Absence::Unavailable);
+        }
+        self.send = Some(Box::new(Sending::new(request, control)));
+        Ok(())
+    }
+    pub(in crate::session_startup) fn add_receive(
+        &mut self,
         request: crate::native_files::ReceiveRequest,
         control: crate::native_files::ReceiveControl,
-    ) -> Self {
-        Self::Receive(Box::new(download::Lane::new(request, control)))
+    ) -> Result<(), Absence> {
+        if self.receive.is_some() {
+            return Err(Absence::Unavailable);
+        }
+        self.receive = Some(Box::new(download::Lane::new(request, control)));
+        Ok(())
     }
     pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut ControlledViewer) {
-        match self {
-            Self::Send(lane) => lane.viewer(viewer),
-            Self::Receive(lane) => lane.viewer(viewer),
+        if let Some(lane) = &mut self.send {
+            lane.viewer(viewer);
+        }
+        if let Some(lane) = &mut self.receive {
+            lane.viewer(viewer);
         }
     }
     pub(in crate::session_startup) fn observe(&self, viewer: &ControlledViewer) {
-        match self {
-            Self::Send(lane) => lane.observe(viewer),
-            Self::Receive(lane) => lane.observe(viewer),
+        if let Some(lane) = &self.send {
+            lane.observe(viewer);
+        }
+        if let Some(lane) = &self.receive {
+            lane.observe(viewer);
         }
     }
     pub(in crate::session_startup) fn without_control(&mut self) {
-        match self {
-            Self::Send(lane) => {
-                lane.request = None;
-                lane.control.end(Absence::Unavailable);
-                lane.control.cleaned(Some(Ok(())));
-            }
-            Self::Receive(lane) => lane.without_control(),
+        if let Some(lane) = &mut self.send {
+            lane.request = None;
+            lane.control.end(Absence::Unavailable);
+            lane.control.cleaned(Some(Ok(())));
+        }
+        if let Some(lane) = &mut self.receive {
+            lane.without_control();
         }
     }
 }
@@ -201,16 +226,16 @@ impl Endpoint for ControlledViewer {
         self.file_stage()
     }
     fn failure(&self) -> Option<Error> {
-        self.file_failure()
+        self.file_send_failure()
     }
     fn start(&mut self, request: SendRequest) -> Result<(), Error> {
         self.send_files(request.selection, request.lifetime)
     }
     fn cancel(&mut self) -> Result<(), Error> {
-        self.cancel_files()
+        self.cancel_file_send()
     }
     fn cleanup(&mut self) -> Option<Result<(), Error>> {
-        self.try_finish_file_cleanup()
+        self.try_finish_file_send_cleanup()
     }
     fn report(&self) -> Option<Report> {
         self.file_batch_report()

@@ -211,6 +211,39 @@ pub fn control_offer_with_download(clipboard: bool, audio: bool) -> Offer {
     offer
 }
 
+/// Explicit independent upload and download selections. The two directions
+/// require positive `file-duplex` negotiation; either legacy single-direction
+/// host can still select its original optional file workflow.
+pub fn control_offer_with_duplex(clipboard: bool, audio: bool) -> Offer {
+    let mut offer = control_offer_with_auxiliary(clipboard, true, audio);
+    for (name, version) in [
+        (
+            fr_wire::files::DOWNLOAD_CAPABILITY,
+            fr_wire::files::DOWNLOAD_VERSION,
+        ),
+        (
+            fr_wire::files::DUPLEX_CAPABILITY,
+            fr_wire::files::DUPLEX_VERSION,
+        ),
+    ] {
+        offer.capabilities.push(Capability {
+            name: name.into(),
+            version,
+            required: false,
+        });
+    }
+    // The fullest profile needs one optional slot. Use the existing fixed
+    // attachment allowance path; keep all authority, privacy, input and recovery
+    // boundaries and do not raise the negotiation or queue bounds.
+    if offer.capabilities.len() > fr_wire::negotiation::MAX_CAPABILITIES {
+        offer
+            .capabilities
+            .retain(|cap| cap.name != attachment::credit::CAPABILITY);
+    }
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer
+}
+
 fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
     let mut capabilities: Vec<_> = [
         (display::CAPABILITY, 1, true),

@@ -760,9 +760,11 @@ fn role_index(role: MediaRole, controlled: bool, audio: bool) -> Result<usize, E
         // Audio has its own slot in BOTH modes, after explicit capability
         // selection. No unselected audio or input role is accepted here.
         MediaRole::AudioDown if audio => Ok(4),
-        MediaRole::Input | MediaRole::Clipboard | MediaRole::Files | MediaRole::AudioDown => {
-            Err(Error::Order)
-        }
+        MediaRole::Input
+        | MediaRole::Clipboard
+        | MediaRole::Files
+        | MediaRole::FilesDownload
+        | MediaRole::AudioDown => Err(Error::Order),
     }
 }
 async fn attach_media(

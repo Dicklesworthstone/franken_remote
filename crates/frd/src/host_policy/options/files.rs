@@ -18,7 +18,6 @@ impl RunOptions {
         }
         if !self.once
             || self.input_agent.is_none()
-            || self.files.is_some()
             || self.send.len() > crate::native_files::MAX_SENDS
             || self.send.iter().any(|path| {
                 !path.is_absolute()

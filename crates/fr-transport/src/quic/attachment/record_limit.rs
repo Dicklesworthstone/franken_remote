@@ -15,7 +15,7 @@ pub(super) fn maximum(
     // must not be capped at the unrelated critical reserve. Recovery remains
     // asymmetric: its reverse route is critical, so it still fits both pools.
     let send_bytes = match role {
-        MediaRole::Clipboard | MediaRole::Files => bulk_bytes,
+        MediaRole::Clipboard | MediaRole::Files | MediaRole::FilesDownload => bulk_bytes,
         MediaRole::Recovery => bulk_bytes.min(critical_bytes),
         _ => critical_bytes,
     };
@@ -26,7 +26,8 @@ pub(super) fn maximum(
         MediaRole::Configuration
         | MediaRole::Recovery
         | MediaRole::Clipboard
-        | MediaRole::Files => base,
+        | MediaRole::Files
+        | MediaRole::FilesDownload => base,
         // One cap covers reliable replies/progress and packet datagrams.
         MediaRole::Video | MediaRole::AudioDown => base.min(datagram_bytes as u64),
         MediaRole::Input => base.min(MAX_INPUT_RECORD_BYTES as u64),
@@ -68,7 +69,11 @@ mod tests {
     fn bulk_uses_its_own_pool_and_retains_every_other_role_bound() {
         let limits = ProtocolLimits::ABSOLUTE;
         for critical in [1024, 4096, 8192, 16_384] {
-            for role in [MediaRole::Clipboard, MediaRole::Files] {
+            for role in [
+                MediaRole::Clipboard,
+                MediaRole::Files,
+                MediaRole::FilesDownload,
+            ] {
                 assert_eq!(
                     maximum(&limits, role, 65_536, critical, 131_072, 1150),
                     65_536
@@ -106,7 +111,11 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-            for role in [MediaRole::Clipboard, MediaRole::Files] {
+            for role in [
+                MediaRole::Clipboard,
+                MediaRole::Files,
+                MediaRole::FilesDownload,
+            ] {
                 assert_eq!(maximum(&limits, role, stream, 8192, bulk, 1150), expected);
             }
         }
@@ -135,6 +144,7 @@ mod tests {
             MediaRole::Input,
             MediaRole::Clipboard,
             MediaRole::Files,
+            MediaRole::FilesDownload,
             MediaRole::AudioDown,
         ] {
             for stream in [0, 1, 64, 8192, 65_536, u64::MAX] {
@@ -186,7 +196,11 @@ mod negotiation_tests {
                     .unwrap()
                     .select()
                     .unwrap();
-                for role in [MediaRole::Clipboard, MediaRole::Files] {
+                for role in [
+                    MediaRole::Clipboard,
+                    MediaRole::Files,
+                    MediaRole::FilesDownload,
+                ] {
                     assert_eq!(
                         negotiated_maximum(&selection, role, 65_536, 8192, 131_072, 1150),
                         if host && client { 65_536 } else { 8192 }
@@ -216,7 +230,11 @@ mod negotiation_tests {
         future.capabilities[0].version += 1;
         for selection in [observe, future] {
             assert!(!attachment::bulk_records_selected(&selection));
-            for role in [MediaRole::Clipboard, MediaRole::Files] {
+            for role in [
+                MediaRole::Clipboard,
+                MediaRole::Files,
+                MediaRole::FilesDownload,
+            ] {
                 assert_eq!(
                     negotiated_maximum(&selection, role, 65_536, 8192, 131_072, 1150),
                     8192
@@ -235,7 +253,11 @@ mod negotiation_tests {
         .unwrap();
         let selection = host.intersect(&client).unwrap().select().unwrap();
         assert!(attachment::bulk_records_selected(&selection));
-        for role in [MediaRole::Clipboard, MediaRole::Files] {
+        for role in [
+            MediaRole::Clipboard,
+            MediaRole::Files,
+            MediaRole::FilesDownload,
+        ] {
             assert_eq!(
                 negotiated_maximum(&selection, role, 65_536, 8192, 131_072, 1150),
                 6000

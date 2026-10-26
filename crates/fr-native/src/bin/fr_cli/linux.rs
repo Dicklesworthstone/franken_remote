@@ -399,7 +399,12 @@ fn connect(
         ..Default::default()
     };
     let result = if connection.control {
-        let offer = if connection.receive.is_some() {
+        let offer = if connection.receive.is_some() && !connection.send.is_empty() {
+            fr_client::native::control_offer_with_duplex(
+                connection.clipboard,
+                connection.audio.is_some(),
+            )
+        } else if connection.receive.is_some() {
             fr_client::native::control_offer_with_download(
                 connection.clipboard,
                 connection.audio.is_some(),

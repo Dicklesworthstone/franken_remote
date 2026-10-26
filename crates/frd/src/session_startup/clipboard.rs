@@ -364,7 +364,9 @@ impl Pending {
                     Message::Binding(d) if d.role == MediaRole::Clipboard => d,
                     Message::Binding(d)
                     | Message::Ticket(attachment::Grant { descriptor: d, .. })
-                        if d.role == MediaRole::Files =>
+                        if d.role == MediaRole::Files
+                            || (d.role == MediaRole::FilesDownload
+                                && fr_wire::files::duplex_selected(&self.selection)) =>
                     {
                         return Ok(Disposition::Blocked);
                     }

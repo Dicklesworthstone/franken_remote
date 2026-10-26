@@ -58,14 +58,14 @@ impl Lane {
         self.observe(viewer);
         if self.control.cancel_requested() && !self.cancelled {
             self.cancelled = true;
-            if let Err(error) = viewer.cancel_files() {
+            if let Err(error) = viewer.cancel_file_receive() {
                 self.control.end(Absence::Refused(error));
             }
         }
         if let Some(error) = viewer.file_receive_failure() {
             self.control.end(Absence::ReceiveFailed(error));
         } else if viewer.file_receive_state().is_none()
-            && let Some(error) = viewer.file_failure()
+            && let Some(error) = viewer.file_receive_setup_failure()
         {
             self.control.end(Absence::SetupFailed(error));
         }

@@ -78,9 +78,13 @@ fn selected_objects_through_original_owners(directory_source: bool) {
                 Some(first.len() as u64)
             }
         );
-        let mut host = HostLane::new(&directory);
+        let mut host = HostLane::default();
+        host.add_upload(&directory);
         let control = SendControl::new();
-        let mut viewer = ViewerLane::new(selection.request().unwrap(), control.clone());
+        let mut viewer = ViewerLane::default();
+        viewer
+            .add_send(selection.request().unwrap(), control.clone())
+            .unwrap();
         let view = state.host_media.binding();
         let mut tickets = 700_000_u128;
         let mut ticket = || nonce(&mut tickets);
@@ -195,13 +199,16 @@ fn a_session_without_the_drop_selection_gets_a_typed_absence_and_no_lane() {
         let source = Disk::new();
         fs::write(source.0.join("a.bin"), b"a").unwrap();
         let control = SendControl::new();
-        let mut viewer = ViewerLane::new(
-            Selection::select(&[source.0.join("a.bin")])
-                .unwrap()
-                .request()
-                .unwrap(),
-            control.clone(),
-        );
+        let mut viewer = ViewerLane::default();
+        viewer
+            .add_send(
+                Selection::select(&[source.0.join("a.bin")])
+                    .unwrap()
+                    .request()
+                    .unwrap(),
+                control.clone(),
+            )
+            .unwrap();
         viewer.viewer(&mut state.viewer);
         let status = control.status();
         assert_eq!(status.phase, SendPhase::Ended);

@@ -343,3 +343,6 @@ fn record(kind: u16, binding: u32, len: usize) -> Vec<u8> {
 
 #[path = "files/download.rs"]
 mod download;
+
+#[path = "files/duplex.rs"]
+mod duplex;

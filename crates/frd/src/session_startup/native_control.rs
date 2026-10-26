@@ -16,7 +16,7 @@ use fr_wire::{
 mod offers;
 pub use offers::{
     CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
-    host_offer_with_download, host_offer_with_files, with_line_scroll,
+    host_offer_with_download, host_offer_with_duplex, host_offer_with_files, with_line_scroll,
 };
 
 /// Positive playback selection, including the explicit control-audio extension.
@@ -32,11 +32,11 @@ pub(crate) fn audio_selected(selection: &Selection) -> bool {
 pub(crate) fn files_lane(selection: &Selection) -> Result<(), crate::native_files::Absence> {
     use crate::native_files::Absence;
     if selection.role != Role::RequestControl
-        || selected(
+        || (selected(
             selection,
             fr_wire::files::DOWNLOAD_CAPABILITY,
             fr_wire::files::DOWNLOAD_VERSION,
-        )
+        ) && !fr_wire::files::duplex_selected(selection))
         || !FILE_CAPABILITIES
             .iter()
             .all(|&(name, version)| selected(selection, name, version))
@@ -46,18 +46,19 @@ pub(crate) fn files_lane(selection: &Selection) -> Result<(), crate::native_file
     Ok(())
 }
 
-/// Positive host-to-controller selection. The one-use lane has exactly one
+/// Positive host-to-controller selection. Each one-use attachment has one
 /// direction, established by capability agreement before application payload.
+/// A second upload attachment requires the complete duplex profile.
 pub(crate) fn file_download_lane(
     selection: &Selection,
 ) -> Result<(), crate::native_files::Absence> {
     use crate::native_files::Absence;
     if selection.role != Role::RequestControl
-        || selected(
+        || (selected(
             selection,
             fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
             fr_wire::files::CHANNEL_SCOPE_VERSION,
-        )
+        ) && !fr_wire::files::duplex_selected(selection))
         || ![
             (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
             (fr_wire::files::CAPABILITY, fr_wire::files::VERSION),

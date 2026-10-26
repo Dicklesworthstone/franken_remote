@@ -14,15 +14,43 @@ use fr_core::{
 
 pub const CAPABILITY: &str = "file-atp-full";
 pub const VERSION: u16 = 1;
-/// Explicitly selects host-to-controller data on the sole Files lane. Both
+/// Selects host-to-controller data on the legacy sole Files lane, or enables
+/// the separate download role when duplex is completely selected. Both
 /// endpoints still require original control and separately approved local paths.
 pub const DOWNLOAD_CAPABILITY: &str = "file-download";
 pub const DOWNLOAD_VERSION: u16 = 1;
+/// Two independently bound file directions, each with its own local permission,
+/// quotas and receipts. This never authorizes paths or resumes a transfer.
+pub const DUPLEX_CAPABILITY: &str = "file-duplex";
+pub const DUPLEX_VERSION: u16 = 1;
 /// Optional, positively negotiated scope agreement for a host drop directory.
 /// Its handle is the completed Files attachment's binding ID, widened to u128.
 /// This names an already locally approved endpoint; it grants no authority.
 pub const CHANNEL_SCOPE_CAPABILITY: &str = "file-channel-scope";
 pub const CHANNEL_SCOPE_VERSION: u16 = 1;
+
+/// A partial extension cannot reinterpret a legacy Files attachment.
+pub fn duplex_selected(selection: &crate::negotiation::Selection) -> bool {
+    use crate::{attachment, negotiation::Role};
+    selection.role == Role::RequestControl
+        && selection.validate().is_ok()
+        && [
+            (attachment::CAPABILITY, attachment::VERSION),
+            (DUPLEX_CAPABILITY, DUPLEX_VERSION),
+            (CAPABILITY, VERSION),
+            (DOWNLOAD_CAPABILITY, DOWNLOAD_VERSION),
+            (CHANNEL_SCOPE_CAPABILITY, CHANNEL_SCOPE_VERSION),
+            (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
+            (attachment::INPUT_CAPABILITY, attachment::INPUT_VERSION),
+        ]
+        .iter()
+        .all(|(name, version)| {
+            selection
+                .capabilities
+                .iter()
+                .any(|c| c.name == *name && c.version == *version)
+        })
+}
 pub const ATP_PORTABLE_FULL: u16 = 1;
 /// Bounded, portable content-only directory tree; same pinned ATP full-object
 /// schema. An explicit matching `FileAccept` is required before any data is sent.

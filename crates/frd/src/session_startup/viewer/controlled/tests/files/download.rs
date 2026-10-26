@@ -49,7 +49,7 @@ fn offer(state: &mut Fixture, selected: Selection) {
         )
         .unwrap();
 }
-async fn retire(state: &mut Fixture, cleanup: &Cx) {
+pub(super) async fn retire(state: &mut Fixture, cleanup: &Cx) {
     state.viewer.close();
     state.host.close();
     state

@@ -506,14 +506,21 @@ impl StreamingViewer {
         request: crate::native_files::SendRequest,
     ) -> Result<crate::native_files::SendControl, crate::native_files::Absence> {
         use crate::native_files::Absence;
-        if self.served || self.files.is_some() {
+        if self.served || self.files.as_ref().is_some_and(files::Lane::has_send) {
             return Err(Absence::Unavailable);
         }
         let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::files_lane(&session.opened.selection)?;
+        if self.files.as_ref().is_some_and(files::Lane::has_receive)
+            && !fr_wire::files::duplex_selected(&session.opened.selection)
+        {
+            return Err(Absence::NotNegotiated);
+        }
         let control = crate::native_files::SendControl::new();
-        self.files = Some(files::Lane::new(request, control.clone()));
+        self.files
+            .get_or_insert_with(files::Lane::default)
+            .add_send(request, control.clone())?;
         Ok(control)
     }
     /// Register one explicitly approved local destination before serving.
@@ -524,14 +531,21 @@ impl StreamingViewer {
         request: crate::native_files::ReceiveRequest,
     ) -> Result<crate::native_files::ReceiveControl, crate::native_files::Absence> {
         use crate::native_files::Absence;
-        if self.served || self.files.is_some() {
+        if self.served || self.files.as_ref().is_some_and(files::Lane::has_receive) {
             return Err(Absence::Unavailable);
         }
         let (session, _) = self.peer.parts().map_err(|_| Absence::Unavailable)?;
         session.check().map_err(|_| Absence::Unavailable)?;
         super::super::native_control::file_download_lane(&session.opened.selection)?;
+        if self.files.as_ref().is_some_and(files::Lane::has_send)
+            && !fr_wire::files::duplex_selected(&session.opened.selection)
+        {
+            return Err(Absence::NotNegotiated);
+        }
         let control = crate::native_files::ReceiveControl::new();
-        self.files = Some(files::Lane::download(request, control.clone()));
+        self.files
+            .get_or_insert_with(files::Lane::default)
+            .add_receive(request, control.clone())?;
         Ok(control)
     }
     pub(crate) async fn reap_clipboard(

@@ -391,3 +391,114 @@ fn downloads_negotiate_direction_without_advertising_a_legacy_upload_directory()
         }
     }
 }
+
+#[test]
+fn duplex_profiles_round_trip_with_independent_optional_lanes_and_original_bounds() {
+    for clipboard in [false, true] {
+        for audio in [false, true] {
+            let host = with_line_scroll(host_offer_with_duplex(true, clipboard, audio));
+            let client = fr_client::native::control_offer_with_duplex(clipboard, audio);
+            for offer in [&host, &client] {
+                offer.validate().unwrap();
+                assert!(offer.capabilities.len() <= negotiation::MAX_CAPABILITIES);
+                assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
+                for name in [
+                    fr_wire::files::CAPABILITY,
+                    fr_wire::files::DOWNLOAD_CAPABILITY,
+                    fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+                    fr_wire::files::DUPLEX_CAPABILITY,
+                    attachment::FILES_CAPABILITY,
+                    attachment::INPUT_CAPABILITY,
+                    fr_wire::input_ticket::AUTHORITY_CAPABILITY,
+                    fr_wire::input_ticket::READINESS_CAPABILITY,
+                    fr_wire::cursor::CAPABILITY,
+                    fr_wire::recovery_request::CAPABILITY,
+                    control::LINE_SCROLL_CAPABILITY,
+                ] {
+                    assert!(present(offer, name), "missing {name}");
+                }
+                // The fullest profile uses the already bounded fixed allowance
+                // path instead of raising the negotiation count or dropping gates.
+                assert_eq!(
+                    present(offer, attachment::credit::CAPABILITY),
+                    !(clipboard && audio)
+                );
+            }
+            let selected = select(&host, &client);
+            assert!(fr_wire::files::duplex_selected(&selected));
+            super::super::files_lane(&selected).unwrap();
+            super::super::file_download_lane(&selected).unwrap();
+            assert_eq!(fr_wire::audio_control::downlink_selected(&selected), audio);
+            for &(name, version) in &CLIPBOARD_CAPABILITIES {
+                assert_eq!(
+                    selected
+                        .capabilities
+                        .iter()
+                        .any(|c| c.name == name && c.version == version),
+                    clipboard
+                );
+            }
+            let observation = select(&host, &fr_client::native::observation_offer());
+            assert!(!fr_wire::files::duplex_selected(&observation));
+            assert!(super::super::files_lane(&observation).is_err());
+            assert!(super::super::file_download_lane(&observation).is_err());
+        }
+    }
+}
+
+#[test]
+fn duplex_with_each_legacy_peer_selects_only_that_peers_explicit_direction() {
+    let host = with_line_scroll(host_offer_with_duplex(true, true, true));
+    let client = fr_client::native::control_offer_with_duplex(true, true);
+    for selected in [
+        select(&host, &control_offer_with_auxiliary(true, true, true)),
+        select(
+            &with_line_scroll(host_offer_with_files(true, true, true, true)),
+            &client,
+        ),
+    ] {
+        assert!(!fr_wire::files::duplex_selected(&selected));
+        assert_eq!(selected.role, Role::RequestControl);
+        super::super::files_lane(&selected).unwrap();
+        assert!(super::super::file_download_lane(&selected).is_err());
+    }
+    for selected in [
+        select(
+            &host,
+            &fr_client::native::control_offer_with_download(true, true),
+        ),
+        select(
+            &with_line_scroll(host_offer_with_download(true, true, true, true)),
+            &client,
+        ),
+    ] {
+        assert!(!fr_wire::files::duplex_selected(&selected));
+        assert_eq!(selected.role, Role::RequestControl);
+        super::super::file_download_lane(&selected).unwrap();
+        assert!(super::super::files_lane(&selected).is_err());
+    }
+    // Both old direction capabilities alone are ambiguous, not consent to a
+    // second owner. Omission or an unknown duplex version refuses both lanes.
+    for version in [None, Some(fr_wire::files::DUPLEX_VERSION + 1)] {
+        let mut peer = client.clone();
+        if let Some(version) = version {
+            peer.capabilities
+                .iter_mut()
+                .find(|c| c.name == fr_wire::files::DUPLEX_CAPABILITY)
+                .unwrap()
+                .version = version;
+        } else {
+            peer.capabilities
+                .retain(|c| c.name != fr_wire::files::DUPLEX_CAPABILITY);
+        }
+        let selected = select(&host, &peer);
+        assert_eq!(selected.role, Role::RequestControl);
+        assert!(!fr_wire::files::duplex_selected(&selected));
+        assert!(super::super::files_lane(&selected).is_err());
+        assert!(super::super::file_download_lane(&selected).is_err());
+    }
+    assert!(!present(
+        &host_offer_with_duplex(false, true, true),
+        fr_wire::files::DUPLEX_CAPABILITY
+    ));
+}

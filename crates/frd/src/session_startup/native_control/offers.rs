@@ -199,6 +199,50 @@ pub fn host_offer_with_download(
     offer
 }
 
+/// Both an explicitly configured host drop directory and a finite host source
+/// selection. Each direction retains an independent one-use file attachment;
+/// optional negotiation permits a legacy peer's original single direction.
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn host_offer_with_duplex(control: bool, clipboard: bool, audio: bool) -> Offer {
+    let mut offer = host_offer_with_files(control, clipboard, audio, true);
+    if control {
+        for (name, version) in [
+            (
+                fr_wire::files::DOWNLOAD_CAPABILITY,
+                fr_wire::files::DOWNLOAD_VERSION,
+            ),
+            (
+                fr_wire::files::DUPLEX_CAPABILITY,
+                fr_wire::files::DUPLEX_VERSION,
+            ),
+        ] {
+            offer.capabilities.push(Capability {
+                name: name.into(),
+                version,
+                required: false,
+            });
+        }
+    }
+    bound_duplex_offer(&mut offer);
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer
+}
+fn bound_duplex_offer(offer: &mut Offer) {
+    if offer.capabilities.len() > fr_wire::negotiation::MAX_CAPABILITIES
+        && offer
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == fr_wire::files::DUPLEX_CAPABILITY)
+    {
+        // Legacy fixed attachment allowances stay bounded and validated. This
+        // optional omission keeps the original negotiation count ceiling, all
+        // control/privacy boundaries, cursor, wheel and recovery capabilities.
+        offer
+            .capabilities
+            .retain(|cap| cap.name != attachment::credit::CAPABILITY);
+    }
+}
+
 /// Only for a control-capable host whose probed input executor can scroll by
 /// lines: the optional `native-input-line-scroll` boundary. A controller asks
 /// for `LineScroll` only when both peers select it; without it the wheel alone
@@ -210,6 +254,7 @@ pub fn with_line_scroll(mut offer: Offer) -> Offer {
         version: control::LINE_SCROLL_VERSION,
         required: false,
     });
+    bound_duplex_offer(&mut offer);
     offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     offer
 }

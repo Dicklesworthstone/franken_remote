@@ -4,15 +4,15 @@ use super::*;
 use fr_files::{receive::Publication, session, wire::ResultReceipt, worker::Completion};
 use frd::native_files::{ReceivePhase, ReceiveStatus};
 
-struct DownloadProbe {
+pub(super) struct DownloadProbe {
     sample: Mutex<ReceiveStatus>,
-    commands: Mutex<Vec<Action>>,
+    pub(super) commands: Mutex<Vec<Action>>,
     stopped: AtomicBool,
     stall: AtomicBool,
     stalled: AtomicBool,
 }
 impl DownloadProbe {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             sample: Mutex::new(ReceiveStatus {
                 phase: ReceivePhase::Receiving,

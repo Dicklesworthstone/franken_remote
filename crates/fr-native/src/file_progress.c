@@ -2,6 +2,8 @@
  * The decoder's drawable and coordinates are NEVER changed or drawn over.
  * All native work stays on the panel's own connection/owner thread. */
 enum { UP_WIDTH = 640, UP_HEIGHT = 310, UP_ROWS = 8, UP_COLS = 104 };
+enum { UP_SECONDARY = 1, UP_RESERVE_CLIPBOARD = 2, UP_FIRST_CLIPBOARD = 4, UP_RESERVATIONS = 2 };
+struct fr_upload_rect { int32_t x, y, width, height; };
 struct fr_upload_frame {
     uint8_t lines[UP_ROWS][UP_COLS];
     int32_t progress;
@@ -14,11 +16,13 @@ struct fr_upload {
     uint32_t pressed;
     uint32_t parent, parent_width, parent_height, direction, root;
     int mapped;
+    uint32_t placement;
+    unsigned reserved_count;
+    struct fr_upload_rect reserved[UP_RESERVATIONS];
     /* Clipboard readiness needs server-authored unobscured evidence, not just
      * a successful map request. 0 is unknown, 1 unobscured, 2 obscured. */
     int visibility;
 };
-struct fr_upload_rect { int32_t x, y, width, height; };
 /* Use the actual local X hierarchy, including a WM's reparenting frame. A
  * bounded walk cannot mistake a peer-supplied coordinate for the viewer. */
 static int upload_rectangle(struct fr_upload *p, uint32_t window,
@@ -71,27 +75,85 @@ static int upload_on_screen(const struct fr_upload_rect *r, int32_t width, int32
         r->x + r->width <= width && r->y + r->height <= height;
 }
 static int32_t upload_clamp(int32_t n, int32_t max) { return n < 0 ? 0 : n > max ? max : n; }
-static int upload_position(struct fr_upload *p, int32_t width, int32_t height,
-        int16_t *x, int16_t *y) {
-    struct fr_upload_rect parent;
-    if (!upload_rectangle(p, p->parent, p->parent_width, p->parent_height, &parent)) return 0;
-    int32_t panel_width = p->base->width, panel_height = p->base->height;
-    int32_t px = upload_clamp(parent.x, width - panel_width);
-    int32_t py = upload_clamp(parent.y, height - panel_height);
+static int upload_fits(const struct fr_upload_rect *choice,
+        const struct fr_upload_rect *parent, int32_t width, int32_t height,
+        const struct fr_upload_rect *reserved, unsigned count) {
+    if (!upload_on_screen(choice, width, height) || !upload_separate(choice, parent)) return 0;
+    for (unsigned i = 0; i < count; ++i)
+        if (!upload_separate(choice, &reserved[i])) return 0;
+    return 1;
+}
+static int upload_find_position(const struct fr_upload_rect *parent,
+        int32_t width, int32_t height, int32_t panel_width, int32_t panel_height,
+        const struct fr_upload_rect *reserved, unsigned count,
+        struct fr_upload_rect *out) {
+    if (count > UP_RESERVATIONS) return 0;
+    int32_t px = upload_clamp(parent->x, width - panel_width);
+    int32_t py = upload_clamp(parent->y, height - panel_height);
     for (int32_t gap = 24; gap >= 0; gap -= 24) {
         struct fr_upload_rect choices[] = {
-            { parent.x + parent.width + gap, py, panel_width, panel_height },
-            { parent.x - panel_width - gap, py, panel_width, panel_height },
-            { px, parent.y + parent.height + gap, panel_width, panel_height },
-            { px, parent.y - panel_height - gap, panel_width, panel_height },
+            { parent->x + parent->width + gap, py, panel_width, panel_height },
+            { parent->x - panel_width - gap, py, panel_width, panel_height },
+            { px, parent->y + parent->height + gap, panel_width, panel_height },
+            { px, parent->y - panel_height - gap, panel_width, panel_height },
         };
         for (unsigned i = 0; i < sizeof(choices) / sizeof(choices[0]); ++i) {
-            if (upload_on_screen(&choices[i], width, height) && upload_separate(&choices[i], &parent)) {
-                *x = (int16_t)choices[i].x; *y = (int16_t)choices[i].y; return 1;
+            if (upload_fits(&choices[i], parent, width, height, reserved, count)) {
+                *out = choices[i]; return 1;
+            }
+        }
+        if (!count) continue; /* Preserve ordinary/clipboard placement exactly. */
+        /* At most two reserved rectangles, eleven anchors per axis and two
+         * gaps. This is bounded local geometry, not a global window search. */
+        int32_t xs[5 + 3 * UP_RESERVATIONS] = {
+            px, parent->x + parent->width + gap, parent->x - panel_width - gap,
+            0, width - panel_width,
+        };
+        int32_t ys[5 + 3 * UP_RESERVATIONS] = {
+            py, parent->y + parent->height + gap, parent->y - panel_height - gap,
+            0, height - panel_height,
+        };
+        unsigned anchors = 5;
+        for (unsigned i = 0; i < count; ++i) {
+            xs[anchors] = reserved[i].x; ys[anchors++] = reserved[i].y;
+            xs[anchors] = reserved[i].x + reserved[i].width + gap;
+            ys[anchors++] = reserved[i].y + reserved[i].height + gap;
+            xs[anchors] = reserved[i].x - panel_width - gap;
+            ys[anchors++] = reserved[i].y - panel_height - gap;
+        }
+        for (unsigned ix = 0; ix < anchors; ++ix) {
+            for (unsigned iy = 0; iy < anchors; ++iy) {
+                struct fr_upload_rect choice = { xs[ix], ys[iy], panel_width, panel_height };
+                if (upload_fits(&choice, parent, width, height, reserved, count)) {
+                    *out = choice; return 1;
+                }
             }
         }
     }
     return 0;
+}
+static int upload_position(struct fr_upload *p, int32_t width, int32_t height,
+        int16_t *x, int16_t *y) {
+    struct fr_upload_rect parent, chosen, privacy;
+    if (!upload_rectangle(p, p->parent, p->parent_width, p->parent_height, &parent)) return 0;
+    unsigned count = 0;
+    if (p->placement & (UP_RESERVE_CLIPBOARD | UP_FIRST_CLIPBOARD)) {
+        if (!upload_find_position(&parent, width, height, FR_CLIPBOARD_WIDTH,
+            FR_CLIPBOARD_HEIGHT, NULL, 0, &privacy)) return 0;
+    }
+    if (p->placement & UP_RESERVE_CLIPBOARD) p->reserved[count++] = privacy;
+    if (p->placement & UP_SECONDARY) {
+        /* The second file direction never reuses the first file panel's slot,
+         * including when their owner threads race to open. Clipboard retains
+         * its existing preferred slot and its independent visibility fence. */
+        if (!upload_find_position(&parent, width, height, UP_WIDTH, UP_HEIGHT,
+            &privacy, p->placement & UP_FIRST_CLIPBOARD ? 1u : 0u, &p->reserved[count])) return 0;
+        ++count;
+    }
+    if (!upload_find_position(&parent, width, height, p->base->width, p->base->height,
+        p->reserved, count, &chosen)) return 0;
+    p->reserved_count = count;
+    *x = (int16_t)chosen.x; *y = (int16_t)chosen.y; return 1;
 }
 /* Recheck mapped geometry before accepting local commands and on each refresh.
  * A WM may ignore position hints or move either ancestor later. Hide the
@@ -107,6 +169,8 @@ static int upload_layout_valid(struct fr_upload *p) {
     int valid = g && !e && g->root == p->root &&
         upload_on_screen(&parent, g->width, g->height) &&
         upload_on_screen(&panel, g->width, g->height);
+    for (unsigned i = 0; valid && i < p->reserved_count; ++i)
+        valid = upload_separate(&panel, &p->reserved[i]);
     free(g); free(e);
     return valid && !xcb_connection_has_error(p->base->c);
 }
@@ -125,9 +189,12 @@ void fr_upload_close(struct fr_upload *p) {
     free(p);
 }
 void fr_upload_disarm(struct fr_upload *p) { if (p) p->pressed = 0; }
-struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
-        uint32_t width, uint32_t height, uint32_t direction) {
-    if (!display || !parent || !width || !height || direction > 3) return NULL;
+static struct fr_upload *upload_open(const char *display, uint32_t parent,
+        uint32_t width, uint32_t height, uint32_t direction, uint32_t placement) {
+    if (!display || !parent || !width || !height || direction > 3 ||
+        placement > (UP_SECONDARY | UP_RESERVE_CLIPBOARD | UP_FIRST_CLIPBOARD) ||
+        ((placement & UP_FIRST_CLIPBOARD) && !(placement & UP_SECONDARY)) ||
+        (placement && direction > 1)) return NULL;
     struct fr_upload *p = calloc(1, sizeof(*p));
     if (!p) return NULL;
     p->base = calloc(1, sizeof(*p->base));
@@ -154,7 +221,7 @@ struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
     free(a); free(e);
     if (!valid) goto fail;
     p->parent = parent; p->parent_width = width; p->parent_height = height;
-    p->direction = direction; p->root = it.data->root;
+    p->direction = direction; p->root = it.data->root; p->placement = placement;
     int16_t x, y;
     if (!upload_position(p, it.data->width_in_pixels, it.data->height_in_pixels, &x, &y)) goto fail;
     uint32_t parent_events = XCB_EVENT_MASK_STRUCTURE_NOTIFY;
@@ -207,6 +274,15 @@ struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
     return p;
 fail:
     fr_upload_close(p); return NULL;
+}
+struct fr_upload *fr_upload_open(const char *display, uint32_t parent,
+        uint32_t width, uint32_t height, uint32_t direction) {
+    return upload_open(display, parent, width, height, direction, 0);
+}
+struct fr_upload *fr_upload_open_file(const char *display, uint32_t parent,
+        uint32_t width, uint32_t height, uint32_t direction, uint32_t placement) {
+    if (direction > 1) return NULL;
+    return upload_open(display, parent, width, height, direction, placement);
 }
 static int upload_text(struct fr_upload *p, int16_t x, int16_t y, const char *text, size_t n) {
     return n < 256 && checked(p->base, xcb_image_text_8_checked(p->base->c,

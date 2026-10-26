@@ -130,7 +130,7 @@ def prop(window, name):
         return None
     finally: free(data)
 
-def panel(window=None, depth=0):
+def panel(window=None, depth=0, kind=None):
     if window is None: window = root
     if depth > 3: return 0
     r, p, children, count = U(), U(), C.POINTER(U)(), C.c_uint()
@@ -140,9 +140,10 @@ def panel(window=None, depth=0):
     finally:
         if children: free(children)
     for child in candidates:
-        if prop(child, b"WM_TRANSIENT_FOR") == [parent] and prop(child, b"WM_CLASS") == panel_class:
+        expected_class = ("franken-remote-" + kind).encode() + b"\0FrankenRemote\0" if kind else panel_class
+        if prop(child, b"WM_TRANSIENT_FOR") == [parent] and prop(child, b"WM_CLASS") == expected_class:
             return child
-        found = panel(child, depth + 1)
+        found = panel(child, depth + 1, kind)
         if found: return found
     return 0
 
@@ -158,6 +159,12 @@ for raw in sys.stdin:
     if not parts: continue
     command = parts[0]
     if command == "quit": break
+    if command == "direction":
+        direction = parts[1]
+        assert direction in ("upload", "download", "audio", "clipboard")
+        panel_class = ("franken-remote-" + direction).encode() + b"\0FrankenRemote\0"
+        print("ok", flush=True)
+        continue
     w = panel()
     result = "ok"
     if command == "exists": result = "yes" if w else "no"
@@ -175,6 +182,9 @@ for raw in sys.stdin:
     elif command == "placement":
         px, py, pw, ph = rectangle(w)
         result = "separate" if separate(rectangle(parent), (px, py, pw, ph)) and px >= 0 and py >= 0 and px + pw <= root_attrs.width and py + ph <= root_attrs.height else "invalid"
+    elif command == "separate_from":
+        other = panel(kind=parts[1])
+        result = "separate" if w and other and separate(rectangle(w), rectangle(other)) else "invalid"
     elif command in ("parent_overlap", "panel_overlap", "panel_offscreen", "parent_offscreen"):
         if command == "parent_overlap":
             xx, yy, _, _ = rectangle(w); target = outer(parent)

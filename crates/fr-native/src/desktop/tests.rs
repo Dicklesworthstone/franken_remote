@@ -4,6 +4,85 @@ use fr_client::input::{ClientInstant, InputClient, Policy, viewport::SurfaceRect
 use fr_core::{ids::*, input::*, input_submission::Capabilities, limits::ProtocolLimits};
 
 #[test]
+fn file_panel_directions_retain_distinct_status_and_both_cleanup_owners() {
+    use crate::file_progress::{Panel, Status as PanelStatus, StopReason};
+    use std::time::{Duration, Instant};
+    for upload_finishes_first in [true, false] {
+        let configuration =
+            Configuration::new(Path::new("/usr/bin/false"), ":0", None, 79).unwrap();
+        let mut desktop = Desktop::new(configuration);
+        let (upload, finish_upload) = Panel::pending_cleanup_fixture();
+        let (receive, finish_receive) = Panel::pending_cleanup_fixture();
+        desktop.file_progress = Some(Ok(upload));
+        desktop.receive_progress = Some(Ok(receive));
+        let upload = desktop.upload_progress().unwrap().unwrap();
+        let receive = desktop.receive_progress().unwrap().unwrap();
+        upload.hide();
+        assert_eq!(upload.status(), PanelStatus::Stopped(StopReason::Hidden));
+        assert_eq!(receive.status(), PanelStatus::Running);
+        assert_eq!(
+            desktop.file_progress().unwrap().unwrap().status(),
+            upload.status()
+        );
+        desktop.close();
+        assert_eq!(
+            receive.status(),
+            PanelStatus::Stopped(StopReason::OwnerStopped)
+        );
+        assert_eq!(desktop.window_cleanup(), WindowCleanup::Pending);
+        let (first, last) = if upload_finishes_first {
+            (&finish_upload, &finish_receive)
+        } else {
+            (&finish_receive, &finish_upload)
+        };
+        first.send(()).unwrap();
+        let first_owner = if upload_finishes_first {
+            &mut desktop.file_progress
+        } else {
+            &mut desktop.receive_progress
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !first_owner.as_mut().unwrap().as_mut().unwrap().finish() {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            desktop.window_cleanup(),
+            WindowCleanup::Pending,
+            "the other original native owner still blocks reconnect"
+        );
+        last.send(()).unwrap();
+        while desktop.window_cleanup() == WindowCleanup::Pending {
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(desktop.window_cleanup(), WindowCleanup::NotStarted);
+    }
+}
+
+#[test]
+fn download_only_progress_keeps_legacy_access_and_directional_refusals() {
+    use crate::file_progress::Error as PanelError;
+    let configuration = Configuration::new(Path::new("/usr/bin/false"), ":0", None, 80).unwrap();
+    let mut desktop = Desktop::new(configuration);
+    desktop.receive_progress = Some(Err(PanelError::InvalidParent));
+    assert!(desktop.upload_progress().is_none());
+    assert!(matches!(
+        desktop.file_progress(),
+        Some(Err(PanelError::InvalidParent))
+    ));
+    desktop.file_progress = Some(Err(PanelError::InvalidDisplay));
+    assert!(matches!(
+        desktop.upload_progress(),
+        Some(Err(PanelError::InvalidDisplay))
+    ));
+    assert!(matches!(
+        desktop.receive_progress(),
+        Some(Err(PanelError::InvalidParent))
+    ));
+}
+
+#[test]
 fn input_mapping_must_describe_the_actual_full_native_pixel_image() {
     let bounds = InputBounds::new(DesktopPoint { x: -320, y: -80 }, 320, 240).unwrap();
     let client = InputClient::new(

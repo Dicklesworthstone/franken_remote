@@ -1,6 +1,6 @@
 //! A Files source or recipient may cancel at its authenticated final handoff.
 use super::{
-    super::{ACTIVE, ARMED, MediaChannel, MediaRole, Ordering, Phase, QuicRecords, RETIRED},
+    super::{ACTIVE, ARMED, MediaChannel, Ordering, Phase, QuicRecords, RETIRED},
     FILES_RETIRED,
 };
 use crate::quic::{Cx, Error};
@@ -24,7 +24,7 @@ impl MediaChannel {
         // Foreign objects must not mutate either owner before being refused.
         if !q.is_bound_to(&self.connection)
             || (!self.host && self.files_direction != Direction::ToController)
-            || self.descriptor.role != MediaRole::Files
+            || !self.descriptor.role.is_files()
         {
             return Err(Error::WrongRoute);
         }

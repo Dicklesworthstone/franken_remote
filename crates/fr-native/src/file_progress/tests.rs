@@ -2,6 +2,7 @@
 //! file outcomes are explicit fixtures, not authenticated transfer qualification.
 mod audio;
 mod clipboard;
+mod duplex;
 mod receive;
 use super::*;
 use frd::native_files::{SendPhase, SendSnapshot, SendStatus};
@@ -11,6 +12,26 @@ use std::{
     sync::{Mutex, atomic::AtomicBool},
 };
 static SERIAL: Mutex<()> = Mutex::new(());
+
+impl Panel {
+    /// A real joinable thread held at an explicit test cleanup barrier. This is
+    /// an owner-lifetime fixture, not evidence of native X11 or file authority.
+    pub(crate) fn pending_cleanup_fixture() -> (Self, std::sync::mpsc::SyncSender<()>) {
+        let (release, cleanup) = std::sync::mpsc::sync_channel(0);
+        let task = thread::spawn(move || cleanup.recv().unwrap());
+        (
+            Self {
+                control: Control {
+                    state: Arc::new(AtomicU8::new(1)),
+                    privacy: None,
+                },
+                task: Some(task),
+                watchdog: None,
+            },
+            release,
+        )
+    }
+}
 pub(super) fn snapshot() -> SendSnapshot {
     SendSnapshot {
         status: SendStatus {

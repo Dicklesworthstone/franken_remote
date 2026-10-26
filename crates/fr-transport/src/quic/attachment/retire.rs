@@ -14,7 +14,7 @@ const AUDIO_RETIRED: u64 = 0x4652_4144;
 pub(super) fn retirement_code(role: MediaRole) -> Option<u64> {
     match role {
         MediaRole::Clipboard => Some(CLIPBOARD_RETIRED),
-        MediaRole::Files => Some(FILES_RETIRED),
+        MediaRole::Files | MediaRole::FilesDownload => Some(FILES_RETIRED),
         MediaRole::AudioDown => Some(AUDIO_RETIRED),
         MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video => Some(MEDIA_RETIRED),
         // Input has one ordering/authority domain for the connection lifetime.
@@ -33,7 +33,10 @@ impl MediaChannel {
     /// Retire only the completed file pair. Retain its consumed ticket, binding
     /// and stream IDs; a second attachment cannot reset cumulative file quotas.
     pub fn retire_files(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
-        self.retire_optional(q, cx, MediaRole::Files)
+        if !self.descriptor.role.is_files() {
+            return Err(Error::WrongRoute);
+        }
+        self.retire_optional(q, cx, self.descriptor.role)
     }
     /// Retire a COMPLETED configuration, recovery or video attachment on its
     /// original connection. The session fences view/input authority first, then

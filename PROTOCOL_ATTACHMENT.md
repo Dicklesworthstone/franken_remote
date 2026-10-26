@@ -11,7 +11,8 @@ recovery (2), and video progress/repair (3), with primary data host-to-viewer.
 All integers are big-endian. The descriptor is 118 bytes: channel binding u32;
 host boot, OS session, remote session and display handle (four u128); geometry,
 configuration, recovery and viewport (four u64); role u8; primary direction u8
-(fixed 1); host and viewer native unidirectional stream IDs (two u64). The IDs
+(1 for the original three media roles); host and viewer native unidirectional
+stream IDs (two u64). The IDs
 must fit QUIC's 62-bit space and name the indicated initiator and direction.
 
 A grant is that descriptor plus an opaque 128-bit one-use ticket, host-monotonic
@@ -79,3 +80,37 @@ Recovery uses a separate bulk binding. Actual packet allowances also respect the
 selected transport's stream, datagram and queue caps. Compressed and decoded
 picture budgets remain separate. Input and other non-media channel attachment
 and the protected ingress/application lifecycle are not established by this join.
+
+## Optional file directions on the original controller
+
+The descriptor layout and ticket/acknowledgement sizes above are unchanged.
+The complete, positively selected `file-duplex` v1 profile in
+[PROTOCOL_FILES.md](PROTOCOL_FILES.md) adds one role; it does not repurpose the
+reserved audio-up byte or reinterpret an old peer's descriptor.
+
+| Wire role | Name | Descriptor primary direction | File data direction |
+|---|---|---|---|
+| 6 | `Files` | 2 | To host under duplex; legacy `file-download` selection remains unchanged without duplex |
+| 8 | Reserved audio-up | Unsupported | No file meaning; still a typed `UnsupportedKind` refusal |
+| 9 | `FilesDownload` | 1 | To controller, only under the complete duplex profile |
+
+Every file role requires the original active input attachment. Two directions
+consume two separate reservations, with exact role/binding/ticket validation,
+no reservation reuse even after cancellation, and separate locally approved
+channel-derived handles. A legacy Files reservation cannot be upgraded later
+by supplying a different selection. The complete profile is retained when the
+original reservation is created; later dispatch cannot broaden it.
+
+Clipboard and the two fixed file owners may overlap their bounded attachment
+handshakes on the original CONTROL parser. Stream pairs are announced in their
+reserved order. A pending owner may defer only a fully decoded sibling offer,
+or an acknowledgement/ticket matching another original pending reservation;
+unknown acknowledgements remain errors. At most two sibling identities are
+retained in a fixed array, with no new queue, deadline extension, or grant.
+Each owner still validates its own full transition and final handoff.
+
+`crates/fr-wire/tests/file_duplex.rs` independently encodes role 9 and checks
+truncation, direction, reserved-role and authority-envelope isolation.
+`crates/fr-transport/tests/media_attachment/files/duplex.rs` exercises the three
+optional owners and independent original-connection file retirement. These
+source regressions do not establish live-tailnet or third-party interoperability.

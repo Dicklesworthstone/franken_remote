@@ -37,7 +37,7 @@ impl Outgoing {
 }
 
 impl ControlledHost {
-    /// Send one finite local selection on this controller's one-use Files lane.
+    /// Send one finite local selection on this controller's one-use download lane.
     /// Only positive download negotiation permits this direction. The selection
     /// contains pinned local descriptors; no peer path or browse request exists.
     /// Ordinary turns finish attachment before starting any source worker.
@@ -67,36 +67,42 @@ impl ControlledHost {
     /// verified ATP and reported publication; transport acknowledgements do not.
     pub fn file_batch_report(&self) -> Option<batch::Report> {
         self.files
+            .download
             .sender
             .as_ref()
             .and_then(|outgoing| outgoing.sender.batch_report())
     }
     pub fn take_file_batch_report(&mut self) -> Option<batch::Report> {
         self.files
+            .download
             .sender
             .as_mut()
             .and_then(|outgoing| outgoing.sender.take_batch_report())
     }
     pub fn file_send_result(&self) -> Option<sender::Receipt> {
         self.files
+            .download
             .sender
             .as_ref()
             .and_then(|outgoing| outgoing.sender.result())
     }
     pub fn file_send_progress(&self) -> Option<sender::Progress> {
         self.files
+            .download
             .sender
             .as_ref()
             .and_then(|outgoing| outgoing.sender.progress())
     }
     pub fn file_send_stage(&self) -> Option<sender::Stage> {
         self.files
+            .download
             .sender
             .as_ref()
             .map(|outgoing| outgoing.sender.stage())
     }
     pub fn file_send_negotiating(&self) -> bool {
         self.files
+            .download
             .pending
             .as_ref()
             .is_some_and(super::negotiation::Pending::is_download)

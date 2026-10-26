@@ -73,12 +73,18 @@ pub enum MediaRole {
     /// lane plus `AudioPacket` datagrams. Requires positive selection of
     /// `fr_wire::audio::CAPABILITY`; attachment is not a local audio enable.
     AudioDown = 7,
+    /// Independently bounded host-to-controller files under `file-duplex`.
+    FilesDownload = 9,
 }
 /// Wire value reserved for the client-microphone `audio-up` channel. It is a
 /// typed refusal (`UnsupportedKind`) until a qualified virtual microphone
 /// endpoint exists; it never decodes as another role.
 pub const AUDIO_UP_RESERVED_ROLE: u8 = 8;
 impl MediaRole {
+    /// File framing is shared; attachment, direction and authority are not.
+    pub const fn is_files(self) -> bool {
+        matches!(self, Self::Files | Self::FilesDownload)
+    }
     /// Wire direction: 1 = host-to-viewer, 2 = viewer-to-host. This describes
     /// application data, not the fixed directions of the attachment handshake.
     pub const fn primary_direction(self) -> u8 {
@@ -98,6 +104,7 @@ impl MediaRole {
             6 => Ok(Self::Files),
             7 => Ok(Self::AudioDown),
             AUDIO_UP_RESERVED_ROLE => Err(WireError::UnsupportedKind),
+            9 => Ok(Self::FilesDownload),
             _ => Err(WireError::InvalidValue),
         }
     }

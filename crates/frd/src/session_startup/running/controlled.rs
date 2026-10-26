@@ -26,7 +26,7 @@ pub struct ControlledHost {
     submitted: super::input_wake::Submitted,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
-    files: files::Slot,
+    files: files::Slots,
     terminal_report: Option<Result<(), fr_transport::quic::Error>>,
     terminal_registered: bool,
 }
@@ -70,7 +70,7 @@ impl HostSession {
             submitted: super::input_wake::Submitted::default(),
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
-            files: files::Slot::default(),
+            files: files::Slots::default(),
             terminal_report: None,
             terminal_registered: false,
         };
@@ -233,7 +233,7 @@ impl Drop for Operation<'_> {
 }
 struct InputServices<'a, T, F> {
     input: &'a mut QuicInput,
-    files: &'a mut files::Slot,
+    files: &'a mut files::Slots,
     clipboard: &'a mut Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: &'a mut crate::session_startup::clipboard::Setup,
     cx: asupersync::cx::Cx,

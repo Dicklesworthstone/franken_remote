@@ -211,7 +211,8 @@ impl ControlledHost {
     ) -> Result<(), Error> {
         if self.session.opened.selected.capabilities.iter().any(|cap| {
             cap.name == files::DOWNLOAD_CAPABILITY && cap.version == files::DOWNLOAD_VERSION
-        }) {
+        }) && !files::duplex_selected(&self.session.opened.selected)
+        {
             return Err(Error::NotNegotiated);
         }
         self.offer_file_target(request, handle, Target::Receive(configuration))
@@ -223,7 +224,9 @@ impl ControlledHost {
         handle: u128,
         target: Target,
     ) -> Result<(), Error> {
-        if self.files.used {
+        let download = matches!(target, Target::Send { .. });
+        let duplex = files::duplex_selected(&self.session.opened.selected);
+        if self.files.slot(download).used || (!duplex && self.files.slot(!download).used) {
             return Err(Error::AlreadyAttached);
         }
         self.session.check().map_err(|_| Error::Closed)?;
@@ -265,7 +268,11 @@ impl ControlledHost {
                     selection: selected,
                 },
                 request,
-                attachment::MediaRole::Files,
+                if download && duplex {
+                    attachment::MediaRole::FilesDownload
+                } else {
+                    attachment::MediaRole::Files
+                },
                 || {
                     observation.check().is_ok()
                         && crate::session_startup::now(cx).is_ok_and(|now| {
@@ -276,7 +283,8 @@ impl ControlledHost {
             .map_err(Error::Transport)?;
         // Retain all ownership before returning to the caller. Native startup
         // and its fallible allocations occur only after authenticated completion.
-        self.files.pending = Some(Pending {
+        let slot = self.files.slot_mut(download);
+        slot.pending = Some(Pending {
             cx: cx.clone(),
             connection: q.binding(),
             control: self.session.opened.routes,
@@ -286,7 +294,7 @@ impl ControlledHost {
             target,
             last,
         });
-        self.files.used = true;
+        slot.used = true;
         Ok(())
     }
 }

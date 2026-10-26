@@ -5,6 +5,7 @@
 //! its records. Retirement never erases an already committed publication.
 mod download;
 mod negotiation;
+mod slots;
 use super::ControlledHost;
 use crate::worker::Deadline;
 use asupersync::{cx::Cx, time::sleep_until, types::Time};
@@ -17,6 +18,7 @@ use fr_files::{
 use fr_transport::quic::{self, MediaChannel, QuicRecords, Route, files::FilesChannel};
 use fr_wire::{files, negotiation::Role};
 use negotiation::{Advance, Pending};
+pub(super) use slots::Slots;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -216,14 +218,17 @@ impl ControlledHost {
         handle: u128,
         configuration: Configuration,
     ) -> Result<(), Error> {
-        if self.files.used {
+        if self.files.upload.used
+            || (self.files.download.used && !files::duplex_selected(&self.session.opened.selected))
+        {
             return Err(Error::AlreadyAttached);
         }
         self.session.check().map_err(|_| Error::Closed)?;
         let selection = &self.session.opened.selected;
-        if selection.capabilities.iter().any(|cap| {
+        if (selection.capabilities.iter().any(|cap| {
             cap.name == files::DOWNLOAD_CAPABILITY && cap.version == files::DOWNLOAD_VERSION
-        }) || selection.role != Role::RequestControl
+        }) && !files::duplex_selected(selection))
+            || selection.role != Role::RequestControl
             || !selection
                 .capabilities
                 .iter()
@@ -232,7 +237,9 @@ impl ControlledHost {
             return Err(Error::NotNegotiated);
         }
         let q = &mut self.session.opened.transport;
-        if channel.completed_parent(q).map_err(Error::Transport)? != self.session.opened.binding {
+        if channel.descriptor().role != fr_wire::attachment::MediaRole::Files
+            || channel.completed_parent(q).map_err(Error::Transport)? != self.session.opened.binding
+        {
             return Err(Error::WrongBinding);
         }
         let authority = self.input.file_authority(q).map_err(|_| Error::Closed)?;
@@ -240,7 +247,7 @@ impl ControlledHost {
             .map_err(Error::Transport)?;
         // The completed lane has reserved stream/transfer identity. Neither a
         // failed worker start nor retirement may silently create a second owner.
-        self.files.used = true;
+        self.files.upload.used = true;
         let result = HostReceiver::spawn_with_authority(
             self.session.opened.cx.clone(),
             q,
@@ -250,24 +257,25 @@ impl ControlledHost {
         );
         match result {
             Ok(receiver) => {
-                self.files.receiver = Some(receiver);
+                self.files.upload.receiver = Some(receiver);
                 Ok(())
             }
             Err(error) => {
-                self.files.reason = Some(Error::Receiver(error));
+                self.files.upload.reason = Some(Error::Receiver(error));
                 Err(Error::Receiver(error))
             }
         }
     }
     /// The pending metadata exchange has not started a disk worker yet.
     pub fn file_receive_negotiating(&self) -> bool {
-        self.files.pending.is_some()
+        self.files.upload.pending.is_some()
     }
     pub fn file_receive_state(&self) -> Option<State> {
-        self.files.receiver.as_ref().map(HostReceiver::state)
+        self.files.upload.receiver.as_ref().map(HostReceiver::state)
     }
     pub fn file_receive_progress(&self) -> Option<Progress> {
         self.files
+            .upload
             .receiver
             .as_ref()
             .and_then(HostReceiver::progress)
@@ -276,37 +284,52 @@ impl ControlledHost {
     /// Missing results must never be interpreted as proof of no external effect.
     pub fn file_receive_result(&self) -> Option<ResultReceipt> {
         self.files
+            .upload
             .receiver
             .as_ref()
             .and_then(HostReceiver::last_result)
     }
     pub fn file_receive_reason(&self) -> Option<Error> {
-        self.files.reason
+        self.files.upload.reason
     }
-    /// Stop and reset only file streams. The controller and its renewal remain
-    /// live. Keep driving or call `reap_files` to observe original disk cleanup.
-    /// Cancelling an unfinished ticket exchange instead fences the parent: there
-    /// is not yet a completed optional pair that can be reset independently.
+    /// Stop both optional file directions. Completed pairs retire independently;
+    /// an unfinished exchange still requires the original parent fence.
     pub fn retire_files(&mut self) -> Result<(), Error> {
-        if self.files.pending.is_some() {
+        let upload = self.retire_file_upload();
+        let download = self.retire_file_download();
+        upload.and(download)
+    }
+    /// Stop receipt into the host's selected drop directory only. A completed
+    /// download continues on its independently admitted attachment.
+    pub fn retire_file_upload(&mut self) -> Result<(), Error> {
+        if self.files.upload.pending.is_some() {
             self.close();
             return Err(Error::Cancelled);
         }
-        if let Some(outgoing) = &mut self.files.sender {
+        if let Some(receiver) = &mut self.files.upload.receiver {
+            let result = receiver
+                .retire(&mut self.session.opened.transport)
+                .map_err(Error::Receiver);
+            self.files.upload.collect();
+            if let Err(error) = result {
+                self.files.upload.reason.get_or_insert(error);
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+    /// Stop the host's finite selected source batch only. Publication receipts
+    /// stay with this original sender; an upload receiver remains independent.
+    pub fn retire_file_download(&mut self) -> Result<(), Error> {
+        if self.files.download.pending.is_some() {
+            self.close();
+            return Err(Error::Cancelled);
+        }
+        if let Some(outgoing) = &mut self.files.download.sender {
             outgoing
                 .sender
                 .cancel(&mut self.session.opened.transport)
                 .map_err(Error::Sender)?;
-        }
-        if let Some(receiver) = &mut self.files.receiver {
-            let result = receiver
-                .retire(&mut self.session.opened.transport)
-                .map_err(Error::Receiver);
-            self.files.collect();
-            if let Err(error) = result {
-                self.files.reason.get_or_insert(error);
-                return Err(error);
-            }
         }
         Ok(())
     }
@@ -315,17 +338,18 @@ impl ControlledHost {
     pub fn file_receive_cleanup(&mut self) -> Cleanup {
         if self
             .files
+            .upload
             .receiver
             .as_ref()
             .is_some_and(|r| r.state() != State::Active)
         {
-            self.files.collect();
+            self.files.upload.collect();
         }
-        self.files.cleanup()
+        self.files.upload.cleanup()
     }
-    /// Drain with an independently live cleanup context and the caller's ORIGINAL
-    /// absolute deadline. Cancellation/expiry retain custody and actual receipts
-    /// for a later collection; they never label the worker clean or replay work.
+    /// Drain BOTH original disk owners with an independently live cleanup
+    /// context and the caller's original absolute deadline. No success is
+    /// returned while either worker is pending; receipts survive every outcome.
     pub async fn reap_files(&mut self, cx: &Cx, deadline: Deadline) -> Result<Cleanup, Error> {
         self.retire_files()?;
         let mut previous = None;
@@ -338,16 +362,23 @@ impl ControlledHost {
             if current >= deadline.time() {
                 return Err(Error::CleanupPending);
             }
-            if let Some(outgoing) = &mut self.files.sender {
-                if let Some(result) = outgoing.sender.try_finish_cleanup() {
-                    result.map_err(Error::Sender)?;
-                    return Ok(Cleanup::Finished(Ok(())));
-                }
-            } else {
-                let result = self.file_receive_cleanup();
-                if result != Cleanup::Pending {
-                    return Ok(result);
-                }
+            let upload = self.file_receive_cleanup();
+            let download = match self.files.download.sender.as_mut() {
+                Some(outgoing) => outgoing.sender.try_finish_cleanup(),
+                None => Some(Ok(())),
+            };
+            if upload != Cleanup::Pending
+                && let Some(result) = download
+            {
+                // Report a retained source failure only after the independent
+                // receiver is joined too; neither result settles its sibling.
+                result.map_err(Error::Sender)?;
+                return Ok(match upload {
+                    Cleanup::NotStarted if self.files.download.sender.is_some() => {
+                        Cleanup::Finished(Ok(()))
+                    }
+                    outcome => outcome,
+                });
             }
             previous = Some(current);
             sleep_until(

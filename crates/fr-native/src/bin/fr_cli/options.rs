@@ -104,10 +104,11 @@ pub struct Connection {
     pub audio: Option<AudioRequest>,
     /// `--send PATH` (repeatable, with `--control` only): regular files the
     /// user explicitly selected, sent in order into the host's drop directory
-    /// after control is granted. Empty offers no file capability at all.
+    /// after control is granted. Empty selects no upload.
     pub send: Vec<PathBuf>,
     /// `--receive DIR`: the explicit local destination for host-selected files.
-    /// This requires control and excludes `--send`; neither direction is implicit.
+    /// This requires control and may accompany an explicit `--send` selection;
+    /// neither direction is implicit.
     pub receive: Option<ReceiveOptions>,
 }
 /// At most this many `--send` files per connection (frd's native bound).
@@ -686,13 +687,6 @@ fn parse_command(
                 2,
             ));
         }
-        if receive.is_some() && !send.is_empty() {
-            return Err(Failure::new(
-                "files_direction_conflict",
-                "Choose --send or --receive for this connection; file direction is fixed for the original control lease.",
-                2,
-            ));
-        }
         if send.len() > MAX_SENDS {
             return Err(Failure::new(
                 "send_too_many",
@@ -1102,14 +1096,6 @@ mod tests {
         assert_eq!(selected.send, [] as [PathBuf; 0]);
         for (flags, code) in [
             ("--view-only --receive /a", "receive_requires_control"),
-            (
-                "--control --send /a --receive /b",
-                "files_direction_conflict",
-            ),
-            (
-                "--control --receive /b --send /a",
-                "files_direction_conflict",
-            ),
             ("--control --receive relative", "invalid_arguments"),
             ("--control --receive /a/../b", "invalid_arguments"),
             ("--control --receive", "invalid_arguments"),
@@ -1122,6 +1108,21 @@ mod tests {
                     .code,
                 code,
                 "{flags}"
+            );
+        }
+        for flags in [
+            "--control --send /a --receive /b",
+            "--control --receive /b --send /a",
+        ] {
+            let Command::Connect(both) =
+                options(&format!("connect {base} {flags}")).unwrap().command
+            else {
+                panic!("controlled connection");
+            };
+            assert_eq!(both.send, [PathBuf::from("/a")]);
+            assert_eq!(
+                both.receive.as_ref().unwrap().directory,
+                PathBuf::from("/b")
             );
         }
         for refused in [

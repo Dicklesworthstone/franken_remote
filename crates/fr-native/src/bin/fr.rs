@@ -68,7 +68,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
     [--capture-system-shortcuts]
-    [--send /absolute/file-or-directory]... | [--receive /absolute/private-directory]
+    [--send /absolute/file-or-directory]... [--receive /absolute/private-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
@@ -167,8 +167,12 @@ resumes it after reconnect. Filenames remain absent from diagnostics.
 A download progress panel shows privately staged bytes separately from actual
 publication receipts and cleanup. Cancel download requests file-only cancellation;
 closing the panel only hides it. The panel never retries or resumes a download.
---receive and --send are mutually exclusive. Either may accompany --clipboard
-and --audio. Files follow this original control lease and are never resumed or
+--receive and --send may be combined when the host selects both --send and
+--files. Both peers must support independent file directions; a legacy peer can
+select its original direction while the other reports not negotiated. Upload and
+download keep separate permissions, byte limits, receipts and cancellation. Both
+may accompany --clipboard and --audio. Files follow this original control lease
+and are never resumed or
 replayed automatically. Completion reports local publications separately from
 progress, by index, byte count and durability, with typed refusal, absence and
 actual cleanup status; filenames and paths are omitted, including on cancellation.

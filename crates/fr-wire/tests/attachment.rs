@@ -374,7 +374,7 @@ fn audio_down_role_has_its_own_golden_byte_and_audio_up_stays_reserved() {
         );
     }
     let mut unknown = expected;
-    unknown[124] = 9;
+    unknown[124] = 10;
     assert_eq!(
         decode(&unknown, parent(), 7, &L, D::HostToViewer, T::Reliable),
         Err(fr_wire::WireError::InvalidValue)

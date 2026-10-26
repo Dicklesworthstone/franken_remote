@@ -5,6 +5,17 @@ use super::{
     PENDING, QuicRecords, attachment,
 };
 
+/// Optional owners share only the original CONTROL parser; each still owns
+/// one independent, immutable ticket and stream pair. At most two siblings
+/// exist (clipboard, upload, download), so dispatch never allocates a queue.
+pub(super) fn optional_siblings(a: MediaRole, b: MediaRole) -> bool {
+    a != b
+        && (a == MediaRole::Clipboard || a.is_files())
+        && (b == MediaRole::Clipboard || b.is_files())
+}
+
+type PendingSiblings = [Option<(u32, MediaRole)>; 2];
+
 impl MediaChannel {
     /// Stream identifiers are reserved monotonically. Announce those pairs in
     /// that same order, even when role dispatch polls the later owner first.
@@ -30,25 +41,27 @@ impl MediaChannel {
         reservation.offered = true;
         Ok(())
     }
-    fn sibling_role(&self) -> Option<MediaRole> {
-        match self.descriptor.role {
-            MediaRole::Clipboard => Some(MediaRole::Files),
-            MediaRole::Files => Some(MediaRole::Clipboard),
-            _ => None,
+    fn sibling_role(&self, role: MediaRole) -> bool {
+        optional_siblings(self.descriptor.role, role)
+            && (role != MediaRole::FilesDownload || self.files_duplex)
+    }
+    pub(super) fn pending_siblings(&self, q: &QuicRecords) -> PendingSiblings {
+        let mut siblings = [None; 2];
+        for (slot, reservation) in siblings.iter_mut().zip(q.attachments.iter().filter(|r| {
+            self.sibling_role(r.role) && matches!(r.state.load(Ordering::Acquire), PENDING | ARMED)
+        })) {
+            *slot = Some((reservation.binding, reservation.role));
         }
+        siblings
     }
-    pub(super) fn pending_sibling(&self, q: &QuicRecords) -> Option<u32> {
-        let role = self.sibling_role()?;
-        q.attachments.iter().find_map(|reservation| {
-            (reservation.role == role
-                && matches!(reservation.state.load(Ordering::Acquire), PENDING | ARMED))
-            .then_some(reservation.binding)
-        })
-    }
-    pub(super) fn defer_sibling(&self, bytes: &[u8], pending: Option<u32>) -> Result<bool, Error> {
-        let Some(sibling) = self.sibling_role() else {
+    pub(super) fn defer_sibling(
+        &self,
+        bytes: &[u8],
+        pending: PendingSiblings,
+    ) -> Result<bool, Error> {
+        if self.descriptor.role != MediaRole::Clipboard && !self.descriptor.role.is_files() {
             return Ok(false);
-        };
+        }
         // Validate the complete original-session record before classifying it.
         // An unknown ACK, malformed record or wrong tuple on our own binding
         // stays a protocol error, never an ignored message or another grant.
@@ -85,13 +98,16 @@ impl MediaChannel {
             // The other viewer-side acceptor has not reserved its pair yet.
             // Leave its offer in the original parser, without allocation.
             Message::Binding(descriptor) => {
-                descriptor.role == sibling
+                self.sibling_role(descriptor.role)
                     && descriptor.binding.parent.id != self.descriptor.binding.parent.id
             }
-            Message::Accepted(id) => pending == Some(id),
+            Message::Accepted(id) => pending.iter().flatten().any(|(binding, _)| *binding == id),
             Message::Ticket(grant) => {
-                grant.descriptor.role == sibling
-                    && pending == Some(grant.descriptor.binding.parent.id)
+                self.sibling_role(grant.descriptor.role)
+                    && pending.contains(&Some((
+                        grant.descriptor.binding.parent.id,
+                        grant.descriptor.role,
+                    )))
             }
             _ => false,
         })

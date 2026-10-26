@@ -3,8 +3,8 @@
 use super::*;
 use frd::native_clipboard::{Cleanup, Phase, Status as ClipboardStatus};
 
-struct ClipboardProbe {
-    enabled: AtomicBool,
+pub(super) struct ClipboardProbe {
+    pub(super) enabled: AtomicBool,
     session_stopped: AtomicBool,
     requests: Mutex<Vec<Action>>,
 }
@@ -42,7 +42,7 @@ impl Target for ClipboardProbe {
     }
 }
 
-fn start_clipboard(
+pub(super) fn start_clipboard(
     display: CString,
     window: crate::viewer_input::Window,
 ) -> (Arc<ClipboardProbe>, Arc<AtomicU8>, JoinHandle<StopReason>) {

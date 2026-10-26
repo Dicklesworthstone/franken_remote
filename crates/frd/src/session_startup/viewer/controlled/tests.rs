@@ -190,6 +190,7 @@ enum ClipboardMode {
     FilesNegotiate,
     FileDrop,
     FileDownload,
+    FileDuplex,
     Combined,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
@@ -250,6 +251,7 @@ async fn fixture_with_clipboard(
             | ClipboardMode::FilesNegotiate
             | ClipboardMode::FileDrop
             | ClipboardMode::FileDownload
+            | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
     ) {
         for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
@@ -260,17 +262,30 @@ async fn fixture_with_clipboard(
             });
         }
     }
-    if matches!(clipboard, ClipboardMode::FileDrop | ClipboardMode::Combined) {
+    if matches!(
+        clipboard,
+        ClipboardMode::FileDrop | ClipboardMode::FileDuplex | ClipboardMode::Combined
+    ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::CHANNEL_SCOPE_CAPABILITY.into(),
             version: fr_wire::files::CHANNEL_SCOPE_VERSION,
             required: false,
         });
     }
-    if clipboard == ClipboardMode::FileDownload {
+    if matches!(
+        clipboard,
+        ClipboardMode::FileDownload | ClipboardMode::FileDuplex
+    ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DOWNLOAD_CAPABILITY.into(),
             version: fr_wire::files::DOWNLOAD_VERSION,
+            required: false,
+        });
+    }
+    if clipboard == ClipboardMode::FileDuplex {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::files::DUPLEX_CAPABILITY.into(),
+            version: fr_wire::files::DUPLEX_VERSION,
             required: false,
         });
     }

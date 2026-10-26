@@ -43,8 +43,8 @@ use crate::{
     },
     session_monitor::{self, Monitor, Status as Lifetime},
     session_startup::{
-        Configuration, host_offer_with_download, host_offer_with_files, shared_viewers,
-        with_line_scroll,
+        Configuration, host_offer_with_download, host_offer_with_duplex, host_offer_with_files,
+        shared_viewers, with_line_scroll,
     },
     worker::{Deadline, EncoderProbe, Launch, Retirement},
 };
@@ -411,7 +411,11 @@ fn request(
         },
         session: Configuration {
             offer: if download {
-                let selected = host_offer_with_download(control.is_some(), clipboard, audio, true);
+                let selected = if files {
+                    host_offer_with_duplex(control.is_some(), clipboard, audio)
+                } else {
+                    host_offer_with_download(control.is_some(), clipboard, audio, true)
+                };
                 if control.is_some_and(|c| c.contains(Capability::LineScroll)) {
                     with_line_scroll(selected)
                 } else {
@@ -834,8 +838,7 @@ fn check(options: &Options) -> Result<(), Error> {
             .is_some_and(|p| !p.is_absolute())
         || (options.clipboard && options.input_agent.is_none())
         || (options.files.is_some() && options.input_agent.is_none())
-        || (options.file_send.is_some()
-            && (!options.once || options.input_agent.is_none() || options.files.is_some()))
+        || (options.file_send.is_some() && (!options.once || options.input_agent.is_none()))
     {
         return Err(Error::Configuration);
     }

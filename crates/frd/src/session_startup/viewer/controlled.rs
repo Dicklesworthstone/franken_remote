@@ -119,7 +119,7 @@ pub struct ControlledViewer {
     native_capture: Option<Box<dyn events::NativeCapture>>,
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
-    files: Box<files::Slot>,
+    files: Box<files::Slots>,
     /// The platform owner of the local pointer image (remote cursor, §11.4).
     local_cursor: Option<Box<dyn local_cursor::LocalCursor>>,
     /// Positions this viewer encoded for the host, to tell lag from divergence.

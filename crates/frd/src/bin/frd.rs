@@ -82,8 +82,9 @@ OPTIONS:
                     sessions never expose either clipboard
     --send PATH     With --once and --input-agent: send this explicit absolute
                     file or portable directory root to a controller using --receive.
-                    Repeat up to 8 times. No browsing or automatic replay; cannot
-                    combine with --files.
+                    Repeat up to 8 times. May combine with --files for independent
+                    transfers in both directions when both peers support them.
+                    No browsing or automatic replay.
     --files DIR     With --input-agent: the controller may send files or portable
                     directory trees
                     (fr connect --control --send) into DIR, an existing absolute
