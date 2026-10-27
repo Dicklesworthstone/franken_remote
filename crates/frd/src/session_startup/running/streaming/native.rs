@@ -86,6 +86,39 @@ impl Display {
         Launch::new(binary, &self.name, None, role, epoch).unwrap()
     }
 }
+// A late optional picture can cross the next paint boundary. Count it only
+// against its actual preceding color, and never after the new color appeared.
+// Each source episode must still produce its changed picture and at most one
+// refinement; arbitrary idle encoding or a missing changed picture fails.
+fn count_presented_color(
+    target: &mut Display,
+    colors: &[u32],
+    painted: usize,
+    pictures: &mut [u64],
+) {
+    let current = painted.checked_sub(1).expect("source was painted first");
+    let actual = target.pixel();
+    let matches = |expected: u32| {
+        [0, 8, 16]
+            .into_iter()
+            .all(|shift| ((actual >> shift) & 255).abs_diff((expected >> shift) & 255) <= 8)
+    };
+    let episode = if matches(colors[current]) {
+        current
+    } else {
+        assert!(
+            current > 0 && pictures[current] == 0 && matches(colors[current - 1]),
+            "stale or unexpected X11 source color {actual:06x}"
+        );
+        current - 1
+    };
+    pictures[episode] += 1;
+    assert!(
+        pictures[episode] <= 2,
+        "a stationary source encoded more than one optional picture"
+    );
+}
+
 impl Drop for Display {
     fn drop(&mut self) {
         let _ = self.helper.kill();
@@ -314,33 +347,31 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
         } = Box::pin(native_pair(&c, &h, &image, &image)).await;
         let (mut presenter, mut receiver) = decoder.finish().unwrap();
         let stop = control.clone();
-        let (result, frame_count) = Box::pin(support::both(
+        let colors = [
+            0x0020_4060,
+            0x0060_4020,
+            0x0020_5050,
+            0x0070_5040,
+            0x0030_6050,
+            0x0060_4050,
+            0x0050_3070,
+        ];
+        let (result, presented) = Box::pin(support::both(
             streaming.serve(|| nonce(&mut n), || None, block),
             async {
-                // Each idle interval really reads/compares the source while
-                // encoding no dummy video. Seven updates span a renewal boundary.
-                let mut count = 0;
+                // Seven changes span renewal. Each quiet episode permits only
+                // its one bounded optional refinement, never continuous video.
+                let mut pictures = colors.map(|_| 0_u64);
                 let mut lost = std::collections::BTreeSet::new();
+                let mut lost_frame = None;
                 let mut expected_fragments = 0;
                 let mut repairs = 0;
                 let mut pending: Option<(Vec<u8>, u64, u64)> = None;
                 let mut reply = vec![0; v_media.limits().record_bytes()];
                 let route = Route::Stream(v_media.repair_stream(viewer.io().unwrap().0).unwrap());
-                for (index, color) in [
-                    0x0020_4060,
-                    0x0060_4020,
-                    0x0020_5050,
-                    0x0070_5040,
-                    0x0030_6050,
-                    0x0060_4050,
-                    0x0050_3070,
-                ]
-                .into_iter()
-                .enumerate()
-                {
+                for (index, color) in colors.iter().copied().enumerate() {
                     source_display.paint(color);
                     let until = now(&c).unwrap() + 700_000;
-                    let mut matched = false;
                     while now(&c).unwrap() < until {
                         viewer.drive(Duration::from_millis(1), block).await.unwrap();
                         v_media
@@ -360,12 +391,18 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
                                         let fragment =
                                             fr_wire::decode_fragment(record, &v_media.limits())
                                                 .unwrap();
-                                        expected_fragments =
-                                            fragment.descriptor.fragment_count().unwrap();
-                                        // Drop the first actual delivery of EVERY fragment;
-                                        // only a subsequent repair can fill the whole picture.
-                                        if lost.insert(fragment.index) {
-                                            return Ok(Disposition::Consumed);
+                                        // Select one actual picture. A later refinement
+                                        // must not replace its fragment-count oracle.
+                                        if fragment.descriptor.frame
+                                            == *lost_frame.get_or_insert(fragment.descriptor.frame)
+                                        {
+                                            expected_fragments =
+                                                fragment.descriptor.fragment_count().unwrap();
+                                            // Drop every fragment's first delivery; only
+                                            // subsequent repair can fill this picture.
+                                            if lost.insert(fragment.index) {
+                                                return Ok(Disposition::Consumed);
+                                            }
                                         }
                                     }
                                     receiver.receive(channel, b, now(&c).unwrap()).unwrap();
@@ -409,12 +446,18 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
                             presenter.present_next(&c, &mut receiver).await.unwrap()
                         {
                             assert!(receipt.frame.as_raw() > initial_frame.as_raw());
-                            target_display.assert_pixel(color);
-                            matched = true;
-                            count += 1;
+                            count_presented_color(
+                                &mut target_display,
+                                &colors,
+                                index + 1,
+                                &mut pictures,
+                            );
                         }
                     }
-                    assert!(matched, "real dependent HEVC picture never arrived");
+                    assert!(
+                        (1..=2).contains(&pictures[index]),
+                        "changed source color was never presented"
+                    );
                     target_display.assert_pixel(color);
                     assert!(
                         control.check().is_ok(),
@@ -424,13 +467,18 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
                 assert!(repairs > 0 && !lost.is_empty());
                 assert_eq!(lost.len(), usize::try_from(expected_fragments).unwrap());
                 stop.revoke();
-                count
+                pictures
             },
         ))
         .await;
         assert!(result.is_err());
-        assert_eq!(frame_count, 7);
-        assert_eq!(streaming.statistics().encoded_updates, 7);
+        let frame_count = presented.iter().sum::<u64>();
+        assert!(
+            frame_count > u64::try_from(colors.len()).unwrap(),
+            "no optional refinement crossed the live media path"
+        );
+        assert!(presented.iter().all(|count| (1..=2).contains(count)));
+        assert_eq!(streaming.statistics().encoded_updates, frame_count);
         assert!(streaming.statistics().unchanged_observations >= 20);
         assert!(streaming.statistics().repair_requests > 0);
         assert_eq!(
@@ -512,7 +560,7 @@ fn continuous_viewer(adaptive: bool) {
         let stop = receiving.control();
         let colors = [0x0020_4060, 0x0060_4020, 0x0020_5050, 0x0050_3070];
         let mut index = 0;
-        let mut pictures = 0;
+        let mut per_color = colors.map(|_| 0_u64);
         let mut until = 0;
         let (host_result, viewer_result) = Box::pin(support::both(
             streaming.serve(|| nonce(&mut n), || None, block),
@@ -521,12 +569,17 @@ fn continuous_viewer(adaptive: bool) {
                     assert!(input.is_none());
                     if let Some(event) = event {
                         assert_eq!(event.stage, media::PresentationStage::SubmittedToCompositor);
-                        target_display.assert_pixel(colors[index - 1]);
-                        pictures += 1;
+                        count_presented_color(&mut target_display, &colors, index, &mut per_color);
                     }
                     let stamp = now(&c).unwrap();
                     if stamp >= until {
-                        assert_eq!(pictures, index, "idle must not encode extra pictures");
+                        if index > 0 {
+                            assert!(
+                                (1..=2).contains(&per_color[index - 1]),
+                                "changed source color was never presented"
+                            );
+                            target_display.assert_pixel(colors[index - 1]);
+                        }
                         assert!(
                             control.check().is_ok(),
                             "native viewer starved observation renewal"
@@ -538,7 +591,11 @@ fn continuous_viewer(adaptive: bool) {
                         }
                         source_display.paint(colors[index]);
                         index += 1;
-                        until = stamp + if adaptive { 1_450_000 } else { 850_000 };
+                        // A refinement is an encoded update, so adaptive idle
+                        // needs its 400 ms settle dwell followed by a full second
+                        // of real unchanged evidence. This is fixture time only;
+                        // session/media deadlines and the 12 s run bound stay put.
+                        until = stamp + if adaptive { 2_200_000 } else { 850_000 };
                     }
                     Ok(())
                 },
@@ -548,12 +605,17 @@ fn continuous_viewer(adaptive: bool) {
         ))
         .await;
         assert!(host_result.is_err() && viewer_result.is_err());
-        assert_eq!(pictures, colors.len());
-        assert_eq!(receiving.statistics().decoded, 4);
+        let pictures = per_color.iter().sum::<u64>();
+        assert!(per_color.iter().all(|count| (1..=2).contains(count)));
+        assert!(
+            pictures > u64::try_from(colors.len()).unwrap(),
+            "no optional refinement crossed the live media path"
+        );
+        assert_eq!(receiving.statistics().decoded, pictures);
         assert!(receiving.statistics().network_turns > 20);
         assert_eq!(receiving.worker_id(), decoder_pid);
         assert_eq!(streaming.worker_id(), Some(source_pid));
-        assert_eq!(streaming.statistics().encoded_updates, 4);
+        assert_eq!(streaming.statistics().encoded_updates, pictures);
         assert!(streaming.statistics().unchanged_observations > 10);
         if adaptive {
             let pacing = streaming.pacing().unwrap();

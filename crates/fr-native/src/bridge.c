@@ -123,7 +123,11 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
          * (desktop) and 59 ms (busy) on ts2, past a 30 fps interval; with 4
          * threads 12 and 21 ms; busy pictures were about 3% larger. */
         char params[256];
-        snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error",gop,gop);
+        /* A small positive AQ strength keeps per-frame ROI offsets enabled
+         * without the normal AQ redistribution. Zero disables ROI in x265.
+         * Ordinary frames carry zero offsets; one admitted settle refinement
+         * uses -6 QP, still under this encoder's original bitrate and VBV. */
+        snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error:aq-mode=1:aq-strength=0.01",gop,gop);
         av_dict_set(&opts,"preset","ultrafast",0); av_dict_set(&opts,"tune","zerolatency",0);
         av_dict_set(&opts,"x265-params",params,0); av_dict_set(&opts,"forced-idr","1",0);
     }
@@ -137,8 +141,9 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
     if (!e->scale || sws_setColorspaceDetails(e->scale,sws_getCoefficients(SWS_CS_ITU709),1,sws_getCoefficients(SWS_CS_ITU709),0,0,1<<16,1<<16)<0) { fr_encoder_free(e); return FR_CODEC; }
     *out=e; return FR_OK;
 }
-int fr_encoder_send(FrEncoder *e,const uint8_t *bgra,size_t len,int64_t pts,int idr) {
+int fr_encoder_send(FrEncoder *e,const uint8_t *bgra,size_t len,int64_t pts,int idr,int refine) {
     if (!e || !bgra || pts<0 || e->draining || !bgra_buffer(e->ctx->width,e->ctx->height,len)) return FR_INVALID;
+    if ((refine!=0 && refine!=1) || (refine && (idr || e->hardware))) return FR_INVALID;
     if (av_frame_make_writable(e->input)<0) return FR_MEMORY;
     /* A no-op-free reference: sws_scale_frame refs its source, and a frame
      * without one would make it copy all 8 MB first. Released before return. */
@@ -151,6 +156,22 @@ int fr_encoder_send(FrEncoder *e,const uint8_t *bgra,size_t len,int64_t pts,int 
     av_frame_unref(src);
     if (scaled<0) return FR_CODEC;
     e->input->pts=pts; e->input->pict_type=idr?AV_PICTURE_TYPE_I:AV_PICTURE_TYPE_NONE;
+    if (!e->hardware) {
+        /* x265 allocates a recycled frame's quant-offset array only when that
+         * frame is created. Supplying ROI for the first time after startup can
+         * memcpy into NULL (x265 3.5). Supply a bounded zero-offset full-frame
+         * ROI from the FIRST submission, and replace it on every later frame.
+         * FFmpeg refs side data with the submitted frame; removing our ref on
+         * the next send cannot free a codec-owned copy. Its temporary 16x16
+         * offset map is <260 KiB at the admitted 16-megapixel ceiling. */
+        av_frame_remove_side_data(e->input,AV_FRAME_DATA_REGIONS_OF_INTEREST);
+        AVFrameSideData *sd=av_frame_new_side_data(e->input,AV_FRAME_DATA_REGIONS_OF_INTEREST,sizeof(AVRegionOfInterest));
+        if (!sd) return FR_MEMORY;
+        AVRegionOfInterest *roi=(AVRegionOfInterest *)sd->data;
+        roi->self_size=sizeof(*roi); roi->top=0; roi->bottom=e->ctx->height;
+        roi->left=0; roi->right=e->ctx->width;
+        roi->qoffset=(AVRational){refine?-6:0,51};
+    }
     if (e->frames) {
         AVFrame *gpu=av_frame_alloc(); if (!gpu) return FR_MEMORY;
         int r=av_hwframe_get_buffer(e->frames,gpu,0);

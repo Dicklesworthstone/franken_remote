@@ -57,8 +57,14 @@ unsafe extern "C" {
         out: *mut *mut c_void,
     ) -> c_int;
     fn fr_encoder_free(p: *mut c_void);
-    fn fr_encoder_send(p: *mut c_void, bytes: *const u8, len: usize, pts: i64, idr: c_int)
-    -> c_int;
+    fn fr_encoder_send(
+        p: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        pts: i64,
+        idr: c_int,
+        refine: c_int,
+    ) -> c_int;
     fn fr_encoder_drain(p: *mut c_void) -> c_int;
     fn fr_encoder_peek(p: *mut c_void, len: *mut usize, pts: *mut i64) -> c_int;
     fn fr_encoder_take(p: *mut c_void, bytes: *mut u8, len: usize) -> c_int;
@@ -231,9 +237,11 @@ pub struct HevcEncoder {
     config: CodecConfiguration,
     limits: ProtocolLimits,
     admission: HevcGuard,
+    refinement: bool,
     pending: VecDeque<Pending>,
     last_submitted: Option<FrameId>,
     last_output: Option<FrameId>,
+    since_idr: u32,
     draining: bool,
     closed: bool,
     _thread: PhantomData<Rc<()>>,
@@ -278,9 +286,11 @@ impl HevcEncoder {
             config,
             limits,
             admission,
+            refinement: backend == EncodeBackend::SoftwareExplicit,
             pending: VecDeque::with_capacity(4),
             last_submitted: None,
             last_output: None,
+            since_idr: 0,
             draining: false,
             closed: false,
             _thread: PhantomData,
@@ -292,6 +302,41 @@ impl HevcEncoder {
         id: FrameId,
         capture_micros: u64,
         force_idr: bool,
+    ) -> Result<(), NativeError> {
+        self.submit_inner(frame, id, capture_micros, force_idr, false)
+    }
+    /// Per-picture quantization refinement is qualified only for the software
+    /// libx265 path. It keeps the configured bitrate, VBV and parameter sets;
+    /// hardware backends are not inferred from the existence of an ROI API.
+    pub const fn supports_refinement(&self) -> bool {
+        self.refinement
+    }
+    pub(crate) fn refinement_ready(&self) -> bool {
+        self.refinement
+            && !self.closed
+            && !self.draining
+            && self.pending.is_empty()
+            && self.last_output.is_some()
+            && self.since_idr < self.config.gop().max_gop_frames()
+    }
+    pub(crate) fn submit_refinement(
+        &mut self,
+        frame: &BgraFrame,
+        id: FrameId,
+        capture_micros: u64,
+    ) -> Result<(), NativeError> {
+        if !self.refinement_ready() {
+            return Err(NativeError::Unavailable);
+        }
+        self.submit_inner(frame, id, capture_micros, false, true)
+    }
+    fn submit_inner(
+        &mut self,
+        frame: &BgraFrame,
+        id: FrameId,
+        capture_micros: u64,
+        force_idr: bool,
+        refine: bool,
     ) -> Result<(), NativeError> {
         if self.closed || self.draining {
             return Err(NativeError::Closed);
@@ -315,6 +360,7 @@ impl HevcEncoder {
                 frame.bytes.len(),
                 i64::try_from(id.as_raw()).map_err(|_| NativeError::StaleGeneration)?,
                 c_int::from(idr),
+                c_int::from(refine),
             )
         }) {
             Ok(()) => {}
@@ -396,6 +442,11 @@ impl HevcEncoder {
         )
         .map_err(|_| NativeError::Codec)?;
         self.last_output = Some(p.frame);
+        self.since_idr = if idr {
+            1
+        } else {
+            self.since_idr.saturating_add(1)
+        };
         Ok(au)
     }
     pub fn drain(&mut self) -> Result<(), NativeError> {

@@ -14,6 +14,9 @@ use fr_media::{
 };
 use std::time::{Duration, Instant};
 
+mod refinement;
+use refinement::{Moment, Refinement};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureOutput {
     Submitted,
@@ -25,11 +28,14 @@ pub struct CaptureStats {
     pub readbacks: u64,
     pub damage_observations: u64,
     pub encoded_submissions: u64,
+    /// Successfully collected optional refinements, included in submissions.
+    pub refinements: u64,
 }
 const VERIFICATION_INTERVAL: Duration = Duration::from_millis(250);
 struct Snapshot {
     frame: FrameId,
     pixels: BgraFrame,
+    refined: bool,
 }
 // Fixed bounded native inventory stays inline in the single worker owner.
 #[allow(clippy::large_enum_variant)]
@@ -80,6 +86,7 @@ pub struct ChangeAwareCapture {
     last_readback: Option<Instant>,
     last_readback_micros: Option<u64>,
     stats: CaptureStats,
+    refinement: Option<Refinement>,
 }
 impl ChangeAwareCapture {
     /// Counts actual X11 transfers, not source freshness or estimated GPU work.
@@ -117,7 +124,9 @@ impl ChangeAwareCapture {
                 readbacks: 0,
                 damage_observations: 0,
                 encoded_submissions: 0,
+                refinements: 0,
             },
+            refinement: None,
         }
     }
     #[cfg(feature = "linux-displays")]
@@ -139,7 +148,9 @@ impl ChangeAwareCapture {
                 readbacks: 0,
                 damage_observations: 0,
                 encoded_submissions: 0,
+                refinements: 0,
             },
+            refinement: None,
         }
     }
     /// Enable DAMAGE on the original X capture connection. `false` means the
@@ -155,6 +166,22 @@ impl ChangeAwareCapture {
         self.surface
             .enable_damage()
             .inspect_err(|_| self.closed = true)
+    }
+    /// Enable one bounded, newly verified settle refinement per real damage
+    /// burst before capture starts. Only the measured libx265 path implements
+    /// the per-picture quantization control; hardware returns `false`.
+    pub fn enable_settle_refinement(&mut self) -> Result<bool, NativeError> {
+        if self.closed {
+            return Err(NativeError::Closed);
+        }
+        if self.last_request.is_some() || self.refinement.is_some() {
+            return Err(NativeError::InvalidConfiguration);
+        }
+        if !self.codec.supports_refinement() {
+            return Ok(false);
+        }
+        self.refinement = Some(Refinement::default());
+        Ok(true)
     }
     pub const fn stats(&self) -> CaptureStats {
         self.stats
@@ -195,11 +222,18 @@ impl ChangeAwareCapture {
         }
         self.last_request = Some(frame);
         self.last_observed = Some(observed_micros);
+        let observation = Moment::new(observed_micros, Instant::now());
+        let refinement_due = self.codec.refinement_ready()
+            && self
+                .refinement
+                .as_ref()
+                .is_some_and(|state| state.due(observation));
         // Source observations are scoped to the X drawable. Independently bound
         // both real worker time and parent clock distance between full checks;
         // duplicate/delayed parent timestamps cannot suppress readbacks forever.
         if only_if_changed
             && !force_idr
+            && !refinement_due
             && let Some(old) = &self.baseline
             && self
                 .last_readback
@@ -213,12 +247,31 @@ impl ChangeAwareCapture {
                 .inspect_err(|_| self.closed = true)?
         {
             self.stats.damage_observations = self.stats.damage_observations.saturating_add(1);
+            if let Some(state) = &mut self.refinement {
+                state.unchanged(observation);
+            }
             return Ok(CaptureOutput::Unchanged(UnchangedCapture {
                 candidate: frame,
                 reference: old.frame,
                 observed_micros,
             }));
         }
+        self.capture_pixels(
+            frame,
+            observed_micros,
+            force_idr,
+            only_if_changed,
+            observation,
+        )
+    }
+    fn capture_pixels(
+        &mut self,
+        frame: FrameId,
+        observed_micros: u64,
+        force_idr: bool,
+        only_if_changed: bool,
+        observation: Moment,
+    ) -> Result<CaptureOutput, NativeError> {
         // Nothing acquired below can bless the baseline until capture succeeds.
         let pixels = self
             .surface
@@ -227,25 +280,55 @@ impl ChangeAwareCapture {
         self.last_readback = Some(Instant::now());
         self.last_readback_micros = Some(observed_micros);
         self.stats.readbacks = self.stats.readbacks.saturating_add(1);
-        if only_if_changed
+        let unchanged = self.baseline.as_ref().is_some_and(|old| {
+            old.pixels.width() == pixels.width()
+                && old.pixels.height() == pixels.height()
+                && old.pixels.pixels() == pixels.pixels()
+        });
+        if unchanged && let Some(state) = &mut self.refinement {
+            state.unchanged(observation);
+        }
+        let refine = only_if_changed
             && !force_idr
-            && let Some(old) = &self.baseline
-            && old.pixels.width() == pixels.width()
-            && old.pixels.height() == pixels.height()
-            && old.pixels.pixels() == pixels.pixels()
-        {
+            && unchanged
+            && self.codec.refinement_ready()
+            && self
+                .refinement
+                .as_ref()
+                .is_some_and(|state| state.due(observation));
+        if only_if_changed && !force_idr && unchanged && !refine {
             self.surface.verify().inspect_err(|_| self.closed = true)?;
+            let old = self.baseline.as_ref().expect("compared baseline");
             return Ok(CaptureOutput::Unchanged(UnchangedCapture {
                 candidate: frame,
                 reference: old.frame,
                 observed_micros,
             }));
         }
-        self.codec
-            .submit(&pixels, frame, observed_micros, force_idr)
-            .inspect_err(|_| self.closed = true)?;
+        // The final comparison gives real changed pixels priority, even when a
+        // refinement was due before this full readback. No queued old snapshot
+        // is re-encoded and no extra capture/encoder queue is introduced.
+        let submitted = if refine {
+            self.codec
+                .submit_refinement(&pixels, frame, observed_micros)
+        } else {
+            self.codec
+                .submit(&pixels, frame, observed_micros, force_idr)
+        };
+        submitted.inspect_err(|_| self.closed = true)?;
+        if let Some(state) = &mut self.refinement {
+            if refine {
+                state.admitted(observation);
+            } else if !unchanged {
+                state.changed();
+            }
+        }
         self.stats.encoded_submissions = self.stats.encoded_submissions.saturating_add(1);
-        self.pending = Some(Snapshot { frame, pixels });
+        self.pending = Some(Snapshot {
+            frame,
+            pixels,
+            refined: refine,
+        });
         Ok(CaptureOutput::Submitted)
     }
     pub fn poll_output(&mut self) -> Result<EncodedAccessUnit, NativeError> {
@@ -271,6 +354,9 @@ impl ChangeAwareCapture {
         // Encoding can block after capture validation. A changed selected output
         // must not release either an access unit or unchanged-source evidence.
         self.surface.verify().inspect_err(|_| self.closed = true)?;
+        if self.pending.as_ref().is_some_and(|pending| pending.refined) {
+            self.stats.refinements = self.stats.refinements.saturating_add(1);
+        }
         // Move the snapshot only AFTER the validated access unit exists. Pending
         // or refused native submissions cannot become an unchanged-source anchor.
         self.baseline = self.pending.take();

@@ -202,9 +202,11 @@ reference-retention credit, and configuration/lifecycle refusal.
 
 The explicit `actual_hevc_streams_adaptive_idle_wakes_without_replacing_capture_or_decoder`
 test uses the real FFmpeg worker and two private X11 displays. It checks four
-changed pictures by pixel readback across renewals and verified idle, no extra
-encoded pictures, conservative wake, fewer conditional captures, and unchanged
-native capture/decoder process identities. This is software HEVC and X11 readback,
+changed pictures by pixel readback across renewals and verified idle, at most one
+optional settled refinement per changed source, conservative wake, fewer conditional
+captures, and unchanged native capture/decoder process identities. The adaptive
+fixture leaves 2.2 seconds per color so the one optional picture can precede the
+full one-second unchanged-evidence dwell. This is software HEVC and X11 readback,
 not hardware acceleration, physical scanout, or live-tailnet ingress proof.
 
 The base revision retains the separately published `17854a7` correction to
@@ -227,12 +229,79 @@ noise) its defaults emitted P pictures of up to 70 KB; with the bound the larges
 was 24 KB and the IDR fell from 85 to 69 KB. VA-API keeps its libavcodec defaults
 (not measured).
 
-Remaining work includes qualified runtime bitrate/quantizer/resolution changes,
-remote decoder and presentation feedback, aggregate host/path budgets, qualified
+Remaining work includes qualified dynamic bitrate/resolution changes, hardware
+quantizer control, platform presentation feedback, aggregate host/path budgets, qualified
 damage-event and local-input wakeup, and platform/GUI policy selection. Collected
 remote-input wakeup is implemented separately in
 [INPUT_CAPTURE_WAKE.md](INPUT_CAPTURE_WAKE.md). The broad adaptive-control bead
 remains incomplete.
+
+## Software settle-to-sharp
+
+The shipped Linux capture worker enables one optional refinement after a source
+stops changing when the explicitly selected encoder is software libx265. This
+applies to both root-desktop and selected-display conditional capture, independent
+of the local `--adaptive-capture` pacing switch. Library callers opt in with
+`ChangeAwareCapture::enable_settle_refinement` before capture starts. Hardware
+encoders return `false`; they do not silently substitute a software encoder or
+claim equivalent per-picture controls.
+
+Real changed pixels arm one refinement episode. At least 400 ms of consecutive
+unchanged source evidence must pass on **both** the original request clock and
+the worker's monotonic clock; an evidence gap longer than 250 ms restarts that
+dwell. A source-wide two-second cooldown also bounds optional submissions, and a
+stationary source never rearms merely because the cooldown expires. Immediately
+before refinement, the worker performs a fresh full readback and comparison.
+Changed pixels take priority over polish, including damage arriving while an
+earlier encoded result remains uncollected.
+
+The admitted optional picture uses the existing libx265 instance, with a
+full-frame ROI offset of -6 QP. A small positive AQ strength keeps that control
+active; ordinary submissions carry zero ROI offsets. ROI storage is supplied
+from the first submission because adding it only after startup can crash x265
+3.5 when it recycles a frame without quantization-offset storage. The existing
+bitrate, 200 ms VBV, access-unit cap, HEVC profile, color format, configuration
+generation and reference chain remain in force. Refinement is skipped when the
+next picture must be the natural GOP-boundary IDR; optional work neither extends
+the GOP nor forces an otherwise idle source to restart the decoder.
+
+This uses the existing single capture credit and original request timestamp.
+It adds no snapshot queue, background encoder, authority renewal or new
+transport lane. A pending output cannot become a source baseline; the refined
+baseline is installed only after output validation and the final display check.
+Subsequent unchanged observations name that actual emitted frame. Normal bounded
+source verification continues after the one optional picture, without repeated
+idle encodes.
+
+### Measured native evidence
+
+On 2026-10-27, the exact production core/wire/media/native Rust sources and C
+bridge were built with the pinned compiler, then exercised with FFmpeg 6.1,
+libx265 and private Xvfb displays. All 10 `damage_capture` integration tests
+passed, including the real production worker subprocess, and the native library
+tests reported 38 passed with one existing manual CPU microbenchmark ignored.
+
+The 320x240 moving-text fixture at 500 kbit/s measured decoded RGB mean squared
+error of **187.0704 before** and **135.2352 after** the optional picture, a
+**27.7089% reduction**. Its refinement was a **5,551-byte P picture**, within the
+configured 200 ms bitrate budget, with the original source timestamp and
+configuration. This is a measured fixture result, not a guarantee for every
+desktop or bitrate and not lossless or 4:4:4 text.
+
+The regressions also require actual decoded-pixel improvement, preserve changed
+pixels and frame identity under backpressure, retain forced recovery IDRs, and
+check idle DAMAGE suppression at the natural GOP boundary. The production-worker
+test observes more than 2.1 seconds **after** the single refinement without
+another encoded picture. The pure state tests cover both clocks, evidence gaps,
+one-shot admission and the cooldown across later changes.
+
+Strict targeted Clippy and formatting passed on the final native sources and
+tests. A final integration rerun after an equivalent test-helper lint change was
+blocked before capture by Xvfb failing to create its keyboard scratch file on the
+exhausted shared disk; the successful native run used the same production
+sources. This is software HEVC/X11 evidence. Daemon integration changes, a fresh
+full-workspace Cargo run, GPU encoders, physical scanout and impaired-tailnet
+quality remain separate verification work.
 
 ## Direct publication verification
 

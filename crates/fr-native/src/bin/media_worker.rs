@@ -77,6 +77,7 @@ mod linux {
         .map_err(native)?;
         let mut capture = ChangeAwareCapture::new(surface, codec);
         capture.enable_damage_tracking().map_err(native)?;
+        capture.enable_settle_refinement().map_err(native)?;
         Ok(Media::Capture(capture))
     }
     fn open(
@@ -522,6 +523,7 @@ mod linux {
                     .map_err(native)?;
                     let mut capture = ChangeAwareCapture::selected(surface, codec);
                     capture.enable_damage_tracking().map_err(native)?;
+                    capture.enable_settle_refinement().map_err(native)?;
                     // Configuration work can block; check topology again before Ready.
                     capture.check_display().map_err(native)?;
                     return Ok(Some((

@@ -52,15 +52,10 @@ impl Display {
         X11Surface::presenter(Some(&self.name), 320, 240, ProtocolLimits::ABSOLUTE).unwrap()
     }
     fn capture(&self) -> ChangeAwareCapture {
-        let configuration = Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: CodecConfigurationGeneration::INITIAL,
-        };
+        self.capture_at_rate(2_000_000)
+    }
+    fn capture_at_rate(&self, bitrate: u32) -> ChangeAwareCapture {
+        let configuration = configuration(bitrate);
         let limits = configuration.limits().unwrap();
         ChangeAwareCapture::new(
             X11Surface::capture(Some(&self.name), limits).unwrap(),
@@ -69,12 +64,27 @@ impl Display {
                 limits,
                 EncodeBackend::SoftwareExplicit,
                 30,
-                2_000_000,
+                bitrate,
             )
             .unwrap(),
         )
     }
 }
+fn configuration(bitrate: u32) -> Configuration {
+    Configuration {
+        width: 320,
+        height: 240,
+        fps: 30,
+        backend: Backend::SoftwareExplicit,
+        bitrate,
+        max_access_unit_bytes: 1024 * 1024,
+        generation: CodecConfigurationGeneration::INITIAL,
+    }
+}
+
+#[path = "damage_capture/refinement.rs"]
+mod refinement;
+
 impl Drop for Display {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -295,6 +305,7 @@ fn supervised_worker_keeps_conditional_capture_and_recovery_wire_contracts() {
     );
     assert_eq!(recovery.header.kind, Kind::Unit);
     assert!(parse_unit(recovery.into_body(), &limits).unwrap().is_idr());
+    refinement::worker_settle(&mut exchange, configuration);
     assert_eq!(exchange(Kind::Stop, vec![]).header.kind, Kind::Stopped);
     assert!(child.0.wait().unwrap().success());
 }
