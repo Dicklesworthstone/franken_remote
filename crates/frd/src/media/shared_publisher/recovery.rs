@@ -130,6 +130,19 @@ impl Subscriber {
         let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
         entry.failure.map_or(Ok(entry.local_failure.is_some()), Err)
     }
+    /// The failed generation's original scope, solely for validating an obsolete
+    /// report. Reading it cannot start recovery or replenish its deadline.
+    pub(crate) fn locally_failed_view(&self) -> Result<Option<fr_wire::decoder::Binding>, Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        let members = shared.lock().map_err(|_| Error::Poisoned)?;
+        members.owner.check().map_err(Error::Media)?;
+        let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
+        if let Some(error) = entry.failure {
+            return Err(error);
+        }
+        entry.control.check().map_err(Error::Media)?;
+        Ok(entry.local_failure.as_ref().map(|_| entry.view))
+    }
     pub fn recovery_state(&mut self, q: &QuicRecords) -> Result<RecoveryState, Error> {
         self.with_entry(q, |entry| {
             Ok(if entry.join.is_some() && entry.recovery.is_some() {

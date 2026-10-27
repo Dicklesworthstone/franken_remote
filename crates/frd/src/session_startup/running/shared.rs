@@ -295,6 +295,25 @@ struct SharedServices<'a, F> {
     statistics: &'a mut SharedStatistics,
     other: &'a mut F,
 }
+impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
+    fn presentation_record(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
+        if route != Route::Stream(self.routes.inbound) || self.presentation.is_none() {
+            return Err(());
+        }
+        let progress = self.subscriber.session_progress().map_err(|_| ())?;
+        // This source check can discover reference expiry AFTER recovery_record
+        // checked the preceding state. Validate the now-obsolete report without
+        // feeding missing progress to the verifier or certifying the failed view.
+        if progress.is_none() && self.discard_local_presentation(route, bytes)? {
+            return Ok(Disposition::Consumed);
+        }
+        let presentation = self.presentation.as_mut().ok_or(())?;
+        presentation.observe(progress).map_err(|_| ())?;
+        presentation.receive(route, bytes).map_err(|_| ())?;
+        self.statistics.presentation_reports = presentation.accepted;
+        Ok(Disposition::Consumed)
+    }
+}
 impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServices<'_, F> {
     fn permitted(&mut self) -> bool {
         self.control.check().is_ok() && self.subscriber.session_live().is_ok()
@@ -388,13 +407,7 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
             return Ok(disposition);
         }
         if presented::is_report(bytes) {
-            let presentation = self.presentation.as_mut().ok_or(())?;
-            presentation
-                .observe(self.subscriber.session_progress().map_err(|_| ())?)
-                .map_err(|_| ())?;
-            presentation.receive(route, bytes).map_err(|_| ())?;
-            self.statistics.presentation_reports = presentation.accepted;
-            Ok(Disposition::Consumed)
+            self.presentation_record(route, bytes)
         } else if feedback::is_feedback(bytes) {
             let feedback = self.feedback.as_mut().ok_or(())?;
             feedback

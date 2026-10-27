@@ -20,6 +20,40 @@ fn is_request(bytes: &[u8]) -> bool {
     bytes.get(6..8) == Some(&0x0036_u16.to_be_bytes())
 }
 impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
+    fn discard_presentation(
+        &self,
+        route: Route,
+        bytes: &[u8],
+        mut view: Binding,
+    ) -> Result<Disposition, ()> {
+        if route != Route::Stream(self.routes.inbound) {
+            return Err(());
+        }
+        presented::Setup::selected(self.selection, self.parent, view)
+            .map_err(|_| ())?
+            .ok_or(())?;
+        view.parent = self.parent;
+        fr_wire::presented::decode(
+            bytes,
+            view,
+            &self.selection.limits,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .map_err(|_| ())?;
+        Ok(Disposition::Consumed)
+    }
+    pub(super) fn discard_local_presentation(
+        &self,
+        route: Route,
+        bytes: &[u8],
+    ) -> Result<bool, ()> {
+        let Some(view) = self.subscriber.locally_failed_view().map_err(|_| ())? else {
+            return Ok(false);
+        };
+        self.discard_presentation(route, bytes, view)?;
+        Ok(true)
+    }
     pub(super) fn maintain_recovery(
         &mut self,
         q: &mut QuicRecords,
@@ -140,6 +174,9 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
         if !self.permitted() {
             return Err(());
         }
+        if presented::is_report(bytes) && route != Route::Stream(self.routes.inbound) {
+            return Err(());
+        }
         if let Some(handoff) = &*self.recovery {
             if self.subscriber.owns_recovery_record(route, bytes) {
                 return Ok(Some(Disposition::Blocked));
@@ -157,23 +194,28 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
                 .map_err(|_| ())?;
                 return Ok(Some(Disposition::Consumed));
             }
+            if presented::is_report(bytes) {
+                return self
+                    .discard_presentation(route, bytes, handoff.previous)
+                    .map(Some);
+            }
             if route == handoff.repair
-                || (route == Route::Stream(self.routes.inbound)
-                    && (presented::is_report(bytes) || feedback::is_feedback(bytes)))
+                || (route == Route::Stream(self.routes.inbound) && feedback::is_feedback(bytes))
             {
                 return Ok(Some(Disposition::Consumed));
             }
         }
         if route == Route::Stream(self.routes.inbound) && is_request(bytes) {
-            // A record arriving after maintain belongs to the NEXT maintain turn,
-            // never an unrelated callback or a best-effort decoded request queue.
+            // Only the next maintenance turn admits this request.
             return Ok(Some(Disposition::Blocked));
         }
+        if presented::is_report(bytes) && self.discard_local_presentation(route, bytes)? {
+            return Ok(Some(Disposition::Consumed));
+        }
         if route == Route::Stream(self.routes.inbound)
-            && (presented::is_report(bytes) || feedback::is_feedback(bytes))
+            && feedback::is_feedback(bytes)
             && self.subscriber.awaits_recovery_request().map_err(|_| ())?
         {
-            // Sent about the view this sender has already failed.
             return Ok(Some(Disposition::Consumed));
         }
         Ok(None)

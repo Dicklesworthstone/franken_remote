@@ -660,3 +660,6 @@ fn source_revoked_by_nonce_supplier_prevents_recovery_admission_and_all_further_
         cleanup(&mut g, &cx).await;
     });
 }
+
+#[path = "presentation_tests.rs"]
+mod presentation_tests;
