@@ -162,7 +162,7 @@ fn feedback(p: &mut Member) -> ViewerFeedback {
         .unwrap();
     let routes = p.viewer.io().unwrap().1;
     ViewerFeedback::new(
-        setup,
+        &setup,
         Route::Stream(routes.inbound),
         Route::Stream(routes.outbound),
     )

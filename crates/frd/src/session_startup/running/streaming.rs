@@ -127,7 +127,7 @@ impl StreamingHost {
             let feedback = setup
                 .map(|s| {
                     HostFeedback::new(
-                        s,
+                        &s,
                         Route::Stream(session.opened.routes.inbound),
                         Route::Stream(session.opened.routes.outbound),
                     )

@@ -182,6 +182,9 @@ async fn accept_selected(
             first: None,
             acknowledged: false,
             frames: vec![],
+            feedback: None,
+            decode_delay_us: 0,
+            pending_decode: None,
             nonce: 10000,
         },
     }

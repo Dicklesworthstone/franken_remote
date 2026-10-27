@@ -88,6 +88,7 @@ impl Configuration {
     /// before the native factory. A failed setup never opens the clipboard.
     /// The hook must bound its own native wait and retain its cleanup owner.
     /// Repeated calls compose in order; none can replace an earlier fence.
+    #[must_use]
     pub fn before_native_setup(
         mut self,
         before: impl FnOnce(Control) -> Result<(), PlatformError> + Send + 'static,

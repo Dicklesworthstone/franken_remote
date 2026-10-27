@@ -131,7 +131,7 @@ fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
         .map_err(Error::ReceiverFeedback)?
         .map(|s| {
             HostFeedback::new(
-                s,
+                &s,
                 Route::Stream(session.opened.routes.inbound),
                 Route::Stream(session.opened.routes.outbound),
             )

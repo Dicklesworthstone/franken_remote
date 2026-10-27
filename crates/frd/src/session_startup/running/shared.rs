@@ -132,7 +132,7 @@ impl HostSession {
             .map_err(Error::ReceiverFeedback)?
             .map(|setup| {
                 HostFeedback::new(
-                    setup,
+                    &setup,
                     Route::Stream(self.opened.routes.inbound),
                     Route::Stream(self.opened.routes.outbound),
                 )

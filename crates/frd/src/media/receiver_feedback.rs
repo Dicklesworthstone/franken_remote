@@ -92,7 +92,7 @@ pub(crate) struct HostFeedback {
     pub(crate) accepted: u64,
 }
 impl HostFeedback {
-    pub(crate) fn new(setup: Setup, inbound: Route, outbound: Route) -> Result<Self, Error> {
+    pub(crate) fn new(setup: &Setup, inbound: Route, outbound: Route) -> Result<Self, Error> {
         Ok(Self {
             inbound,
             outbound,
@@ -144,7 +144,7 @@ pub(crate) struct ViewerFeedback {
     pub(crate) sent: u64,
 }
 impl ViewerFeedback {
-    pub(crate) fn new(setup: Setup, inbound: Route, outbound: Route) -> Result<Self, Error> {
+    pub(crate) fn new(setup: &Setup, inbound: Route, outbound: Route) -> Result<Self, Error> {
         Ok(Self {
             inbound,
             outbound,

@@ -99,7 +99,7 @@ fn profile_three_publishes_mixed_and_all_empty_trees_and_proves_every_entry() {
         assert_eq!(proof.files as usize, manifest.entries.len());
         assert_eq!(proof.bytes_received, manifest.total_bytes);
         assert!(proof.committed && proof.sha_ok && proof.merkle_ok);
-        assert!(proof.committed_paths.is_empty());
+        assert_eq!(proof.committed_paths, Vec::<String>::new());
         for path in ["empty-sibling", "src/deep/empty-leaf"] {
             assert!(f.root.join("project").join(path).is_dir());
             assert_eq!(

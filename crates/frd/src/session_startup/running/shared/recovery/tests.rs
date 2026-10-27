@@ -164,6 +164,9 @@ async fn replace(mut p: Member) -> Member {
         configured: false,
         first: None,
         acknowledged: false,
+        feedback: None,
+        decode_delay_us: 0,
+        pending_decode: None,
     }
 }
 

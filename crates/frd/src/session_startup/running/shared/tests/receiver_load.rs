@@ -19,7 +19,7 @@ impl Member {
         let routes = self.viewer.io().unwrap().1;
         self.feedback = Some(
             ViewerFeedback::new(
-                setup,
+                &setup,
                 Route::Stream(routes.inbound),
                 Route::Stream(routes.outbound),
             )

@@ -113,7 +113,7 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
             .map_err(Error::ReceiverFeedback)?
             .map(|setup| {
                 HostFeedback::new(
-                    setup,
+                    &setup,
                     Route::Stream(self.routes.inbound),
                     Route::Stream(self.routes.outbound),
                 )

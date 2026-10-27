@@ -449,7 +449,7 @@ impl ControlledViewer {
     pub fn file_cleanup_finished(&self) -> bool {
         self.files.upload.cleanup_finished() && self.files.download.cleanup_finished()
     }
-    /// Stop the upload only. The native SendControl uses this entry point so
+    /// Stop the upload only. The native `SendControl` uses this entry point so
     /// its Cancel action cannot revoke a separately accepted download.
     pub fn cancel_file_send(&mut self) -> Result<(), Error> {
         if self.files.upload.pending.is_some() {

@@ -313,9 +313,18 @@ fn telemetry(host: &mut HostSession, peer: &mut Peer) -> (feedback::HostFeedback
     let hr = host.io().unwrap().1;
     let cr = session.routes;
     (
-        feedback::HostFeedback::new(setup, Route::Stream(hr.inbound), Route::Stream(hr.outbound))
-            .unwrap(),
-        ViewerFeedback::new(setup, Route::Stream(cr.inbound), Route::Stream(cr.outbound)).unwrap(),
+        feedback::HostFeedback::new(
+            &setup,
+            Route::Stream(hr.inbound),
+            Route::Stream(hr.outbound),
+        )
+        .unwrap(),
+        ViewerFeedback::new(
+            &setup,
+            Route::Stream(cr.inbound),
+            Route::Stream(cr.outbound),
+        )
+        .unwrap(),
     )
 }
 

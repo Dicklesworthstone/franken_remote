@@ -387,7 +387,7 @@ impl StreamingViewer {
             let feedback = setup
                 .map(|s| {
                     ViewerFeedback::new(
-                        s,
+                        &s,
                         Route::Stream(session.routes.inbound),
                         Route::Stream(session.routes.outbound),
                     )

@@ -74,7 +74,7 @@ fn receiver() -> ReceivePipeline {
     r.receive(Channel::MediaConfig, &bytes[..n], 0).unwrap();
     r
 }
-fn query(cfg: Setup, seq: u64) -> Vec<u8> {
+fn query(cfg: &Setup, seq: u64) -> Vec<u8> {
     let mut b = vec![0; wire::QUERY_BYTES];
     wire::encode(
         wire::Message::Query { sequence: seq },
@@ -109,18 +109,18 @@ fn load(f: &mut ViewerFeedback, now: u64) -> Load {
 fn backpressured_metrics_keep_exact_sample_sequence_and_deadline() {
     let r = receiver();
     let cfg = setup();
-    let mut f = ViewerFeedback::new(cfg, route(), route()).unwrap();
+    let mut f = ViewerFeedback::new(&cfg, route(), route()).unwrap();
     f.begin(0).unwrap();
-    f.receive(route(), &query(cfg, 1), &r, 10_000).unwrap();
+    f.receive(route(), &query(&cfg, 1), &r, 10_000).unwrap();
     let original = pending(&mut f, 10_000);
     for (seq, t) in [(2, 20_000), (3, 50_000), (4, 109_999)] {
-        f.receive(route(), &query(cfg, seq), &r, t).unwrap();
+        f.receive(route(), &query(&cfg, seq), &r, t).unwrap();
         assert_eq!(pending(&mut f, t), original);
     }
     assert_eq!(load(&mut f, 109_999).work_us, Some(10_000));
     assert_eq!(original.1, 110_000);
     assert!(f.responder.pending(110_000).unwrap().is_none());
-    f.receive(route(), &query(cfg, 4), &r, 110_001).unwrap();
+    f.receive(route(), &query(&cfg, 4), &r, 110_001).unwrap();
     assert!(
         f.responder.pending(110_001).unwrap().is_none(),
         "retired query must not be resampled"
@@ -129,7 +129,7 @@ fn backpressured_metrics_keep_exact_sample_sequence_and_deadline() {
 #[test]
 fn new_native_work_cannot_hide_recent_slow_completion_as_zero_cost() {
     let r = receiver();
-    let mut f = ViewerFeedback::new(setup(), route(), route()).unwrap();
+    let mut f = ViewerFeedback::new(&setup(), route(), route()).unwrap();
     f.begin(0).unwrap();
     f.complete(100_000).unwrap();
     f.begin(100_000).unwrap();
@@ -170,8 +170,8 @@ fn only_selected_version_and_original_view_session_can_enable_feedback() {
 fn feedback_is_advisory_on_only_the_original_route_and_full_view() {
     let r = receiver();
     let cfg = setup();
-    let mut f = ViewerFeedback::new(cfg, route(), route()).unwrap();
-    let mut host = HostFeedback::new(cfg, route(), route()).unwrap();
+    let mut f = ViewerFeedback::new(&cfg, route(), route()).unwrap();
+    let mut host = HostFeedback::new(&cfg, route(), route()).unwrap();
     host.requester.prepare(0).unwrap();
     let b = host.requester.pending(0).unwrap().unwrap().0.to_vec();
     host.requester.queued(0).unwrap();
@@ -184,7 +184,7 @@ fn feedback_is_advisory_on_only_the_original_route_and_full_view() {
     let mut foreign = cfg;
     foreign.binding.viewport = foreign.binding.viewport.next().unwrap();
     assert!(
-        HostFeedback::new(foreign, route(), route())
+        HostFeedback::new(&foreign, route(), route())
             .unwrap()
             .receive(route(), &response, 2)
             .is_err()
@@ -221,7 +221,7 @@ fn shared_sample_keeps_installed_media_scope_and_original_query_expiry() {
     let cfg = Setup::selected(&selected, parent, view).unwrap().unwrap();
     assert_eq!(cfg.media_view, view);
     assert_eq!(cfg.binding, Binding { parent, ..view });
-    let mut host = HostFeedback::new(cfg, route(), route()).unwrap();
+    let mut host = HostFeedback::new(&cfg, route(), route()).unwrap();
     let measured = Load {
         retained_bytes: 4096,
         retained_pictures: 2,
@@ -278,7 +278,7 @@ fn shared_sample_keeps_installed_media_scope_and_original_query_expiry() {
 
 #[test]
 fn shared_sample_reads_cannot_regress_behind_query_admission_expiry() {
-    let mut host = HostFeedback::new(setup(), route(), route()).unwrap();
+    let mut host = HostFeedback::new(&setup(), route(), route()).unwrap();
     assert_eq!(host.sample(1).unwrap(), None);
     assert_eq!(
         host.sample(0),
@@ -306,11 +306,11 @@ pub(crate) fn actual_backpressure(
 ) {
     let mut cfg = setup();
     cfg.binding.parent = parent;
-    let mut f = ViewerFeedback::new(cfg, route, route).unwrap();
+    let mut f = ViewerFeedback::new(&cfg, route, route).unwrap();
     let r = receiver();
     let current = c.timer_driver().unwrap().now().as_nanos() / 1000;
     f.begin(current).unwrap();
-    f.receive(route, &query(cfg, 1), &r, current + 1).unwrap();
+    f.receive(route, &query(&cfg, 1), &r, current + 1).unwrap();
     let original = pending(&mut f, current + 1);
     let mut filled = 0;
     loop {
