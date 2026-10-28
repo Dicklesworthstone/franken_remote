@@ -301,7 +301,13 @@ dropping an obsolete in-flight result, so a real codec change cannot disappear
 from policy state or permanently occupy its only capture slot. Recovery and
 shared membership changes cancel unsent proposals; an already submitted effect
 is recorded, and any required restoration uses a later original capture credit
-under the same native dwell. Authority, renewal, reference and recovery deadlines
+under the same native dwell. The private recovery handoff also carries a pending
+measured target on its original scheduled IDR, after the existing recovery
+allowance wait. It records the worker's actual result before decoder admission;
+an old-rate reply acknowledges deferral and the existing generation reset cancels
+any remaining old-scope intent. This lets a cut that could not obtain ordinary
+sender credit reach the recovery picture without forcing an extra IDR or
+renewing its allowance. Authority, renewal, reference and recovery deadlines
 are not extended by a rate decision.
 
 ### Validation of the bitrate path
@@ -325,10 +331,14 @@ elapsed network delivery. Lower bitrate can reduce text quality; it is not
 lossless compression or a hardware result. The native ownership, bounds and
 measurement details are in [video rate controls](docs/video-rate-controls.md).
 
-The private/shared daemon integration, new shared cohort regressions and the
-obsolete-result recovery regression are source-reviewed but not runtime
-qualified in this increment. The recovery subprocess fixture itself passed a
-mixed legacy/rate roundtrip. Full Cargo/daemon execution remains blocked by
+The private/shared daemon integration, new shared cohort regressions and three
+private recovery regressions are source-reviewed but not runtime qualified in
+this increment. The recovery subprocess fixture itself passed a mixed legacy/rate
+roundtrip. Five additional fixture subprocess scenarios cover a static pending
+cut applied on recovery, a recovery IDR that still defers its target, rejection
+of both legacy-recovery substitutions, and rejection of old-scope target replay.
+The pure policy suite passed all 20 tests again. These fixture checks do not
+execute the full daemon recovery scenarios. Full Cargo/daemon execution remains blocked by
 exhausted shared-host disk/memory and the unavailable exact pinned runtime
 checkout. The actual 40/120 ms lossy-path acceptance rows remain untested here;
 beads `fr-rc-media-wire-controller-qej` and `fr-xfvs` stay open.
@@ -423,7 +433,7 @@ The original query deadline bounds sample age, and measured receiver backlog and
 decode-service time inform the canonical controller without overriding its local
 rate, deadline or ownership constraints. Platform presentation measurements,
 runtime resolution/configuration changes and aggregate bandwidth control remain
-separate. The software bitrate-only path below retains exact original decoder
+separate. The software bitrate-only path retains exact original decoder
 parameter sets.
 
 Receiver-dependent dwell also follows the original view scope. Private recovery

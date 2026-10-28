@@ -122,6 +122,27 @@ pub(super) async fn replace(
         .await?;
     }
     waiting.check()?;
+    // The normal sender may have lost capture credit with a measured cut still
+    // pending. Carry that same decision on this already-scheduled recovery IDR;
+    // neither its bitrate token nor its native request renews recovery allowance.
+    let rate_capture = host
+        .stream
+        .bitrate
+        .as_mut()
+        .map(fr_media::bitrate::Controller::begin_capture)
+        .transpose()
+        .map_err(bitrate_error)?;
+    let source = &mut host.stream.source;
+    let native = async {
+        match rate_capture {
+            Some(capture) => {
+                source
+                    .capture_at_rate(&control, false, capture.bitrate())
+                    .await
+            }
+            None => source.capture_if_changed(&control, false).await,
+        }
+    };
     let update = during(
         &mut host.host,
         acquisition,
@@ -130,9 +151,29 @@ pub(super) async fn replace(
         &mut waiting,
         nonce,
         ticket,
-        host.stream.source.capture_if_changed(&control, false),
+        native,
     )
     .await?;
+    // A validated native effect survives even if the original failure budget
+    // expires before decoder admission. Old-rate replies acknowledge deferral.
+    match (
+        &mut host.stream.bitrate,
+        rate_capture,
+        update.applied_bitrate(),
+    ) {
+        (Some(policy), Some(capture), Some(actual)) => policy
+            .complete_capture(
+                capture,
+                actual,
+                update
+                    .encoded()
+                    .is_some_and(fr_media::access_unit::EncodedAccessUnit::is_idr),
+                now(&cx)?,
+            )
+            .map_err(bitrate_error)?,
+        (None, None, None) => {}
+        _ => return Err(Error::Order),
+    }
     waiting.check()?;
     let mut startup = decoder_startup::Host::new(
         control.clone(),

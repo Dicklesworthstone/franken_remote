@@ -364,19 +364,29 @@ async fn fixture_with_input(
 
 #[test]
 fn both_running_peers_recover_and_continue_on_the_original_workers_and_connection() {
-    recover_on_original_owners(true, false);
+    recover_on_original_owners(true, "healthy", None);
 }
 #[test]
 fn shipped_observer_recovers_when_the_host_omits_optional_decoder_metrics() {
-    recover_on_original_owners(false, false);
+    recover_on_original_owners(false, "healthy", None);
 }
 #[test]
 fn discarded_in_flight_rate_change_is_accounted_before_recovery_continues() {
-    recover_on_original_owners(true, true);
+    recover_on_original_owners(true, "healthy", Some(1_000_000));
 }
 
-/// Seed a known pressure proposal so frame 2 applies it while the peer requests
-/// recovery. This tests real IPC/result ownership, not a network estimator.
+#[test]
+fn pending_static_rate_cut_applies_on_the_scheduled_recovery_idr() {
+    recover_on_original_owners(true, "rate-at-recovery", Some(1_000_000));
+}
+#[test]
+fn recovery_idr_can_defer_the_cut_without_claiming_it_or_replaying_old_scope_intent() {
+    recover_on_original_owners(true, "rate-deferred-recovery", Some(2_000_000));
+}
+
+/// Seed a known pressure proposal before the peer requests recovery. The source
+/// fixture either applies it on frame 2 or defers it through an unchanged result.
+/// This tests real IPC/result ownership, not a network estimator.
 fn request_lower_bitrate(host: &mut StreamingHost, current: u64) {
     host.enable_adaptive_capture(Duration::from_millis(200))
         .unwrap();
@@ -407,7 +417,7 @@ fn request_lower_bitrate(host: &mut StreamingHost, current: u64) {
 }
 
 #[allow(clippy::too_many_lines)]
-fn recover_on_original_owners(metrics: bool, adaptive_bitrate: bool) {
+fn recover_on_original_owners(metrics: bool, mode: &'static str, expected_bitrate: Option<u32>) {
     run(move |c, h| async move {
         let cleanup = Cx::current().unwrap();
         let Fixture {
@@ -420,7 +430,7 @@ fn recover_on_original_owners(metrics: bool, adaptive_bitrate: bool) {
         } = Box::pin(fixture_features(
             &c,
             &h,
-            "healthy",
+            mode,
             2_000_000,
             Role::Observe,
             true,
@@ -437,7 +447,7 @@ fn recover_on_original_owners(metrics: bool, adaptive_bitrate: bool) {
         // Start the canonical loop only after this real timer elapsed, so its
         // normal selective repair cannot make the intentionally lost frame whole.
         asupersync::time::sleep(c.now(), Duration::from_millis(150)).await;
-        if adaptive_bitrate {
+        if expected_bitrate.is_some() {
             request_lower_bitrate(&mut host, now(&h).unwrap());
         }
         let stop = viewer.control();
@@ -473,8 +483,8 @@ fn recover_on_original_owners(metrics: bool, adaptive_bitrate: bool) {
         assert_eq!(viewer.receiver_feedback_reports() > 0, metrics);
         assert_eq!(viewer.worker_id(), original_viewer);
         assert_eq!(host.statistics().recovered_streams, 1);
-        if adaptive_bitrate {
-            assert_eq!(host.bitrate().unwrap().applied_bitrate(), 1_000_000);
+        if let Some(expected) = expected_bitrate {
+            assert_eq!(host.bitrate().unwrap().applied_bitrate(), expected);
             assert_eq!(host.bitrate().unwrap().ceiling_bitrate(), 2_000_000);
         }
         assert_eq!(
