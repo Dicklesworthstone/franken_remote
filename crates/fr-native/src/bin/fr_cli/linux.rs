@@ -18,6 +18,8 @@ mod lapse;
 mod refusal;
 #[path = "linux/robot.rs"]
 mod robot;
+#[path = "linux/session_control.rs"]
+mod session_control;
 #[cfg(feature = "linux-desktop")]
 use super::options::DisplayChoice;
 use super::{
@@ -207,24 +209,66 @@ impl Shutdown {
         stopped: &Cell<bool>,
         operation: impl Future<Output = T>,
     ) -> T {
-        await_shutdown(cx, stopped, operation, async {
-            let mut interrupt = pin!(self.interrupt.recv());
-            let mut terminate = pin!(self.terminate.recv());
-            let mut hangup = pin!(self.hangup.recv());
-            poll_fn(|task| {
-                if interrupt.as_mut().poll(task).is_ready()
-                    || terminate.as_mut().poll(task).is_ready()
-                    || hangup.as_mut().poll(task).is_ready()
-                {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
+        await_shutdown(cx, stopped, operation, self.requested()).await
+    }
+    async fn requested(&mut self) {
+        let mut interrupt = pin!(self.interrupt.recv());
+        let mut terminate = pin!(self.terminate.recv());
+        let mut hangup = pin!(self.hangup.recv());
+        poll_fn(|task| {
+            if interrupt.as_mut().poll(task).is_ready()
+                || terminate.as_mut().poll(task).is_ready()
+                || hangup.as_mut().poll(task).is_ready()
+            {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
         })
+        .await;
+    }
+    #[cfg(feature = "linux-desktop")]
+    async fn run_connection<T>(
+        &mut self,
+        cx: &Cx,
+        stopped: &Cell<bool>,
+        operation: impl Future<Output = T>,
+        local: &Cx,
+        owner: &mut session_control::Owner,
+    ) -> T {
+        await_shutdown(
+            cx,
+            stopped,
+            operation,
+            local_or_signal(owner.wait_for_stop(local), self.requested()),
+        )
         .await
     }
+}
+/// A listener failure is not an authenticated stop request. Keep ordinary
+/// signal handling alive, without polling a failed local service again.
+#[cfg(any(test, feature = "linux-desktop"))]
+async fn local_or_signal<E>(
+    local: impl Future<Output = Result<(), E>>,
+    signal: impl Future<Output = ()>,
+) {
+    let mut local = pin!(local);
+    let mut signal = pin!(signal);
+    let mut local_failed = false;
+    poll_fn(|task| {
+        if signal.as_mut().poll(task).is_ready() {
+            return Poll::Ready(());
+        }
+        if !local_failed {
+            match local.as_mut().poll(task) {
+                Poll::Ready(Ok(())) => return Poll::Ready(()),
+                Poll::Ready(Err(_)) => local_failed = true,
+                Poll::Pending => {}
+            }
+        }
+        Poll::Pending
+    })
+    .await;
 }
 /// Signal readiness cancels the supervisor but NEVER drops the reconnect future:
 /// its independent bounded cleanup still runs and its actual result is retained.
@@ -246,10 +290,6 @@ async fn await_shutdown<T>(
     .await
 }
 pub fn run(options: &Options) -> Result<String, Failure> {
-    let api = match &options.socket {
-        Some(path) => LocalApi::new(path).map_err(tailnet)?,
-        None => LocalApi::installed(),
-    };
     let mut shutdown = Shutdown::new()?;
     let runtime = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
@@ -265,6 +305,28 @@ pub fn run(options: &Options) -> Result<String, Failure> {
         .try_request_cx_with_budget(Budget::INFINITE)
         .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))?;
     let stopped = Cell::new(false);
+    // Local session closure still works when installed Tailscale is stopped or
+    // its socket is unavailable. It never opens another remote connection.
+    match &options.command {
+        Command::Disconnect(opts) => {
+            return robot::run_disconnect(
+                &runtime,
+                &cx,
+                &mut shutdown,
+                &stopped,
+                opts,
+                options.json,
+            );
+        }
+        Command::Robot(opts) => {
+            return robot::run_robot(&runtime, &cx, &mut shutdown, &stopped, opts, options.json);
+        }
+        _ => {}
+    }
+    let api = match &options.socket {
+        Some(path) => LocalApi::new(path).map_err(tailnet)?,
+        None => LocalApi::installed(),
+    };
     match &options.command {
         Command::Help => unreachable!("help handled before runtime construction"),
         Command::Hosts => {
@@ -312,8 +374,7 @@ pub fn run(options: &Options) -> Result<String, Failure> {
             inspect_opts,
             options.json,
         ),
-        Command::Disconnect(disconnect_opts) => Err(robot::run_disconnect(disconnect_opts)),
-        Command::Robot(robot_cmd) => Err(robot::run_robot(robot_cmd)),
+        Command::Disconnect(_) | Command::Robot(_) => unreachable!("local command handled above"),
     }
 }
 #[cfg(feature = "linux-desktop")]
@@ -398,6 +459,18 @@ fn connect(
         max_attempts: connection.attempts,
         ..Default::default()
     };
+    // This local control context outlives cancellation of the connection so
+    // its caller can receive the real cleanup result from the same owner.
+    let local = runtime
+        .handle()
+        .try_request_cx_with_budget(Budget::INFINITE)
+        .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))?;
+    let mut owner = runtime
+        .block_on(session_control::Owner::bind(
+            &local,
+            &connection.target.node,
+        ))
+        .map_err(robot::local_failure)?;
     let result = if connection.control {
         let offer = if connection.receive.is_some() && connection.uploads() {
             fr_client::native::control_offer_with_duplex(
@@ -427,7 +500,7 @@ fn connect(
             policy,
             &mut application,
         );
-        runtime.block_on(shutdown.run(cx, stopped, operation))
+        runtime.block_on(shutdown.run_connection(cx, stopped, operation, &local, &mut owner))
     } else {
         let operation = client.run_observing(
             cx.clone(),
@@ -438,9 +511,17 @@ fn connect(
             policy,
             &mut application,
         );
-        runtime.block_on(shutdown.run(cx, stopped, operation))
+        runtime.block_on(shutdown.run_connection(cx, stopped, operation, &local, &mut owner))
     };
     state.borrow_mut().media = application.statistics();
+    let cleanup = if native_cleanup_confirmed(&application, &result) {
+        session_control::Completion::Confirmed
+    } else {
+        session_control::Completion::Unconfirmed
+    };
+    // A lost requester cannot undo shutdown or turn confirmed local cleanup
+    // into failure. The requester independently reports its missing reply.
+    let _ = runtime.block_on(owner.complete(&local, cleanup));
     completed(&application, result, stopped.get(), &state.borrow(), json)
 }
 /// The existing local X11 session: `--x-display`, else DISPLAY.
@@ -573,13 +654,7 @@ fn completed_result(
     json: bool,
 ) -> Result<String, Failure> {
     // A signal or UI close never conceals unsuccessful native cleanup.
-    if application.cleanup_failure().is_some()
-        || application.desktop().is_some()
-        || matches!(
-            result,
-            Err(reconnect::Failure::Cleanup | reconnect::Failure::CleanupExpired)
-        )
-    {
+    if !native_cleanup_confirmed(application, &result) {
         return Err(failure(
             "native_cleanup_incomplete",
             "Native cleanup was not confirmed; inspect remaining workers before another connection.",
@@ -668,6 +743,19 @@ fn completed_result(
             .control_disconnect_outcome()
             .and_then(|outcome| outcome.revocation),
     ))
+}
+
+#[cfg(feature = "linux-desktop")]
+fn native_cleanup_confirmed(
+    application: &Session<Interface>,
+    result: &Result<(), reconnect::Failure>,
+) -> bool {
+    application.cleanup_failure().is_none()
+        && application.desktop().is_none()
+        && !matches!(
+            result,
+            Err(reconnect::Failure::Cleanup | reconnect::Failure::CleanupExpired)
+        )
 }
 
 #[cfg(not(feature = "linux-desktop"))]
@@ -1379,6 +1467,61 @@ mod tests {
         ));
         assert_eq!(result, 42);
         assert!(stopped.get() && collected.get());
+    }
+
+    #[test]
+    fn a_failed_local_control_service_does_not_forge_a_stop_or_block_signals() {
+        let polls = Cell::new(0);
+        let signalled = Cell::new(false);
+        let local = poll_fn(|_| {
+            polls.set(polls.get() + 1);
+            assert_eq!(polls.get(), 1, "a failed listener is never repolled");
+            Poll::Ready(Err(()))
+        });
+        let signal = poll_fn(|_| {
+            if signalled.get() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        });
+        let mut join = pin!(local_or_signal(local, signal));
+        let mut task = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(join.as_mut().poll(&mut task).is_pending());
+        assert!(join.as_mut().poll(&mut task).is_pending());
+        signalled.set(true);
+        assert!(join.as_mut().poll(&mut task).is_ready());
+        assert_eq!(polls.get(), 1);
+    }
+
+    #[test]
+    fn an_authenticated_local_stop_waits_for_the_original_cleanup() {
+        let runtime = RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let stopped = Cell::new(false);
+        let cleaned = Cell::new(false);
+        let result = runtime.block_on(await_shutdown(
+            &cx,
+            &stopped,
+            async {
+                assert!(cx.is_cancel_requested());
+                asupersync::time::sleep_until(
+                    cx.timer_driver()
+                        .unwrap()
+                        .now()
+                        .saturating_add_nanos(1_000_000),
+                )
+                .await;
+                cleaned.set(true);
+                19
+            },
+            local_or_signal(std::future::ready(Ok::<(), ()>(())), std::future::pending()),
+        ));
+        assert_eq!(result, 19);
+        assert!(stopped.get() && cleaned.get());
     }
 
     #[cfg(feature = "linux-desktop")]

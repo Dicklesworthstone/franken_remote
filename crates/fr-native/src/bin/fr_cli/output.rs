@@ -104,7 +104,9 @@ pub fn failure(error: Failure, json: bool) -> String {
         format!(
             "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":{},\"error\":{{\"code\":{},\"next_action\":{}}}{}}}\n",
             timestamp(),
-            quoted(if error.exit == 130 {
+            quoted(if error.unknown_effect {
+                "unknown_external_effect"
+            } else if error.exit == 130 {
                 "cancelled"
             } else {
                 "refused"
@@ -710,6 +712,22 @@ mod tests {
             assert!(!quoted(&c.to_string()).contains(c));
         }
     }
+    #[test]
+    fn an_uncollected_stop_reply_is_unknown_not_a_refusal() {
+        let error = Failure::new(
+            "disconnect_outcome_unknown",
+            "Inspect the original connection.",
+            1,
+        )
+        .uncertain();
+        let value: serde_json::Value = serde_json::from_str(&failure(error, true)).unwrap();
+        assert_eq!(value["outcome"], "unknown_external_effect");
+        assert_eq!(value["error"]["code"], "disconnect_outcome_unknown");
+        assert!(value.get("stage").is_none());
+        assert!(value.get("data").is_none());
+        assert_eq!(error.exit, 1);
+    }
+
     #[test]
     fn failures_are_versioned_and_never_echo_untrusted_arguments() {
         let s = failure(

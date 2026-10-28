@@ -20,6 +20,9 @@ struct Failure {
     code: &'static str,
     next: &'static str,
     exit: u8,
+    /// The command may already have changed its original owner, but no result
+    /// was collected. A failed local reply must not be presented as refusal.
+    unknown_effect: bool,
     revocation: Option<terminal::Report>,
     closure: Option<closure::Report>,
     /// Earlier attempts' typed ends, when a reconnect's own end would hide them.
@@ -45,12 +48,17 @@ impl Failure {
             code,
             next,
             exit,
+            unknown_effect: false,
             revocation: None,
             closure: None,
             earlier: output::Earlier::NONE,
             files_receive: None,
             control_history: None,
         }
+    }
+    fn uncertain(mut self) -> Self {
+        self.unknown_effect = true;
+        self
     }
 }
 const HELP: &str = "\
@@ -208,6 +216,14 @@ focus. If it cannot, the initial CLI preferences still apply; use --fit to leave
 room for local controls. The completion reports audio_controls and the last setting.
 A host without audio is reported as typed absence, not an error; video continues.
 Builds without the linux-audio feature refuse --audio.
+A running Linux fr connect also accepts local shutdown with fr disconnect TARGET
+or fr robot session close TARGET, using exactly the target supplied to connect.
+The same-user caller is authenticated by the local kernel; no tailnet request,
+PID signal, new host controller or replay is used. One local connection owns each
+exact target. Closure confirms local native cleanup only, not remote key release
+or rollback of prior effects; the original connect result retains host reports.
+Robot --lease is refused until a real local lease handle is available. Other
+robot session-open, observe and input commands remain unavailable.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
 ";

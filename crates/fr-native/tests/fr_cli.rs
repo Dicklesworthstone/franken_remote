@@ -485,7 +485,7 @@ fn doctor_cli_checks_help_and_refuses_invalid_arguments() {
 }
 
 #[test]
-fn status_needs_localapi_and_disconnect_refuses_without_a_background_session() {
+fn status_needs_localapi_but_local_disconnect_does_not() {
     let missing = path("status-absent.sock");
     let output = cli(&format!("status --socket {} --json", missing.display()));
     assert_eq!(output.status.code(), Some(1));
@@ -493,17 +493,26 @@ fn status_needs_localapi_and_disconnect_refuses_without_a_background_session() {
         &output,
         "assert x['outcome']=='refused'\nassert x['error']['code']=='tailscale_unavailable'",
     );
-    let output = cli("disconnect host-beta --json");
-    assert_eq!(output.status.code(), Some(2));
-    json(
-        &output,
-        "assert x['outcome']=='refused'\nassert x['error']['code']=='no_background_session'\nassert 'data' not in x",
+    let target = format!(
+        "absent-local-session-{}",
+        path("disconnect").file_name().unwrap().to_string_lossy()
     );
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("host-beta"));
+    for command in ["disconnect", "robot session close"] {
+        let output = cli(&format!(
+            "{command} {target} --socket {} --json",
+            missing.display()
+        ));
+        assert_eq!(output.status.code(), Some(2));
+        json(
+            &output,
+            "assert x['outcome']=='refused'\nassert x['error']['code']=='no_local_session'\nassert 'data' not in x",
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(&target));
+    }
 }
 
 #[test]
-fn robot_surface_refuses_every_subcommand_without_side_effects() {
+fn unavailable_robot_capabilities_and_unissued_leases_are_refused() {
     let screen = path("robot-screen.png");
     let screen = screen.to_str().unwrap();
     for args in [
@@ -552,9 +561,16 @@ fn robot_surface_refuses_every_subcommand_without_side_effects() {
     ] {
         let output = run_cli(args);
         assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let code = if args.get(2) == Some(&"close") {
+            "local_lease_unavailable"
+        } else {
+            "robot_surface_unavailable"
+        };
         json(
             &output,
-            "assert x['outcome']=='refused'\nassert x['error']['code']=='robot_surface_unavailable'\nassert 'data' not in x and 'stage' not in x",
+            &format!(
+                "assert x['outcome']=='refused'\nassert x['error']['code']=='{code}'\nassert 'data' not in x and 'stage' not in x"
+            ),
         );
         assert!(
             !std::path::Path::new(screen).exists(),

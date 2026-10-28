@@ -1,13 +1,14 @@
 //! `fr status`, `fr inspect`, `fr disconnect` and `fr robot`.
 //!
 //! Status and inspect report only what the installed Tailscale `LocalAPI`
-//! returns; anything not probed is unknown, never a plausible default. `fr`
-//! keeps no background sessions, so disconnect and the robot surface (plan 18,
-//! bead `fr-agent-robot-surface-3o3`) refuse until a live client session backs
-//! them: no session is opened, nothing is observed and no input is sent.
+//! returns; anything not probed is unknown, never a plausible default. Local
+//! disconnect and robot session-close address the authenticated, original
+//! foreground connection owner and wait for its actual native cleanup result.
+//! Session-open, observation and input automation still require their own live
+//! integration; closing a connection never fabricates those capabilities.
 
 use super::super::options::{DisconnectOptions, InspectOptions, RobotCommand};
-use super::{Cell, Cx, Failure, LocalApi, Runtime, Shutdown, failure, tailnet};
+use super::{Cell, Cx, Failure, LocalApi, Runtime, Shutdown, failure, session_control, tailnet};
 use fr_client::robot::{AcknowledgementStage, RobotEnvelope, RobotInspectData, RobotStatusData};
 
 fn now_unix_ms() -> u64 {
@@ -129,20 +130,110 @@ fn exact_match(peer: &fr_tailnet::DiscoveredPeer, opts: &InspectOptions) -> bool
     }
 }
 
-pub(super) fn run_disconnect(_opts: &DisconnectOptions) -> Failure {
-    Failure::new(
-        "no_background_session",
-        "fr keeps no background sessions: a `fr connect` session runs in the foreground and ends when its window closes or fr is interrupted (Ctrl-C). Nothing was disconnected.",
-        2,
-    )
+/// This is a local connection outcome, not a remote input-effect receipt.
+/// The original foreground command retains any host closing/lease reports.
+#[derive(serde::Serialize)]
+struct LocalCloseData {
+    scope: &'static str,
+    connection_id: String,
+    target: String,
+    closed: bool,
+    local_cleanup_confirmed: bool,
 }
 
-pub(super) fn run_robot(_cmd: &RobotCommand) -> Failure {
-    Failure::new(
+pub(super) fn run_disconnect(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    opts: &DisconnectOptions,
+    json: bool,
+) -> Result<String, Failure> {
+    close(runtime, cx, shutdown, stopped, &opts.node, json)
+}
+
+pub(super) fn run_robot(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    command: &RobotCommand,
+    json: bool,
+) -> Result<String, Failure> {
+    if let RobotCommand::SessionClose(options) = command {
+        if options.lease.is_some() {
+            return Err(Failure::new(
+                "local_lease_unavailable",
+                "This foreground connection exposes no robot lease handle. Omit --lease to close the exact local target; a supplied handle is never ignored or treated as authority.",
+                2,
+            ));
+        }
+        return close(runtime, cx, shutdown, stopped, &options.node, json);
+    }
+    Err(Failure::new(
         "robot_surface_unavailable",
-        "The robot surface is not backed by a live session yet: no session was opened, nothing was observed, no file was written and no input was sent. Use `fr displays` or `fr connect --view-only`.",
+        "Robot session-open, observe and input are not backed by a live session yet. Use fr connect for a foreground session; fr robot session close can close that exact local connection.",
         2,
-    )
+    ))
+}
+
+fn close(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    target: &str,
+    json: bool,
+) -> Result<String, Failure> {
+    let result = runtime
+        .block_on(shutdown.run(cx, stopped, session_control::stop(cx, target)))
+        .map_err(local_failure)?;
+    if result.completion != session_control::Completion::Confirmed {
+        return Err(failure(
+            "native_cleanup_incomplete",
+            "The original local connection stopped, but did not confirm all native cleanup. Inspect its result and remaining workers before starting another connection; prior effects are not rolled back.",
+        ).uncertain());
+    }
+    let data = LocalCloseData {
+        scope: "local_connection",
+        connection_id: result.info.instance,
+        target: result.info.target,
+        closed: true,
+        local_cleanup_confirmed: true,
+    };
+    let envelope = RobotEnvelope::success(now_unix_ms(), AcknowledgementStage::Observed, data);
+    if json {
+        envelope.render_json().map_err(|_| {
+            failure(
+                "serialization_error",
+                "Failed to render local closure JSON.",
+            )
+        })
+    } else {
+        Ok(envelope.render_human(Some(
+            "The original local connection has stopped and native cleanup is confirmed. Remote key release and prior effects are reported separately by the original fr connect command.\n",
+        )))
+    }
+}
+
+pub(super) fn local_failure(error: session_control::Error) -> Failure {
+    use session_control::Error as E;
+    let (code, next, exit) = match error {
+        E::InvalidTarget => ("invalid_local_target", "Use the exact nonempty target supplied to the running fr connect command; no prefixes or aliases are inferred.", 2),
+        E::AlreadyRunning => ("local_session_already_running", "A foreground connection already owns this exact local target. Use fr disconnect with that target, or its window, before connecting again.", 2),
+        E::NoSession => ("no_local_session", "No running connection for this exact target was found for this user. Use the same target text as fr connect; nothing was disconnected.", 2),
+        E::UntrustedPeer => ("local_session_untrusted", "The local endpoint did not belong to the same operating-system user. No local control request was authorized.", 1),
+        E::WrongOwner => ("local_session_changed", "The local endpoint did not identify the expected target and connection. Inspect the original fr connect process before trying again.", 1),
+        E::Protocol => ("local_session_protocol", "The local connection returned an invalid control record. Check that both commands use compatible FrankenRemote versions.", 1),
+        E::Timeout => ("local_session_timeout", "The original local connection did not complete its control handshake in time. Check its foreground process; no replacement connection was opened.", 1),
+        E::OutcomeUnknown => return failure(
+            "disconnect_outcome_unknown",
+            "The stop request may have reached the original connection, but its cleanup reply was not collected. Inspect the original fr connect result before any new connection; this command does not retry or signal another process.",
+        ).uncertain(),
+        E::Cancelled => ("cancelled", "Local connection lookup was cancelled before a stop request was submitted.", 130),
+        E::Unavailable => ("local_session_unavailable", "The local connection control endpoint is unavailable. Use the original viewer window or Ctrl-C to stop it.", 1),
+    };
+    Failure::new(code, next, exit)
 }
 
 #[cfg(test)]
