@@ -102,22 +102,27 @@ pub struct Connection {
     /// `--audio`: explicitly ask for host playback audio in either role.
     /// `None` offers no audio capability at all.
     pub audio: Option<AudioRequest>,
-    /// `--send PATH` (repeatable, with `--control` only): regular files the
-    /// user explicitly selected, sent in order into the host's drop directory
-    /// after control is granted. Empty selects no initial source.
-    pub send: Vec<PathBuf>,
-    /// `--file-drop`: explicitly allow a first local Copy drop after control
-    /// without requiring an initial --send. Reconnect never re-enables it.
-    pub file_drop: bool,
+    /// Explicit local upload choices, retained only for the original control.
+    pub upload: UploadOptions,
     /// `--receive DIR`: the explicit local destination for host-selected files.
     /// This requires control and may accompany an explicit `--send` selection;
     /// neither direction is implicit.
     pub receive: Option<ReceiveOptions>,
 }
+#[cfg(any(feature = "linux-desktop", test))]
 impl Connection {
     pub fn uploads(&self) -> bool {
-        self.file_drop || !self.send.is_empty()
+        self.upload.file_drop || !self.upload.paths.is_empty()
     }
+}
+#[allow(dead_code)]
+pub struct UploadOptions {
+    /// `--send PATH` (repeatable, with `--control` only): files or directories
+    /// explicitly selected for the original upload. Empty selects no source.
+    pub paths: Vec<PathBuf>,
+    /// `--file-drop`: explicitly allow a first local Copy drop after control
+    /// without requiring an initial --send. Reconnect never re-enables it.
+    pub file_drop: bool,
 }
 /// At most this many `--send` files per connection (frd's native bound).
 pub const MAX_SENDS: usize = 8;
@@ -750,8 +755,10 @@ fn parse_command(
                     volume: audio_volume.unwrap_or(100),
                     muted: audio_muted,
                 }),
-                send,
-                file_drop,
+                upload: UploadOptions {
+                    paths: send,
+                    file_drop,
+                },
                 receive,
             })
         }
@@ -1032,8 +1039,8 @@ mod tests {
         else {
             unreachable!("connection required");
         };
-        assert_eq!(plain.send, Vec::<PathBuf>::new());
-        assert!(!plain.file_drop && !plain.uploads());
+        assert_eq!(plain.upload.paths, Vec::<PathBuf>::new());
+        assert!(!plain.upload.file_drop && !plain.uploads());
         let Command::Connect(c) = options(&format!(
             "connect {base} --control --send /home/u/a.bin --send /home/u/données.txt"
         ))
@@ -1043,7 +1050,7 @@ mod tests {
             unreachable!("connection required");
         };
         assert_eq!(
-            c.send,
+            c.upload.paths,
             [
                 PathBuf::from("/home/u/a.bin"),
                 PathBuf::from("/home/u/données.txt")
@@ -1058,7 +1065,7 @@ mod tests {
             unreachable!("connection required");
         };
         assert!(both.clipboard);
-        assert_eq!(both.send, [PathBuf::from("/a")]);
+        assert_eq!(both.upload.paths, [PathBuf::from("/a")]);
         for (flags, code) in [
             ("--view-only --send /a", "send_requires_control"),
             (
@@ -1097,9 +1104,9 @@ mod tests {
             else {
                 unreachable!("connection required");
             };
-            assert!(connection.file_drop && connection.uploads());
+            assert!(connection.upload.file_drop && connection.uploads());
             assert!(
-                connection.send.is_empty(),
+                connection.upload.paths.is_empty(),
                 "drop consent is not a selected path"
             );
         }
@@ -1111,8 +1118,8 @@ mod tests {
         else {
             unreachable!("connection required");
         };
-        assert!(connection.file_drop && connection.uploads());
-        assert_eq!(connection.send, [PathBuf::from("/private/initial")]);
+        assert!(connection.upload.file_drop && connection.uploads());
+        assert_eq!(connection.upload.paths, [PathBuf::from("/private/initial")]);
         for (arguments, code) in [
             (
                 format!("{base} --view-only --file-drop"),
@@ -1157,7 +1164,7 @@ mod tests {
             Some(std::path::Path::new("/home/u/downloads"))
         );
         assert!(selected.control && selected.clipboard && selected.audio.is_some());
-        assert_eq!(selected.send, [] as [PathBuf; 0]);
+        assert_eq!(selected.upload.paths, [] as [PathBuf; 0]);
         for (flags, code) in [
             ("--view-only --receive /a", "receive_requires_control"),
             ("--control --receive relative", "invalid_arguments"),
@@ -1183,7 +1190,7 @@ mod tests {
             else {
                 panic!("controlled connection");
             };
-            assert_eq!(both.send, [PathBuf::from("/a")]);
+            assert_eq!(both.upload.paths, [PathBuf::from("/a")]);
             assert_eq!(
                 both.receive.as_ref().unwrap().directory,
                 PathBuf::from("/b")
@@ -1646,7 +1653,10 @@ mod controlled_audio_tests {
             };
             assert!(connection.control && connection.audio.is_some());
             assert_eq!(connection.clipboard, !extra.contains("--no-clipboard"));
-            assert_eq!(connection.send.len(), usize::from(extra.contains("--send")));
+            assert_eq!(
+                connection.upload.paths.len(),
+                usize::from(extra.contains("--send"))
+            );
         }
     }
 

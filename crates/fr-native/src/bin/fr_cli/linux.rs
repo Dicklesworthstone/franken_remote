@@ -335,7 +335,7 @@ fn connect(
         )
     })?;
     // Classify every --send path by type before any network I/O.
-    let sends = files::select(&connection.send, connection.file_drop)?;
+    let sends = files::select(&connection.upload.paths, connection.upload.file_drop)?;
     let downloads = files::download::select(connection.receive.as_ref())?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
@@ -1961,8 +1961,10 @@ mod tests {
             capture_system_shortcuts: false,
             clipboard: false,
             audio: None,
-            send: Vec::new(),
-            file_drop: false,
+            upload: crate::options::UploadOptions {
+                paths: Vec::new(),
+                file_drop: false,
+            },
             receive: None,
         };
         let runtime = RuntimeBuilder::current_thread()

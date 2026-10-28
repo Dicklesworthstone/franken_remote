@@ -140,7 +140,7 @@ mod tests {
         assert!(!default.keep_both);
         let configured = connection("--receive-conflict keep-both --receive-max-file-bytes 2147483648 --receive /private/destination --receive-max-session-bytes 4294967296").unwrap();
         assert_eq!(configured.clipboard, absent.clipboard);
-        assert!(configured.audio.is_none() && configured.send.is_empty());
+        assert!(configured.audio.is_none() && configured.upload.paths.is_empty());
         let without_clipboard =
             connection("--receive /private/destination --no-clipboard").unwrap();
         assert!(!without_clipboard.clipboard);
