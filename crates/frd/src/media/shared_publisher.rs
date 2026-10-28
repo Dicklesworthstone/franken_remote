@@ -441,6 +441,7 @@ impl Publisher {
                     .lock()
                     .map_err(|_| Error::Poisoned)
                     .and_then(|m| {
+                        adaptive.observe_receivers(&m);
                         let peers = m.peer_evidence(m.last, adaptive.interval_us());
                         adaptive.sample(m.last, false, peers)
                     });

@@ -128,7 +128,8 @@ fn a_healthy_accepted_sibling_keeps_its_whole_load_and_is_independent_of_laggard
             peer_evidence(10_001, 100_000, peers.into_iter()),
             PeerEvidence {
                 send: Availability::Ready,
-                receiver: ReceiverEvidence::Measured(healthy())
+                receiver: ReceiverEvidence::Measured(healthy()),
+                reset_receiver: true,
             }
         );
     }
@@ -377,6 +378,7 @@ fn missing_receiver_samples_do_not_disable_real_capture_credit_or_source_pressur
                     PeerEvidence {
                         send: Availability::Ready,
                         receiver: ReceiverEvidence::Unknown,
+                        reset_receiver: false,
                     },
                 )
                 .unwrap();
@@ -388,5 +390,159 @@ fn missing_receiver_samples_do_not_disable_real_capture_credit_or_source_pressur
         };
         assert_eq!(pacing.interval_us(), 200_000);
         assert!(pacing.controller.decisions().any(|r| r.reason == expected));
+    }
+}
+
+#[test]
+fn a_known_healthy_blocked_sibling_resets_aggregate_pressure_without_granting_a_probe() {
+    for send in [Availability::Blocked, Availability::Unknown] {
+        for receiver in [
+            ReceiverEvidence::Measured(healthy()),
+            ReceiverEvidence::Unobserved,
+        ] {
+            let mut pacing = pacing();
+            for now in (0..=80_000).step_by(10_000) {
+                let slow = pair(now, Availability::Ready, backlog());
+                let evidence = peer_evidence(now, pacing.interval_us(), [slow, slow].into_iter());
+                assert!(!evidence.reset_receiver);
+                pacing.sample(now, true, evidence).unwrap();
+            }
+            assert_eq!(
+                pacing.controller.report().unwrap().receiver_pressure_us[0],
+                80_000
+            );
+            let evidence = peer_evidence(
+                90_000,
+                pacing.interval_us(),
+                [
+                    pair(90_000, Availability::Ready, backlog()),
+                    (Some((90_000, send)), receiver),
+                ]
+                .into_iter(),
+            );
+            assert_eq!(evidence.send, Availability::Ready);
+            assert_eq!(evidence.receiver, ReceiverEvidence::Unknown);
+            assert!(evidence.reset_receiver);
+            pacing.sample(90_000, true, evidence).unwrap();
+            for now in (100_000..=190_000).step_by(10_000) {
+                let slow = pair(now, Availability::Ready, backlog());
+                let evidence = peer_evidence(now, pacing.interval_us(), [slow, slow].into_iter());
+                pacing.sample(now, true, evidence).unwrap();
+                let report = pacing.controller.report().unwrap();
+                assert_eq!(report.reason, pacing::Reason::Hold);
+                assert_eq!(report.receiver_pressure_us[0], now - 100_000);
+                assert_eq!(report.headroom_us, 0);
+            }
+            let slow = pair(200_000, Availability::Ready, backlog());
+            let evidence = peer_evidence(200_000, pacing.interval_us(), [slow, slow].into_iter());
+            pacing.sample(200_000, true, evidence).unwrap();
+            assert_eq!(
+                pacing.controller.report().unwrap().reason,
+                pacing::Reason::ReceiverBacklog
+            );
+        }
+    }
+}
+
+#[test]
+fn receiver_scope_changes_reset_dwell_and_unchanged_scopes_preserve_it() {
+    for changed in [false, true] {
+        let mut pacing = pacing();
+        let mut views = [None; super::super::super::MAX_SUBSCRIBERS];
+        views[0] = Some(binding());
+        pacing.observe_receiver_views(&views);
+        for now in [0, 40_000, 80_000] {
+            let evidence = peer_evidence(
+                now,
+                pacing.interval_us(),
+                [pair(now, Availability::Ready, backlog())].into_iter(),
+            );
+            pacing.sample(now, true, evidence).unwrap();
+        }
+        if changed {
+            let view = views[0].as_mut().unwrap();
+            view.recovery = view.recovery.next().unwrap();
+        }
+        pacing.observe_receiver_views(&views);
+        let evidence = peer_evidence(
+            100_000,
+            pacing.interval_us(),
+            [pair(100_000, Availability::Ready, backlog())].into_iter(),
+        );
+        pacing.sample(100_000, true, evidence).unwrap();
+        let report = pacing.controller.report().unwrap();
+        assert_eq!(
+            report.receiver_pressure_us[0],
+            if changed { 0 } else { 100_000 }
+        );
+        assert_eq!(
+            report.reason,
+            if changed {
+                pacing::Reason::Hold
+            } else {
+                pacing::Reason::ReceiverBacklog
+            }
+        );
+        // Fencing/removal empties the original slot; rejoining it cannot inherit
+        // the old receiver's measured pressure even if its numeric view matches.
+        views[0] = None;
+        pacing.observe_receiver_views(&views);
+        views[0] = Some(binding());
+        pacing.observe_receiver_views(&views);
+        let evidence = peer_evidence(
+            110_000,
+            pacing.interval_us(),
+            [pair(110_000, Availability::Ready, backlog())].into_iter(),
+        );
+        pacing.sample(110_000, true, evidence).unwrap();
+        assert_eq!(
+            pacing.controller.report().unwrap().receiver_pressure_us,
+            [0; 2]
+        );
+    }
+}
+
+#[test]
+fn unchanged_receiver_scopes_keep_headroom_but_replacement_discards_it() {
+    for changed in [false, true] {
+        let mut pacing = pacing();
+        let mut views = [None; super::super::super::MAX_SUBSCRIBERS];
+        views[0] = Some(binding());
+        pacing.observe_receiver_views(&views);
+        for now in (1000..=1_901_000).step_by(50_000) {
+            complete(&mut pacing, now, true);
+            let evidence = peer_evidence(
+                now,
+                pacing.interval_us(),
+                [pair(now, Availability::Ready, healthy())].into_iter(),
+            );
+            assert!(
+                evidence.reset_receiver,
+                "healthy evidence clears pressure only"
+            );
+            pacing.sample(now, true, evidence).unwrap();
+        }
+        if changed {
+            let view = views[0].as_mut().unwrap();
+            view.recovery = view.recovery.next().unwrap();
+        }
+        pacing.observe_receiver_views(&views);
+        complete(&mut pacing, 2_001_000, true);
+        let evidence = peer_evidence(
+            2_001_000,
+            pacing.interval_us(),
+            [pair(2_001_000, Availability::Ready, healthy())].into_iter(),
+        );
+        pacing.sample(2_001_000, true, evidence).unwrap();
+        let report = pacing.controller.report().unwrap();
+        assert_eq!(report.headroom_us, if changed { 0 } else { 2_000_000 });
+        assert_eq!(
+            report.reason,
+            if changed {
+                pacing::Reason::Hold
+            } else {
+                pacing::Reason::HeadroomProbe
+            }
+        );
     }
 }

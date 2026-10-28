@@ -38,6 +38,9 @@ fn record_send(
     });
 }
 impl Entry {
+    fn pacing_eligible(&self) -> bool {
+        self.failure.is_none() && self.join.is_none() && self.starting.is_none() && !self.fenced()
+    }
     pub(super) fn note_video_send(
         &mut self,
         progress: &crate::media_egress::Progress,
@@ -80,6 +83,8 @@ impl ReceiverSample {
 pub(super) struct PeerEvidence {
     send: Availability,
     receiver: ReceiverEvidence,
+    // Known counterevidence may veto overload without supplying a probe path.
+    reset_receiver: bool,
 }
 
 pub(super) struct CapturePacing {
@@ -87,6 +92,7 @@ pub(super) struct CapturePacing {
     in_flight: Option<u64>,
     last_work: Option<(u64, u64)>,
     observation: Option<Observation>,
+    receiver_views: [Option<Binding>; super::MAX_SUBSCRIBERS],
 }
 impl CapturePacing {
     fn new(minimum: Duration, maximum: Duration, fps: u16) -> Result<Self, Error> {
@@ -107,10 +113,26 @@ impl CapturePacing {
             in_flight: None,
             last_work: None,
             observation: None,
+            receiver_views: [None; super::MAX_SUBSCRIBERS],
         })
     }
     pub(super) fn interval_us(&self) -> u64 {
         self.controller.interval_us()
+    }
+    pub(super) fn observe_receivers(&mut self, members: &Members) {
+        let views = std::array::from_fn(|slot| {
+            members.entries[slot]
+                .as_ref()
+                .filter(|entry| entry.pacing_eligible())
+                .map(|entry| entry.view)
+        });
+        self.observe_receiver_views(&views);
+    }
+    fn observe_receiver_views(&mut self, views: &[Option<Binding>; super::MAX_SUBSCRIBERS]) {
+        if self.receiver_views != *views {
+            self.controller.reset_receiver_evidence();
+            self.receiver_views = *views;
+        }
     }
     pub(super) fn start(&mut self, now: u64) -> Result<(), Error> {
         if self.in_flight.is_some() {
@@ -159,6 +181,9 @@ impl CapturePacing {
         } else {
             Availability::Blocked
         };
+        if peers.reset_receiver {
+            self.controller.reset_receiver_pressure();
+        }
         self.controller
             .update_with_receiver(
                 Sample {
@@ -198,6 +223,7 @@ fn peer_evidence(
     let mut healthy = None;
     let mut pressured = None;
     let mut all_pressured = true;
+    let mut reset_receiver = false;
     // At the slowest adaptive cadence a real enqueue occurs only every 200 ms.
     // Keep that outcome across one admission interval, bounded by the canonical
     // source-evidence horizon. Idle never refreshes the original timestamp.
@@ -223,6 +249,7 @@ fn peer_evidence(
             pressured.get_or_insert(receiver);
         } else {
             all_pressured = false;
+            reset_receiver |= !matches!(receiver, ReceiverEvidence::Unknown);
         }
     }
     PeerEvidence {
@@ -236,6 +263,7 @@ fn peer_evidence(
         receiver: healthy
             .or(pressured.filter(|_| all_pressured))
             .unwrap_or(ReceiverEvidence::Unknown),
+        reset_receiver: !any || reset_receiver,
     }
 }
 fn receiver_headroom(load: Load, interval: u64) -> bool {
@@ -252,12 +280,7 @@ impl Members {
             self.entries
                 .iter()
                 .flatten()
-                .filter(|entry| {
-                    entry.failure.is_none()
-                        && entry.join.is_none()
-                        && entry.starting.is_none()
-                        && !entry.fenced()
-                })
+                .filter(|entry| entry.pacing_eligible())
                 .map(|entry| {
                     (
                         entry
@@ -302,11 +325,11 @@ impl Publisher {
             .and_then(|n| n.checked_add(fr_media::worker::UNIT_PREFIX_BYTES))
             .ok_or(Error::InvalidBudget)?;
         let ready = self.pool.can_share_capacity(capacity);
-        let peers = self
-            .members
-            .lock()
-            .map_err(|_| Error::Poisoned)?
-            .peer_evidence(now, adaptive.controller.interval_us());
+        let peers = {
+            let members = self.members.lock().map_err(|_| Error::Poisoned)?;
+            adaptive.observe_receivers(&members);
+            members.peer_evidence(now, adaptive.controller.interval_us())
+        };
         adaptive.sample(now, ready, peers).map(Some)
     }
 }

@@ -111,7 +111,8 @@ pub(super) async fn recover(
         .map_err(Error::Media)?;
     host.media = Some(media);
     // Reports from the old generation cannot establish readiness/freshness
-    // for this one. The native capture and pacing histories are not reset.
+    // for this one. Native capture and local pressure histories are retained;
+    // receiver-dependent dwell is invalidated with its original generation.
     install_evidence(host)?;
     host.stream.statistics.recovered_streams =
         host.stream.statistics.recovered_streams.saturating_add(1);
@@ -121,6 +122,9 @@ pub(super) async fn recover(
 fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
     let feedback_reports = host.receiver_feedback_reports();
     let presentation_reports = host.presentation_reports();
+    if let Some(controller) = &mut host.stream.pacing {
+        controller.reset_receiver_evidence();
+    }
     let session = host.host.session()?;
     let view = host
         .stream

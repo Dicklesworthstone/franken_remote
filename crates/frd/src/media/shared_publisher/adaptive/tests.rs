@@ -6,6 +6,7 @@ fn local(send: Availability) -> PeerEvidence {
     PeerEvidence {
         send,
         receiver: ReceiverEvidence::Unobserved,
+        reset_receiver: true,
     }
 }
 fn send_evidence(

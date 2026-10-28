@@ -85,6 +85,39 @@ Only the next raw capture is rescheduled: encoded references, original media and
 input deadlines, held-state ownership, action identities and current native jobs
 are unchanged.
 
+### Pressure evidence across reply gaps
+
+A single outstanding query with a 150 ms lifetime has only about 30 ms of usable
+reply evidence on a 120 ms RTT path. Resetting the overload clock on every
+unknown interval made the 100 ms pressure dwell impossible to complete, even
+with repeated timely reports of overload.
+
+Receiver backlog and decoder-work dwell now accumulate only intervals whose two
+observed endpoints both establish that cause. An unknown sample reports zero
+active pressure, contributes no elapsed time, and breaks interval continuity.
+It can preserve earlier measured intervals for at most 100 ms since the last
+positive sample. The first positive sample after that gap contributes no gap
+time. Known nonpressure, explicit absence of negotiation, or a longer gap
+clears the history. The next reduction still requires a current positive report
+and the original 250 ms adjustment cooldown; local pressure retains precedence.
+
+The requester, responder, one-record bounds and original query expiry are
+unchanged. A reply arriving at or beyond 150 ms is still expired. This correction
+allows multiple brief **timely** reply windows to establish measured overload;
+it does not claim headroom from silence or qualify arbitrary RTTs.
+
+Private recovery clears receiver-pressure and receiver-dependent headroom
+evidence when it installs a new feedback generation. Shared pacing compares the
+full bindings in its fixed eight-slot eligible-viewer inventory at both actual
+sampling sites, under the existing members lock. Membership, eligibility and
+generation changes clear that evidence without resetting local work/send/credit
+history, the interval or adjustment cooldown.
+
+For shared sources, known nonpressured or unnegotiated evidence from an eligible
+viewer also clears aggregate receiver pressure. This applies even if that
+viewer's send path is blocked. It supplies no synthetic headroom: upward probes
+still need one same-viewer pair of accepted enqueue and healthy decoder evidence.
+
 `StreamingHost::receiver_feedback_reports` counts accepted new solicited reports.
 `StreamingViewer::receiver_feedback_reports` counts reply admissions into transport.
 Neither is an acknowledgement of delivery, presentation or application effects.
@@ -128,6 +161,31 @@ keeps a healthy sibling progressing through the slow viewer's departure. Codec
 output and decode completion are explicit fixtures; no hardware or WAN result
 is implied. Pure regressions separately cover sample expiry, binding changes,
 mixed-viewer evidence, missing reports and cadence-limited probe recovery.
+
+## Delayed-feedback validation, 28 October 2026
+
+The exact production `fr-media` library and the complete pacing and
+receiver-feedback test targets were rebuilt with the pinned compiler against
+the original production core/wire libraries. **All 31 tests passed**: 15 pacing
+tests and 16 receiver-feedback tests, including seven added cases.
+
+The deterministic 120 ms RTT replay runs the actual `Requester`, `Responder`
+and controller with independent host/viewer clock origins and the original
+query deadlines. Before this correction, two seconds produced no reduction and
+never accumulated more than 20 ms of live pressure. The corrected controller
+first changes the capture interval from 40 ms to 80 ms at 620 ms, after exactly
+100 ms of positive endpoint intervals across five reply windows. Every unknown
+window reports zero active pressure. A separate 160 ms RTT replay keeps all late
+replies unknown and makes no receiver-driven adjustment.
+
+The tests also cover isolated positive endpoints, the exact 100 ms pause bound,
+known healthy/unnegotiated counterevidence, scope resets, old headroom removal,
+preserved local-pressure precedence and the unchanged reduction cooldown.
+Additional shared-owner regressions cover a healthy but blocked sibling,
+membership/generation resets and continued same-view headroom. Those daemon
+regressions are source-reviewed but have not been executed in this session.
+This is deterministic protocol/controller evidence, not live WAN impairment,
+physical presentation or a full-workspace Cargo pass.
 
 ## Verification scope
 

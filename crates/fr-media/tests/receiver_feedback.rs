@@ -254,3 +254,286 @@ fn decoder_pressure_prevents_an_idle_wake_from_overriding_known_load() {
     assert_eq!(r.reason, Reason::ChangedAfterIdle);
     assert_eq!(r.interval_us, 200_000);
 }
+
+/// Two bounded in-flight records and independent clocks exercise the actual
+/// single-credit query/reply state machines, including their original expiry.
+fn delayed_feedback(rtt_us: u64, measured: Load, end_us: u64) -> Vec<fr_media::pacing::Report> {
+    let mut host = Requester::new(binding(), ProtocolLimits::ABSOLUTE, 0).unwrap();
+    let viewer_epoch = 90_000_000;
+    let mut viewer = Responder::new(binding(), ProtocolLimits::ABSOLUTE, viewer_epoch).unwrap();
+    let mut controller = controller();
+    let mut query: Option<(u64, Vec<u8>, u64)> = None;
+    let mut reply: Option<(u64, Vec<u8>, u64)> = None;
+    let mut reports = Vec::new();
+    for now in (0..=end_us).step_by(10_000) {
+        if query.as_ref().is_some_and(|record| record.0 <= now) {
+            let (_, bytes, original_until) = query.take().unwrap();
+            let viewer_now = viewer_epoch + now;
+            assert!(viewer.receive(&bytes, measured, viewer_now).unwrap());
+            assert!(
+                viewer
+                    .transmit(viewer_now, |bytes, until| {
+                        assert_eq!(until, viewer_now + REPLY_LIFETIME_US);
+                        assert!(reply.is_none());
+                        reply = Some((now + rtt_us / 2, bytes.to_vec(), original_until));
+                        Ok::<_, ()>(Admission::Accepted)
+                    })
+                    .unwrap()
+            );
+        }
+        if reply.as_ref().is_some_and(|record| record.0 <= now) {
+            let (_, bytes, original_until) = reply.take().unwrap();
+            let accepted = host.receive(&bytes, now).unwrap();
+            assert_eq!(accepted, now < original_until);
+            if accepted {
+                assert_eq!(host.sample(now).unwrap(), Some((measured, original_until)));
+            }
+        }
+        host.transmit(now, |bytes, until| {
+            assert_eq!(until, now + SAMPLE_LIFETIME_US);
+            assert!(query.is_none());
+            query = Some((now + rtt_us / 2, bytes.to_vec(), until));
+            Ok::<_, ()>(Admission::Accepted)
+        })
+        .unwrap();
+        let evidence = host.evidence(now).unwrap();
+        let report = controller
+            .update_with_receiver(sample(now), evidence)
+            .unwrap();
+        if evidence == E::Unknown {
+            assert_eq!(report.receiver_pressure_us, [0; 2]);
+            assert!(!matches!(
+                report.reason,
+                Reason::ReceiverBacklog | Reason::DecoderWork
+            ));
+        }
+        reports.push(report);
+    }
+    reports
+}
+
+#[test]
+fn live_high_rtt_replies_accumulate_only_measured_pressure_between_query_gaps() {
+    for (measured, reason, component) in [
+        (
+            Load {
+                retained_pictures: 3,
+                ..load()
+            },
+            Reason::ReceiverBacklog,
+            0,
+        ),
+        (
+            Load {
+                work_us: Some(1_000_000),
+                ..load()
+            },
+            Reason::DecoderWork,
+            1,
+        ),
+    ] {
+        let reports = delayed_feedback(120_000, measured, 2_000_000);
+        for now in [150_000, 230_000, 270_000, 350_000] {
+            let report = reports
+                .iter()
+                .find(|report| report.sample.now_us == now)
+                .unwrap();
+            assert_eq!(report.receiver, E::Unknown, "query expiry is not extended");
+            assert_eq!(report.receiver_pressure_us, [0; 2]);
+        }
+        let decisions: Vec<_> = reports
+            .iter()
+            .filter(|report| report.reason == reason)
+            .collect();
+        let first = decisions
+            .first()
+            .expect("live delayed overload must eventually reduce capture");
+        // Each 30 ms live reply window supplies two measured 10 ms edges.
+        // Five windows are needed; none of the 90 ms query gaps is counted.
+        assert_eq!(first.sample.now_us, 620_000);
+        assert_eq!(first.receiver_pressure_us[component], 100_000);
+        assert_eq!(
+            (first.previous_interval_us, first.interval_us),
+            (40_000, 80_000)
+        );
+        for pair in decisions.windows(2) {
+            assert!(pair[1].sample.now_us - pair[0].sample.now_us >= 250_000);
+        }
+        assert_eq!(reports.last().unwrap().interval_us, 200_000);
+    }
+}
+
+#[test]
+fn late_replies_and_isolated_positive_endpoints_never_bank_pressure() {
+    let measured = Load {
+        work_us: Some(1_000_000),
+        ..load()
+    };
+    let reports = delayed_feedback(160_000, measured, 2_000_000);
+    assert!(reports.iter().all(|report| report.receiver == E::Unknown));
+    assert!(reports.iter().all(|report| report.interval_us == 40_000));
+    let mut c = controller();
+    for now in (0..=1_000_000_u64).step_by(10_000) {
+        let evidence = if now.is_multiple_of(60_000) {
+            E::Measured(measured)
+        } else {
+            E::Unknown
+        };
+        let report = c.update_with_receiver(sample(now), evidence).unwrap();
+        assert_eq!(report.receiver_pressure_us, [0; 2]);
+        assert_eq!(report.reason, Reason::Hold);
+    }
+}
+
+#[test]
+fn receiver_pressure_gaps_pause_only_within_the_last_positive_bound() {
+    let measured = E::Measured(Load {
+        retained_pictures: 3,
+        ..load()
+    });
+    for gap in [100_000, 100_001] {
+        let mut c = controller();
+        for now in [0, 40_000, 80_000] {
+            c.update_with_receiver(sample(now), measured).unwrap();
+        }
+        for now in (90_000..80_000 + gap).step_by(10_000) {
+            let report = c.update_with_receiver(sample(now), E::Unknown).unwrap();
+            assert_eq!(report.receiver_pressure_us, [0; 2]);
+            assert_eq!(report.reason, Reason::Hold);
+        }
+        let resumed = c
+            .update_with_receiver(sample(80_000 + gap), measured)
+            .unwrap();
+        assert_eq!(
+            resumed.receiver_pressure_us[0],
+            if gap == 100_000 { 80_000 } else { 0 }
+        );
+        assert_eq!(resumed.reason, Reason::Hold);
+        let next = c
+            .update_with_receiver(sample(100_000 + gap), measured)
+            .unwrap();
+        if gap == 100_000 {
+            assert_eq!(next.receiver_pressure_us[0], 100_000);
+            assert_eq!(next.reason, Reason::ReceiverBacklog);
+        } else {
+            assert_eq!(next.receiver_pressure_us[0], 20_000);
+            assert_eq!(next.reason, Reason::Hold);
+        }
+    }
+}
+
+#[test]
+fn known_nonpressured_and_unnegotiated_evidence_clear_the_pressure_bank() {
+    let busy = E::Measured(Load {
+        retained_pictures: 3,
+        work_us: Some(1_000_000),
+        ..load()
+    });
+    for counterevidence in [
+        E::Measured(load()),
+        E::Unobserved,
+        E::Measured(Load {
+            work_us: None,
+            ..load()
+        }),
+    ] {
+        let mut c = controller();
+        for now in [0, 40_000, 80_000] {
+            c.update_with_receiver(sample(now), busy).unwrap();
+        }
+        c.update_with_receiver(sample(90_000), counterevidence)
+            .unwrap();
+        assert_eq!(
+            c.update_with_receiver(sample(100_000), busy)
+                .unwrap()
+                .receiver_pressure_us,
+            [0; 2]
+        );
+        let report = c.update_with_receiver(sample(120_000), busy).unwrap();
+        assert_eq!(report.receiver_pressure_us, [20_000; 2]);
+        assert_eq!(report.reason, Reason::Hold);
+    }
+}
+
+#[test]
+fn receiver_scope_reset_preserves_local_pressure_and_its_precedence() {
+    let busy = E::Measured(Load {
+        retained_pictures: 3,
+        work_us: Some(1_000_000),
+        ..load()
+    });
+    for (component, reason) in [
+        (0, Reason::SourceWork),
+        (1, Reason::SendAdmission),
+        (2, Reason::CaptureCredit),
+    ] {
+        let mut c = controller();
+        let local = |now| {
+            let mut s = sample(now);
+            match component {
+                0 => s.source_work_us = Some(1_000_000),
+                1 => s.send = Availability::Blocked,
+                _ => s.capture_credit = Availability::Blocked,
+            }
+            s
+        };
+        for now in [0, 40_000, 80_000] {
+            c.update_with_receiver(local(now), busy).unwrap();
+        }
+        c.reset_receiver_evidence();
+        assert_eq!(c.interval_us(), 40_000);
+        let report = c.update_with_receiver(local(100_000), busy).unwrap();
+        assert_eq!(report.receiver_pressure_us, [0; 2]);
+        assert_eq!(report.pressure_us[component], 100_000);
+        assert_eq!(report.reason, reason);
+    }
+}
+
+#[test]
+fn scope_reset_discards_old_probe_evidence_but_counterevidence_does_not() {
+    for scope_changed in [false, true] {
+        let mut c = controller();
+        for now in (0..=1_900_000).step_by(50_000) {
+            c.update_with_receiver(sample(now), E::Measured(load()))
+                .unwrap();
+        }
+        if scope_changed {
+            c.reset_receiver_evidence();
+        } else {
+            c.reset_receiver_pressure();
+        }
+        let report = c
+            .update_with_receiver(sample(2_000_000), E::Measured(load()))
+            .unwrap();
+        if scope_changed {
+            assert_eq!(report.headroom_us, 0);
+            assert_eq!(report.reason, Reason::Hold);
+            assert_eq!(report.interval_us, 40_000);
+        } else {
+            assert_eq!(report.headroom_us, 2_000_000);
+            assert_eq!(report.reason, Reason::HeadroomProbe);
+        }
+    }
+}
+
+#[test]
+fn receiver_scope_reset_keeps_the_existing_reduction_cooldown() {
+    let measured = E::Measured(Load {
+        work_us: Some(1_000_000),
+        ..load()
+    });
+    let mut c = controller();
+    for now in [0, 50_000, 100_000] {
+        c.update_with_receiver(sample(now), measured).unwrap();
+    }
+    assert_eq!(c.interval_us(), 80_000);
+    c.reset_receiver_evidence();
+    for now in [110_000, 150_000, 200_000, 210_000, 250_000, 300_000] {
+        let report = c.update_with_receiver(sample(now), measured).unwrap();
+        assert_eq!(report.interval_us, 80_000);
+        assert_eq!(report.reason, Reason::Hold);
+    }
+    let report = c.update_with_receiver(sample(350_000), measured).unwrap();
+    assert_eq!(report.reason, Reason::DecoderWork);
+    assert_eq!(report.interval_us, 160_000);
+}

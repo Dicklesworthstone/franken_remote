@@ -115,7 +115,9 @@ pub struct Controller {
     last_now: Option<u64>,
     adjusted: Option<u64>,
     busy_since: [Option<u64>; 3],
-    receiver_busy_since: [Option<u64>; 2],
+    receiver_busy_at: [Option<u64>; 2],
+    receiver_evidence_us: [u64; 2],
+    receiver_previous_busy: [bool; 2],
     headroom_since: Option<u64>,
     headroom_evidence_us: u64,
     headroom_previous_ready: bool,
@@ -136,7 +138,9 @@ impl Controller {
             last_now: None,
             adjusted: None,
             busy_since: [None; 3],
-            receiver_busy_since: [None; 2],
+            receiver_busy_at: [None; 2],
+            receiver_evidence_us: [0; 2],
+            receiver_previous_busy: [false; 2],
             headroom_since: None,
             headroom_evidence_us: 0,
             headroom_previous_ready: false,
@@ -163,6 +167,21 @@ impl Controller {
         (0..self.decisions.len()).filter_map(move |i| {
             self.decisions[(self.decision_next + i) % self.decisions.len()].as_ref()
         })
+    }
+    /// Known receiver counterevidence clears only remote overload dwell. A
+    /// shared owner may need this even when no whole viewer can justify a probe.
+    /// Local pressure, headroom, cadence and the adjustment cooldown survive.
+    pub fn reset_receiver_pressure(&mut self) {
+        self.receiver_busy_at = [None; 2];
+        self.receiver_evidence_us = [0; 2];
+        self.receiver_previous_busy = [false; 2];
+    }
+    /// A source/view membership or generation boundary invalidates remote dwell
+    /// AND probe evidence that included the previous receiver's reports. The
+    /// native source/local pressure history, interval and cooldown are retained.
+    pub fn reset_receiver_evidence(&mut self) {
+        self.reset_receiver_pressure();
+        self.reset_headroom();
     }
     pub fn update(&mut self, sample: Sample) -> Result<Report, Error> {
         self.update_with_receiver(sample, ReceiverEvidence::Unobserved)
@@ -301,13 +320,32 @@ impl Controller {
                     && load.work_us.is_some_and(|n| n <= self.interval * 3 / 4),
             ),
         };
+        let unknown = matches!(receiver, ReceiverEvidence::Unknown);
         let mut receiver_pressure_us = [0; 2];
         for (i, busy) in remote.into_iter().enumerate() {
+            if self.receiver_busy_at[i].is_some_and(|last| now_us - last > MAX_SAMPLE_GAP_US) {
+                self.receiver_busy_at[i] = None;
+                self.receiver_evidence_us[i] = 0;
+                self.receiver_previous_busy[i] = false;
+            }
             if busy {
-                receiver_pressure_us[i] =
-                    now_us - *self.receiver_busy_since[i].get_or_insert(now_us);
+                if self.receiver_previous_busy[i]
+                    && let Some(last) = self.receiver_busy_at[i]
+                {
+                    self.receiver_evidence_us[i] =
+                        self.receiver_evidence_us[i].saturating_add(now_us - last);
+                }
+                self.receiver_busy_at[i] = Some(now_us);
+                self.receiver_previous_busy[i] = true;
+                receiver_pressure_us[i] = self.receiver_evidence_us[i];
+            } else if unknown {
+                // A bounded query/reply gap pauses measured pressure; neither
+                // edge beside Unknown counts, and Unknown cannot reduce cadence.
+                self.receiver_previous_busy[i] = false;
             } else {
-                self.receiver_busy_since[i] = None;
+                self.receiver_busy_at[i] = None;
+                self.receiver_evidence_us[i] = 0;
+                self.receiver_previous_busy[i] = false;
             }
         }
         (remote, receiver_ready, receiver_pressure_us)
@@ -418,7 +456,7 @@ impl Controller {
     }
     fn reset_evidence(&mut self) {
         self.busy_since = [None; 3];
-        self.receiver_busy_since = [None; 2];
+        self.reset_receiver_pressure();
         self.reset_headroom();
         self.unchanged_since = None;
     }

@@ -148,10 +148,20 @@ limits remain independent enforcement boundaries.
 ## Adjustment rules
 
 Startup uses twice the minimum interval, clamped to the maximum. A continuously
-observed overload must persist for 100 ms before reducing offered raw work; each
-reduction doubles the interval within its bounds and is separated from the next
-by at least 250 ms. Source-work, send-admission, and capture-credit causes retain
-distinct reason codes.
+observed local overload must persist for 100 ms before reducing offered raw work;
+each reduction doubles the interval within its bounds and is separated from the
+next by at least 250 ms. Source-work, send-admission, and capture-credit causes
+retain distinct reason codes.
+
+Receiver backlog and decoder-work pressure each require 100 ms of accumulated
+measured evidence. Only intervals whose endpoints both report positive pressure
+contribute time. Short unknown gaps pause that evidence; neither adjacent edge
+counts, and an unknown sample cannot trigger a reduction. Known counterevidence,
+an explicitly unobserved receiver, or more than 100 ms since the last positive
+sample clears the corresponding history. This allows repeated timely replies
+on a delayed path to establish sustained overload without extending any reply's
+original query-created expiry. Local-pressure precedence and the 250 ms
+adjustment cooldown are unchanged.
 
 Upward probes require two seconds of measured local headroom, a recent genuine
 source observation, known ready sender credit, and no send backpressure. Each
@@ -326,3 +336,12 @@ The original query deadline bounds sample age, and measured receiver backlog and
 decode-service time inform the canonical controller without overriding its local
 rate, deadline or ownership constraints. Platform presentation measurements,
 runtime codec reconfiguration and aggregate bandwidth control remain separate.
+
+Receiver-dependent dwell also follows the original view scope. Private recovery
+clears it when installing the replacement feedback owner. Shared pacing keeps a
+fixed inventory of the eight original subscriber slots and clears receiver
+pressure plus receiver-dependent probe headroom whenever an eligible member or
+its full binding changes. Source-work/send-credit history, capture interval and
+adjustment cooldown survive. A measured nonpressured sibling vetoes accumulated
+shared receiver pressure even if its sender is blocked; that veto cannot combine
+its decoder with another viewer's ready sender to manufacture headroom.
