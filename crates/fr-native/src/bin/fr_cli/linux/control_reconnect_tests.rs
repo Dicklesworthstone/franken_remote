@@ -455,3 +455,142 @@ fn observation_reconnect_keeps_its_original_optional_audio_offer() {
     assert_eq!(ui.offer(1, &original).unwrap(), original);
     assert_eq!(ui.offer(32, &original).unwrap(), original);
 }
+
+fn permission_lost_summary() -> CleanupSummary {
+    use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+    CleanupSummary {
+        disconnect: Some(frd::session_startup::ViewerCloseOutcome {
+            request_acknowledged: false,
+            report: Some(Closed {
+                reason: ClosedReason::PermissionLost,
+                cleanup: Cleanup::Unconfirmed,
+                effects: OutstandingEffects::Known {
+                    pending: 4,
+                    uncertain: 2,
+                },
+            }),
+            transport: Err(fr_transport::quic::Error::Expired),
+        }),
+        ..summary()
+    }
+}
+
+#[test]
+fn a_recovered_viewing_attempt_keeps_its_own_terminal_report_and_vetoes_retry() {
+    for requested_control in [false, true] {
+        let mut ui = interface();
+        if !requested_control {
+            ui.progress.borrow_mut().control = None;
+        }
+        ui.status(Status::Connecting { attempt: 1 }).unwrap();
+        if let Some(control) = ui.progress.borrow_mut().control.as_mut() {
+            control.spend_request();
+        }
+        ui.status(Status::Cleaning {
+            attempt: 1,
+            failure: Some(transient()),
+        })
+        .unwrap();
+        let original = CleanupSummary {
+            input_stop: requested_control.then_some(InputStop::Local),
+            ..summary()
+        };
+        ui.cleanup_finished(1, original);
+        ui.status(reconnecting()).unwrap();
+        ui.status(Status::Connecting { attempt: 2 }).unwrap();
+        if let Some(control) = ui.progress.borrow_mut().control.as_mut() {
+            assert_eq!(control.opened(), control::AttemptMode::ViewingOnly);
+        }
+        // The transport result can win the service race, while cleanup still
+        // collects an authenticated report from the current viewing session.
+        ui.status(Status::Cleaning {
+            attempt: 2,
+            failure: Some(transient()),
+        })
+        .unwrap();
+        ui.cleanup_finished(2, permission_lost_summary());
+        assert_eq!(
+            ui.status(Status::Reconnecting {
+                attempt: 3,
+                delay: Duration::from_millis(500),
+                failure: transient(),
+            }),
+            Err(CallbackError)
+        );
+        let progress = ui.progress.borrow();
+        if let Some(control) = progress.control {
+            // The new viewer's report must never rewrite the old controller's
+            // request, effects or close exchange just to make the veto work.
+            assert_eq!(control.request_attempt, Some(1));
+            assert_eq!(control.cleanup, Some(original));
+            assert_eq!(control.ended, Some(Err(transient())));
+        }
+        let error = completed(
+            &unused_session(),
+            Err(reconnect::Failure::Notification),
+            false,
+            &progress,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "host_permission_lost");
+        let output: serde_json::Value =
+            serde_json::from_str(&crate::terminal::output(error, true)).unwrap();
+        let report = &output["close_exchange"]["host_report"];
+        assert_eq!(report["cleanup_stage"], "unconfirmed");
+        assert_eq!(report["outstanding_effects"]["pending"], 4);
+        assert_eq!(report["outstanding_effects"]["uncertain"], 2);
+        assert_eq!(
+            completed(
+                &unused_session(),
+                Err(reconnect::Failure::CleanupExpired),
+                false,
+                &progress,
+                true,
+            )
+            .unwrap_err()
+            .code,
+            "native_cleanup_incomplete"
+        );
+    }
+}
+
+#[test]
+fn viewing_cleanup_is_attempt_scoped_and_partial_acknowledgements_allow_retry() {
+    let mut ui = interface();
+    ui.progress.borrow_mut().control = None;
+    for (attempt, stop) in [(1, InputStop::Local), (2, InputStop::Closed)] {
+        ui.status(Status::Connecting { attempt }).unwrap();
+        assert!(ui.progress.borrow().cleanup.is_none());
+        // A dial that failed before creating a new desktop may repeat the
+        // previous owner's callback. Foreign evidence cannot name this end.
+        ui.cleanup_finished(attempt - 1, permission_lost_summary());
+        ui.cleanup_finished(attempt + 1, permission_lost_summary());
+        assert!(ui.progress.borrow().cleanup.is_none());
+        ui.status(Status::Cleaning {
+            attempt,
+            failure: Some(transient()),
+        })
+        .unwrap();
+        ui.cleanup_finished(
+            attempt,
+            CleanupSummary {
+                disconnect: Some(frd::session_startup::ViewerCloseOutcome {
+                    request_acknowledged: true,
+                    report: None,
+                    transport: Err(fr_transport::quic::Error::Expired),
+                }),
+                input_stop: Some(stop),
+                ..summary()
+            },
+        );
+        assert_eq!(
+            ui.status(Status::Reconnecting {
+                attempt: attempt + 1,
+                delay: Duration::from_millis(250),
+                failure: transient(),
+            }),
+            Ok(())
+        );
+    }
+}

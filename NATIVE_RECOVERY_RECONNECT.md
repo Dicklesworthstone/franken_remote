@@ -75,10 +75,15 @@ and the resulting one-slot intent have a fixed 250 ms bound. An old/not-ready
 gesture is discarded and a new physical gesture is required. No shortcut event
 or held modifier is carried into the new input owner.
 
-Native cleanup also reports its exact original closing exchange, lease report
-and first input-stop cause. A genuine local stop or authenticated host terminal
-report that races with a link failure still vetoes reconnect after cleanup.
-The cleanup callback is informational: it cannot turn failed cleanup into success.
+Every attempt retains its own native closing exchange and first input-stop
+cause, including observation-only sessions and recovered viewing desktops that
+never request control. A genuine local stop or authenticated host terminal
+report that races with a link failure still vetoes reconnect after cleanup and
+names the terminal reason. This evidence is scoped to the current attempt;
+repeated callbacks from an older desktop cannot become a later dial's report.
+The original and fresh control-request histories remain separate and unchanged.
+A partial acknowledgement without a host report does not invent revocation,
+and the cleanup callback cannot turn failed cleanup into success.
 
 JSON distinguishes `last_attempt_mode` (`control_capable`, `view_only`, or
 `explicit_control`),

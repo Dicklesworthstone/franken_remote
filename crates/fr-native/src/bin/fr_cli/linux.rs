@@ -618,14 +618,16 @@ fn completed_result(
     if let Err(error) = result
         && !progress.user_closed
     {
-        // The post-cleanup retry notice may be vetoed by the original native
-        // input stop or an authenticated host report. Name that exact evidence;
-        // a generic notification failure cannot inherit an older link error.
+        // Every attempt, including a recovered viewing-only connection, may
+        // publish terminal evidence during cleanup. Name the current evidence
+        // before consulting the separately retained control-request history.
         if error == reconnect::Failure::Notification
-            && let Some(named) = progress
-                .control
-                .and_then(|control| control.latest_cleanup())
-                .and_then(control_retry_stop)
+            && let Some(named) = progress.cleanup.and_then(control_retry_stop).or_else(|| {
+                progress
+                    .control
+                    .and_then(|control| control.latest_cleanup())
+                    .and_then(control_retry_stop)
+            })
         {
             return Err(named);
         }
@@ -715,6 +717,8 @@ struct Progress {
     missing_display: bool,
     user_closed: bool,
     window: Option<WindowControl>,
+    /// Current-attempt evidence, even when no control request was made.
+    cleanup: Option<fr_native::desktop::reconnect::CleanupSummary>,
     /// Some only for `--control`: content-free request/grant/result tallies.
     control: Option<control::Counters>,
     /// Some only for `--audio`: content-free playback outcome.
@@ -738,8 +742,23 @@ impl Progress {
         // The previous owner has already been reaped. Its stopped handle must
         // not classify a connection failure before this attempt opens a window.
         self.window = None;
+        self.cleanup = None;
         if let Some(control) = &mut self.control {
             control.begin_attempt(attempt);
+        }
+    }
+    fn retain_cleanup(
+        &mut self,
+        attempt: u8,
+        summary: fr_native::desktop::reconnect::CleanupSummary,
+    ) {
+        // A failed later dial may reap no new desktop and repeat the previous
+        // owner's callback. It must not become this attempt's terminal report.
+        if attempt != 0 && attempt == self.attempts {
+            self.cleanup = Some(summary);
+        }
+        if let Some(control) = &mut self.control {
+            control.retain_cleanup(attempt, summary);
         }
     }
     /// A WM request can publish after the initial cleanup notice. Only that
@@ -874,9 +893,7 @@ impl Ui for Interface {
             .as_ref()
             .is_some_and(WindowControl::close_requested);
         progress.after_cleanup(close_requested);
-        if let Some(counters) = progress.control.as_mut() {
-            counters.retain_cleanup(attempt, summary);
-        }
+        progress.retain_cleanup(attempt, summary);
     }
     fn frame(&mut self, _: u8, frame: Option<Presentation>) -> Result<(), CallbackError> {
         if frame.is_some() {
@@ -922,6 +939,7 @@ impl Ui for Interface {
             }
             Status::Reconnecting { .. } => {
                 if progress.user_closed
+                    || progress.cleanup.and_then(control_retry_stop).is_some()
                     || progress
                         .control
                         .is_some_and(|control| control.retry_stopped())
