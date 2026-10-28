@@ -244,17 +244,26 @@ async fn send_message(q: &mut QuicRecords, cx: &Cx, routes: ControlRoutes, messa
 }
 /// Explicit test peer, NOT `Host::from_admitted` and never a production bypass.
 async fn startup_peer(
+    q: QuicRecords,
+    cx: &Cx,
+    routes: ControlRoutes,
+    chosen: bool,
+) -> (QuicRecords, ControlRoutes, ControlBinding) {
+    Box::pin(startup_peer_with_offer(q, cx, routes, chosen, offered())).await
+}
+async fn startup_peer_with_offer(
     mut q: QuicRecords,
     cx: &Cx,
     mut routes: ControlRoutes,
     chosen: bool,
+    offer: Offer,
 ) -> (QuicRecords, ControlRoutes, ControlBinding) {
     let hello = receive(&mut q, cx, routes).await;
     assert!(matches!(
         negotiation::decode(&hello, negotiation::MAX_RECORD, 0).unwrap(),
         Message::ClientHello(_)
     ));
-    send_message(&mut q, cx, routes, Message::HostCapabilities(offered())).await;
+    send_message(&mut q, cx, routes, Message::HostCapabilities(offer.clone())).await;
     let selected = receive(&mut q, cx, routes).await;
     assert!(matches!(
         negotiation::decode(&selected, negotiation::MAX_RECORD, 0).unwrap(),
@@ -272,7 +281,7 @@ async fn startup_peer(
         routes,
         Message::SessionOpened {
             binding,
-            selection: offered().select().unwrap(),
+            selection: offer.select().unwrap(),
             observation_until_us: support::clock(cx) + 3_000_000,
         },
     )

@@ -148,6 +148,18 @@ pub trait Application {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>>;
     fn status(&mut self, status: Status) -> Result<(), CallbackError>;
+    /// Bounded terminal evidence retained by this attempt's original owner.
+    /// Return only an actually validated peer/session report; this grants no
+    /// authority and must not infer a report from socket or native cleanup.
+    /// The supervisor reads it only for a failed attempt, AFTER successful
+    /// cleanup, and stops with this exact error even when a retryable local
+    /// failure won the service race. A successful user-requested shutdown stays
+    /// successful even if its closing exchange has a report. Reset the evidence
+    /// when a new `Connecting` attempt begins. Cleanup failure still dominates,
+    /// and returning `Some` can only prevent another attempt.
+    fn terminal_failure(&self) -> Option<ObserverError> {
+        None
+    }
 }
 
 impl Client {
@@ -316,7 +328,14 @@ impl Client {
                         );
                         return Err(error);
                     }
-                    notice?;
+                    let terminal = failed_attempt_terminal(application, &outcome);
+                    // A Cleaning callback failure must not erase a retained
+                    // host report from an already failed attempt. Successful
+                    // completion and failures without a report keep their
+                    // existing notification semantics.
+                    if terminal.is_none() {
+                        notice?;
+                    }
                     if let Err(error) = clock.live(&cx) {
                         let _ = notify(
                             application,
@@ -326,6 +345,12 @@ impl Client {
                             },
                         );
                         return Err(error);
+                    }
+                    if let Some(failure) = terminal {
+                        // A notification failure cannot erase an authenticated
+                        // report or its known external-effect stages.
+                        let _ = notify(application, Status::Stopped { attempt, failure });
+                        return Err(failure);
                     }
                     match outcome {
                         Ok(value) => {
@@ -376,10 +401,23 @@ fn notify(app: &mut impl Application, status: Status) -> Result<(), Failure> {
     app.status(status).map_err(|_| Failure::Notification)
 }
 
-/// Retry explicit transient transport/availability outcomes and exhausted media
-/// delivery horizons during streaming. The latter restart the entire observation
-/// through authenticated startup and a fresh decoder, ONLY after native cleanup;
-/// they never resume an invalid reference chain or restore an old input lease.
+/// Called only after cleanup. A normal completed close may have a valid
+/// `ClientRequested` report; it is evidence of that success, never a failure.
+fn failed_attempt_terminal<A: Application>(
+    application: &A,
+    outcome: &Result<A::Output, Failure>,
+) -> Option<Failure> {
+    if outcome.is_ok() {
+        return None;
+    }
+    application.terminal_failure().map(Failure::Observation)
+}
+
+/// Retry explicit transient transport/availability outcomes, exhausted media
+/// delivery horizons and native-worker deadlines during established streaming.
+/// Media failures restart the entire observation through authenticated startup
+/// and a fresh decoder, ONLY after native cleanup; they never resume an invalid
+/// reference chain, reuse a poisoned worker or restore an old input lease.
 /// Established control and telemetry can wrap the same transport failure; their
 /// typed transport errors share the policy, not their input/authority failures.
 /// Closed, cancelled, unauthorized, malformed, handler and actual codec failures
@@ -391,6 +429,11 @@ fn notify(app: &mut impl Application, status: Status) -> Result<(), Failure> {
 /// dropped the old socket and no Viewer/application was exposed. Each retry
 /// revalidates the pinned identity and performs strict TLS again; a typed
 /// certificate, protocol or authority refusal is still terminal.
+/// A streamed worker deadline keeps its original request bound and stops the
+/// current session. A fresh attempt is allowed only after the application has
+/// positively reaped that child and its other native owners. Startup/recovery
+/// handshake deadlines, decoder refusals and uncertain pipe failures stay
+/// terminal; neither a hung process nor a codec error is resumed in place.
 pub fn retryable(failure: Failure) -> bool {
     use crate::session_startup::ControlledViewerError;
 
@@ -412,6 +455,9 @@ pub fn retryable(failure: Failure) -> bool {
                 fr_wire::recovery_request::Reason::ReferenceExpired
                 | fr_wire::recovery_request::Reason::RecoveryExpired,
             ),
+        )))
+        | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Media(
+            crate::media::Error::Worker(crate::worker::Error::Deadline),
         ))) => true,
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Session(e)
@@ -525,8 +571,9 @@ pub enum Lapse {
     /// claims. The session ends on the protocol fault instead of guessing.
     UnexpectedRecord,
     /// This client's own decode/present worker did not answer a request
-    /// within its deadline (live: a client starved for CPU), so the session
-    /// ended instead of showing pictures late.
+    /// within its original deadline. That worker and session were fenced;
+    /// any remaining attempt may create a fresh viewing session after confirmed
+    /// native cleanup. This never certifies a late picture or restores input.
     VideoWorkerLate,
 }
 pub fn lapse(failure: Failure) -> Option<Lapse> {

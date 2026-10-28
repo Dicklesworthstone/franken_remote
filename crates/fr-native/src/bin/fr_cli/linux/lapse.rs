@@ -32,7 +32,7 @@ pub(super) fn reconnect(error: reconnect::Failure) -> Option<Failure> {
         ),
         Lapse::VideoWorkerLate => failure(
             "video_worker_late",
-            "This machine's video decoder/presenter did not finish a picture within its deadline, which usually means this machine is overloaded, so the session ended instead of showing pictures late; nothing is replayed. Check this machine's load (for example with top) before starting a new session.",
+            "This machine's video decoder/presenter did not answer within its fixed deadline, and automatic viewing recovery has ended. The old session and input were fenced; no input is replayed. Check this machine's load (for example with top) before starting a new session.",
         ),
         Lapse::ControlRenewalFailed => failure(
             "control_renewal_failed",

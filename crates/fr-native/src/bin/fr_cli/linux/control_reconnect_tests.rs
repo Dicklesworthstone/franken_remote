@@ -594,3 +594,131 @@ fn viewing_cleanup_is_attempt_scoped_and_partial_acknowledgements_allow_retry() 
         );
     }
 }
+
+fn streamed_worker_timeout() -> reconnect::Failure {
+    reconnect::Failure::Observation(frd::session_startup::ObserverError::Streaming(
+        frd::session_startup::StreamingViewerError::Media(frd::media::Error::Worker(
+            frd::worker::Error::Deadline,
+        )),
+    ))
+}
+fn timed_out_controller() -> Interface {
+    let mut ui = interface();
+    ui.status(Status::Connecting { attempt: 1 }).unwrap();
+    {
+        let mut progress = ui.progress.borrow_mut();
+        let control = progress.control.as_mut().unwrap();
+        control.spend_request();
+        control.granted = true;
+        control.results = 4;
+        control.submitted = 2;
+    }
+    ui.status(Status::Cleaning {
+        attempt: 1,
+        failure: Some(streamed_worker_timeout()),
+    })
+    .unwrap();
+    ui
+}
+fn retry_worker() -> Status {
+    Status::Reconnecting {
+        attempt: 2,
+        delay: Duration::from_millis(250),
+        failure: streamed_worker_timeout(),
+    }
+}
+
+#[test]
+fn a_streamed_worker_timeout_recovers_viewing_without_replaying_the_control_request() {
+    assert!(reconnect::retryable(streamed_worker_timeout()));
+    let mut ui = timed_out_controller();
+    let original = CleanupSummary {
+        input_stop: Some(InputStop::Local),
+        ..summary()
+    };
+    ui.cleanup_finished(1, original);
+    ui.status(retry_worker()).unwrap();
+    ui.status(Status::Connecting { attempt: 2 }).unwrap();
+    let mut progress = ui.progress.borrow_mut();
+    let control = progress.control.as_mut().unwrap();
+    assert_eq!(control.opened(), control::AttemptMode::ViewingOnly);
+    assert_eq!(control.request_attempt, Some(1));
+    assert_eq!(control.viewing_reconnects, 1);
+    assert_eq!(control.ended, Some(Err(streamed_worker_timeout())));
+    assert_eq!(control.cleanup, Some(original));
+    assert_eq!(control.results, 4);
+    assert_eq!(control.submitted, 2);
+    assert!(
+        control.granted,
+        "historical grant must not erase committed effects"
+    );
+    assert!(control.fresh.iter().all(Option::is_none));
+}
+
+#[test]
+fn worker_timeout_cannot_override_host_reports_local_stop_or_failed_cleanup() {
+    use fr_wire::lease_revoked::{CleanupStage, EffectStage, Reason, Revoked};
+    let revocation = CleanupSummary {
+        control_disconnect: Some(frd::session_startup::ControlCloseOutcome {
+            exchange: frd::session_startup::ViewerCloseOutcome {
+                request_acknowledged: false,
+                report: None,
+                transport: Err(fr_transport::quic::Error::Native),
+            },
+            revocation: Some(Revoked {
+                lease: fr_core::ids::InputLeaseId::from_raw(993),
+                reason: Reason::LocalRevoke,
+                cleanup: CleanupStage::Fenced,
+                effects: EffectStage::ReceiptsPending,
+            }),
+        }),
+        ..summary()
+    };
+    for (cleanup, code) in [
+        (
+            CleanupSummary {
+                input_stop: Some(InputStop::FocusLost),
+                ..summary()
+            },
+            "control_focus_lost",
+        ),
+        (
+            CleanupSummary {
+                input_stop: Some(InputStop::LocalEscape),
+                ..summary()
+            },
+            "control_released_locally",
+        ),
+        (permission_lost_summary(), "host_permission_lost"),
+        (revocation, "host_control_revoked"),
+    ] {
+        let mut ui = timed_out_controller();
+        ui.cleanup_finished(1, cleanup);
+        assert_eq!(ui.status(retry_worker()), Err(CallbackError));
+        let progress = ui.progress.borrow();
+        let failure = completed(
+            &unused_session(),
+            Err(reconnect::Failure::Notification),
+            false,
+            &progress,
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(failure.code, code);
+        for failure in [
+            reconnect::Failure::Cleanup,
+            reconnect::Failure::CleanupExpired,
+        ] {
+            assert_eq!(
+                completed(&unused_session(), Err(failure), false, &progress, true,)
+                    .unwrap_err()
+                    .code,
+                "native_cleanup_incomplete"
+            );
+        }
+    }
+    let mut ui = timed_out_controller();
+    ui.progress.borrow_mut().user_closed = true;
+    ui.cleanup_finished(1, summary());
+    assert_eq!(ui.status(retry_worker()), Err(CallbackError));
+}

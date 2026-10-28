@@ -210,3 +210,93 @@ fn serving_guard_fences_unpolled_or_pending_join_before_abandonment() {
         assert_eq!(native_dropped.get(), Some(true));
     }
 }
+
+#[test]
+fn authenticated_terminal_evidence_survives_a_racing_worker_deadline() {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_transport::quic::{Error as T, PeerClose};
+    use fr_wire::{closure, lease_revoked};
+
+    let closed = closure::Closed {
+        reason: closure::ClosedReason::PermissionLost,
+        cleanup: closure::Cleanup::Unconfirmed,
+        effects: closure::OutstandingEffects::Known {
+            pending: 4,
+            uncertain: 2,
+        },
+    };
+    let revoked = lease_revoked::Revoked {
+        lease: fr_core::ids::InputLeaseId::from_raw(411),
+        reason: lease_revoked::Reason::LocalRevoke,
+        cleanup: lease_revoked::CleanupStage::Fenced,
+        effects: lease_revoked::EffectStage::ReceiptsPending,
+    };
+    for terminal in [
+        Error::Session(S::RemoteClosed(closed)),
+        Error::Control(C::Session(S::RemoteClosed(closed))),
+        Error::Control(C::LeaseRevoked(revoked)),
+        Error::Transport(T::PeerClosed(PeerClose::Session(closed.reason))),
+        Error::Recovery(crate::media_quic::recovery::Error::Transport(
+            T::PeerClosed(PeerClose::Session(closed.reason)),
+        )),
+    ] {
+        let (_runtime, control) = control();
+        let mut native = Box::pin(native(
+            &control,
+            true,
+            Err(media::Error::Worker(crate::worker::Error::Deadline)),
+        ));
+        let polls = native.polls.clone();
+        let mut network = turn(&control, false, true);
+        network.result = Err(terminal);
+        let ready = network.ready.clone();
+        let completed = network.completed.clone();
+        let dropped = network.dropped.clone();
+        let mut joined = Box::pin(drive(native.as_mut(), network, &control));
+        assert_eq!(poll(joined.as_mut()), Poll::Pending);
+        assert!(
+            control.is_stopped(),
+            "input fence must not wait for a report"
+        );
+        assert_eq!(
+            dropped.get(),
+            None,
+            "original network future must be drained"
+        );
+        ready.set(true);
+        assert_eq!(poll(joined.as_mut()), Poll::Ready(Err(terminal)));
+        assert!(completed.get());
+        assert_eq!(polls.get(), 1);
+        drop(joined);
+        assert_eq!(dropped.get(), Some(true));
+        assert!(!crate::native_connection::reconnect::retryable(
+            crate::native_connection::reconnect::Failure::Observation(
+                crate::session_startup::ObserverError::Streaming(terminal),
+            ),
+        ));
+    }
+}
+
+#[test]
+fn self_generated_close_or_cancel_does_not_hide_the_original_worker_deadline() {
+    use fr_transport::quic::Error as T;
+    for network_error in [
+        Error::Closed,
+        Error::Transport(T::Cancelled),
+        Error::Transport(T::Closed),
+        Error::Transport(T::Expired),
+        Error::Transport(T::Native),
+    ] {
+        let (_runtime, control) = control();
+        let worker = media::Error::Worker(crate::worker::Error::Deadline);
+        let mut native = Box::pin(native(&control, true, Err(worker)));
+        let mut network = turn(&control, true, true);
+        network.result = Err(network_error);
+        let mut joined = Box::pin(drive(native.as_mut(), network, &control));
+        assert_eq!(
+            poll(joined.as_mut()),
+            Poll::Ready(Err(Error::Media(worker)))
+        );
+        assert!(control.is_stopped());
+    }
+}

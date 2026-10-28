@@ -1,4 +1,4 @@
-# Bounded reconnect after recovery-channel exhaustion
+# Bounded fresh-session viewing recovery
 
 The native observation profile can recover a lost reference chain without
 restarting the current connection or decoder. The bounded QUIC namespace retains
@@ -17,9 +17,10 @@ checks still run before this result can be produced.
 
 The native reconnect supervisor permits a fresh attempt for this typed result
 only when the original reason is `ReferenceExpired` or `RecoveryExpired`.
-`DecodeFailed`, worker failure/hang, arbitrary recovery closure, unauthorized
-access and malformed protocol remain terminal. Known QUIC `Native`/`Expired`
-errors inside recovery/replacement wrappers now retain the same retry policy as
+`DecodeFailed`, arbitrary recovery closure, unauthorized access and malformed
+protocol remain terminal. The narrowly defined streamed worker deadline below
+also permits a fresh attempt after cleanup. Known QUIC `Native`/`Expired`
+errors inside recovery/replacement wrappers retain the same retry policy as
 their existing direct transport equivalents; arbitrary backpressure is not
 classified as a reason to reconnect.
 
@@ -32,6 +33,65 @@ selection are performed again as required; no old input authority, action,
 window, worker, attachment or recovery deadline is restored. Failed or stalled
 cleanup terminates rather than allowing overlapping native owners.
 
+## Established native worker timeout
+
+A decode/present request that misses its original native deadline still ends
+that worker and session immediately. Only the established-streaming result
+`Streaming(Media(Worker(Deadline)))` can now enter the existing fresh-session
+supervisor. The supervisor must confirm cleanup of the original child, window,
+input capture and other native owners before its fixed backoff and another
+attempt. Cleanup error or expiry remains terminal. Attempts share the original
+finite counter; successful frames do not reset it. This bounds repeated hangs
+without reusing a poisoned decoder or admitting overlapping owners.
+
+The media deadlines are unchanged. A positively negotiated reference-recovery
+session already retains and drains an in-flight native borrow under the fixed
+two-second ceiling while its expired picture is fenced and input is suspended.
+A responsive late reply can still recover on the same running decoder. A request
+that reaches the native ceiling poisons the worker; this new path instead creates
+an independently authenticated session, receiver, decoder epoch, mapping and IDR
+startup after confirmed native cleanup. It neither revives the failed reference
+chain nor claims that killing the child reclaimed GPU driver resources.
+
+Decoder configuration, initial first-frame, and replacement-handshake timeouts
+remain terminal, as do malformed media, explicit codec refusal, broken pipes,
+ambiguous process exit and cancellation. A genuine local stop or authenticated
+host terminal report still vetoes reconnect even when the worker timeout wins
+the service race. Previously requested control stays spent: recovery opens only
+viewing until a new explicit local control decision. Historical external effects
+and their receipts remain in the original request's report.
+
+The native/network join still fences input before polling the original pending
+network future, then drains that same future. If it returns an already validated
+host closure or revocation, that exact typed report takes precedence over a
+racing native timeout; cancellation and bare socket closure do not. The join
+does not delay the fence or fetch later packets to seek terminal evidence.
+The lower-level native adapters also retain their original observer's explicit
+closing reports across reap. The supervisor's default `terminal_failure()` hook
+reads that bounded evidence only for an already failed attempt after successful
+cleanup and can only stop another attempt with its exact reason. A normal
+successful user-requested close remains successful even when its closing
+exchange has a report. A failed Cleaning notification cannot erase retained
+terminal evidence; the supervisor's cancellation/clock checks keep their
+precedence. The evidence resets at the next attempt; failed cleanup remains
+dominant. Optional file owners join under the same original
+cleanup deadline before either native adapter can permit replacement.
+
+The focused runtime regression
+`a_hung_stream_worker_is_reaped_before_a_fresh_epoch_can_present_again` uses
+actual TLS/UDP, an X11 window and supervised fixture children. It positively
+negotiates reference recovery, hangs only the first decoder epoch after initial
+startup, rejects another attempt while its native owner remains retained,
+requires explicit child/window reap, and requires a subsequent streamed picture
+from the fresh epoch. Codec replies are synthetic and do not qualify HEVC,
+hardware, physical visibility or installed-tailnet identity. Classifier and CLI
+regressions cover terminal startup/codec errors, cleanup failure, host revocation,
+local stop and control non-replay. These new Rust runtime regressions have not
+been executed in the resource-constrained editing environment; the pinned
+Asupersync dependency build was killed before their test artifacts could be
+produced. The live loaded-client five-minute acceptance remains open under
+`fr-live-client-present-cost-tqu7`.
+
 ## Control CLI: recover viewing without reacquiring input
 
 The shipped Linux `fr connect --control` uses the same finite `--attempts`
@@ -39,9 +99,9 @@ budget as observation (default five; `--attempts 1` makes one attempt). Its
 control decision is spent before submitting the first request, including a
 request whose admission or reply is uncertain. An established transient
 transport/media failure can then recover a fresh **viewing-only** desktop after
-confirmed native cleanup. The existing retry classifier and deadlines remain
-unchanged, including retries for observation-session expiration and renewal
-timeouts. Explicit control-authority revocation/refusal, input expiry, user close,
+confirmed native cleanup. The retry classifier includes the streamed native
+worker deadline described above and the existing observation-session expiration
+and renewal timeouts. All operation and cleanup deadlines remain unchanged. Explicit control-authority revocation/refusal, input expiry, user close,
 local escape, focus or native capture failure, protocol refusal and TLS/identity
 failure do not authorize another attempt.
 

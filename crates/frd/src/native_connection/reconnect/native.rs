@@ -42,6 +42,7 @@ pub fn native_view(
         status,
         observer: None,
         started: false,
+        terminal: None,
     }
 }
 struct Native<L, C, A, U, S> {
@@ -53,6 +54,7 @@ struct Native<L, C, A, U, S> {
     status: S,
     observer: Option<NativeObserver>,
     started: bool,
+    terminal: Option<ObserverError>,
 }
 impl<L, C, A, U, S> Application for Native<L, C, A, U, S>
 where
@@ -67,6 +69,7 @@ where
         if self.started || self.observer.is_some() {
             return Err(ObserverError::Order);
         }
+        self.terminal = None;
         let launch = (self.launch)(attempt).map_err(|_| ObserverError::Application)?;
         self.started = true;
         self.observer = Some(
@@ -94,13 +97,18 @@ where
     }
     async fn cleanup(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), CallbackError> {
         if let Some(observer) = self.observer.as_mut() {
+            // Capture only this owner's validated explicit reports before
+            // fencing/reaping can discard it. Cleanup itself creates no report.
+            self.terminal = self.terminal.or_else(|| reported_terminal(observer));
             observer.close(); // Fence input/publication before either foreign cleanup.
             let media = observer.reap_media(cx, deadline).await;
             let input = observer.reap_input_capture(cx, deadline).await;
             let clipboard = observer.reap_clipboard(cx, deadline).await;
+            let files = observer.reap_files(cx, deadline).await;
             media.map_err(|_| CallbackError)?;
             input.map_err(|_| CallbackError)?;
             clipboard_finished(clipboard.map_err(|_| CallbackError)?)?;
+            files.map_err(|_| CallbackError)?;
             self.observer = None;
             self.started = false;
             Ok(())
@@ -111,7 +119,16 @@ where
         }
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
+        if matches!(status, Status::Connecting { .. }) {
+            if self.started || self.observer.is_some() {
+                return Err(CallbackError);
+            }
+            self.terminal = None;
+        }
         (self.status)(status)
+    }
+    fn terminal_failure(&self) -> Option<ObserverError> {
+        self.terminal
     }
 }
 
@@ -195,6 +212,7 @@ pub fn native_control_view_with_setup(
         setup,
         observer: None,
         started: false,
+        terminal: None,
     }
 }
 struct NativeControl<L, C, A, U, R, S, P> {
@@ -212,6 +230,7 @@ struct NativeControl<L, C, A, U, R, S, P> {
     setup: P,
     observer: Option<NativeObserver>,
     started: bool,
+    terminal: Option<ObserverError>,
 }
 impl<L, C, A, U, R, S, P> Application for NativeControl<L, C, A, U, R, S, P>
 where
@@ -232,6 +251,7 @@ where
         if self.started || self.observer.is_some() {
             return Err(ObserverError::Order);
         }
+        self.terminal = None;
         let launch = (self.launch)(attempt).map_err(|_| ObserverError::Application)?;
         self.started = true;
         self.observer = Some(
@@ -259,13 +279,18 @@ where
     }
     async fn cleanup(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), CallbackError> {
         if let Some(observer) = self.observer.as_mut() {
+            // Capture only this owner's validated explicit reports before
+            // fencing/reaping can discard it. Cleanup itself creates no report.
+            self.terminal = self.terminal.or_else(|| reported_terminal(observer));
             observer.close(); // Fence input/publication before either foreign cleanup.
             let media = observer.reap_media(cx, deadline).await;
             let input = observer.reap_input_capture(cx, deadline).await;
             let clipboard = observer.reap_clipboard(cx, deadline).await;
+            let files = observer.reap_files(cx, deadline).await;
             media.map_err(|_| CallbackError)?;
             input.map_err(|_| CallbackError)?;
             clipboard_finished(clipboard.map_err(|_| CallbackError)?)?;
+            files.map_err(|_| CallbackError)?;
             self.observer = None;
             self.started = false;
             Ok(())
@@ -276,8 +301,43 @@ where
         }
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
+        if matches!(status, Status::Connecting { .. }) {
+            if self.started || self.observer.is_some() {
+                return Err(CallbackError);
+            }
+            self.terminal = None;
+        }
         (self.status)(status)
     }
+    fn terminal_failure(&self) -> Option<ObserverError> {
+        self.terminal
+    }
+}
+
+fn reported_terminal(observer: &NativeObserver) -> Option<ObserverError> {
+    explicit_terminal(
+        observer.disconnect_outcome(),
+        observer.control_disconnect_outcome(),
+    )
+}
+/// These getters describe completed explicit exchanges only. Ordinary peer
+/// errors keep their exact typed payload through the native/network join.
+fn explicit_terminal(
+    viewing: Option<fr_transport::quic::CloseOutcome>,
+    control: Option<fr_transport::ControlCloseOutcome>,
+) -> Option<ObserverError> {
+    use crate::session_startup::{
+        ControlledViewerError as C, Error as S, StreamingViewerError as V,
+    };
+    if let Some(report) = control.and_then(|outcome| outcome.revocation) {
+        return Some(ObserverError::Streaming(V::Control(C::LeaseRevoked(
+            report,
+        ))));
+    }
+    viewing
+        .and_then(|outcome| outcome.report)
+        .or_else(|| control.and_then(|outcome| outcome.exchange.report))
+        .map(|report| ObserverError::Streaming(V::Session(S::RemoteClosed(report))))
 }
 
 fn clipboard_finished(cleanup: crate::native_clipboard::Cleanup) -> Result<(), CallbackError> {
@@ -294,6 +354,144 @@ fn clipboard_finished(cleanup: crate::native_clipboard::Cleanup) -> Result<(), C
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn report() -> fr_wire::closure::Closed {
+        use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+        Closed {
+            reason: ClosedReason::PermissionLost,
+            cleanup: Cleanup::Unconfirmed,
+            effects: OutstandingEffects::Known {
+                pending: 5,
+                uncertain: 2,
+            },
+        }
+    }
+    fn terminal() -> ObserverError {
+        ObserverError::Streaming(crate::session_startup::StreamingViewerError::Session(
+            crate::session_startup::Error::RemoteClosed(report()),
+        ))
+    }
+    fn observing(started: bool) -> impl Application<Output = ()> {
+        Native {
+            policy: ObserverPolicy::default(),
+            launch: |_: u8| -> Result<Launch, CallbackError> { panic!("unexpected native launch") },
+            choose: |_: u8, _: &Catalog| Ok(None),
+            approval: |_: u8, _: ApprovalNotice| Ok(()),
+            ui: |_: u8, _: Option<Presentation>| Ok(()),
+            status: |_: Status| Ok(()),
+            observer: None,
+            started,
+            terminal: Some(terminal()),
+        }
+    }
+    fn controlled(started: bool) -> impl Application<Output = ()> {
+        NativeControl {
+            observer_policy: ObserverPolicy::default(),
+            clock_policy: ClockPolicy::default(),
+            input_policy: InputPolicy::default(),
+            sequence: 1,
+            capabilities: Capabilities::default(),
+            launch: |_: u8| -> Result<Launch, CallbackError> { panic!("unexpected native launch") },
+            choose: |_: u8, _: &Catalog| Ok(None),
+            approval: |_: u8, _: ApprovalNotice| Ok(()),
+            ui: |_: u8, _: InteractiveViewerState<'_>, _: Option<Presentation>| Ok(()),
+            result: |_: u8, _: ResultEvent| {},
+            status: |_: Status| Ok(()),
+            setup: |_: u8, _: &mut NativeObserver| Ok(()),
+            observer: None,
+            started,
+            terminal: Some(terminal()),
+        }
+    }
+    fn completed_latch(mut application: impl Application<Output = ()>) {
+        // Exercise the actual adapters without native I/O: the fixture report
+        // is metadata, not proof that an authenticated peer or worker existed.
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        let cx = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
+        let deadline = Deadline::after(&cx, std::time::Duration::from_secs(1)).unwrap();
+        assert_eq!(application.terminal_failure(), Some(terminal()));
+        assert_eq!(rt.block_on(application.cleanup(&cx, deadline)), Ok(()));
+        assert_eq!(application.terminal_failure(), Some(terminal()));
+        application
+            .status(Status::Connecting { attempt: 2 })
+            .unwrap();
+        assert_eq!(application.terminal_failure(), None);
+        // Failed discovery starts no observer. Repeated cleanup cannot carry
+        // the preceding attempt's report into this one.
+        assert_eq!(rt.block_on(application.cleanup(&cx, deadline)), Ok(()));
+        assert_eq!(application.terminal_failure(), None);
+    }
+    fn unfinished_latch(mut application: impl Application<Output = ()>) {
+        assert_eq!(
+            application.status(Status::Connecting { attempt: 2 }),
+            Err(CallbackError)
+        );
+        assert_eq!(application.terminal_failure(), Some(terminal()));
+    }
+    #[test]
+    fn native_adapters_retain_terminal_reports_until_a_fresh_attempt_after_cleanup() {
+        completed_latch(observing(false));
+        completed_latch(controlled(false));
+        unfinished_latch(observing(true));
+        unfinished_latch(controlled(true));
+    }
+    #[test]
+    fn explicit_exchange_reports_preserve_exact_effects_and_do_not_invent_revocation() {
+        use fr_wire::lease_revoked::{CleanupStage, EffectStage, Reason, Revoked};
+        let partial = fr_transport::quic::CloseOutcome {
+            request_acknowledged: true,
+            report: None,
+            transport: Err(fr_transport::quic::Error::Expired),
+        };
+        assert_eq!(explicit_terminal(Some(partial), None), None);
+        assert_eq!(
+            explicit_terminal(
+                None,
+                Some(fr_transport::ControlCloseOutcome {
+                    exchange: partial,
+                    revocation: None,
+                })
+            ),
+            None
+        );
+        let exchange = fr_transport::quic::CloseOutcome {
+            report: Some(report()),
+            ..partial
+        };
+        assert_eq!(explicit_terminal(Some(exchange), None), Some(terminal()));
+        assert_eq!(
+            explicit_terminal(
+                Some(partial),
+                Some(fr_transport::ControlCloseOutcome {
+                    exchange,
+                    revocation: None,
+                })
+            ),
+            Some(terminal())
+        );
+        let revoked = Revoked {
+            lease: fr_core::ids::InputLeaseId::from_raw(412),
+            reason: Reason::LocalRevoke,
+            cleanup: CleanupStage::Fenced,
+            effects: EffectStage::ReceiptsPending,
+        };
+        assert_eq!(
+            explicit_terminal(
+                None,
+                Some(fr_transport::ControlCloseOutcome {
+                    exchange: partial,
+                    revocation: Some(revoked),
+                })
+            ),
+            Some(ObserverError::Streaming(
+                crate::session_startup::StreamingViewerError::Control(
+                    crate::session_startup::ControlledViewerError::LeaseRevoked(revoked),
+                )
+            ))
+        );
+    }
     #[test]
     fn cleanup_is_not_success_just_because_the_clipboard_call_returned() {
         use crate::native_clipboard::Cleanup;

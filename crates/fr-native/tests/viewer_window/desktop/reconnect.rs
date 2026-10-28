@@ -19,6 +19,7 @@ struct StateLog {
     windows: Vec<fr_native::viewer_window::WindowControl>,
     workers: Vec<u32>,
     frames: usize,
+    presented: Vec<(u8, u64)>,
 }
 struct Interface {
     log: Rc<RefCell<StateLog>>,
@@ -63,10 +64,14 @@ impl Ui for Interface {
     }
     fn frame(
         &mut self,
-        _: u8,
-        _: Option<frd::session_startup::Presentation>,
+        attempt: u8,
+        frame: Option<frd::session_startup::Presentation>,
     ) -> Result<(), CallbackError> {
-        self.log.borrow_mut().frames += 1;
+        let mut log = self.log.borrow_mut();
+        log.frames += 1;
+        if let Some(frame) = frame {
+            log.presented.push((attempt, frame.frame.as_raw()));
+        }
         Ok(())
     }
     fn status(&mut self, _: Status) -> Result<(), CallbackError> {
@@ -299,6 +304,13 @@ fn decoder_image(mode: &str) -> PathBuf {
             "elif k in (4,6): reply(h,261 if k==4 else 264,b[:8])",
             "elif k in (4,6): raise SystemExit(7)",
         ),
+        // The first session configures and presents its startup IDR normally,
+        // then hangs on streamed frame 1. A fresh epoch must really be used for
+        // the next session to present that same frame with the same executable.
+        "stall-stream-700" => source.replace(
+            "elif k in (4,6): reply(h,261 if k==4 else 264,b[:8])",
+            "elif k in (4,6):\n            if int.from_bytes(h[8:24],'big') == 700 and int.from_bytes(b[:8],'big') > 0: __import__('time').sleep(60)\n            reply(h,261 if k==4 else 264,b[:8])",
+        ),
         "healthy" => source,
         _ => panic!("unknown explicit decoder fixture"),
     };
@@ -409,6 +421,33 @@ async fn start_media(
     ControlBinding,
     ControlRoutes,
 ) {
+    let StartedMedia {
+        transport,
+        source,
+        control,
+        parent,
+        routes,
+        ..
+    } = Box::pin(start_stream(q, h, routes, image, stopped, offered())).await;
+    (transport, source, control, parent, routes)
+}
+
+struct StartedMedia {
+    transport: QuicRecords,
+    source: frd::media::CaptureSource,
+    control: frd::media::ObservationControl,
+    parent: ControlBinding,
+    routes: ControlRoutes,
+    sender: frd::media_quic::QuicEgress,
+}
+async fn start_stream(
+    q: QuicRecords,
+    h: &Cx,
+    routes: ControlRoutes,
+    image: &Path,
+    stopped: Option<frd::session_startup::StreamingViewerControl>,
+    offer: Offer,
+) -> StartedMedia {
     use fr_core::{
         authority::{AuthorityPolicy, SessionAuthority},
         ids::*,
@@ -422,8 +461,9 @@ async fn start_media(
         media_egress::Lane,
         worker::Launch,
     };
-    let (mut q, routes, parent) = Box::pin(startup_peer(q, h, routes, true)).await;
-    let selection = offered().select().unwrap();
+    let selection = offer.select().unwrap();
+    let (mut q, routes, parent) =
+        Box::pin(startup_peer_with_offer(q, h, routes, true, offer)).await;
     let channels = attach_media(&mut q, h, routes, parent, &selection).await;
     let mut authority =
         SessionAuthority::new(parent.remote_session, AuthorityPolicy::plan_defaults());
@@ -473,7 +513,14 @@ async fn start_media(
         sender.transmit(h, &mut q, Lane::Original).unwrap();
         q.drive(h, Duration::from_millis(1), || true).await.unwrap();
     }
-    (q, source, control, parent, routes)
+    StartedMedia {
+        transport: q,
+        source,
+        control,
+        parent,
+        routes,
+        sender,
+    }
 }
 
 #[test]
@@ -630,3 +677,6 @@ fn incomplete_decoder(mode: &str) {
 
 #[path = "reconnect/closure.rs"]
 mod closure;
+
+#[path = "reconnect/worker_deadline.rs"]
+mod worker_deadline;

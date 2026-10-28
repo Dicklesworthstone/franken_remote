@@ -16,7 +16,11 @@ struct App {
     events: Vec<Status>,
     cleaned: usize,
     fail_cleanup: bool,
+    fail_cleaning_status: bool,
+    fail_terminal_status: bool,
     stop: Option<Cx>,
+    terminal: Option<ObserverError>,
+    terminal_reads: Cell<usize>,
 }
 impl App {
     fn new() -> Self {
@@ -24,7 +28,11 @@ impl App {
             events: vec![],
             cleaned: 0,
             fail_cleanup: false,
+            fail_cleaning_status: false,
+            fail_terminal_status: false,
             stop: None,
+            terminal: None,
+            terminal_reads: Cell::new(0),
         }
     }
 }
@@ -43,8 +51,21 @@ impl Application for App {
             Ok(())
         }
     }
+    fn terminal_failure(&self) -> Option<ObserverError> {
+        assert!(
+            self.cleaned > 0,
+            "terminal evidence read before mandatory cleanup"
+        );
+        self.terminal_reads.set(self.terminal_reads.get() + 1);
+        self.terminal
+    }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         self.events.push(status);
+        if (self.fail_terminal_status && matches!(status, Status::Stopped { .. }))
+            || (self.fail_cleaning_status && matches!(status, Status::Cleaning { .. }))
+        {
+            return Err(CallbackError);
+        }
         if matches!(status, Status::Reconnecting { .. })
             && let Some(cx) = &self.stop
         {
@@ -707,6 +728,105 @@ fn native_control_adapter_constructs_without_starting_a_session_or_request() {
         |_, _, _| Ok(()),
         |_, _| {},
         |_| Ok(()),
+    );
+}
+
+#[test]
+fn retained_terminal_evidence_is_read_after_cleanup_and_vetoes_a_retry_with_its_exact_reason() {
+    use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+    let report = Closed {
+        reason: ClosedReason::PermissionLost,
+        cleanup: Cleanup::Unconfirmed,
+        effects: OutstandingEffects::Known {
+            pending: 3,
+            uncertain: 1,
+        },
+    };
+    let terminal = ObserverError::Streaming(StreamingViewerError::Session(
+        crate::session_startup::Error::RemoteClosed(report),
+    ));
+    let rt = network::runtime();
+    rt.block_on(async {
+        for (fail_cleanup, fail_cleaning_status, fail_terminal_status) in [
+            (false, false, false),
+            (false, false, true),
+            (false, true, false),
+            (false, true, true),
+            (true, true, true),
+        ] {
+            // Existing absent-LocalAPI path exercises the real supervisor's
+            // ordering, not a fabricated authenticated session or native reap.
+            let cx = rt.request_cx_with_budget(Budget::INFINITE);
+            let mut app = App::new();
+            app.fail_cleanup = fail_cleanup;
+            app.fail_cleaning_status = fail_cleaning_status;
+            app.fail_terminal_status = fail_terminal_status;
+            app.terminal = Some(terminal);
+            let expected = if fail_cleanup {
+                Failure::Cleanup
+            } else {
+                Failure::Observation(terminal)
+            };
+            let result = client()
+                .run_observing(
+                    cx,
+                    rt.handle(),
+                    PeerSelector::StableId("absent"),
+                    Configuration::default(),
+                    offer(),
+                    quick(),
+                    &mut app,
+                )
+                .await;
+            assert_eq!(result, Err(expected));
+            assert_eq!(app.cleaned, 1);
+            assert_eq!(app.terminal_reads.get(), usize::from(!fail_cleanup));
+            assert!(
+                !app.events
+                    .iter()
+                    .any(|status| matches!(status, Status::Reconnecting { .. }))
+            );
+            assert_eq!(
+                app.events.last(),
+                Some(&Status::Stopped {
+                    attempt: 1,
+                    failure: expected
+                })
+            );
+            assert_eq!(
+                app.terminal,
+                Some(terminal),
+                "terminal effects must remain inspectable"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_completed_user_requested_close_is_not_reclassified_by_its_terminal_report() {
+    use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+    let terminal = ObserverError::Streaming(StreamingViewerError::Session(
+        crate::session_startup::Error::RemoteClosed(Closed {
+            reason: ClosedReason::ClientRequested,
+            cleanup: Cleanup::Complete,
+            effects: OutstandingEffects::Known {
+                pending: 0,
+                uncertain: 0,
+            },
+        }),
+    ));
+    let mut app = App::new();
+    app.terminal = Some(terminal);
+    let completed = Ok(());
+    // The exact selector used after production cleanup must not even query
+    // the hook for success. This is not a simulated successful connection.
+    assert_eq!(failed_attempt_terminal(&app, &completed), None);
+    assert_eq!(completed, Ok(()));
+    assert_eq!(app.terminal_reads.get(), 0);
+    assert_eq!(
+        app.terminal,
+        Some(terminal),
+        "closing evidence remains inspectable"
     );
 }
 

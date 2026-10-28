@@ -57,7 +57,7 @@ fn recovery_and_replacement_keep_the_existing_strict_transport_retry_policy() {
     }
 }
 #[test]
-fn ambiguous_recovery_closure_and_hung_native_work_do_not_trigger_new_sessions() {
+fn ambiguous_recovery_closure_and_native_failures_do_not_trigger_new_sessions() {
     for error in [
         recovery::Error::Closed,
         recovery::Error::WrongBinding,
@@ -73,7 +73,6 @@ fn ambiguous_recovery_closure_and_hung_native_work_do_not_trigger_new_sessions()
         ))));
     }
     for error in [
-        crate::worker::Error::Deadline,
         crate::worker::Error::Cancelled,
         crate::worker::Error::PeerClosed,
         crate::worker::Error::PipeFailed,
@@ -90,6 +89,56 @@ fn ambiguous_recovery_closure_and_hung_native_work_do_not_trigger_new_sessions()
         Failure::Cancelled,
     ] {
         assert!(!retryable(error));
+    }
+}
+
+#[test]
+fn only_an_established_worker_deadline_permits_fresh_viewing_after_cleanup() {
+    use crate::{media, worker};
+    use fr_media::worker::Error as Protocol;
+
+    let timed_out = media::Error::Worker(worker::Error::Deadline);
+    let failure = observation(StreamingViewerError::Media(timed_out));
+    assert!(retryable(failure));
+    assert_eq!(lapse(failure), Some(Lapse::VideoWorkerLate));
+
+    // No useful initial view or completed replacement exists in these cases.
+    // Their bounded handshake cannot be renewed by relabelling it as streaming.
+    for failure in [
+        Failure::Observation(ObserverError::Decoder(
+            media::decoder_startup::Error::Media(timed_out),
+        )),
+        observation(StreamingViewerError::Startup(
+            media::decoder_startup::Error::Media(timed_out),
+        )),
+        observation(StreamingViewerError::Startup(
+            media::decoder_startup::Error::Expired,
+        )),
+        Failure::Cleanup,
+        Failure::CleanupExpired,
+        Failure::Cancelled,
+    ] {
+        assert!(!retryable(failure), "{failure:?}");
+    }
+
+    // Codec/IPC failures are not evidence of scheduling pressure. Even a
+    // successfully reaped child cannot turn them into automatic reconnects.
+    for error in [
+        worker::Error::Cancelled,
+        worker::Error::ClockRegression,
+        worker::Error::PeerClosed,
+        worker::Error::PipeFailed,
+        worker::Error::Unavailable,
+        worker::Error::ReapPending,
+        worker::Error::Protocol(Protocol::Malformed),
+        worker::Error::WorkerRefused(Protocol::Malformed),
+    ] {
+        assert!(!retryable(observation(StreamingViewerError::Media(
+            media::Error::Worker(error),
+        ))));
+    }
+    for error in [media::Error::InvalidFrame, media::Error::Poisoned] {
+        assert!(!retryable(observation(StreamingViewerError::Media(error))));
     }
 }
 
