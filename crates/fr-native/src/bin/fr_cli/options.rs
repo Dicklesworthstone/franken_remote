@@ -104,12 +104,20 @@ pub struct Connection {
     pub audio: Option<AudioRequest>,
     /// `--send PATH` (repeatable, with `--control` only): regular files the
     /// user explicitly selected, sent in order into the host's drop directory
-    /// after control is granted. Empty selects no upload.
+    /// after control is granted. Empty selects no initial source.
     pub send: Vec<PathBuf>,
+    /// `--file-drop`: explicitly allow a first local Copy drop after control
+    /// without requiring an initial --send. Reconnect never re-enables it.
+    pub file_drop: bool,
     /// `--receive DIR`: the explicit local destination for host-selected files.
     /// This requires control and may accompany an explicit `--send` selection;
     /// neither direction is implicit.
     pub receive: Option<ReceiveOptions>,
+}
+impl Connection {
+    pub fn uploads(&self) -> bool {
+        self.file_drop || !self.send.is_empty()
+    }
 }
 /// At most this many `--send` files per connection (frd's native bound).
 pub const MAX_SENDS: usize = 8;
@@ -568,6 +576,7 @@ fn parse_command(
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
     let mut send = Vec::new();
+    let mut file_drop = false;
     let mut receive = None;
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
@@ -624,6 +633,7 @@ fn parse_command(
             "--port" if remote || doctor => port = next_port(args, &mut index)?,
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             "--send" if connect => send.push(next_path(args, &mut index)?),
+            "--file-drop" if connect => file_drop = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
             "--receive-max-file-bytes" if connect => {
                 receive_max_file_bytes = Some(receive::bytes(next_arg(args, &mut index)?)?);
@@ -677,6 +687,13 @@ fn parse_command(
             return Err(Failure::new(
                 "send_requires_control",
                 "Files are sent only on your own control lease; pass --control with --send. A view-only session never sends files.",
+                2,
+            ));
+        }
+        if file_drop && !control {
+            return Err(Failure::new(
+                "file_drop_requires_control",
+                "File drops use your original control lease; pass --control with --file-drop. A view-only session never selects or sends local files.",
                 2,
             ));
         }
@@ -734,6 +751,7 @@ fn parse_command(
                     muted: audio_muted,
                 }),
                 send,
+                file_drop,
                 receive,
             })
         }
@@ -1015,6 +1033,7 @@ mod tests {
             unreachable!("connection required");
         };
         assert_eq!(plain.send, Vec::<PathBuf>::new());
+        assert!(!plain.file_drop && !plain.uploads());
         let Command::Connect(c) = options(&format!(
             "connect {base} --control --send /home/u/a.bin --send /home/u/données.txt"
         ))
@@ -1065,6 +1084,51 @@ mod tests {
             "hosts --send /a",
         ] {
             assert_eq!(options(refused).err().unwrap().code, "invalid_arguments");
+        }
+    }
+    #[test]
+    fn file_drop_explicitly_enables_upload_without_selecting_a_source() {
+        let base = "connect n-host --experimental-native --worker /opt/fr/worker --display only";
+        for extra in ["", "--receive /private/downloads", "--audio --no-clipboard"] {
+            let Command::Connect(connection) =
+                options(&format!("{base} --control --file-drop {extra}"))
+                    .unwrap()
+                    .command
+            else {
+                unreachable!("connection required");
+            };
+            assert!(connection.file_drop && connection.uploads());
+            assert!(
+                connection.send.is_empty(),
+                "drop consent is not a selected path"
+            );
+        }
+        let Command::Connect(connection) = options(&format!(
+            "{base} --control --file-drop --send /private/initial"
+        ))
+        .unwrap()
+        .command
+        else {
+            unreachable!("connection required");
+        };
+        assert!(connection.file_drop && connection.uploads());
+        assert_eq!(connection.send, [PathBuf::from("/private/initial")]);
+        for (arguments, code) in [
+            (
+                format!("{base} --view-only --file-drop"),
+                "file_drop_requires_control",
+            ),
+            (
+                format!("{base} --control --file-drop --file-drop"),
+                "invalid_arguments",
+            ),
+            (
+                "displays n-host --experimental-native --file-drop".to_owned(),
+                "invalid_arguments",
+            ),
+            ("hosts --file-drop".to_owned(), "invalid_arguments"),
+        ] {
+            assert_eq!(options(&arguments).err().unwrap().code, code, "{arguments}");
         }
     }
     #[test]

@@ -498,12 +498,18 @@ impl StreamingViewer {
     }
     /// Hand ONE attempt's explicit selection to the controller's drop lane,
     /// once, before service. Typed absence unless this session selected the
-    /// lane (host `--files`, no clipboard). Nothing opens or reads now: the
+    /// lane (host `--files`). Nothing opens or reads now: the
     /// expectation is set on the first controlled turn and the batch starts
     /// only on the established lane.
     pub(crate) fn configure_file_send(
         &mut self,
         request: crate::native_files::SendRequest,
+    ) -> Result<crate::native_files::SendControl, crate::native_files::Absence> {
+        self.configure_file_source(Some(request))
+    }
+    fn configure_file_source(
+        &mut self,
+        request: Option<crate::native_files::SendRequest>,
     ) -> Result<crate::native_files::SendControl, crate::native_files::Absence> {
         use crate::native_files::Absence;
         if self.served || self.files.as_ref().is_some_and(files::Lane::has_send) {
@@ -518,9 +524,11 @@ impl StreamingViewer {
             return Err(Absence::NotNegotiated);
         }
         let control = crate::native_files::SendControl::new();
-        self.files
-            .get_or_insert_with(files::Lane::default)
-            .add_send(request, control.clone())?;
+        let lane = self.files.get_or_insert_with(files::Lane::default);
+        match request {
+            Some(request) => lane.add_send(request, control.clone())?,
+            None => lane.add_deferred_send(control.clone())?,
+        }
         Ok(control)
     }
     pub(crate) fn configure_file_send_with_intake(
@@ -535,6 +543,34 @@ impl StreamingViewer {
     > {
         let policy = request.policy;
         let control = self.configure_file_send(request)?;
+        self.attach_file_intake(control, policy)
+    }
+    /// Explicitly enable an upload lane without selecting a source. Only a
+    /// later local selection can start the original, authorized ATP sender.
+    pub(crate) fn configure_file_drop(
+        &mut self,
+    ) -> Result<
+        (
+            crate::native_files::SendControl,
+            crate::native_files::SendIntake,
+        ),
+        crate::native_files::Absence,
+    > {
+        let policy = fr_files::sender::Policy::default();
+        let control = self.configure_file_source(None)?;
+        self.attach_file_intake(control, policy)
+    }
+    fn attach_file_intake(
+        &mut self,
+        control: crate::native_files::SendControl,
+        policy: fr_files::sender::Policy,
+    ) -> Result<
+        (
+            crate::native_files::SendControl,
+            crate::native_files::SendIntake,
+        ),
+        crate::native_files::Absence,
+    > {
         let (session, _) = self
             .peer
             .parts()

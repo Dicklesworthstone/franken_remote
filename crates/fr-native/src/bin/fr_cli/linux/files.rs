@@ -1,4 +1,4 @@
-//! `fr connect --control --send PATH...`: the local half of the drop lane.
+//! `fr connect --control --send PATH...|--file-drop`: the local upload owner.
 //!
 //! Every path is classified by type BEFORE any network I/O: symbolic links
 //! and special files refuse (typed, by 1-based position, never by name).
@@ -37,7 +37,7 @@ pub(super) fn offer(clipboard: bool, send: bool) -> fr_wire::negotiation::Offer 
 
 /// The explicit selection and the current attempt's content-free handle.
 pub(super) struct Local {
-    selection: Selection,
+    selection: Option<Selection>,
     sizes: Vec<Option<u64>>,
     attempt: Option<Attempt>,
 }
@@ -49,10 +49,15 @@ enum Attempt {
     Absent(&'static str),
 }
 
-/// `None` without `--send`. Refusals name the argument position only.
-pub(super) fn select(paths: &[PathBuf]) -> Result<Option<Local>, Failure> {
+/// Deferred drops have no selected path or descriptor before connection.
+/// `None` without either opt-in. Refusals name the argument position only.
+pub(super) fn select(paths: &[PathBuf], file_drop: bool) -> Result<Option<Local>, Failure> {
     if paths.is_empty() {
-        return Ok(None);
+        return Ok(file_drop.then(|| Local {
+            selection: None,
+            sizes: Vec::new(),
+            attempt: None,
+        }));
     }
     let selection = Selection::select(paths).map_err(|refusal| {
         let what = match refusal.reason {
@@ -87,7 +92,7 @@ pub(super) fn select(paths: &[PathBuf]) -> Result<Option<Local>, Failure> {
     })?;
     let sizes = selection.sizes().collect();
     Ok(Some(Local {
-        selection,
+        selection: Some(selection),
         sizes,
         attempt: None,
     }))
@@ -100,18 +105,36 @@ impl Local {
         // ready invokes this only before the original control decision is
         // spent. A pre-request startup retry still needs fresh descriptors;
         // later viewing/explicit-control attempts retain the original result.
-        self.attempt = Some(match self.selection.request() {
-            Err(_) => Attempt::Absent("local_selection_unavailable"),
-            Ok(request) => match desktop.configure_file_send_with_intake(request) {
-                Ok((control, _intake)) => Attempt::Configured {
-                    control,
-                    // The initial selection was accepted independently of
-                    // this optional UI; a failure cannot undo or replay it.
-                    drops: desktop.enable_file_drops().ok(),
-                },
-                Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
-                Err(_) => Attempt::Absent("files_unavailable"),
+        let configured = match &self.selection {
+            Some(selection) => match selection.request() {
+                Ok(request) => desktop.configure_file_send_with_intake(request),
+                Err(_) => {
+                    self.attempt = Some(Attempt::Absent("local_selection_unavailable"));
+                    return;
+                }
             },
+            None => desktop.configure_file_drop(),
+        };
+        self.attempt = Some(match configured {
+            Ok((control, _intake)) => match desktop.enable_file_drops() {
+                Ok(drops) => Attempt::Configured {
+                    control,
+                    drops: Some(drops),
+                },
+                Err(_) if self.selection.is_none() => {
+                    // An explicitly requested drop-only surface must report
+                    // absence, not silently leave a permanently empty lane.
+                    // Settle the agreed attachment, then stop it independently.
+                    control.cancel();
+                    Attempt::Absent("file_drop_unavailable")
+                }
+                Err(_) => Attempt::Configured {
+                    control,
+                    drops: None,
+                },
+            },
+            Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
+            Err(_) => Attempt::Absent("files_unavailable"),
         });
     }
     pub(super) fn summary(&self) -> Summary {
@@ -127,6 +150,9 @@ impl Local {
             for batch in drops.batches() {
                 out.append_dropped(&batch);
             }
+        }
+        if out.requested != 0 && out.absence == Some("no_files_selected") {
+            out.absence = None;
         }
         out
     }
@@ -202,6 +228,11 @@ fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> 
         Ok(status) => {
             let absence = match (status.absence, status.phase) {
                 (Some(absence), _) => absence_code(absence),
+                (None, SendPhase::WaitingForSelection | SendPhase::SelectionAccepted)
+                    if sizes.is_empty() =>
+                {
+                    "no_files_selected"
+                }
                 (None, SendPhase::WaitingForControl) => "control_not_granted",
                 (None, SendPhase::Negotiating) => "files_setup_incomplete",
                 (None, _) => "files_not_started",
@@ -321,6 +352,9 @@ impl Summary {
             if absence == "not_requested" {
                 return String::new();
             }
+            if absence == "no_files_selected" {
+                return " Files: no files selected.".to_owned();
+            }
             return format!(" Files absent: {absence} (nothing sent).");
         }
         let mut text = format!(
@@ -344,6 +378,42 @@ mod repeated_tests;
 mod tests {
     use super::*;
     use frd::native_files::SendStatus;
+    #[test]
+    fn deferred_upload_has_no_initial_selection_or_fabricated_file_result() {
+        assert!(select(&[], false).unwrap().is_none());
+        let local = select(&[], true).unwrap().unwrap();
+        assert!(local.selection.is_none());
+        assert!(local.sizes.is_empty());
+        assert_eq!(local.summary().requested, 0);
+        assert!(local.summary().sent.is_empty());
+        assert!(local.summary().refused.is_empty());
+        assert_eq!(local.summary().absence, Some("files_not_started"));
+        let empty = summary(
+            &[],
+            Ok(&SendStatus {
+                phase: SendPhase::WaitingForSelection,
+                absence: None,
+                report: None,
+            }),
+        );
+        assert_eq!(empty.text(), " Files: no files selected.");
+        let json: serde_json::Value =
+            serde_json::from_str(&format!("{{\"outcome\":\"success\"{}}}", empty.json())).unwrap();
+        assert_eq!(json["files_requested"], 0);
+        assert_eq!(json["files_sent"], serde_json::json!([]));
+        assert_eq!(json["files_absence"], "no_files_selected");
+        let refused = summary(
+            &[],
+            Ok(&SendStatus {
+                phase: SendPhase::Ended,
+                absence: Some(Absence::NotNegotiated),
+                report: None,
+            }),
+        );
+        assert_eq!(refused.absence, Some("host_files_unavailable"));
+        assert_eq!(refused.requested, 0);
+        assert!(refused.sent.is_empty() && refused.refused.is_empty());
+    }
     #[test]
     fn absence_accounts_for_every_index_without_names() {
         let sizes = [Some(10), Some(0), Some(7)];
@@ -442,15 +512,19 @@ mod tests {
         std::fs::write(&chosen, b"x").unwrap();
         let alias = dir.join("private-alias");
         std::os::unix::fs::symlink(&dir, &alias).unwrap();
-        let failure = select(&[chosen.clone(), alias.clone()]).err().unwrap();
+        let failure = select(&[chosen.clone(), alias.clone()], false)
+            .err()
+            .unwrap();
         assert_eq!(failure.code, "send_symlink");
         assert!(failure.next.starts_with("--send #2 is a symbolic link"));
         assert!(!failure.next.contains("chosen") && !failure.next.contains("fr-cli-send"));
-        assert!(select(&[]).unwrap().is_none());
-        let local = select(std::slice::from_ref(&chosen)).unwrap().unwrap();
+        assert!(select(&[], false).unwrap().is_none());
+        let local = select(std::slice::from_ref(&chosen), false)
+            .unwrap()
+            .unwrap();
         assert_eq!(local.sizes, [Some(1)]);
         assert_eq!(local.summary().absence, Some("files_not_started"));
-        let tree = select(std::slice::from_ref(&dir)).unwrap().unwrap();
+        let tree = select(std::slice::from_ref(&dir), false).unwrap().unwrap();
         assert_eq!(tree.sizes, [None]);
         let json = format!("{{{}}}", tree.summary().json().trim_start_matches(','));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();

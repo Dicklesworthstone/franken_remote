@@ -76,7 +76,10 @@ impl SendControl {
     pub fn cancel(&self) -> bool {
         let mut state = self.lock();
         if state.cancel_requested
-            || matches!(state.status.phase, SendPhase::Finished | SendPhase::Ended)
+            || matches!(
+                state.status.phase,
+                SendPhase::SelectionAccepted | SendPhase::Finished | SendPhase::Ended
+            )
         {
             return false;
         }
@@ -98,7 +101,13 @@ impl SendControl {
     fn set_paused(&self, paused: bool) -> bool {
         let mut state = self.lock();
         if state.cancel_requested
-            || matches!(state.status.phase, SendPhase::Finished | SendPhase::Ended)
+            || matches!(
+                state.status.phase,
+                SendPhase::WaitingForSelection
+                    | SendPhase::SelectionAccepted
+                    | SendPhase::Finished
+                    | SendPhase::Ended
+            )
             || state.pause_requested == paused
         {
             return false;
@@ -114,6 +123,17 @@ impl SendControl {
     }
     pub(crate) fn update(&self, change: impl FnOnce(&mut SendStatus)) {
         change(&mut self.lock().status);
+    }
+    /// Linearize the empty setup handle's retirement against its Cancel button.
+    /// A successful cancellation cannot disappear while the first selection is
+    /// handed to a new owner; after handoff the old handle is terminal.
+    pub(crate) fn accept_selection(&self) -> bool {
+        let mut state = self.lock();
+        if state.cancel_requested || state.status.phase != SendPhase::WaitingForSelection {
+            return false;
+        }
+        state.status.phase = SendPhase::SelectionAccepted;
+        true
     }
     pub(crate) fn end(&self, absence: Absence) {
         self.update(|status| {

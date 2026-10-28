@@ -32,10 +32,19 @@ impl Lane {
         request: SendRequest,
         control: SendControl,
     ) -> Result<(), Absence> {
+        self.install(Sending::new(request, control))
+    }
+    pub(in crate::session_startup) fn add_deferred_send(
+        &mut self,
+        control: SendControl,
+    ) -> Result<(), Absence> {
+        self.install(Sending::deferred(Policy::default(), control))
+    }
+    fn install(&mut self, sending: Sending) -> Result<(), Absence> {
         if self.send.is_some() {
             return Err(Absence::Unavailable);
         }
-        self.send = Some(Box::new(Sending::new(request, control)));
+        self.send = Some(Box::new(sending));
         Ok(())
     }
     pub(in crate::session_startup) fn set_intake(&mut self, intake: SendIntake) {
@@ -96,6 +105,8 @@ pub(in crate::session_startup) struct Sending {
     cancelled: bool,
     intake: Option<SendIntake>,
     original_deadline: Option<u64>,
+    /// An explicit empty-source configuration, never an empty ATP batch.
+    deferred: bool,
 }
 impl Sending {
     pub(in crate::session_startup) fn new(request: SendRequest, control: SendControl) -> Self {
@@ -107,6 +118,20 @@ impl Sending {
             cancelled: false,
             intake: None,
             original_deadline: None,
+            deferred: false,
+        }
+    }
+    fn deferred(policy: Policy, control: SendControl) -> Self {
+        control.update(|status| status.phase = SendPhase::WaitingForSelection);
+        Self {
+            request: None,
+            policy,
+            control,
+            expecting: false,
+            cancelled: false,
+            intake: None,
+            original_deadline: None,
+            deferred: true,
         }
     }
     /// No source read, blocking join, alternate transport pump or renewed grant.
@@ -123,8 +148,10 @@ impl Sending {
             match viewer.expect(self.policy) {
                 Ok(()) => {
                     self.expecting = true;
-                    self.control
-                        .update(|status| status.phase = SendPhase::Negotiating);
+                    if !self.deferred {
+                        self.control
+                            .update(|status| status.phase = SendPhase::Negotiating);
+                    }
                 }
                 // Nothing was spent on a momentarily stale view: retry only
                 // this unstarted expectation, not the source or a sent record.
@@ -161,6 +188,17 @@ impl Sending {
             {
                 self.control.end(Absence::Refused(Error::Cancelled));
             }
+            return;
+        }
+        if self.deferred && viewer.stage() != Some(Stage::Idle) {
+            // The optional attachment still has a fixed setup deadline. No
+            // selected source is needed to surface its refusal and retire the
+            // original intake; a failed setup must not appear ready forever.
+            self.close_intake();
+            self.control.end(Absence::SetupFailed(
+                viewer.failure().unwrap_or(Error::Closed),
+            ));
+            self.poll_cleanup(viewer);
             return;
         }
         if let Some(request) = self.request.take() {
@@ -251,6 +289,20 @@ impl Sending {
             return;
         }
         if let Some(pending) = intake.take() {
+            if self.deferred {
+                // A concurrent setup cancellation and the first handoff have
+                // one winner. The already-taken request must receive its own
+                // terminal result if cancellation won; close cannot see it.
+                if !self.control.accept_selection() {
+                    pending.control.end(Absence::Refused(Error::Cancelled));
+                    pending.control.cleaned(Some(Ok(())));
+                    self.close_intake();
+                    return;
+                }
+                // The setup handle never acquires authority over a later
+                // selection, and no empty batch/publication is fabricated.
+                self.deferred = false;
+            }
             self.control = pending.control;
             self.request = Some(pending.request);
             self.original_deadline = Some(pending.until_us);

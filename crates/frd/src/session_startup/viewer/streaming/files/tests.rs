@@ -16,6 +16,7 @@ struct Peer {
     expectations: usize,
     cancels: usize,
     polls: usize,
+    cancel_on_ready: Option<SendControl>,
 }
 impl Default for Peer {
     fn default() -> Self {
@@ -30,6 +31,7 @@ impl Default for Peer {
             expectations: 0,
             cancels: 0,
             polls: 0,
+            cancel_on_ready: None,
         }
     }
 }
@@ -60,6 +62,12 @@ impl Endpoint for Peer {
         self.starts += 1;
         self.stage = Some(Stage::Queued);
         Ok(())
+    }
+    fn can_start(&mut self) -> bool {
+        if let Some(control) = self.cancel_on_ready.take() {
+            assert!(control.cancel(), "the setup owner has not handed off yet");
+        }
+        !self.closed && self.stage == Some(Stage::Idle)
     }
     fn cancel(&mut self) -> Result<(), Error> {
         assert!(
@@ -275,4 +283,140 @@ fn sender_failure_cleanup_is_polled_even_without_a_user_cancel() {
     assert_eq!(control.snapshot().cleanup, Some(Err(Error::Worker)));
     assert_ne!(control.status().phase, SendPhase::Finished);
     assert!(!peer.closed);
+}
+
+#[test]
+fn deferred_selection_settles_one_attachment_without_starting_an_empty_batch() {
+    let control = SendControl::new();
+    let mut lane = Lane::deferred(Policy::default(), control.clone());
+    let mut peer = Peer::default();
+    assert!(lane.request.is_none());
+    assert!(!control.pause() && !control.resume());
+    lane.viewer(&mut peer);
+    for _ in 0..4 {
+        lane.viewer(&mut peer);
+    }
+    assert_eq!(peer.expectations, 1);
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.polls, 0, "a pending attachment is not a disk owner");
+    peer.negotiating = false;
+    peer.stage = Some(Stage::Idle);
+    for _ in 0..4 {
+        lane.viewer(&mut peer);
+    }
+    assert_eq!(peer.expectations, 1);
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.cancels, 0);
+    assert_eq!(control.status().phase, SendPhase::WaitingForSelection);
+    assert!(control.status().report.is_none());
+    assert!(control.snapshot().current.is_none());
+    assert!(!peer.closed);
+}
+
+#[test]
+fn cancelling_an_empty_selection_settles_the_original_attachment_then_retires_it() {
+    for cancel_before_offer in [true, false] {
+        let control = SendControl::new();
+        let mut lane = Lane::deferred(Policy::default(), control.clone());
+        let mut peer = Peer::default();
+        if cancel_before_offer {
+            assert!(control.cancel());
+        }
+        lane.viewer(&mut peer);
+        if !cancel_before_offer {
+            assert!(control.cancel());
+        }
+        lane.viewer(&mut peer);
+        assert_eq!(peer.expectations, 1);
+        assert_eq!(peer.starts, 0);
+        assert_eq!(peer.cancels, 0, "do not abandon a half-attached lane");
+        peer.negotiating = false;
+        peer.stage = Some(Stage::Idle);
+        peer.cleanup = Some(Ok(()));
+        for _ in 0..4 {
+            lane.viewer(&mut peer);
+        }
+        assert_eq!(peer.expectations, 1);
+        assert_eq!(peer.cancels, 1);
+        assert_eq!(peer.starts, 0);
+        assert_eq!(control.status().phase, SendPhase::Ended);
+        assert_eq!(
+            control.status().absence,
+            Some(Absence::Refused(Error::Cancelled))
+        );
+        assert_eq!(control.snapshot().cleanup, Some(Ok(())));
+        assert!(control.status().report.is_none());
+        assert!(
+            !peer.closed,
+            "file cancellation leaves the desktop owner live"
+        );
+    }
+}
+
+#[test]
+fn failed_deferred_attachment_does_not_wait_forever_for_a_selection() {
+    for stage in [None, Some(Stage::Closed)] {
+        let control = SendControl::new();
+        let mut lane = Lane::deferred(Policy::default(), control.clone());
+        let mut peer = Peer::default();
+        lane.viewer(&mut peer);
+        peer.negotiating = false;
+        peer.stage = stage;
+        peer.cleanup = Some(Ok(()));
+        for _ in 0..4 {
+            lane.viewer(&mut peer);
+        }
+        assert_eq!(peer.expectations, 1);
+        assert_eq!(peer.starts, 0);
+        assert_eq!(control.status().phase, SendPhase::Ended);
+        assert_eq!(
+            control.status().absence,
+            Some(Absence::SetupFailed(Error::Closed))
+        );
+        assert!(control.status().report.is_none());
+        assert!(!control.cancel() && !control.pause() && !control.resume());
+        assert!(!peer.closed);
+    }
+}
+
+#[test]
+fn cancelling_between_readiness_check_and_selection_handoff_cannot_start_a_source() {
+    use asupersync::{runtime::RuntimeBuilder, types::Budget};
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let control = SendControl::new();
+    let intake = SendIntake::new(cx, Policy::default());
+    let mut deferred = Lane::deferred(Policy::default(), control.clone());
+    deferred.intake = Some(intake.clone());
+    let mut peer = Peer::default();
+    established(&mut deferred, &mut peer);
+    deferred.viewer(&mut peer);
+    assert!(intake.ready());
+    let (mut selection, _) = lane();
+    let pending = intake.submit(selection.request.take().unwrap()).unwrap();
+    // Interpose after the lane's first cancel check but before the actual
+    // selection handoff, using the real setup and per-selection controls.
+    peer.cancel_on_ready = Some(control.clone());
+    peer.cleanup = Some(Ok(()));
+    deferred.viewer(&mut peer);
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.cancels, 1);
+    assert!(intake.is_closed());
+    assert!(!intake.ready());
+    assert!(deferred.request.is_none());
+    assert_eq!(pending.status().phase, SendPhase::Ended);
+    assert_eq!(
+        pending.status().absence,
+        Some(Absence::Refused(Error::Cancelled))
+    );
+    assert_eq!(pending.snapshot().cleanup, Some(Ok(())));
+    assert!(pending.status().report.is_none());
+    assert_eq!(control.status().phase, SendPhase::Ended);
+    assert!(
+        !peer.closed,
+        "the cancelled optional upload cannot stop the desktop"
+    );
+    deferred.viewer(&mut peer);
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.cancels, 1);
 }

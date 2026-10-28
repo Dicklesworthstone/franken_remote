@@ -16,8 +16,34 @@ impl Batch {
     }
 }
 impl UploadStatus for Batch {
-    fn finished(&self) -> bool {
+    fn replaceable(&self) -> bool {
         self.finished.load(Ordering::Acquire)
+    }
+}
+
+#[test]
+fn deferred_setup_can_hand_off_its_panel_without_inventing_a_completed_batch() {
+    let mut sample = snapshot();
+    for phase in [
+        SendPhase::WaitingForControl,
+        SendPhase::Negotiating,
+        SendPhase::WaitingForSelection,
+        SendPhase::SelectionAccepted,
+        SendPhase::Sending,
+        SendPhase::Finished,
+        SendPhase::Ended,
+    ] {
+        for cancelled in [false, true] {
+            sample.status.phase = phase;
+            sample.cancel_requested = cancelled;
+            assert_eq!(
+                upload_replaceable(&sample),
+                matches!(phase, SendPhase::Finished | SendPhase::SelectionAccepted)
+                    || (phase == SendPhase::WaitingForSelection && !cancelled)
+            );
+            assert!(sample.status.report.is_none());
+            assert!(sample.current.is_none());
+        }
     }
 }
 
@@ -115,11 +141,21 @@ impl Target for ReplacementTarget {
 
 #[test]
 fn replacement_destroys_the_old_window_before_new_clicks_can_select_new_work() {
+    replaces_original_window(SendPhase::WaitingForControl, SendPhase::Finished);
+}
+
+#[test]
+fn first_drop_replaces_the_empty_setup_window_without_retargeting_its_cancel() {
+    replaces_original_window(SendPhase::WaitingForSelection, SendPhase::SelectionAccepted);
+}
+
+fn replaces_original_window(initial: SendPhase, replacement: SendPhase) {
     let _serial = SERIAL.lock().unwrap();
     let Some((mut peer, display)) = Peer::new() else {
         return;
     };
     let original = Arc::new(Probe::new());
+    original.sample.lock().unwrap().status.phase = initial;
     let next = Arc::new(Probe::new());
     let pending = Arc::new(AtomicBool::new(false));
     let state = Arc::new(AtomicU8::new(0));
@@ -155,7 +191,9 @@ fn replacement_destroys_the_old_window_before_new_clicks_can_select_new_work() {
     wait(|| original.stalled.load(Ordering::Acquire));
     peer.command("click pause");
     peer.command("press cancel");
-    original.sample.lock().unwrap().status.phase = SendPhase::Finished;
+    original.sample.lock().unwrap().status.phase = replacement;
+    assert!(original.sample().status.report.is_none());
+    assert!(original.sample().current.is_none());
     pending.store(true, Ordering::Release);
     original.stall.store(false, Ordering::Release);
     old_cleanup.recv_timeout(Duration::from_secs(3)).unwrap();

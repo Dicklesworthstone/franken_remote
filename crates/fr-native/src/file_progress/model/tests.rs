@@ -85,6 +85,8 @@ fn cancellation_and_all_terminal_phases_disable_every_command() {
     for phase in [
         SendPhase::WaitingForControl,
         SendPhase::Negotiating,
+        SendPhase::WaitingForSelection,
+        SendPhase::SelectionAccepted,
         SendPhase::Sending,
         SendPhase::Finished,
         SendPhase::Ended,
@@ -95,10 +97,46 @@ fn cancellation_and_all_terminal_phases_disable_every_command() {
             s.cancel_requested = cancelled;
             assert_eq!(
                 Frame::new(&s).actions == 0,
-                cancelled || matches!(phase, SendPhase::Finished | SendPhase::Ended)
+                cancelled
+                    || matches!(
+                        phase,
+                        SendPhase::SelectionAccepted | SendPhase::Finished | SendPhase::Ended
+                    )
             );
         }
     }
+}
+#[test]
+fn waiting_for_a_first_drop_exposes_only_cancel_and_no_transfer_evidence() {
+    let mut sample = snapshot();
+    sample.status.phase = SendPhase::WaitingForSelection;
+    for stage in [None, Some(Stage::Idle)] {
+        sample.stage = stage;
+        let frame = Frame::new(&sample);
+        assert_eq!(frame.progress, -1);
+        assert!(frame.permits(Action::Cancel));
+        assert!(!frame.permits(Action::Pause));
+        assert!(!frame.permits(Action::Resume));
+        assert!(text(&frame.lines[0]).starts_with(if stage.is_some() {
+            "Ready to send files"
+        } else {
+            "Waiting for host file sharing"
+        }));
+        assert!(text(&frame.lines[2]).contains("Only the items you drop will be sent"));
+        assert!(
+            frame
+                .lines
+                .iter()
+                .all(|row| !text(row).starts_with("Status exceeds"))
+        );
+    }
+    sample.cancel_requested = true;
+    let frame = Frame::new(&sample);
+    assert_eq!(frame.actions, 0);
+    assert!(text(&frame.lines[0]).starts_with("Stopping file drops"));
+    sample.cancel_requested = false;
+    sample.status.phase = SendPhase::SelectionAccepted;
+    assert_eq!(Frame::new(&sample).actions, 0);
 }
 #[test]
 fn every_sender_stage_is_rendered_without_changing_authority() {

@@ -194,12 +194,18 @@ fn stop(state: &AtomicU8, reason: StopReason) {
     });
 }
 trait UploadStatus: Clone {
-    fn finished(&self) -> bool;
+    fn replaceable(&self) -> bool;
 }
 impl UploadStatus for SendControl {
-    fn finished(&self) -> bool {
-        self.status().phase == SendPhase::Finished
+    fn replaceable(&self) -> bool {
+        upload_replaceable(&self.snapshot())
     }
+}
+fn upload_replaceable(snapshot: &SendSnapshot) -> bool {
+    matches!(
+        snapshot.status.phase,
+        SendPhase::Finished | SendPhase::SelectionAccepted
+    ) || (snapshot.status.phase == SendPhase::WaitingForSelection && !snapshot.cancel_requested)
 }
 /// One current selection and at most one already-admitted successor. The native
 /// thread consumes the successor only AFTER destroying the old native window.
@@ -209,7 +215,7 @@ struct UploadSwap<T = SendControl> {
 }
 impl<T: UploadStatus> UploadSwap<T> {
     fn queue(&mut self, state: &AtomicU8, next: T) -> bool {
-        if !self.current.finished() || self.pending.is_some() {
+        if !self.current.replaceable() || self.pending.is_some() {
             return false;
         }
         // Linearize against hide/failure without reopening any terminal panel.
@@ -256,7 +262,7 @@ impl Control {
         self.stop(StopReason::Hidden);
     }
     /// The selection already belongs to the original SendIntake. This only
-    /// replaces a finished upload's UI, without starting work or retargeting
+    /// replaces a completed upload or empty-source setup UI, without starting work or retargeting
     /// native events queued against its old window. Hidden/failed panels stay
     /// terminal, and only one replacement may wait for native cleanup.
     pub(crate) fn replace_upload(&self, source: SendControl) -> bool {

@@ -351,7 +351,7 @@ impl Desktop {
         &mut self,
         request: frd::native_files::SendRequest,
     ) -> Result<frd::native_files::SendControl, Error> {
-        self.configure_file_send_inner(request, false)
+        self.configure_file_send_inner(Some(request), false)
             .map(|(control, _)| control)
     }
     /// Keep the original negotiated upload available for later explicit local
@@ -367,12 +367,27 @@ impl Desktop {
         ),
         Error,
     > {
-        self.configure_file_send_inner(request, true)
+        self.configure_file_send_inner(Some(request), true)
+            .map(|(control, intake)| (control, intake.expect("requested original intake")))
+    }
+    /// Explicitly prepare file drops without an initial `--send` selection.
+    /// No source is opened or read until the user supplies a local Copy drop.
+    /// The original control grant and host upload attachment still gate intake.
+    pub fn configure_file_drop(
+        &mut self,
+    ) -> Result<
+        (
+            frd::native_files::SendControl,
+            frd::native_files::SendIntake,
+        ),
+        Error,
+    > {
+        self.configure_file_send_inner(None, true)
             .map(|(control, intake)| (control, intake.expect("requested original intake")))
     }
     fn configure_file_send_inner(
         &mut self,
-        request: frd::native_files::SendRequest,
+        request: Option<frd::native_files::SendRequest>,
         repeated: bool,
     ) -> Result<
         (
@@ -390,24 +405,32 @@ impl Desktop {
             first_reserves_clipboard: self.first_file_panel_reserves_clipboard,
         };
         let observer = self.observer.as_mut().ok_or(Error::NotViewing)?;
-        let (controls, intake) = if repeated {
-            let (control, intake) = observer
-                .configure_file_send_with_intake(request)
-                .map_err(Error::Files)?;
-            (control, Some(intake))
-        } else {
-            (
+        let initial_selection = request.is_some();
+        let (controls, intake) = match request {
+            Some(request) if repeated => {
+                let (control, intake) = observer
+                    .configure_file_send_with_intake(request)
+                    .map_err(Error::Files)?;
+                (control, Some(intake))
+            }
+            Some(request) => (
                 observer
                     .configure_file_send(request)
                     .map_err(Error::Files)?,
                 None,
-            )
+            ),
+            None => {
+                let (control, intake) = observer.configure_file_drop().map_err(Error::Files)?;
+                (control, Some(intake))
+            }
         };
         let session = observer.control();
         if !placement.secondary {
             self.first_file_panel_reserves_clipboard = placement.clipboard;
         }
-        self.file_controls = Some(controls.clone());
+        // Keyboard shortcuts belong only to a concrete initial --send batch.
+        // Deferred and later selections use their own panel controls.
+        self.file_controls = initial_selection.then(|| controls.clone());
         self.file_intake = intake.clone();
         // The original observer accepted the selection once BEFORE optional UI.
         // No peer XID, alternative session, source read or permission is created.
@@ -427,7 +450,7 @@ impl Desktop {
         self.file_progress = Some(panel);
         Ok((controls, intake))
     }
-    /// Enable copy-only local file drops after a successful initial selection.
+    /// Enable copy-only local file drops on an explicitly configured upload.
     /// The original intake and native window are taken from THIS Desktop; no
     /// caller can attach another desktop's file lane. Each later selection gets
     /// separate progress controls and remains subject to the original grant.

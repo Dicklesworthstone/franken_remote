@@ -389,6 +389,12 @@ pub enum SendPhase {
     WaitingForControl,
     /// The drop expectation is set; the host's one-use offer is pending.
     Negotiating,
+    /// No source was selected. The original lane must be ready before an
+    /// explicit local drop can supply the first bounded selection.
+    WaitingForSelection,
+    /// An empty-source configuration handed off to the first explicit batch.
+    /// That batch owns its own controls and receipts; this handle is terminal.
+    SelectionAccepted,
     /// The lane is up and the selection was handed to the batch sender.
     Sending,
     /// The batch report is complete (sources joined), whatever its outcome.

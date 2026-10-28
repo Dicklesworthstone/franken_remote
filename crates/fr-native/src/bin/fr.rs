@@ -68,7 +68,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
     [--capture-system-shortcuts]
-    [--send /absolute/file-or-directory]... [--receive /absolute/private-directory]
+    [--send /absolute/file-or-directory]... [--file-drop] [--receive /absolute/private-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
@@ -150,6 +150,13 @@ limits. Wait for each batch to finish before dropping more. Only local file URIs
 and the Copy action are accepted; remote URLs and Move actions are refused.
 Each new batch gets fresh progress buttons. Hiding the panel stops future drops
 without cancelling an accepted upload; no drop is replayed after reconnect.
+Use --file-drop with --control to enable Copy drops without an initial --send.
+Wait for Ready to send files in the upload panel, then drag files or folders
+from your file manager into the remote desktop. Only items you drop are sent.
+The host still needs --files DIR. Close the panel to stop accepting new drops;
+Cancel before the first drop stops file sharing. The desktop stays connected.
+Unavailable native drop controls report file_drop_unavailable. Reconnecting
+never repeats a selection or re-enables drops on a new connection.
 While controlling a configured --send selection, physical Ctrl+Alt+Shift+F8
 requests pause, F9 requests resume, and F10 cancels that upload selection only.
 Keep the viewer focused. Release the function key between requests. Its press,

@@ -107,8 +107,14 @@ impl Frame {
         frame
     }
     pub(super) fn new(s: &SendSnapshot) -> Self {
+        if s.status.phase == SendPhase::WaitingForSelection {
+            return Self::waiting_for_selection(s);
+        }
         let active = !s.cancel_requested
-            && !matches!(s.status.phase, SendPhase::Finished | SendPhase::Ended)
+            && !matches!(
+                s.status.phase,
+                SendPhase::SelectionAccepted | SendPhase::Finished | SendPhase::Ended
+            )
             && s.status
                 .report
                 .is_none_or(|r| !r.complete && r.stop.is_none());
@@ -202,6 +208,42 @@ impl Frame {
         ));
         f
     }
+    fn waiting_for_selection(s: &SendSnapshot) -> Self {
+        let mut frame = Self {
+            lines: [[0; COLUMNS]; ROWS],
+            progress: -1,
+            actions: if s.cancel_requested {
+                0
+            } else {
+                Action::Cancel as u32
+            },
+        };
+        frame.lines[0] = line(format_args!(
+            "{}",
+            if s.cancel_requested {
+                "Stopping file drops; no file has been selected"
+            } else if s.stage == Some(Stage::Idle) {
+                "Ready to send files"
+            } else {
+                "Waiting for host file sharing"
+            }
+        ));
+        frame.lines[1] = line(format_args!(
+            "Drag files or folders from your file manager into the remote desktop."
+        ));
+        frame.lines[2] = line(format_args!("Only the items you drop will be sent."));
+        frame.lines[3] = line(format_args!(
+            "Up to 8 items per drop; wait for each transfer to finish."
+        ));
+        frame.lines[4] = line(format_args!(
+            "Close this panel to stop accepting new drops."
+        ));
+        frame.lines[5] = line(format_args!(
+            "Cancel stops file sharing; the remote desktop stays connected."
+        ));
+        frame.lines[6] = line(format_args!("Progress appears here after selection."));
+        frame
+    }
     pub(super) fn permits(&self, action: Action) -> bool {
         self.actions & action as u32 != 0
     }
@@ -211,6 +253,8 @@ fn phase(s: &SendSnapshot) -> &'static str {
     match s.status.phase {
         SendPhase::WaitingForControl => "Waiting for control; no source started",
         SendPhase::Negotiating => "Negotiating the original file lane",
+        SendPhase::WaitingForSelection => "Waiting for an explicit local selection",
+        SendPhase::SelectionAccepted => "Files selected; opening transfer progress",
         SendPhase::Finished => "Selection finished; outcomes are reported below",
         SendPhase::Ended => "File lane ended or unavailable; no retry",
         SendPhase::Sending => match s.stage {

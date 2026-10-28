@@ -81,6 +81,13 @@ Host options:
 ./target/release/fr connect NODE_ID --control --clipboard --experimental-native --display only --json
 ```
 
+To choose uploads after connecting, add `--file-drop` to the control command
+and run the host with `--input-agent PATH --files DIR`. Once the upload panel
+is ready, copy local files or directories from an X11 file manager onto the
+viewer. No source is opened or read until that explicit drop. Each batch keeps
+its own progress and cancellation controls; viewing-only reconnects do not
+repeat selections. See [native file sending](NATIVE_FILE_SEND.md#additional-selections-during-a-native-desktop-session).
+
 For control, the viewer window must hold keyboard focus. A window manager gives it focus; without one, capture waits 30 s and then ends with `control_focus_lost`. The JSON completion names why a session ended. Typical causes: `host_not_answering` (the host is not running, is busy with another viewer, or UDP 8443 is blocked), `encoder_unavailable` (host startup), and `control_focus_lost`.
 
 The control request is made at most once per command. A transient link failure can

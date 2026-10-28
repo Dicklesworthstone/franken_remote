@@ -335,7 +335,7 @@ fn connect(
         )
     })?;
     // Classify every --send path by type before any network I/O.
-    let sends = files::select(&connection.send)?;
+    let sends = files::select(&connection.send, connection.file_drop)?;
     let downloads = files::download::select(connection.receive.as_ref())?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
@@ -399,7 +399,7 @@ fn connect(
         ..Default::default()
     };
     let result = if connection.control {
-        let offer = if connection.receive.is_some() && !connection.send.is_empty() {
+        let offer = if connection.receive.is_some() && connection.uploads() {
             fr_client::native::control_offer_with_duplex(
                 connection.clipboard,
                 connection.audio.is_some(),
@@ -412,11 +412,11 @@ fn connect(
         } else if connection.audio.is_some() {
             fr_client::native::control_offer_with_auxiliary(
                 connection.clipboard,
-                !connection.send.is_empty(),
+                connection.uploads(),
                 true,
             )
         } else {
-            files::offer(connection.clipboard, !connection.send.is_empty())
+            files::offer(connection.clipboard, connection.uploads())
         };
         let operation = client.run_control_capable(
             cx.clone(),
@@ -1962,6 +1962,7 @@ mod tests {
             clipboard: false,
             audio: None,
             send: Vec::new(),
+            file_drop: false,
             receive: None,
         };
         let runtime = RuntimeBuilder::current_thread()

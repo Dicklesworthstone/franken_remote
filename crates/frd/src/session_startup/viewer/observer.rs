@@ -204,6 +204,23 @@ impl NativeObserver {
         }
         self.viewer.configure_file_send_with_intake(request)
     }
+    /// Prepare the original negotiated upload for an explicit first selection
+    /// made after connection. No source descriptor or disk worker exists yet.
+    /// Read-only observers and unnegotiated or repeated configurations refuse.
+    pub fn configure_file_drop(
+        &mut self,
+    ) -> Result<
+        (
+            crate::native_files::SendControl,
+            crate::native_files::SendIntake,
+        ),
+        crate::native_files::Absence,
+    > {
+        if self.input.is_none() {
+            return Err(crate::native_files::Absence::Unavailable);
+        }
+        self.viewer.configure_file_drop()
+    }
     /// Register this attempt's explicitly selected client destination before
     /// native control service. The returned handle retains every actual terminal
     /// result and can cancel only this optional file operation.

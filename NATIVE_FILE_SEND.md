@@ -1,7 +1,7 @@
 # Native file sending
 
 The shipped native workflow supports explicit uploads and downloads. Uploads use
-`fr connect --control --send PATH` with `frd run --files DIR`; downloads use
+`fr connect --control --send PATH` or `--file-drop` with `frd run --files DIR`; downloads use
 `frd run --once --send PATH` with `fr connect --control --receive DIR`.
 See [NATIVE_FILE_DOWNLOAD.md](NATIVE_FILE_DOWNLOAD.md) for the download workflow.
 The sections below describe the original upload API and its later integrations.
@@ -288,12 +288,17 @@ explicit direction. Neither selection is replayed after reconnect.
 
 ## Additional selections during a native desktop session
 
-Start the Linux X11 viewer with `--control --send PATH...` and a host configured
-with `--files DIR`. After that initial batch publishes successfully and its
-source cleanup finishes, copy local files or directories from an X11 file
-manager onto the viewer window. Keep the upload progress panel open and wait
+Start the Linux X11 viewer with `--control --file-drop` and a host configured
+with `--input-agent PATH --files DIR` to choose files after connecting. The
+upload panel waits for the original control grant and the host's one-use file
+attachment before accepting a Copy drop. No source is selected, opened or read
+by this empty-source configuration; it sends no empty ATP batch. Copy local
+files or directories from an X11 file manager onto the viewer window when the
+panel is ready. Alternatively, use `--control --send PATH...`; additional drops
+become available after the initial batch publishes and source cleanup finishes.
+Keep the upload progress panel open and wait
 for each batch to finish before selecting another. Each drop accepts at most
-eight paths; the desktop retains at most eight additional batches. The host's
+eight paths; the desktop retains at most eight dropped batches. The host's
 original cumulative byte and transfer-attempt limits still apply.
 
 `NativeObserver::configure_file_send_with_intake` and
@@ -305,6 +310,19 @@ the same sender, completed attachment, transfer-ID sequence and control lease;
 they do not negotiate another file lane or renew authority. Each submitted
 selection has a fresh status/cancellation handle and an absolute submission-time
 deadline. Earlier receipts remain available after later failures.
+
+For `--file-drop` without an initial source, `NativeObserver::configure_file_drop`
+and `Desktop::configure_file_drop` use the same owner, attachment and fixed
+sender policy. The initial panel has only Cancel, with no transfer percentage
+or fabricated publication. Its control handle becomes terminal when the first
+explicit selection takes ownership; it cannot pause, cancel or replay a later
+batch. Each accepted batch gets its own Pause / Resume / Cancel controls. The
+initial `--send` keyboard shortcuts remain exclusive to a real initial selection.
+Missing host capability reports `host_files_unavailable`; unavailable native
+drop controls report `file_drop_unavailable` and stop the empty file lane after
+its agreed attachment settles. Closing without a selection reports zero files
+requested or sent and `no_files_selected`. Clipboard, audio and an explicitly
+selected download may coexist under their independently negotiated profiles.
 
 The X11 bridge accepts copy-only XDND version 3–5 `text/uri-list` drops: at most
 32 KiB and eight absolute local paths, with empty authority or `localhost`.
@@ -330,6 +348,14 @@ and retains the preparation worker until it finishes and joins. No selected path
 control, pending drop or old native window crosses a reconnect. A failed batch
 closes the intake; this adds no automatic retry, cross-connection resumption,
 remote browsing or folder synchronization.
+
+Deferred-upload regressions cover empty-lane setup, cancellation before a first
+selection, attachment failure, immutable setup controls, two explicit selections
+on the original UDP/TLS/ATP owners, and normal input while no source is selected.
+CLI and native panel checks cover explicit opt-in, read-only refusal, duplex
+offers and the initial panel's handoff without an invented completed batch.
+These are regression targets; live-tailnet and physical X11 drag-and-drop
+qualification remain separate evidence.
 
 The production URI/inbox module has passing pinned-compiler tests, and the
 production C bridge passes `-std=c11 -Wall -Wextra -Werror -fsyntax-only`.
