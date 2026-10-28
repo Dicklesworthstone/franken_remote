@@ -67,6 +67,7 @@ pub struct Stream {
     pub(crate) statistics: Statistics,
     pub(crate) served: bool,
     pub(crate) pacing: Option<fr_media::pacing::Controller>,
+    pub(crate) bitrate: Option<fr_media::bitrate::Controller>,
 }
 impl std::fmt::Debug for Stream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -115,6 +116,7 @@ impl Stream {
             statistics: Statistics::default(),
             served: false,
             pacing: None,
+            bitrate: None,
         })
     }
     /// Enable adaptive RAW capture admission before service starts. The floor is
@@ -140,6 +142,27 @@ impl Stream {
         );
         Ok(())
     }
+    /// Enable measured software bitrate adaptation on the same source, after
+    /// cadence adaptation and before service. Hardware retains cadence only.
+    /// Native startup calls this under the existing adaptive-capture option;
+    /// cadence-only library callers need not opt into the new worker operation.
+    pub(crate) fn enable_adaptive_bitrate(&mut self) -> Result<bool, super::Error> {
+        self.control.check()?;
+        if self.served || self.pacing.is_none() || self.bitrate.is_some() {
+            return Err(super::Error::InvalidFrame);
+        }
+        if self.source.configuration.backend != fr_media::worker::Backend::SoftwareExplicit {
+            return Ok(false);
+        }
+        self.bitrate = Some(
+            fr_media::bitrate::Controller::new(self.source.configuration.bitrate)
+                .map_err(super::Error::Bitrate)?,
+        );
+        Ok(true)
+    }
+    pub fn bitrate(&self) -> Option<&fr_media::bitrate::Controller> {
+        self.bitrate.as_ref()
+    }
     pub fn pacing(&self) -> Option<&fr_media::pacing::Controller> {
         self.pacing.as_ref()
     }
@@ -151,6 +174,9 @@ impl Stream {
     }
     pub(crate) fn close(&mut self) {
         self.control.revoke();
+        if let Some(bitrate) = &mut self.bitrate {
+            bitrate.close();
+        }
         self.sender.close();
         self.source.worker.abort();
     }

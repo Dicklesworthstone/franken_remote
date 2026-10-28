@@ -105,6 +105,36 @@ struct Members {
     audio: fr_media::audio_delivery::AudioRing,
 }
 impl Members {
+    /// Fanout happens only after native effects have been recorded by the source.
+    fn publish_capture(
+        &mut self,
+        update: &SharedCaptureUpdate,
+        mut refused: usize,
+    ) -> CaptureReport {
+        let mut delivered = 0;
+        for entry in self
+            .entries
+            .iter_mut()
+            .flatten()
+            .filter(|e| e.failure.is_none())
+        {
+            match entry.publish(update) {
+                Ok(true) => delivered += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    entry.close(error);
+                    refused += 1;
+                }
+            }
+        }
+        self.stop_if_empty();
+        CaptureReport {
+            frame: update.frame().as_raw(),
+            unchanged: update.is_unchanged(),
+            delivered,
+            refused,
+        }
+    }
     fn selected_view(&self, view: Binding) -> bool {
         self.selected_catalog.is_none_or(|catalog| {
             catalog.displays().first().is_some_and(|display| {
@@ -404,20 +434,31 @@ impl Publisher {
             .source
             .prepare_shared_capture(&owner, &self.pool)
             .map_err(Error::Media)?;
-        let (mut refused, join_until) = self
-            .members
-            .lock()
-            .map_err(|_| Error::Poisoned)?
-            .capture_credit(&prepared)?;
-        if let Some(adaptive) = &mut self.adaptive {
+        let (refused, join_until) = {
+            let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
+            let admitted = members.capture_credit(&prepared)?;
+            if let Some(adaptive) = &mut self.adaptive {
+                adaptive.observe_receivers(&members)?;
+            }
+            admitted
+        };
+        let bitrate = if let Some(adaptive) = &mut self.adaptive {
+            // Only actual pool/member credit may begin a native rate request.
             adaptive.start(owner.check().map_err(Error::Media)?.as_micros())?;
-        }
+            adaptive.capture_bitrate()
+        } else {
+            None
+        };
         // Declare the fencing guard AFTER the native future: Rust drops it
         // first on cancellation, before the existing IPC future aborts the child.
         let mut capture = pin!(async move {
-            match join_until {
-                Some(until) => prepared.capture_for_join(until).await,
-                None => prepared.capture_if_changed(false).await,
+            if let Some(bitrate) = bitrate {
+                prepared.capture_with_bitrate(bitrate, join_until).await
+            } else {
+                match join_until {
+                    Some(until) => prepared.capture_for_join(until).await,
+                    None => prepared.capture_if_changed(false).await,
+                }
             }
         });
         let mut fence = CaptureGuard {
@@ -441,7 +482,7 @@ impl Publisher {
                     .lock()
                     .map_err(|_| Error::Poisoned)
                     .and_then(|m| {
-                        adaptive.observe_receivers(&m);
+                        adaptive.observe_receivers(&m)?;
                         let peers = m.peer_evidence(m.last, adaptive.interval_us());
                         adaptive.sample(m.last, false, peers)
                     });
@@ -455,38 +496,22 @@ impl Publisher {
                 .map(|result| result.map_err(Error::Media))
         })
         .await?;
+        if let Some(adaptive) = &mut self.adaptive {
+            // A native rate transition already happened. Subscriber expiry or
+            // egress refusal below cannot retroactively undo that effect.
+            adaptive.complete_update(&owner, &update)?;
+        }
         let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
         members.tick()?;
         if let Some(adaptive) = &mut self.adaptive {
+            adaptive.observe_receivers(&members)?;
             adaptive.finish(
                 members.last,
                 update.observed_micros(),
                 !update.is_unchanged(),
             )?;
         }
-        let mut delivered = 0;
-        for entry in members
-            .entries
-            .iter_mut()
-            .flatten()
-            .filter(|e| e.failure.is_none())
-        {
-            match entry.publish(&update) {
-                Ok(true) => delivered += 1,
-                Ok(false) => {}
-                Err(error) => {
-                    entry.close(error);
-                    refused += 1;
-                }
-            }
-        }
-        members.stop_if_empty();
-        let result = CaptureReport {
-            frame: update.frame().as_raw(),
-            unchanged: update.is_unchanged(),
-            delivered,
-            refused,
-        };
+        let result = members.publish_capture(&update, refused);
         drop(update);
         fence.complete = true;
         Ok(result)

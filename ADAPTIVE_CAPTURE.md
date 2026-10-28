@@ -1,14 +1,16 @@
-# Adaptive raw-capture admission
+# Adaptive capture and software bitrate
 
-This is an implemented, opt-in local pacing slice of plan section 13 and bead
-`fr-p1-adaptive-v0-qgi`. It runs in the existing continuous host session and uses
-its real source and QUIC sender. It is **not** a complete adaptive bitrate,
-resolution, end-to-end latency, or per-path aggregate-bandwidth controller.
+This implements opt-in capture pacing and software encoder bitrate control for
+plan section 13 and beads `fr-p1-adaptive-v0-qgi` and
+`fr-rc-media-wire-controller-qej`. Both use the existing continuous host session,
+source and QUIC sender. Software bitrate changes reduce offered encoded bytes
+under measured send-admission pressure; resolution changes, end-to-end latency
+control and per-path aggregate-bandwidth estimation remain incomplete.
 
 ## Local host selection
 
-The shipped Linux host exposes pacing for both an observation-only shared source
-and the first controlling viewer:
+The shipped Linux host selects pacing and software bitrate adaptation for both
+an observation-only shared source and the first controlling viewer:
 
 ```sh
 frd run --encoder software --adaptive-capture
@@ -23,8 +25,10 @@ through their `--` arguments, including on hosts that do not offer control.
 
 The original controlled publisher receives the existing measured source-work,
 send-admission, retention-credit and negotiated decoder-load samples. Collected
-native input retains its existing bounded idle wake path. The encoder bitrate,
-resolution and configuration do not change. An observer-first share now uses the
+native input retains its existing bounded idle wake path. The software encoder
+can change bitrate within the original local ceiling; hardware retains its fixed
+bitrate. Resolution and the exact decoder configuration stay fixed. An
+observer-first share uses the
 same pacing state machine in its original shared publisher, with measured source
 work, genuine changed/unchanged observations and aggregate capture credit. A
 healthy eligible subscriber keeps the source eligible while a lagging subscriber
@@ -110,7 +114,10 @@ rounded up to a whole microsecond. The maximum is caller-selected and cannot
 exceed 200 ms, except that an already slower fixed interval may be retained as
 both minimum and maximum (up to one second). Invalid limits, repeated configuration, and a stopped or already
 serving owner are refused without replacing the controller. Existing callers
-retain their fixed policy until they explicitly enable adaptation.
+retain their fixed policy until they explicitly enable adaptation. These public
+library calls enable capture cadence only and preserve legacy worker messages.
+The real Linux host startup additionally enables the software bitrate controller
+when `--adaptive-capture` is selected.
 
 For an independently owned shared source, call
 `Publisher::enable_adaptive_capture(capture_interval, maximum)` before its
@@ -194,9 +201,10 @@ still covers the sole queued, executing, or uncollected capture result. An
 already-issued operation is neither cancelled nor duplicated by a pacing change.
 Missed capture opportunities are not stored or replayed as a catch-up burst.
 
-The native source, codec configuration, reference chain, capture timestamps,
-packet bytes, pending send expiry, repair spending, receiver budgets, input
-identities, and authority deadlines remain unchanged. A slower interval is not
+The native source, exact codec configuration, capture timestamps, pending send
+expiry, repair spending, receiver budgets, input identities and authority
+deadlines retain their original bounds. A software bitrate transition starts
+with a verified IDR and subsequent pictures reference that actual output. A slower interval is not
 permission to retain an expired picture or action. Independent native-input
 cleanup and session renewal continue through the same host driver.
 
@@ -224,9 +232,10 @@ The base revision retains the separately published `17854a7` correction to
 borrowed decoding. This increment does not replace that correction or its
 queued-dependent regression. The detached continuous path remains independent.
 
-The bitrate is fixed for a session, but the software encoder's **short-term**
-rate is bounded: libx265 runs with a VBV at the configured bitrate and a 200 ms
-buffer (`crates/fr-native/src/bridge.c`). Without it, libx265's average-rate
+The software encoder's **short-term** rate remains bounded at each operating
+point: libx265 runs with a VBV at the currently applied bitrate and a 200 ms buffer
+(`crates/fr-native/src/bridge.c`). Without adaptive capture, its configured target
+stays fixed for the session. Without it, libx265's average-rate
 control emitted single P pictures of up to 77 KB at a 2 Mbit/s target on
 incompressible content: about 300 ms of link time at that rate, past the 250 ms
 reference horizon. With it the largest P picture was about 17 KB and the IDR
@@ -239,12 +248,90 @@ noise) its defaults emitted P pictures of up to 70 KB; with the bound the larges
 was 24 KB and the IDR fell from 85 to 69 KB. VA-API keeps its libavcodec defaults
 (not measured).
 
-Remaining work includes qualified dynamic bitrate/resolution changes, hardware
-quantizer control, platform presentation feedback, aggregate host/path budgets, qualified
+Remaining work includes live impaired-path qualification of software bitrate
+changes, runtime resolution changes, hardware bitrate/quantizer control, platform
+presentation feedback, aggregate host/path budgets, qualified
 damage-event and local-input wakeup, and platform/GUI policy selection. Collected
 remote-input wakeup is implemented separately in
 [INPUT_CAPTURE_WAKE.md](INPUT_CAPTURE_WAKE.md). The broad adaptive-control bead
 remains incomplete.
+
+## Live software bitrate control
+
+With `--adaptive-capture --encoder software`, the original private or shared
+publisher now drives `fr_media::bitrate::Controller` from the same canonical
+pacing reports. The existing `--bitrate` value is the initial target and permanent
+ceiling. No decoder-work sample, capture-credit shortage or slow source operation
+alone is treated as network pressure.
+
+After 100 ms of continuously observed actual send-admission blockage, the
+controller requests half its current bitrate, bounded below by
+`max(initial / 8, 100_000).min(initial)` bits/s. It can still reduce bitrate when
+capture cadence has reached its maximum interval. A sampling gap over 100 ms,
+unknown send outcome or nonblocked outcome breaks that pressure dwell. Shared
+pressure requires every eligible streaming viewer's recent sender evidence to
+be blocked; a ready or unknown sibling vetoes the shared reduction.
+
+Ordinary changes are separated by at least two seconds measured from an
+acknowledged actual application. Upward probes require four seconds of measured
+canonical headroom and add at most one sixteenth of the current rate, capped at
+the original ceiling. Unknown intervals contribute no time; their adjacent edges
+also contribute none. Known pressure, idle state, long gaps or a changed view
+scope clear the relevant evidence. These are local offered-load decisions, not
+claims about delivery throughput or available link capacity.
+
+One policy token accompanies the existing capture credit. Each request carries
+its explicit target, including a same-rate cancellation of a deferred target.
+The worker replies with its actually validated rate. Old-rate or unchanged-source
+replies leave the pending decision intact without restarting its dwell. Static
+observations and settle-only refinements do not apply a new rate. Native capture
+independently enforces its two-second host-and-worker-clock gate.
+
+The software adapter stops the old encoder before reopening it, preserves the
+original validated HEVC level and exact VPS/SPS/PPS, and releases the replacement
+only as a verified IDR. Frame identity, source timestamps and configuration
+generation stay bound to the same source. The existing decoder consumes the new
+IDR and following P pictures. Hardware returns typed unavailability for this
+operation; the host keeps hardware cadence adaptation without enabling software
+bitrate switching or silently substituting an encoder.
+
+Applied-rate accounting happens before sender admission or recipient expiry can
+discard a picture. Private recovery also completes the original token before
+dropping an obsolete in-flight result, so a real codec change cannot disappear
+from policy state or permanently occupy its only capture slot. Recovery and
+shared membership changes cancel unsent proposals; an already submitted effect
+is recorded, and any required restoration uses a later original capture credit
+under the same native dwell. Authority, renewal, reference and recovery deadlines
+are not extended by a rate decision.
+
+### Validation of the bitrate path
+
+Twenty deterministic policy tests passed against the real pacing reports. Five
+new worker-rate codec tests and all nine existing worker protocol tests passed.
+The real native codec suite passed 46 tests with one pre-existing manual
+benchmark ignored; the full Xvfb capture suite passed all 13 tests, including the
+spawned worker's deferred, applied, legacy-cancelled and cooldown rate replies.
+The actual pure parent capture-protocol helper passed 11 tests covering mode,
+frame/config/time, forced-IDR and unchanged-reference guards; the parent worker
+role helper passed three tests, including rate-aware capture admission only for
+the capture role. Strict targeted media/native/helper Clippy and pinned
+formatting passed.
+
+A 640x480 mixed text/busy regression measured an 8 to 2 Mbit/s transition:
+recovery IDR bytes fell from 72,937 to 29,195, and 60 nominal 30 fps pictures
+including that IDR fell from 1,982,529 to 505,800 encoded bytes. The original
+decoder accepted every picture. This measures offered encoded payload, not
+elapsed network delivery. Lower bitrate can reduce text quality; it is not
+lossless compression or a hardware result. The native ownership, bounds and
+measurement details are in [video rate controls](docs/video-rate-controls.md).
+
+The private/shared daemon integration, new shared cohort regressions and the
+obsolete-result recovery regression are source-reviewed but not runtime
+qualified in this increment. The recovery subprocess fixture itself passed a
+mixed legacy/rate roundtrip. Full Cargo/daemon execution remains blocked by
+exhausted shared-host disk/memory and the unavailable exact pinned runtime
+checkout. The actual 40/120 ms lossy-path acceptance rows remain untested here;
+beads `fr-rc-media-wire-controller-qej` and `fr-xfvs` stay open.
 
 ## Software settle-to-sharp
 
@@ -335,7 +422,9 @@ Repository formatting and documentation-link checks are separate validations.
 The original query deadline bounds sample age, and measured receiver backlog and
 decode-service time inform the canonical controller without overriding its local
 rate, deadline or ownership constraints. Platform presentation measurements,
-runtime codec reconfiguration and aggregate bandwidth control remain separate.
+runtime resolution/configuration changes and aggregate bandwidth control remain
+separate. The software bitrate-only path below retains exact original decoder
+parameter sets.
 
 Receiver-dependent dwell also follows the original view scope. Private recovery
 clears it when installing the replacement feedback owner. Shared pacing keeps a

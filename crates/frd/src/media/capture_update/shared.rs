@@ -25,6 +25,7 @@ pub struct SharedCaptureUpdate {
     source: Arc<()>,
     configuration: CodecConfigurationGeneration,
     content: SharedContent,
+    applied_bitrate: Option<u32>,
 }
 impl std::fmt::Debug for SharedCaptureUpdate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,6 +51,7 @@ impl CaptureUpdate {
             source: self.source,
             configuration: self.configuration,
             content,
+            applied_bitrate: self.applied_bitrate,
         })
     }
 }
@@ -73,10 +75,14 @@ impl CaptureUpdate {
             source: self.source,
             configuration: self.configuration,
             content,
+            applied_bitrate: self.applied_bitrate,
         })
     }
 }
 impl SharedCaptureUpdate {
+    pub(crate) const fn applied_bitrate(&self) -> Option<u32> {
+        self.applied_bitrate
+    }
     pub(crate) fn check_publisher_source(
         &self,
         source: &crate::media::CaptureSource,

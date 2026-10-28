@@ -7,9 +7,12 @@ use asupersync::{time::sleep, types::Time};
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::{
     delivery::SendError,
-    worker::{Kind, UnchangedCapture, capture_payload, parse_unit},
+    worker::{Kind, UnchangedCapture},
 };
 use std::{fmt, sync::Arc, time::Duration};
+
+mod protocol;
+use protocol::Content;
 
 mod prepared;
 pub use prepared::PreparedSharedCapture;
@@ -23,10 +26,7 @@ pub struct CaptureUpdate {
     source: Arc<()>,
     configuration: CodecConfigurationGeneration,
     content: Content,
-}
-enum Content {
-    Encoded(EncodedAccessUnit),
-    Unchanged(UnchangedCapture),
+    applied_bitrate: Option<u32>,
 }
 /// A subscriber's recovery budget may bound its private worker, but must not
 /// terminate an independent shared source still serving healthy subscriptions.
@@ -57,6 +57,11 @@ impl fmt::Debug for CaptureUpdate {
     }
 }
 impl CaptureUpdate {
+    /// Worker-confirmed rate, absent on legacy operations. A requested rate
+    /// alone is never evidence that the encoder changed its operating point.
+    pub(crate) const fn applied_bitrate(&self) -> Option<u32> {
+        self.applied_bitrate
+    }
     /// Last actually encoded picture, not the skipped capture candidate.
     pub fn frame(&self) -> FrameId {
         match &self.content {
@@ -89,7 +94,7 @@ impl CaptureSource {
         force_idr: bool,
     ) -> Result<EncodedAccessUnit, Error> {
         match self
-            .capture_request(control, force_idr, false, CaptureScope::Private)
+            .capture_request(control, force_idr, false, CaptureScope::Private, None)
             .await?
             .content
         {
@@ -105,8 +110,25 @@ impl CaptureSource {
         control: &ObservationControl,
         force_idr: bool,
     ) -> Result<CaptureUpdate, Error> {
-        self.capture_request(control, force_idr, true, CaptureScope::Private)
+        self.capture_request(control, force_idr, true, CaptureScope::Private, None)
             .await
+    }
+    /// Same original capture credit and immutable native deadline, with an
+    /// explicit software rate target. An unchanged result may defer the target.
+    pub(crate) async fn capture_at_rate(
+        &mut self,
+        control: &ObservationControl,
+        force_idr: bool,
+        bitrate: u32,
+    ) -> Result<CaptureUpdate, Error> {
+        self.capture_request(
+            control,
+            force_idr,
+            true,
+            CaptureScope::Private,
+            Some(bitrate),
+        )
+        .await
     }
     async fn capture_request(
         &mut self,
@@ -114,7 +136,9 @@ impl CaptureSource {
         force_idr: bool,
         conditional: bool,
         scope: CaptureScope,
+        bitrate: Option<u32>,
     ) -> Result<CaptureUpdate, Error> {
+        protocol::validate_bitrate(self.configuration, bitrate)?;
         #[cfg(target_os = "linux")]
         let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
         let issued = control.check()?;
@@ -138,23 +162,29 @@ impl CaptureSource {
         // Retire before possible external work. Failed/cancelled exchanges poison
         // the worker; neither candidate identity nor original timestamp is retried.
         self.next = frame.next();
+        let request = protocol::Request {
+            configuration: self.configuration,
+            frame,
+            observed_micros: issued.as_micros(),
+            force_idr,
+            conditional,
+            bitrate,
+            reference: self.last_capture,
+        };
+        let (kind, payload) = request.payload()?;
         let mut operation = MediaOperation::new(&mut self.worker);
         let mut reply = operation
             .worker
             .request_checked(
                 &control.cx,
-                if conditional {
-                    Kind::CaptureIfChanged
-                } else {
-                    Kind::Capture
-                },
-                capture_payload(frame, issued.as_micros(), force_idr),
+                kind,
+                payload,
                 maximum_capacity,
                 deadline,
                 || control.live_deadline(),
             )
             .await?;
-        let content = loop {
+        let (content, applied_bitrate) = loop {
             control.check()?;
             // Parsing/polling cannot restart the original recovery attempt.
             if control
@@ -166,50 +196,32 @@ impl CaptureSource {
             {
                 return Err(worker::Error::Deadline.into());
             }
-            match reply.header.kind {
-                Kind::Unit => {
-                    let unit = parse_unit(reply.into_body(), &self.configuration.limits()?)?;
-                    if unit.frame() != frame
-                        || unit.config_generation() != self.configuration.generation
-                        || unit.capture_micros() != issued.as_micros()
-                        || (force_idr && !unit.is_idr())
-                    {
-                        return Err(Error::InvalidFrame);
-                    }
+            if let Some((content, applied_bitrate)) = request
+                .response(reply.header.kind, reply.into_body())
+                .map_err(response_error)?
+            {
+                if let Content::Encoded(unit) = &content {
                     self.last_capture = Some(unit.frame());
-                    break Content::Encoded(unit);
                 }
-                Kind::Unchanged if conditional && !force_idr => {
-                    let proof = UnchangedCapture::decode(reply.body())?;
-                    if proof.candidate != frame
-                        || Some(proof.reference) != self.last_capture
-                        || proof.observed_micros != issued.as_micros()
-                    {
-                        return Err(Error::InvalidFrame);
-                    }
-                    break Content::Unchanged(proof);
-                }
-                Kind::NeedInput => {
-                    let now = control
-                        .cx
-                        .timer_driver()
-                        .ok_or(worker::Error::MissingRuntime)?
-                        .now();
-                    sleep(now, Duration::from_millis(1)).await;
-                    reply = operation
-                        .worker
-                        .request_checked(
-                            &control.cx,
-                            Kind::Poll,
-                            vec![],
-                            maximum_capacity,
-                            deadline,
-                            || control.live_deadline(),
-                        )
-                        .await?;
-                }
-                _ => return Err(Error::Backpressure),
+                break (content, applied_bitrate);
             }
+            let now = control
+                .cx
+                .timer_driver()
+                .ok_or(worker::Error::MissingRuntime)?
+                .now();
+            sleep(now, Duration::from_millis(1)).await;
+            reply = operation
+                .worker
+                .request_checked(
+                    &control.cx,
+                    Kind::Poll,
+                    vec![],
+                    maximum_capacity,
+                    deadline,
+                    || control.live_deadline(),
+                )
+                .await?;
         };
         operation.completed = true;
         #[cfg(target_os = "linux")]
@@ -218,9 +230,18 @@ impl CaptureSource {
             source: self.source.clone(),
             configuration: self.configuration.generation,
             content,
+            applied_bitrate,
         })
     }
 }
+fn response_error(error: protocol::Error) -> Error {
+    match error {
+        protocol::Error::Protocol(error) => error.into(),
+        protocol::Error::InvalidFrame => Error::InvalidFrame,
+        protocol::Error::Backpressure => Error::Backpressure,
+    }
+}
+
 impl Subscription {
     /// Bind actual encoded output to its worker before accepting that worker's
     /// unchanged-source observations. Reusing numeric frame/config IDs is not a

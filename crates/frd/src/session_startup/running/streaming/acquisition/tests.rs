@@ -221,6 +221,7 @@ async fn fixture_with_presentation(
         statistics: crate::media::streaming::Statistics::default(),
         served: false,
         pacing: None,
+        bitrate: None,
     };
     let host = host.into_streaming(stream).unwrap();
     let viewer = StreamingViewer::from_test_parts(viewer, vm, presenter, receiver, initial);

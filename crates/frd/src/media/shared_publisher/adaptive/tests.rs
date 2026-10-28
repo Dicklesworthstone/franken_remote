@@ -1,5 +1,6 @@
 use super::*;
 
+mod bitrate_policy;
 mod receiver;
 
 fn local(send: Availability) -> PeerEvidence {

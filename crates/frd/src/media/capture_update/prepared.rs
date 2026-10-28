@@ -99,7 +99,7 @@ impl PreparedSharedCapture<'_> {
     /// shared worker's lifetime. No parallel encoder, clock, reference identity
     /// or recovery rate allowance is created.
     pub async fn capture_if_changed(self, force_idr: bool) -> Result<SharedCaptureUpdate, Error> {
-        self.capture(force_idr, None).await
+        self.capture(force_idr, None, None).await
     }
     /// Attempt one already-authorized late-join cohort on this source's original
     /// IDR/recovery rate allowance. Rate pressure yields normal dependent/static
@@ -111,12 +111,22 @@ impl PreparedSharedCapture<'_> {
     /// retains its original fixed source deadline, never a renewed one. A failed
     /// subscriber's own recovery deadline remains enforced at final admission.
     pub async fn capture_for_join(self, until_micros: u64) -> Result<SharedCaptureUpdate, Error> {
-        self.capture(false, Some(until_micros)).await
+        self.capture(false, Some(until_micros), None).await
+    }
+    /// Rate adaptation retains this reservation and the original join/recovery
+    /// allowance; it neither forces video on idle nor creates a second encoder.
+    pub(crate) async fn capture_with_bitrate(
+        self,
+        bitrate: u32,
+        join_until: Option<u64>,
+    ) -> Result<SharedCaptureUpdate, Error> {
+        self.capture(false, join_until, Some(bitrate)).await
     }
     async fn capture(
         self,
         force_idr: bool,
         join_until: Option<u64>,
+        bitrate: Option<u32>,
     ) -> Result<SharedCaptureUpdate, Error> {
         let update = self
             .source
@@ -128,6 +138,7 @@ impl PreparedSharedCapture<'_> {
                     maximum_capacity: self.reservation.maximum_capacity(),
                     join_until,
                 },
+                bitrate,
             )
             .await?;
         let result = update.share_reserved(self.reservation);

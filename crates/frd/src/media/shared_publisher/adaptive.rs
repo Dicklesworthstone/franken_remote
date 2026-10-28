@@ -1,9 +1,13 @@
 //! One raw-admission controller for the original shared source. Per-peer
 //! deadlines and retirement remain independent; one slow viewer never chooses
-//! the rate of a healthy viewer. No codec parameter or recovery policy changes.
+//! the rate of a healthy viewer. Optional software bitrate control consumes the
+//! same evidence; decoder configuration and recovery policy remain unchanged.
 use super::{Entry, Error, MediaError, Members, ObservationControl, Publisher};
 use crate::media::receiver_feedback::SharedSample;
-use fr_media::pacing::{self, Availability, Controller, Observation, ReceiverEvidence, Sample};
+use fr_media::{
+    bitrate,
+    pacing::{self, Availability, Controller, Observation, ReceiverEvidence, Sample},
+};
 use fr_wire::{decoder::Binding, receiver_metrics::Load};
 use std::time::Duration;
 
@@ -89,6 +93,8 @@ pub(super) struct PeerEvidence {
 
 pub(super) struct CapturePacing {
     controller: Controller,
+    bitrate: Option<bitrate::Controller>,
+    bitrate_capture: Option<bitrate::Capture>,
     in_flight: Option<u64>,
     last_work: Option<(u64, u64)>,
     observation: Option<Observation>,
@@ -110,6 +116,8 @@ impl CapturePacing {
         };
         Ok(Self {
             controller: Controller::new(policy).map_err(pacing_error)?,
+            bitrate: None,
+            bitrate_capture: None,
             in_flight: None,
             last_work: None,
             observation: None,
@@ -119,27 +127,85 @@ impl CapturePacing {
     pub(super) fn interval_us(&self) -> u64 {
         self.controller.interval_us()
     }
-    pub(super) fn observe_receivers(&mut self, members: &Members) {
+    fn enable_bitrate(&mut self, initial: u32) -> Result<(), Error> {
+        if self.bitrate.is_some() || self.in_flight.is_some() {
+            return Err(Error::InvalidBudget);
+        }
+        self.bitrate = Some(bitrate::Controller::new(initial).map_err(bitrate_error)?);
+        Ok(())
+    }
+    pub(super) fn observe_receivers(&mut self, members: &Members) -> Result<(), Error> {
         let views = std::array::from_fn(|slot| {
             members.entries[slot]
                 .as_ref()
                 .filter(|entry| entry.pacing_eligible())
                 .map(|entry| entry.view)
         });
-        self.observe_receiver_views(&views);
+        self.observe_receiver_views(&views)
     }
-    fn observe_receiver_views(&mut self, views: &[Option<Binding>; super::MAX_SUBSCRIBERS]) {
+    fn observe_receiver_views(
+        &mut self,
+        views: &[Option<Binding>; super::MAX_SUBSCRIBERS],
+    ) -> Result<(), Error> {
         if self.receiver_views != *views {
             self.controller.reset_receiver_evidence();
+            if let Some(bitrate) = &mut self.bitrate {
+                // Cancel an unsent proposal, or explicitly restore the applied
+                // target on the next capture if native work already retained it.
+                // An in-flight token still owns its eventual actual result.
+                bitrate.reset_evidence().map_err(bitrate_error)?;
+            }
             self.receiver_views = *views;
         }
+        Ok(())
     }
     pub(super) fn start(&mut self, now: u64) -> Result<(), Error> {
-        if self.in_flight.is_some() {
+        if self.in_flight.is_some() || self.bitrate_capture.is_some() {
             return Err(Error::InvalidBudget);
         }
+        self.bitrate_capture = self
+            .bitrate
+            .as_mut()
+            .map(bitrate::Controller::begin_capture)
+            .transpose()
+            .map_err(bitrate_error)?;
         self.in_flight = Some(now);
         Ok(())
+    }
+    pub(super) fn capture_bitrate(&self) -> Option<u32> {
+        self.bitrate_capture.map(bitrate::Capture::bitrate)
+    }
+    /// Record the real worker effect BEFORE subscriber expiry or fanout can
+    /// reject this picture. A deferred target is not an applied transition.
+    pub(super) fn complete_bitrate(
+        &mut self,
+        completed: u64,
+        actual: Option<u32>,
+        is_idr: bool,
+    ) -> Result<(), Error> {
+        match (&mut self.bitrate, self.bitrate_capture, actual) {
+            (Some(policy), Some(capture), Some(actual)) => policy
+                .complete_capture(capture, actual, is_idr, completed)
+                .map_err(bitrate_error)?,
+            (None, None, None) => {}
+            _ => return Err(Error::Media(MediaError::InvalidFrame)),
+        }
+        self.bitrate_capture = None;
+        Ok(())
+    }
+    pub(super) fn complete_update(
+        &mut self,
+        owner: &ObservationControl,
+        update: &crate::media::SharedCaptureUpdate,
+    ) -> Result<(), Error> {
+        let completed = crate::media::host_now(&owner.context())
+            .map_err(Error::Media)?
+            .as_micros();
+        self.complete_bitrate(
+            completed,
+            update.applied_bitrate(),
+            update.encoded().is_some_and(|frame| frame.kind().is_idr()),
+        )
     }
     pub(super) fn finish(
         &mut self,
@@ -147,6 +213,9 @@ impl CapturePacing {
         observed: u64,
         changed: bool,
     ) -> Result<(), Error> {
+        if self.bitrate_capture.is_some() {
+            return Err(Error::InvalidBudget);
+        }
         let started = self.in_flight.ok_or(Error::InvalidBudget)?;
         if observed < started || observed > completed {
             return Err(pacing_error(pacing::Error::InvalidObservation));
@@ -184,7 +253,8 @@ impl CapturePacing {
         if peers.reset_receiver {
             self.controller.reset_receiver_pressure();
         }
-        self.controller
+        let report = self
+            .controller
             .update_with_receiver(
                 Sample {
                     now_us: now,
@@ -195,8 +265,11 @@ impl CapturePacing {
                 },
                 peers.receiver,
             )
-            .map(|report| report.interval_us)
-            .map_err(pacing_error)
+            .map_err(pacing_error)?;
+        if let Some(bitrate) = &mut self.bitrate {
+            bitrate.observe(&report).map_err(bitrate_error)?;
+        }
+        Ok(report.interval_us)
     }
 }
 fn elapsed(now: u64, earlier: u64) -> Result<u64, Error> {
@@ -205,6 +278,9 @@ fn elapsed(now: u64, earlier: u64) -> Result<u64, Error> {
 }
 fn pacing_error(error: pacing::Error) -> Error {
     Error::Media(MediaError::Pacing(error))
+}
+fn bitrate_error(error: bitrate::Error) -> Error {
+    Error::Media(MediaError::Bitrate(error))
 }
 
 /// A probe needs one whole healthy path: this SAME viewer's accepted video
@@ -313,6 +389,26 @@ impl Publisher {
         )?));
         Ok(())
     }
+    /// Enable native rate requests only for a real, explicitly selected software
+    /// worker. Cadence-only library callers keep their original IPC contract.
+    pub(crate) fn enable_adaptive_bitrate(&mut self) -> Result<bool, Error> {
+        self.members.lock().map_err(|_| Error::Poisoned)?.tick()?;
+        if self.served {
+            return Err(Error::InvalidBudget);
+        }
+        let adaptive = self.adaptive.as_mut().ok_or(Error::InvalidBudget)?;
+        if self.source.configuration.backend != fr_media::worker::Backend::SoftwareExplicit {
+            return Ok(false);
+        }
+        adaptive.enable_bitrate(self.source.configuration.bitrate)?;
+        Ok(true)
+    }
+    /// Actual applied rate and pending intent are separate source-owned state.
+    pub fn bitrate(&self) -> Option<&bitrate::Controller> {
+        self.adaptive
+            .as_ref()
+            .and_then(|pacing| pacing.bitrate.as_ref())
+    }
     pub fn pacing(&self) -> Option<&Controller> {
         self.adaptive.as_ref().map(|pacing| &pacing.controller)
     }
@@ -327,7 +423,7 @@ impl Publisher {
         let ready = self.pool.can_share_capacity(capacity);
         let peers = {
             let members = self.members.lock().map_err(|_| Error::Poisoned)?;
-            adaptive.observe_receivers(&members);
+            adaptive.observe_receivers(&members)?;
             members.peer_evidence(now, adaptive.controller.interval_us())
         };
         adaptive.sample(now, ready, peers).map(Some)

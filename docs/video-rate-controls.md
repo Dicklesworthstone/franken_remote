@@ -23,8 +23,12 @@ A lower target can trade picture quality for fewer encoded bytes. Actual
 output depends on the selected encoder, content, source and transport.
 
 The same settings pass through observation, controlled capture and the optional
-observation-indicator wrapper. They remain fixed for the host run and its
-existing bounded retries. No change is made to the saved authority policy.
+observation-indicator wrapper. They remain the host run's original ceilings
+through its existing bounded retries. Without `--adaptive-capture`, the encoder
+target stays fixed. With that option and explicit software encoding, the live
+controller may reduce bitrate and slowly probe back toward the original ceiling.
+See [adaptive capture](../ADAPTIVE_CAPTURE.md#live-software-bitrate-control).
+No change is made to the saved authority policy.
 Selecting rates does not select an encoder, enable audio/control/clipboard/files,
 change sharing scope, or bypass local approval. All existing startup checks and
 hardware failure behavior remain in place; hardware never falls back silently.
@@ -75,11 +79,13 @@ for low frame rates; selecting a low rate does not guarantee continuous control.
 ## Reporting and evidence
 
 Listening JSON reports `video_fps_limit` and `encoder_bitrate_target_bps` as
-configuration alongside `encoder_selection`. The bitrate is a codec target,
-not an instantaneous network ceiling. This change is not automatic bandwidth
-adaptation, quality-controller integration, zero-copy capture or GPU qualification.
-CPU-staged X11 remains the capture path. The automatic rate-controller bead
-remains open.
+configuration alongside `encoder_selection`. This JSON field remains the
+original configured ceiling, not a report that a later adaptive target was
+applied. The native worker and live bitrate controller separately track actual
+applied rate. Codec targets are not instantaneous network ceilings or link
+capacity estimates. CPU-staged X11 remains the capture path; automatic software
+bitrate control does not qualify zero-copy capture, GPU bitrate changes or live
+impaired-path recovery. The broader rate-controller bead remains open.
 
 Deterministic tests cover every supported frame period, malformed/duplicate
 flags, worker configuration roundtrips, healthy cadence, stalls, late wakeups,

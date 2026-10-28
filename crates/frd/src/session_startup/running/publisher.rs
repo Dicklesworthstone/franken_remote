@@ -878,6 +878,9 @@ async fn bootstrap(
         stream
             .enable_adaptive_capture(maximum)
             .map_err(|e| budget.fail(Error::Media(e)))?;
+        stream
+            .enable_adaptive_bitrate()
+            .map_err(|e| budget.fail(Error::Media(e)))?;
     }
     let mut host = host
         .into_streaming(stream)

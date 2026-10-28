@@ -338,6 +338,7 @@ async fn fixture_with_input(
         statistics: Statistics::default(),
         served: false,
         pacing: None,
+        bitrate: None,
     };
     let mut host = host.into_streaming(stream).unwrap();
     // Negotiation alone decides: since plan 11.3 suspension, a control
@@ -363,13 +364,50 @@ async fn fixture_with_input(
 
 #[test]
 fn both_running_peers_recover_and_continue_on_the_original_workers_and_connection() {
-    recover_on_original_owners(true);
+    recover_on_original_owners(true, false);
 }
 #[test]
 fn shipped_observer_recovers_when_the_host_omits_optional_decoder_metrics() {
-    recover_on_original_owners(false);
+    recover_on_original_owners(false, false);
 }
-fn recover_on_original_owners(metrics: bool) {
+#[test]
+fn discarded_in_flight_rate_change_is_accounted_before_recovery_continues() {
+    recover_on_original_owners(true, true);
+}
+
+/// Seed a known pressure proposal so frame 2 applies it while the peer requests
+/// recovery. This tests real IPC/result ownership, not a network estimator.
+fn request_lower_bitrate(host: &mut StreamingHost, current: u64) {
+    host.enable_adaptive_capture(Duration::from_millis(200))
+        .unwrap();
+    host.stream.enable_adaptive_bitrate().unwrap();
+    let mut pacing = fr_media::pacing::Controller::new(fr_media::pacing::Policy {
+        minimum_interval_us: 40_000,
+        maximum_interval_us: 40_000,
+    })
+    .unwrap();
+    let budget = host.stream.bitrate.as_mut().unwrap();
+    for at in [current - 100_000, current - 50_000, current] {
+        let report = pacing
+            .update(fr_media::pacing::Sample {
+                now_us: at,
+                source_work_us: Some(5_000),
+                send: fr_media::pacing::Availability::Blocked,
+                capture_credit: fr_media::pacing::Availability::Ready,
+                observation: Some(fr_media::pacing::Observation {
+                    at_us: at,
+                    changed: true,
+                }),
+            })
+            .unwrap();
+        budget.observe(&report).unwrap();
+    }
+    assert_eq!(budget.pending().unwrap().bitrate(), 1_000_000);
+    assert_eq!(budget.applied_bitrate(), 2_000_000);
+}
+
+#[allow(clippy::too_many_lines)]
+fn recover_on_original_owners(metrics: bool, adaptive_bitrate: bool) {
     run(move |c, h| async move {
         let cleanup = Cx::current().unwrap();
         let Fixture {
@@ -399,6 +437,9 @@ fn recover_on_original_owners(metrics: bool) {
         // Start the canonical loop only after this real timer elapsed, so its
         // normal selective repair cannot make the intentionally lost frame whole.
         asupersync::time::sleep(c.now(), Duration::from_millis(150)).await;
+        if adaptive_bitrate {
+            request_lower_bitrate(&mut host, now(&h).unwrap());
+        }
         let stop = viewer.control();
         let frames = Rc::new(RefCell::new(Vec::new()));
         let record = frames.clone();
@@ -432,6 +473,10 @@ fn recover_on_original_owners(metrics: bool) {
         assert_eq!(viewer.receiver_feedback_reports() > 0, metrics);
         assert_eq!(viewer.worker_id(), original_viewer);
         assert_eq!(host.statistics().recovered_streams, 1);
+        if adaptive_bitrate {
+            assert_eq!(host.bitrate().unwrap().applied_bitrate(), 1_000_000);
+            assert_eq!(host.bitrate().unwrap().ceiling_bitrate(), 2_000_000);
+        }
         assert_eq!(
             viewer.statistics().recovered_streams,
             1,

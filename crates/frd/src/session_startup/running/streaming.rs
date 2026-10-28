@@ -318,6 +318,9 @@ impl StreamingHost {
             .enable_adaptive_capture(maximum)
             .map_err(Error::Media)
     }
+    pub fn bitrate(&self) -> Option<&fr_media::bitrate::Controller> {
+        self.stream.bitrate()
+    }
     pub fn pacing(&self) -> Option<&pacing::Controller> {
         self.stream.pacing()
     }
@@ -528,6 +531,8 @@ impl StreamingHost {
                 in_flight: None,
                 send_evidence: send_evidence::SendEvidence::default(),
                 pacing: stream.pacing.as_mut(),
+                bitrate: stream.bitrate.as_mut(),
+                rate_in_flight: None,
                 last_work: None,
                 last_capture,
                 next_capture,
@@ -701,17 +706,18 @@ async fn produce(
     source: &mut CaptureSource,
     control: &ObservationControl,
     cursor: Option<&cursor::StreamCursor>,
-    mut requests: mpsc::Receiver<()>,
+    mut requests: mpsc::Receiver<Option<u32>>,
     completed: mpsc::Sender<CaptureUpdate>,
 ) -> Result<(), Error> {
     let cx = control.context();
     loop {
-        requests.recv(&cx).await.map_err(|_| Error::Closed)?;
+        let bitrate = requests.recv(&cx).await.map_err(|_| Error::Closed)?;
         control.check().map_err(Error::Media)?;
-        let update = source
-            .capture_if_changed(control, false)
-            .await
-            .map_err(Error::Media)?;
+        let update = match bitrate {
+            Some(rate) => source.capture_at_rate(control, false, rate).await,
+            None => source.capture_if_changed(control, false).await,
+        }
+        .map_err(Error::Media)?;
         // Same credit and cadence, separate from pixels: a moving pointer over
         // a static desktop needs no new picture and is not freshness.
         if let Some(cursor) = cursor {
@@ -730,11 +736,13 @@ struct VideoServices<'a, S> {
     statistics: &'a mut Statistics,
     policy: crate::media::streaming::Policy,
     capacity: usize,
-    credit: mpsc::Sender<()>,
+    credit: mpsc::Sender<Option<u32>>,
     results: mpsc::Receiver<CaptureUpdate>,
     in_flight: Option<u64>,
     send_evidence: send_evidence::SendEvidence,
     pacing: Option<&'a mut pacing::Controller>,
+    bitrate: Option<&'a mut fr_media::bitrate::Controller>,
+    rate_in_flight: Option<fr_media::bitrate::Capture>,
     last_work: Option<(u64, u64)>,
     last_capture: Option<u64>,
     next_capture: u64,
@@ -764,6 +772,33 @@ impl<S> VideoServices<'_, S> {
         // that owner's clock floor, or an optional expiry becomes Clock.
         now(cx)
     }
+    /// A collected native result owns its codec effect even when reference
+    /// recovery discards its obsolete pixels. Consume the one original token
+    /// before either ordinary enqueue or the recovery drain releases the update.
+    fn complete_rate_capture(
+        &mut self,
+        update: &CaptureUpdate,
+        collected: u64,
+    ) -> Result<(), Error> {
+        match (
+            &mut self.bitrate,
+            self.rate_in_flight.take(),
+            update.applied_bitrate(),
+        ) {
+            (Some(policy), Some(capture), Some(actual)) => policy
+                .complete_capture(
+                    capture,
+                    actual,
+                    update
+                        .encoded()
+                        .is_some_and(fr_media::access_unit::EncodedAccessUnit::is_idr),
+                    collected,
+                )
+                .map_err(bitrate_error),
+            (None, None, None) => Ok(()),
+            _ => Err(Error::Order),
+        }
+    }
     fn collect_capture(&mut self, cx: &Cx) -> Result<Option<Observation>, Error> {
         let mut observation = None;
         if let Some(started) = self.in_flight {
@@ -771,6 +806,11 @@ impl<S> VideoServices<'_, S> {
                 Ok(update) => {
                     let unchanged = update.is_unchanged();
                     let observed = update.observed_micros();
+                    let collected = now(cx)?;
+                    // Account for the actual native effect before enqueue can
+                    // reject an expired picture. Neither expiry nor recovery can
+                    // undo an encoder change that already produced a valid IDR.
+                    self.complete_rate_capture(&update, collected)?;
                     // Receiving the result drained its native operation even
                     // when the encoded output is now too old to admit. Recovery
                     // must not wait for a second result which will never arrive.
@@ -781,7 +821,6 @@ impl<S> VideoServices<'_, S> {
                             self.statistics.expired_capture_updates.saturating_add(1);
                     }
                     admitted.map_err(Error::MediaTransport)?;
-                    let collected = now(cx)?;
                     self.last_work = Some((
                         collected,
                         collected.checked_sub(started).ok_or(Error::Clock)?,
@@ -840,6 +879,9 @@ impl<S> VideoServices<'_, S> {
                 controller.update(sample)
             }
             .map_err(|error| Error::Media(crate::media::Error::Pacing(error)))?;
+            if let Some(bitrate) = &mut self.bitrate {
+                bitrate.observe(&report).map_err(bitrate_error)?;
+            }
             if report.interval_us != report.previous_interval_us
                 && let Some(last) = self.last_capture
             {
@@ -853,6 +895,9 @@ impl<S> VideoServices<'_, S> {
         };
         Ok(interval)
     }
+}
+fn bitrate_error(error: fr_media::bitrate::Error) -> Error {
+    Error::Media(crate::media::Error::Bitrate(error))
 }
 impl<S: Services> Services for VideoServices<'_, S> {
     fn input_submitted(&mut self, at_us: u64) {
@@ -939,7 +984,16 @@ impl<S: Services> Services for VideoServices<'_, S> {
             self.pacing.as_deref(),
         )?;
         if self.in_flight.is_none() && (current >= self.next_capture || wake) && credit {
-            self.credit.try_send(()).map_err(|_| Error::Order)?;
+            let capture = self
+                .bitrate
+                .as_mut()
+                .map(|policy| policy.begin_capture())
+                .transpose()
+                .map_err(bitrate_error)?;
+            self.credit
+                .try_send(capture.map(fr_media::bitrate::Capture::bitrate))
+                .map_err(|_| Error::Order)?;
+            self.rate_in_flight = capture;
             if current < self.next_capture {
                 self.statistics.input_wake_captures =
                     self.statistics.input_wake_captures.saturating_add(1);

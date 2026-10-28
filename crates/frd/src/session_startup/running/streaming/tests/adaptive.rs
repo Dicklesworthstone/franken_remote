@@ -220,6 +220,8 @@ fn empty_original_egress_does_not_report_ready_before_raw_capture_admission() {
             in_flight: None,
             send_evidence: send_evidence::SendEvidence::default(),
             pacing: stream.pacing.as_mut(),
+            bitrate: None,
+            rate_in_flight: None,
             last_work: None,
             last_capture: None,
             next_capture: current + 100_000,

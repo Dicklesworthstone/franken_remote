@@ -533,6 +533,11 @@ impl Driver {
                         .publisher
                         .enable_adaptive_capture(this.interval, maximum)
                         .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
+                    desktop
+                        .prepared
+                        .publisher
+                        .enable_adaptive_bitrate()
+                        .map_err(|error| Error::from(super::super::Error::Capture(error)))?;
                 }
                 let service = desktop.first().into_service().map_err(Error::Viewers)?;
                 let admission = desktop.admissions();

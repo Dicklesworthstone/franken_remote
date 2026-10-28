@@ -554,6 +554,7 @@ fn continuous_viewer(adaptive: bool) {
             streaming
                 .enable_adaptive_capture(Duration::from_millis(200))
                 .unwrap();
+            assert!(streaming.stream.enable_adaptive_bitrate().unwrap());
         }
         let decoder_pid = decoder.worker_id();
         let mut receiving = viewer.into_streaming(v_media, decoder).unwrap();
@@ -813,6 +814,7 @@ fn actual_hevc_streams_receiver_feedback_slows_capture_with_real_decoder_and_pix
         streaming
             .enable_adaptive_capture(Duration::from_millis(200))
             .unwrap();
+        assert!(streaming.stream.enable_adaptive_bitrate().unwrap());
         let initial_interval = streaming.pacing().unwrap().interval_us();
         let decoder_pid = decoder.worker_id();
         let mut receiving = viewer.into_streaming(v_media, decoder).unwrap();

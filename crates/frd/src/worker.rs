@@ -15,6 +15,7 @@ use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind
 #[cfg(test)]
 mod live_deadline_tests;
 mod readiness;
+mod request_role;
 mod retirement;
 pub use retirement::Retirement;
 mod selected;
@@ -688,18 +689,7 @@ impl Worker {
         if self.state != State::Running {
             return Err(Error::Unavailable.into());
         }
-        if !matches!(
-            (self.role, kind),
-            (
-                Role::Capture,
-                Kind::Capture | Kind::CaptureIfChanged | Kind::CheckMonitor | Kind::ReadCursor
-            ) | (
-                Role::Present,
-                Kind::Present | Kind::Decode | Kind::CursorOverlay
-            ) | (Role::Audio, Kind::ReadAudio)
-                | (Role::Capture | Role::Present, Kind::Poll)
-                | (_, Kind::Stop)
-        ) {
+        if !request_role::allowed(self.role, kind) {
             return Err(Error::Protocol(worker::Error::WrongRole).into());
         }
         if kind == Kind::CheckMonitor && self.selected.is_none() {
@@ -935,11 +925,15 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
                 reply,
                 Kind::Unit | Kind::Unchanged | Kind::NeedInput | Kind::NeedDrain
             ),
+            Kind::CaptureAtRate => matches!(
+                reply,
+                Kind::RateUnit | Kind::RateUnchanged | Kind::NeedInput | Kind::NeedDrain
+            ),
             Kind::Present => matches!(reply, Kind::Presented | Kind::NeedInput | Kind::NeedDrain),
             Kind::Decode => matches!(reply, Kind::Decoded | Kind::NeedInput | Kind::NeedDrain),
             Kind::Poll => matches!(
                 reply,
-                Kind::Unit | Kind::Presented | Kind::Decoded | Kind::NeedInput
+                Kind::Unit | Kind::RateUnit | Kind::Presented | Kind::Decoded | Kind::NeedInput
             ),
             Kind::Stop => reply == Kind::Stopped,
             // Typed cursor states (outside/unsupported/unrepresentable) share

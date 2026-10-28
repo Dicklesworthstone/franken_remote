@@ -125,6 +125,9 @@ fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
     if let Some(controller) = &mut host.stream.pacing {
         controller.reset_receiver_evidence();
     }
+    if let Some(controller) = &mut host.stream.bitrate {
+        controller.reset_evidence().map_err(bitrate_error)?;
+    }
     let session = host.host.session()?;
     let view = host
         .stream
@@ -267,6 +270,10 @@ impl<S: Services> Admission<'_, S> {
         if self.video.in_flight.is_some() {
             match self.video.results.try_recv() {
                 Ok(obsolete) => {
+                    // Recovery retires pixels, not an encoder change already
+                    // validated by this capture's original native operation.
+                    let collected = now(&self.video.control.context())?;
+                    self.video.complete_rate_capture(&obsolete, collected)?;
                     drop(obsolete);
                     self.video.in_flight = None;
                 }

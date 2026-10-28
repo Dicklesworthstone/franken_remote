@@ -22,6 +22,7 @@
 pub mod access_unit;
 pub mod audio;
 pub mod audio_delivery;
+pub mod bitrate;
 pub mod capabilities;
 pub mod codec;
 pub mod config;

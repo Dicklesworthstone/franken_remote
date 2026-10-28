@@ -55,6 +55,7 @@ pub enum Error {
     /// A shared source must have independent local observation ownership.
     NotIndependentSource,
     Pacing(fr_media::pacing::Error),
+    Bitrate(fr_media::bitrate::Error),
     Backpressure,
     Delivery,
     Receiver(DeliveryError),

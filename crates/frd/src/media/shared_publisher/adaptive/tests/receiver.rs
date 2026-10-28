@@ -450,7 +450,7 @@ fn receiver_scope_changes_reset_dwell_and_unchanged_scopes_preserve_it() {
         let mut pacing = pacing();
         let mut views = [None; super::super::super::MAX_SUBSCRIBERS];
         views[0] = Some(binding());
-        pacing.observe_receiver_views(&views);
+        pacing.observe_receiver_views(&views).unwrap();
         for now in [0, 40_000, 80_000] {
             let evidence = peer_evidence(
                 now,
@@ -463,7 +463,7 @@ fn receiver_scope_changes_reset_dwell_and_unchanged_scopes_preserve_it() {
             let view = views[0].as_mut().unwrap();
             view.recovery = view.recovery.next().unwrap();
         }
-        pacing.observe_receiver_views(&views);
+        pacing.observe_receiver_views(&views).unwrap();
         let evidence = peer_evidence(
             100_000,
             pacing.interval_us(),
@@ -486,9 +486,9 @@ fn receiver_scope_changes_reset_dwell_and_unchanged_scopes_preserve_it() {
         // Fencing/removal empties the original slot; rejoining it cannot inherit
         // the old receiver's measured pressure even if its numeric view matches.
         views[0] = None;
-        pacing.observe_receiver_views(&views);
+        pacing.observe_receiver_views(&views).unwrap();
         views[0] = Some(binding());
-        pacing.observe_receiver_views(&views);
+        pacing.observe_receiver_views(&views).unwrap();
         let evidence = peer_evidence(
             110_000,
             pacing.interval_us(),
@@ -508,7 +508,7 @@ fn unchanged_receiver_scopes_keep_headroom_but_replacement_discards_it() {
         let mut pacing = pacing();
         let mut views = [None; super::super::super::MAX_SUBSCRIBERS];
         views[0] = Some(binding());
-        pacing.observe_receiver_views(&views);
+        pacing.observe_receiver_views(&views).unwrap();
         for now in (1000..=1_901_000).step_by(50_000) {
             complete(&mut pacing, now, true);
             let evidence = peer_evidence(
@@ -526,7 +526,7 @@ fn unchanged_receiver_scopes_keep_headroom_but_replacement_discards_it() {
             let view = views[0].as_mut().unwrap();
             view.recovery = view.recovery.next().unwrap();
         }
-        pacing.observe_receiver_views(&views);
+        pacing.observe_receiver_views(&views).unwrap();
         complete(&mut pacing, 2_001_000, true);
         let evidence = peer_evidence(
             2_001_000,

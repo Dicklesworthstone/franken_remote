@@ -239,6 +239,7 @@ async fn media_with_decoder(
         statistics: Statistics::default(),
         served: false,
         pacing: None,
+        bitrate: None,
     };
     Media {
         presenter,
@@ -473,6 +474,8 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             in_flight: None,
             send_evidence: send_evidence::SendEvidence::default(),
             pacing: None,
+            bitrate: None,
+            rate_in_flight: None,
             last_work: None,
             last_capture: None,
             next_capture: 0,

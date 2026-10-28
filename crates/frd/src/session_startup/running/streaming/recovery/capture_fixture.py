@@ -22,21 +22,32 @@ try:
     h=read(36); cfg=read(int.from_bytes(h[32:36],'big'))
     reply(h,257,cfg)
     generation=int.from_bytes(cfg[20:28],'big')
+    bitrate=int.from_bytes(cfg[12:16],'big')
     last=None
     while True:
         h=read(36); b=read(int.from_bytes(h[32:36],'big')); k=int.from_bytes(h[6:8],'big')
         if k==5: reply(h,262); break
-        assert k in (2,7)
-        frame,observed,forced=struct.unpack('>QQB',b)
+        assert k in (2,7,20)
+        if k==20:
+            frame,observed,flags,target=struct.unpack('>QQBI',b)
+            assert flags & ~3 == 0
+            forced=bool(flags & 1)
+        else:
+            frame,observed,forced=struct.unpack('>QQB',b)
+            target=bitrate
+        changed_rate=target!=bitrate
         if MODE.startswith('late'):
             if (frame==1 or MODE=='late-repeat') and not forced:
                 time.sleep(.35)
         elif frame==2 and not forced:
             time.sleep(60 if MODE=='stall' else .35)
-        is_idr=last is None or (forced and MODE not in ('ignore-force','late-ignore-force'))
+        is_idr=last is None or changed_rate or (forced and MODE not in ('ignore-force','late-ignore-force'))
         reference=0 if is_idr else last
         payload=PARAMETERS if is_idr else b'synthetic-dependent'
-        reply(h,258,struct.pack('>QQQQB7x',frame,observed,generation,reference,int(not is_idr))+payload)
+        bitrate=target
+        prefix=struct.pack('>QQQQB',frame,observed,generation,reference,int(not is_idr))
+        reserved=struct.pack('>I3x',bitrate) if k==20 else bytes(7)
+        reply(h,278 if k==20 else 258,prefix+reserved+payload)
         last=frame
 except (EOFError,BrokenPipeError):
     pass
