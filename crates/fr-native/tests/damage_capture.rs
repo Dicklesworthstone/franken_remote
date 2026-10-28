@@ -82,6 +82,8 @@ fn configuration(bitrate: u32) -> Configuration {
     }
 }
 
+#[path = "damage_capture/rate.rs"]
+mod rate;
 #[path = "damage_capture/refinement.rs"]
 mod refinement;
 

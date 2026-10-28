@@ -68,9 +68,17 @@ static struct SwsContext *bgra_scaler(int w,int h,enum AVPixelFormat dst) {
 }
 /* The caller owns the pixels for the duration of one send. */
 static void borrowed(void *opaque,uint8_t *data) { (void)opaque; (void)data; }
-int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder **out) {
+static int qualified_level(int level) {
+    switch (level) {
+        case 0: case 30: case 60: case 63: case 90: case 93: case 120:
+        case 123: case 150: case 153: case 156: case 180: case 183: case 186: return 1;
+        default: return 0;
+    }
+}
+int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level_idc,FrEncoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
     if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>200000000 || gop<1 || gop>480) return FR_INVALID;
+    if (!qualified_level(level_idc) || (level_idc && backend!=2)) return FR_INVALID;
     const char *name = backend==0?"hevc_nvenc":backend==1?"hevc_vaapi":backend==2?"libx265":NULL;
     if (!name) return FR_INVALID;
     const AVCodec *codec=avcodec_find_encoder_by_name(name);
@@ -122,12 +130,18 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,FrEncoder
          * picture delay). Single-threaded, a 1080p P picture took 28 ms
          * (desktop) and 59 ms (busy) on ts2, past a 30 fps interval; with 4
          * threads 12 and 21 ms; busy pictures were about 3% larger. */
-        char params[256];
+        char params[256], level[24]="";
+        /* Only a level already admitted from this source's actual bitstream is
+         * supplied on software rate changes. Auto-level can otherwise change
+         * VPS/SPS when only bitrate falls. Rust still compares EVERY original
+         * parameter-set byte before releasing the new IDR. */
+        if (level_idc) snprintf(level,sizeof(level),":level-idc=%d.%d",level_idc/30,(level_idc%30)/3);
         /* A small positive AQ strength keeps per-frame ROI offsets enabled
          * without the normal AQ redistribution. Zero disables ROI in x265.
          * Ordinary frames carry zero offsets; one admitted settle refinement
          * uses -6 QP, still under this encoder's original bitrate and VBV. */
-        snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error:aq-mode=1:aq-strength=0.01",gop,gop);
+        int written=snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error:aq-mode=1:aq-strength=0.01%s",gop,gop,level);
+        if (written<0 || (size_t)written>=sizeof(params)) { av_dict_free(&opts); fr_encoder_free(e); return FR_INVALID; }
         av_dict_set(&opts,"preset","ultrafast",0); av_dict_set(&opts,"tune","zerolatency",0);
         av_dict_set(&opts,"x265-params",params,0); av_dict_set(&opts,"forced-idr","1",0);
     }

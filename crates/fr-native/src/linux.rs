@@ -54,6 +54,7 @@ unsafe extern "C" {
         fps: c_int,
         bitrate: c_int,
         gop: c_int,
+        level_idc: c_int,
         out: *mut *mut c_void,
     ) -> c_int;
     fn fr_encoder_free(p: *mut c_void);
@@ -233,11 +234,18 @@ struct Pending {
 }
 /// Thread-confined `FFmpeg` owner. Run in the supervised media process, not `frd`.
 pub struct HevcEncoder {
-    raw: NonNull<c_void>,
+    // None only during an explicit stop/reopen or after its terminal failure.
+    // Never retain two native encoder sessions during a bitrate transition.
+    raw: Option<NonNull<c_void>>,
     config: CodecConfiguration,
     limits: ProtocolLimits,
     admission: HevcGuard,
     refinement: bool,
+    fps: u32,
+    initial_bitrate: u32,
+    bitrate: u32,
+    pending_bitrate: Option<u32>,
+    level_idc: Option<u8>,
     pending: VecDeque<Pending>,
     last_submitted: Option<FrameId>,
     last_output: Option<FrameId>,
@@ -267,8 +275,38 @@ impl HevcEncoder {
         }
         let admission =
             HevcGuard::new(config, limits, 4).map_err(|_| NativeError::InvalidConfiguration)?;
+        let raw = Self::open(config, backend, fps, bitrate, 0)?;
+        Ok(Self {
+            raw: Some(raw),
+            config,
+            limits,
+            admission,
+            refinement: backend == EncodeBackend::SoftwareExplicit,
+            fps,
+            initial_bitrate: bitrate,
+            bitrate,
+            pending_bitrate: None,
+            level_idc: None,
+            pending: VecDeque::with_capacity(4),
+            last_submitted: None,
+            last_output: None,
+            since_idr: 0,
+            draining: false,
+            closed: false,
+            _thread: PhantomData,
+        })
+    }
+    fn open(
+        config: CodecConfiguration,
+        backend: EncodeBackend,
+        fps: u32,
+        bitrate: u32,
+        level_idc: u8,
+    ) -> Result<NonNull<c_void>, NativeError> {
+        let g = config.geometry();
         let mut ptr = core::ptr::null_mut();
-        // SAFETY: validated integer ranges; bridge writes only the out pointer, owns all codec allocations.
+        // SAFETY: checked geometry/rate bounds; the optional level comes only
+        // from admitted native output. The bridge owns every native allocation.
         status(unsafe {
             fr_encoder_new(
                 backend as c_int,
@@ -278,23 +316,61 @@ impl HevcEncoder {
                 c_int::try_from(bitrate).map_err(|_| NativeError::InvalidConfiguration)?,
                 c_int::try_from(config.gop().max_gop_frames())
                     .map_err(|_| NativeError::InvalidConfiguration)?,
+                c_int::from(level_idc),
                 &raw mut ptr,
             )
         })?;
-        Ok(Self {
-            raw: NonNull::new(ptr).ok_or(NativeError::Allocation)?,
-            config,
-            limits,
-            admission,
-            refinement: backend == EncodeBackend::SoftwareExplicit,
-            pending: VecDeque::with_capacity(4),
-            last_submitted: None,
-            last_output: None,
-            since_idr: 0,
-            draining: false,
-            closed: false,
-            _thread: PhantomData,
-        })
+        NonNull::new(ptr).ok_or(NativeError::Allocation)
+    }
+    /// Initial local ceiling; it is never raised by a worker request.
+    pub const fn initial_bitrate(&self) -> u32 {
+        self.initial_bitrate
+    }
+    /// Last rate with validated output, not merely an accepted reopen request.
+    pub const fn bitrate(&self) -> u32 {
+        self.bitrate
+    }
+    pub(crate) fn validate_bitrate(&self, bitrate: u32) -> Result<(), NativeError> {
+        if !self.refinement {
+            return Err(NativeError::Unavailable);
+        }
+        if !(10_000.max(self.initial_bitrate / 16)..=self.initial_bitrate).contains(&bitrate) {
+            return Err(NativeError::InvalidConfiguration);
+        }
+        Ok(())
+    }
+    /// Stop first: no temporary second encoder or reference/surface overlap.
+    /// Keep the ORIGINAL admission guard, frame IDs and decoder configuration.
+    /// Failure after stop is terminal; neither the old encoder nor its pending
+    /// work can be resurrected. Capture owns the separate dual-clock rate gate.
+    pub(crate) fn reopen_bitrate(&mut self, bitrate: u32) -> Result<bool, NativeError> {
+        if self.closed || self.draining {
+            return Err(NativeError::Closed);
+        }
+        self.validate_bitrate(bitrate)?;
+        if !self.pending.is_empty() || self.pending_bitrate.is_some() {
+            return Err(NativeError::NeedDrain);
+        }
+        if bitrate == self.bitrate {
+            return Ok(false);
+        }
+        let level = self.level_idc.ok_or(NativeError::NeedInput)?;
+        let raw = self.raw.take().ok_or(NativeError::Closed)?;
+        self.closed = true;
+        // SAFETY: no pending submission/output remains. This is the unique
+        // encoder context, released BEFORE allocating the replacement.
+        unsafe { fr_encoder_free(raw.as_ptr()) };
+        let replacement = Self::open(
+            self.config,
+            EncodeBackend::SoftwareExplicit,
+            self.fps,
+            bitrate,
+            level,
+        )?;
+        self.raw = Some(replacement);
+        self.pending_bitrate = Some(bitrate);
+        self.closed = false;
+        Ok(true)
     }
     pub fn submit(
         &mut self,
@@ -316,6 +392,7 @@ impl HevcEncoder {
             && !self.closed
             && !self.draining
             && self.pending.is_empty()
+            && self.pending_bitrate.is_none()
             && self.last_output.is_some()
             && self.since_idr < self.config.gop().max_gop_frames()
     }
@@ -351,11 +428,11 @@ impl HevcEncoder {
         if self.pending.len() >= 4 {
             return Err(NativeError::NeedDrain);
         }
-        let idr = force_idr || self.last_submitted.is_none();
+        let idr = force_idr || self.last_submitted.is_none() || self.pending_bitrate.is_some();
         // SAFETY: frame is immutable and complete; bridge copies it before return and retains no Rust pointer.
         match status(unsafe {
             fr_encoder_send(
-                self.raw.as_ptr(),
+                self.raw.ok_or(NativeError::Closed)?.as_ptr(),
                 frame.bytes.as_ptr(),
                 frame.bytes.len(),
                 i64::try_from(id.as_raw()).map_err(|_| NativeError::StaleGeneration)?,
@@ -385,7 +462,13 @@ impl HevcEncoder {
         let mut len = 0;
         let mut pts = 0;
         // SAFETY: live unique context and valid out parameters; packet remains bridge-owned until take.
-        status(unsafe { fr_encoder_peek(self.raw.as_ptr(), &raw mut len, &raw mut pts) })?;
+        status(unsafe {
+            fr_encoder_peek(
+                self.raw.ok_or(NativeError::Closed)?.as_ptr(),
+                &raw mut len,
+                &raw mut pts,
+            )
+        })?;
         if len == 0
             || self.limits.validate_access_unit_len(len).is_err()
             || self
@@ -398,7 +481,13 @@ impl HevcEncoder {
         }
         let mut bytes = zeroed(len)?;
         // SAFETY: destination has exactly the size returned by peek on this exclusively owned context.
-        status(unsafe { fr_encoder_take(self.raw.as_ptr(), bytes.as_mut_ptr(), len) })?;
+        status(unsafe {
+            fr_encoder_take(
+                self.raw.ok_or(NativeError::Closed)?.as_ptr(),
+                bytes.as_mut_ptr(),
+                len,
+            )
+        })?;
         let p = self.pending.pop_front().ok_or(NativeError::Codec)?;
         // Drop encoder metadata SEI (NVENC pic_timing on every picture) before
         // the unchanged strict admission; it is not needed to decode.
@@ -413,10 +502,14 @@ impl HevcEncoder {
                 return Err(error);
             }
         };
-        if (p.force_idr && !idr) || self.admission.validate_annex_b(&bytes, idr).is_err() {
+        if p.force_idr && !idr {
             self.closed = true;
             return Err(NativeError::UnsupportedBitstream);
         }
+        let info = self.admission.validate_annex_b(&bytes, idr).map_err(|_| {
+            self.closed = true;
+            NativeError::UnsupportedBitstream
+        })?;
         // Annex B is a native API detail. Only canonical four-byte-length NALs
         // leave this adapter for delivery, IPC or browser sample preparation.
         let Ok(bytes) = annex_b_to_length_prefixed(&bytes, self.limits) else {
@@ -442,6 +535,10 @@ impl HevcEncoder {
         )
         .map_err(|_| NativeError::Codec)?;
         self.last_output = Some(p.frame);
+        self.level_idc = Some(info.level_idc);
+        if let Some(bitrate) = self.pending_bitrate.take() {
+            self.bitrate = bitrate;
+        }
         self.since_idr = if idr {
             1
         } else {
@@ -454,7 +551,7 @@ impl HevcEncoder {
             return Err(NativeError::Closed);
         }
         // SAFETY: null-frame draining is inside the bridge, on the unique context.
-        match status(unsafe { fr_encoder_drain(self.raw.as_ptr()) }) {
+        match status(unsafe { fr_encoder_drain(self.raw.ok_or(NativeError::Closed)?.as_ptr()) }) {
             Err(NativeError::NeedInput) => Err(NativeError::NeedDrain),
             Ok(()) => {
                 self.draining = true;
@@ -466,8 +563,11 @@ impl HevcEncoder {
 }
 impl Drop for HevcEncoder {
     fn drop(&mut self) {
-        // SAFETY: unique native context; bridge releases frames before backing device refs.
-        unsafe { fr_encoder_free(self.raw.as_ptr()) };
+        if let Some(raw) = self.raw.take() {
+            // SAFETY: unique native context; bridge releases frames before
+            // backing device refs. Failed stop/reopen leaves no old pointer.
+            unsafe { fr_encoder_free(raw.as_ptr()) };
+        }
     }
 }
 
@@ -1095,3 +1195,6 @@ mod tests {
 
 #[cfg(test)]
 mod admission_tests;
+
+#[cfg(test)]
+mod rate_tests;

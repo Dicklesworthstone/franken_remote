@@ -95,3 +95,46 @@ cargo test -p frd --lib shared_publisher::service --locked
 cargo test -p frd --lib host_run::tests --locked
 cargo test -p frd --test encoder_cli --locked
 ```
+
+## Bounded software bitrate changes in the native worker
+
+The Linux software capture worker accepts an explicit target on one original
+capture credit and reports the **actual applied bitrate** with its encoded or
+unchanged result. A request alone does not mean the encoder changed. This private
+worker operation is available to the media controller; ordinary fixed-rate
+capture keeps its existing request/reply contract.
+
+A lower target waits for a real changed, unconditional or recovery capture.
+An idle observation or optional settle-only refinement does not restart the
+encoder. After a validated transition, both the original host timestamp and the
+worker's monotonic clock must advance two seconds before another transition.
+The worker accepts targets only between the original ceiling and the greater of
+10,000 bits/s or one sixteenth of that ceiling. Hardware returns a typed
+unsupported result; it never falls back to software.
+
+The software adapter stops its one old encoder before reopening libx265. It
+retains the original frame identities, geometry, color, GOP, nominal frame rate
+and decoder-configuration admission guard, and pins the HEVC level learned from
+validated original output. The first new picture must be an IDR with byte-exact
+original VPS/SPS/PPS. A reopen or parameter-set failure ends that source instead
+of releasing incompatible media. There is no overlapping encoder or extra
+capture queue. Legacy recovery capture cancels a still-deferred rate request so
+an old response shape cannot conceal an applied change.
+
+Production-source tests with FFmpeg 6.1/libx265 3.5 and Xvfb passed: 46 native unit
+tests (one pre-existing manual benchmark ignored), all 13 capture regressions,
+all five new worker-rate protocol tests and all nine existing worker protocol
+tests. These include actual stop/reopen, original-decoder playback, malformed
+requests, pending-output refusal, idle deferral, dual-clock dwell and a spawned
+worker exchanging actual-rate responses. The native suite adds eight tests;
+the capture suite adds three.
+
+In the deterministic 640x480 mixed text/busy fixture, an 8,000,000 to 2,000,000
+bits/s change reduced the recovery IDR from 72,937 to 29,195 bytes and 60 nominal
+30 fps pictures from 1,982,529 to 505,800 encoded bytes. The original decoder
+accepted every picture with its original configuration and timestamps. These
+are encoded-payload measurements, not elapsed delivery or network throughput;
+reduced bitrate can reduce picture quality. They do not qualify hardware,
+resolution changes, or live impaired-path recovery. Full workspace/Cargo and
+daemon verification remain blocked by the shared host's exhausted disk/memory
+and incomplete pinned runtime dependency checkout.

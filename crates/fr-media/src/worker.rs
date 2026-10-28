@@ -23,6 +23,7 @@ pub mod capture;
 pub mod cursor;
 pub mod overlay;
 pub mod presentation;
+pub mod rate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
@@ -50,6 +51,8 @@ pub enum Kind {
     ConfigureAudio = 18,
     /// Audio-role pull of already encoded packets; empty body.
     ReadAudio = 19,
+    /// Capture with a bounded software bitrate target; replies report actual rate.
+    CaptureAtRate = 20,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -76,6 +79,10 @@ pub enum Kind {
     AudioReady = 276,
     /// Zero or more encoded packets plus content-free gap/overrun counters.
     AudioPackets = 277,
+    /// Validated encoded result plus the rate actually installed by the worker.
+    RateUnit = 278,
+    /// Unchanged source plus actual rate; a requested rate may still be deferred.
+    RateUnchanged = 279,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -99,6 +106,7 @@ impl Kind {
             17 => Self::CursorOverlay,
             18 => Self::ConfigureAudio,
             19 => Self::ReadAudio,
+            20 => Self::CaptureAtRate,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -120,6 +128,8 @@ impl Kind {
             275 => Self::CursorOverlayApplied,
             276 => Self::AudioReady,
             277 => Self::AudioPackets,
+            278 => Self::RateUnit,
+            279 => Self::RateUnchanged,
             _ => return Err(Error::Malformed),
         })
     }
@@ -168,13 +178,15 @@ impl Kind {
             Self::CursorSnapshot => cursor::accepts_length(length, limits),
             Self::CursorOverlay => overlay::accepts_length(length, limits),
             Self::Capture | Self::CaptureIfChanged => length == 17,
+            Self::CaptureAtRate => length == rate::CAPTURE_BYTES,
+            Self::RateUnchanged => length == rate::UNCHANGED_BYTES,
             Self::Unchanged => length == 24,
             Self::Poll | Self::Stop | Self::NeedInput | Self::NeedDrain | Self::Stopped => {
                 length == 0
             }
             Self::Presented | Self::Decoded => length == 8,
             Self::Refused => length == 2,
-            Self::Unit | Self::Present | Self::Decode => {
+            Self::Unit | Self::RateUnit | Self::Present | Self::Decode => {
                 length > UNIT_PREFIX_BYTES
                     && length - UNIT_PREFIX_BYTES <= limits.max_encoded_access_unit_bytes() as usize
             }

@@ -24,7 +24,10 @@ mod linux {
     // Fixed bounded native inventory stays inline in the single worker owner.
     #[allow(clippy::large_enum_variant)]
     enum Media {
-        Capture(ChangeAwareCapture),
+        Capture {
+            source: ChangeAwareCapture,
+            rate_reply: bool,
+        },
         Present {
             surface: X11Surface,
             codec: HevcDecoder,
@@ -78,7 +81,10 @@ mod linux {
         let mut capture = ChangeAwareCapture::new(surface, codec);
         capture.enable_damage_tracking().map_err(native)?;
         capture.enable_settle_refinement().map_err(native)?;
-        Ok(Media::Capture(capture))
+        Ok(Media::Capture {
+            source: capture,
+            rate_reply: false,
+        })
     }
     fn open(
         role: Role,
@@ -147,7 +153,11 @@ mod linux {
 
         fn poll(&mut self, verify: bool) -> Result<(Kind, Vec<u8>), Error> {
             match self {
-                Self::Capture(capture) => match capture.poll_output() {
+                Self::Capture { source, rate_reply } => match source.poll_output() {
+                    Ok(unit) if *rate_reply => Ok((
+                        Kind::RateUnit,
+                        worker::rate::unit_payload(&unit, source.stats().encoder_bitrate_bps)?,
+                    )),
                     Ok(unit) => Ok((Kind::Unit, worker::unit_payload(&unit)?)),
                     Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
                     Err(e) => Err(native(e)),
@@ -225,7 +235,10 @@ mod linux {
         /// Missing XFIXES or an unrepresentable image is a typed, NON-fatal
         /// state: remote cursor forwarding must never end capture.
         fn read_cursor(&mut self, limits: &ProtocolLimits) -> Result<(Kind, Vec<u8>), Error> {
-            let Self::Capture(capture) = self else {
+            let Self::Capture {
+                source: capture, ..
+            } = self
+            else {
                 return Err(Error::WrongRole);
             };
             let typed = |observation: Observation<'_>| -> Result<(Kind, Vec<u8>), Error> {
@@ -303,25 +316,53 @@ mod linux {
                 Kind::ReadCursor => self.read_cursor(limits),
                 Kind::CursorOverlay => self.cursor_overlay(request.body(), limits, verify),
                 Kind::CheckMonitor => {
-                    let Self::Capture(capture) = self else {
+                    let Self::Capture {
+                        source: capture, ..
+                    } = self
+                    else {
                         return Err(Error::WrongRole);
                     };
                     capture.check_display().map_err(native)?;
                     Ok((Kind::MonitorValid, Vec::new()))
                 }
-                Kind::Capture | Kind::CaptureIfChanged => {
-                    let Self::Capture(capture) = self else {
+                Kind::Capture | Kind::CaptureIfChanged | Kind::CaptureAtRate => {
+                    let Self::Capture { source, rate_reply } = self else {
                         return Err(Error::WrongRole);
                     };
-                    let (id, capture_lower_bound, force_idr) =
-                        worker::parse_capture(request.body())?;
-                    match capture.capture(
-                        id,
-                        capture_lower_bound,
-                        force_idr,
-                        request.header.kind == Kind::CaptureIfChanged,
-                    ) {
-                        Ok(CaptureOutput::Submitted) => self.poll(verify),
+                    let with_rate = request.header.kind == Kind::CaptureAtRate;
+                    let result = if with_rate {
+                        let capture = worker::rate::Capture::decode(request.body())?;
+                        source.capture_with_bitrate(
+                            capture.frame,
+                            capture.observed_micros,
+                            capture.force_idr,
+                            capture.only_if_changed,
+                            capture.bitrate,
+                        )
+                    } else {
+                        let (id, capture_lower_bound, force_idr) =
+                            worker::parse_capture(request.body())?;
+                        source.capture(
+                            id,
+                            capture_lower_bound,
+                            force_idr,
+                            request.header.kind == Kind::CaptureIfChanged,
+                        )
+                    };
+                    match result {
+                        Ok(CaptureOutput::Submitted) => {
+                            // Only admitted work changes the response shape;
+                            // NeedDrain cannot steal a prior result's rate tag.
+                            *rate_reply = with_rate;
+                            self.poll(verify)
+                        }
+                        Ok(CaptureOutput::Unchanged(evidence)) if with_rate => Ok((
+                            Kind::RateUnchanged,
+                            worker::rate::unchanged_payload(
+                                evidence,
+                                source.stats().encoder_bitrate_bps,
+                            )?,
+                        )),
                         Ok(CaptureOutput::Unchanged(evidence)) => {
                             Ok((Kind::Unchanged, evidence.encode()?))
                         }
@@ -528,7 +569,10 @@ mod linux {
                     capture.check_display().map_err(native)?;
                     return Ok(Some((
                         c,
-                        Media::Capture(capture),
+                        Media::Capture {
+                            source: capture,
+                            rate_reply: false,
+                        },
                         Kind::MonitorReady,
                         request.into_body(),
                     )));
@@ -562,7 +606,11 @@ mod linux {
             max_access_unit_bytes: limits.max_encoded_access_unit_bytes(),
             generation: CodecConfigurationGeneration::INITIAL,
         };
-        let Media::Capture(mut capture) = capture_media(surface, configuration)? else {
+        let Media::Capture {
+            source: mut capture,
+            ..
+        } = capture_media(surface, configuration)?
+        else {
             return Err(Error::WrongRole);
         };
         match capture
