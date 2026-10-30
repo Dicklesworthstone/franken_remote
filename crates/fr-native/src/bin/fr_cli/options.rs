@@ -4,6 +4,8 @@ use std::{collections::BTreeSet, path::PathBuf};
 #[path = "options/receive.rs"]
 mod receive;
 pub use receive::ReceiveOptions;
+#[path = "options/local_session.rs"]
+mod local_session;
 
 pub struct Options {
     pub command: Command,
@@ -35,6 +37,7 @@ pub struct DisconnectOptions {
 pub enum RobotCommand {
     SessionOpen(RobotSessionOpenOptions),
     SessionClose(RobotSessionCloseOptions),
+    SessionStatus { node: String },
     Observe(RobotObserveOptions),
     Input(RobotInputOptions),
 }
@@ -48,6 +51,8 @@ pub struct RobotSessionOpenOptions {
 pub struct RobotSessionCloseOptions {
     pub node: String,
     pub lease: Option<String>,
+    /// Comparison-only identifier from local session status, never a lease.
+    pub connection_id: Option<String>,
 }
 #[allow(dead_code)]
 pub struct RobotObserveOptions {
@@ -324,6 +329,7 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
             let mut socket = None;
             let mut seen = BTreeSet::new();
             match action.as_str() {
+                "status" => local_session::status(args),
                 "open" => {
                     let mut role = "control".to_string();
                     let mut port = 8443_u16;
@@ -361,6 +367,7 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                 }
                 "close" => {
                     let mut lease = None;
+                    let mut connection_id = None;
                     while index < args.len() {
                         let flag = args[index].as_str();
                         index += 1;
@@ -370,6 +377,11 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                         match flag {
                             "--json" => json = true,
                             "--lease" => lease = Some(next_arg(args, &mut index)?.to_string()),
+                            "--connection-id" => {
+                                connection_id = Some(local_session::identifier(next_arg(
+                                    args, &mut index,
+                                )?)?);
+                            }
                             "--socket" => socket = Some(next_path(args, &mut index)?),
                             _ => return Err(usage()),
                         }
@@ -379,6 +391,7 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                             RobotSessionCloseOptions {
                                 node: node.clone(),
                                 lease,
+                                connection_id,
                             },
                         )),
                         json,

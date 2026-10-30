@@ -1,11 +1,12 @@
 //! `fr status`, `fr inspect`, `fr disconnect` and `fr robot`.
 //!
 //! Status and inspect report only what the installed Tailscale `LocalAPI`
-//! returns; anything not probed is unknown, never a plausible default. Local
-//! disconnect and robot session-close address the authenticated, original
-//! foreground connection owner and wait for its actual native cleanup result.
-//! Session-open, observation and input automation still require their own live
-//! integration; closing a connection never fabricates those capabilities.
+//! returns; anything not probed is unknown, never a plausible default. Robot
+//! session-status identifies the authenticated original local foreground owner,
+//! not a remote grant. Local disconnect and robot session-close wait for that
+//! owner's actual native cleanup result. A comparison-only connection ID can
+//! prevent an old automation request from stopping a replacement invocation.
+//! Session-open, observation and input automation still need live integration.
 
 use super::super::options::{DisconnectOptions, InspectOptions, RobotCommand};
 use super::{Cell, Cx, Failure, LocalApi, Runtime, Shutdown, failure, session_control, tailnet};
@@ -141,6 +142,46 @@ struct LocalCloseData {
     local_cleanup_confirmed: bool,
 }
 
+/// Presence describes only the authenticated local invocation. It may still be
+/// dialing, awaiting consent, or reconnecting. A public instance is not a lease.
+#[derive(serde::Serialize)]
+struct LocalSessionData {
+    scope: &'static str,
+    connection_id: String,
+    target: String,
+    local_owner_present: bool,
+    remote_session_state: Option<&'static str>,
+    remote_control_granted: Option<bool>,
+}
+
+fn render_local_status(info: session_control::Info, json: bool) -> Result<String, Failure> {
+    let human = (!json).then(|| {
+        format!(
+            "Identified the existing local foreground connection.\nTarget: {}\nConnection ID: {}\nRemote session and control state: not observed.\n",
+            info.target, info.instance,
+        )
+    });
+    let data = LocalSessionData {
+        scope: "local_connection",
+        connection_id: info.instance,
+        target: info.target,
+        local_owner_present: true,
+        remote_session_state: None,
+        remote_control_granted: None,
+    };
+    let envelope = RobotEnvelope::success(now_unix_ms(), AcknowledgementStage::Observed, data);
+    if json {
+        envelope.render_json().map_err(|_| {
+            failure(
+                "serialization_error",
+                "Failed to render local session status JSON.",
+            )
+        })
+    } else {
+        Ok(envelope.render_human(human.as_deref()))
+    }
+}
+
 pub(super) fn run_disconnect(
     runtime: &Runtime,
     cx: &Cx,
@@ -149,7 +190,7 @@ pub(super) fn run_disconnect(
     opts: &DisconnectOptions,
     json: bool,
 ) -> Result<String, Failure> {
-    close(runtime, cx, shutdown, stopped, &opts.node, json)
+    close(runtime, cx, shutdown, stopped, &opts.node, None, json)
 }
 
 pub(super) fn run_robot(
@@ -160,6 +201,12 @@ pub(super) fn run_robot(
     command: &RobotCommand,
     json: bool,
 ) -> Result<String, Failure> {
+    if let RobotCommand::SessionStatus { node } = command {
+        let info = runtime
+            .block_on(shutdown.run(cx, stopped, session_control::probe(cx, node)))
+            .map_err(local_failure)?;
+        return render_local_status(info, json);
+    }
     if let RobotCommand::SessionClose(options) = command {
         if options.lease.is_some() {
             return Err(Failure::new(
@@ -168,11 +215,19 @@ pub(super) fn run_robot(
                 2,
             ));
         }
-        return close(runtime, cx, shutdown, stopped, &options.node, json);
+        return close(
+            runtime,
+            cx,
+            shutdown,
+            stopped,
+            &options.node,
+            options.connection_id.as_deref(),
+            json,
+        );
     }
     Err(Failure::new(
         "robot_surface_unavailable",
-        "Robot session-open, observe and input are not backed by a live session yet. Use fr connect for a foreground session; fr robot session close can close that exact local connection.",
+        "Robot session-open, observe and input are not backed by a live session yet. Use fr connect for a foreground session; fr robot session status identifies that local invocation, and session close can stop it.",
         2,
     ))
 }
@@ -183,10 +238,17 @@ fn close(
     shutdown: &mut Shutdown,
     stopped: &Cell<bool>,
     target: &str,
+    expected: Option<&str>,
     json: bool,
 ) -> Result<String, Failure> {
+    let request = async {
+        match expected {
+            Some(instance) => session_control::stop_if(cx, target, instance).await,
+            None => session_control::stop(cx, target).await,
+        }
+    };
     let result = runtime
-        .block_on(shutdown.run(cx, stopped, session_control::stop(cx, target)))
+        .block_on(shutdown.run(cx, stopped, request))
         .map_err(local_failure)?;
     if result.completion != session_control::Completion::Confirmed {
         return Err(failure(
@@ -220,10 +282,11 @@ pub(super) fn local_failure(error: session_control::Error) -> Failure {
     use session_control::Error as E;
     let (code, next, exit) = match error {
         E::InvalidTarget => ("invalid_local_target", "Use the exact nonempty target supplied to the running fr connect command; no prefixes or aliases are inferred.", 2),
+        E::InvalidInstance => ("invalid_connection_id", "Use the complete 32-character lowercase hexadecimal connection_id from fr robot session status; it is a comparison identifier, not an input lease.", 2),
         E::AlreadyRunning => ("local_session_already_running", "A foreground connection already owns this exact local target. Use fr disconnect with that target, or its window, before connecting again.", 2),
         E::NoSession => ("no_local_session", "No running connection for this exact target was found for this user. Use the same target text as fr connect; nothing was disconnected.", 2),
         E::UntrustedPeer => ("local_session_untrusted", "The local endpoint did not belong to the same operating-system user. No local control request was authorized.", 1),
-        E::WrongOwner => ("local_session_changed", "The local endpoint did not identify the expected target and connection. Inspect the original fr connect process before trying again.", 1),
+        E::WrongOwner => ("local_session_changed", "The local endpoint did not identify the expected target and connection. No stop request was sent. Inspect the original fr connect process before trying again.", 1),
         E::Protocol => ("local_session_protocol", "The local connection returned an invalid control record. Check that both commands use compatible FrankenRemote versions.", 1),
         E::Timeout => ("local_session_timeout", "The original local connection did not complete its control handshake in time. Check its foreground process; no replacement connection was opened.", 1),
         E::OutcomeUnknown => return failure(
@@ -270,5 +333,51 @@ mod tests {
                 "{node} {by_name}"
             );
         }
+    }
+
+    #[test]
+    fn local_status_reports_identity_without_manufacturing_remote_readiness() {
+        let instance = "0123456789abcdef0123456789abcdef";
+        for json in [true, false] {
+            let text = render_local_status(
+                session_control::Info {
+                    target: "n-host".into(),
+                    instance: instance.into(),
+                },
+                json,
+            )
+            .unwrap();
+            assert!(text.contains(instance));
+            if json {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let data = &value["data"];
+                assert_eq!(data["scope"], "local_connection");
+                assert_eq!(data["target"], "n-host");
+                assert_eq!(data["connection_id"], instance);
+                assert_eq!(data["local_owner_present"], true);
+                assert_eq!(data.get("remote_session_state"), Some(&serde_json::Value::Null));
+                assert_eq!(data.get("remote_control_granted"), Some(&serde_json::Value::Null));
+                assert!(data.get("lease").is_none());
+                assert!(data.get("local_cleanup_confirmed").is_none());
+            } else {
+                assert!(text.contains("not observed"));
+            }
+        }
+    }
+
+    #[test]
+    fn stale_pins_and_uncertain_stops_keep_different_failure_codes() {
+        assert_eq!(
+            local_failure(session_control::Error::InvalidInstance).code,
+            "invalid_connection_id"
+        );
+        assert_eq!(
+            local_failure(session_control::Error::WrongOwner).code,
+            "local_session_changed"
+        );
+        assert_eq!(
+            local_failure(session_control::Error::OutcomeUnknown).code,
+            "disconnect_outcome_unknown"
+        );
     }
 }

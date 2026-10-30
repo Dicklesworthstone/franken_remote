@@ -1,4 +1,4 @@
-//! Same-user local stop control for ONE existing foreground `fr connect`.
+//! Same-user local inspection and stop control for ONE foreground `fr connect`.
 //!
 //! The abstract socket lives exactly as long as its original invocation. It
 //! owns no daemon, PID, input lease, transport or retry. A caller first reads
@@ -40,6 +40,7 @@ const FINISHED: [u8; 8] = *b"FRSC1FN\0";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Error {
     InvalidTarget,
+    InvalidInstance,
     #[cfg_attr(not(any(feature = "linux-desktop", test)), allow(dead_code))]
     AlreadyRunning,
     NoSession,
@@ -216,8 +217,9 @@ impl Owner {
     }
 }
 
-/// Read-only identification. No input authority, connection or stop is created.
-#[cfg(test)]
+/// Read-only identification. No remote connection, input authority or stop is
+/// created. The foreground invocation may still be dialing or reconnecting;
+/// identifying it is not evidence of remote readiness or an accepted grant.
 pub(super) async fn probe(cx: &Cx, target: &str) -> Result<Info, Error> {
     let (_, info, _) = identified(cx, target).await?;
     Ok(info)
@@ -227,7 +229,28 @@ pub(super) async fn probe(cx: &Cx, target: &str) -> Result<Info, Error> {
 /// reconnect to repeat an uncertain request. The response is its actual local
 /// cleanup outcome, not a fabricated remote key-release acknowledgement.
 pub(super) async fn stop(cx: &Cx, target: &str) -> Result<Stopped, Error> {
+    stop_checked(cx, target, None).await
+}
+
+/// Stop only the invocation previously identified by read-only lookup. The pin
+/// is comparison metadata, not authority. Authenticate and compare on the SAME
+/// socket before sending STOP; a replacement owner is never stopped or retried.
+pub(super) async fn stop_if(cx: &Cx, target: &str, expected: &str) -> Result<Stopped, Error> {
+    if expected.len() != 32
+        || !expected
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::InvalidInstance);
+    }
+    stop_checked(cx, target, Some(expected)).await
+}
+
+async fn stop_checked(cx: &Cx, target: &str, expected: Option<&str>) -> Result<Stopped, Error> {
     let (mut stream, info, instance) = identified(cx, target).await?;
+    if expected.is_some_and(|expected| expected != info.instance) {
+        return Err(Error::WrongOwner);
+    }
     let mut request = [0; 24];
     request[..8].copy_from_slice(&STOP);
     request[8..].copy_from_slice(&instance);
@@ -463,3 +486,6 @@ async fn bounded<T>(
 #[cfg(test)]
 #[path = "session_control/tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "session_control/inspection_tests.rs"]
+mod inspection_tests;
