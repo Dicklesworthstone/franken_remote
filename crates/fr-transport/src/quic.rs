@@ -889,10 +889,13 @@ impl QuicRecords {
         }
         Ok(SendAdmission::Accepted)
     }
-    /// Flush at most eight small bulk prefixes or one critical prefix, then wait
-    /// at most `wait` for incoming I/O. Each prefix rechecks authority, deadlines, native congestion
-    /// and flow credit, and critical-stream priority. The whole turn retains one
-    /// 250 ms bound; backpressure never becomes an unbounded write loop.
+    /// Flush at most eight small bulk prefixes, or one critical prefix followed
+    /// by at most one bulk prefix, then wait at most `wait` for incoming I/O.
+    /// Critical work gets the first native slot on every turn; the bounded bulk
+    /// opportunity keeps a continuous critical backlog from starving recovery.
+    /// Each prefix rechecks authority, deadlines, native congestion and flow
+    /// credit. The whole turn retains one 250 ms bound; backpressure never
+    /// becomes an unbounded write loop.
     /// Dropping an active native I/O operation is terminal. The session watchdog
     /// must independently cancel Cx on expiry/revoke, including during silence.
     pub async fn drive(
@@ -925,9 +928,10 @@ impl QuicRecords {
         authorize: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         let gate = self.lifetime_check.clone();
+        let mut bulk_opportunity = false;
         for _ in 0..TURN_SEND_PREFIXES {
             let current = self.check(cx, authorize)?;
-            let queued = self.queue_stream_prefix(cx, current)?;
+            let queued = self.queue_stream_prefix(cx, current, bulk_opportunity)?;
             let until = self.senders.iter().filter_map(|s| s.until).min();
             // Native ownership stays outside self across every await: dropping
             // or unwinding an in-flight operation cannot resume its queued data.
@@ -945,11 +949,14 @@ impl QuicRecords {
             .await;
             let native = held.release();
             self.finish_native_io(native, result)?;
-            if queued != Some(Priority::Bulk) {
-                // A critical prefix gets the first native slot, then yields to
-                // receive/service control before spending a bulk turn budget.
+            if bulk_opportunity || queued.is_none() {
                 break;
             }
+            // After critical service, offer exactly ONE prefix to the existing
+            // bulk round-robin, then yield to ingress even if more work fits.
+            // It borrows no critical flow credit and cannot bypass congestion,
+            // epoch accounting, authority or the original delivery deadlines.
+            bulk_opportunity = queued == Some(Priority::Critical);
         }
         let current = self.check(cx, authorize)?;
         let until = self.senders.iter().filter_map(|s| s.until).min();
@@ -1070,7 +1077,12 @@ impl QuicRecords {
     /// queued datagram, but not another empty packet. Keeping an entire extra
     /// slot idle also reduced recovery to stop-and-wait at the two-packet floor.
     /// Critical-first selection and its connection flow-credit reserve remain.
-    fn queue_stream_prefix(&mut self, cx: &Cx, now: u64) -> Result<Option<Priority>, Error> {
+    fn queue_stream_prefix(
+        &mut self,
+        cx: &Cx,
+        now: u64,
+        bulk_only: bool,
+    ) -> Result<Option<Priority>, Error> {
         if self.pending_writes.iter().any(|p| now >= p.deliver_by) {
             return Err(Error::Expired);
         }
@@ -1096,6 +1108,9 @@ impl QuicRecords {
         let connection_credit = inner.streams().connection_send_remaining();
         let mut selected = None;
         for (class, priority) in [Priority::Critical, Priority::Bulk].into_iter().enumerate() {
+            if bulk_only && priority == Priority::Critical {
+                continue;
+            }
             if priority == Priority::Bulk
                 && !send_window::bulk_prefix_fits(
                     room,

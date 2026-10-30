@@ -175,8 +175,9 @@ fn critical_records_still_preempt_both_bulk_lanes() {
         send(&cx, &mut peers, 1, &small);
         send(&cx, &mut peers, 2, &critical);
 
-        // A critical prefix gets the first slot and then yields to receiving
-        // control. Neither bulk lane may use this turn's native stream slot.
+        // A critical prefix gets the first slot. The following bounded bulk
+        // opportunity can only begin the large record, not complete it or
+        // overtake its stream with the later small record.
         peers
             .server
             .drive(&cx, Duration::ZERO, || true)
@@ -186,6 +187,91 @@ fn critical_records_still_preempt_both_bulk_lanes() {
         receive_queued(&cx, &mut peers, &mut received).await;
         assert_eq!(received, [(3, critical)]);
         assert!(!peers.server.is_closed());
+    });
+}
+
+#[test]
+fn a_continuous_critical_backlog_cannot_starve_reliable_recovery() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut peers = peers(&cx).await;
+        let recovery = record(peers.outgoing[0], 19, 3600);
+        send(&cx, &mut peers, 0, &recovery);
+        let critical: Vec<_> = (0..8)
+            .map(|sequence| record(peers.outgoing[2], 40 + sequence, 100))
+            .collect();
+        for bytes in &critical {
+            send(&cx, &mut peers, 2, bytes);
+        }
+        let mut received = Vec::new();
+        for turn in 1..=4 {
+            peers
+                .server
+                .drive(&cx, Duration::ZERO, || true)
+                .await
+                .unwrap();
+            // Critical work remains queued at every turn, not merely waiting
+            // for an ACK. Strict priority used to prevent ANY recovery prefix.
+            assert!(!peers.server.send_staged(peers.outgoing[2]).unwrap());
+            receive_queued(&cx, &mut peers, &mut received).await;
+            let critical_received: Vec<_> = received
+                .iter()
+                .filter(|(binding, _)| *binding == 3)
+                .map(|(_, bytes)| bytes.clone())
+                .collect();
+            assert_eq!(critical_received, critical[..turn]);
+            let recovery_received: Vec<_> = received
+                .iter()
+                .filter(|(binding, _)| *binding == 1)
+                .map(|(_, bytes)| bytes.clone())
+                .collect();
+            if turn < 4 {
+                // Only one 900-byte bulk prefix per critical turn: recovery
+                // cannot spend the ordinary eight-prefix burst here.
+                assert!(recovery_received.is_empty());
+            } else {
+                assert_eq!(recovery_received, [recovery.clone()]);
+            }
+        }
+        // No sender receive turn ran: native staging and application receipt
+        // are not ACK evidence and cannot reclaim either class's quota.
+        assert_eq!(peers.server.usage().retained_send_records, 9);
+        assert_eq!(
+            peers.server.usage().retained_send_upper_bound,
+            recovery.len() + critical.iter().map(Vec::len).sum::<usize>()
+        );
+    });
+}
+
+#[test]
+fn the_bulk_opportunity_after_critical_work_still_rechecks_authority() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut peers = peers(&cx).await;
+        let recovery = record(peers.outgoing[0], 19, 100);
+        let critical = record(peers.outgoing[2], 40, 100);
+        send(&cx, &mut peers, 0, &recovery);
+        send(&cx, &mut peers, 2, &critical);
+        let mut checks = 0;
+        let result = peers
+            .server
+            .drive(&cx, Duration::ZERO, || {
+                checks += 1;
+                checks < 4
+            })
+            .await;
+        assert_eq!(result, Err(fr_transport::quic::Error::Unauthorized));
+        assert!(peers.server.is_closed());
+        assert_eq!(peers.server.usage().retained_send_records, 0);
+        let mut received = Vec::new();
+        receive_queued(&cx, &mut peers, &mut received).await;
+        // Even if critical bytes already reached the socket, revocation must
+        // fence the following bulk prefix; existing effects are not rolled back.
+        assert!(
+            received
+                .iter()
+                .all(|(binding, bytes)| *binding == 3 && bytes == &critical)
+        );
     });
 }
 
