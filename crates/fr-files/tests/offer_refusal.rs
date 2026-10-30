@@ -181,3 +181,129 @@ fn replayed_offer_cannot_replace_publication_with_a_no_effect_reply() {
         assert!(!f.link.c.is_closed() && !f.link.h.is_closed());
     });
 }
+
+// Exercise serialization failures directly: the native transport deliberately
+// supplies a full-sized buffer. Reuse its original input owner and negotiated
+// bindings, but give this wire-only receiver a separate, private test directory.
+fn wire_receiver(
+    f: &Running,
+    cx: &Cx,
+) -> (fr_files::wire::HostReceiver, fr_files::worker::Task) {
+    use std::os::unix::fs::DirBuilderExt;
+    let directory = f.path.join("wire-only");
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let directory = fr_files::receive::DropDirectory::open(
+        &directory,
+        fr_files::receive::Limits {
+            max_file_bytes: 1_000_000,
+            max_reserved_bytes: 1_000_000,
+            max_transfers: 1,
+        },
+    )
+    .unwrap();
+    fr_files::wire::HostReceiver::spawn(
+        cx.clone(),
+        &f.input,
+        directory,
+        fr_files::session::Permission::new(true),
+        fr_files::session::Policy::conservative(),
+        fr_files::wire::Settings {
+            incoming: f.client.outgoing(),
+            outgoing: f.client.incoming(),
+            limits: f.client.limits(),
+        },
+    )
+    .unwrap()
+}
+
+fn finish_wire_worker(task: &mut fr_files::worker::Task) {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(result) = task.try_finish_cleanup() {
+            assert_eq!(result, Ok(()));
+            break;
+        }
+        assert!(std::time::Instant::now() < until, "wire worker cleanup stalled");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn short_buffers_and_following_cancellation_cannot_consume_the_retained_refusal() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let f = Running::new(&cx).await;
+        let (mut receiver, mut task) = wire_receiver(&f, &cx);
+        let offer = f.packet(
+            1,
+            Body::Offer {
+                profile: files::ATP_PORTABLE_FULL,
+                atp: b"invalid ATP frame",
+            },
+        );
+        assert!(matches!(
+            receiver.receive(&offer),
+            Err(fr_files::wire::Error::Atp(_))
+        ));
+        assert!(receiver.is_closed());
+        for length in [0, files::COMMON_BYTES, files::COMPLETE_OVERHEAD - 1] {
+            assert!(matches!(
+                receiver.poll_reply(&mut vec![0; length]),
+                Err(fr_files::wire::Error::Wire(_))
+            ));
+            assert!(receiver.is_busy());
+            assert!(receiver.last_result().is_none());
+        }
+        let cancel = f.packet(1, Body::Cancel(Reason::User));
+        assert_eq!(receiver.receive(&cancel), Err(fr_files::wire::Error::Busy));
+        assert_eq!(receiver.receive(&offer), Err(fr_files::wire::Error::Busy));
+        let mut reply = vec![0; f.client.limits().record_bytes()];
+        let length = receiver.poll_reply(&mut reply).unwrap().unwrap();
+        assert_refused(&f, &reply[..length], 1);
+        assert!(!receiver.is_busy());
+        assert_eq!(receiver.poll_reply(&mut reply), Ok(None));
+        assert!(receiver.last_result().is_none());
+        finish_wire_worker(&mut task);
+        assert_eq!(fs::read_dir(f.path.join("wire-only")).unwrap().count(), 0);
+        f.input_live(&cx);
+    });
+}
+
+#[test]
+fn a_foreign_binding_never_gets_a_pre_admission_refusal() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let f = Running::new(&cx).await;
+        let (mut receiver, mut task) = wire_receiver(&f, &cx);
+        let mut context = f.client.outgoing();
+        context.channel = context.channel.checked_add(1).unwrap();
+        let mut bytes = vec![0; f.client.limits().record_bytes()];
+        let length = files::encode(
+            files::Message {
+                id: 1,
+                body: Body::Offer {
+                    profile: files::ATP_PORTABLE_FULL,
+                    atp: b"invalid ATP frame",
+                },
+            },
+            context,
+            f.client.limits(),
+            &mut bytes,
+        )
+        .unwrap();
+        assert!(matches!(
+            receiver.receive(&bytes[..length]),
+            Err(fr_files::wire::Error::Wire(_))
+        ));
+        assert!(!receiver.is_busy());
+        assert!(receiver.last_result().is_none());
+        assert_eq!(receiver.poll_reply(&mut bytes), Ok(None));
+        receiver.stop();
+        finish_wire_worker(&mut task);
+        assert_eq!(fs::read_dir(f.path.join("wire-only")).unwrap().count(), 0);
+        f.input_live(&cx);
+    });
+}
