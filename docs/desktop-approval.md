@@ -51,6 +51,38 @@ separate `--observation-indicator` wrapper refuse this consent profile with
 switch to unattended sharing. The long-lived observation-indicator window and
 the one-use consent window are not combined by this slice.
 
+## Install the monitored host as a user service
+
+The installer accepts the same explicit desktop selection for a systemd user
+service. For example, preview the service for your actual selected session:
+
+```sh
+frd install --user --dry-run --approval local --sharing own-user -- \
+  --encoder software --display :0 --logind-session c2 \
+  --worker /absolute/path/fr-media-worker \
+  --session-monitor /absolute/path/fr-session-monitor
+```
+
+Remove `--dry-run` to write the service definition, then follow the reported
+service-manager and ingress-helper steps. Installation does not start sharing
+or approve a connection. Add `--input-agent /absolute/path/fr-input-agent` after
+`--` if this host should also offer control; local approval alone enables no
+input, audio, clipboard or file capability.
+
+The unit starts with and belongs to `graphical-session.target`. Supply that
+desktop's X11 environment to the user service and install the matching
+`fr-observation-indicator` beside `frd`. Every start still verifies the selected
+logind session and the packaged consent UI before listening. The session ID is
+an explicit selection, not a reusable login identity: if a later login changes
+it, update the service selection. No new desktop inherits an earlier approval.
+
+A missing `--logind-session`, system service, headless profile or separate
+`--observation-indicator` wrapper refuses explicit local-approval installation.
+Omitting `--approval` continues to inherit saved policy at host startup; the
+installer neither rewrites that policy nor changes it to unattended sharing.
+These installer checks verify the configuration, not device consent or a live
+installed desktop.
+
 ## Original lifetimes, not reusable approvals
 
 The host notifies a capacity-one inbox with the ORIGINAL `Approval` capability,

@@ -76,10 +76,7 @@ impl InstallOptions {
                 });
             }
             if self.approval_mode == "local" {
-                return Err(ServiceError::HostProfileUnavailable {
-                    code: "local_approval_unavailable",
-                    detail: "an installed unit cannot select the logind session that local approval needs yet; install with --approval none or run frd run --approval local --logind-session ID directly",
-                });
+                self.validate_local_approval()?;
             }
         }
         for path in std::iter::once(&self.exec_path)
@@ -112,6 +109,29 @@ impl InstallOptions {
     }
 }
 impl InstallOptions {
+    /// A user service can carry the same explicit desktop selection as a
+    /// foreground host. Installation supplies no consent or lifecycle evidence:
+    /// startup still requires the original monitor and packaged approval UI.
+    fn validate_local_approval(&self) -> Result<(), ServiceError> {
+        let unavailable = || ServiceError::HostProfileUnavailable {
+            code: "local_approval_unavailable",
+            detail: "local approval needs a user service with -- --logind-session ID for the shared graphical desktop, without --headless or --observation-indicator; startup revalidates that session and the packaged approval UI",
+        };
+        if self.kind != ServiceKind::SystemdUser {
+            return Err(unavailable());
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let run = crate::host_policy::options::RunOptions::parse(&self.run_args)
+                .map_err(|_| ServiceError::InvalidOptions)?;
+            if run.logind_session.is_some() && !run.headless && run.observation_indicator.is_none()
+            {
+                return Ok(());
+            }
+        }
+        Err(unavailable())
+    }
+
     /// Parse carried flags with the real host parser and return whether they
     /// explicitly select an encoder. The renderer retains those original args;
     /// this never inserts a software flag, changes authority policy or probes GPU
@@ -227,3 +247,6 @@ mod tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod file_conflict_tests;
+
+#[cfg(all(test, target_os = "linux"))]
+mod local_approval_tests;

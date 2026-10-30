@@ -649,6 +649,13 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
         next_steps.extend(ingress_helper_steps(helper));
     }
 
+    if options.kind == ServiceKind::SystemdUser && options.approval_mode == "local" {
+        next_steps.push(
+            "Local approval uses the explicitly selected logind session on every start. Install the matching fr-observation-indicator beside frd and provide the selected session's X11 environment; missing session evidence or UI refuses hosting. After a new login changes the session ID, update the service selection explicitly."
+                .into(),
+        );
+    }
+
     Ok(InstallReport {
         kind: options.kind,
         unit_path,
