@@ -1,0 +1,184 @@
+FrankenRemote development client
+
+fr hosts [--json] [--socket /absolute/tailscaled.sock]
+fr status [--json] [--socket /absolute/tailscaled.sock]
+fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]
+fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
+fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
+    [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
+fr connect NODE_ID --view-only|--control --experimental-native
+    --display HANDLE|only|choose [--worker /absolute/fr-media-worker] [--trust-roots /absolute/ca-roots.pem]
+    [--by-name] [--x-display :0] [--socket /absolute/tailscaled.sock]
+    [--port 8443] [--ipv6] [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
+    [--capture-system-shortcuts]
+    [--send /absolute/file-or-directory]... [--file-drop] [--receive /absolute/private-directory]
+    [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
+    [--receive-max-session-bytes N]
+    [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
+     [--audio-volume 0..100] [--audio-muted]] [--json]
+fr robot session open NODE_ID --foreground --role view|control
+    --experimental-native --display HANDLE|only|choose [connect options above]
+fr robot session status NODE_ID [--json]
+fr robot session close NODE_ID [--connection-id ID] [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
+fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.json] [--precondition-geometry GEN] [--max-observation-age MS] [--precondition-lease LEASE] [--precondition-focus WINDOW] [--semantic-evidence none|unverified_pixels|adapter|instrumentation] [--json]
+
+Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
+Discovery lists machines, not installed/ready desktops or access permissions.
+--trust-roots defaults to the distribution bundle /etc/ssl/certs/ca-certificates.crt;
+--worker defaults to the fr-media-worker installed beside fr.
+Displays requires host approval when configured; it starts no decoder or input.
+--display only explicitly selects the sole current display, refusing ambiguity.
+--display choose opens a native chooser in each approved connection.
+--fit bounds the fixed local window and explicitly enables CPU nearest-neighbour
+aspect fitting; the remote display is not resized. Omit it for native pixels.
+Connect uses fresh installed-tailnet identity and strict TLS on every attempt.
+--by-name selects an exact canonical tailnet FQDN, never arbitrary DNS or URLs.
+Connect needs exactly one role. --view-only never requests control.
+--control requests input control ONCE, after the window shows a fresh frame; the
+host must run frd run --input-agent. Keys, buttons, absolute pointer and discrete
+line-wheel scrolling are available (no text or pixel-scroll input).
+Lost or refused control is never retried or reacquired. After a transient link
+failure, remaining --attempts may reconnect VIEWING ONLY, after confirmed native
+cleanup. Clipboard and file requests are not repeated; start a new command to
+request control again. User close, local release, explicit control
+revocation/refusal and input expiry remain terminal. Completion reports the last
+attempt's mode and number of viewing-only reconnects separately from historical
+control effects.
+--capture-system-shortcuts (with --control, Linux X11 only) requests a keyboard
+grab after control is granted, so shortcuts such as Alt+Tab can reach the host.
+On acquisition, the viewer title identifies this mode and
+Ctrl+Alt+Shift+Escape as the immediate local release. Without this flag, the
+local window manager keeps its shortcuts. The choice is fixed for this connection.
+Unavailable capture ends control with system_shortcuts_unavailable; it is never
+silently downgraded. Focus loss, window changes and existing input fences end
+capture and release the grab. Reserved X-server shortcuts remain platform limits.
+A session that ends without a host report names its local cause: view_stale
+(the picture could not be proven fresh in time), transport_deadline_expired (a
+record missed its delivery deadline), host_not_heard (host renewals stopped
+arriving), video_reference_lost (lost video could not be repaired in time),
+video_startup_expired (a decoder start or restart ran out of time),
+video_worker_late (this machine's decoder/presenter missed a deadline, usually
+overload) or control_renewal_failed (the control lease could not be renewed in
+time);
+any other end is native_session_failed, its typed chain on stderr. When an
+automatic reconnect then fails too, attempts_ended names the earlier
+attempts' ends (the reconnect's own end, e.g. host_not_answering after a
+--once host stopped, would otherwise hide them).
+With --control, UTF-8 text clipboard sharing is enabled by default, up to 1 MiB
+per item, when both ends provide it (build fr-native with linux-clipboard).
+It starts only after control is granted and local privacy controls are visible.
+Use --no-clipboard before connecting, or Turn off in either end's Clipboard
+sharing window, to disable this lane. Closing or losing that window also turns
+clipboard sharing off for the current session. The desktop normally continues;
+if an in-progress transfer cannot stop independently, the connection closes.
+--clipboard explicitly selects the default; conflicting choices are refused.
+View-only sessions never access either clipboard. Missing native permission or
+clipboard support reports typed absence while keyboard, mouse and video continue.
+--send PATH (with --control, repeatable up to 8) sends those regular files or
+portable directory roots, in order, into the host's drop directory after control
+is granted, when the host runs frd run --files DIR. Symlinks and special files
+are refused before connecting. The host never overwrites: a taken name is
+refused. Completion reports each selection by index and size only, with the
+host-reported outcome or a typed refusal. Empty files, empty directory roots and
+nested empty folders are preserved; older peers may refuse the required profile.
+A separate upload progress panel shows queued bytes, publication receipts,
+pause intent and local cleanup, with Pause / Resume / Cancel upload buttons.
+It requests no keyboard focus. Closing it only hides progress; the upload and
+keyboard controls continue. Panel failure does not cancel the desktop or files.
+A full progress bar is not a publication receipt, and an unknown size is not zero.
+After the initial upload finishes successfully, copy local files or directories
+from an X11 file manager onto the viewer to send another selection on this same
+session. Keep the upload panel open. Each drop accepts up to 8 selections; at
+most 8 additional batches are retained, under the host's original cumulative
+limits. Wait for each batch to finish before dropping more. Only local file URIs
+and the Copy action are accepted; remote URLs and Move actions are refused.
+Each new batch gets fresh progress buttons. Hiding the panel stops future drops
+without cancelling an accepted upload; no drop is replayed after reconnect.
+Use --file-drop with --control to enable Copy drops without an initial --send.
+Wait for Ready to send files in the upload panel, then drag files or folders
+from your file manager into the remote desktop. Only items you drop are sent.
+The host still needs --files DIR. Close the panel to stop accepting new drops;
+Cancel before the first drop stops file sharing. The desktop stays connected.
+Unavailable native drop controls report file_drop_unavailable. Reconnecting
+never repeats a selection or re-enables drops on a new connection.
+While controlling a configured --send selection, physical Ctrl+Alt+Shift+F8
+requests pause, F9 requests resume, and F10 cancels that upload selection only.
+Keep the viewer focused. Release the function key between requests. Its press,
+repeat and release stay local; modifier keys still follow ordinary input rules.
+Original transfer deadlines continue while paused; resume never retries ended
+work. These keys stay bound to the original --send selection; use the new panel's
+buttons for later drops. Downloads are not controlled by these keys. Ctrl+Alt+Shift+Escape remains
+an immediate local stop. Missing/ambiguous physical keys disable these shortcuts.
+--receive DIR (with --control) accepts the host's explicit selections into an
+existing absolute local directory owned by you and not writable by other users
+or groups. No path component may be a symlink. The host must run frd run --once
+--input-agent PATH --send PATH... . Each complete file or portable directory is
+published atomically without overwriting an existing name; empty files and
+empty roots and nested folders are supported. No received item is opened or run.
+Receive defaults are 256 MiB per selection and 1 GiB cumulatively per session.
+--receive-max-file-bytes and --receive-max-session-bytes set positive byte limits;
+the session limit must be at least the per-file limit. A directory counts by its
+total file content, and admitted attempts consume the session budget even if
+cancelled. These options require --receive and do not increase memory queues.
+--receive-conflict keep-both publishes a colliding file or whole directory under
+a bounded .fr-conflict- name, preserving the original. The default is reject.
+Neither choice overwrites or merges existing content, retries a transfer, or
+resumes it after reconnect. Filenames remain absent from diagnostics.
+A download progress panel shows privately staged bytes separately from actual
+publication receipts and cleanup. Cancel download requests file-only cancellation;
+closing the panel only hides it. The panel never retries or resumes a download.
+--receive and --send may be combined when the host selects both --send and
+--files. Both peers must support independent file directions; a legacy peer can
+select its original direction while the other reports not negotiated. Upload and
+download keep separate permissions, byte limits, receipts and cancellation. Both
+may accompany --clipboard and --audio. Files follow this original control lease
+and are never resumed or
+replayed automatically. Completion reports local publications separately from
+progress, by index, byte count and durability, with typed refusal, absence and
+actual cleanup status; filenames and paths are omitted, including on cancellation.
+--audio (with --view-only or --control) asks for host playback audio; without it no audio
+capability is offered. The host must run frd run --audio. Output goes to the local
+PulseAudio server (--audio-server, else PULSE_SERVER, else
+$XDG_RUNTIME_DIR/pulse/native) and its default sink unless --audio-sink names one.
+--audio-volume sets this session's local volume (0..100, default 100);
+--audio-muted starts muted. A local Remote audio panel offers Quieter, Louder and
+Mute / unmute in either viewing role. Volume changes keep mute as selected, and
+both preferences survive audio recovery without restarting playback and are kept
+when this command reconnects. Changes apply to new audio submissions; already
+queued sound drains briefly. No host, microphone or system-wide volume is changed.
+Closing the panel keeps the setting.
+The panel appears only if it can fit outside the remote image without taking
+focus. If it cannot, the initial CLI preferences still apply; use --fit to leave
+room for local controls. The completion reports audio_controls and the last setting.
+A host without audio is reported as typed absence, not an error; video continues.
+Builds without the linux-audio feature refuse --audio.
+A running Linux fr connect also accepts local shutdown with fr disconnect TARGET
+or fr robot session close TARGET, using exactly the target supplied to connect.
+The same-user caller is authenticated by the local kernel; no tailnet request,
+PID signal, new host controller or replay is used. One local connection owns each
+exact target. Closure confirms local native cleanup only, not remote key release
+or rollback of prior effects; the original connect result retains host reports.
+fr robot session status TARGET identifies that same-user foreground invocation
+without contacting Tailscale or requesting a stop. Remote state stays unknown.
+Its connection_id names one invocation, not a remote session or input lease.
+Use fr robot session close TARGET --connection-id ID to stop only the invocation
+previously inspected. A replacement refuses with local_session_changed before
+any stop request is sent. The ID survives viewing reconnects within that original
+invocation, but a new fr connect gets a new ID. Omitting --connection-id keeps
+the existing close-current-owner behavior. A lost stop reply remains
+unknown_external_effect, never an invitation to retry another invocation.
+Robot session open with --foreground --role view|control (in that order after
+TARGET) starts this same native connection owner, including strict TLS, host
+approval, explicit display selection and native cleanup. All connect options
+apply. It needs a local desktop; it is not a headless or detached broker.
+It stays running until closed and emits the ordinary connect completion report
+only after shutdown, not a fabricated opened acknowledgement or input lease.
+Use another process's session status/close commands for its local lifecycle.
+Without --foreground, the reserved broker-style session-open remains unavailable.
+Robot --lease is refused until a real local lease handle is available; observe
+and scripted input remain unavailable. A foreground control role enables the
+ordinary local input path only, never credential-free robot input.
+Native transport/media remain unqualified. Set XAUTHORITY in the local environment
+when the window and worker require it. Close the window or use Ctrl-C to stop.
