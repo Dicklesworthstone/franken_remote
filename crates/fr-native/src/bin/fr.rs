@@ -11,6 +11,8 @@ mod linux;
 mod options;
 #[path = "fr_cli/output.rs"]
 mod output;
+#[path = "fr_cli/robot_observe.rs"]
+mod robot_observe;
 #[path = "fr_cli/robot_open.rs"]
 mod robot_open;
 #[path = "fr_cli/terminal.rs"]
@@ -63,7 +65,10 @@ impl Failure {
         self
     }
 }
-const HELP: &str = include_str!("fr_cli/help.txt");
+const HELP: &str = concat!(
+    include_str!("fr_cli/help.txt"),
+    include_str!("fr_cli/robot_observe/help.txt"),
+);
 
 fn main() -> ExitCode {
     let mut args = Vec::new();
@@ -89,6 +94,9 @@ fn main() -> ExitCode {
             );
         };
         args.push(arg);
+    }
+    if robot_observe::requested(&args) {
+        return finish(robot_observe::run(&args), json);
     }
     let parsed = match robot_open::parse(&args) {
         Ok(v) => v,

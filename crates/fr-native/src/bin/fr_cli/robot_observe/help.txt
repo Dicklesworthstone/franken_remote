@@ -1,0 +1,18 @@
+
+Explicit one-shot native observation (separate read-only connection):
+fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|only
+    [--by-name] [--worker /absolute/fr-media-worker] [--x-display :0]
+    [--trust-roots /absolute/ca-roots.pem] [--socket /absolute/tailscaled.sock]
+    [--port 8443] [--ipv6] [--fit WIDTHxHEIGHT]
+    [--evidence-level decoded|submitted_to_compositor] [--json]
+The --native-once prefix immediately follows NODE_ID. This explicitly opens ONE
+new observation, subject to normal tailnet/TLS admission and host approval. It
+does not query an existing controller and is not a headless screenshot service.
+It opens the native viewer, records its first decoder completion even on an idle
+screen, runs InspectionComplete closure, and waits for local native cleanup.
+It never requests input, clipboard, files or audio, and never reconnects.
+Output describes historical display/frame metadata, not pixels or a current
+input precondition. Unknown capture times, codec generation and source freshness
+stay unknown. Compositor submission is not physical visibility. Screenshots and
+instrumentally_observed evidence are refused, never silently substituted.
+Without --native-once, the reserved robot-observe form remains unavailable.
