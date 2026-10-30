@@ -3,7 +3,6 @@
 //! positively completed native cleanup permits another attempt; no replay.
 #![forbid(unsafe_code)]
 mod once;
-pub use once::Observation;
 use super::{CaptureCleanup, Cleanup, Configuration, Desktop, Error, PickerCleanup, WindowCleanup};
 use asupersync::{
     cx::Cx,
@@ -24,6 +23,7 @@ use frd::{
     },
     worker::Deadline,
 };
+pub use once::Observation;
 
 /// Control-capable means viewing until a NEW explicit UI request. These are
 /// policies and an initial sequence, never retained credentials or actions.

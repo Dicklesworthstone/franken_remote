@@ -38,23 +38,48 @@ fn explicit_local_configuration_survives_translation() {
     assert!(request.connection.target.by_name);
     assert!(request.connection.target.ipv6);
     assert_eq!(request.connection.target.port, 9443);
-    assert_eq!(request.socket, Some(PathBuf::from("/local/tailscaled.sock")));
-    assert_eq!(request.connection.target.roots, PathBuf::from("/local/roots.pem"));
-    assert_eq!(request.connection.worker, PathBuf::from("/local/fr-media-worker"));
+    assert_eq!(
+        request.socket,
+        Some(PathBuf::from("/local/tailscaled.sock"))
+    );
+    assert_eq!(
+        request.connection.target.roots,
+        PathBuf::from("/local/roots.pem")
+    );
+    assert_eq!(
+        request.connection.worker,
+        PathBuf::from("/local/fr-media-worker")
+    );
     assert_eq!(request.connection.x_display.as_deref(), Some(":9"));
     assert_eq!(request.connection.fit_window, Some((800, 600)));
-    assert_eq!(request.connection.display, options::DisplayChoice::Handle(17));
+    assert_eq!(
+        request.connection.display,
+        options::DisplayChoice::Handle(17)
+    );
     assert_eq!(request.minimum, Minimum::SubmittedToCompositor);
 }
 
 #[test]
 fn no_control_auxiliary_retry_or_broker_authority_can_enter_the_one_shot_path() {
     for tail in [
-        "--control", "--role control", "--view-only", "--attempts 2",
-        "--clipboard", "--no-clipboard", "--audio", "--send /private/file",
-        "--receive /private/directory", "--file-drop", "--capture-system-shortcuts",
-        "--lease private-lease", "--connection-id private-instance", "--native-once",
-        "--json --json", "--socket relative", "--port 0", "unexpected",
+        "--control",
+        "--role control",
+        "--view-only",
+        "--attempts 2",
+        "--clipboard",
+        "--no-clipboard",
+        "--audio",
+        "--send /private/file",
+        "--receive /private/directory",
+        "--file-drop",
+        "--capture-system-shortcuts",
+        "--lease private-lease",
+        "--connection-id private-instance",
+        "--native-once",
+        "--json --json",
+        "--socket relative",
+        "--port 0",
+        "unexpected",
     ] {
         let failure = request(tail).err().expect("must refuse");
         assert_eq!(failure.exit, 2, "{tail}");
@@ -64,9 +89,18 @@ fn no_control_auxiliary_retry_or_broker_authority_can_enter_the_one_shot_path() 
 
 #[test]
 fn unsupported_artifacts_and_visibility_claims_refuse_before_any_io() {
-    assert_eq!(code("--screenshot /private/screen.png"), "observation_artifact_unavailable");
-    assert_eq!(code("--evidence-level instrumentally_observed"), "observation_evidence_unavailable");
-    assert_eq!(code("--evidence-level decoded --evidence-level decoded"), "invalid_arguments");
+    assert_eq!(
+        code("--screenshot /private/screen.png"),
+        "observation_artifact_unavailable"
+    );
+    assert_eq!(
+        code("--evidence-level instrumentally_observed"),
+        "observation_evidence_unavailable"
+    );
+    assert_eq!(
+        code("--evidence-level decoded --evidence-level decoded"),
+        "invalid_arguments"
+    );
     assert_eq!(code("--evidence-level invented"), "invalid_arguments");
 }
 
@@ -93,7 +127,9 @@ fn legacy_commands_are_not_silently_converted_into_new_connections() {
     ] {
         assert!(!requested(&args(text)));
     }
-    assert!(requested(&args("robot observe n-host --json --native-once")));
+    assert!(requested(&args(
+        "robot observe n-host --json --native-once"
+    )));
     assert!(parse(&args("robot observe n-host --json --native-once")).is_err());
 }
 
@@ -102,7 +138,10 @@ fn original_argument_size_and_count_are_checked_before_translation() {
     let mut oversized = args("robot observe n-host --native-once");
     oversized.extend((0..29).map(|_| "--json".to_owned()));
     assert!(parse(&oversized).is_err());
-    assert_eq!(code(&format!("--worker /{}", "a".repeat(4096))), "invalid_arguments");
+    assert_eq!(
+        code(&format!("--worker /{}", "a".repeat(4096))),
+        "invalid_arguments"
+    );
     let mut control = args("robot observe n-host --native-once");
     control[2] = "n-host\nPRIVATE".into();
     assert!(parse(&control).is_err());

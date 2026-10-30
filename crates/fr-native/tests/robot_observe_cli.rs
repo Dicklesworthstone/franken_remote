@@ -3,8 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    fs,
-    io,
+    fs, io,
     os::unix::net::UnixListener,
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
@@ -54,7 +53,10 @@ fn run(args: &[&str]) -> Output {
     ));
     let until = Instant::now() + Duration::from_secs(5);
     while process.0.as_mut().unwrap().try_wait().unwrap().is_none() {
-        assert!(Instant::now() < until, "bounded one-shot CLI did not finish");
+        assert!(
+            Instant::now() < until,
+            "bounded one-shot CLI did not finish"
+        );
         thread::sleep(Duration::from_millis(5));
     }
     let output = process.0.take().unwrap().wait_with_output().unwrap();
@@ -81,9 +83,18 @@ fn one_shot_validates_real_local_roots_before_contacting_discovery() {
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     let output = run(&[
-        "robot", "observe", "n-PRIVATE", "--native-once", "--experimental-native",
-        "--display", "only", "--trust-roots", roots.to_str().unwrap(),
-        "--socket", socket.to_str().unwrap(), "--json",
+        "robot",
+        "observe",
+        "n-PRIVATE",
+        "--native-once",
+        "--experimental-native",
+        "--display",
+        "only",
+        "--trust-roots",
+        roots.to_str().unwrap(),
+        "--socket",
+        socket.to_str().unwrap(),
+        "--json",
     ]);
     refused(&output, "invalid_trust_store", 1);
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
@@ -94,12 +105,24 @@ fn artifact_and_optical_evidence_refusals_happen_without_opening_output_files() 
     let fixture = Fixture::new();
     let artifact = fixture.0.join("PRIVATE-screen.png");
     for (flags, code) in [
-        (vec!["--screenshot", artifact.to_str().unwrap()], "observation_artifact_unavailable"),
-        (vec!["--evidence-level", "instrumentally_observed"], "observation_evidence_unavailable"),
+        (
+            vec!["--screenshot", artifact.to_str().unwrap()],
+            "observation_artifact_unavailable",
+        ),
+        (
+            vec!["--evidence-level", "instrumentally_observed"],
+            "observation_evidence_unavailable",
+        ),
     ] {
         let mut args = vec![
-            "robot", "observe", "n-PRIVATE", "--native-once", "--experimental-native",
-            "--display", "only", "--json",
+            "robot",
+            "observe",
+            "n-PRIVATE",
+            "--native-once",
+            "--experimental-native",
+            "--display",
+            "only",
+            "--json",
         ];
         args.extend(flags);
         refused(&run(&args), code, 2);
@@ -110,13 +133,22 @@ fn artifact_and_optical_evidence_refusals_happen_without_opening_output_files() 
 #[test]
 fn one_shot_never_accepts_control_files_audio_or_reconnect_options() {
     for flags in [
-        vec!["--control"], vec!["--send", "/PRIVATE/selected"],
-        vec!["--receive", "/PRIVATE/destination"], vec!["--audio"],
-        vec!["--attempts", "2"], vec!["--lease", "PRIVATE-lease"],
+        vec!["--control"],
+        vec!["--send", "/PRIVATE/selected"],
+        vec!["--receive", "/PRIVATE/destination"],
+        vec!["--audio"],
+        vec!["--attempts", "2"],
+        vec!["--lease", "PRIVATE-lease"],
     ] {
         let mut args = vec![
-            "robot", "observe", "n-PRIVATE", "--native-once", "--experimental-native",
-            "--display", "only", "--json",
+            "robot",
+            "observe",
+            "n-PRIVATE",
+            "--native-once",
+            "--experimental-native",
+            "--display",
+            "only",
+            "--json",
         ];
         args.extend(flags);
         refused(&run(&args), "invalid_arguments", 2);
@@ -131,7 +163,15 @@ fn legacy_observe_and_unqualified_native_requests_do_not_open_a_new_session() {
         2,
     );
     refused(
-        &run(&["robot", "observe", "n-PRIVATE", "--native-once", "--display", "only", "--json"]),
+        &run(&[
+            "robot",
+            "observe",
+            "n-PRIVATE",
+            "--native-once",
+            "--display",
+            "only",
+            "--json",
+        ]),
         "native_transport_unqualified",
         2,
     );

@@ -73,8 +73,8 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
             "--experimental-native" | "--by-name" | "--ipv6" | "--json" => {
                 connect.push(flag.to_owned());
             }
-            "--display" | "--worker" | "--trust-roots" | "--x-display" | "--socket"
-            | "--port" | "--fit" | "--evidence-level" => {
+            "--display" | "--worker" | "--trust-roots" | "--x-display" | "--socket" | "--port"
+            | "--fit" | "--evidence-level" => {
                 let value = args
                     .get(index)
                     .filter(|value| !value.is_empty() && !value.starts_with("--"))

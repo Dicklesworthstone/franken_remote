@@ -78,10 +78,11 @@ pub(super) fn render(
     })?;
     let mut data = data(observation, request.minimum, receipt_time)?;
     data["target"] = json!(request.connection.target.node);
-    data["close_exchange"] = close.map_or(Ok(Value::Null), |outcome| {
-        serde_json::from_str(&crate::closure::Report::from(outcome).json())
-    })
-    .map_err(|_| serialization())?;
+    data["close_exchange"] = close
+        .map_or(Ok(Value::Null), |outcome| {
+            serde_json::from_str(&crate::closure::Report::from(outcome).json())
+        })
+        .map_err(|_| serialization())?;
     if request.json {
         // No input acknowledgement stage applies. The explicit evidence level
         // above is the decoder/compositor boundary, never optical observation.

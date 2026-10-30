@@ -13,13 +13,7 @@ fn incomplete_cleanup_dominates_success_and_cancellation() {
             assert_eq!(error.code, "native_cleanup_incomplete");
         }
     }
-    let error = completion_gate(
-        Err(reconnect::Failure::Cleanup),
-        true,
-        false,
-        false,
-    )
-    .unwrap_err();
+    let error = completion_gate(Err(reconnect::Failure::Cleanup), true, false, false).unwrap_err();
     assert_eq!(error.code, "native_cleanup_incomplete");
 }
 
@@ -31,13 +25,8 @@ fn cancellation_and_failures_cannot_be_relabelled_as_observation_success() {
     assert_eq!(error.exit, 130);
     let error = completion_gate(Ok(()), true, false, true).unwrap_err();
     assert_eq!(error.code, "display_not_offered");
-    let error = completion_gate(
-        Err(reconnect::Failure::Notification),
-        true,
-        false,
-        false,
-    )
-    .unwrap_err();
+    let error =
+        completion_gate(Err(reconnect::Failure::Notification), true, false, false).unwrap_err();
     assert_eq!(error.code, "native_observation_failed");
 }
 

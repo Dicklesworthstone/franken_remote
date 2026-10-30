@@ -235,7 +235,11 @@ impl Ui for Interface {
         }
         Ok(selected)
     }
-    fn approval(&mut self, _: u8, _: fr_client::startup::ApprovalNotice) -> Result<(), CallbackError> {
+    fn approval(
+        &mut self,
+        _: u8,
+        _: fr_client::startup::ApprovalNotice,
+    ) -> Result<(), CallbackError> {
         Ok(())
     }
     fn ready(&mut self, _: u8, _: &mut Desktop) -> Result<(), CallbackError> {
