@@ -120,6 +120,7 @@ jobs:
           assert len(binaries) == 1, 'one exact native control test binary required'
           tests = [
               'real_control::system_shortcuts::captured_system_shortcuts_reach_the_host_and_release_on_both_local_exits',
+              'real_control::robot_input::foreground_robot_actions_have_host_receipts_and_do_not_replay_after_focus_loss',
               'real_control::reconnect::transient_control_transport_loss_reconnects_fresh_viewing_without_reacquiring_input',
               'real_control::reconnect::a_new_native_gesture_requests_fresh_control_after_viewing_reconnect',
           ]

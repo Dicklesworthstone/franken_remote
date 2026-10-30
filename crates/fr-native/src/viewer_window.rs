@@ -129,6 +129,7 @@ struct Shared {
     orderly_close: AtomicU8,
     control_choice: choice::Choice,
     automation_focus: focus::Gate,
+    automation_focus_stop: AtomicU8,
     file_drops: file_drop::Inbox,
     target: OnceLock<X11Target>,
     width: u32,
@@ -149,6 +150,21 @@ impl Shared {
         }
     }
     fn stop(&self, reason: StopReason) {
+        if matches!(reason, StopReason::FocusLost | StopReason::FocusUnavailable)
+            && self.state.load(Ordering::Acquire) < 2
+            && !self.session.is_stopped()
+        {
+            // Reporting only: retain the first native focus cause BEFORE
+            // cancellation wakes the supervisor. A concurrent status reader
+            // may publish SessionEnded, but cannot erase this original cause.
+            // An already stopped owner cannot acquire a late focus diagnosis.
+            let _ = self.automation_focus_stop.compare_exchange(
+                0,
+                reason as u8,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            );
+        }
         // No native lock, codec call, network round trip, or replacement grant.
         // Fence first; publishing Stopped never claims cleanup has completed.
         self.session.stop();
@@ -222,6 +238,12 @@ impl WindowControl {
         self.status() == Status::Mapped
             && self.0.automation_focus.ready(Instant::now())
             && self.status() == Status::Mapped
+    }
+    /// The first native automation focus failure, retained before its original
+    /// session was cancelled. This reporting-only latch survives cleanup and
+    /// never polls liveness, changes readiness, or proves completed cleanup.
+    pub fn automation_focus_stop(&self) -> Option<StopReason> {
+        StopReason::from_state(self.0.automation_focus_stop.load(Ordering::Acquire))
     }
     /// Offer F8 on this fresh viewing window. It never grants input; the UI must
     /// consume a fresh gesture and use the session's ordinary control request.
@@ -342,6 +364,7 @@ impl ViewerWindow {
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
             control_choice: choice::Choice::default(),
             automation_focus: focus::Gate::default(),
+            automation_focus_stop: AtomicU8::new(0),
             file_drops: file_drop::Inbox::default(),
             target: OnceLock::new(),
             width,

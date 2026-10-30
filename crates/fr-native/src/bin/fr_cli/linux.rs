@@ -118,6 +118,23 @@ fn input_stopped(reason: fr_native::viewer_input::StopReason) -> Option<Failure>
     };
     Some(failure(code, next))
 }
+/// Automation retains its own window cause: it deliberately has no native
+/// event-capture owner from which `last_input_stop` could recover that reason.
+#[cfg(feature = "linux-desktop")]
+fn automation_focus_stopped(reason: StopReason) -> Option<Failure> {
+    let (code, next) = match reason {
+        StopReason::FocusLost => (
+            "control_focus_lost",
+            "The foreground automation window lost keyboard focus and its original control session ended. Open a new explicit session and keep its viewer focused; never replay an action with an uncertain outcome.",
+        ),
+        StopReason::FocusUnavailable => (
+            "control_focus_unavailable",
+            "Fresh keyboard-focus evidence for the foreground automation window was unavailable or timed out. Check the local X11 desktop before opening a new explicit session; previously submitted actions are not replayed or rolled back.",
+        ),
+        _ => return None,
+    };
+    Some(failure(code, next))
+}
 /// Native setup can stop the original viewer before attachment returns its
 /// status handle. Retain that exact typed cause through the attachment error.
 #[cfg(feature = "linux-desktop")]
@@ -290,6 +307,12 @@ async fn await_shutdown<T>(
     .await
 }
 pub fn run(options: &Options) -> Result<String, Failure> {
+    run_mode(options, false)
+}
+pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
+    run_mode(options, true)
+}
+fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     let mut shutdown = Shutdown::new()?;
     let runtime = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
@@ -361,6 +384,7 @@ pub fn run(options: &Options) -> Result<String, Failure> {
             api,
             connection,
             options.json,
+            automation,
         ),
         Command::Status => {
             robot::run_status(&runtime, &cx, &mut shutdown, &stopped, &api, options.json)
@@ -378,7 +402,7 @@ pub fn run(options: &Options) -> Result<String, Failure> {
     }
 }
 #[cfg(feature = "linux-desktop")]
-#[allow(clippy::too_many_lines)] // One CLI session owner: dial, desktop, completion in order.
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One original native session owner.
 fn connect(
     runtime: &Runtime,
     cx: &Cx,
@@ -387,6 +411,7 @@ fn connect(
     api: LocalApi,
     connection: &Connection,
     json: bool,
+    automation: bool,
 ) -> Result<String, Failure> {
     let roots = read_roots(&connection.target.roots)?;
     let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
@@ -471,6 +496,10 @@ fn connect(
             &connection.target.node,
         ))
         .map_err(robot::local_failure)?;
+    if automation {
+        state.borrow_mut().automation =
+            Some(owner.enable_input(&local).map_err(robot::local_failure)?);
+    }
     let result = if connection.control {
         let offer = if connection.receive.is_some() && connection.uploads() {
             fr_client::native::control_offer_with_duplex(
@@ -671,6 +700,12 @@ fn completed_result(
             130,
         ));
     }
+    if let Some(named) = progress
+        .automation_focus_stop
+        .and_then(automation_focus_stopped)
+    {
+        return Err(named);
+    }
     if application.last_error()
         == Some(fr_native::desktop::Error::Picker(
             fr_native::display_picker::Error::Cancelled,
@@ -759,6 +794,7 @@ fn native_cleanup_confirmed(
 }
 
 #[cfg(not(feature = "linux-desktop"))]
+#[allow(clippy::too_many_arguments)]
 fn connect(
     _runtime: &Runtime,
     _cx: &Cx,
@@ -767,6 +803,7 @@ fn connect(
     _api: LocalApi,
     _connection: &Connection,
     _json: bool,
+    _automation: bool,
 ) -> Result<String, Failure> {
     Err(Failure::new(
         "gui_unavailable",
@@ -798,6 +835,10 @@ fn offer() -> Offer {
 #[cfg(feature = "linux-desktop")]
 #[derive(Default)]
 struct Progress {
+    /// Only the explicit foreground automation mode exposes this bounded owner.
+    automation: Option<session_control::input::Shared>,
+    /// Original native focus cause, independent of cleanup-generated status.
+    automation_focus_stop: Option<StopReason>,
     attempts: u8,
     opened: u8,
     presented: u64,
@@ -830,6 +871,7 @@ impl Progress {
         // The previous owner has already been reaped. Its stopped handle must
         // not classify a connection failure before this attempt opens a window.
         self.window = None;
+        self.automation_focus_stop = None;
         self.cleanup = None;
         if let Some(control) = &mut self.control {
             control.begin_attempt(attempt);
@@ -849,6 +891,13 @@ impl Progress {
             control.retain_cleanup(attempt, summary);
         }
     }
+    fn retain_automation_focus_stop(&mut self, reason: Option<StopReason>) {
+        if self.automation.is_some() && self.automation_focus_stop.is_none() {
+            self.automation_focus_stop = reason.filter(|reason| {
+                matches!(reason, StopReason::FocusLost | StopReason::FocusUnavailable)
+            });
+        }
+    }
     /// A WM request can publish after the initial cleanup notice. Only that
     /// retained latch, never a cleanup-generated status, is safe after reaping.
     fn after_cleanup(&mut self, close_requested: bool) {
@@ -859,9 +908,9 @@ impl Progress {
             window,
             Some(WindowStatus::CloseRequested | WindowStatus::Stopped(StopReason::User))
         );
-        if self.user_closed {
+        if self.user_closed || self.automation_focus_stop.is_some() {
             // Cleaning notification failure stops retries AFTER mandatory
-            // cleanup. A user's close must never reconnect another window.
+            // cleanup. Neither user close nor lost focus can open a new owner.
             Err(CallbackError)
         } else {
             Ok(())
@@ -927,6 +976,13 @@ impl Ui for Interface {
         p.opened = p.opened.saturating_add(1);
         p.approval_pending = false;
         p.window = desktop.window();
+        if p.automation.is_some() {
+            p.window
+                .as_ref()
+                .ok_or(CallbackError)?
+                .enable_automation_focus()
+                .map_err(|_| CallbackError)?;
+        }
         if let Some(counters) = p.control.as_mut() {
             let mode = counters.opened();
             let mut attempt = control::Attempt::new(desktop, mode).ok_or(CallbackError)?;
@@ -960,14 +1016,22 @@ impl Ui for Interface {
         if frame.is_some() {
             progress.presented = progress.presented.saturating_add(1);
         }
+        let automation = progress.automation.clone();
         match (self.attempt.as_mut(), progress.control.as_mut()) {
-            (Some(attempt), Some(counters)) => attempt.turn(state, frame, counters),
+            (Some(attempt), Some(counters)) => match automation {
+                Some(automation) => attempt.automation_turn(state, frame, counters, &automation),
+                None => attempt.turn(state, frame, counters),
+            },
             _ => Err(CallbackError),
         }
     }
     fn input_result(&mut self, _: u8, result: fr_client::input::ResultEvent) {
-        if let Some(counters) = self.progress.borrow_mut().control.as_mut() {
+        let mut progress = self.progress.borrow_mut();
+        if let Some(counters) = progress.control.as_mut() {
             counters.result(&result);
+        }
+        if let Some(automation) = &progress.automation {
+            automation.result(result);
         }
     }
     fn cleanup_finished(
@@ -976,6 +1040,11 @@ impl Ui for Interface {
         summary: fr_native::desktop::reconnect::CleanupSummary,
     ) {
         let mut progress = self.progress.borrow_mut();
+        let focus_stop = progress
+            .window
+            .as_ref()
+            .and_then(WindowControl::automation_focus_stop);
+        progress.retain_automation_focus_stop(focus_stop);
         let close_requested = progress
             .window
             .as_ref()
@@ -998,6 +1067,14 @@ impl Ui for Interface {
                 self.attempt = None;
             }
             Status::Cleaning { attempt, failure } => {
+                let focus_stop = progress
+                    .window
+                    .as_ref()
+                    .and_then(WindowControl::automation_focus_stop);
+                progress.retain_automation_focus_stop(focus_stop);
+                if let Some(automation) = &progress.automation {
+                    automation.retire();
+                }
                 if let Some(failure) = failure {
                     progress.ended.push(attempt, end_code(failure));
                 }
@@ -1027,6 +1104,7 @@ impl Ui for Interface {
             }
             Status::Reconnecting { .. } => {
                 if progress.user_closed
+                    || progress.automation_focus_stop.is_some()
                     || progress.cleanup.and_then(control_retry_stop).is_some()
                     || progress
                         .control
@@ -1623,6 +1701,89 @@ mod tests {
             )
         }
         #[test]
+        fn automation_focus_causes_survive_cleanup_status_and_keep_control_evidence() {
+            for (reason, code) in [
+                (StopReason::FocusLost, "control_focus_lost"),
+                (StopReason::FocusUnavailable, "control_focus_unavailable"),
+            ] {
+                let mut progress = Progress {
+                    automation: Some(
+                        session_control::input::Shared::new([1; 16], [2; 16]).unwrap(),
+                    ),
+                    control: Some(control::Counters::default()),
+                    ..Progress::default()
+                };
+                progress.begin(1);
+                progress.control.as_mut().unwrap().spend_request();
+                // The reporting latch precedes cancellation. A status reader
+                // may already see SessionEnded when the supervisor wakes.
+                progress.retain_automation_focus_stop(Some(reason));
+                assert_eq!(
+                    progress.before_cleanup(Some(WindowStatus::Stopped(StopReason::SessionEnded))),
+                    Err(CallbackError)
+                );
+                progress.retain_automation_focus_stop(Some(StopReason::NativeFailure));
+                progress.after_cleanup(true);
+                assert_eq!(progress.automation_focus_stop, Some(reason));
+                let failure = completed(
+                    &unused_session(),
+                    Err(reconnect::Failure::Notification),
+                    false,
+                    &progress,
+                    true,
+                )
+                .unwrap_err();
+                assert_eq!((failure.code, failure.exit), (code, 1));
+                assert!(failure.control_history.is_some());
+                assert!(!failure.unknown_effect);
+                let output: serde_json::Value =
+                    serde_json::from_str(&crate::terminal::output(failure, true)).unwrap();
+                assert_eq!(output["error"]["code"], code);
+                assert_eq!(output["control_requested"], true);
+                assert_eq!(output["control_request_attempt"], 1);
+                // A focus diagnosis cannot imply native or host cleanup.
+                assert_eq!(
+                    completed(
+                        &unused_session(),
+                        Err(reconnect::Failure::CleanupExpired),
+                        false,
+                        &progress,
+                        true,
+                    )
+                    .unwrap_err()
+                    .code,
+                    "native_cleanup_incomplete"
+                );
+            }
+        }
+        #[test]
+        fn focus_reporting_is_opt_in_original_attempt_only_and_first_cause_wins() {
+            let mut progress = Progress::default();
+            progress.retain_automation_focus_stop(Some(StopReason::FocusLost));
+            assert!(progress.automation_focus_stop.is_none());
+            progress.automation =
+                Some(session_control::input::Shared::new([1; 16], [2; 16]).unwrap());
+            progress.begin(1);
+            for reason in [
+                StopReason::SessionEnded,
+                StopReason::User,
+                StopReason::NativeFailure,
+            ] {
+                assert!(automation_focus_stopped(reason).is_none());
+                progress.retain_automation_focus_stop(Some(reason));
+                assert!(progress.automation_focus_stop.is_none());
+            }
+            progress.retain_automation_focus_stop(Some(StopReason::FocusUnavailable));
+            progress.retain_automation_focus_stop(Some(StopReason::FocusLost));
+            assert_eq!(
+                progress.automation_focus_stop,
+                Some(StopReason::FocusUnavailable)
+            );
+            progress.begin(2);
+            assert!(progress.automation_focus_stop.is_none());
+            assert_eq!(progress.before_cleanup(None), Ok(()));
+        }
+        #[test]
         fn cleanup_stopping_a_window_is_not_evidence_of_a_user_close() {
             let mut progress = Progress::default();
             progress.begin(1);
@@ -2118,7 +2279,16 @@ mod tests {
         let mut shutdown = Shutdown::new().unwrap();
         let stopped = Cell::new(false);
         let api = LocalApi::new(std::path::Path::new("/dev/null")).unwrap();
-        let result = connect(&runtime, &cx, &mut shutdown, &stopped, api, &options, true);
+        let result = connect(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            api,
+            &options,
+            true,
+            false,
+        );
         assert_eq!(result.unwrap_err().code, "gui_unavailable");
     }
 }

@@ -1,0 +1,31 @@
+
+Explicit foreground robot control (Linux native desktop):
+fr robot session open NODE_ID --foreground --role control --accept-input
+    --experimental-native --display HANDLE|only [native trust/display options] [--json]
+fr robot input NODE_ID --connection-id ID --status [--json]
+fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
+    --observation-id INTEGER --max-observation-age-ms 1..1000
+    (--click BUTTON,X,Y | --key USB_USAGE | --scroll X,Y,DX,DY) [--json]
+
+Find the public connection ID with fr robot session status NODE_ID --json.
+Keep the foreground viewer focused. The explicit automation owner requests one
+control lease and has no reconnect, clipboard, files or native input forwarding.
+--status returns a bounded input observation with all view generations and a
+local comparison lease handle. Source age includes measured clock uncertainty;
+compositor submission is not proof of optical visibility or application success.
+
+Use increasing nonzero request IDs. Each action pins the ORIGINAL observation;
+a new status read cannot refresh an accepted command. Coordinates are signed
+host desktop pixels. Buttons are 1 primary, 2 secondary, 3 middle, 4 back, 5 forward.
+--key taps a physical USB page-7 usage (decimal), not Unicode or a keyboard-layout
+guess. Scroll deltas are integer lines on each axis, at most 120 in magnitude.
+Clicks and key taps submit a bounded press/release pair, in order, with host
+receipts. Text, pointer replay, arbitrary batches and persistent held keys are
+unavailable. Human keyboard/mouse events are not forwarded in this mode.
+
+Results distinguish confirmed OS submission, partial effects, refusal, and an
+unknown external effect. Partial/uncertain requests fence the original control
+owner and trigger its existing held-state cleanup. Nothing is rolled back or
+automatically retried. At most eight results are retained; older request IDs stay
+consumed even after eviction. A duplicate must keep every original argument.
+Focus loss, hiding/resizing, local close and authority expiry remain terminal.

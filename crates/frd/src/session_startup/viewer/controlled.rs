@@ -397,6 +397,22 @@ impl ControlledViewer {
     pub fn granted_capabilities(&self) -> fr_core::input_submission::Capabilities {
         self.input.capabilities()
     }
+    /// Content-free evidence from this original input owner. A local automation
+    /// precondition cannot substitute a decoder receipt or renew old source age.
+    /// The ordinary action path still rechecks authority and tickets at encoding
+    /// and transport submission; this sample itself grants nothing.
+    pub fn input_observation(
+        &mut self,
+    ) -> Result<(fr_core::input::InputView, fr_wire::presented::Sample), Error> {
+        let at = self.check()?;
+        self.input.send_limit(at)?;
+        let sample = self.input.presented_sample(at)?;
+        Ok((self.input.input_view(), sample))
+    }
+    /// Immutable receipt identity, excluding the bearer input ticket.
+    pub fn input_result_binding(&self) -> fr_wire::input_result::ResultBinding {
+        self.input.binding()
+    }
     /// Stale-view suspensions of this grant's input so far and their total
     /// duration in microseconds, the current one included (plan 21: time
     /// spent with input suspended by stale view). Counts only, no content.

@@ -11,6 +11,8 @@ mod linux;
 mod options;
 #[path = "fr_cli/output.rs"]
 mod output;
+#[path = "fr_cli/robot_input.rs"]
+mod robot_input;
 #[path = "fr_cli/robot_observe.rs"]
 mod robot_observe;
 #[path = "fr_cli/robot_open.rs"]
@@ -71,6 +73,7 @@ impl Failure {
 const HELP: &str = concat!(
     include_str!("fr_cli/help.txt"),
     include_str!("fr_cli/robot_observe/help.txt"),
+    include_str!("fr_cli/robot_input/help.txt"),
 );
 
 fn main() -> ExitCode {
@@ -97,6 +100,18 @@ fn main() -> ExitCode {
             );
         };
         args.push(arg);
+    }
+    if robot_input::requested(&args) {
+        return match robot_input::run(&args) {
+            Ok(reply) => {
+                if output::write(&reply.text).is_ok() {
+                    ExitCode::from(reply.exit)
+                } else {
+                    ExitCode::from(74)
+                }
+            }
+            Err(failure) => finish(Err(failure), json),
+        };
     }
     if robot_observe::requested(&args) {
         return finish(robot_observe::run(&args), json);

@@ -561,6 +561,31 @@ impl Attempt {
             }
         }
     }
+    /// Exclusive scripted input shares the original grant and viewport but
+    /// never attaches a second X11 event/held-state producer. The native window
+    /// still independently fences focus, visibility and lifecycle loss.
+    pub(super) fn automation_turn(
+        &mut self,
+        state: InteractiveViewerState<'_>,
+        frame: Option<Presentation>,
+        counters: &mut Counters,
+        automation: &crate::session_control::input::Shared,
+    ) -> Result<Option<Layout>, CallbackError> {
+        match state {
+            InteractiveViewerState::Controlled(viewer) => {
+                let _layout =
+                    self.turn(InteractiveViewerState::Controlled(viewer), frame, counters)?;
+                automation.turn(viewer, self.window.automation_focus_ready());
+                Ok(None)
+            }
+            other => {
+                if !self.window.automation_focus_ready() {
+                    return Ok(None);
+                }
+                self.turn(other, frame, counters)
+            }
+        }
+    }
     /// The whole selected display into this exact window: 1:1 for native
     /// pixels, the same centered aspect fit as the `--fit` presenter otherwise.
     /// `Desktop::serve_interactive` independently rechecks both rectangles.

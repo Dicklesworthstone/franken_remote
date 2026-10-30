@@ -29,9 +29,10 @@ refusal and nothing is stopped. A supplied robot `--lease` is refused as
 `local_lease_unavailable`: no robot lease handle has been issued, and an arbitrary
 handle must never be silently ignored or accepted as authority.
 
-The full robot session-open, observe and input workflows remain unavailable.
-This is a concrete lifecycle command for the existing foreground connection,
-not a background client service.
+Explicit foreground robot session-open and read-only observation publication
+use this same local ownership boundary. An opt-in bounded native input mode is
+documented in [NATIVE_ROBOT_INPUT.md](NATIVE_ROBOT_INPUT.md). Detached robot
+broker workflows remain unavailable; no background client service is created.
 
 ## Ownership and bounds
 

@@ -1894,3 +1894,6 @@ fn a_host_without_wheel_buttons_grants_control_without_the_wheel() {
     assert_eq!(report["wheel_unavailable"], true, "{report}");
     s.daemon.finish();
 }
+
+#[path = "real_control/robot_input.rs"]
+mod robot_input;
