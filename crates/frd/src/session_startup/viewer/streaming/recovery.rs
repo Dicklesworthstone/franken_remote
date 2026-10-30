@@ -56,7 +56,7 @@ pub(super) fn service(
         .service(cx, &mut session.transport, receiver, || {
             now(cx).is_ok_and(|current| current < until)
         })
-        .map_err(Error::Recovery)?;
+        .map_err(|error| service_failure(error, receiver.failure()))?;
     let recovering = matches!(
         state,
         recovery_control::State::Pending | recovery_control::State::Requested
@@ -71,6 +71,29 @@ pub(super) fn service(
         }
     }
     Ok(recovering)
+}
+
+/// Preserve a horizon actually exhausted by this original receiver's service,
+/// after its connection/authority checks. Without negotiation, tick() already
+/// returns the same Delivery error. Adding the reporting owner must not hide it
+/// and suppress bounded fresh viewing after cleanup. The ORIGINAL receiver must
+/// independently retain an expired horizon: a later recovery timeout cannot
+/// relabel a decode failure, capacity fault or unknown cause as frame loss.
+/// This never resumes the failed chain or renews any deadline. Other wrappers
+/// retain their exact cause, including cancellation and authority failures.
+fn service_failure(
+    error: recovery_control::Error,
+    original: Option<DeliveryError>,
+) -> Error {
+    match error {
+        recovery_control::Error::Delivery(
+            error @ (DeliveryError::ReferenceExpired | DeliveryError::RecoveryExpired),
+        ) if matches!(
+            original,
+            Some(DeliveryError::ReferenceExpired | DeliveryError::RecoveryExpired)
+        ) => Error::Delivery(error),
+        error => Error::Recovery(error),
+    }
 }
 
 /// Late old-generation payloads are obsolete, not decoder input. The transport

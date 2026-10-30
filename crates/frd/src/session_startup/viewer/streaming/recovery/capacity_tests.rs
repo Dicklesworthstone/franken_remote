@@ -1,6 +1,7 @@
 //! Exercise the native receive boundary with real FRD0 parsing/reassembly and
 //! synthetic media. These are not network or native-decoder qualification tests.
 use super::{receive, recoverable};
+use crate::{native_connection::reconnect, session_startup::ObserverError};
 use fr_core::{
     ids::{CodecConfigurationGeneration, RecoveryGeneration},
     limits::{LimitOverrides, ProtocolLimits},
@@ -192,4 +193,128 @@ fn full_native_window_does_not_turn_malformed_traffic_into_recovery() {
         Err(DeliveryError::Wire(_))
     ));
     assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+fn observation(error: super::Error) -> reconnect::Failure {
+    reconnect::Failure::Observation(ObserverError::Streaming(error))
+}
+
+#[test]
+fn actual_reference_expiry_retains_fresh_view_fallback_through_reporting() {
+    let (config, mut receiver, budget) = fixture(true);
+    receive(
+        &mut receiver,
+        Channel::MediaConfig,
+        &announcement(config, 1),
+        1,
+        true,
+    )
+    .unwrap();
+    let until = receiver.reference_deadline().unwrap();
+    assert_eq!(until, 1 + config.policy.reference_budget_micros);
+    assert_eq!(receiver.tick(until - 1), Ok(()));
+    assert_eq!(receiver.failure(), None);
+    assert_eq!(receiver.tick(until), Err(DeliveryError::ReferenceExpired));
+    assert_eq!(receiver.failure(), Some(DeliveryError::ReferenceExpired));
+    assert_eq!(receiver.state(), ReceiveState::NeedsRecovery);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+
+    // The actual receiver has failed at its ORIGINAL boundary. These two
+    // explicit service-outcome fixtures exercise the production translation,
+    // not a network recovery or a claim that a replacement decoder started.
+    for horizon in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+        let wrapped = super::recovery_control::Error::Delivery(horizon);
+        let mapped = super::service_failure(wrapped, receiver.failure());
+        assert_eq!(mapped, super::Error::Delivery(horizon));
+        assert!(reconnect::retryable(observation(mapped)));
+        assert_eq!(
+            reconnect::lapse(observation(mapped)),
+            Some(reconnect::Lapse::VideoReferenceLost)
+        );
+        // An arbitrary wrapper outside this provenance-checked producer does
+        // NOT become a retry instruction. Neither path revives the old view.
+        assert!(!reconnect::retryable(observation(super::Error::Recovery(wrapped))));
+        assert_eq!(receiver.state(), ReceiveState::NeedsRecovery);
+        assert!(receiver.latest_progress().is_none());
+        assert_eq!(receiver.reference_deadline(), None);
+        assert_eq!(receiver.tick(until + 1), Err(DeliveryError::ReferenceExpired));
+    }
+}
+
+#[test]
+fn a_failed_decode_cannot_be_relabelled_by_a_later_recovery_timeout() {
+    let (_, mut receiver, budget) = fixture(false);
+    let idr = receiver.take_decodable(0).unwrap().unwrap();
+    assert_eq!(
+        receiver.acknowledge_decode(&idr, false, 0).err(),
+        Some(DeliveryError::DecodeFailed)
+    );
+    drop(idr);
+    assert_eq!(receiver.failure(), Some(DeliveryError::DecodeFailed));
+    let wrapped = super::recovery_control::Error::Delivery(DeliveryError::RecoveryExpired);
+    let mapped = super::service_failure(wrapped, receiver.failure());
+    assert_eq!(mapped, super::Error::Recovery(wrapped));
+    assert!(!reconnect::retryable(observation(mapped)));
+    assert_eq!(reconnect::lapse(observation(mapped)), None);
+    assert_eq!(receiver.state(), ReceiveState::NeedsRecovery);
+    assert_eq!(budget.usage(), BudgetUsage::default());
+}
+
+#[test]
+fn recovery_timeout_needs_the_original_receivers_expiry_not_just_an_error_code() {
+    for original in [
+        None,
+        Some(DeliveryError::DecodeFailed),
+        Some(DeliveryError::ReferenceCapacityExceeded),
+        Some(DeliveryError::ResourceLimit),
+        Some(DeliveryError::AllocationFailed),
+        Some(DeliveryError::ClockRegression),
+        Some(DeliveryError::DecodeMismatch),
+    ] {
+        for horizon in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+            let wrapped = super::recovery_control::Error::Delivery(horizon);
+            let mapped = super::service_failure(wrapped, original);
+            assert_eq!(mapped, super::Error::Recovery(wrapped));
+            assert!(!reconnect::retryable(observation(mapped)), "{original:?}");
+        }
+    }
+    // Both expired horizons are allowed when genuinely retained by the same
+    // original receiver. The current service's precise error is preserved.
+    for original in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+        for current in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+            assert_eq!(
+                super::service_failure(
+                    super::recovery_control::Error::Delivery(current),
+                    Some(original),
+                ),
+                super::Error::Delivery(current)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_prior_expiry_never_masks_current_authority_protocol_or_scope_refusal() {
+    use super::recovery_control::Error as Recovery;
+    use fr_transport::quic::Error as Transport;
+
+    for error in [
+        Recovery::WrongBinding,
+        Recovery::Closed,
+        Recovery::NotNegotiated,
+        Recovery::Transport(Transport::Unauthorized),
+        Recovery::Transport(Transport::Cancelled),
+        Recovery::Transport(Transport::Malformed),
+        Recovery::Transport(Transport::Closed),
+        Recovery::Transport(Transport::Clock),
+        Recovery::Delivery(DeliveryError::DecodeFailed),
+        Recovery::Delivery(DeliveryError::ReferenceCapacityExceeded),
+        Recovery::Delivery(DeliveryError::ClockRegression),
+        Recovery::Delivery(DeliveryError::StaleGeneration),
+        Recovery::Delivery(DeliveryError::DecodeMismatch),
+    ] {
+        let mapped = super::service_failure(error, Some(DeliveryError::ReferenceExpired));
+        assert_eq!(mapped, super::Error::Recovery(error));
+        assert!(!reconnect::retryable(observation(mapped)), "{error:?}");
+    }
 }
