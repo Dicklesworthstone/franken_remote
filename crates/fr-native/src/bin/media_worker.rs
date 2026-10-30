@@ -113,12 +113,17 @@ mod linux {
                     ),
                 }
                 .map_err(native)?;
+                // Create only the bounded slice pool before TSYNC. Remote
+                // parameter sets are admitted and parsed after EVERY thread is
+                // confined; no new thread or syscall permission is needed later.
+                let prepared = HevcDecoder::prepare(config, limits).map_err(native)?;
                 surface
                     .confine_decoder_process(input, io::stdout().as_fd(), io::stderr().as_fd())
                     .map_err(|_| Error::SandboxUnavailable)?;
                 Media::Present {
                     surface,
-                    codec: HevcDecoder::new(config, limits, record.ok_or(Error::WrongState)?)
+                    codec: prepared
+                        .configure(record.ok_or(Error::WrongState)?)
                         .map_err(native)?,
                     display_next: None,
                     fitted: if fit {

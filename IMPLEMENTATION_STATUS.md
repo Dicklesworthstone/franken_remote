@@ -109,10 +109,56 @@ VAAPI hardware is untested.
 
 **Client presenter.** A fixed 200 ms limit per native decode/present request
 killed a healthy first 1080p decode on a busy client; each picture's own budget
-now binds (ff14b5a). Presenting still costs 48-200 ms per 1080p picture on
-that client (XPutImage over the socket, swscale), so sessions can end when a
-streamed picture outlives its 250 ms budget (bead
-fr-live-client-present-cost-tqu7).
+now binds (ff14b5a). The historical 48-200 ms measurements on the loaded client
+predate the current MIT-SHM presentation path, recycled BGRA buffers and
+reactor-driven pipe reads. Those implementations already exist; the loaded
+two-machine acceptance in `fr-live-client-present-cost-tqu7` remains open.
+
+The Linux worker now prepares exactly four HEVC slice threads from checked
+geometry, applies the unchanged seccomp filter to every thread with TSYNC, and
+only then admits and parses the remote decoder record. Configuration produces
+no picture. This adds no frame threading or picture queue and changes no
+presentation deadline. Failed preparation/configuration is terminal; the
+original single-thread constructor remains available inside confinement. See
+[WORKER_SANDBOX.md](WORKER_SANDBOX.md#hevc-slice-threads).
+
+**Native decoder measurements, 2026-10-30.** The actual production bridge,
+installed FFmpeg 6.1.1 (`libavcodec` 60), and software x265 encoder generated 65
+1920x1080 pictures per fixture at 30 fps/8 Mbit/s. After five warmups, 60 paired
+decode-plus-BGRA measurements alternated single-thread/four-slice order on the
+same encoded packets. Destination poisoning and canary checks were outside the
+timed region; every output pixel matched between paths.
+
+| Fixture | Single-thread p50 | Single-thread p95 | Four-slice p50 | Four-slice p95 |
+|---|---:|---:|---:|---:|
+| Moving desktop | 10.207 ms | 16.329 ms | 5.243 ms | 9.996 ms |
+| High-noise frames | 10.795 ms | 14.471 ms | 7.083 ms | 11.403 ms |
+
+These are local native elapsed times before confinement, not transport, X11
+presentation, scanout or hardware measurements. Each fixture subsequently
+passed untimed decoding inside the real unchanged filter, including mixed
+reference-only outputs and the original constructor. All four prepared thread
+indices refused file opens, sockets and `clone3` with `EPERM`. Small 192x128 and
+cropped 1366x768 rows passed the same checks. Reproduce the native harness with
+[`scripts/test_native_decoder.sh`](scripts/test_native_decoder.sh).
+
+**Cropped-frame correctness.** Those tests exposed an existing FFmpeg 6.1 fast
+conversion path that left six visible columns unwritten at width 1366 with a
+tightly packed BGRA destination. Widths not divisible by eight now select the
+supported general converter with `SWS_ACCURATE_RND`, without another frame
+buffer or copy; aligned widths keep the fast path. Different poisoned output
+buffers, opaque-alpha checks and leading/trailing canaries verify the whole
+visible image. Restoring only the old conversion flag makes the cropped
+regression fail on the previously unwritten alpha bytes.
+
+The actual native library, media-worker binary and reference-decoder tests
+also compiled in a same-source `linux-media` workspace: all seven decoder tests
+and strict Clippy passed, including the three new prepared-decoder tests.
+The three Xvfb worker integration tests compiled but were not run because Xvfb
+was unavailable. The isolated manifest excludes unrelated unavailable runtime
+dependencies; this is not full-workspace or live-session qualification. The
+five-minute loaded-client acceptance and current QUIC idle-traffic defect
+(`fr-r6qp`) remain outstanding.
 
 **macOS**: the workspace builds, lints and tests (new CI job). Every `fr`/`frd`
 command refuses with `platform_unavailable`.

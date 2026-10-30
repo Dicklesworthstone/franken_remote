@@ -215,28 +215,43 @@ int fr_encoder_take(FrEncoder *e,uint8_t *dst,size_t len) {
     memcpy(dst,e->packet->data,len); av_packet_unref(e->packet); e->have_packet=0; return FR_OK;
 }
 
-typedef struct { AVCodecContext *ctx; AVFrame *frame; struct SwsContext *scale; int w,h,have_frame; } FrDecoder;
+typedef struct { AVCodecContext *ctx; AVFrame *frame; struct SwsContext *scale; int w,h,have_frame,configured; } FrDecoder;
 void fr_decoder_free(FrDecoder *d) {
     if (!d) return; avcodec_free_context(&d->ctx); av_frame_free(&d->frame); sws_freeContext(d->scale); free(d);
 }
-int fr_decoder_new(int w,int h,int coded_w,int coded_h,const uint8_t *configuration,size_t configuration_len,FrDecoder **out) {
+/* Pool preparation may run before TSYNC, but receives only bounded geometry.
+   With no extradata, avcodec_open2 cannot parse remote parameter sets. The
+   existing single-thread constructor still configures in its caller's sandbox. */
+static int fr_decoder_create(int w,int h,int coded_w,int coded_h,int threads,
+                             const uint8_t *configuration,size_t configuration_len,
+                             FrDecoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
     if (!geometry(w,h) || !geometry(coded_w,coded_h) || w>coded_w || h>coded_h) return FR_INVALID;
-    if (!configuration || configuration_len<23 || configuration_len>12326) return FR_INVALID;
+    if ((threads!=1 && threads!=4) ||
+        (configuration && (configuration_len<23 || configuration_len>12326)) ||
+        (!configuration && configuration_len)) return FR_INVALID;
     const AVCodec *codec=avcodec_find_decoder(AV_CODEC_ID_HEVC); if (!codec) return FR_UNAVAILABLE;
     FrDecoder *d=calloc(1,sizeof(*d)); if (!d) return FR_MEMORY;
     d->ctx=avcodec_alloc_context3(codec); d->frame=av_frame_alloc(); d->w=w; d->h=h;
     if (!d->ctx || !d->frame) { fr_decoder_free(d); return FR_MEMORY; }
     d->ctx->width=w; d->ctx->height=h; d->ctx->pix_fmt=AV_PIX_FMT_YUV420P;
-    d->ctx->thread_count=1; d->ctx->thread_type=FF_THREAD_SLICE;
+    d->ctx->thread_count=threads; d->ctx->thread_type=FF_THREAD_SLICE;
     d->ctx->err_recognition=AV_EF_EXPLODE|AV_EF_CAREFUL; d->ctx->flags|=AV_CODEC_FLAG_LOW_DELAY;
-    /* Rust admits exact VPS/SPS/PPS before this boundary. FFmpeg owns the copy
-       and requires zeroed SIMD padding even for configuration-only input. */
-    d->ctx->extradata=av_mallocz(configuration_len+AV_INPUT_BUFFER_PADDING_SIZE);
-    if (!d->ctx->extradata) { fr_decoder_free(d); return FR_MEMORY; }
-    memcpy(d->ctx->extradata,configuration,configuration_len);
-    d->ctx->extradata_size=(int)configuration_len;
+    if (configuration) {
+        /* Rust admits exact VPS/SPS/PPS before this boundary. FFmpeg owns the
+           copy and requires zeroed SIMD padding for configuration-only input. */
+        d->ctx->extradata=av_mallocz(configuration_len+AV_INPUT_BUFFER_PADDING_SIZE);
+        if (!d->ctx->extradata) { fr_decoder_free(d); return FR_MEMORY; }
+        memcpy(d->ctx->extradata,configuration,configuration_len);
+        d->ctx->extradata_size=(int)configuration_len;
+    }
     if (avcodec_open2(d->ctx,codec,NULL)<0) { fr_decoder_free(d); return FR_UNAVAILABLE; }
+    /* FFmpeg can silently fall back when pool creation fails. The prepared
+       path promises exactly four slice threads and no extra picture delay. */
+    if (threads==4 && (d->ctx->thread_count!=4 ||
+                      d->ctx->active_thread_type!=FF_THREAD_SLICE)) {
+        fr_decoder_free(d); return FR_UNAVAILABLE;
+    }
     /* max_pixels also checks SIMD-aligned rows in FFmpeg 6.1 ff_get_buffer.
        SPS coded pixels are NOT that allocation envelope: 1366 visible pixels
        need 1376 coded pixels but can need 1408 allocation pixels per row.
@@ -252,10 +267,51 @@ int fr_decoder_new(int w,int h,int coded_w,int coded_h,const uint8_t *configurat
         fr_decoder_free(d); return FR_INVALID;
     }
     d->ctx->max_pixels=(int64_t)allocation_w*allocation_h;
+    d->configured=configuration!=NULL;
     *out=d; return FR_OK;
 }
+int fr_decoder_new(int w,int h,int coded_w,int coded_h,const uint8_t *configuration,
+                    size_t configuration_len,FrDecoder **out) {
+    if (!configuration || configuration_len<23 || configuration_len>12326) {
+        if (out) *out=NULL;
+        return FR_INVALID;
+    }
+    return fr_decoder_create(w,h,coded_w,coded_h,1,configuration,configuration_len,out);
+}
+int fr_decoder_prepare(int w,int h,int coded_w,int coded_h,FrDecoder **out) {
+    return fr_decoder_create(w,h,coded_w,coded_h,4,NULL,0,out);
+}
+int fr_decoder_configure(FrDecoder *d,const uint8_t *configuration,size_t length) {
+    if (!d || d->configured!=0 || !configuration || length<23 || length>12326 ||
+        configuration[0]!=1 || (configuration[21]&3)!=3) return FR_INVALID;
+    /* Consume preparation before native work. A failed parse cannot be retried
+       on an uncertain context. The Rust owner also consumes this capability.
+       FFmpeg's HEVC decoder explicitly supports NEW_EXTRADATA (6.1 hevcdec.c).
+       A fixed four-byte-length-prefixed AUD makes it parse the admitted hvcC
+       inside confinement, without supplying any VCL picture or flushing. */
+    d->configured=-1;
+    AVPacket *p=av_packet_alloc();
+    if (!p) return FR_MEMORY;
+    static const uint8_t aud[]={0,0,0,3,0x46,0x01,0x50};
+    int r=av_new_packet(p,sizeof(aud));
+    if (r<0) { av_packet_free(&p); return result(r); }
+    memcpy(p->data,aud,sizeof(aud));
+    /* av_packet_new_side_data supplies zeroed native SIMD padding. */
+    uint8_t *extra=av_packet_new_side_data(p,AV_PKT_DATA_NEW_EXTRADATA,length);
+    if (!extra) { av_packet_free(&p); return FR_MEMORY; }
+    memcpy(extra,configuration,length);
+    r=avcodec_send_packet(d->ctx,p);
+    av_packet_free(&p);
+    if (r<0) return r==AVERROR(ENOMEM)?FR_MEMORY:FR_CODEC;
+    /* Configured is distinct from decoded/presented. No output is expected
+       from this metadata-only packet; an unexpected picture is a refusal. */
+    r=avcodec_receive_frame(d->ctx,d->frame);
+    if (r!=AVERROR(EAGAIN)) return r==AVERROR(ENOMEM)?FR_MEMORY:FR_CODEC;
+    d->configured=1;
+    return FR_OK;
+}
 int fr_decoder_send(FrDecoder *d,const uint8_t *bytes,size_t len,int64_t pts) {
-    if (!d || !bytes || !len || len>16777216 || pts<0) return FR_INVALID;
+    if (!d || d->configured!=1 || !bytes || !len || len>16777216 || pts<0) return FR_INVALID;
     AVPacket *p=av_packet_alloc(); if (!p) return FR_MEMORY;
     int r=av_new_packet(p,(int)len);
     if (r>=0) { /* av_new_packet supplies zeroed AV_INPUT_BUFFER_PADDING_SIZE bytes. */
@@ -266,6 +322,7 @@ int fr_decoder_send(FrDecoder *d,const uint8_t *bytes,size_t len,int64_t pts) {
 /* Both output modes complete the same real decode and validate the same
    frame. Reference-only work must never bypass native geometry/error checks. */
 static int fr_decoder_output(FrDecoder *d) {
+    if (!d || d->configured!=1) return FR_INVALID;
     if (!d->have_frame) { int r=avcodec_receive_frame(d->ctx,d->frame); if (r<0) return result(r); d->have_frame=1; }
     AVFrame *f=d->frame;
     if (f->width!=d->w || f->height!=d->h || f->format!=AV_PIX_FMT_YUV420P || f->pts<0 || f->decode_error_flags) return FR_GEOMETRY;
@@ -287,7 +344,12 @@ int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
     if (!d || !out || !pts || !bgra_buffer(d->w,d->h,len)) return FR_INVALID;
     int code=fr_decoder_output(d); if (code!=FR_OK) return code;
     AVFrame *f=d->frame;
-    d->scale=sws_getCachedContext(d->scale,d->w,d->h,(enum AVPixelFormat)f->format,d->w,d->h,AV_PIX_FMT_BGRA,SWS_FAST_BILINEAR,NULL,NULL,NULL);
+    /* FFmpeg 6.1's fast unscaled x86 converter rounds down to eight-pixel
+       blocks when the tightly packed destination has no rounded-up padding.
+       Select its general converter for these widths so EVERY visible pixel
+       is written, without adding a second BGRA buffer or another copy. */
+    int flags=SWS_FAST_BILINEAR|((d->w&7)?SWS_ACCURATE_RND:0);
+    d->scale=sws_getCachedContext(d->scale,d->w,d->h,(enum AVPixelFormat)f->format,d->w,d->h,AV_PIX_FMT_BGRA,flags,NULL,NULL,NULL);
     if (!d->scale || sws_setColorspaceDetails(d->scale,sws_getCoefficients(SWS_CS_ITU709),0,sws_getCoefficients(SWS_CS_ITU709),1,0,1<<16,1<<16)<0) return FR_CODEC;
     uint8_t *dst[4]={out,NULL,NULL,NULL}; int stride[4]={d->w*4,0,0,0};
     if (sws_scale(d->scale,(const uint8_t *const *)f->data,f->linesize,0,d->h,dst,stride)!=d->h) return FR_CODEC;

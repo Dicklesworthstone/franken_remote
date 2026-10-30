@@ -81,7 +81,7 @@ fn native_focus_reply_stall_expires_instead_of_renewing_cached_focus() {
     // This is the private Xvfb child from THIS test. No shared desktop or
     // protocol response is replaced. SIGKILL in Desktop::drop still works if
     // an assertion unwinds while that child is stopped.
-    let signal = |name| {
+    let signal = |name: &str| {
         assert!(
             Command::new("kill")
                 .args([name, &desktop.process.id().to_string()])

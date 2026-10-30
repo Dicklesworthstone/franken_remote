@@ -13,6 +13,9 @@ use fr_native::{BgraFrame, EncodeBackend, HevcDecoder, HevcEncoder, NativeError}
 #[path = "reference_decode/allocations.rs"]
 mod allocations;
 
+#[path = "reference_decode/prepared.rs"]
+mod prepared;
+
 fn configuration() -> Configuration {
     Configuration {
         width: 192,

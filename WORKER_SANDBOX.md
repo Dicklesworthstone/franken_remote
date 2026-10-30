@@ -35,6 +35,37 @@ Under plan §5.4 and §19.1:
 
 ## 3. Enforced Escape-Attempt Verification
 
+### HEVC slice threads
+
+The Linux presenter prepares a fixed four-thread HEVC slice pool before entering
+seccomp. Preparation passes only checked scalar geometry to FFmpeg: no decoder
+record, parameter sets or encoded picture bytes. The existing filter is then
+installed with `SECCOMP_FILTER_FLAG_TSYNC`, and an incomplete synchronization is
+fatal. Only after confinement does the consuming `PreparedHevcDecoder::configure`
+operation admit the remote hvcC record with the Rust HEVC guard and configure
+FFmpeg. Configuration uses `AV_PKT_DATA_NEW_EXTRADATA` with a fixed metadata-only
+AUD packet and must produce no picture.
+
+The worker requests slice threading only, with exactly four threads; it refuses
+silent native fallback. Frame threading, picture queues, presentation deadlines
+and the syscall allow-list are unchanged. `clone`/`clone3` remain forbidden after
+confinement. Failed or unused preparations release their native context and join
+the pool; the original single-thread constructor remains available to callers
+that already entered confinement.
+
+`scripts/test_native_decoder.sh` compiles the actual production bridge and
+unchanged filter. Its confined child probes file opens, socket creation and
+process creation on every slice-thread index, requiring `EPERM`; file and socket
+controls must first succeed without the filter. It also checks metadata-only
+configuration, malformed configuration, allocation limits, reference-only
+decoding, exact pixels and the original constructor inside confinement. The
+timing rows measure native CPU decode plus BGRA conversion, not X11
+presentation, transport or visible latency. The script requires a C compiler,
+`pkg-config`, the FFmpeg/X11/XCB development libraries and an FFmpeg build with
+the software x265 encoder; it does not require an X server.
+
+### Presenter escape attempts
+
 Verification is automated in `crates/fr-native/tests/decoder_sandbox_escape.rs`.
 Before 2026-09-27 that test only checked that each probe failed, and its TCP and
 approval-IPC probes targeted endpoints that did not exist, so they would have

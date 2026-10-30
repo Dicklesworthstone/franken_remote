@@ -78,6 +78,18 @@ unsafe extern "C" {
         configuration_len: usize,
         out: *mut *mut c_void,
     ) -> c_int;
+    fn fr_decoder_prepare(
+        w: c_int,
+        h: c_int,
+        coded_w: c_int,
+        coded_h: c_int,
+        out: *mut *mut c_void,
+    ) -> c_int;
+    fn fr_decoder_configure(
+        p: *mut c_void,
+        configuration: *const u8,
+        configuration_len: usize,
+    ) -> c_int;
     fn fr_decoder_free(p: *mut c_void);
     fn fr_decoder_send(p: *mut c_void, bytes: *const u8, len: usize, pts: i64) -> c_int;
     fn fr_decoder_receive(p: *mut c_void, bytes: *mut u8, len: usize, pts: *mut i64) -> c_int;
@@ -571,6 +583,62 @@ impl Drop for HevcEncoder {
     }
 }
 
+fn decoder_dimensions(
+    config: CodecConfiguration,
+    limits: ProtocolLimits,
+) -> Result<[c_int; 4], NativeError> {
+    let g = config.geometry();
+    frame_len(g.coded_width(), g.coded_height(), &limits)?;
+    frame_len(g.crop_width(), g.crop_height(), &limits)?;
+    if config.color() != ColorInfo::sdr_bt709() {
+        return Err(NativeError::InvalidConfiguration);
+    }
+    let convert = |n| c_int::try_from(n).map_err(|_| NativeError::InvalidConfiguration);
+    Ok([
+        convert(g.crop_width())?,
+        convert(g.crop_height())?,
+        convert(g.coded_width())?,
+        convert(g.coded_height())?,
+    ])
+}
+
+/// A bounded native slice pool with no remote parameter sets or pictures.
+/// Preparation creates exactly four slice threads before process confinement.
+/// Configuration consumes this owner after confinement and admits the hvcC
+/// record before any native parse. Dropping an unused preparation joins its pool.
+pub struct PreparedHevcDecoder {
+    raw: Option<NonNull<c_void>>,
+    config: CodecConfiguration,
+    limits: ProtocolLimits,
+    _thread: PhantomData<Rc<()>>,
+}
+impl PreparedHevcDecoder {
+    pub fn configure(mut self, record: &[u8]) -> Result<HevcDecoder, NativeError> {
+        let admission = HevcGuard::from_decoder_record(self.config, self.limits, 4, record)
+            .map_err(|_| NativeError::InvalidConfiguration)?;
+        let raw = self.raw.ok_or(NativeError::Closed)?;
+        // SAFETY: exclusive prepared context; complete, bounded parameter sets
+        // were admitted above. Native packet/side-data storage owns padded copies.
+        // A metadata-only exchange configures the API without producing a frame.
+        status(unsafe { fr_decoder_configure(raw.as_ptr(), record.as_ptr(), record.len()) })?;
+        Ok(HevcDecoder::from_native(
+            self.raw.take().ok_or(NativeError::Closed)?,
+            self.config,
+            self.limits,
+            admission,
+        ))
+    }
+}
+impl Drop for PreparedHevcDecoder {
+    fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            // SAFETY: this owner has not transferred its unique context. Native
+            // shutdown joins all bounded slice workers before freeing their state.
+            unsafe { fr_decoder_free(raw.as_ptr()) };
+        }
+    }
+}
+
 /// Software decode with fixed admitted dimensions and padded packet ownership.
 /// The pure-Rust HEVC guard admits parameter sets and complete slice headers
 /// before foreign submission. This is not CABAC validation or an OS sandbox;
@@ -594,12 +662,7 @@ impl HevcDecoder {
         limits: ProtocolLimits,
         record: &[u8],
     ) -> Result<Self, NativeError> {
-        let g = config.geometry();
-        frame_len(g.coded_width(), g.coded_height(), &limits)?;
-        frame_len(g.crop_width(), g.crop_height(), &limits)?;
-        if config.color() != ColorInfo::sdr_bt709() {
-            return Err(NativeError::InvalidConfiguration);
-        }
+        let [width, height, coded_width, coded_height] = decoder_dimensions(config, limits)?;
         let admission = HevcGuard::from_decoder_record(config, limits, 4, record)
             .map_err(|_| NativeError::InvalidConfiguration)?;
         initialize()?;
@@ -608,17 +671,53 @@ impl HevcDecoder {
         // Bridge copies the exact record into padded native-owned extradata.
         status(unsafe {
             fr_decoder_new(
-                c_int::try_from(g.crop_width()).map_err(|_| NativeError::InvalidConfiguration)?,
-                c_int::try_from(g.crop_height()).map_err(|_| NativeError::InvalidConfiguration)?,
-                c_int::try_from(g.coded_width()).map_err(|_| NativeError::InvalidConfiguration)?,
-                c_int::try_from(g.coded_height()).map_err(|_| NativeError::InvalidConfiguration)?,
+                width,
+                height,
+                coded_width,
+                coded_height,
                 record.as_ptr(),
                 record.len(),
                 &raw mut ptr,
             )
         })?;
-        Ok(Self {
-            raw: NonNull::new(ptr).ok_or(NativeError::Allocation)?,
+        Ok(Self::from_native(
+            NonNull::new(ptr).ok_or(NativeError::Allocation)?,
+            config,
+            limits,
+            admission,
+        ))
+    }
+    /// Prepare the fixed slice pool before applying a process-wide sandbox.
+    /// This function passes only checked geometry into the native library;
+    /// the returned owner's consuming `configure` operation parses media later.
+    /// `new` remains the single-thread path usable after confinement.
+    pub fn prepare(
+        config: CodecConfiguration,
+        limits: ProtocolLimits,
+    ) -> Result<PreparedHevcDecoder, NativeError> {
+        let [width, height, coded_width, coded_height] = decoder_dimensions(config, limits)?;
+        initialize()?;
+        let mut ptr = core::ptr::null_mut();
+        // SAFETY: bounded scalar dimensions and writable output pointer only.
+        // No remote record or encoded bytes enter this preparation operation.
+        status(unsafe {
+            fr_decoder_prepare(width, height, coded_width, coded_height, &raw mut ptr)
+        })?;
+        Ok(PreparedHevcDecoder {
+            raw: Some(NonNull::new(ptr).ok_or(NativeError::Allocation)?),
+            config,
+            limits,
+            _thread: PhantomData,
+        })
+    }
+    fn from_native(
+        raw: NonNull<c_void>,
+        config: CodecConfiguration,
+        limits: ProtocolLimits,
+        admission: HevcGuard,
+    ) -> Self {
+        Self {
+            raw,
             config,
             limits,
             admission,
@@ -627,7 +726,7 @@ impl HevcDecoder {
             closed: false,
             spare: None,
             _thread: PhantomData,
-        })
+        }
     }
     /// Return a presented frame's buffer for the next decode. Only a buffer of
     /// exactly this decoder's output size is kept; anything else is dropped.
