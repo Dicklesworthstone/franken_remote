@@ -74,6 +74,10 @@ pub struct HostReceiver {
     settings: Settings,
     policy: Policy,
     reply: Option<Event>,
+    // A fresh offer rejected BEFORE disk admission is not a worker receipt.
+    // Retain one content-free refusal through encoding/backpressure, separately
+    // from the last actual disk outcome (which may already be published).
+    offer_refusal: Option<(u64, Reason)>,
     progress: Option<Progress>,
     last: Option<ResultReceipt>,
 }
@@ -127,6 +131,7 @@ impl HostReceiver {
                 settings,
                 policy,
                 reply: None,
+                offer_refusal: None,
                 progress: None,
                 last: None,
             },
@@ -140,7 +145,10 @@ impl HostReceiver {
         self.atp.is_closed()
     }
     pub fn is_busy(&self) -> bool {
-        self.reply.is_some() || self.atp.has_pending()
+        self.reply.is_some() || self.offer_refusal.is_some() || self.atp.has_pending()
+    }
+    pub(crate) fn has_pending_offer_refusal(&self) -> bool {
+        self.offer_refusal.is_some()
     }
     pub fn progress(&self) -> Option<Progress> {
         if self.is_closed() {
@@ -155,10 +163,14 @@ impl HostReceiver {
 
     /// Parse only with the installed role, channel, lease and directory binding.
     /// Cancel bypasses backpressure; no other record is enqueued before the prior
-    /// actual receipt has been polled and its bounded reply encoded.
+    /// actual receipt has been polled and its bounded reply encoded. A terminal
+    /// pre-admission refusal is retained even if a later cancellation arrives.
     pub fn receive(&mut self, bytes: &[u8]) -> Result<Admission, Error> {
         let message = files::decode(bytes, self.settings.incoming, self.settings.limits)
             .map_err(Error::Wire)?;
+        if self.has_pending_offer_refusal() {
+            return Err(Error::Busy);
+        }
         if let Body::Cancel(_) = message.body {
             self.atp
                 .cancel(self.atp.binding(), message.id)
@@ -173,16 +185,50 @@ impl HostReceiver {
             Body::Chunk { atp } => (atp, false, self.atp.profile()),
             _ => return Err(Error::Wire(WireError::WrongRole)),
         };
-        self.atp
-            .push_enveloped(self.atp.binding(), message.id, atp, Some(offer), profile)
-            .map(Admission::Queued)
-            .map_err(Error::Atp)
+        // Only a NEW offer with no active or pending disk work can certify
+        // pre-admission refusal. In particular, an old transfer ID or a rejected
+        // completion must never overwrite publication evidence with "no effect".
+        let fresh_offer = offer
+            && !self.atp.is_closed()
+            && self.progress.is_none()
+            && self.last.is_none_or(|last| message.id > last.id);
+        let result = self
+            .atp
+            .push_enveloped(self.atp.binding(), message.id, atp, Some(offer), profile);
+        if let Err(error) = result
+            && fresh_offer
+            && let Some(reason) = offer_refusal(error)
+        {
+            self.atp.stop();
+            self.offer_refusal = Some((message.id, reason));
+        }
+        result.map(Admission::Queued).map_err(Error::Atp)
     }
 
-    /// `FileAccept` is emitted only after real staging admission; `FileComplete` only
-    /// from the actual worker outcome. Private staging is never called publication.
+    /// `FileAccept` is emitted only after real staging admission. `FileComplete`
+    /// carries an actual worker outcome or a fresh offer's pre-admission refusal;
+    /// the latter never manufactures a disk receipt. Staging is not publication.
     /// No network receipt, first byte or queued completion grants input authority.
     pub fn poll_reply(&mut self, output: &mut [u8]) -> Result<Option<usize>, Error> {
+        if let Some((id, reason)) = self.offer_refusal {
+            let size = files::encode(
+                Message {
+                    id,
+                    body: Body::Complete {
+                        disposition: Disposition::Refused,
+                        reason,
+                        published_bytes: 0,
+                        atp: &[],
+                    },
+                },
+                self.settings.outgoing,
+                self.settings.limits,
+                output,
+            )
+            .map_err(Error::Wire)?;
+            self.offer_refusal = None;
+            return Ok(Some(size));
+        }
         if self.reply.is_none() {
             let Some(event) = self.atp.poll().map_err(Error::Atp)? else {
                 return Ok(None);
@@ -307,5 +353,71 @@ fn refusal(error: worker::Error) -> Reason {
         | worker::Error::Allocation => Reason::Resource,
         worker::Error::UnknownEffect => Reason::UnknownEffect,
         _ => Reason::Invalid,
+    }
+}
+
+// Only failures known to precede disk admission can become a no-effect reply.
+// Busy remains backpressure; worker failure/poison/unknown effect cannot be
+// relabelled refusal merely because no publication receipt has arrived yet.
+fn offer_refusal(error: atp::Error) -> Option<Reason> {
+    match error {
+        atp::Error::Limits
+        | atp::Error::ResourceLimit
+        | atp::Error::Worker(worker::Error::Allocation | worker::Error::SequenceExhausted) => {
+            Some(Reason::Resource)
+        }
+        atp::Error::WrongBinding
+        | atp::Error::WrongTransfer
+        | atp::Error::Frame
+        | atp::Error::Manifest
+        | atp::Error::UnsupportedProfile
+        | atp::Error::Order
+        | atp::Error::BufferTooSmall
+        | atp::Error::Worker(
+            worker::Error::InvalidName | worker::Error::InvalidChunk | worker::Error::WrongBinding,
+        ) => Some(Reason::Invalid),
+        atp::Error::Busy | atp::Error::Closed | atp::Error::Worker(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pre_admission_refusals_preserve_invalid_and_resource_categories() {
+        for error in [
+            atp::Error::Frame,
+            atp::Error::Manifest,
+            atp::Error::UnsupportedProfile,
+            atp::Error::Order,
+            atp::Error::Worker(worker::Error::InvalidName),
+        ] {
+            assert_eq!(offer_refusal(error), Some(Reason::Invalid));
+        }
+        for error in [
+            atp::Error::Limits,
+            atp::Error::ResourceLimit,
+            atp::Error::Worker(worker::Error::Allocation),
+            atp::Error::Worker(worker::Error::SequenceExhausted),
+        ] {
+            assert_eq!(offer_refusal(error), Some(Reason::Resource));
+        }
+    }
+
+    #[test]
+    fn backpressure_and_uncertain_worker_effects_never_become_refusal() {
+        for error in [
+            atp::Error::Busy,
+            atp::Error::Closed,
+            atp::Error::Worker(worker::Error::Busy),
+            atp::Error::Worker(worker::Error::UnknownEffect),
+            atp::Error::Worker(worker::Error::Session(session::Error::UnknownEffect)),
+            atp::Error::Worker(worker::Error::Poisoned),
+            atp::Error::Worker(worker::Error::Panicked),
+            atp::Error::Worker(worker::Error::Cancelled),
+        ] {
+            assert_eq!(offer_refusal(error), None);
+        }
     }
 }

@@ -324,6 +324,12 @@ impl HostReceiver {
         let mut refusal = None;
         self.lane
             .dispatch(q, &self.cx, &mut *authorize, |bytes| {
+                // One terminal refusal already owns the reply slot. Do not
+                // consume a following cancel/data record or reset the lane
+                // before its bounded reply has entered transport ownership.
+                if receiver.has_pending_offer_refusal() {
+                    return Ok(Disposition::Blocked);
+                }
                 if cancel_only
                     && !matches!(
                         fr_wire::files::decode(bytes, incoming, limits),
@@ -340,6 +346,12 @@ impl HostReceiver {
                         Ok(Disposition::Consumed)
                     }
                     Err(error) if busy(error) => Ok(Disposition::Blocked),
+                    Err(_) if receiver.has_pending_offer_refusal() => {
+                        // The original worker is fenced. The next service turn
+                        // drains FileComplete under the unchanged reply budget,
+                        // then retires files without cancelling desktop input.
+                        Ok(Disposition::Consumed)
+                    }
                     Err(error) => {
                         refusal = Some(error);
                         Ok(Disposition::Consumed)
