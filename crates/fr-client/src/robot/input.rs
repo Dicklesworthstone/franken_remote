@@ -10,6 +10,9 @@ use super::envelope::{AcknowledgementStage, RobotError};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Bounded metadata for requests sent through an authenticated native owner.
+pub mod native;
+
 /// Supported discrete input action primitives.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -160,10 +163,7 @@ impl RobotInputRequest {
         if self.lease_handle != active_l {
             return Err(RobotError::new(
                 "lease_invalid_or_expired",
-                format!(
-                    "Supplied lease handle '{}' does not match active control lease. Request fresh control lease.",
-                    self.lease_handle
-                ),
+                "The supplied handle does not match the active control lease. Inspect the original session before making a new request.",
             ));
         }
 
@@ -173,9 +173,7 @@ impl RobotInputRequest {
         {
             return Err(RobotError::new(
                 "lease_mismatch_or_expired",
-                format!(
-                    "Preconditioned lease '{req_l}' does not match active lease '{active_l}'. Re-acquire lease before retrying input."
-                ),
+                "The required lease does not match the active control lease. Inspect the original session before making a new request.",
             ));
         }
 
@@ -192,35 +190,50 @@ impl RobotInputRequest {
         }
 
         // 4. Observation freshness fence
-        if let Some(max_age) = self.max_observation_age_ms
-            && let Some(age) = observation_age_ms
-            && age > max_age
-        {
-            return Err(RobotError::new(
-                "observation_expired",
-                format!(
-                    "Observation age {age} ms exceeds maximum allowed age {max_age} ms. Re-observe workstation before retrying input."
-                ),
-            ));
+        if let Some(max_age) = self.max_observation_age_ms {
+            let age = observation_age_ms.ok_or_else(|| {
+                RobotError::new(
+                    "observation_age_unavailable",
+                    "The requested observation age cannot be established. Obtain current observation evidence before making a new request.",
+                )
+            })?;
+            if age > max_age {
+                return Err(RobotError::new(
+                    "observation_expired",
+                    "The observation exceeds the requested age bound. Re-observe before deciding whether to make a new request.",
+                ));
+            }
         }
 
         // 5. Focus window check (labeled best-effort)
-        if let Some(focus) = &self.precondition_focus
-            && let Some(curr_win) = current_focus_window
-            && !curr_win.contains(&focus.target_window)
-        {
-            return Err(RobotError::new(
-                "focus_mismatch",
-                format!(
-                    "Target window '{}' does not match current active window '{}' (checked best-effort). Re-observe before retrying input.",
-                    focus.target_window, curr_win
-                ),
-            ));
+        if let Some(focus) = &self.precondition_focus {
+            if !focus.best_effort || focus.target_window.is_empty() {
+                return Err(RobotError::new(
+                    "focus_precondition_unsupported",
+                    "This focus check supports only an explicit nonempty best-effort target; atomic focus cannot be asserted.",
+                ));
+            }
+            let curr_win = current_focus_window.ok_or_else(|| {
+                RobotError::new(
+                    "focus_unavailable",
+                    "Current focus evidence is unavailable. Observe focus before making a new request.",
+                )
+            })?;
+            if !curr_win.contains(&focus.target_window) {
+                return Err(RobotError::new(
+                    "focus_mismatch",
+                    "The current focus does not match the requested target (checked best-effort). Re-observe before making a new request.",
+                ));
+            }
         }
 
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "input/precondition_tests.rs"]
+mod precondition_tests;
 
 /// Response payload reporting input execution results and staged acknowledgements.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
