@@ -8,6 +8,7 @@
 mod choice;
 pub(crate) mod file_drop;
 pub(crate) mod file_send;
+mod focus;
 pub use file_send::{
     BatchStatus as DroppedBatchStatus, Control as FileDropControl, Error as FileDropError,
 };
@@ -64,6 +65,8 @@ unsafe extern "C" {
     fn fr_viewer_window_drop_complete(handle: *mut c_void, accepted: c_int);
     fn fr_viewer_window_control_age(handle: *mut c_void) -> u32;
     fn fr_viewer_window_control_reset(handle: *mut c_void);
+    fn fr_viewer_window_focus_begin(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_focus_poll(handle: *mut c_void) -> c_int;
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -78,6 +81,8 @@ pub enum StopReason {
     MappingExpired,
     EventFlood,
     CloseExpired,
+    FocusLost,
+    FocusUnavailable,
 }
 impl StopReason {
     fn from_state(value: u8) -> Option<Self> {
@@ -92,6 +97,8 @@ impl StopReason {
             9 => Some(Self::MappingExpired),
             10 => Some(Self::EventFlood),
             11 => Some(Self::CloseExpired),
+            12 => Some(Self::FocusLost),
+            13 => Some(Self::FocusUnavailable),
             _ => None,
         }
     }
@@ -121,6 +128,7 @@ struct Shared {
     state: AtomicU8,
     orderly_close: AtomicU8,
     control_choice: choice::Choice,
+    automation_focus: focus::Gate,
     file_drops: file_drop::Inbox,
     target: OnceLock<X11Target>,
     width: u32,
@@ -144,6 +152,7 @@ impl Shared {
         // No native lock, codec call, network round trip, or replacement grant.
         // Fence first; publishing Stopped never claims cleanup has completed.
         self.session.stop();
+        self.automation_focus.stop();
         self.file_drops.close();
         let _ = self
             .state
@@ -190,6 +199,29 @@ impl WindowControl {
             1 => Status::Mapped,
             value => Status::Stopped(StopReason::from_state(value).expect("private state")),
         }
+    }
+    /// Require fresh focus evidence for an explicitly automated controller on
+    /// this original window. No physical event producer, keyboard grab or new
+    /// input authority is created. Acquisition is bounded to thirty seconds;
+    /// after the first verified focus, losing it ends this original session.
+    /// Call once before requesting control and check readiness before dispatch.
+    pub fn enable_automation_focus(&self) -> Result<(), Error> {
+        if self.status() != Status::Mapped || !self.0.automation_focus.enable(Instant::now()) {
+            return Err(Error::NotReady);
+        }
+        if self.status() != Status::Mapped {
+            return Err(Error::NotReady);
+        }
+        Ok(())
+    }
+    /// A recent server reply named this exact local window as keyboard focus.
+    /// The age includes the native round trip; unknown/stale evidence refuses.
+    /// This is a best-effort local focus check, never proof of source freshness,
+    /// compositor visibility, host application focus or input authorization.
+    pub fn automation_focus_ready(&self) -> bool {
+        self.status() == Status::Mapped
+            && self.0.automation_focus.ready(Instant::now())
+            && self.status() == Status::Mapped
     }
     /// Offer F8 on this fresh viewing window. It never grants input; the UI must
     /// consume a fresh gesture and use the session's ordinary control request.
@@ -309,6 +341,7 @@ impl ViewerWindow {
             state: AtomicU8::new(0),
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
             control_choice: choice::Choice::default(),
+            automation_focus: focus::Gate::default(),
             file_drops: file_drop::Inbox::default(),
             target: OnceLock::new(),
             width,
@@ -721,6 +754,15 @@ fn drain_events(
                 files.event(native, kind, before);
                 None
             }
+            13 => {
+                chosen = false;
+                invalidated = true;
+                gesture
+                    .invalidate(native, false)
+                    .err()
+                    .map(|()| StopReason::NativeFailure)
+                    .or_else(|| shared.automation_focus.lost().err())
+            }
             _ => lifecycle_event(shared, mapped, close_started, kind),
         };
         if let Some(reason) = reason {
@@ -739,6 +781,7 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     let mut close_started: Option<Instant> = None;
     let mut gesture = ControlGesture::default();
     let mut files = FileGesture::default();
+    let mut focus = focus::Probe::default();
     let mut previous_turn = Instant::now();
     loop {
         if !shared.live() {
@@ -777,6 +820,10 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             return;
         }
         files.finish(&native, fresh && turn.elapsed() < choice::MAX_AGE);
+        if let Err(reason) = focus.tick(&native) {
+            shared.stop(reason);
+            return;
+        }
         previous_turn = turn;
         if mapped
             && shared.live()

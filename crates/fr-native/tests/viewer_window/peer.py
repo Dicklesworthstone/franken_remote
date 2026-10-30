@@ -18,6 +18,7 @@ sig("XMoveWindow", c.c_int, D, W, c.c_int, c.c_int)
 sig("XResizeWindow", c.c_int, D, W, c.c_uint, c.c_uint)
 sig("XUnmapWindow", c.c_int, D, W)
 sig("XDestroyWindow", c.c_int, D, W)
+sig("XSetInputFocus", c.c_int, D, W, c.c_int, W)
 sig("XInternAtom", W, D, c.c_char_p, c.c_int)
 sig("XSendEvent", c.c_int, D, W, c.c_int, c.c_long, D)
 sig("XGetImage", D, D, W, c.c_int, c.c_int, c.c_uint, c.c_uint, W, c.c_int)
@@ -27,8 +28,11 @@ class Client(c.Structure):
     _fields_ = [("type", c.c_int), ("serial", c.c_ulong), ("synthetic", c.c_int),
                 ("display", D), ("window", W), ("message_type", W),
                 ("format", c.c_int), ("data", c.c_long * 5)]
+class Focus(c.Structure):
+    _fields_ = [("type", c.c_int), ("serial", c.c_ulong), ("synthetic", c.c_int),
+                ("display", D), ("window", W), ("mode", c.c_int), ("detail", c.c_int)]
 class Event(c.Union):
-    _fields_ = [("client", Client), ("pad", c.c_long * 24)]
+    _fields_ = [("client", Client), ("focus", Focus), ("pad", c.c_long * 24)]
 d = x.XOpenDisplay(sys.argv[1].encode("ascii"))
 assert d, "test display missing"
 w, op = int(sys.argv[2]), sys.argv[3]
@@ -44,6 +48,19 @@ try:
     elif op == "resize": x.XResizeWindow(d, w, 322, 240)
     elif op == "unmap": x.XUnmapWindow(d, w)
     elif op == "destroy": x.XDestroyWindow(d, w)
+    elif op == "focus": x.XSetInputFocus(d, w, 2, 0)
+    elif op == "blur": x.XSetInputFocus(d, 1, 0, 0)
+    elif op == "focus_bounce":
+        x.XSetInputFocus(d, 1, 0, 0)
+        x.XSetInputFocus(d, w, 2, 0)
+    elif op == "focus_in_synthetic":
+        e = Event()
+        e.focus.type = 9
+        e.focus.display = d
+        e.focus.window = w
+        e.focus.mode = 0
+        e.focus.detail = 3
+        assert x.XSendEvent(d, w, 0, 1 << 21, c.byref(e))
     elif op == "close":
         e = Event()
         e.client.type = 33

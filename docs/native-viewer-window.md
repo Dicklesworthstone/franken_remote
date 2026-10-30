@@ -78,6 +78,34 @@ user consent or a new input grant. No account, pairing mechanism, global input
 grab, synthetic approval, authority extension or software-codec fallback is
 introduced.
 
+## Explicit automation focus gate
+
+An automation-only foreground owner can keep this same window, decoder and
+controlled viewer without attaching the physical X11 event producer. It calls
+`WindowControl::enable_automation_focus()` once before requesting control, then
+requires `automation_focus_ready()` before the request and each action. Neither
+method obtains an input lease or replaces the ordinary input-ticket,
+presentation and geometry checks.
+
+The existing window thread queries keyboard focus asynchronously on its original
+XCB connection. There is at most one fixed-size outstanding reply. Initial focus
+acquisition has a thirty-second limit; each query and retained positive result
+has a 100 ms horizon measured from request issuance. Late replies cannot refresh
+old evidence. Synthetic FocusIn events never prove focus. After the first
+verified focus, any loss permanently fences the original session, including a
+loss followed by focus regain in the same event batch. A stalled or unavailable
+native query ends with `FocusUnavailable`; established loss ends with
+`FocusLost`. Ordinary viewers do not enable or poll this gate.
+
+This is a best-effort local focus check. It proves neither host application
+focus, source freshness nor physical visibility. It creates no native input
+producer, held-state reconciliation, grab, background control, or new session.
+The existing window close, hide, resize and native cleanup rules still apply.
+The real X11 focus regressions live in
+`crates/fr-native/tests/viewer_window/focus.rs`; they distinguish independent
+server replies from synthetic events and exercise original-owner isolation and
+an intentionally stopped private X server.
+
 ## Focused verification
 
 With the repository-pinned Rust toolchain and the relevant development packages:

@@ -18,6 +18,8 @@ use std::{
 };
 #[path = "../../frd/tests/support/executable.rs"]
 mod executable;
+#[path = "viewer_window/focus.rs"]
+mod focus;
 #[allow(dead_code)]
 #[path = "../../fr-transport/tests/support/mod.rs"]
 mod support;

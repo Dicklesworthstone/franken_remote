@@ -2,6 +2,7 @@
  * it never selects the input target or controls this connection's lifetime.
  * No callbacks, Xlib globals, grabs, native input injection or peer strings. */
 #include <xcb/xcb.h>
+#include <xcb/xcbext.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,9 +23,11 @@ struct fr_viewer_window {
     uint16_t control_locks;
     xcb_atom_t control_clock;
     uint32_t control_sequence, control_baseline, control_press_at, control_release_at, control_age;
+    uint32_t focus_query;
+    uint8_t focus_changed;
 };
 enum { IGNORE, MAPPED, HIDDEN, LOST, RESIZED, STOP, CONTROL_CHOSEN,
-       CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK };
+       CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK, FOCUS_LEFT = 13 };
 static int checked(struct fr_viewer_window *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -84,7 +87,8 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
     if (it.data->width_in_pixels < width || it.data->height_in_pixels < height) goto fail;
     h->width = (uint16_t)width; h->height = (uint16_t)height;
     h->window = xcb_generate_id(h->c);
-    uint32_t values[] = { it.data->black_pixel, XCB_EVENT_MASK_STRUCTURE_NOTIFY };
+    uint32_t values[] = { it.data->black_pixel,
+        XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE };
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
         h->window, it.data->root, origin, origin, h->width, h->height, 0,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
@@ -244,6 +248,27 @@ int fr_viewer_window_control_released(struct fr_viewer_window *h) {
     int held = control_held(h);
     return held < 0 ? -1 : !held;
 }
+/* Optional automation evidence on the ORIGINAL connection. At most one fixed
+ * reply is outstanding, and Rust owns its immutable deadline. Neither call
+ * blocks for a reply or changes focus; FocusIn is never positive evidence. */
+int fr_viewer_window_focus_begin(struct fr_viewer_window *h) {
+    if (!h || h->focus_query || xcb_connection_has_error(h->c)) return -1;
+    h->focus_changed = 0;
+    h->focus_query = xcb_get_input_focus(h->c).sequence;
+    return h->focus_query && xcb_flush(h->c) > 0 ? 1 : -1;
+}
+/* 0 pending; 1 not focused; 2 focused; -1 malformed/unavailable. */
+int fr_viewer_window_focus_poll(struct fr_viewer_window *h) {
+    if (!h || !h->focus_query || xcb_connection_has_error(h->c)) return -1;
+    void *raw = NULL; xcb_generic_error_t *error = NULL;
+    if (!xcb_poll_for_reply(h->c, h->focus_query, &raw, &error))
+        return xcb_connection_has_error(h->c) ? -1 : 0;
+    xcb_get_input_focus_reply_t *r = raw;
+    int valid = r && !error && r->response_type == 1 && !r->length;
+    int focused = valid && r->focus == h->window && !h->focus_changed;
+    free(raw); free(error); h->focus_query = 0;
+    return valid ? (focused ? 2 : 1) : -1;
+}
 int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     if (!h || !kind || xcb_connection_has_error(h->c)) return -1;
     xcb_generic_event_t *e = xcb_poll_for_event(h->c);
@@ -331,7 +356,8 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     }
     case XCB_FOCUS_OUT:
         if (((xcb_focus_out_event_t *)e)->event == h->window) {
-            fr_viewer_window_control_reset(h); *kind = CONTROL_RESET;
+            h->focus_changed = 1;
+            fr_viewer_window_control_reset(h); *kind = FOCUS_LEFT;
         }
         break;
     case XCB_MAPPING_NOTIFY:
