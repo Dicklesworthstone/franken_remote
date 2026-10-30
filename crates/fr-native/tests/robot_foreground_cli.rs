@@ -7,11 +7,14 @@ use std::{
     io,
     os::unix::net::UnixListener,
     path::PathBuf,
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
     thread,
     time::{Duration, Instant},
 };
+
+#[path = "robot_foreground_cli/lifecycle.rs"]
+mod lifecycle;
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -33,27 +36,48 @@ impl Drop for Fixture {
         let _ = fs::remove_dir(&self.0);
     }
 }
-fn run(args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fr"))
-        .args(args)
-        .env_remove("DISPLAY")
-        .env_remove("XAUTHORITY")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let until = Instant::now() + Duration::from_secs(5);
-    while child.try_wait().unwrap().is_none() {
-        if Instant::now() >= until {
+
+/// A failed assertion must not leave a real foreground connection running.
+struct Process(Option<Child>);
+impl Process {
+    fn spawn(args: &[&str]) -> Self {
+        Self(Some(
+            Command::new(env!("CARGO_BIN_EXE_fr"))
+                .args(args)
+                .env_remove("DISPLAY")
+                .env_remove("XAUTHORITY")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        ))
+    }
+    fn running(&mut self) -> bool {
+        self.0.as_mut().unwrap().try_wait().unwrap().is_none()
+    }
+    fn finish(mut self) -> Output {
+        let until = Instant::now() + Duration::from_secs(5);
+        while self.running() {
+            assert!(Instant::now() < until, "bounded foreground CLI did not finish");
+            thread::sleep(Duration::from_millis(5));
+        }
+        let output = self.0.take().unwrap().wait_with_output().unwrap();
+        assert!(output.stdout.len() < 8192);
+        assert!(output.stderr.len() < 8192);
+        output
+    }
+}
+impl Drop for Process {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
             let _ = child.kill();
             let _ = child.wait();
-            panic!("foreground CLI refusal did not finish within its test bound");
         }
-        thread::sleep(Duration::from_millis(5));
     }
-    let output = child.wait_with_output().unwrap();
-    assert!(output.stdout.len() < 8192);
+}
+fn run(args: &[&str]) -> Output {
+    let output = Process::spawn(args).finish();
     assert!(output.stderr.is_empty());
     output
 }
@@ -99,7 +123,9 @@ fn both_foreground_roles_reach_real_trust_validation_before_network_or_native_wo
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(!text.contains("PRIVATE-INVALID-CERTIFICATE"));
         assert!(!text.contains("n-private"));
-        assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
+        assert!(
+            matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 }
 
@@ -108,7 +134,10 @@ fn foreground_view_cannot_obtain_control_only_capabilities_through_the_robot_ent
     for (flags, code) in [
         (vec!["--clipboard"], "clipboard_requires_control"),
         (vec!["--send", "/private/selected"], "send_requires_control"),
-        (vec!["--receive", "/private/destination"], "receive_requires_control"),
+        (
+            vec!["--receive", "/private/destination"],
+            "receive_requires_control",
+        ),
         (vec!["--control"], "connection_role_required"),
     ] {
         let mut args = vec![
