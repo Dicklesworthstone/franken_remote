@@ -1,6 +1,7 @@
 //! Explicit local automation through the original foreground control owner.
 //! Commands contain comparison handles only; host tickets never leave that owner.
 use crate::{Failure, options};
+#[cfg(any(target_os = "linux", test))]
 use fr_client::robot::{InputDisposition, input::native::Report};
 use serde::{Deserialize, Serialize};
 
@@ -20,6 +21,7 @@ pub(crate) enum Operation {
     KeyTap { usage: u16 },
 }
 impl Operation {
+    #[cfg(any(target_os = "linux", test))]
     pub fn count(self) -> u8 {
         if matches!(self, Self::Scroll { .. }) {
             1
@@ -57,6 +59,7 @@ impl Request {
             && self.operation.valid()
     }
 }
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Refusal {
@@ -72,6 +75,7 @@ pub(crate) enum Refusal {
     InputUnavailable,
     Stopped,
 }
+#[cfg(any(target_os = "linux", test))]
 impl Refusal {
     pub fn code(self) -> &'static str {
         match self {
@@ -91,6 +95,7 @@ impl Refusal {
 }
 /// One explicitly requested observation; its identity pins the original source
 /// age and ALL input generations. Reading status never refreshes an old action.
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
@@ -106,6 +111,7 @@ pub(crate) struct Snapshot {
     pub source_age_upper_ms: Option<u64>,
     pub physical_visibility_proven: bool,
 }
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Response {
@@ -113,6 +119,7 @@ pub(crate) enum Response {
     Result { report: Report },
     Refused { reason: Refusal },
 }
+#[cfg(any(target_os = "linux", test))]
 impl Response {
     pub fn render(self, json: bool) -> Result<Output, Failure> {
         let (outcome, stage, error, data, exit) = match self {
@@ -161,6 +168,7 @@ impl Response {
         Ok(Output { text, exit })
     }
 }
+#[cfg(any(target_os = "linux", test))]
 pub(crate) fn protocol() -> Failure {
     Failure::new(
         "local_session_protocol",
@@ -202,6 +210,9 @@ pub(crate) fn id(text: &str) -> Result<[u8; 16], Failure> {
     }
     Ok(id)
 }
+// Unsupported platforms still validate the complete request before refusing.
+// Only the Linux owner consumes the validated fields.
+#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
 pub(crate) struct Command {
     pub target: String,
     pub connection: String,
