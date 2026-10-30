@@ -10,6 +10,21 @@ pub struct Observation {
     pub display: Display,
     pub completion: Presentation,
 }
+impl Observation {
+    /// Read the ORIGINAL initial receipt during a live desktop's ready callback.
+    /// Later frames arrive through Ui::frame; this accessor is not a current
+    /// freshness probe and cannot create evidence before native startup succeeds.
+    pub fn initial_from(desktop: &super::super::Desktop) -> Option<Self> {
+        if desktop.state() != super::super::State::Viewing {
+            return None;
+        }
+        let observer = desktop.observer.as_ref()?;
+        Some(Self {
+            display: observer.display(),
+            completion: observer.initial_presentation(),
+        })
+    }
+}
 
 pub(super) fn flow(
     one_shot: bool,
@@ -71,5 +86,15 @@ mod tests {
         assert!(session.one_shot);
         assert!(session.initial_observation().is_none());
         assert!(session.desktop().is_none());
+    }
+
+    #[test]
+    fn an_unopened_or_stopped_desktop_cannot_supply_a_native_receipt() {
+        let configuration =
+            Configuration::new(Path::new("/local/fr-media-worker"), ":0", None, 1).unwrap();
+        let mut desktop = crate::desktop::Desktop::new(configuration);
+        assert!(Observation::initial_from(&desktop).is_none());
+        desktop.close();
+        assert!(Observation::initial_from(&desktop).is_none());
     }
 }

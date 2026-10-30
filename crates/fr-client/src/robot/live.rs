@@ -161,12 +161,16 @@ impl Observation {
         Ok(())
     }
     pub fn presented(&mut self, serial: u64, evidence: Evidence, at: Instant) -> Result<(), Error> {
-        let Some((display, _, _, previous)) = self.frame else { return Err(Error::Order); };
+        let Some((display, previous_serial, previous_evidence, previous)) = self.frame else { return Err(Error::Order); };
         if self.phase != Phase::Streaming || at < previous {
             self.retire(Phase::Stopped);
             return Err(Error::Clock);
         }
-        self.frame = Some((display, serial, evidence, at));
+        // Startup can deliver the retained first receipt to the service callback
+        // too. Seeing it twice is not a new decode and cannot refresh its age.
+        if serial != previous_serial || evidence != previous_evidence {
+            self.frame = Some((display, serial, evidence, at));
+        }
         Ok(())
     }
     /// Clear BEFORE teardown/backoff. No old geometry or receipt crosses attempts.
@@ -187,7 +191,7 @@ impl Observation {
                 scale_numerator: d.scale_numerator, scale_denominator: d.scale_denominator,
                 rotation_quarter_turns: d.rotation, frame_serial: serial,
                 evidence_level: evidence,
-                receipt_age_ms: u64::try_from(age.as_millis()).map_err(|_| Error::Clock)?,
+                receipt_age_ms: u64::try_from(age.as_nanos().div_ceil(1_000_000)).map_err(|_| Error::Clock)?,
             })
         }).transpose()?;
         Ok(Snapshot { schema_version: 1, attempt: self.attempt, phase: self.phase, frame })

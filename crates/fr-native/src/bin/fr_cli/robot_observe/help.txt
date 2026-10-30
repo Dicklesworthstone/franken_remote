@@ -7,12 +7,23 @@ fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|on
     [--evidence-level decoded|submitted_to_compositor] [--json]
 The --native-once prefix immediately follows NODE_ID. This explicitly opens ONE
 new observation, subject to normal tailnet/TLS admission and host approval. It
-does not query an existing controller and is not a headless screenshot service.
-It opens the native viewer, records its first decoder completion even on an idle
+opens the native viewer, records its first decoder completion even on an idle
 screen, runs InspectionComplete closure, and waits for local native cleanup.
 It never requests input, clipboard, files or audio, and never reconnects.
-Output describes historical display/frame metadata, not pixels or a current
-input precondition. Unknown capture times, codec generation and source freshness
-stay unknown. Compositor submission is not physical visibility. Screenshots and
-instrumentally_observed evidence are refused, never silently substituted.
-Without --native-once, the reserved robot-observe form remains unavailable.
+Output is historical metadata, not pixels or a current input precondition.
+Unknown host capture times, codec generation and source freshness stay unknown.
+Compositor submission is not physical visibility. Screenshots and optical
+observation are refused. This requires a local X11 display, not headless capture.
+
+Reusable foreground view-only observation publisher:
+fr robot session open NODE_ID --foreground --role view --publish-observations
+    --experimental-native --display HANDLE|only [read-only options above]
+fr robot session status NODE_ID --json
+fr robot observe NODE_ID --connection-id HEX32 [--max-receipt-age-ms 1..60000]
+    [--evidence-level decoded|submitted_to_compositor] [--json]
+The opt-in owner stays foreground with one attempt; status supplies its public
+comparison ID. Reads authenticate that existing local owner and never dial,
+capture, reconnect or grant input. Receipt age is local metadata age, NOT host
+source freshness. Owners without publication refuse. Close with fr disconnect
+or robot session close --connection-id HEX32; cleanup remains mandatory.
+Without --native-once or --connection-id, robot observe remains unavailable.

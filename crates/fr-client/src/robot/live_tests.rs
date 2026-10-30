@@ -126,3 +126,12 @@ fn bounded_wire_snapshot_validation_rejects_incoherence_and_bad_geometry() {
     json["frame"]["evidence_level"] = serde_json::json!("instrumentally_observed");
     assert!(serde_json::from_value::<Snapshot>(json).is_err());
 }
+
+#[test]
+fn repeated_initial_receipt_cannot_refresh_metadata_and_fractional_age_rounds_up() {
+    let now = Instant::now();
+    let mut value = streaming(now);
+    value.presented(0, Evidence::Decoded, now + Duration::from_secs(1)).unwrap();
+    let snapshot = value.snapshot(now + Duration::from_micros(1_000_001)).unwrap();
+    assert_eq!(snapshot.frame.unwrap().receipt_age_ms, 1001);
+}
