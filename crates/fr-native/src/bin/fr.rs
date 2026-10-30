@@ -82,7 +82,8 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
      [--audio-volume 0..100] [--audio-muted]] [--json]
 fr robot session open NODE_ID [--role view|control] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
-fr robot session close NODE_ID [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
+fr robot session status NODE_ID [--json]
+fr robot session close NODE_ID [--connection-id ID] [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
 fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.json] [--precondition-geometry GEN] [--max-observation-age MS] [--precondition-lease LEASE] [--precondition-focus WINDOW] [--semantic-evidence none|unverified_pixels|adapter|instrumentation] [--json]
 
@@ -222,6 +223,15 @@ The same-user caller is authenticated by the local kernel; no tailnet request,
 PID signal, new host controller or replay is used. One local connection owns each
 exact target. Closure confirms local native cleanup only, not remote key release
 or rollback of prior effects; the original connect result retains host reports.
+fr robot session status TARGET identifies that same-user foreground invocation
+without contacting Tailscale or requesting a stop. Remote state stays unknown.
+Its connection_id names one invocation, not a remote session or input lease.
+Use fr robot session close TARGET --connection-id ID to stop only the invocation
+previously inspected. A replacement refuses with local_session_changed before
+any stop request is sent. The ID survives viewing reconnects within that original
+invocation, but a new fr connect gets a new ID. Omitting --connection-id keeps
+the existing close-current-owner behavior. A lost stop reply remains
+unknown_external_effect, never an invitation to retry another invocation.
 Robot --lease is refused until a real local lease handle is available. Other
 robot session-open, observe and input commands remain unavailable.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
