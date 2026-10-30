@@ -2,6 +2,8 @@
 //! Each attempt owns a fresh window, decoder, input queue and clipboard. Only
 //! positively completed native cleanup permits another attempt; no replay.
 #![forbid(unsafe_code)]
+mod once;
+pub use once::Observation;
 use super::{CaptureCleanup, Cleanup, Configuration, Desktop, Error, PickerCleanup, WindowCleanup};
 use asupersync::{
     cx::Cx,
@@ -113,6 +115,8 @@ pub struct Session<U> {
     policy: ObserverPolicy,
     mode: Mode,
     ui: U,
+    one_shot: bool,
+    initial: Option<Observation>,
     desktop: Option<Desktop>,
     opened: bool,
     last_attempt: u8,
@@ -143,6 +147,8 @@ impl<U> Session<U> {
             policy,
             mode,
             ui,
+            one_shot: false,
+            initial: None,
             desktop: None,
             opened: false,
             last_attempt: 0,
@@ -155,6 +161,21 @@ impl<U> Session<U> {
             statistics: None,
             input_stop: None,
         }
+    }
+    /// Observe exactly one initial native completion, then run the original
+    /// viewer's `InspectionComplete` closing exchange and mandatory cleanup.
+    /// This constructor cannot request control. The caller still chooses the
+    /// supervisor's finite attempt policy; use one attempt for a one-shot CLI.
+    pub fn observing_once(configuration: Configuration, policy: ObserverPolicy, ui: U) -> Self {
+        let mut session = Self::new(configuration, policy, Mode::Observe, ui);
+        session.one_shot = true;
+        session
+    }
+    /// Historical first-frame evidence, retained through cleanup. This is not
+    /// current source freshness, physical visibility, pixels, or input authority.
+    /// A failed run or incomplete cleanup must not be rendered as success.
+    pub const fn initial_observation(&self) -> Option<Observation> {
+        self.initial
     }
     /// Give a control-capable session an orderly window close: a controller's
     /// window-manager close runs the terminal exchange on a fresh context
@@ -271,6 +292,7 @@ impl<U: Ui> Application for Session<U> {
         self.ui.offer(attempt, original)
     }
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
+        self.initial = None;
         let configuration = self.configuration(attempt)?;
         let stop = viewer.control();
         self.last_attempt = attempt;
@@ -298,6 +320,7 @@ impl<U: Ui> Application for Session<U> {
             ),
             _ => None,
         };
+        let one_shot = self.one_shot;
         let outcome = async {
             desktop
                 .open(
@@ -314,14 +337,22 @@ impl<U: Ui> Application for Session<U> {
                 )?
                 .await?;
             self.opened = true;
+            if one_shot {
+                let observer = desktop.observer.as_ref().ok_or(Error::NotViewing)?;
+                self.initial = Some(Observation {
+                    display: observer.display(),
+                    completion: observer.initial_presentation(),
+                });
+            }
             callback(&stop, || ui.borrow_mut().ready(attempt, desktop))
                 .map_err(|_| Error::Observer(ObserverError::Application))?;
             match self.mode {
                 Mode::Observe => desktop
                     .serve_until(|frame| {
-                        callback(&stop, || ui.borrow_mut().frame(attempt, frame))
-                            .map(|()| std::ops::ControlFlow::Continue(()))
-                            .map_err(|_| ())
+                        once::flow(one_shot, || {
+                            callback(&stop, || ui.borrow_mut().frame(attempt, frame))
+                        })
+                        .map_err(|_| ())
                     })?
                     .await
                     .map(|_| ())
