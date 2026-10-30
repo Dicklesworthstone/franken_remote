@@ -430,10 +430,12 @@ fn failed_attempt_terminal<A: Application>(
 /// revalidates the pinned identity and performs strict TLS again; a typed
 /// certificate, protocol or authority refusal is still terminal.
 /// A streamed worker deadline keeps its original request bound and stops the
-/// current session. A fresh attempt is allowed only after the application has
-/// positively reaped that child and its other native owners. Startup/recovery
-/// handshake deadlines, decoder refusals and uncertain pipe failures stay
-/// terminal; neither a hung process nor a codec error is resumed in place.
+/// current session. An expired decoder-replacement handshake likewise abandons
+/// that entire session; neither deadline is renewed to finish old native work.
+/// A fresh attempt is allowed only after the application has positively reaped
+/// the child and its other native owners. Initial decoder startup, decoder
+/// refusals and uncertain pipe failures stay terminal. An authenticated terminal
+/// report still vetoes a retry after cleanup, even if local expiry won the race.
 pub fn retryable(failure: Failure) -> bool {
     use crate::session_startup::ControlledViewerError;
 
@@ -458,6 +460,9 @@ pub fn retryable(failure: Failure) -> bool {
         )))
         | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Media(
             crate::media::Error::Worker(crate::worker::Error::Deadline),
+        )))
+        | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Startup(
+            crate::media::decoder_startup::Error::Expired,
         ))) => true,
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Session(e)
@@ -559,8 +564,9 @@ pub enum Lapse {
     /// session ended after any automatic reconnects.
     VideoReferenceLost,
     /// The decoder's start or restart handshake (configuration, recovery
-    /// picture, first decode) did not complete within its bounded deadline, so
-    /// the session ended instead of showing an unverified picture.
+    /// picture, first decode) did not complete within its bounded deadline.
+    /// The session ends without showing an unverified picture; an established
+    /// stream's replacement timeout may permit fresh viewing after cleanup.
     VideoStartupExpired,
     /// The control lease could not be kept: a renewal challenge was refused or
     /// its response missed its deadline, or no newer ticket proved the lease
