@@ -154,11 +154,38 @@ regression fail on the previously unwritten alpha bytes.
 The actual native library, media-worker binary and reference-decoder tests
 also compiled in a same-source `linux-media` workspace: all seven decoder tests
 and strict Clippy passed, including the three new prepared-decoder tests.
-The three Xvfb worker integration tests compiled but were not run because Xvfb
-was unavailable. The isolated manifest excludes unrelated unavailable runtime
-dependencies; this is not full-workspace or live-session qualification. The
-five-minute loaded-client acceptance and current QUIC idle-traffic defect
-(`fr-r6qp`) remain outstanding.
+All three real Xvfb worker integration tests subsequently passed against the
+same `e67bdfc` production source: native and fitted pixel readback across
+reference-only history, cursor recomposition from the last presented picture,
+and malformed decode-only input refusal with worker termination and unchanged
+visible pixels. All ten `reference_decode` test bodies have therefore run
+successfully. These tests use the actual confined worker and a bounded private-
+pipe test driver; they do not exercise a complete `frd` authority supervisor or
+a tailnet session. The isolated manifest excludes unrelated unavailable runtime
+dependencies; this is not full-workspace qualification. The five-minute
+loaded-client acceptance and current QUIC idle-traffic defect (`fr-r6qp`) remain
+outstanding.
+
+**Explicit robot commands (2026-10-30):** the foreground input owner accepts
+bounded modifier chords (`--chord MODIFIER,...,KEY`), with one to four USB
+modifiers and a maximum of ten receipt-gated transitions. Original observation,
+generation, lease and request deadlines govern the entire chord; partial or
+unknown effects fence the owner without replay. The actual client ledger's 22
+tests and 68 focused parser/encoder/owner-state tests passed, with strict Clippy.
+
+One-shot `fr robot observe --native-once --screenshot PATH` exports the actual
+retained, composited viewport as an exclusively created private PNG after the
+original session's completion and local cleanup. The worker matches frame,
+codec-configuration and recovery identities, with an independent 32 MiB pixel
+ceiling; reference-only decoding cannot replace the retained presentation.
+All 12 actual native decoder/worker tests, 130 media tests, four parent request
+policy tests and 58 focused CLI/artifact tests passed. An independent PNG decoder
+verified ten generated files and every pixel. These are component and native
+worker checks: the full session regression was added but could not run because
+the exact pinned Asupersync compiler process exceeded the local 8 GiB memory
+limit. Full CLI linking, live screenshots/chords over a tailnet, screenshot
+export from an existing foreground owner and the broader robot acceptance bead
+remain unqualified or incomplete. See [the command contract](docs/native-client-cli.md).
 
 **macOS**: the workspace builds, lints and tests (new CI job). Every `fr`/`frd`
 command refuses with `platform_unavailable`.

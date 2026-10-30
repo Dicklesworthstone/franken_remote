@@ -15,7 +15,7 @@ pub(super) fn allowed(role: Role, kind: Kind) -> bool {
                 | Kind::ReadCursor
         ) | (
             Role::Present,
-            Kind::Present | Kind::Decode | Kind::CursorOverlay
+            Kind::Present | Kind::Decode | Kind::CursorOverlay | Kind::ReadPresentation
         ) | (Role::Audio, Kind::ReadAudio)
             | (Role::Capture | Role::Present, Kind::Poll)
             | (_, Kind::Stop)
@@ -43,6 +43,7 @@ mod tests {
             (Kind::Present, Role::Present),
             (Kind::Decode, Role::Present),
             (Kind::CursorOverlay, Role::Present),
+            (Kind::ReadPresentation, Role::Present),
             (Kind::ReadAudio, Role::Audio),
         ] {
             for role in [Role::Capture, Role::Present, Role::Audio] {
@@ -90,6 +91,8 @@ mod tests {
             Kind::AudioPackets,
             Kind::RateUnit,
             Kind::RateUnchanged,
+            Kind::PresentationPixels,
+            Kind::PresentationAbsent,
         ] {
             for role in [Role::Capture, Role::Present, Role::Audio] {
                 assert!(!allowed(role, kind), "{role:?}: {kind:?}");

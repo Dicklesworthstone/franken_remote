@@ -7,8 +7,10 @@ mod cursor;
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use fr_core::limits::ProtocolLimits;
+    use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
+    use fr_media::access_unit::FrameKind;
     use fr_media::worker::cursor::Observation;
+    use fr_media::worker::presentation_snapshot::{Absent, Snapshot, Stamp};
     use fr_media::worker::{self, Backend, Configuration, Error, Kind, Record, Role, Sequence};
     use fr_native::{
         BgraFrame, CursorOverlay, EncodeBackend, FittedFrame, HevcDecoder, HevcEncoder,
@@ -21,6 +23,12 @@ mod linux {
         os::fd::{AsFd, BorrowedFd},
     };
 
+    #[derive(Clone, Copy)]
+    struct PendingPresentation {
+        display: bool,
+        stamp: Stamp,
+    }
+
     // Fixed bounded native inventory stays inline in the single worker owner.
     #[allow(clippy::large_enum_variant)]
     enum Media {
@@ -31,7 +39,9 @@ mod linux {
         Present {
             surface: X11Surface,
             codec: HevcDecoder,
-            display_next: Option<bool>,
+            pending: Option<PendingPresentation>,
+            /// Recovery identity of the last accepted IDR, inherited by P pictures.
+            recovery: Option<RecoveryGeneration>,
             fitted: Option<FittedFrame>,
             /// The single client-rendered remote cursor (parent-supplied state).
             overlay: CursorOverlay,
@@ -39,7 +49,9 @@ mod linux {
             /// desktop is re-composited without a new decode. Fit mode retains
             /// its output inside `FittedFrame` instead.
             last: Option<BgraFrame>,
-            presented: bool,
+            /// Exact video identity of the retained, successfully submitted image.
+            /// Reference-only decoding and cursor movement never replace it.
+            presented: Option<Stamp>,
         },
     }
     fn placement(fitted: Option<&FittedFrame>) -> OverlayPlacement {
@@ -125,7 +137,8 @@ mod linux {
                     codec: prepared
                         .configure(record.ok_or(Error::WrongState)?)
                         .map_err(native)?,
-                    display_next: None,
+                    pending: None,
+                    recovery: None,
                     fitted: if fit {
                         FittedFrame::for_viewport(
                             configuration.width,
@@ -139,7 +152,7 @@ mod linux {
                     },
                     overlay: CursorOverlay::new(),
                     last: None,
-                    presented: false,
+                    presented: None,
                 }
             }
         })
@@ -170,21 +183,25 @@ mod linux {
                 Self::Present {
                     surface,
                     codec,
-                    display_next,
+                    pending,
                     fitted,
                     overlay,
                     last,
                     presented,
+                    ..
                 } => {
                     // A reference-only Decode still completes the real HEVC
                     // picture, but never needs BGRA conversion or a display
                     // buffer. Keep this choice through NeedInput/Poll turns.
                     // The last presented pixels and cursor save-under remain
                     // untouched, and Decoded never becomes a visibility claim.
-                    if *display_next == Some(false) {
+                    if pending.as_ref().is_some_and(|work| !work.display) {
                         return match codec.poll_reference() {
                             Ok(frame) => {
-                                *display_next = None;
+                                let work = pending.take().ok_or(Error::WrongState)?;
+                                if work.stamp.frame != frame {
+                                    return Err(Error::WrongState);
+                                }
                                 Ok((Kind::Decoded, frame.as_raw().to_be_bytes().to_vec()))
                             }
                             Err(NativeError::NeedInput) => Ok((Kind::NeedInput, Vec::new())),
@@ -193,7 +210,8 @@ mod linux {
                     }
                     match codec.poll_output() {
                         Ok((frame, pixels)) => {
-                            if display_next.take() != Some(true) {
+                            let work = pending.take().ok_or(Error::WrongState)?;
+                            if !work.display || work.stamp.frame != frame {
                                 return Err(Error::WrongState);
                             }
                             let place = placement(fitted.as_ref());
@@ -227,7 +245,7 @@ mod linux {
                             } else {
                                 codec.recycle(pixels);
                             }
-                            *presented = true;
+                            *presented = Some(work.stamp);
                             // This acknowledges X11 submission/synchronization, not optical visibility.
                             Ok((Kind::Presented, frame.as_raw().to_be_bytes().to_vec()))
                         }
@@ -280,7 +298,7 @@ mod linux {
         ) -> Result<(Kind, Vec<u8>), Error> {
             let Self::Present {
                 surface,
-                display_next,
+                pending,
                 fitted,
                 overlay,
                 last,
@@ -291,12 +309,12 @@ mod linux {
                 return Err(Error::WrongRole);
             };
             // Only between pictures; never interleaved with a decode.
-            if display_next.is_some() {
+            if pending.is_some() {
                 return Err(Error::WrongState);
             }
             let update = worker::overlay::decode(body, limits)?;
             overlay.apply(&update).map_err(native)?;
-            if *presented {
+            if presented.is_some() {
                 let place = placement(fitted.as_ref());
                 let retained = match fitted {
                     Some(fitted) => Some(fitted.output_mut()),
@@ -311,6 +329,50 @@ mod linux {
             }
             Ok((Kind::CursorOverlayApplied, Vec::new()))
         }
+        /// Copy only the already presented viewport. The source/frame stamp
+        /// cannot advance through this request, a cursor update, or Decode.
+        fn read_presentation(&mut self, body: &[u8]) -> Result<(Kind, Vec<u8>), Error> {
+            let expected = Stamp::decode(body)?;
+            let Self::Present {
+                pending,
+                fitted,
+                last,
+                presented,
+                ..
+            } = self
+            else {
+                return Err(Error::WrongRole);
+            };
+            let absent = |reason: Absent| Ok((Kind::PresentationAbsent, reason.encode().to_vec()));
+            if pending.is_some() {
+                return absent(Absent::Busy);
+            }
+            let Some(stamp) = *presented else {
+                return absent(Absent::NoFrame);
+            };
+            if stamp != expected {
+                return absent(Absent::NotCurrent);
+            }
+            let retained = match fitted {
+                Some(fitted) => &*fitted.output_mut(),
+                None => match last.as_ref() {
+                    Some(frame) => frame,
+                    None => return absent(Absent::NoFrame),
+                },
+            };
+            match Snapshot::encode(
+                stamp,
+                retained.width(),
+                retained.height(),
+                retained.pixels(),
+            ) {
+                Ok(body) => Ok((Kind::PresentationPixels, body)),
+                // Optional export cannot take down the live decoder because
+                // its independent copy ceiling or allocation was unavailable.
+                Err(Error::ResourceLimit | Error::Allocation) => absent(Absent::TooLarge),
+                Err(error) => Err(error),
+            }
+        }
         fn handle(
             &mut self,
             request: Record,
@@ -319,6 +381,7 @@ mod linux {
         ) -> Result<(Kind, Vec<u8>), Error> {
             match request.header.kind {
                 Kind::ReadCursor => self.read_cursor(limits),
+                Kind::ReadPresentation => self.read_presentation(request.body()),
                 Kind::CursorOverlay => self.cursor_overlay(request.body(), limits, verify),
                 Kind::CheckMonitor => {
                     let Self::Capture {
@@ -378,20 +441,31 @@ mod linux {
                 Kind::Present | Kind::Decode => {
                     let Self::Present {
                         codec,
-                        display_next,
+                        pending,
+                        recovery,
                         ..
                     } = self
                     else {
                         return Err(Error::WrongRole);
                     };
-                    if display_next.is_some() {
+                    if pending.is_some() {
                         return Ok((Kind::NeedDrain, Vec::new()));
                     }
                     let display = request.header.kind == Kind::Present;
                     let unit = worker::parse_unit(request.into_body(), limits)?;
+                    let chain = match unit.kind() {
+                        FrameKind::Idr { recovery } => recovery,
+                        FrameKind::Predicted { .. } => (*recovery).ok_or(Error::WrongState)?,
+                    };
+                    let stamp = Stamp {
+                        frame: unit.frame(),
+                        configuration: unit.config_generation(),
+                        recovery: chain,
+                    };
                     match codec.submit(&unit) {
                         Ok(()) => {
-                            *display_next = Some(display);
+                            *recovery = Some(chain);
+                            *pending = Some(PendingPresentation { display, stamp });
                             self.poll(verify)
                         }
                         Err(NativeError::NeedDrain) => Ok((Kind::NeedDrain, Vec::new())),

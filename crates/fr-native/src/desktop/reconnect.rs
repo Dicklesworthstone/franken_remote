@@ -117,6 +117,7 @@ pub struct Session<U> {
     ui: U,
     one_shot: bool,
     initial: Option<Observation>,
+    initial_snapshot: Option<fr_media::worker::presentation_snapshot::Snapshot>,
     desktop: Option<Desktop>,
     opened: bool,
     last_attempt: u8,
@@ -149,6 +150,7 @@ impl<U> Session<U> {
             ui,
             one_shot: false,
             initial: None,
+            initial_snapshot: None,
             desktop: None,
             opened: false,
             last_attempt: 0,
@@ -176,6 +178,13 @@ impl<U> Session<U> {
     /// A failed run or incomplete cleanup must not be rendered as success.
     pub const fn initial_observation(&self) -> Option<Observation> {
         self.initial
+    }
+    /// Consume the explicitly requested artifact after inspecting the original
+    /// run and cleanup result. This never reacquires or refreshes observation.
+    pub fn take_initial_snapshot(
+        &mut self,
+    ) -> Option<fr_media::worker::presentation_snapshot::Snapshot> {
+        self.initial_snapshot.take()
     }
     /// Give a control-capable session an orderly window close: a controller's
     /// window-manager close runs the terminal exchange on a fresh context
@@ -241,6 +250,7 @@ impl<U> Session<U> {
             configuration.fit_window = base.fit_window;
             configuration.clipboard_space = base.clipboard_space;
             configuration.capture_system_shortcuts = base.capture_system_shortcuts;
+            configuration.initial_snapshot = base.initial_snapshot;
             configuration
         })
         .map_err(|_| ObserverError::Application)
@@ -293,6 +303,7 @@ impl<U: Ui> Application for Session<U> {
     }
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
         self.initial = None;
+        self.initial_snapshot = None;
         let configuration = self.configuration(attempt)?;
         let stop = viewer.control();
         self.last_attempt = attempt;
@@ -337,6 +348,7 @@ impl<U: Ui> Application for Session<U> {
                 )?
                 .await?;
             self.opened = true;
+            self.initial_snapshot = desktop.take_initial_snapshot();
             if one_shot {
                 let observer = desktop.observer.as_ref().ok_or(Error::NotViewing)?;
                 self.initial = Some(Observation {

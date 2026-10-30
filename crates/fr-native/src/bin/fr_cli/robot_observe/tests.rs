@@ -16,13 +16,14 @@ fn code(tail: &str) -> &'static str {
 fn explicit_observation_is_one_read_only_attempt_without_auxiliary_capabilities() {
     let request = request("--json").unwrap();
     assert!(request.json);
+    assert!(request.screenshot.is_none());
     assert_eq!(request.minimum, Minimum::Decoded);
     assert_eq!(request.connection.attempts, 1);
     assert!(!request.connection.control);
     assert!(!request.connection.clipboard);
     assert!(!request.connection.capture_system_shortcuts);
     assert!(request.connection.audio.is_none());
-    assert!(request.connection.upload.paths.is_empty());
+    assert_eq!(request.connection.upload.paths, [] as [PathBuf; 0]);
     assert!(!request.connection.upload.file_drop);
     assert!(request.connection.receive.is_none());
     assert_eq!(request.connection.display, options::DisplayChoice::Only);
@@ -88,11 +89,7 @@ fn no_control_auxiliary_retry_or_broker_authority_can_enter_the_one_shot_path() 
 }
 
 #[test]
-fn unsupported_artifacts_and_visibility_claims_refuse_before_any_io() {
-    assert_eq!(
-        code("--screenshot /private/screen.png"),
-        "observation_artifact_unavailable"
-    );
+fn unsupported_visibility_claims_refuse_before_any_io() {
     assert_eq!(
         code("--evidence-level instrumentally_observed"),
         "observation_evidence_unavailable"
@@ -145,4 +142,32 @@ fn original_argument_size_and_count_are_checked_before_translation() {
     let mut control = args("robot observe n-host --native-once");
     control[2] = "n-host\nPRIVATE".into();
     assert!(parse(&control).is_err());
+}
+
+#[test]
+fn explicit_screenshot_is_local_output_and_does_not_change_connection_authority() {
+    let request = request("--screenshot /private/screen.png --json").unwrap();
+    assert_eq!(
+        request.screenshot,
+        Some(PathBuf::from("/private/screen.png"))
+    );
+    assert!(!request.live);
+    assert!(!request.connection.control);
+    assert_eq!(request.connection.attempts, 1);
+    assert_eq!(request.connection.upload.paths, [] as [PathBuf; 0]);
+    for tail in [
+        "--screenshot",
+        "--screenshot --json",
+        "--screenshot one.png --screenshot two.png",
+    ] {
+        assert_eq!(code(tail), "invalid_arguments");
+    }
+    let live = args(
+        "robot session open n-host --foreground --role view --publish-observations --experimental-native --display only --screenshot /private/screen.png",
+    );
+    let error = parse_live(&live)
+        .err()
+        .expect("live screenshots remain unavailable");
+    assert_eq!(error.code, "observation_artifact_unavailable");
+    assert!(!format!("{error:?}").contains("/private/"));
 }

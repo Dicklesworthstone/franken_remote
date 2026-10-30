@@ -10,6 +10,9 @@ mod local;
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 #[path = "robot_observe/report.rs"]
 mod report;
+#[cfg(any(all(target_os = "linux", feature = "linux-desktop"), test))]
+#[path = "robot_observe/artifact.rs"]
+mod artifact;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Minimum {
@@ -23,6 +26,7 @@ struct Request {
     json: bool,
     minimum: Minimum,
     live: bool,
+    screenshot: Option<PathBuf>,
 }
 fn observing(args: &[String]) -> bool {
     args.first().is_some_and(|arg| arg == "robot")
@@ -57,6 +61,7 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
     let node = args.get(2).ok_or_else(usage)?;
     let mut connect = vec!["connect".to_owned(), node.clone(), "--view-only".to_owned(), "--attempts".to_owned(), "1".to_owned()];
     let mut minimum = Minimum::Decoded;
+    let mut screenshot = None;
     let mut index = 4;
     let mut seen = BTreeSet::new();
     while index < args.len() {
@@ -81,9 +86,11 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
                     connect.extend([flag.to_owned(), value.clone()]);
                 }
             }
-            "--screenshot" => return Err(Failure::new(
-                "observation_artifact_unavailable",
-                "Native observation returns metadata only. No screenshot file was opened or written.", 2)),
+            "--screenshot" => {
+                let value = args.get(index).filter(|value| !value.is_empty() && !value.starts_with("--")).ok_or_else(usage)?;
+                index += 1;
+                screenshot = Some(PathBuf::from(value));
+            }
             _ => return Err(usage()),
         }
     }
@@ -94,7 +101,7 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
             "observation_display_required",
             "Observation needs a specific display handle or --display only; it does not open an interactive display chooser.", 2));
     }
-    Ok(Request { connection, socket: options.socket, json: options.json, minimum, live: false })
+    Ok(Request { connection, socket: options.socket, json: options.json, minimum, live: false, screenshot })
 }
 fn parse_live(args: &[String]) -> Result<Request, Failure> {
     bounded_args(args)?;
@@ -107,6 +114,11 @@ fn parse_live(args: &[String]) -> Result<Request, Failure> {
     let mut translated = vec!["robot".into(), "observe".into(), args[3].clone(), "--native-once".into()];
     translated.extend(args[7..].iter().filter(|arg| *arg != "--publish-observations").cloned());
     let mut request = parse(&translated)?;
+    if request.screenshot.is_some() {
+        return Err(Failure::new(
+            "observation_artifact_unavailable",
+            "Live publication returns metadata only. Use an explicit --native-once observation to request a screenshot; no file was opened.", 2));
+    }
     request.live = true;
     Ok(request)
 }

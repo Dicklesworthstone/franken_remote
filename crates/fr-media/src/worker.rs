@@ -23,6 +23,7 @@ pub mod capture;
 pub mod cursor;
 pub mod overlay;
 pub mod presentation;
+pub mod presentation_snapshot;
 pub mod rate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,8 @@ pub enum Kind {
     ReadAudio = 19,
     /// Capture with a bounded software bitrate target; replies report actual rate.
     CaptureAtRate = 20,
+    /// Copy the exact retained presentation named by a bounded identity tuple.
+    ReadPresentation = 21,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -83,6 +86,10 @@ pub enum Kind {
     RateUnit = 278,
     /// Unchanged source plus actual rate; a requested rate may still be deferred.
     RateUnchanged = 279,
+    /// Retained composited viewport, never a new decode or visibility receipt.
+    PresentationPixels = 280,
+    /// Routine absence (no frame, mismatch, busy, or export bound).
+    PresentationAbsent = 281,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -107,6 +114,7 @@ impl Kind {
             18 => Self::ConfigureAudio,
             19 => Self::ReadAudio,
             20 => Self::CaptureAtRate,
+            21 => Self::ReadPresentation,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -130,6 +138,8 @@ impl Kind {
             277 => Self::AudioPackets,
             278 => Self::RateUnit,
             279 => Self::RateUnchanged,
+            280 => Self::PresentationPixels,
+            281 => Self::PresentationAbsent,
             _ => return Err(Error::Malformed),
         })
     }
@@ -175,6 +185,9 @@ impl Kind {
                     .contains(&length)
                     && length <= limits.max_control_message_bytes() as usize
             }
+            Self::ReadPresentation => length == presentation_snapshot::STAMP_BYTES,
+            Self::PresentationPixels => presentation_snapshot::accepts_length(length),
+            Self::PresentationAbsent => length == 1,
             Self::CursorSnapshot => cursor::accepts_length(length, limits),
             Self::CursorOverlay => overlay::accepts_length(length, limits),
             Self::Capture | Self::CaptureIfChanged => length == 17,

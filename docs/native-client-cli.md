@@ -688,3 +688,51 @@ changing its arguments is refused, and evicted IDs stay consumed. Do not issue
 a fresh request ID to replay uncertain input. These checks have deterministic
 parser, action-order, receipt-ledger and owner-state regression coverage; they
 are not a new live network or desktop qualification claim.
+
+## One-shot native screenshots
+
+```sh
+fr robot observe NODE_ID --native-once --experimental-native --display only \
+  --screenshot /absolute/new-screen.png --json
+```
+
+The `--native-once` prefix immediately follows the node. This opens one view-only
+native connection with the existing installed-tailnet identity, strict TLS and
+any configured host approval. It requires a local X11 display and the installed
+media worker. No control, clipboard, files or audio is requested; no reconnect
+is attempted. Add `--fit 1280x720` to bound the local viewport without changing
+the remote display. Each requested dimension is capped at the source dimension.
+
+The sandboxed worker exports its first submitted viewport, bound to the original
+frame, codec configuration and recovery generation. Publication waits for the
+session's successful operation and confirmed local native cleanup. The PNG
+contains the rendered viewport, including fitting/letterboxing and any remote
+cursor overlay present in that frame; it excludes the native OS pointer. Its
+pixel dimensions are separate from the source display dimensions in the report.
+
+The destination must be new: existing files and final symlinks, including
+dangling symlinks, refuse without replacement. Unix files are created with mode
+0600. Encoding and validation finish before the destination opens. A later
+write or sync failure reports an error and may leave a partial new file; no
+successful artifact is reported. The pathname stays local and never reaches
+the worker or host. Raw pixels are limited to 32 MiB, with under 11 KiB of
+additional PNG framing; the writer uses stored zlib blocks and adds no image
+codec dependency.
+
+JSON includes the artifact's frame and geometry binding, configuration/recovery
+generations, viewport dimensions, MIME type, byte count, SHA-256 and local path.
+Capture/presentation wall times and source freshness remain unknown. Submission
+to a compositor does not establish physical visibility or input authority.
+Screenshots are currently limited to `--native-once`; live and existing-owner
+observation requests return `observation_artifact_unavailable`. Without the flag,
+observation retains metadata only.
+
+**Verification scope:** the focused harness ran 58 actual-source options,
+observation parser, report and PNG writer tests, followed by strict Clippy.
+Independent zlib/Pillow decoding checked ten generated images, including fitted
+viewports; a complete independently generated PNG fixture is also asserted by
+the Rust tests. The harness omits native startup and closing transport adapters.
+The full `fr`/session regression build remains blocked by the pinned upstream
+Asupersync compiler exceeding this environment's 8 GiB memory limit; the new
+full-session regression has not run. These checks do not qualify a live tailnet,
+GPU compositor or physical display.

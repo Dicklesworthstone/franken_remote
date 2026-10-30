@@ -278,6 +278,18 @@ impl NativeObserver {
     pub const fn initial_presentation(&self) -> streaming::Presentation {
         self.initial
     }
+    /// Explicit one-shot export of the initial presented viewport. This is
+    /// bounded local worker IPC beside the original network service, never a
+    /// fresh capture, new connection, visibility proof or reusable input grant.
+    /// Only an observation-only owner before serving may request it, once.
+    pub fn snapshot_initial(
+        &mut self,
+    ) -> impl Future<
+        Output = Result<Option<fr_media::worker::presentation_snapshot::Snapshot>, Error>,
+    > + '_ {
+        let snapshot = self.viewer.snapshot_initial(self.initial.frame);
+        async move { snapshot.await.map_err(Error::Streaming) }
+    }
     /// Request metadata uses this actual selected display, not caller-guessed
     /// channel IDs or generations. Capabilities remain a request, not permission.
     pub fn control_request(

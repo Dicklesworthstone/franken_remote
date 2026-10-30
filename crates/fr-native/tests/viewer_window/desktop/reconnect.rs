@@ -680,3 +680,7 @@ mod closure;
 
 #[path = "reconnect/worker_deadline.rs"]
 mod worker_deadline;
+
+#[cfg(feature = "linux-media")]
+#[path = "reconnect/snapshot.rs"]
+mod snapshot;

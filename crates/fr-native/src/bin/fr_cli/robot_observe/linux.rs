@@ -59,6 +59,9 @@ pub(super) fn run(request: &Request) -> Result<String, Failure> {
     if let Some((width, height)) = connection.fit_window {
         desktop = desktop.with_fitted_window(width, height).map_err(|_| failure("invalid_window_size", "Choose bounded even dimensions for --fit."))?;
     }
+    if request.screenshot.is_some() {
+        desktop = desktop.with_initial_snapshot();
+    }
     // The optional endpoint is the SAME one used by fr connect/status/close.
     // Bind before dialing and retain it through confirmed native cleanup.
     let local = runtime.handle().try_request_cx_with_budget(Budget::INFINITE)
@@ -117,7 +120,10 @@ pub(super) fn run(request: &Request) -> Result<String, Failure> {
             if let Some(info) = info {
                 return closed(info, request.json, application.disconnect_outcome());
             }
-            report::render(request, application.initial_observation(), receipt_time.get(), application.disconnect_outcome())
+            report::render(
+                request, application.initial_observation(), receipt_time.get(),
+                application.disconnect_outcome(), application.take_initial_snapshot(),
+            )
         });
     crate::closure::preserve(result, application.disconnect_outcome())
 }

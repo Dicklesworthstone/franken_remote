@@ -698,6 +698,14 @@ impl Worker {
         if maximum_capacity == Some(0) {
             return Err(Error::Protocol(worker::Error::ResourceLimit).into());
         }
+        // Pixel export has an independent fixed ceiling. It never widens the
+        // normal control/AU limits, and a caller may further narrow its credit.
+        let maximum_capacity = if kind == Kind::ReadPresentation {
+            let ceiling = worker::presentation_snapshot::MAX_BODY_BYTES;
+            Some(maximum_capacity.map_or(ceiling, |maximum| maximum.min(ceiling)))
+        } else {
+            maximum_capacity
+        };
         self.exchange_checked(cx, kind, body, maximum_capacity, deadline, live)
             .await
     }
@@ -940,6 +948,9 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             // one reply kind; NeedInput means the pointer moved mid-query.
             Kind::ReadCursor => matches!(reply, Kind::CursorSnapshot | Kind::NeedInput),
             Kind::CursorOverlay => reply == Kind::CursorOverlayApplied,
+            Kind::ReadPresentation => {
+                matches!(reply, Kind::PresentationPixels | Kind::PresentationAbsent)
+            }
             Kind::ConfigureAudio => reply == Kind::AudioReady,
             // Zero packets is an ordinary AudioPackets reply, never NeedInput.
             Kind::ReadAudio => reply == Kind::AudioPackets,
@@ -949,12 +960,37 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use asupersync::{
         runtime::RuntimeBuilder,
         time::{TimerDriverHandle, VirtualClock},
     };
     use std::sync::Arc;
+
+    #[test]
+    fn presentation_export_replies_are_private_to_the_explicit_request() {
+        for reply in [Kind::PresentationPixels, Kind::PresentationAbsent] {
+            assert!(allowed_reply(Kind::ReadPresentation, reply));
+            for request in [
+                Kind::Present,
+                Kind::Decode,
+                Kind::Poll,
+                Kind::ReadCursor,
+                Kind::Capture,
+            ] {
+                assert!(!allowed_reply(request, reply));
+            }
+        }
+        for reply in [
+            Kind::Presented,
+            Kind::Decoded,
+            Kind::NeedInput,
+            Kind::CursorSnapshot,
+        ] {
+            assert!(!allowed_reply(Kind::ReadPresentation, reply));
+        }
+    }
 
     /// A stand-in worker image speaking only the probe's one-line reply.
     fn probe_image(script: &str) -> std::path::PathBuf {

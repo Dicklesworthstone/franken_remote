@@ -1,5 +1,6 @@
 //! Historical native receipt projection. Unknown host-clock evidence stays null.
-use super::{Failure, Minimum, Request};
+use super::{Failure, Minimum, Request, artifact};
+use fr_media::worker::presentation_snapshot::Snapshot;
 use fr_native::desktop::reconnect::Observation;
 use frd::{media::PresentationStage, session_startup::ViewerCloseOutcome};
 use serde_json::{Value, json};
@@ -68,6 +69,7 @@ pub(super) fn render(
     observation: Option<Observation>,
     receipt_time: Option<u64>,
     close: Option<ViewerCloseOutcome>,
+    snapshot: Option<Snapshot>,
 ) -> Result<String, Failure> {
     let observation = observation.ok_or_else(|| {
         Failure::new(
@@ -83,6 +85,14 @@ pub(super) fn render(
             serde_json::from_str(&crate::closure::Report::from(outcome).json())
         })
         .map_err(|_| serialization())?;
+    // The caller reaches reporting only after the original successful operation
+    // and confirmed native cleanup. Validate binding before any output path opens.
+    let image = save_artifact(request, observation, snapshot)?;
+    if let Some(image) = image {
+        data["configuration_generation"] = image["configuration_generation"].clone();
+        data["recovery_generation"] = image["recovery_generation"].clone();
+        data["artifact"] = image;
+    }
     if request.json {
         // No input acknowledgement stage applies. The explicit evidence level
         // above is the decoder/compositor boundary, never optical observation.
@@ -103,8 +113,25 @@ pub(super) fn render(
             || "No completed host close exchange; remote cleanup is unknown.".to_owned(),
             |outcome| crate::closure::Report::from(outcome).text(),
         );
+        let image = if data["artifact"].is_null() {
+            "No screenshot requested.".to_owned()
+        } else {
+            format!(
+                "Screenshot: {} (PNG, {}x{} presented viewport, {} bytes, SHA-256 {}). Remote overlay may be included; the native OS pointer is excluded.",
+                data["artifact"]["storage_path"]
+                    .as_str()
+                    .unwrap_or_default(),
+                data["artifact"]["pixel_width"],
+                data["artifact"]["pixel_height"],
+                data["artifact"]["byte_count"],
+                data["artifact"]["sha256"].as_str().unwrap_or_default(),
+            )
+        };
+        let configuration = data["configuration_generation"]
+            .as_u64()
+            .map_or_else(|| "unknown".to_owned(), |generation| generation.to_string());
         Ok(format!(
-            "One-shot observation complete; the read-only session has ended.\nTarget: {}\nDisplay: {} ({}x{} pixels), geometry generation {}\nInitial frame: {}, evidence: {}\nSource freshness, capture/presentation times and codec generation: unknown.\nLocal native cleanup confirmed. {closing}\nNo screenshot, input authority, physical visibility or semantic result is claimed.\n",
+            "One-shot observation complete; the read-only session has ended.\nTarget: {}\nDisplay: {} ({}x{} pixels), geometry generation {}\nInitial frame: {}, evidence: {}\nSource freshness and capture/presentation times: unknown.\nCodec configuration generation: {configuration}.\nLocal native cleanup confirmed. {closing}\n{image}\nNo input authority, physical visibility or semantic result is claimed.\n",
             request.connection.target.node,
             display.handle,
             display.pixel_width,
@@ -114,6 +141,68 @@ pub(super) fn render(
             data["evidence_level"].as_str().unwrap_or("unknown"),
         ))
     }
+}
+
+fn save_artifact(
+    request: &Request,
+    observation: Observation,
+    snapshot: Option<Snapshot>,
+) -> Result<Option<Value>, Failure> {
+    let Some(path) = &request.screenshot else {
+        return Ok(None);
+    };
+    if request.live {
+        return Err(Failure::new(
+            "observation_artifact_unavailable",
+            "Live observation does not export screenshots. No screenshot file was opened.",
+            1,
+        ));
+    }
+    let snapshot = snapshot.ok_or_else(|| Failure::new(
+        "observation_artifact_unavailable", "The original media worker supplied no initial screenshot. No screenshot file was opened.", 1,
+    ))?;
+    let stamp = snapshot.stamp();
+    let source = (
+        observation.display.pixel_width,
+        observation.display.pixel_height,
+    );
+    // Desktop clamps each requested dimension independently before creating
+    // the actual target. Match that original viewport, including mixed bounds.
+    let viewport = request
+        .connection
+        .fit_window
+        .map_or(source, |(width, height)| {
+            (width.min(source.0), height.min(source.1))
+        });
+    if stamp.frame != observation.completion.frame
+        || observation.completion.stage != PresentationStage::SubmittedToCompositor
+        || (snapshot.width(), snapshot.height()) != viewport
+    {
+        return Err(Failure::new(
+            "observation_artifact_mismatch",
+            "The screenshot does not match the original presented frame and selected viewport. No screenshot file was opened.",
+            1,
+        ));
+    }
+    let saved = artifact::write(path, snapshot.width(), snapshot.height(), snapshot.pixels())?;
+    Ok(Some(json!({
+        "artifact_id": format!("viewport-{}-{}", stamp.frame.as_raw(), &saved.sha256[..12]),
+        "producing_frame_serial": stamp.frame.as_raw(),
+        "producing_geometry_generation": observation.display.geometry.as_raw(),
+        "configuration_generation": stamp.configuration.as_raw(),
+        "recovery_generation": stamp.recovery.as_raw(),
+        "capture_timestamp_unix_ms": null,
+        "evidence_level": "submitted_to_compositor",
+        "pixel_domain": "presented_viewport",
+        "cursor_content": "remote_overlay_if_present",
+        "native_os_pointer_included": false,
+        "mime_type": "image/png",
+        "pixel_width": snapshot.width(),
+        "pixel_height": snapshot.height(),
+        "byte_count": saved.byte_count,
+        "sha256": saved.sha256,
+        "storage_path": path,
+    })))
 }
 
 fn serialization() -> Failure {
@@ -218,7 +307,7 @@ mod tests {
             .collect::<Vec<_>>();
         let request = super::super::parse(&args).unwrap();
         let frame = observation(PresentationStage::SubmittedToCompositor);
-        let text = render(&request, Some(frame), Some(1234), None).unwrap();
+        let text = render(&request, Some(frame), Some(1234), None, None).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["outcome"], "success");
@@ -228,8 +317,12 @@ mod tests {
         assert!(value.get("stage").is_none());
         assert!(value.get("lease").is_none());
         assert_eq!(
-            render(&request, None, None, None).unwrap_err().code,
+            render(&request, None, None, None, None).unwrap_err().code,
             "observation_unavailable"
         );
     }
 }
+
+#[cfg(test)]
+#[path = "report_artifact_tests.rs"]
+mod artifact_tests;

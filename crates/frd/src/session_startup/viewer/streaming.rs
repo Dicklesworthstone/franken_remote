@@ -11,6 +11,7 @@ mod native_turn;
 mod recovery;
 mod repair;
 mod repair_send;
+mod snapshot;
 use super::{
     ViewerSession,
     controlled::{ControlledViewer, ViewerControl},
@@ -279,6 +280,7 @@ pub struct StreamingViewer {
     control: StreamingViewerControl,
     statistics: Statistics,
     served: bool,
+    initial_snapshot_requested: bool,
     initial: Option<media::PresentationReceipt>,
     disconnect_outcome: Option<quic::CloseOutcome>,
 }
@@ -449,6 +451,7 @@ impl StreamingViewer {
             control: StreamingViewerControl { cx, input },
             statistics: Statistics::default(),
             served: false,
+            initial_snapshot_requested: false,
             initial: None,
             disconnect_outcome: None,
         })

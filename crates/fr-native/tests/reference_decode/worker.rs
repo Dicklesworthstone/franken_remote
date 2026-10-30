@@ -279,3 +279,6 @@ fn a_decode_only_request_cannot_bypass_native_bitstream_refusal() {
     worker.finish(false);
     assert_eq!(ui.snapshot().unwrap().pixels(), before);
 }
+
+#[path = "presentation_snapshot.rs"]
+mod presentation_snapshot;

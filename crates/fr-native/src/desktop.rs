@@ -41,6 +41,7 @@ pub struct Configuration {
     fit_window: Option<(u32, u32)>,
     clipboard_space: bool,
     capture_system_shortcuts: bool,
+    initial_snapshot: bool,
 }
 impl Configuration {
     pub fn new(
@@ -60,6 +61,7 @@ impl Configuration {
             fit_window: None,
             clipboard_space: false,
             capture_system_shortcuts: false,
+            initial_snapshot: false,
         })
     }
     /// Explicit maximum window size in physical pixels. The full remote image
@@ -71,6 +73,14 @@ impl Configuration {
             .map_err(|_| Error::Window(viewer_window::Error::InvalidSize))?;
         self.fit_window = Some((width, height));
         Ok(self)
+    }
+    /// Explicitly export the first presented viewport during observation-only
+    /// startup. Pixels remain bounded and private until taken by the caller;
+    /// no file is opened and no screenshot is recorded by default.
+    #[must_use]
+    pub const fn with_initial_snapshot(mut self) -> Self {
+        self.initial_snapshot = true;
+        self
     }
     /// Reserve screen space for the mandatory local clipboard off control.
     /// The original viewer target may be smaller than the remote display or
@@ -174,6 +184,7 @@ pub struct Desktop {
     configuration: Configuration,
     state: State,
     observer: Option<NativeObserver>,
+    initial_snapshot: Option<fr_media::worker::presentation_snapshot::Snapshot>,
     window: Option<ViewerWindow>,
     picker: Option<DisplayPicker>,
     renderer_started: bool,
@@ -199,6 +210,7 @@ impl Desktop {
             configuration,
             state: State::New,
             observer: None,
+            initial_snapshot: None,
             window: None,
             picker: None,
             renderer_started: false,
@@ -225,6 +237,14 @@ impl Desktop {
         } else {
             self.state
         }
+    }
+    /// Move the explicitly requested initial artifact out once. Historical
+    /// pixels carry their producing frame/configuration/recovery tuple and
+    /// viewport dimensions; taking them does not refresh any input observation.
+    pub fn take_initial_snapshot(
+        &mut self,
+    ) -> Option<fr_media::worker::presentation_snapshot::Snapshot> {
+        self.initial_snapshot.take()
     }
     pub fn window(&self) -> Option<WindowControl> {
         self.window.as_ref().map(ViewerWindow::control)
@@ -623,6 +643,7 @@ impl Desktop {
         let retirement = &mut self.retirement;
         let picker_stop = stop.clone();
         let observer = &mut self.observer;
+        let initial_snapshot = &mut self.initial_snapshot;
         // One content-free failure slot, shared only by these startup futures.
         // This is not a native callback queue and retains no pixels or input.
         let failure = Rc::new(Cell::new(None));
@@ -711,6 +732,14 @@ impl Desktop {
                     .await
                     .map_err(|error| failure.get().unwrap_or(Error::Observer(error)))?;
                 *observer = Some(ready);
+                if configuration.initial_snapshot {
+                    *initial_snapshot = observer
+                        .as_mut()
+                        .ok_or(Error::NotViewing)?
+                        .snapshot_initial()
+                        .await
+                        .map_err(Error::Observer)?;
+                }
                 Ok(())
             }),
         })

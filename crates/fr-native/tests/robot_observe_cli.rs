@@ -79,6 +79,7 @@ fn one_shot_validates_real_local_roots_before_contacting_discovery() {
     let fixture = Fixture::new();
     let roots = fixture.0.join("roots.pem");
     let socket = fixture.0.join("localapi.sock");
+    let artifact = fixture.0.join("PRIVATE-screen.png");
     fs::write(&roots, b"PRIVATE-INVALID-CERTIFICATE").unwrap();
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -94,38 +95,65 @@ fn one_shot_validates_real_local_roots_before_contacting_discovery() {
         roots.to_str().unwrap(),
         "--socket",
         socket.to_str().unwrap(),
+        "--screenshot",
+        artifact.to_str().unwrap(),
         "--json",
     ]);
     refused(&output, "invalid_trust_store", 1);
+    assert!(!artifact.exists());
     assert!(matches!(listener.accept(), Err(error) if error.kind() == io::ErrorKind::WouldBlock));
 }
 
 #[test]
-fn artifact_and_optical_evidence_refusals_happen_without_opening_output_files() {
+fn optical_evidence_refuses_before_opening_a_requested_screenshot() {
     let fixture = Fixture::new();
     let artifact = fixture.0.join("PRIVATE-screen.png");
-    for (flags, code) in [
-        (
-            vec!["--screenshot", artifact.to_str().unwrap()],
-            "observation_artifact_unavailable",
-        ),
-        (
-            vec!["--evidence-level", "instrumentally_observed"],
-            "observation_evidence_unavailable",
-        ),
-    ] {
-        let mut args = vec![
+    let args = [
+        "robot",
+        "observe",
+        "n-PRIVATE",
+        "--native-once",
+        "--experimental-native",
+        "--display",
+        "only",
+        "--screenshot",
+        artifact.to_str().unwrap(),
+        "--evidence-level",
+        "instrumentally_observed",
+        "--json",
+    ];
+    refused(&run(&args), "observation_evidence_unavailable", 2);
+    assert!(!artifact.exists());
+}
+
+#[test]
+fn live_and_local_observation_do_not_silently_enable_pixel_export() {
+    let fixture = Fixture::new();
+    let artifact = fixture.0.join("PRIVATE-screen.png");
+    for mut args in [
+        vec![
             "robot",
-            "observe",
+            "session",
+            "open",
             "n-PRIVATE",
-            "--native-once",
+            "--foreground",
+            "--role",
+            "view",
+            "--publish-observations",
             "--experimental-native",
             "--display",
             "only",
-            "--json",
-        ];
-        args.extend(flags);
-        refused(&run(&args), code, 2);
+        ],
+        vec![
+            "robot",
+            "observe",
+            "n-PRIVATE",
+            "--connection-id",
+            "00000000000000000000000000000001",
+        ],
+    ] {
+        args.extend(["--screenshot", artifact.to_str().unwrap(), "--json"]);
+        refused(&run(&args), "observation_artifact_unavailable", 2);
         assert!(!artifact.exists());
     }
 }

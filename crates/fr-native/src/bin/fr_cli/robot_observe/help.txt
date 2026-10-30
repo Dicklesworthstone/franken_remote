@@ -4,16 +4,20 @@ fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|on
     [--by-name] [--worker /absolute/fr-media-worker] [--x-display :0]
     [--trust-roots /absolute/ca-roots.pem] [--socket /absolute/tailscaled.sock]
     [--port 8443] [--ipv6] [--fit WIDTHxHEIGHT]
-    [--evidence-level decoded|submitted_to_compositor] [--json]
+    [--evidence-level decoded|submitted_to_compositor] [--screenshot /path/screen.png] [--json]
 The --native-once prefix immediately follows NODE_ID. This explicitly opens ONE
 new observation, subject to normal tailnet/TLS admission and host approval. It
 opens the native viewer, records its first decoder completion even on an idle
 screen, runs InspectionComplete closure, and waits for local native cleanup.
 It never requests input, clipboard, files or audio, and never reconnects.
-Output is historical metadata, not pixels or a current input precondition.
-Unknown host capture times, codec generation and source freshness stay unknown.
-Compositor submission is not physical visibility. Screenshots and optical
-observation are refused. This requires a local X11 display, not headless capture.
+Output is historical evidence, never a current input precondition. An explicit
+--screenshot writes the first presented viewport as PNG after native cleanup,
+including fitted letterboxing and any remote cursor overlay, not the native OS
+pointer. The destination must not exist; output is at most 32 MiB of raw pixels
+plus bounded PNG framing. Pixel dimensions describe the viewport separately
+from the selected host display. Capture times and source freshness stay unknown.
+Compositor submission is not physical visibility. This requires a local X11
+display, not headless capture. No screenshot is retained unless requested.
 
 Reusable foreground view-only observation publisher:
 fr robot session open NODE_ID --foreground --role view --publish-observations
@@ -24,6 +28,7 @@ fr robot observe NODE_ID --connection-id HEX32 [--max-receipt-age-ms 1..60000]
 The opt-in owner stays foreground with one attempt; status supplies its public
 comparison ID. Reads authenticate that existing local owner and never dial,
 capture, reconnect or grant input. Receipt age is local metadata age, NOT host
-source freshness. Owners without publication refuse. Close with fr disconnect
+source freshness. Screenshots remain unavailable in this live/local mode.
+Owners without publication refuse. Close with fr disconnect
 or robot session close --connection-id HEX32; cleanup remains mandatory.
 Without --native-once or --connection-id, robot observe remains unavailable.
