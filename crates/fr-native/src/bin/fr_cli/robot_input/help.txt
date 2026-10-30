@@ -5,7 +5,7 @@ fr robot session open NODE_ID --foreground --role control --accept-input
 fr robot input NODE_ID --connection-id ID --status [--json]
 fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     --observation-id INTEGER --max-observation-age-ms 1..1000
-    (--click BUTTON,X,Y | --key USB_USAGE | --scroll X,Y,DX,DY) [--json]
+    (--click BUTTON,X,Y | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
 
 Find the public connection ID with fr robot session status NODE_ID --json.
 Keep the foreground viewer focused. The explicit automation owner requests one
@@ -19,9 +19,14 @@ a new status read cannot refresh an accepted command. Coordinates are signed
 host desktop pixels. Buttons are 1 primary, 2 secondary, 3 middle, 4 back, 5 forward.
 --key taps a physical USB page-7 usage (decimal), not Unicode or a keyboard-layout
 guess. Scroll deltas are integer lines on each axis, at most 120 in magnitude.
-Clicks and key taps submit a bounded press/release pair, in order, with host
-receipts. Text, pointer replay, arbitrary batches and persistent held keys are
-unavailable. Human keyboard/mouse events are not forwarded in this mode.
+--chord holds one to four distinct USB modifiers (224..231) through one
+non-modifier key tap; for example, 224,225,19 is physical left Ctrl+Shift+P.
+Modifiers press in ascending usage order, then the key; releases run in reverse.
+Each of at most ten transitions waits for its own original host receipt. The
+original observation age and request deadline are checked throughout; neither
+is refreshed between keys. Clicks and key taps use the same press/release gates.
+Text, pointer replay, arbitrary batches and persistent held keys are unavailable.
+Human keyboard/mouse events are not forwarded in this mode.
 
 Results distinguish confirmed OS submission, partial effects, refusal, and an
 unknown external effect. Partial/uncertain requests fence the original control

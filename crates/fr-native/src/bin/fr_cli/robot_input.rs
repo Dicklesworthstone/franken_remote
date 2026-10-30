@@ -16,17 +16,36 @@ pub(crate) struct Output {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
-    Scroll { x: i32, y: i32, dx: i32, dy: i32 },
-    Click { button: u8, x: i32, y: i32 },
-    KeyTap { usage: u16 },
+    Scroll {
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
+    Click {
+        button: u8,
+        x: i32,
+        y: i32,
+    },
+    KeyTap {
+        usage: u16,
+    },
+    /// USB modifiers 224..231 as a canonical set, followed by one physical key.
+    KeyChord {
+        modifiers: u8,
+        usage: u16,
+    },
 }
 impl Operation {
     #[cfg(any(target_os = "linux", test))]
     pub fn count(self) -> u8 {
-        if matches!(self, Self::Scroll { .. }) {
-            1
-        } else {
-            2
+        match self {
+            Self::Scroll { .. } => 1,
+            Self::Click { .. } | Self::KeyTap { .. } => 2,
+            Self::KeyChord { modifiers, .. } => {
+                // A byte has at most eight set bits, including invalid requests.
+                u8::try_from(2 * (modifiers.count_ones() + 1)).expect("bounded modifier set")
+            }
         }
     }
     pub fn valid(self) -> bool {
@@ -36,7 +55,39 @@ impl Operation {
             }
             Self::Click { button, .. } => (1..=5).contains(&button),
             Self::KeyTap { usage } => fr_core::input::PhysicalKey::new(usage).is_some(),
+            Self::KeyChord { modifiers, usage } => {
+                (1..=4).contains(&modifiers.count_ones())
+                    && usage < 224
+                    && fr_core::input::PhysicalKey::new(usage).is_some()
+            }
         }
+    }
+    fn chord(values: &[i32]) -> Result<Self, Failure> {
+        let [modifiers @ .., key] = values else {
+            return Err(usage());
+        };
+        if !(1..=4).contains(&modifiers.len()) {
+            return Err(usage());
+        }
+        let mut mask = 0_u8;
+        for modifier in modifiers {
+            if !(224..=231).contains(modifier) {
+                return Err(usage());
+            }
+            let bit = 1 << (*modifier - 224);
+            if mask & bit != 0 {
+                return Err(usage());
+            }
+            mask |= bit;
+        }
+        let operation = Self::KeyChord {
+            modifiers: mask,
+            usage: u16::try_from(*key).map_err(|_| usage())?,
+        };
+        if !operation.valid() {
+            return Err(usage());
+        }
+        Ok(operation)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,7 +371,7 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--request-id" => request_id = Some(value.parse().map_err(|_| usage())?),
             "--observation-id" => observation_id = Some(value.parse().map_err(|_| usage())?),
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
-            "--scroll" | "--click" | "--key" => {
+            "--scroll" | "--click" | "--key" | "--chord" => {
                 if operation.is_some() {
                     return Err(usage());
                 }
@@ -339,6 +390,7 @@ fn command(args: &[String]) -> Result<Command, Failure> {
                     ("--key", &[usage_value]) => Operation::KeyTap {
                         usage: u16::try_from(usage_value).map_err(|_| usage())?,
                     },
+                    ("--chord", values) => Operation::chord(values)?,
                     _ => return Err(usage()),
                 });
             }

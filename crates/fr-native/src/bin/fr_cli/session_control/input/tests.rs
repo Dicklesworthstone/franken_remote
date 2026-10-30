@@ -631,3 +631,122 @@ fn coherent_single_action_receipt_cannot_complete_a_click_or_different_request()
         Err(Error::Protocol)
     );
 }
+
+#[test]
+fn a_complete_chord_keeps_the_same_owner_and_retains_all_key_receipts() {
+    let shared = fresh();
+    let request = Request {
+        operation: Operation::KeyChord {
+            modifiers: 0b0000_1111,
+            usage: 19,
+        },
+        ..request(&snapshot(&shared), 1)
+    };
+    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    for sequence in 0..u64::from(request.operation.count()) {
+        encoded(&shared, 1, sequence);
+        assert!(!ready(&shared, 1));
+        shared.result(ResultEvent::Completed(InputResult {
+            submitted_operations: 1,
+            ..receipt(sequence)
+        }));
+    }
+    let complete = retained(&shared, request);
+    assert_eq!(complete.disposition, InputDisposition::Committed);
+    assert_eq!(complete.actions_total, 10);
+    assert_eq!(complete.actions_submitted, 10);
+    assert_eq!(complete.submitted_operations, 10);
+    let state = shared.0.lock().unwrap();
+    assert!(state.pending.is_none());
+    assert!(!state.stopped && !state.ledger.is_closed());
+    drop(state);
+    assert_eq!(
+        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        complete
+    );
+    assert!(snapshot(&shared).ready);
+}
+
+#[test]
+fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases() {
+    for prefix in [1_u8, 4, 5, 6, 9] {
+        for missing_receipt in [false, true] {
+            let shared = fresh();
+            let request = Request {
+                operation: Operation::KeyChord {
+                    modifiers: 0b0000_1111,
+                    usage: 19,
+                },
+                ..request(&snapshot(&shared), 1)
+            };
+            let mut waiting = Box::pin(shared.submit(request));
+            assert!(poll(waiting.as_mut()).is_pending());
+            for sequence in 0..u64::from(prefix) {
+                encoded(&shared, 1, sequence);
+                shared.result(ResultEvent::Completed(InputResult {
+                    submitted_operations: 1,
+                    ..receipt(sequence)
+                }));
+            }
+            encoded(&shared, 1, u64::from(prefix));
+            if !missing_receipt {
+                shared.result(ResultEvent::Completed(InputResult {
+                    stage: Stage::Admitted,
+                    outcome: InputOutcome::CancelledBeforeSubmission,
+                    submitted_operations: 0,
+                    reason: Some(fr_wire::input_result::Reason::Revoked),
+                    ..receipt(u64::from(prefix))
+                }));
+            }
+            // Losing the local requester is a terminal fence, including when
+            // the previous modifier/key transition has no host receipt.
+            drop(waiting);
+            let actual = retained(&shared, request);
+            assert_eq!(
+                actual.disposition,
+                if missing_receipt {
+                    InputDisposition::UnknownEffect
+                } else {
+                    InputDisposition::Partial
+                }
+            );
+            assert_eq!(actual.actions_encoded, prefix + 1);
+            assert_eq!(actual.actions_submitted, prefix);
+            assert_eq!(actual.submitted_operations, u32::from(prefix));
+            assert_eq!(actual.unacknowledged_actions, u8::from(missing_receipt));
+            let state = shared.0.lock().unwrap();
+            assert!(state.stopped && state.ledger.is_closed());
+            assert!(state.pending.is_none() && state.live.is_none() && state.pinned.is_none());
+            drop(state);
+            assert!(!snapshot(&shared).ready);
+            assert_eq!(
+                report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+                actual
+            );
+            assert_eq!(
+                shared.0.lock().unwrap().submit(Request {
+                    request_id: 2,
+                    ..request
+                }),
+                Err(Refusal::Stopped)
+            );
+            if missing_receipt {
+                shared.result(ResultEvent::Completed(InputResult {
+                    submitted_operations: 1,
+                    ..receipt(u64::from(prefix))
+                }));
+                let late = retained(&shared, request);
+                assert_eq!(late.unacknowledged_actions, 0);
+                assert_eq!(late.actions_submitted, prefix + 1);
+                assert!(!snapshot(&shared).ready);
+                assert_eq!(
+                    shared.0.lock().unwrap().submit(Request {
+                        request_id: 2,
+                        ..request
+                    }),
+                    Err(Refusal::Stopped)
+                );
+            }
+        }
+    }
+}

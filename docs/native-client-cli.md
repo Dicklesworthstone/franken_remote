@@ -632,3 +632,59 @@ Unchanged viewer C archives were reused because local XCB RENDER headers were
 absent; the new sandbox C was rebuilt. All modified preimages matched current
 main. A cold dependency build, complete latest-workspace run, physical audio
 device, desktop PipeWire session and live-tailnet qualification remain untested.
+
+
+## Bounded robot shortcuts on the original foreground owner
+
+Open an explicit automation owner in one foreground process:
+
+```sh
+fr robot session open NODE_ID --foreground --role control --accept-input \
+  --experimental-native --display only
+```
+
+Keep its native viewer focused. This mode requests control once and disables
+human keyboard/mouse forwarding, reconnects and auxiliary sharing lanes. The
+host still needs its input agent and any configured local approval. In another
+process, obtain that invocation's `connection_id` with `fr robot session status
+NODE_ID --json`, then request its current input observation:
+
+```sh
+fr robot input NODE_ID --connection-id CONNECTION_ID --status --json
+```
+
+When `ready` is true, use the returned lease comparison handle, observation ID,
+and next request ID. A command must include its maximum observation age in
+milliseconds (1–1000). For example, this requests the physical left Ctrl+Shift+P
+shortcut using decimal USB page-7 usages:
+
+```sh
+fr robot input NODE_ID --connection-id CONNECTION_ID \
+  --lease LEASE_HANDLE --request-id REQUEST_ID --observation-id OBSERVATION_ID \
+  --max-observation-age-ms 250 --chord 224,225,19 --json
+```
+
+`--chord` accepts one to four distinct modifiers from 224–231 followed by one
+non-modifier physical key. Modifiers press in ascending USB usage order, the key
+presses and releases while they remain held, then modifiers release in reverse
+order. Reordering the same modifier set produces the same canonical request.
+Duplicate modifiers, missing keys, unsupported usages and longer sequences
+refuse before dispatch. `--key` remains a single physical key tap; `--click` and
+`--scroll` retain their existing bounded forms. This interface provides no text
+insertion, arbitrary batches, repeated shortcuts or persistent held keys.
+
+Every transition waits for its own matching reliable host receipt from the
+original session and lease. The original observation, view generations and
+request deadline govern the whole chord; successful intermediate keys and fresh
+status reads do not extend them. A distant or stalled host can therefore leave
+a confirmed prefix and a terminal partial result. Partial or uncertain input
+stops that owner and invokes its existing held-key cleanup. Cleanup does not
+undo previously submitted keys, and the command is never automatically retried.
+
+Results report OS submission, partial submission, refusal or unknown effects.
+They do not prove that an application accepted the shortcut or changed its UI.
+An identical request ID and unchanged arguments retrieve the retained outcome;
+changing its arguments is refused, and evicted IDs stay consumed. Do not issue
+a fresh request ID to replay uncertain input. These checks have deterministic
+parser, action-order, receipt-ledger and owner-state regression coverage; they
+are not a new live network or desktop qualification claim.

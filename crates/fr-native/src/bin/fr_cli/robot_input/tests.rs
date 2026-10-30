@@ -292,6 +292,7 @@ fn status_cannot_smuggle_actions_or_replace_original_preconditions() {
         "--observation-id 7",
         "--max-observation-age-ms 250",
         "--key 4",
+        "--chord 224,4",
         "--status",
         "--json",
     ] {
@@ -299,6 +300,7 @@ fn status_cannot_smuggle_actions_or_replace_original_preconditions() {
     }
     for suffix in [
         "--key 4",
+        "--chord 224,4",
         "--scroll 0,0,0,1",
         "--click 1,0,0",
         "--request-id 10",
@@ -503,4 +505,100 @@ fn typed_refusal_codes_remain_machine_readable_and_content_free() {
         assert!(value["stage"].is_null() && value["data"].is_null());
         assert!(!output.text.contains(LEASE) && !output.text.contains(CONNECTION));
     }
+}
+
+#[test]
+fn modifier_chords_are_canonical_bounded_physical_key_sets() {
+    let canonical = command(&action("--chord", "224,225,227,231,19"))
+        .unwrap()
+        .request
+        .unwrap();
+    let reordered = command(&action("--chord", "231,227,224,225,19"))
+        .unwrap()
+        .request
+        .unwrap();
+    assert!(canonical == reordered);
+    assert!(
+        canonical.operation
+            == Operation::KeyChord {
+                modifiers: 0b1000_1011,
+                usage: 19
+            }
+    );
+    assert_eq!(
+        canonical.operation.count(),
+        fr_client::robot::input::native::MAX_ACTIONS
+    );
+    let wire = serde_json::to_vec(&canonical).unwrap();
+    assert!(wire.len() <= 512);
+    assert_eq!(wire, serde_json::to_vec(&reordered).unwrap());
+    assert!(serde_json::from_slice::<Request>(&wire).unwrap() == canonical);
+    for (text, count) in [("224,4", 4), ("231,164", 4), ("224,228,19", 6)] {
+        let parsed = command(&action("--chord", text)).unwrap().request.unwrap();
+        assert!(parsed.valid());
+        assert_eq!(parsed.operation.count(), count);
+    }
+}
+
+#[test]
+fn chords_refuse_duplicates_nonmodifiers_missing_keys_and_unbounded_sequences() {
+    for text in [
+        "4",
+        "224",
+        "224,225",
+        "224,224,4",
+        "231,224,231,4",
+        "4,224",
+        "223,4",
+        "232,4",
+        "-1,4",
+        "256,4",
+        "65536,4",
+        "224,0",
+        "224,3",
+        "224,165",
+        "224,223",
+        "224,232",
+        "224,-1",
+        "224,65536",
+        "224,225,226,227,228,4",
+        "224,,4",
+        ",224,4",
+        "224,4,",
+        "224,private-key",
+    ] {
+        let failure = refused(&action("--chord", text));
+        assert!(!format!("{failure:?}").contains("private-key"));
+    }
+    let mut duplicate = action("--chord", "224,4");
+    duplicate.extend(words("--chord 225,5"));
+    refused(&duplicate);
+}
+
+#[test]
+fn raw_chord_requests_cannot_bypass_modifier_and_key_bounds() {
+    let request = command(&action("--chord", "224,4"))
+        .unwrap()
+        .request
+        .unwrap();
+    for modifiers in 0_u8..=255 {
+        let mut wire = serde_json::to_value(request).unwrap();
+        wire["operation"]["modifiers"] = modifiers.into();
+        let decoded: Request = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.valid(), (1..=4).contains(&modifiers.count_ones()));
+        if decoded.valid() {
+            assert!(decoded.operation.count() <= fr_client::robot::input::native::MAX_ACTIONS);
+        }
+    }
+    for usage in [0, 165, 223, 224, 231, 232, 65535] {
+        let mut wire = serde_json::to_value(request).unwrap();
+        wire["operation"]["usage"] = usage.into();
+        assert!(!serde_json::from_value::<Request>(wire).unwrap().valid());
+    }
+    let mut wire = serde_json::to_value(request).unwrap();
+    wire["operation"]["modifiers"] = 256.into();
+    assert!(serde_json::from_value::<Request>(wire).is_err());
+    let mut wire = serde_json::to_value(request).unwrap();
+    wire["operation"]["repeat"] = 10.into();
+    assert!(serde_json::from_value::<Request>(wire).is_err());
 }

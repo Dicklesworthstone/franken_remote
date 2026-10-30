@@ -35,6 +35,29 @@ impl Operation {
                     KeyTransition::Release
                 },
             }),
+            Self::KeyChord { modifiers, usage } if self.valid() && index < self.count() => {
+                let release_start = self.count() / 2;
+                let pressed = index < release_start;
+                // Press the canonical modifier set, then the key. Mirror that
+                // order for release so every modifier spans the entire key tap.
+                let ordinal = if pressed {
+                    index
+                } else {
+                    2 * release_start - index - 1
+                };
+                let usage = (224_u16..=231)
+                    .filter(|key| modifiers & (1 << (*key - 224)) != 0)
+                    .chain(std::iter::once(usage))
+                    .nth(usize::from(ordinal))?;
+                Some(Action::Key {
+                    key: PhysicalKey::new(usage)?,
+                    transition: if pressed {
+                        KeyTransition::Press
+                    } else {
+                        KeyTransition::Release
+                    },
+                })
+            }
             _ => None,
         }
     }
@@ -132,5 +155,101 @@ impl Shared {
             }
         }
         state.wake();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn key_step(operation: Operation, index: u8) -> (u16, KeyTransition) {
+        let Some(Action::Key { key, transition }) = operation.action(index) else {
+            panic!("a chord emits only bounded physical key transitions");
+        };
+        (key.usage(), transition)
+    }
+
+    #[test]
+    fn shortcut_keeps_modifiers_held_through_the_key_and_releases_in_reverse() {
+        let chord = Operation::KeyChord {
+            modifiers: 0b0000_0011,
+            usage: 19,
+        };
+        let expected = [
+            (224, KeyTransition::Press),
+            (225, KeyTransition::Press),
+            (19, KeyTransition::Press),
+            (19, KeyTransition::Release),
+            (225, KeyTransition::Release),
+            (224, KeyTransition::Release),
+        ];
+        for (index, step) in expected.into_iter().enumerate() {
+            assert_eq!(key_step(chord, u8::try_from(index).unwrap()), step);
+        }
+        assert!(chord.action(6).is_none());
+    }
+
+    #[test]
+    fn maximum_chord_has_exactly_ten_transitions_and_no_held_keys_after_completion() {
+        let chord = Operation::KeyChord {
+            modifiers: 0b1100_0101,
+            usage: 164,
+        };
+        let expected = [224, 226, 230, 231, 164, 164, 231, 230, 226, 224];
+        assert_eq!(chord.count(), 10);
+        let mut held = BTreeSet::new();
+        for (index, usage) in expected.into_iter().enumerate() {
+            let (actual, transition) = key_step(chord, u8::try_from(index).unwrap());
+            assert_eq!(actual, usage);
+            if index < 5 {
+                assert_eq!(transition, KeyTransition::Press);
+                assert!(held.insert(actual));
+            } else {
+                assert_eq!(transition, KeyTransition::Release);
+                assert!(held.remove(&actual));
+            }
+            if index == 4 || index == 5 {
+                assert!(
+                    [224, 226, 230, 231]
+                        .iter()
+                        .all(|usage| held.contains(usage))
+                );
+            }
+        }
+        assert!(held.is_empty());
+        for index in 10..=255 {
+            assert!(chord.action(index).is_none());
+        }
+    }
+
+    #[test]
+    fn malformed_raw_chords_never_reach_the_action_encoder() {
+        for chord in [
+            Operation::KeyChord {
+                modifiers: 0,
+                usage: 4,
+            },
+            Operation::KeyChord {
+                modifiers: 0b0001_1111,
+                usage: 4,
+            },
+            Operation::KeyChord {
+                modifiers: 255,
+                usage: 4,
+            },
+            Operation::KeyChord {
+                modifiers: 1,
+                usage: 224,
+            },
+            Operation::KeyChord {
+                modifiers: 1,
+                usage: 165,
+            },
+        ] {
+            for index in 0..=255 {
+                assert!(chord.action(index).is_none());
+            }
+        }
     }
 }

@@ -789,3 +789,189 @@ fn late_failed_receipt_cannot_erase_an_untracked_post_encoder_effect() {
         assert_eq!(actual.end, End::Stopped);
     }
 }
+
+fn key_submitted(sequence: u64) -> InputResult {
+    InputResult {
+        submitted_operations: 1,
+        ..submitted(sequence)
+    }
+}
+
+#[test]
+fn maximum_chord_waits_for_each_exact_receipt_and_retains_all_ten_transitions() {
+    let mut ledger = Ledger::new(scope()).unwrap();
+    assert_eq!(MAX_ACTIONS, 10);
+    start(&mut ledger, 1, 0, MAX_ACTIONS);
+    for sequence in 1..=u64::from(MAX_ACTIONS) {
+        assert!(ledger.ready(1, sequence).unwrap());
+        ledger.encoded(1, binding(), sequence).unwrap();
+        assert!(!ledger.ready(1, sequence).unwrap());
+        // An early future receipt is not buffered as evidence for later work.
+        assert_eq!(
+            ledger.result(ResultEvent::Completed(key_submitted(sequence + 1))),
+            Ok(None)
+        );
+        if sequence > 1 {
+            assert_eq!(
+                ledger.result(ResultEvent::Duplicate(key_submitted(sequence - 1))),
+                Ok(None)
+            );
+        }
+        assert!(!ledger.ready(1, sequence).unwrap());
+        let actual = ledger
+            .result(ResultEvent::Completed(key_submitted(sequence)))
+            .unwrap();
+        assert_eq!(actual.is_some(), sequence == u64::from(MAX_ACTIONS));
+    }
+    let complete = report(&ledger, 1);
+    assert_eq!(complete.validate(), Ok(()));
+    assert_eq!(complete.disposition, InputDisposition::Committed);
+    assert_eq!(complete.actions_total, MAX_ACTIONS);
+    assert_eq!(complete.actions_encoded, MAX_ACTIONS);
+    assert_eq!(complete.acknowledged_actions, MAX_ACTIONS);
+    assert_eq!(complete.actions_submitted, MAX_ACTIONS);
+    assert_eq!(complete.unacknowledged_actions, 0);
+    assert_eq!(complete.submitted_operations, u32::from(MAX_ACTIONS));
+    assert_eq!(ledger.encoded(1, binding(), 11), Err(Error::NoPending));
+    assert_eq!(
+        ledger.begin(scope(), key(1), 20, 200, MAX_ACTIONS),
+        Ok(Admission::Retained(complete))
+    );
+    assert!(!ledger.is_closed());
+}
+
+#[test]
+fn chord_deadline_never_refreshes_after_any_confirmed_modifier_or_key_prefix() {
+    for prefix in 1..MAX_ACTIONS {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, MAX_ACTIONS);
+        for sequence in 1..=u64::from(prefix) {
+            assert!(ledger.ready(1, sequence).unwrap());
+            ledger.encoded(1, binding(), sequence).unwrap();
+            assert_eq!(
+                ledger.result(ResultEvent::Completed(key_submitted(sequence))),
+                Ok(None)
+            );
+        }
+        assert_eq!(
+            ledger.begin(scope(), key(1), 99, 1000, MAX_ACTIONS),
+            Ok(Admission::Pending)
+        );
+        assert!(!ledger.ready(1, 100).unwrap());
+        let expired = report(&ledger, 1);
+        assert_eq!(expired.end, End::Expired);
+        assert_eq!(expired.disposition, InputDisposition::Partial);
+        assert_eq!(expired.actions_encoded, prefix);
+        assert_eq!(expired.actions_submitted, prefix);
+        assert_eq!(expired.submitted_operations, u32::from(prefix));
+        assert!(ledger.is_closed());
+        assert_eq!(
+            ledger.begin(scope(), key(1), 101, 1000, MAX_ACTIONS),
+            Ok(Admission::Retained(expired))
+        );
+        assert_eq!(
+            ledger.begin(scope(), key(2), 101, 1000, MAX_ACTIONS),
+            Err(Error::Closed)
+        );
+    }
+}
+
+#[test]
+fn a_refused_chord_transition_stops_the_remaining_sequence_at_every_position() {
+    for refused in 1..=MAX_ACTIONS {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, MAX_ACTIONS);
+        for sequence in 1..u64::from(refused) {
+            ledger.encoded(1, binding(), sequence).unwrap();
+            assert_eq!(
+                ledger.result(ResultEvent::Completed(key_submitted(sequence))),
+                Ok(None)
+            );
+        }
+        ledger.encoded(1, binding(), u64::from(refused)).unwrap();
+        let failure = InputResult {
+            outcome: InputOutcome::CancelledBeforeSubmission,
+            stage: Stage::Admitted,
+            submitted_operations: 0,
+            reason: Some(Reason::Revoked),
+            ..key_submitted(u64::from(refused))
+        };
+        let actual = ledger
+            .result(ResultEvent::Completed(failure))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            actual.disposition,
+            if refused == 1 {
+                InputDisposition::Refused
+            } else {
+                InputDisposition::Partial
+            }
+        );
+        assert_eq!(actual.actions_encoded, refused);
+        assert_eq!(actual.acknowledged_actions, refused);
+        assert_eq!(actual.actions_submitted, refused - 1);
+        assert_eq!(actual.submitted_operations, u32::from(refused - 1));
+        assert_eq!(actual.unacknowledged_actions, 0);
+        assert!(ledger.is_closed());
+        assert_eq!(
+            ledger.encoded(1, binding(), u64::from(refused) + 1),
+            Err(Error::Closed)
+        );
+        assert_eq!(
+            ledger.begin(scope(), key(2), 1, 100, MAX_ACTIONS),
+            Err(Error::Closed)
+        );
+    }
+}
+
+#[test]
+fn a_missing_chord_receipt_never_replays_even_when_a_late_result_resolves_it() {
+    for confirmed in 0..MAX_ACTIONS {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, MAX_ACTIONS);
+        for sequence in 1..=u64::from(confirmed) {
+            ledger.encoded(1, binding(), sequence).unwrap();
+            assert_eq!(
+                ledger.result(ResultEvent::Completed(key_submitted(sequence))),
+                Ok(None)
+            );
+        }
+        let pending = u64::from(confirmed) + 1;
+        ledger.encoded(1, binding(), pending).unwrap();
+        let expired = ledger.expire(100).unwrap().unwrap();
+        assert_eq!(expired.disposition, InputDisposition::UnknownEffect);
+        assert_eq!(expired.actions_submitted, confirmed);
+        assert_eq!(expired.unacknowledged_actions, 1);
+        assert_eq!(expired.submitted_operations, u32::from(confirmed));
+        assert!(ledger.is_closed());
+        let late = ledger
+            .result(ResultEvent::Completed(key_submitted(pending)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(late.unacknowledged_actions, 0);
+        assert_eq!(late.actions_submitted, confirmed + 1);
+        assert_eq!(
+            late.disposition,
+            if confirmed + 1 == MAX_ACTIONS {
+                InputDisposition::Committed
+            } else {
+                InputDisposition::Partial
+            }
+        );
+        assert_eq!(late.end, End::Expired);
+        assert!(ledger.is_closed());
+        assert_eq!(
+            ledger.encoded(1, binding(), pending + 1),
+            Err(Error::Closed)
+        );
+        assert_eq!(
+            ledger.begin(scope(), key(1), 101, 1000, MAX_ACTIONS),
+            Ok(Admission::Retained(late))
+        );
+        assert_eq!(
+            ledger.begin(scope(), key(2), 101, 1000, MAX_ACTIONS),
+            Err(Error::Closed)
+        );
+    }
+}

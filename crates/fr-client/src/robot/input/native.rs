@@ -11,7 +11,8 @@ use fr_wire::input_result::{InputResult, Reason, ResultBinding, SequenceSpace, S
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-pub const MAX_ACTIONS: u8 = 2;
+/// Four modifiers plus one key, each pressed and released once.
+pub const MAX_ACTIONS: u8 = 10;
 pub const RETAINED_REPORTS: usize = 8;
 pub const MAX_REQUEST_MICROS: u64 = 10_000_000;
 
@@ -277,7 +278,7 @@ impl Request {
                 report.actions_submitted +=
                     u8::from(receipt.outcome == InputOutcome::SubmittedToOs);
                 // Each action is validated against the wire's 4096-operation
-                // bound; two bounded receipts cannot overflow this sum.
+                // bound; ten bounded receipts cannot overflow this sum.
                 report.submitted_operations += receipt.submitted_operations;
                 report.host_outcome = Some(receipt.outcome.into());
                 report.host_reason = receipt.reason.map(|reason| reason as u16);

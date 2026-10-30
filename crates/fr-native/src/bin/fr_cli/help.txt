@@ -22,7 +22,8 @@ fr robot session open NODE_ID --foreground --role view|control
 fr robot session status NODE_ID [--json]
 fr robot session close NODE_ID [--connection-id ID] [--lease LEASE] [--socket /absolute/tailscaled.sock] [--json]
 fr robot observe NODE_ID [--display N] [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor|instrumentally_observed] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
-fr robot input NODE_ID --lease LEASE --request-id REQUEST [--batch /path/batch.json] [--precondition-geometry GEN] [--max-observation-age MS] [--precondition-lease LEASE] [--precondition-focus WINDOW] [--semantic-evidence none|unverified_pixels|adapter|instrumentation] [--json]
+fr robot input NODE_ID --connection-id ID --status [--json]
+    See Explicit foreground robot control below for bounded input commands.
 
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Discovery lists machines, not installed/ready desktops or access permissions.
@@ -177,8 +178,9 @@ It stays running until closed and emits the ordinary connect completion report
 only after shutdown, not a fabricated opened acknowledgement or input lease.
 Use another process's session status/close commands for its local lifecycle.
 Without --foreground, the reserved broker-style session-open remains unavailable.
-Robot --lease is refused until a real local lease handle is available; observe
-and scripted input remain unavailable. A foreground control role enables the
-ordinary local input path only, never credential-free robot input.
+A foreground control role enables ordinary local input. Explicit robot control
+requires --accept-input at open and the original local connection, lease and
+observation handles on each command; see below. Detached broker sessions and
+arbitrary input scripts remain unavailable.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
