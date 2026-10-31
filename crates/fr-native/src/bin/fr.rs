@@ -18,6 +18,9 @@ mod robot_observe;
 #[path = "fr_cli/robot_open.rs"]
 mod robot_open;
 #[cfg(target_os = "linux")]
+#[path = "fr_cli/saved_hosts.rs"]
+mod saved_hosts;
+#[cfg(target_os = "linux")]
 #[path = "fr_cli/session_control.rs"]
 mod session_control;
 #[path = "fr_cli/terminal.rs"]

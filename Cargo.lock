@@ -625,6 +625,7 @@ dependencies = [
  "fr-transport",
  "fr-wire",
  "frd",
+ "rustix",
  "serde",
  "serde_json",
 ]

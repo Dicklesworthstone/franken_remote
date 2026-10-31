@@ -1,5 +1,12 @@
 use super::*;
-fn parsed(words: &str) -> Result<Options, Failure> { parse(&words.split_whitespace().map(str::to_owned).collect::<Vec<_>>()) }
+fn parsed(words: &str) -> Result<Options, Failure> {
+    parse(
+        &words
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect::<Vec<_>>(),
+    )
+}
 #[test]
 fn probe_only_options_require_both_explicit_probe_and_transport_consent() {
     let Command::Inspect(options) = parsed("inspect n-peer --json").unwrap().command else {

@@ -44,6 +44,14 @@ pub(super) fn parse(args: &[String]) -> Result<options::Options, Failure> {
         Some("control") => "--control",
         _ => return Err(usage()),
     };
+    // Saved aliases are an explicit ordinary connect/displays feature. They
+    // are not silently added to this existing robot command translator.
+    if args[7..]
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--saved" | "--hosts-file"))
+    {
+        return Err(usage());
+    }
     let mut connect = Vec::with_capacity(args.len() - 4);
     connect.extend(["connect".to_owned(), node.clone(), role.to_owned()]);
     connect.extend_from_slice(&args[7..]);

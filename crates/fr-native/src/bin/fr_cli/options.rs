@@ -15,6 +15,7 @@ pub struct Options {
 pub enum Command {
     Help,
     Hosts,
+    SavedHosts(SavedHostOptions),
     Connect(Connection),
     Displays(Target),
     Doctor(DoctorOptions),
@@ -81,11 +82,30 @@ pub struct RobotInputOptions {
     pub semantic_evidence: Option<String>,
     pub port: u16,
 }
+pub struct SavedHostOptions {
+    pub action: SavedHostAction,
+    pub file: Option<PathBuf>,
+}
+pub enum SavedHostAction {
+    Save {
+        alias: String,
+        node: String,
+        port: u16,
+    },
+    List,
+    Forget {
+        alias: String,
+    },
+}
+pub struct SavedSelection {
+    pub file: Option<PathBuf>,
+}
 pub struct DoctorOptions {
     pub port: u16,
     pub roots: Option<PathBuf>,
 }
 pub struct Target {
+    pub saved: Option<SavedSelection>,
     pub node: String,
     pub by_name: bool,
     pub roots: PathBuf,
@@ -311,6 +331,69 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
                 ipv6,
             }),
         }),
+        json,
+        socket,
+    })
+}
+
+fn parse_saved_hosts(args: &[String]) -> Result<Options, Failure> {
+    use fr_client::discovery::saved_peers::valid_alias;
+    let action = args.get(1).ok_or_else(usage)?.as_str();
+    let alias = if action == "saved" {
+        None
+    } else {
+        Some(
+            args.get(2)
+                .filter(|s| valid_alias(s))
+                .ok_or_else(usage)?
+                .clone(),
+        )
+    };
+    let node = if action == "save" {
+        let node = args.get(3).ok_or_else(usage)?;
+        validate_node(node)?;
+        if node.len() > 128 {
+            return Err(usage());
+        }
+        Some(node.clone())
+    } else {
+        None
+    };
+    let mut index = match action {
+        "save" => 4,
+        "forget" => 3,
+        "saved" => 2,
+        _ => return Err(usage()),
+    };
+    let (mut json, mut file, mut socket, mut port) = (false, None, None, 8443);
+    let mut seen = BTreeSet::new();
+    while index < args.len() {
+        let flag = args[index].as_str();
+        index += 1;
+        if !seen.insert(flag) {
+            return Err(usage());
+        }
+        match flag {
+            "--json" => json = true,
+            "--hosts-file" => file = Some(next_path(args, &mut index)?),
+            "--socket" if action == "save" => socket = Some(next_path(args, &mut index)?),
+            "--port" if action == "save" => port = next_port(args, &mut index)?,
+            _ => return Err(usage()),
+        }
+    }
+    let action = match action {
+        "save" => SavedHostAction::Save {
+            alias: alias.ok_or_else(usage)?,
+            node: node.ok_or_else(usage)?,
+            port,
+        },
+        "forget" => SavedHostAction::Forget {
+            alias: alias.ok_or_else(usage)?,
+        },
+        _ => SavedHostAction::List,
+    };
+    Ok(Options {
+        command: Command::SavedHosts(SavedHostOptions { action, file }),
         json,
         socket,
     })
@@ -575,6 +658,13 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
         "inspect" => parse_inspect(args),
         "disconnect" => parse_disconnect(args),
         "robot" => parse_robot(args),
+        "hosts"
+            if args
+                .get(1)
+                .is_some_and(|s| matches!(s.as_str(), "save" | "saved" | "forget")) =>
+        {
+            parse_saved_hosts(args)
+        }
         "hosts" => parse_command(args, 1, None, false, false),
         "doctor" => parse_command(args, 1, None, false, true),
         "connect" | "displays" => {
@@ -618,6 +708,7 @@ fn parse_command(
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
+    let (mut saved, mut hosts_file) = (false, None);
     let mut send = Vec::new();
     let mut file_drop = false;
     let mut receive = None;
@@ -634,6 +725,8 @@ fn parse_command(
             "--json" => json = true,
             "--socket" => socket = Some(next_path(args, &mut index)?),
             "--by-name" if remote => by_name = true,
+            "--saved" if remote => saved = true,
+            "--hosts-file" if remote => hosts_file = Some(next_path(args, &mut index)?),
             "--view-only" if connect => view_only = true,
             "--control" if connect => control = true,
             "--capture-system-shortcuts" if connect => capture_system_shortcuts = true,
@@ -696,7 +789,17 @@ fn parse_command(
         receive_max_session_bytes,
         receive_keep_both,
     )?;
+    if hosts_file.is_some() && !saved {
+        return Err(usage());
+    }
     let command = if let Some(node) = node {
+        if saved
+            && (by_name
+                || seen.contains("--port")
+                || !fr_client::discovery::saved_peers::valid_alias(&node))
+        {
+            return Err(usage());
+        }
         if connect && view_only == control {
             return Err(Failure::new(
                 "connection_role_required",
@@ -765,6 +868,7 @@ fn parse_command(
             return Err(usage());
         }
         let target = Target {
+            saved: saved.then_some(SavedSelection { file: hosts_file }),
             node,
             by_name,
             roots: roots.unwrap_or_else(|| PathBuf::from(fr_tailnet::trust::SYSTEM_BUNDLE)),
@@ -1727,6 +1831,10 @@ mod controlled_audio_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "options/saved_hosts_tests.rs"]
+mod saved_hosts_tests;
 
 #[cfg(test)]
 #[path = "options/probe_tests.rs"]

@@ -274,7 +274,19 @@ fn cancelling_either_partial_direction_preserves_the_other_and_input() {
                         drive(&mut state, &c, &h, &mut n, &mut t).await;
                     }
                     if cancel_download {
-                        assert!(state.viewer.file_receive_result().is_none());
+                        // The last disk receipt records staging progress too;
+                        // only the separate terminal result list certifies an end.
+                        let progress = state.viewer.file_receive_progress().unwrap();
+                        assert!(matches!(
+                            state.viewer.file_receive_result(),
+                            Some(fr_files::wire::ResultReceipt {
+                                id,
+                                outcome: Ok(
+                                    fr_files::worker::Completion::Begun(actual)
+                                        | fr_files::worker::Completion::Written(actual)
+                                ),
+                            }) if id == progress.id && actual == progress
+                        ));
                         assert!(
                             state
                                 .viewer

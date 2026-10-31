@@ -1,8 +1,8 @@
 //! One authenticated, approved metadata lookup. No renderer, worker or reconnect
 //! is needed; output is written only after the original local session is closed.
 use super::{
-    Cell, Client, Configuration, Cx, Duration, Failure, LocalApi, ObserverPolicy, PeerSelector,
-    Runtime, Shutdown, Target, failure, offer, output, read_roots, tailnet,
+    Cell, Client, Configuration, Cx, Duration, Failure, LocalApi, ObserverPolicy, Runtime,
+    Shutdown, Target, failure, offer, output, read_roots, tailnet,
 };
 use fr_wire::display::Catalog;
 use frd::{native_connection, session_startup::ObserverError};
@@ -17,6 +17,7 @@ pub(super) fn run(
     target: &Target,
     json: bool,
 ) -> Result<String, Failure> {
+    let selected = crate::saved_hosts::select(target)?;
     let mut client =
         Client::new(api, read_roots(&target.roots)?, Duration::from_secs(5)).map_err(|_| {
             failure(
@@ -24,13 +25,9 @@ pub(super) fn run(
                 "Verify the local CA roots and native connection policy.",
             )
         })?;
-    let selector = if target.by_name {
-        PeerSelector::Name(&target.node)
-    } else {
-        PeerSelector::StableId(&target.node)
-    };
+    let selector = selected.selector();
     let cfg = Configuration {
-        port: target.port,
+        port: selected.port,
         family: if target.ipv6 {
             super::AddressFamily::Ipv6
         } else {

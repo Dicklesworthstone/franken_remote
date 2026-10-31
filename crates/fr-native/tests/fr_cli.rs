@@ -578,3 +578,6 @@ fn unavailable_robot_capabilities_and_unissued_leases_are_refused() {
         );
     }
 }
+
+#[path = "fr_cli/saved_hosts.rs"]
+mod saved_hosts;

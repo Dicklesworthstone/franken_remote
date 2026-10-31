@@ -124,7 +124,10 @@ fn inspection_error(error: session_startup::Error) -> Failure {
         return refused;
     }
     match error {
-        session_startup::Error::Expired => inspection_timeout(),
+        session_startup::Error::Expired
+        | session_startup::Error::ClientStartup(fr_client::startup::Error::Expired) => {
+            inspection_timeout()
+        }
         session_startup::Error::Cancelled => Failure::new(
             "cancelled",
             "Capability inspection cancelled before opening observation.",
@@ -166,6 +169,15 @@ mod tests {
     fn expiration_cancellation_and_identity_changes_remain_distinct() {
         assert_eq!(
             inspection_error(session_startup::Error::Expired).code,
+            "capability_inspection_timeout"
+        );
+        let expired = session_startup::Error::ClientStartup(fr_client::startup::Error::Expired);
+        assert_eq!(
+            inspection_error(expired).code,
+            "capability_inspection_timeout"
+        );
+        assert_eq!(
+            connection_error(native_connection::Error::Session(expired)).code,
             "capability_inspection_timeout"
         );
         let cancelled = inspection_error(session_startup::Error::Cancelled);

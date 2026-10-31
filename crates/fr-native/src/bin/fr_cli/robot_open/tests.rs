@@ -210,3 +210,26 @@ fn old_broker_commands_do_not_silently_turn_into_foreground_connections() {
     ));
     assert!(matches!(parsed("--help").command, Command::Help));
 }
+
+#[test]
+fn saved_aliases_are_not_implicitly_enabled_by_the_robot_translator() {
+    for flag in ["--saved", "--hosts-file"] {
+        let args = [
+            "robot",
+            "session",
+            "open",
+            "office",
+            "--foreground",
+            "--role",
+            "view",
+            "--experimental-native",
+            "--display",
+            "only",
+            flag,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        assert!(super::parse(&args).is_err());
+    }
+}

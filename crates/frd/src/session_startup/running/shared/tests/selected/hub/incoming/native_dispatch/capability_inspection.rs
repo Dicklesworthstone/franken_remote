@@ -200,12 +200,13 @@ async fn abandon(incoming: &Incoming, rt: &Runtime) {
         let started = now(&c).unwrap();
         let mut startup = Startup::new(offer, started, 4_000_000).unwrap();
         startup.begin_inspection(started).unwrap();
+        let deadline = startup.deadline_us();
         transport
             .send(
                 &c,
                 Route::Stream(routes.outbound),
                 startup.pending(started).unwrap().unwrap(),
-                startup.deadline_us(),
+                deadline,
                 || true,
             )
             .unwrap();

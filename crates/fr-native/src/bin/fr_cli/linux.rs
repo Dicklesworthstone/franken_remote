@@ -313,6 +313,11 @@ pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
     run_mode(options, true)
 }
 fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
+    if let Command::SavedHosts(saved) = &options.command {
+        if let Some(text) = super::saved_hosts::local(saved, options.json)? {
+            return Ok(text);
+        }
+    }
     let mut shutdown = Shutdown::new()?;
     let runtime = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
@@ -358,6 +363,24 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
                 .map_err(tailnet)?;
             Ok(output::hosts(&snapshot, options.json))
         }
+        Command::SavedHosts(saved) => {
+            let super::options::SavedHostAction::Save { node, .. } = &saved.action else {
+                unreachable!("local saved-host command handled above");
+            };
+            let target = runtime
+                .block_on(shutdown.run(
+                    &cx,
+                    &stopped,
+                    api.peer_target(&cx, PeerSelector::StableId(node)),
+                ))
+                .map_err(tailnet)?;
+            super::saved_hosts::save(
+                saved,
+                target.stable_id(),
+                target.certificate_name(),
+                options.json,
+            )
+        }
         Command::Displays(target) => displays::run(
             &runtime,
             &cx,
@@ -401,6 +424,7 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
         Command::Disconnect(_) | Command::Robot(_) => unreachable!("local command handled above"),
     }
 }
+
 #[cfg(feature = "linux-desktop")]
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // One original native session owner.
 fn connect(
@@ -413,6 +437,7 @@ fn connect(
     json: bool,
     automation: bool,
 ) -> Result<String, Failure> {
+    let selected = super::saved_hosts::select(&connection.target)?;
     let roots = read_roots(&connection.target.roots)?;
     let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
         failure(
@@ -466,13 +491,9 @@ fn connect(
     )
     // A controller's window close runs the closing exchange, as a viewer's does.
     .with_cleanup_runtime(runtime.handle());
-    let selector = if connection.target.by_name {
-        PeerSelector::Name(&connection.target.node)
-    } else {
-        PeerSelector::StableId(&connection.target.node)
-    };
+    let selector = selected.selector();
     let cfg = Configuration {
-        port: connection.target.port,
+        port: selected.port,
         family: if connection.target.ipv6 {
             AddressFamily::Ipv6
         } else {
@@ -491,10 +512,7 @@ fn connect(
         .try_request_cx_with_budget(Budget::INFINITE)
         .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))?;
     let mut owner = runtime
-        .block_on(session_control::Owner::bind(
-            &local,
-            &connection.target.node,
-        ))
+        .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
     if automation {
         state.borrow_mut().automation =
@@ -984,12 +1002,14 @@ impl Ui for Interface {
                 .map_err(|_| CallbackError)?;
             let observation = fr_native::desktop::reconnect::Observation::initial_from(desktop)
                 .ok_or(CallbackError)?;
-            automation.bind_snapshot(
-                desktop.snapshot_handle().map_err(|_| CallbackError)?,
-                observation.display,
-                observation.completion.frame.as_raw(),
-                snapshot_evidence(observation.completion.stage),
-            ).map_err(|()| CallbackError)?;
+            automation
+                .bind_snapshot(
+                    desktop.snapshot_handle().map_err(|_| CallbackError)?,
+                    observation.display,
+                    observation.completion.frame.as_raw(),
+                    snapshot_evidence(observation.completion.stage),
+                )
+                .map_err(|()| CallbackError)?;
         }
         if let Some(counters) = p.control.as_mut() {
             let mode = counters.opened();
@@ -1026,7 +1046,8 @@ impl Ui for Interface {
         }
         let automation = progress.automation.clone();
         if let (Some(automation), Some(frame)) = (&automation, frame) {
-            automation.presented(frame.frame.as_raw(), snapshot_evidence(frame.stage))
+            automation
+                .presented(frame.frame.as_raw(), snapshot_evidence(frame.stage))
                 .map_err(|()| CallbackError)?;
         }
         match (self.attempt.as_mut(), progress.control.as_mut()) {
@@ -2262,6 +2283,7 @@ mod tests {
     fn connect_without_desktop_feature_returns_gui_unavailable() {
         let options = crate::options::Connection {
             target: crate::options::Target {
+                saved: None,
                 node: "node-1".into(),
                 by_name: false,
                 roots: std::path::PathBuf::from("/dev/null"),
@@ -2321,6 +2343,8 @@ mod control_reconnect_tests;
 fn snapshot_evidence(stage: frd::media::PresentationStage) -> fr_client::robot::live::Evidence {
     match stage {
         frd::media::PresentationStage::DecodedOnly => fr_client::robot::live::Evidence::Decoded,
-        frd::media::PresentationStage::SubmittedToCompositor => fr_client::robot::live::Evidence::SubmittedToCompositor,
+        frd::media::PresentationStage::SubmittedToCompositor => {
+            fr_client::robot::live::Evidence::SubmittedToCompositor
+        }
     }
 }

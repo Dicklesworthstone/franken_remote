@@ -30,6 +30,7 @@ h, kind, body = record()
 assert kind == 11 and not body
 reply(h, 269, struct.pack(">QB", 70, 2) + display(201, -320) + display(202, 0))
 configured = False
+actual_rate = None
 last = None
 while True:
     h, kind, body = record()
@@ -51,12 +52,27 @@ while True:
             reply(h, 263, struct.pack(">H", 9))
             continue
         generation = int.from_bytes(body[20:28], "big")
+        actual_rate = int.from_bytes(body[12:16], "big")
         configured = True
         reply(h, 270, body)
         continue
     # ReadCursor: no separate cursor exists here (typed Unsupported).
     if kind == 16:
         reply(h, 274, b"\x02")
+        continue
+    if kind == 20:
+        assert configured and len(body) == 21
+        frame, observed, flags, target_rate = struct.unpack(">QQBI", body)
+        assert flags & ~3 == 0 and 10_000 <= target_rate <= 200_000_000
+        assert actual_rate is not None and 10_000 <= actual_rate <= 200_000_000
+        force, conditional = flags & 1, flags & 2
+        if last is not None and conditional and not force and MODE != "changing":
+            # An idle capture defers a new target; report the original actual rate.
+            reply(h, 279, struct.pack(">QQQI", frame, last, observed, actual_rate))
+        else:
+            actual_rate = target_rate
+            reply(h, 278, struct.pack(">QQQQBI3x", frame, observed, generation, 0, 0, actual_rate) + b"synthetic-monitor-unit")
+            last = frame
         continue
     assert configured and kind in (2, 7) and len(body) == 17
     frame, observed, force = struct.unpack(">QQB", body)

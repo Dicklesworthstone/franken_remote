@@ -16,6 +16,7 @@ pub mod cache;
 pub mod directory;
 pub mod prober;
 pub mod saved_hosts;
+pub mod saved_peers;
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;

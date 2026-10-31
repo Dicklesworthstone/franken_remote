@@ -4,7 +4,6 @@ fr hosts [--json] [--socket /absolute/tailscaled.sock]
 fr status [--json] [--socket /absolute/tailscaled.sock]
 fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]
 fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
-    [--probe --experimental-native [--trust-roots /absolute/ca-roots.pem] [--ipv6]]
 fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
 fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
@@ -32,11 +31,6 @@ fr robot input NODE_ID --connection-id ID --status [--json]
 
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Discovery lists machines, not installed/ready desktops or access permissions.
-Inspect --probe authenticates one native host, reports its advertised capability
-intersection and seven wire limits, then requires an acknowledged close before
-observation or approval. It starts no desktop worker; display inventory, approval
-policy and live hardware admission remain unknown. The original dial and probe
-have one five-second deadline. Older hosts refuse; no observation fallback opens.
 --trust-roots defaults to the distribution bundle /etc/ssl/certs/ca-certificates.crt;
 --worker defaults to the fr-media-worker installed beside fr.
 Displays requires host approval when configured; it starts no decoder or input.
@@ -202,3 +196,29 @@ observation handles on each command; see below. Detached broker sessions and
 arbitrary input scripts remain unavailable.
 Native transport/media remain unqualified. Set XAUTHORITY in the local environment
 when the window and worker require it. Close the window or use Ctrl-C to stop.
+
+Saved local hosts:
+  fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]
+  fr hosts saved [--hosts-file PATH] [--json]
+  fr hosts forget ALIAS [--hosts-file PATH] [--json]
+  fr connect ALIAS --saved [--hosts-file PATH] --view-only|--control --display only|choose|HANDLE --experimental-native [connect options]
+  fr displays ALIAS --saved [--hosts-file PATH] --experimental-native [display options]
+ALIAS is 1..64 lowercase letters, digits, '.', '_' or '-', starting with a letter
+or digit. Saving looks up the stable node ID through installed Tailscale and
+records its exact canonical TLS name and port. It does not contact frd, enable
+hosting, approve a desktop, remember permissions or save addresses. Every saved
+connection resolves both identity fields again and verifies TLS normally. A
+renamed/reassigned peer refuses; explicitly forget and save again to change it.
+Aliases require --saved and cannot be combined with --by-name or --port. Without
+--saved, targets retain their current stable-node-ID meaning. Profiles default to
+$XDG_CONFIG_HOME/franken_remote/hosts.json, or $HOME/.config/franken_remote/hosts.json.
+List/forget work without Tailscale; files are private, bounded to 100 entries and
+128 KiB, written atomically, and refuse symlinks, duplicate or malformed records.
+
+Explicit host capability probe:
+  fr inspect NODE_ID [--by-name] --probe --experimental-native [--trust-roots PATH] [--ipv6] [--port PORT] [--socket PATH] [--json]
+The ordinary inspect command remains a local Tailscale metadata lookup. --probe
+explicitly opens the authenticated experimental native transport to ask frd for
+its advertised capabilities. It does not request a desktop, input lease, worker,
+screenshot, clipboard or file transfer. This is a capability snapshot, not a
+promise that a later display, encoder, decoder or permission request will work.

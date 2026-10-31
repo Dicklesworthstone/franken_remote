@@ -18,6 +18,10 @@ fr-tailnet = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# The CLI's local profile store uses the same pinned safe filesystem adapter as frd.
+rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
+
 [dev-dependencies]
 fr-transport.workspace = true
 fr-client.workspace = true
