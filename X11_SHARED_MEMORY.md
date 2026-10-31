@@ -35,6 +35,14 @@ ownership of the descriptor during attachment; only the mapping and the server
 resource remain afterward. This prevents an orphan SysV segment when a worker
 is killed before it can execute cleanup. Detach completes before local unmapping;
 `XDestroyImage` never frees mmap memory. The owning Display outlives the transfer.
+The complete bounded image is reserved with Linux `fallocate` **before** sealing,
+mapping or attachment. A successful `ftruncate` alone leaves sparse backing that
+can fault when the worker or X server first writes the pages. If reservation is
+refused, including `ENOSPC`, `ENOMEM` or unsupported allocation, the descriptor
+is closed and the existing socket path reports `SharedAllocationUnavailable`.
+No unbacked mapping is offered to the X server. This follows the
+[Linux allocation contract](https://man7.org/linux/man-pages/man2/fallocate.2.html);
+it does not claim immunity from system-wide OOM termination or native failures.
 All blocking X-server work remains inside the supervised media boundary; it is
 not made wall-clock cancellable by this optimization. The selected user and X
 server remain trusted, as before. The decoder seccomp allowlist is unchanged.
@@ -95,6 +103,16 @@ independent XGetImage pixel comparison, selected rectangles, invalid sizes and
 buffer guards, a real descriptor-allocation refusal, checked X error handling,
 terminal failed transfers, repeated cleanup and client descriptor counts. Each
 mode also measures 300 warm 1920x1080 readbacks and retains its output.
+
+The same command also checks allocation refusal with MIT-SHM available. A
+test-process-only kernel seccomp filter forces `fallocate` to return `ENOSPC`,
+`ENOMEM`, or `EOPNOTSUPP`; each process then runs four capture/presentation
+cycles through the unchanged production owner. Independent pixel readback,
+the typed socket fallback, retained-byte counts and descriptor cleanup must all
+pass. The filter does not intercept mapping, image copies or X-server requests.
+This is deterministic reservation-failure evidence, not a machine-wide
+low-memory soak. It requires no change to the production decoder sandbox,
+because presentation backing is reserved before that sandbox is installed.
 
 The Rust `image_transfer` integration target exercises the actual public root and
 selected-monitor APIs, generation retirement and four concurrent original X

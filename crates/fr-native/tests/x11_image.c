@@ -9,7 +9,13 @@
 #include <string.h>
 #include <time.h>
 #include <dirent.h>
+#include <errno.h>
+#include <stddef.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
+#include <sys/syscall.h>
 static uint64_t micros(void) {
     struct timespec now;
     assert(clock_gettime(CLOCK_MONOTONIC, &now) == 0);
@@ -25,6 +31,57 @@ static int descriptors(void) {
     while (readdir(dir)) n++;
     closedir(dir);
     return n;
+}
+/* Force a real kernel reservation refusal in this test process only. No
+   allocation hook or altered image implementation is linked into the test. */
+static void refuse_reservation(int error) {
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD|BPF_W|BPF_ABS,offsetof(struct seccomp_data,nr)),
+        BPF_JUMP(BPF_JMP|BPF_JEQ|BPF_K,__NR_fallocate,0,1),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ERRNO|(unsigned int)error),
+        BPF_STMT(BPF_RET|BPF_K,SECCOMP_RET_ALLOW)
+    };
+    struct sock_fprog program={sizeof(filter)/sizeof(filter[0]),filter};
+    assert(prctl(PR_SET_NO_NEW_PRIVS,1UL,0UL,0UL,0UL)==0);
+    assert(prctl(PR_SET_SECCOMP,SECCOMP_MODE_FILTER,&program)==0);
+}
+static void allocation_refused(Display *d, Window root, Visual *visual, GC gc, int error) {
+    const int w=64,h=64;
+    uint8_t pixels[64*64*4];
+    FrXImageTransfer *t=NULL;
+    FrXImageStats stats;
+    /* Prove SHM is available before injecting failure; a missing extension
+       must not let this regression pass without exercising allocation. */
+    assert(fr_ximage_new(d,visual,24,w,h,1,&t)==0);
+    fr_ximage_stats(t,&stats);
+    assert(stats.path==1 && stats.fallback==0);
+    fr_ximage_free(t);
+    int original_fds=descriptors();
+    refuse_reservation(error);
+    for (int pass=1;pass<=4;pass++) {
+        XSetForeground(d,gc,0x2468ac); XFillRectangle(d,root,gc,0,0,w,h); XSync(d,False);
+        assert(fr_ximage_new(d,visual,24,w,h,1,&t)==0);
+        fr_ximage_stats(t,&stats);
+        assert(stats.path==2 && stats.fallback==3 && stats.retained_bytes==0);
+        assert(fr_ximage_capture(t,root,0,0,pixels,sizeof(pixels))==0);
+        for (size_t i=0;i<sizeof(pixels);i+=4)
+            assert(pixels[i]==0xac && pixels[i+1]==0x68 && pixels[i+2]==0x24 && pixels[i+3]==255);
+        fr_ximage_free(t);
+        assert(fr_ximage_new(d,visual,24,w,h,0,&t)==0);
+        fr_ximage_stats(t,&stats);
+        assert(stats.path==2 && stats.fallback==3 && stats.retained_bytes==sizeof(pixels));
+        memset(pixels,pass*37,sizeof(pixels));
+        assert(fr_ximage_store(t,pixels,sizeof(pixels))==0);
+        assert(fr_ximage_draw(t,root,gc)==0);
+        XImage *reference=XGetImage(d,root,0,0,w,h,AllPlanes,ZPixmap); assert(reference);
+        unsigned long expected=(unsigned long)(pass*37)*0x010101;
+        for (int y=0;y<h;y++) for (int x=0;x<w;x++)
+            assert(XGetPixel(reference,x,y)==expected);
+        XDestroyImage(reference);
+        fr_ximage_free(t);
+        assert(descriptors()==original_fds);
+    }
+    printf("{\"operation\":\"reservation_refused\",\"errno\":%d,\"capture_and_present_cycles\":4,\"path\":\"socket\",\"fallback\":\"shared_allocation_unavailable\"}\n",error);
 }
 static void presentation(Display *d, Window root, Visual *visual, GC gc, int shared) {
     const int w=1920,h=1080;
@@ -92,13 +149,21 @@ static void presentation(Display *d, Window root, Visual *visual, GC gc, int sha
     free(pixels);
 }
 int main(int argc, char **argv) {
-    assert(argc==2 && (!strcmp(argv[1],"shared") || !strcmp(argv[1],"socket")));
+    assert(argc==2);
+    int allocation_error=!strcmp(argv[1],"enospc")?ENOSPC:
+        !strcmp(argv[1],"enomem")?ENOMEM:!strcmp(argv[1],"unsupported")?EOPNOTSUPP:0;
+    assert(allocation_error || !strcmp(argv[1],"shared") || !strcmp(argv[1],"socket"));
     int shared=strcmp(argv[1],"shared")==0;
     Display *d=XOpenDisplay(NULL); assert(d);
     int screen=DefaultScreen(d);
     Window root=RootWindow(d,screen);
     Visual *visual=DefaultVisual(d,screen);
     GC gc=XCreateGC(d,root,0,NULL); assert(gc);
+    if (allocation_error) {
+        allocation_refused(d,root,visual,gc,allocation_error);
+        XFreeGC(d,gc); XCloseDisplay(d);
+        return 0;
+    }
     const int w=1920,h=1080;
     XSetForeground(d,gc,0x2468ac); XFillRectangle(d,root,gc,0,0,w,h);
     XSetForeground(d,gc,0xeca864); XFillRectangle(d,root,gc,100,40,64,64);

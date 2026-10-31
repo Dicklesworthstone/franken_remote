@@ -74,7 +74,12 @@ static int fr_shm_version(FrXImageTransfer *t) {
 static int fr_shm_allocate(FrXImageTransfer *t) {
     int fd = memfd_create("fr-x11-image", MFD_CLOEXEC | MFD_ALLOW_SEALING);
     if (fd < 0) return 3;
+    /* ftruncate reserves only the length, not backing pages. A later access
+       through our mapping or the X server can SIGBUS on an unbacked hole.
+       Admit the full bounded image before mapping/attachment; reservation
+       failure selects the existing socket path without exposing sparse SHM. */
     if (ftruncate(fd, (off_t)t->length) != 0 ||
+        fallocate(fd, 0, 0, (off_t)t->length) != 0 ||
         fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL) != 0) {
         close(fd); return 3;
     }

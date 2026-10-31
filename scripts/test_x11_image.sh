@@ -15,7 +15,7 @@ import selectors
 import subprocess
 import sys
 work = Path(sys.argv[1]).resolve()
-for mode in ("shared", "socket"):
+for mode in ("shared", "socket", "enospc", "enomem", "unsupported"):
     args = ["Xvfb", "-displayfd", "1", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"]
     if mode == "socket":
         args += ["-extension", "MIT-SHM"]
