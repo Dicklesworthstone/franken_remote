@@ -75,7 +75,9 @@ impl ChannelToken {
     }
 }
 
-/// Distinguishable stages for receiver acknowledgements.
+/// Distinguishable stages for receiver acknowledgements. None proves that
+/// receive allocations or codec references were freed, so these observations
+/// cannot return resource credit. Only [`ReleasedCredit`] can do that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WssAck {
     Received(u64, usize),
@@ -99,60 +101,145 @@ impl WssAck {
     }
 }
 
-/// Receiver-granted outstanding-byte and frame credit window.
-#[derive(Debug, Clone)]
+/// Cumulative receive resources actually freed in one negotiated credit epoch.
+/// These are totals since attachment, not additional grants or frame IDs.
+/// They may exceed the initial allowance during a long-running session.
+///
+/// The receiver must include retained codec references and charged metadata in
+/// its accounting. Receipt, decode, presentation, socket acceptance and transport
+/// acknowledgements alone do not establish that those resources were released.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleasedCredit {
+    pub credit_epoch: u64,
+    pub released_bytes: u64,
+    pub released_frames: u64,
+}
+
+/// Whether a validated release report advanced either cumulative counter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreditUpdate {
+    Applied,
+    Ignored,
+}
+
+/// Single sender owner of an attached channel's byte and frame allowance.
+///
+/// Per PROTOCOL.md §5, outstanding use is cumulative consumption minus cumulative
+/// released resources. Both dimensions must fit the initial allowance. Reserve
+/// the complete charged allocation, including metadata, before sending a unit;
+/// reserving only its first fragment would not bound receiver memory.
+///
+/// This owner cannot be cloned or reset. Channel replacement needs a freshly
+/// negotiated epoch and a new window, never reused counters under an old epoch.
+/// This is accounting policy, not a WSS endpoint or proof of receiver release.
+#[derive(Debug)]
 pub struct ReceiverCreditWindow {
-    max_bytes: usize,
-    max_frames: usize,
-    outstanding_bytes: usize,
-    outstanding_frames: usize,
+    credit_epoch: u64,
+    max_bytes: u64,
+    max_frames: u64,
+    consumed_bytes: u64,
+    consumed_frames: u64,
+    released_bytes: u64,
+    released_frames: u64,
 }
 
 impl ReceiverCreditWindow {
-    #[must_use]
-    pub const fn new(max_bytes: usize, max_frames: usize) -> Self {
-        Self {
+    /// Install the negotiated epoch and positive local allowances from the
+    /// admitted attachment. `PROTOCOL_ATTACHMENT.md` rejects credit epoch zero;
+    /// unlike a typed initial generation, it cannot identify a credit owner.
+    pub const fn new(credit_epoch: u64, max_bytes: u64, max_frames: u64) -> Result<Self, WssError> {
+        if credit_epoch == 0 || max_bytes == 0 || max_frames == 0 {
+            return Err(WssError::InvalidCreditWindow);
+        }
+        Ok(Self {
+            credit_epoch,
             max_bytes,
             max_frames,
-            outstanding_bytes: 0,
-            outstanding_frames: 0,
-        }
+            consumed_bytes: 0,
+            consumed_frames: 0,
+            released_bytes: 0,
+            released_frames: 0,
+        })
     }
 
     #[must_use]
-    pub const fn can_send(&self, bytes: usize) -> bool {
-        self.outstanding_frames < self.max_frames
-            && self.outstanding_bytes.saturating_add(bytes) <= self.max_bytes
+    pub const fn credit_epoch(&self) -> u64 {
+        self.credit_epoch
     }
 
-    pub fn try_reserve(&mut self, bytes: usize) -> Result<(), WssError> {
-        if !self.can_send(bytes) {
-            return Err(WssError::CreditStarvation(
-                self.outstanding_bytes,
-                self.max_bytes,
-                self.outstanding_frames,
-                self.max_frames,
-            ));
-        }
-        self.outstanding_bytes += bytes;
-        self.outstanding_frames += 1;
+    #[must_use]
+    pub fn can_send(&self, bytes: u64) -> bool {
+        self.reservation(bytes).is_ok()
+    }
+
+    /// Consume one complete frame's nonzero allocation cost. Failure leaves
+    /// both counters untouched; releasing resources never resets consumption.
+    pub fn try_reserve(&mut self, bytes: u64) -> Result<(), WssError> {
+        let (consumed_bytes, consumed_frames) = self.reservation(bytes)?;
+        self.consumed_bytes = consumed_bytes;
+        self.consumed_frames = consumed_frames;
         Ok(())
     }
 
-    pub fn return_credit(&mut self, ack: WssAck) {
-        let freed_bytes = ack.bytes().min(self.outstanding_bytes);
-        self.outstanding_bytes -= freed_bytes;
-        self.outstanding_frames = self.outstanding_frames.saturating_sub(1);
+    fn reservation(&self, bytes: u64) -> Result<(u64, u64), WssError> {
+        if bytes == 0 {
+            return Err(WssError::InvalidCreditCharge);
+        }
+        let consumed_bytes = self
+            .consumed_bytes
+            .checked_add(bytes)
+            .ok_or(WssError::CreditCounterExhausted)?;
+        let consumed_frames = self
+            .consumed_frames
+            .checked_add(1)
+            .ok_or(WssError::CreditCounterExhausted)?;
+        if consumed_bytes - self.released_bytes > self.max_bytes
+            || consumed_frames - self.released_frames > self.max_frames
+        {
+            return Err(WssError::CreditStarvation(
+                self.outstanding_bytes(),
+                self.max_bytes,
+                self.outstanding_frames(),
+                self.max_frames,
+            ));
+        }
+        Ok((consumed_bytes, consumed_frames))
+    }
+
+    /// Apply cumulative freed-resource totals, independently ignoring duplicate
+    /// or older counters. Validate the epoch and BOTH upper bounds first: one
+    /// valid field cannot grant credit when the other field is malformed.
+    /// Neither acknowledgement stages nor new allowances are accepted here.
+    pub fn return_credit(&mut self, release: ReleasedCredit) -> Result<CreditUpdate, WssError> {
+        if release.credit_epoch != self.credit_epoch {
+            return Err(WssError::CreditEpochMismatch {
+                expected: self.credit_epoch,
+                received: release.credit_epoch,
+            });
+        }
+        if release.released_bytes > self.consumed_bytes
+            || release.released_frames > self.consumed_frames
+        {
+            return Err(WssError::CreditReleaseExceedsConsumption);
+        }
+        let bytes = self.released_bytes.max(release.released_bytes);
+        let frames = self.released_frames.max(release.released_frames);
+        if bytes == self.released_bytes && frames == self.released_frames {
+            return Ok(CreditUpdate::Ignored);
+        }
+        self.released_bytes = bytes;
+        self.released_frames = frames;
+        Ok(CreditUpdate::Applied)
     }
 
     #[must_use]
-    pub const fn outstanding_bytes(&self) -> usize {
-        self.outstanding_bytes
+    pub const fn outstanding_bytes(&self) -> u64 {
+        self.consumed_bytes - self.released_bytes
     }
 
     #[must_use]
-    pub const fn outstanding_frames(&self) -> usize {
-        self.outstanding_frames
+    pub const fn outstanding_frames(&self) -> u64 {
+        self.consumed_frames - self.released_frames
     }
 }
 
@@ -192,13 +279,19 @@ impl ChannelSupervisor {
 
     /// Replaces the active channel with a fresh generation, immediately fencing the old one.
     pub fn replace_channel(&mut self) -> Result<ChannelGeneration, WssError> {
+        let next = self
+            .active_generation
+            .0
+            .checked_add(1)
+            .map(ChannelGeneration)
+            .ok_or(WssError::GenerationExhausted)?;
         if self.closing_generations.len() >= self.max_closing_channels {
             return Err(WssError::ResetFloodThrottled(
                 self.closing_generations.len(),
             ));
         }
         self.closing_generations.insert(self.active_generation);
-        self.active_generation = ChannelGeneration(self.active_generation.0 + 1);
+        self.active_generation = next;
         Ok(self.active_generation)
     }
 
@@ -276,14 +369,24 @@ pub const fn is_compression_allowed(_role: WssChannelRole) -> bool {
 pub enum WssError {
     RoleMismatch(WssChannelRole, WssChannelRole),
     TokenAlreadyConsumed,
-    CreditStarvation(usize, usize, usize, usize),
+    InvalidCreditWindow,
+    InvalidCreditCharge,
+    CreditStarvation(u64, u64, u64, u64),
+    CreditEpochMismatch { expected: u64, received: u64 },
+    CreditReleaseExceedsConsumption,
+    CreditCounterExhausted,
     StaleGeneration(ChannelGeneration, ChannelGeneration),
+    GenerationExhausted,
     ResetFloodThrottled(usize),
     SocketClosed,
     InputSuspendedStaleView,
     ClipboardNotAllowedOnInput,
     SecurityDowngradeRefused,
 }
+
+#[cfg(test)]
+#[path = "wss/credit_tests.rs"]
+mod credit_tests;
 
 #[cfg(test)]
 mod tests {
@@ -336,41 +439,6 @@ mod tests {
     }
 
     #[test]
-    fn receiver_credit_window_enforces_byte_and_frame_bounds_and_ack_release() {
-        let mut credit = ReceiverCreditWindow::new(10_000, 3);
-        assert!(credit.can_send(5_000));
-        assert_eq!(credit.try_reserve(4_000), Ok(()));
-        assert_eq!(credit.outstanding_bytes(), 4_000);
-        assert_eq!(credit.outstanding_frames(), 1);
-
-        assert_eq!(credit.try_reserve(4_000), Ok(()));
-        assert_eq!(credit.outstanding_bytes(), 8_000);
-        assert_eq!(credit.outstanding_frames(), 2);
-
-        // Third frame fits bytes but hits frame count
-        assert_eq!(credit.try_reserve(1_000), Ok(()));
-        assert_eq!(credit.outstanding_frames(), 3);
-
-        // Frame count exhausted
-        assert!(!credit.can_send(500));
-        assert!(matches!(
-            credit.try_reserve(500),
-            Err(WssError::CreditStarvation(..))
-        ));
-
-        // Distinguishable ACKs free credit
-        credit.return_credit(WssAck::Received(1, 4_000));
-        assert_eq!(credit.outstanding_bytes(), 5_000);
-        assert_eq!(credit.outstanding_frames(), 2);
-        assert!(credit.can_send(2_000));
-
-        credit.return_credit(WssAck::Decoded(2, 4_000));
-        credit.return_credit(WssAck::Presented(3, 1_000));
-        assert_eq!(credit.outstanding_bytes(), 0);
-        assert_eq!(credit.outstanding_frames(), 0);
-    }
-
-    #[test]
     fn stale_generation_fencing_and_closing_channel_bounds() {
         let mut supervisor = ChannelSupervisor::new(WssChannelRole::Video, 2);
         let gen1 = supervisor.active_generation();
@@ -398,6 +466,36 @@ mod tests {
         supervisor.complete_close(gen1);
         let gen4 = supervisor.replace_channel().unwrap();
         assert_eq!(gen4, ChannelGeneration(4));
+    }
+
+    #[test]
+    fn generation_exhaustion_neither_reuses_ids_nor_mutates_closing_owners() {
+        let mut supervisor = ChannelSupervisor::new(WssChannelRole::Video, 3);
+        supervisor.active_generation = ChannelGeneration(u64::MAX - 1);
+        assert_eq!(
+            supervisor.replace_channel(),
+            Ok(ChannelGeneration(u64::MAX))
+        );
+        let closing = supervisor.closing_generations.clone();
+        assert_eq!(
+            supervisor.replace_channel(),
+            Err(WssError::GenerationExhausted)
+        );
+        assert_eq!(supervisor.active_generation(), ChannelGeneration(u64::MAX));
+        assert_eq!(supervisor.closing_generations, closing);
+        assert_eq!(
+            supervisor.check_admission(ChannelGeneration(0)),
+            Err(WssError::StaleGeneration(
+                ChannelGeneration(u64::MAX),
+                ChannelGeneration(0),
+            ))
+        );
+        supervisor.complete_close(ChannelGeneration(u64::MAX - 1));
+        assert_eq!(
+            supervisor.replace_channel(),
+            Err(WssError::GenerationExhausted)
+        );
+        assert!(supervisor.closing_generations.is_empty());
     }
 
     #[test]
