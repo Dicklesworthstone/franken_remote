@@ -723,9 +723,8 @@ JSON includes the artifact's frame and geometry binding, configuration/recovery
 generations, viewport dimensions, MIME type, byte count, SHA-256 and local path.
 Capture/presentation wall times and source freshness remain unknown. Submission
 to a compositor does not establish physical visibility or input authority.
-Screenshots are currently limited to `--native-once`; live and existing-owner
-observation requests return `observation_artifact_unavailable`. Without the flag,
-observation retains metadata only.
+Existing explicitly enabled owners can also export the current retained image,
+as described below. Without the flag, observation retains metadata only.
 
 **Verification scope:** the focused harness ran 58 actual-source options,
 observation parser, report and PNG writer tests, followed by strict Clippy.
@@ -736,3 +735,79 @@ The full `fr`/session regression build remains blocked by the pinned upstream
 Asupersync compiler exceeding this environment's 8 GiB memory limit; the new
 full-session regression has not run. These checks do not qualify a live tailnet,
 GPU compositor or physical display.
+
+## Screenshots from an existing foreground owner
+
+Open one explicit view publisher, then leave that process running:
+
+```sh
+fr robot session open NODE_ID --foreground --role view --publish-observations \
+  --experimental-native --display only
+```
+
+In another process, identify that invocation and request one image:
+
+```sh
+fr robot session status NODE_ID --json
+fr robot observe NODE_ID --connection-id CONNECTION_ID \
+  --screenshot /absolute/new-screen.png --json
+```
+
+The same command also reads an owner opened with `--foreground --role control
+--accept-input`. Ordinary `fr connect` owners refuse image export. The local
+kernel authenticates the caller, and the public connection ID pins the exact
+original owner on the same socket. This opens no new host connection and requests
+no new control lease. The existing host approval and selected display still
+apply. The owner remains running after the image is delivered.
+
+Only an explicit screenshot request copies the worker's retained presentation;
+it does not recapture the desktop, advance the decoder, or start recording.
+There is one bounded export per owner, including pending worker work and a slow
+local reader, with an original two-second budget. The response carries at most
+2048 bytes of metadata and 32 MiB of raw pixels plus the fixed image header.
+The caller validates the complete response and the owner's final success seal
+before opening the file. Recovery, stop, changed generations, expiry or a busy
+export produces a refusal; no replacement picture is automatically selected.
+PNG encoding and filesystem writes occur only in the requesting CLI process.
+The output pathname never reaches the owner, worker or remote host.
+
+### Observe, then act on that same frame
+
+A screenshot from an `--accept-input` owner can return
+`data.current_input_precondition: true` and a `data.control_authority` object
+containing `lease`, `observation_id`, `next_request_id`, geometry/viewport/codec/
+recovery generations, `frame` and `source_age_upper_ms`. These are the original
+comparison handles for the image's frame. To request an action, use its returned
+lease, observation ID and next request ID with `fr robot input` and the same
+connection ID. Coordinates remain signed host desktop pixels, not fitted PNG
+coordinates; the source display geometry and viewport dimensions are reported
+separately. A screenshot does not prove application-level success.
+
+Do not insert an input `--status` query between observing and acting: that query
+creates a new pin and invalidates the old unsubmitted observation. A concurrent
+status/input request can also refuse an in-progress export. Neither an image
+nor a fresh status refreshes an already accepted action or authorizes its replay.
+
+Original source age includes the local transfer and PNG-writing time. At or
+above 1000 ms, the result clears input readiness and its lease/observation/view
+handles while preserving the historical artifact. The input command independently
+checks its requested maximum age, original lease and all generations again at
+submission. If the old observation is no longer useful, obtain a new one and
+make a new decision. No action is automatically retried. A view-only screenshot
+always has null control authority and unknown host source freshness.
+
+The new-file, mode0600, size, hash, fitted viewport and cursor rules in the
+one-shot section apply here too. `--max-receipt-age-ms` limits local receipt age,
+not host source freshness. It is checked before creating the file and after
+writing: if it expires during the write, the error explicitly reports that the
+new file was written and supplies no current input precondition. File write or
+sync errors may leave a partial new file.
+
+**Verification scope:** 111 focused tests and strict Clippy passed for the actual
+parser, owner ledger/capture methods, mailbox, metadata/framing, report and PNG
+writer source. Tests cover concurrent pin replacement, generation changes,
+retirement, cancellation, source-age expiry and real file publication. The
+harness does not execute socket read/write, native startup or full session
+integration. Real abstract-socket regressions are authored but remain unrun
+because the pinned upstream Asupersync compilation exceeds this environment's
+8 GiB memory limit. This is not a new live-tailnet or physical-display result.

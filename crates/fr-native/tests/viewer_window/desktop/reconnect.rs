@@ -684,3 +684,6 @@ mod worker_deadline;
 #[cfg(feature = "linux-media")]
 #[path = "reconnect/snapshot.rs"]
 mod snapshot;
+
+#[path = "reconnect/live_snapshot.rs"]
+mod live_snapshot;

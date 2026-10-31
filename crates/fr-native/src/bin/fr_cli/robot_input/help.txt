@@ -13,6 +13,10 @@ control lease and has no reconnect, clipboard, files or native input forwarding.
 --status returns a bounded input observation with all view generations and a
 local comparison lease handle. Source age includes measured clock uncertainty;
 compositor submission is not proof of optical visibility or application success.
+For an image tied to that input observation, use fr robot observe NODE_ID
+--connection-id ID --screenshot /path/new-screen.png --json. Its control_authority
+object supplies the original input handles for the pictured frame; do not replace
+them with a subsequent --status read. Expired readiness clears those handles.
 
 Use increasing nonzero request IDs. Each action pins the ORIGINAL observation;
 a new status read cannot refresh an accepted command. Coordinates are signed

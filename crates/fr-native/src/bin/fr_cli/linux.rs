@@ -976,12 +976,20 @@ impl Ui for Interface {
         p.opened = p.opened.saturating_add(1);
         p.approval_pending = false;
         p.window = desktop.window();
-        if p.automation.is_some() {
+        if let Some(automation) = &p.automation {
             p.window
                 .as_ref()
                 .ok_or(CallbackError)?
                 .enable_automation_focus()
                 .map_err(|_| CallbackError)?;
+            let observation = fr_native::desktop::reconnect::Observation::initial_from(desktop)
+                .ok_or(CallbackError)?;
+            automation.bind_snapshot(
+                desktop.snapshot_handle().map_err(|_| CallbackError)?,
+                observation.display,
+                observation.completion.frame.as_raw(),
+                snapshot_evidence(observation.completion.stage),
+            ).map_err(|()| CallbackError)?;
         }
         if let Some(counters) = p.control.as_mut() {
             let mode = counters.opened();
@@ -1017,6 +1025,10 @@ impl Ui for Interface {
             progress.presented = progress.presented.saturating_add(1);
         }
         let automation = progress.automation.clone();
+        if let (Some(automation), Some(frame)) = (&automation, frame) {
+            automation.presented(frame.frame.as_raw(), snapshot_evidence(frame.stage))
+                .map_err(|()| CallbackError)?;
+        }
         match (self.attempt.as_mut(), progress.control.as_mut()) {
             (Some(attempt), Some(counters)) => match automation {
                 Some(automation) => attempt.automation_turn(state, frame, counters, &automation),
@@ -2304,3 +2316,11 @@ mod audio_overflow_tests;
 #[cfg(all(test, feature = "linux-desktop"))]
 #[path = "linux/control_reconnect_tests.rs"]
 mod control_reconnect_tests;
+
+#[cfg(feature = "linux-desktop")]
+fn snapshot_evidence(stage: frd::media::PresentationStage) -> fr_client::robot::live::Evidence {
+    match stage {
+        frd::media::PresentationStage::DecodedOnly => fr_client::robot::live::Evidence::Decoded,
+        frd::media::PresentationStage::SubmittedToCompositor => fr_client::robot::live::Evidence::SubmittedToCompositor,
+    }
+}

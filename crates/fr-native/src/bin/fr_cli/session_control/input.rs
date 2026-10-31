@@ -118,7 +118,7 @@ pub(crate) async fn exchange(
         }
     })
 }
-fn validate_snapshot(snapshot: &crate::robot_input::Snapshot) -> Result<(), Error> {
+pub(super) fn validate_snapshot(snapshot: &crate::robot_input::Snapshot) -> Result<(), Error> {
     let complete = snapshot
         .lease
         .as_deref()
@@ -161,7 +161,7 @@ fn validate_report(
     }
     report.validate().map_err(|_| Error::Protocol)
 }
-fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
+pub(super) fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
     snapshot.ready = false;
     snapshot.lease = None;
     snapshot.observation_id = None;
@@ -209,6 +209,8 @@ struct State {
     live: Option<Candidate>,
     pinned: Option<(u64, Candidate)>,
     next_observation: u64,
+    observation: fr_client::robot::live::Observation,
+    snapshots: Option<fr_client::robot::snapshot::Handle>,
     pending: Option<Pending>,
     stop: Option<frd::session_startup::ViewerControl>,
     stopped: bool,
@@ -235,6 +237,7 @@ impl State {
         self.stopped = true;
         self.live = None;
         self.pinned = None;
+        self.observation.retire(fr_client::robot::live::Phase::Stopped);
         if let Some(stop) = &self.stop {
             stop.stop();
         }
@@ -439,6 +442,8 @@ impl Shared {
             live: None,
             pinned: None,
             next_observation: 0,
+            observation: fr_client::robot::live::Observation::default(),
+            snapshots: None,
             pending: None,
             stop: None,
             stopped: false,
@@ -604,3 +609,7 @@ mod live;
 #[cfg(test)]
 #[path = "input/tests.rs"]
 mod tests;
+
+#[cfg(any(feature = "linux-desktop", test))]
+#[path = "input/screenshot.rs"]
+mod screenshot;

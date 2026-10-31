@@ -30,7 +30,10 @@ pub(crate) enum ReadError {
 
 #[cfg(any(feature = "linux-desktop", test))]
 #[derive(Clone, Default)]
-pub(crate) struct Publisher(Arc<Mutex<Observation>>);
+pub(crate) struct Publisher(
+    Arc<Mutex<Observation>>,
+    Arc<Mutex<Option<fr_client::robot::snapshot::Handle>>>,
+);
 #[cfg(any(feature = "linux-desktop", test))]
 impl Publisher {
     /// Session-thread work is bounded and never waits for a reader-held lock.
@@ -40,6 +43,9 @@ impl Publisher {
     }
     pub fn retire(&self, phase: Phase) {
         let _ = self.update(|value| { value.retire(phase); Ok(()) });
+        // Drop a handle outside the shared lock; no image work happens here.
+        let old = self.1.try_lock().ok().and_then(|mut handle| handle.take());
+        drop(old);
     }
     fn read(&self) -> Option<Snapshot> {
         self.0.try_lock().ok()?.snapshot(Instant::now()).ok()
@@ -104,3 +110,7 @@ pub(super) async fn respond(stream: &mut UnixStream, instance: [u8; 16], publish
 #[cfg(test)]
 #[path = "observation_tests.rs"]
 mod tests;
+
+#[cfg(any(feature = "linux-desktop", test))]
+#[path = "observation/screenshot.rs"]
+mod screenshot;

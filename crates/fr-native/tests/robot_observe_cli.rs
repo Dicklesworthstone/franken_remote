@@ -127,35 +127,23 @@ fn optical_evidence_refuses_before_opening_a_requested_screenshot() {
 }
 
 #[test]
-fn live_and_local_observation_do_not_silently_enable_pixel_export() {
+fn publisher_open_never_starts_recording_and_local_screenshot_requires_an_existing_owner() {
     let fixture = Fixture::new();
     let artifact = fixture.0.join("PRIVATE-screen.png");
-    for mut args in [
-        vec![
-            "robot",
-            "session",
-            "open",
-            "n-PRIVATE",
-            "--foreground",
-            "--role",
-            "view",
-            "--publish-observations",
-            "--experimental-native",
-            "--display",
-            "only",
-        ],
-        vec![
-            "robot",
-            "observe",
-            "n-PRIVATE",
-            "--connection-id",
-            "00000000000000000000000000000001",
-        ],
-    ] {
-        args.extend(["--screenshot", artifact.to_str().unwrap(), "--json"]);
-        refused(&run(&args), "observation_artifact_unavailable", 2);
-        assert!(!artifact.exists());
-    }
+    let target = format!("n-PRIVATE-unopened-{}", std::process::id());
+    let open = [
+        "robot", "session", "open", &target, "--foreground", "--role", "view",
+        "--publish-observations", "--experimental-native", "--display", "only",
+        "--screenshot", artifact.to_str().unwrap(), "--json",
+    ];
+    refused(&run(&open), "observation_artifact_unavailable", 2);
+    assert!(!artifact.exists());
+    let read = [
+        "robot", "observe", &target, "--connection-id", "00000000000000000000000000000001",
+        "--screenshot", artifact.to_str().unwrap(), "--json",
+    ];
+    refused(&run(&read), "no_local_session", 1);
+    assert!(!artifact.exists());
 }
 
 #[test]
@@ -212,6 +200,7 @@ fn help_explains_new_connection_lifetime_and_unknown_observation_fields() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--native-once"));
     assert!(help.contains("separate read-only connection"));
-    assert!(help.contains("not a headless screenshot"));
+    assert!(help.contains("local X11"));
+    assert!(help.contains("not headless capture"));
     assert!(help.contains("unknown"));
 }

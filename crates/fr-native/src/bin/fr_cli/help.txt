@@ -25,7 +25,7 @@ fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|on
     [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor]
     [read-only connect options above] [--json]
 fr robot observe NODE_ID --connection-id HEX32 [--max-receipt-age-ms 1..60000]
-    [--evidence-level decoded|submitted_to_compositor] [--json]
+    [--screenshot /path/screen.png] [--evidence-level decoded|submitted_to_compositor] [--json]
 fr robot input NODE_ID --connection-id ID --status [--json]
     See Explicit foreground robot control below for bounded input commands.
 
@@ -185,8 +185,11 @@ Without --foreground, the reserved broker-style session-open remains unavailable
 One-shot robot observation can save the first presented viewport as PNG with
 --screenshot PATH after local native cleanup; existing destinations refuse.
 The image includes fitting and any remote cursor overlay, excluding the native
-OS pointer. Live/local observation still returns metadata only. Run
-fr --help for the explicit read-only connection options and bounds.
+OS pointer. Existing --publish-observations or --accept-input owners also
+accept fr robot observe TARGET --connection-id ID --screenshot PATH. The owner
+stays connected; only the explicit caller saves an image. A control screenshot
+returns its original input observation handles, expiring them as time passes.
+Run fr --help for the explicit connection options, bounds and refusal behavior.
 A foreground control role enables ordinary local input. Explicit robot control
 requires --accept-input at open and the original local connection, lease and
 observation handles on each command; see below. Detached broker sessions and

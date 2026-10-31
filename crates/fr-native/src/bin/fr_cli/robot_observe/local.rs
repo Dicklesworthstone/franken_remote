@@ -1,7 +1,7 @@
 //! Query one existing local publisher without opening any remote connection.
 use super::{Failure, Minimum, bounded_args, observing, usage};
 use fr_client::robot::live::{Evidence, Snapshot};
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, path::PathBuf};
 
 struct Request {
     target: String,
@@ -9,12 +9,13 @@ struct Request {
     maximum_age_ms: Option<u64>,
     minimum: Minimum,
     json: bool,
+    screenshot: Option<PathBuf>,
 }
 fn parse(args: &[String]) -> Result<Request, Failure> {
     bounded_args(args)?;
     if !observing(args) { return Err(usage()); }
     let target = args.get(2).filter(|s| !s.is_empty() && s.len() <= 253 && !s.starts_with('-')).ok_or_else(usage)?.clone();
-    let mut request = Request { target, instance: String::new(), maximum_age_ms: None, minimum: Minimum::Decoded, json: false };
+    let mut request = Request { target, instance: String::new(), maximum_age_ms: None, minimum: Minimum::Decoded, json: false, screenshot: None };
     let mut index = 3;
     let mut seen = BTreeSet::new();
     while index < args.len() {
@@ -22,12 +23,10 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
         index += 1;
         if !seen.insert(flag) { return Err(usage()); }
         if flag == "--json" { request.json = true; continue; }
-        if flag == "--screenshot" {
-            return Err(Failure::new("observation_artifact_unavailable", "Live observation reads metadata only; no screenshot file was opened.", 2));
-        }
         let value = args.get(index).filter(|value| !value.is_empty() && !value.starts_with("--")).ok_or_else(usage)?;
         index += 1;
         match flag {
+            "--screenshot" => request.screenshot = Some(PathBuf::from(value)),
             "--connection-id" => {
                 if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) { return Err(usage()); }
                 request.instance.clone_from(value);
@@ -60,9 +59,16 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
             .map_err(|_| Failure::new("runtime_unavailable", "Check local runtime resources.", 1))?;
         let cx = runtime.handle().try_request_cx_with_budget(Budget::INFINITE)
             .map_err(|_| Failure::new("runtime_unavailable", "Check local runtime resources.", 1))?;
+        if request.screenshot.is_some() {
+            let observed = runtime.block_on(crate::session_control::screenshot::read(
+                &cx, &request.target, &request.instance,
+            )).map_err(artifact::read_failure)?;
+            let request = Request { target: observed.info.target, instance: observed.info.instance, ..request };
+            return artifact::render(&request, observed.metadata, &observed.snapshot, observed.round_trip_ms);
+        }
         let observed = runtime.block_on(observation::read(&cx, &request.target, &request.instance)).map_err(read_failure)?;
         let request = Request { target: observed.info.target, instance: observed.info.instance, ..request };
-        render(&request, observed.snapshot, observed.round_trip_ms)
+        render(&request, &observed.snapshot, observed.round_trip_ms)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -71,7 +77,7 @@ pub(super) fn run(args: &[String]) -> Result<String, Failure> {
     }
 }
 
-fn render(request: &Request, snapshot: Snapshot, round_trip_ms: u64) -> Result<String, Failure> {
+fn render(request: &Request, snapshot: &Snapshot, round_trip_ms: u64) -> Result<String, Failure> {
     snapshot.validate().map_err(|_| Failure::new("local_session_protocol", "The owner returned invalid observation metadata.", 1))?;
     let frame = snapshot.frame.as_ref().ok_or_else(|| Failure::new(
         "observation_not_ready", "This owner has no active decoded observation. Check its foreground process, host approval and display selection; no new connection was opened.", 1))?;
@@ -110,7 +116,6 @@ fn render(request: &Request, snapshot: Snapshot, round_trip_ms: u64) -> Result<S
 fn read_failure(error: crate::session_control::observation::ReadError) -> Failure {
     use crate::session_control::{Error, observation::ReadError};
     let code = match error {
-        ReadError::Unavailable => "local_observation_unavailable",
         ReadError::Local(Error::InvalidInstance) => "invalid_connection_id",
         ReadError::Local(Error::InvalidTarget) => "invalid_local_target",
         ReadError::Local(Error::NoSession) => "no_local_session",
@@ -119,7 +124,7 @@ fn read_failure(error: crate::session_control::observation::ReadError) -> Failur
         ReadError::Local(Error::Protocol) => "local_session_protocol",
         ReadError::Local(Error::Timeout) => "local_session_timeout",
         ReadError::Local(Error::Cancelled) => return Failure::new("cancelled", "Local observation lookup was cancelled; no stop or input was sent.", 130),
-        ReadError::Local(_) => "local_observation_unavailable",
+        ReadError::Unavailable | ReadError::Local(_) => "local_observation_unavailable",
     };
     Failure::new(code, "Use the exact target and connection_id from fr robot session status. The original foreground view must opt in with --publish-observations; this query never creates a replacement session.", 1)
 }
@@ -127,3 +132,7 @@ fn read_failure(error: crate::session_control::observation::ReadError) -> Failur
 #[cfg(test)]
 #[path = "local_tests.rs"]
 mod tests;
+
+#[cfg(target_os = "linux")]
+#[path = "local/artifact.rs"]
+mod artifact;

@@ -10,7 +10,7 @@ mod local;
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 #[path = "robot_observe/report.rs"]
 mod report;
-#[cfg(any(all(target_os = "linux", feature = "linux-desktop"), test))]
+#[cfg(any(target_os = "linux", test))]
 #[path = "robot_observe/artifact.rs"]
 mod artifact;
 

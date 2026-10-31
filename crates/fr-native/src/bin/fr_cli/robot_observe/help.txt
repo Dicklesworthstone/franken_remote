@@ -24,11 +24,29 @@ fr robot session open NODE_ID --foreground --role view --publish-observations
     --experimental-native --display HANDLE|only [read-only options above]
 fr robot session status NODE_ID --json
 fr robot observe NODE_ID --connection-id HEX32 [--max-receipt-age-ms 1..60000]
-    [--evidence-level decoded|submitted_to_compositor] [--json]
+    [--screenshot /path/new-screen.png] [--evidence-level decoded|submitted_to_compositor] [--json]
 The opt-in owner stays foreground with one attempt; status supplies its public
 comparison ID. Reads authenticate that existing local owner and never dial,
 capture, reconnect or grant input. Receipt age is local metadata age, NOT host
-source freshness. Screenshots remain unavailable in this live/local mode.
-Owners without publication refuse. Close with fr disconnect
-or robot session close --connection-id HEX32; cleanup remains mandatory.
+source freshness. With --screenshot, the original worker copies one retained
+presented viewport; this does not recapture or decode a new frame. The same
+32 MiB raw-pixel, PNG, cursor and new-file rules above apply. The owner stays
+connected. Only one export is in flight, including a slow reader; no recording
+or automatic pixel publication is enabled by opening an owner.
+
+A foreground control owner explicitly opened with --accept-input also accepts
+--connection-id ID --screenshot PATH. Its result includes control_authority with
+the ORIGINAL lease comparison handle, observation_id, next_request_id, all view
+generations, frame and bounded source age. Use those same handles for input;
+do not read --status between screenshot and action, which creates a new pin.
+IPC and PNG-writing time age the original observation. At 1000 ms the returned
+input readiness and handles are cleared; the image remains historical. Input
+still rechecks its original age and authority on submission. Screenshots never
+request or renew a control lease, perform an action or retry a stale picture.
+Concurrent status/input, recovery, stop and expiry can refuse an export; no
+replacement frame or precondition is silently selected. Ordinary owners refuse.
+If --max-receipt-age-ms expires while writing, the error explicitly reports that
+the new file was written but provides no current input precondition.
+Close with fr disconnect or robot session close --connection-id HEX32; cleanup
+remains mandatory. Metadata-only reads retain their existing read-only scope.
 Without --native-once or --connection-id, robot observe remains unavailable.

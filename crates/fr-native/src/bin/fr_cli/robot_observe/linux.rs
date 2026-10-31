@@ -221,6 +221,8 @@ impl Ui for Interface {
             }
             publisher.update(|state| state.ready(original.display, original.completion.frame.as_raw(), evidence(original.completion.stage), Instant::now()))
                 .map_err(|()| CallbackError)?;
+            publisher.bind_snapshot(desktop.snapshot_handle().map_err(|_| CallbackError)?)
+                .map_err(|()| CallbackError)?;
         }
         Ok(())
     }

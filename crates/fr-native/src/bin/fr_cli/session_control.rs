@@ -7,6 +7,8 @@
 pub(super) mod input;
 #[path = "session_control/observation.rs"]
 pub(super) mod observation;
+#[path = "session_control/screenshot.rs"]
+pub(super) mod screenshot;
 #[cfg(any(feature = "linux-desktop", test))]
 use asupersync::net::unix::UnixListener;
 use asupersync::{
@@ -390,6 +392,10 @@ async fn peer(
     }
     if request[..8] == observation::REQUEST {
         observation::respond(&mut stream, instance, observations.as_ref()).await?;
+        return Ok(None);
+    }
+    if request[..8] == screenshot::REQUEST {
+        screenshot::respond(&mut stream, instance, observations.as_ref(), automation.as_ref()).await?;
         return Ok(None);
     }
     Err(Error::Protocol)
