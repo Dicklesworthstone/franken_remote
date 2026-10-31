@@ -46,6 +46,8 @@ linux-audio-playout = ["linux-opus", "dep:fr-client"]
 linux-pulse-playback = ["linux-audio-playout"]
 # Explicit named client recording source; permission-gated worker API only.
 linux-microphone-capture = ["linux-pulse-playback"]
+# Per-session, explicitly selected microphone capture in a supervised child.
+linux-microphone-process = ["linux-microphone-capture"]
 # Explicit native virtual source; no CLI/GUI, capture, runtime or default enable.
 linux-pipewire-mic = []
 # Bound uplink Opus, isolated decoding and actual virtual-source graph demand.
@@ -121,3 +123,9 @@ required-features = ["linux-input"]
 name = "fr-opus-worker"
 path = "src/bin/opus_worker.rs"
 required-features = ["linux-opus-process"]
+
+# Explicit microphone RECORD/Opus worker; independent of HEVC and CLI/runtime.
+[[bin]]
+name = "fr-audio-worker"
+path = "src/bin/audio_worker.rs"
+required-features = ["linux-microphone-process"]

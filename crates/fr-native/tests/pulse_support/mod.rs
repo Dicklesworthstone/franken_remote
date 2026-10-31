@@ -1,5 +1,6 @@
 //! A real private `PulseAudio` daemon with a null output. No host sound device,
 //! user server, default microphone, or network socket is opened by these tests.
+pub mod microphone;
 use fr_client::input::ClientInstant;
 use fr_native::pulse::{Error, PlaybackDevice, State};
 use std::{

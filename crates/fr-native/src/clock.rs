@@ -32,8 +32,52 @@ pub fn monotonic_ns() -> Option<u64> {
         .checked_add(u64::try_from(now.tv_nsec).ok()?)
 }
 
+/// Translate an original local instant to the same-boot child clock. Sampling
+/// raw time FIRST conservatively places the result no later than `at`; time
+/// spent crossing this boundary never adds custody or authorization lifetime.
+#[cfg(feature = "linux-microphone-process")]
+pub(crate) fn stamp_ns(at: std::time::Instant) -> Option<u64> {
+    let raw = monotonic_ns()?;
+    let local = std::time::Instant::now();
+    if let Some(ahead) = at.checked_duration_since(local) {
+        raw.checked_add(u64::try_from(ahead.as_nanos()).ok()?)
+    } else {
+        raw.checked_sub(u64::try_from(local.duration_since(at).as_nanos()).ok()?)
+    }
+}
+
+/// Translate an original child's absolute instant back without renewing it.
+/// Local time is sampled FIRST, so this conversion can only shorten lifetime.
+#[cfg(feature = "linux-microphone-process")]
+pub(crate) fn local_instant(at_ns: u64) -> Option<std::time::Instant> {
+    let local = std::time::Instant::now();
+    let raw = monotonic_ns()?;
+    if let Some(ahead) = at_ns.checked_sub(raw) {
+        local.checked_add(std::time::Duration::from_nanos(ahead))
+    } else {
+        local.checked_sub(std::time::Duration::from_nanos(raw - at_ns))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "linux-microphone-process")]
+    #[test]
+    fn process_handoffs_only_shorten_original_instants() {
+        let now = std::time::Instant::now();
+        for at in [
+            now.checked_sub(std::time::Duration::from_millis(80))
+                .unwrap(),
+            now,
+            now + std::time::Duration::from_millis(80),
+        ] {
+            let raw = super::stamp_ns(at).unwrap();
+            let returned = super::local_instant(raw).unwrap();
+            assert!(returned <= at);
+            assert!(at.duration_since(returned) < std::time::Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn monotonic_clock_never_regresses_and_tracks_std_instant() {
         let start = std::time::Instant::now();

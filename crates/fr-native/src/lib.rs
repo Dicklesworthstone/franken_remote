@@ -7,6 +7,9 @@ pub mod opus;
 #[cfg(all(target_os = "linux", feature = "linux-pulse-playback"))]
 pub mod pulse;
 
+#[cfg(all(target_os = "linux", feature = "linux-microphone-process"))]
+pub mod audio_process;
+
 #[cfg(all(target_os = "linux", feature = "linux-pipewire-mic"))]
 pub mod pipewire_mic;
 
@@ -41,7 +44,8 @@ pub mod image_transfer;
     any(
         feature = "linux-media",
         feature = "linux-input",
-        feature = "linux-opus-process"
+        feature = "linux-opus-process",
+        feature = "linux-microphone-process"
     )
 ))]
 mod parent;
@@ -52,12 +56,20 @@ pub use parent::bind_worker_parent;
     any(
         feature = "linux-media",
         feature = "linux-input",
-        feature = "linux-opus-process"
+        feature = "linux-opus-process",
+        feature = "linux-microphone-process"
     )
 ))]
 pub use parent::{ParentUnbound, bind_parent};
 
-#[cfg(all(target_os = "linux", feature = "linux-input"))]
+#[cfg(all(
+    target_os = "linux",
+    any(
+        feature = "linux-input",
+        feature = "linux-microphone-process",
+        feature = "linux-microphone-playout"
+    )
+))]
 pub mod clock;
 
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
