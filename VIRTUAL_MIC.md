@@ -1,10 +1,109 @@
 # Virtual-microphone endpoint: Phase 0 evidence (open bead `fr-p0-virtual-mic-xyh`)
 
-Updated September 17, 2026. This page records what was actually executed for
+Updated October 31, 2026. This page records what was actually executed for
 the Phase 0 virtual-microphone spike and what remains untested. It follows
 [AGENTS.md](AGENTS.md) §7: evidence categories are separate; an untested row
 is never "supported with caveats"; this spike does not claim a FrankenRemote
 uplink, host OS qualification, or any capability beyond the exact rows below.
+
+## Linux native endpoint API (implemented; private-server qualification)
+
+`fr-native` now provides an opt-in `linux-pipewire-mic` feature and the safe
+`pipewire_mic::Microphone` owner. It creates an actual application-selectable
+PipeWire `Audio/Source` with `node.virtual=true`, accepts the existing decoded
+`AudioPcmFrame`, and publishes 48-kHz interleaved S16 mono/stereo PCM. This
+implements the native endpoint boundary; it does not enable microphone
+forwarding in `fr`/`frd`, capture a physical microphone, grant observation, or
+advertise a qualified microphone capability.
+
+The caller explicitly selects an absolute local Unix socket. The connected
+daemon's peer UID must match the process's effective UID. There is no socket
+environment fallback, module installation, autoconnection, default-device
+change, persistent source, or network listener. Source names are generated
+locally and contain no remote metadata. The owner is deliberately neither
+`Send` nor `Sync`: create, poll, and destroy it on one supervised native audio
+worker. The only cross-thread handle is the terminal `Control::stop` fence.
+The native loop remains entered on that owner thread from creation through
+stream/context teardown. This invariant matters: PipeWire 1.0.5 can execute
+a queued invocation on its caller's thread when no loop thread is registered,
+so omitting `RT_PROCESS` alone does not guarantee callback confinement.
+
+The original approval must be checked when connecting, admitting PCM, and
+polling. During `poll`, the borrowed permission check also runs inside the
+native callback immediately before submitting PCM to PipeWire. Its lifetime
+ends before `poll` returns; no native realtime callback retains it. A failed
+or panicking callback closes the original endpoint. These checks must be
+nonblocking and avoid allocation or I/O. Driver setup/destruction can still
+stall and require worker supervision outside the authority path.
+
+Each endpoint accepts exactly its original generation, channel layout and
+10/20-ms frame size. Sample timestamps cannot overlap or replay. A valid
+attempt consumes its sample interval even if expired or refused for pressure,
+so callers discard that sound instead of retrying with a renewed deadline.
+Four fixed input blocks retain their original absolute local deadlines, at
+most 100 ms ahead. Native callbacks recheck those deadlines after copying and
+the permission check, just before queueing. The bridge allocates no buffers
+while processing, uses at most two 4096-frame native buffers, and substitutes
+silence for missing/expired/fenced sound. These bounds describe local custody;
+already submitted OS audio cannot be recalled and these tests do not establish
+an audible end-to-end latency bound.
+
+Typical worker lifecycle:
+
+```rust,ignore
+let mut endpoint = Microphone::connect(&selected_socket, original_uplink_config,
+    || original_session.microphone_permitted())?;
+let stop = endpoint.control(); // supervisor may terminally fence this endpoint
+while endpoint.poll(|| original_session.microphone_permitted())? != State::Ready {
+    // Yield to the existing worker's bounded supervision; do not busy-spin.
+}
+endpoint.submit(&decoded_frame, original_frame_deadline,
+    || original_session.microphone_permitted())?;
+// Continue polling while permitted; on pressure/expiry discard the sound.
+endpoint.close();
+```
+
+Build dependencies on Debian/Ubuntu are a C compiler, `pkg-config`, and
+`libpipewire-0.3-dev` (including its SPA development dependency). The feature
+is disabled by default. `--all-features` Linux builds require the SDK. Real
+qualification additionally requires `pipewire`, `pipewire-bin`, and Python 3:
+
+```sh
+cargo check -p fr-native --no-default-features --features linux-pipewire-mic \
+  --lib --locked
+cargo test -p fr-native --no-default-features --features linux-pipewire-mic \
+  --test pipewire_microphone --locked -- --include-ignored --test-threads=1 --nocapture
+```
+
+The repository-owned tests launch a private daemon in a fresh mode-0700
+runtime directory. An independent `pw-cat` process records actual PCM; the
+helper configures and links only the exact test-owned source/recorder nodes
+because this private server has no session manager. It requires matching
+synthetic samples, silence after expired sound and terminal stop, and source
+removal witnessed through another connection. Additional assertions cover
+queue pressure, generation/layout refusals, replay refusal, old stop handles,
+daemon failure, and permission loss during the native submission callback.
+Missing tools or unsuccessful capture fail explicitly. WAVs and native logs
+are retained in the printed test directory; they are synthetic test data.
+
+The corrected Rust API and independent recorder were executed against
+PipeWire 1.0.5 with the pinned Rust toolchain on October 31, 2026. The
+terminal-stop run recorded 171,008 frames, including 125,440 matching
+synthetic samples; the permission-revoked-inside-callback run recorded
+162,816 frames, including 122,112 matching samples. Both had zero peak in
+the final silent quarter second and server-observed source removal. The
+revocation test requires the native callback to execute and queue silence
+while the submitted-audio counter remains unchanged. These are sample-flow
+and fencing observations, not a latency benchmark.
+Real WirePlumber selection, meeting applications, device hotplug, physical
+microphone permissions, host/client uplink transport, and end-to-end latency
+remain unqualified. The existing abstract `fr-media` endpoint continues to
+return typed unsupported until the full session owner is integrated.
+
+The implementation uses PipeWire's documented
+[stream source and callback lifecycle](https://docs.pipewire.org/page_streams.html)
+and [connected-fd ownership](https://docs.pipewire.org/group__pw__core.html).
+The older standalone spike below remains separate historical evidence.
 
 ## Linux: private PipeWire endpoint (executed, partial)
 

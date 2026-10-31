@@ -1,5 +1,6 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
+    build_pipewire_microphone();
     build_opus_process();
     build_keyboard();
     build_clipboard();
@@ -84,6 +85,55 @@ fn main() {
     // Narrow public ABI for checked MIT-SHM on the original Xlib connection.
     println!("cargo:rustc-link-lib=dylib:+verbatim=libX11-xcb.so.1");
     link_system_libraries(&packages, library);
+}
+
+fn build_pipewire_microphone() {
+    println!("cargo:rerun-if-changed=src/pipewire_mic.c");
+    println!("cargo:rerun-if-changed=src/pipewire_mic.h");
+    println!("cargo:rerun-if-env-changed=CC");
+    if env::var_os("CARGO_FEATURE_LINUX_PIPEWIRE_MIC").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "PipeWire cross-build requires an explicit qualified sysroot"
+    );
+    let flags = Command::new("pkg-config")
+        .args(["--cflags", "libpipewire-0.3"])
+        .output()
+        .expect("pkg-config is required for the PipeWire microphone");
+    assert!(
+        flags.status.success(),
+        "install libpipewire-0.3-dev: {}",
+        String::from_utf8_lossy(&flags.stderr)
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args(["-std=c11", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror"])
+            .args(String::from_utf8(flags.stdout).unwrap().split_whitespace())
+            .args(["-c", "src/pipewire_mic.c", "-o"])
+            .arg(out.join("pipewire_mic.o"))
+            .status()
+            .expect("native C compiler")
+            .success(),
+        "PipeWire microphone bridge compilation failed"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrpipewiremic.a"))
+            .arg(out.join("pipewire_mic.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frpipewiremic");
+    link_system_libraries(&["libpipewire-0.3"], None);
 }
 
 /// Link FFmpeg/X11 either from the explicit SDK directory or from pkg-config.

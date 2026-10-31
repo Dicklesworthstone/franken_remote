@@ -7,6 +7,9 @@ pub mod opus;
 #[cfg(all(target_os = "linux", feature = "linux-pulse-playback"))]
 pub mod pulse;
 
+#[cfg(all(target_os = "linux", feature = "linux-pipewire-mic"))]
+pub mod pipewire_mic;
+
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod cursor;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]

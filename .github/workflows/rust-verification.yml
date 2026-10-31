@@ -54,7 +54,7 @@ jobs:
       # fr-native links libXtst/Xdamage/Xrandr/Xfixes/X11-xcb/opus/pulse by exact
       # soname (#[link(..., modifiers = "+verbatim")]); each must be installed.
       - name: Install Linux native media SDKs
-        run: sudo apt-get update && sudo apt-get install -y libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth xfonts-base iproute2 nftables
+        run: sudo apt-get update && sudo apt-get install -y libpipewire-0.3-dev pipewire pipewire-bin libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth xfonts-base iproute2 nftables
       - name: Format
         id: fmt
         continue-on-error: true
@@ -239,6 +239,37 @@ jobs:
                   failed.append(test)
           assert not failed, f'native clipboard regressions failed: {failed}'
           PY
+      - name: Exercise the private PipeWire microphone endpoint
+        id: pipewire_microphone
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          # Reuse the exact all-workspace/all-feature graph built by Tests.
+          # A minimal-feature cargo test here would rebuild heavy dev dependencies.
+          cargo test --workspace --all-features --locked --no-run --message-format=json > "$RUNNER_TEMP/pipewire-test.json"
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'pipewire-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'pipewire_microphone'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact native microphone test binary required'
+          listed = subprocess.check_output([binaries[0], '--list'], text=True)
+          for test in [
+              'permission_and_server_choice_are_explicit_before_native_setup',
+              'independent_capture_observes_pcm_expiry_terminal_stop_and_exact_cleanup',
+              'permission_revoked_during_a_native_turn_cannot_publish_queued_pcm',
+              'a_panicking_permission_callback_fences_without_unwinding_through_c',
+          ]:
+              assert listed.splitlines().count(f'{test}: test') == 1, f'native microphone regression must be present: {test}'
+          subprocess.run([binaries[0], '--include-ignored', '--test-threads=1', '--nocapture'],
+              check=True, timeout=120)
+          PYTHON
       - name: Examples
         id: examples
         continue-on-error: true
@@ -289,6 +320,7 @@ jobs:
             native_dual_stack=${{ steps.native_dual_stack.outcome }}
             native_dial_fallback=${{ steps.native_dial_fallback.outcome }}
             clipboard_capture_stall=${{ steps.clipboard_capture_stall.outcome }}
+            pipewire_microphone=${{ steps.pipewire_microphone.outcome }}
             examples=${{ steps.examples.outcome }}
             indicator=${{ steps.indicator.outcome }}
             viewer_input=${{ steps.viewer_input.outcome }}

@@ -44,6 +44,8 @@ linux-opus = []
 linux-audio-playout = ["linux-opus", "dep:fr-client"]
 # Native local PulseAudio output, no alternate Rust runtime or default device.
 linux-pulse-playback = ["linux-audio-playout"]
+# Explicit native virtual source; no CLI/GUI, capture, runtime or default enable.
+linux-pipewire-mic = []
 # Host playback audio end to end: the worker's PulseAudio monitor-record +
 # Opus-encode role and `fr connect --audio` playback. Same libpulse/libopus
 # SONAMEs as above; frd itself never enables this feature or links either.

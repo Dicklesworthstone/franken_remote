@@ -140,10 +140,10 @@ pub trait VirtualMicEndpoint: Send + Sync {
 
 /// Linux `PipeWire` virtual microphone source adapter.
 ///
-/// The final endpoint is a `PipeWire` virtual source node
-/// (`media.class = Audio/Source/Virtual`). No such node is implemented, so this
-/// adapter is unqualified on every host, whether or not a `PipeWire` socket
-/// exists: a socket is not an endpoint any application can select.
+/// The explicit native endpoint lives in `fr-native::pipewire_mic`, but this
+/// abstract adapter has no session-owned native integration. It remains
+/// unqualified on every host: neither a socket nor the separate native API
+/// grants microphone authority or proves the full uplink path is available.
 #[derive(Debug)]
 pub struct LinuxPipeWireMicEndpoint {
     status: MicEndpointStatus,
@@ -152,11 +152,10 @@ pub struct LinuxPipeWireMicEndpoint {
 
 impl LinuxPipeWireMicEndpoint {
     /// Typed reason reported by [`Self::probe`].
-    pub const UNQUALIFIED_REASON: &'static str =
-        "no PipeWire virtual source is implemented; microphone forwarding is unsupported";
+    pub const UNQUALIFIED_REASON: &'static str = "PipeWire microphone session integration is unavailable; microphone forwarding is unsupported";
 
     /// Probe the Linux host. Always `Unsupported` until a real `PipeWire`
-    /// virtual source exists; never inferred from the runtime socket.
+    /// endpoint is integrated with this session owner; never inferred from a socket.
     #[must_use]
     pub fn probe() -> Self {
         Self {
