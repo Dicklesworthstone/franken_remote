@@ -152,9 +152,10 @@ pub enum Submission {
 }
 
 /// Implementations must not defer submission to another queue or perform
-/// hidden retries. Potentially blocking preflight happens in `prepare`, before
-/// the owner samples its final clock. `submit` performs one native operation;
-/// its result names OS API submission, never application processing.
+/// hidden retries. Potentially blocking preflight happens in `prepare`, or in
+/// `submit_authorized` BEFORE invoking its final authorization callback. `submit`
+/// performs one native operation; its result names OS API submission, never
+/// application processing.
 pub trait InputSink {
     fn prepare(&mut self, operation: Operation) -> Result<(), PlatformError>;
     fn submit(&mut self, operation: Operation) -> Submission;
@@ -166,6 +167,22 @@ pub trait InputSink {
     fn submit_until(&mut self, operation: Operation, until: HostInstant) -> Submission {
         let _ = until;
         self.submit(operation)
+    }
+    /// Revalidate any prepared native target, then invoke `authorize` exactly
+    /// once immediately before submission. The callback samples the original
+    /// authority/clock and returns its exclusive deadline. No blocking preflight
+    /// or retry may follow a successful callback. An error confirms that no
+    /// native operation was submitted; preparation is cancelled by the owner.
+    ///
+    /// Sinks needing no final native revalidation retain the existing path.
+    /// Wrappers must forward this callback to an inner sink that revalidates.
+    fn submit_authorized(
+        &mut self,
+        operation: Operation,
+        authorize: &mut dyn FnMut() -> Result<HostInstant, Refusal>,
+    ) -> Result<Submission, Refusal> {
+        let until = authorize()?;
+        Ok(self.submit_until(operation, until))
     }
     /// A local owner outside the network path (for example a sharing indicator
     /// shown by an out-of-process executor) revoked input. Polled between
@@ -899,9 +916,10 @@ impl Attempt<'_, '_> {
         // in prepare, and a stale ticket must not leave that state stranded.
         let prepared = PreparedSink(sink);
         prepared.0.prepare(op).map_err(Refusal::Platform)?;
-        let until = self.owner.check(self.request.credentials, clock())?;
         // Track a possible press BEFORE invoking the platform. Even a panic or
         // an unknown native result must leave enough state for release cleanup.
+        // Do not track it until final native revalidation AND authorization have
+        // succeeded: neither a failed callback nor a preflight panic is a press.
         let previous = match op {
             Operation::Key {
                 key,
@@ -914,21 +932,26 @@ impl Attempt<'_, '_> {
             _ => None,
         };
         let previous_wheel = self.owner.wheel;
-        self.track(op, true);
-        self.uncertain = true;
-        let refusal = match prepared.0.submit_until(op, until) {
-            Submission::Submitted => {
+        let result = prepared.0.submit_authorized(op, &mut || {
+            let until = self.owner.check(self.request.credentials, clock())?;
+            self.track(op, true);
+            self.uncertain = true;
+            Ok(until)
+        });
+        let refusal = match result {
+            Ok(Submission::Submitted) => {
                 self.uncertain = false;
                 self.submitted += 1;
                 self.track(op, false);
                 return Ok(());
             }
-            Submission::Unknown => return Err(Refusal::UnknownEffect),
+            Ok(Submission::Unknown) => return Err(Refusal::UnknownEffect),
             // Each names a confirmed absence of the native call, like
             // NotSubmitted: restore the pessimistic press tracking below.
-            Submission::NotSubmitted(error) => Refusal::Platform(error),
-            Submission::Expired => Refusal::ExpiredAtBoundary,
-            Submission::Fenced => Refusal::Revoked,
+            Ok(Submission::NotSubmitted(error)) => Refusal::Platform(error),
+            Ok(Submission::Expired) => Refusal::ExpiredAtBoundary,
+            Ok(Submission::Fenced) => Refusal::Revoked,
+            Err(error) => error,
         };
         self.uncertain = false;
         if matches!(op, Operation::Wheel { pressed: true, .. }) {

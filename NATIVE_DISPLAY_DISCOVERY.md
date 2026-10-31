@@ -60,7 +60,9 @@ of at least 16 pixels. Logical coordinates are X root-window pixel units, scale
 1:1, already in root orientation: not toolkit DPI or physical-panel measurements.
 Host-local Launch selects the X server/screen; no peer string becomes a selector,
 command, executable or library path. `libXrandr.so.2` is a native runtime dependency
-only for the opt-in monitor feature.
+only for opt-in monitor capture or `linux-input-monitors`. The latter reuses this
+inventory to bind input to one exact monitor without enabling media/FFmpeg; see
+[selected monitor control](NATIVE_INPUT.md#selected-monitor-control).
 
 ## Topology and output publication
 

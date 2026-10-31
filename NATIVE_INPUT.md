@@ -22,6 +22,83 @@ adapter; their wire/core paths do not manufacture native support. There is no
 clipboard-paste fallback and no
 fallback after Wayland/portal permission refusal.
 
+## Selected monitor control
+
+The `linux-input-monitors` feature admits a whole RandR 1.5 monitor without
+enabling FFmpeg, capture or DAMAGE. A combined `linux-displays,linux-input`
+build provides the same input path. Plain `linux-input` keeps its existing
+whole-root profile and does not acquire a RandR runtime dependency.
+
+In a monitor-enabled build, `X11Pointer::open_exact` preserves the granted
+monitor's origin and dimensions. It opens the canonical bounded `X11Inventory`
+and requires exactly one current monitor with those bounds, including when the
+selected monitor covers the entire X root.
+Arbitrary crops, a rectangle spanning neighboring monitors, and ambiguous
+equal-bounds monitors refuse. There is no fallback to root-sized authority.
+The explicit `X11Pointer::open` root/probe API and plain `linux-input` build
+retain their original whole-root profile. A monitor-enabled exact bind never
+takes that path after a missing or ambiguous monitor match.
+
+Matching rectangles are not sufficient to prove that the input process opened
+the monitor previously selected for capture. The original capture inventory
+must revalidate **after the input executor reports Ready and before the host
+publishes its grant**. The controlled source performs that check on its original
+worker and retained selection. The input process then keeps its own inventory
+alive throughout the grant. Their overlapping lifetimes prevent an equal-size
+remove/re-add between discovery and native startup from becoming a new target
+under the old selection.
+
+Absolute input already contains X root-window pixel coordinates. The adapter
+does not subtract or add the selected origin a second time. Pointer destinations
+must lie inside the granted rectangle, with exclusive right and bottom edges.
+Button and wheel presses also check the actual current pointer against that
+rectangle during preflight; intervening local movement to a neighboring monitor
+does not authorize a new press there. Existing wire coordinate/barrier rules and
+the final host ticket/authority checks remain in effect for each native operation.
+
+Before positive key, pointer, button and wheel work on an exact monitor target,
+preflight checks root geometry and the retained inventory. Any observed topology change is terminal,
+including a neighbor changing or a monitor being removed and recreated with
+the same native identity and bounds. Restoring the old layout does not revive
+the owner. Release-only cleanup remains available after that fence, including
+when the local pointer has moved outside the selected rectangle.
+
+The native owner refreshes a prepared operation again at submission: an earlier
+`Prepared` reply does not preserve topology, pointer position or a button/key
+mapping across an IPC delay. It releases the XTest cache guard before those
+queries while retaining consent exclusion, then reacquires the guard before the
+final authority predicate. The canonical `InputSession` supplies its fresh
+authority/clock check through `submit_authorized`; the separate executor supplies
+its fence, indicator and monotonic deadline check through `submit_checked`.
+Its emergency release snapshot includes any physical codes refreshed by this
+preparation. A refusal consumes the preparation and makes no native input call.
+
+The blocking native checks finish before that final authorization/clock sample.
+No server grab or blocking preflight follows it. As elsewhere in this adapter,
+local pointer movement and X11
+reconfiguration can race an already submitted request; this is not atomic
+physical-position enforcement. Keyboard injection retains the X server's current
+focus semantics. Monitor selection is a viewing/coordinate binding, not an
+application isolation boundary. The selected desktop user and X server remain
+trusted. Existing root-size, native-monitor format and capability bounds apply;
+seamless hotplug and in-place target switching remain unavailable.
+
+The native regression `input_monitors_x11` uses real RandR monitors and XTest on
+private Xvfb servers, with an independent Xlib observer. It exercises nonzero
+horizontal and vertical origins, actual button/wheel event coordinates, crop and
+ambiguity refusal (including root-sized monitors), neighboring pixels, local pointer escape, sticky topology
+fences, release-only cleanup, and the original inventory's post-startup check.
+It also separates Prepare from Submit, changes topology or moves the pointer in
+between, and verifies refusal both directly and over the actual input-agent's
+private IPC. The child additionally refuses an expired prepared request without
+replaying it. Authority and clock values in the core-path tests are explicit
+local fixtures, not live tailnet or physical-display qualification.
+
+```sh
+cargo build -p fr-native --lib --no-default-features --features linux-input-monitors --locked
+cargo test -p fr-native --no-default-features --features linux-input-monitors --test input_monitors_x11 --locked -- --test-threads=1
+```
+
 ## Relative motion
 
 A successful XTest version query enables `Capability::Relative` only for version

@@ -19,6 +19,17 @@ mod linux;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub use linux::*;
 
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-media", feature = "linux-input-monitors")
+))]
+mod error;
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-media", feature = "linux-input-monitors")
+))]
+pub use error::NativeError;
+
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod capture;
 
@@ -62,7 +73,10 @@ pub mod input_agent;
 ))]
 pub mod xlib;
 
-#[cfg(all(target_os = "linux", feature = "linux-displays"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-displays", feature = "linux-input-monitors")
+))]
 pub mod displays;
 
 #[cfg(all(target_os = "linux", feature = "linux-clipboard"))]

@@ -55,16 +55,14 @@ impl X11Pointer {
             if self.wheel.held.is_some() {
                 return Err(PlatformError::Permission);
             }
-            if self.geometry()? != self.dimensions {
-                return Err(PlatformError::GeometryChanged);
-            }
             let code = self.wheel_mapping()?[usize::from(logical(direction) - 4)];
             if self.buttons.contains(&Some(code)) {
                 return Err(PlatformError::Permission);
             }
             // Core X11 exposes held bits only for logical buttons 1..=5. Do not
             // claim equivalent physical/synthetic attribution for horizontal wheels.
-            let (_, mask) = self.query_pointer()?;
+            let (point, mask) = self.query_pointer()?;
+            self.target_pointer(point)?;
             if logical(direction) <= 5 && mask & (1u32 << (7 + logical(direction))) != 0 {
                 return Err(PlatformError::Permission);
             }

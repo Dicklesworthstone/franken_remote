@@ -7,6 +7,9 @@ use fr_core::{
     time::HostInstant,
 };
 
+#[path = "input_preparation/final_validation.rs"]
+mod final_validation;
+
 #[derive(Default)]
 struct Sink {
     prepared: Option<Operation>,

@@ -16,6 +16,10 @@ enum Mode {
     Abandoned,
     /// Out-of-process executor (protocol fixture child) via `approve_fenced`.
     Fenced,
+    SourceCheckOrdered,
+    SourceCheckRefused,
+    SourceCheckStall,
+    CaptureStallBeforeReady,
 }
 struct Unblock(Arc<AtomicBool>);
 impl Drop for Unblock {
@@ -26,14 +30,25 @@ impl Drop for Unblock {
 
 #[allow(clippy::too_many_lines)]
 async fn managed(c: Cx, h: Cx, mode: Mode) {
+    static NEXT_CHECK: AtomicUsize = AtomicUsize::new(0);
     let cleanup = Cx::current().unwrap();
+    let source_marker = std::env::temp_dir().join(format!(
+        "fr-input-source-check-{}-{}",
+        std::process::id(),
+        NEXT_CHECK.fetch_add(1, Ordering::Relaxed),
+    ));
+    let checked_marker = source_marker.with_extension("checked");
+    let ordered_mode = format!("ordered-target-check:{}", source_marker.display());
     let (mut host, mut viewer) = Box::pin(prepare(
         &c,
         &h,
-        if mode == Mode::CaptureStall {
-            "stall"
-        } else {
-            "unchanged"
+        match mode {
+            Mode::CaptureStall => "stall-after-target-check",
+            Mode::CaptureStallBeforeReady => "stall",
+            Mode::SourceCheckOrdered => &ordered_mode,
+            Mode::SourceCheckRefused => "target-check-refused",
+            Mode::SourceCheckStall => "target-check-stall",
+            _ => "unchanged",
         },
         keys(),
     ))
@@ -74,6 +89,7 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                         let release_at = released.clone();
                         let calls = factories.clone();
                         let unblocked = gate.0.clone();
+                        let source_marker = source_marker.clone();
                         let cx = h.clone();
                         let fresh =
                             || Some((InputLeaseId::from_raw(219), InputTicketId::from_raw(223)));
@@ -108,6 +124,10 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                     }
                                     if mode == Mode::FactoryFails {
                                         return Err(PlatformError::Unavailable);
+                                    }
+                                    if mode == Mode::SourceCheckOrdered {
+                                        std::fs::write(source_marker, b"native initialized\n")
+                                            .unwrap();
                                     }
                                     Ok(Sink {
                                         effects,
@@ -178,7 +198,15 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                         | Mode::CaptureStall
                                         | Mode::Abandoned
                                         | Mode::Fenced
+                                        | Mode::SourceCheckOrdered
                                 ));
+                                if mode == Mode::SourceCheckOrdered {
+                                    assert_eq!(
+                                        std::fs::read_to_string(&checked_marker).unwrap(),
+                                        "checked original capture inventory\n",
+                                        "grant preceded the newly issued original-source check"
+                                    );
+                                }
                                 if let Some(p) = frame {
                                     crate::session_startup::confirm_visible(
                                         input.visible(p.frame.as_raw()),
@@ -191,9 +219,10 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                                 }
                                 // No release action: final destruction must release
                                 // the held key without manufacturing a second receipt.
-                                if matches!(mode, Mode::Renewing | Mode::Fenced)
-                                    && receipts.get() == 1
-                                    && now(&c).unwrap() >= at + 3_100_000
+                                if receipts.get() == 1
+                                    && (mode == Mode::SourceCheckOrdered
+                                        || (matches!(mode, Mode::Renewing | Mode::Fenced)
+                                            && now(&c).unwrap() >= at + 3_100_000))
                                 {
                                     stop.revoke();
                                     view_stop.stop();
@@ -288,7 +317,10 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
         assert_eq!(lines.last().map(String::as_str), Some("STOP"));
         assert!(host.presentation_reports() > 3);
         assert!(viewer.presentation_reports() > 3);
-    } else if matches!(mode, Mode::Renewing | Mode::CaptureStall | Mode::Abandoned) {
+    } else if matches!(
+        mode,
+        Mode::Renewing | Mode::CaptureStall | Mode::Abandoned | Mode::SourceCheckOrdered
+    ) {
         assert!(granted && action_sent);
         assert_eq!(approval_count, 1);
         assert_eq!(factories.load(Ordering::Acquire), 1);
@@ -319,7 +351,7 @@ async fn managed(c: Cx, h: Cx, mode: Mode) {
                 at >= start && at < start + 1_000_000,
                 "release delayed until capture watchdog"
             );
-        } else {
+        } else if mode != Mode::SourceCheckOrdered {
             assert!(host.presentation_reports() > 3);
             assert!(viewer.presentation_reports() > 3);
         }
@@ -385,6 +417,22 @@ fn approve_fenced_installs_the_executor_fence_before_any_cleanup_release() {
 #[test]
 fn managed_driver_releases_held_key_while_capture_is_stalled() {
     run(|c, h| managed(c, h, Mode::CaptureStall));
+}
+#[test]
+fn selected_source_is_checked_after_native_initialization_before_the_only_grant() {
+    run(|c, h| managed(c, h, Mode::SourceCheckOrdered));
+}
+#[test]
+fn selected_source_refusal_cleans_the_ready_native_owner_without_granting() {
+    run(|c, h| managed(c, h, Mode::SourceCheckRefused));
+}
+#[test]
+fn stalled_selected_source_check_cannot_grant_or_leak_the_ready_native_owner() {
+    run(|c, h| managed(c, h, Mode::SourceCheckStall));
+}
+#[test]
+fn capture_started_before_native_readiness_cannot_replace_the_required_check() {
+    run(|c, h| managed(c, h, Mode::CaptureStallBeforeReady));
 }
 #[test]
 fn managed_service_does_not_approve_without_consent() {

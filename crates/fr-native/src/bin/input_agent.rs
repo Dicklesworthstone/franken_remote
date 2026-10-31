@@ -125,6 +125,23 @@ mod linux {
         }
     }
 
+    /// Bounded, nonblocking negative authority. Split from the executor borrow
+    /// so the final check can run while its original native owner is borrowed.
+    fn drain_signals(signals: &UnixDatagram, fenced: &mut bool) {
+        let mut buffer = [0; process::SIGNAL_BYTES + 1];
+        for _ in 0..SIGNALS_PER_CHECK {
+            match signals.recv(&mut buffer) {
+                Ok(_) => *fenced = true,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => {
+                    *fenced = true;
+                    return;
+                }
+            }
+        }
+    }
+
     /// The indicator must be mapped before Ready. Its first stop sends exactly
     /// one datagram: `LocalRevoke` when the local user caused it, otherwise
     /// `IndicatorFailed` (frd names that a native failure, not a revoke).
@@ -330,18 +347,7 @@ mod linux {
         /// channel (malformed, wrong direction) or a broken channel: the
         /// executor fails closed and never reopens.
         fn drain_signals(&mut self) {
-            let mut buffer = [0; process::SIGNAL_BYTES + 1];
-            for _ in 0..SIGNALS_PER_CHECK {
-                match self.signals.recv(&mut buffer) {
-                    Ok(_) => self.fenced = true,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
-                    Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                    Err(_) => {
-                        self.fenced = true;
-                        return;
-                    }
-                }
-            }
+            drain_signals(&self.signals, &mut self.fenced);
         }
         fn revoked(&self) -> bool {
             self.fenced || self.revoked.load(Ordering::Acquire)
@@ -364,19 +370,32 @@ mod linux {
                 self.pointer().cancel_prepared();
                 return Reply::NotSubmitted(PlatformError::Unsupported);
             }
-            // Final executor checks, immediately before the native call.
-            self.drain_signals();
-            if self.revoked() {
-                self.pointer().cancel_prepared();
-                return Reply::Fenced;
+            let Self {
+                pointer,
+                signals,
+                fenced,
+                revoked,
+                ..
+            } = self;
+            let pointer = pointer.as_mut().expect("the X11 owner lives until Stop");
+            // Native topology, pointer and mapping validation happens again at
+            // Submit, since the Prepared reply crossed an IPC boundary. Only
+            // THEN sample the original deadline and independently received
+            // fence; a slow X query cannot spend an already-checked lifetime.
+            match pointer.submit_checked(operation, |held| {
+                emergency::record(held);
+                drain_signals(signals, fenced);
+                if *fenced || revoked.load(Ordering::Acquire) {
+                    return Err(Reply::Fenced);
+                }
+                if clock::monotonic_ns().is_none_or(|now| now >= not_after_ns) {
+                    return Err(Reply::Expired);
+                }
+                Ok(())
+            }) {
+                Ok(submission) => reply(submission),
+                Err(refusal) => refusal,
             }
-            if clock::monotonic_ns().is_none_or(|now| now >= not_after_ns) {
-                self.pointer().cancel_prepared();
-                return Reply::Expired;
-            }
-            let pointer = self.pointer();
-            emergency::record(pointer.native_held());
-            reply(pointer.submit(operation))
         }
         /// Release-only cleanup: no deadline, accepted after a fence too.
         fn release(&mut self, operation: Operation) -> Reply {

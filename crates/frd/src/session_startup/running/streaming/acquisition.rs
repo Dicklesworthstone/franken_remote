@@ -83,12 +83,18 @@ pub(super) struct Acquisition {
     current: Option<Target>,
     ready: bool,
     failure: Option<GrantError>,
+    pub(super) native_target_check: Option<crate::media::source_check::InputTargetCheck>,
 }
 impl Acquisition {
     fn new(host: &mut StreamingHost, seat: Seat, channels: NegotiatedInput) -> Result<Self, Error> {
         if host.stream.served || !matches!(host.host, Host::Observe(_)) {
             return Err(Error::Order);
         }
+        let native_target_check = host
+            .stream
+            .source
+            .input_target_check(&host.stream.control)
+            .map_err(Error::Media)?;
         // The existing attachment proof already binds the connection, view and
         // display. Also require this capture pipeline's exact configuration.
         let session = host.host.session()?;
@@ -104,9 +110,14 @@ impl Acquisition {
         {
             return Err(Error::Order);
         }
-        let broker = session
+        let mut broker = session
             .negotiated_control_broker(seat, channels)
             .map_err(Error::ControlGrant)?;
+        if let Some(check) = &native_target_check {
+            broker
+                .require_native_target_check(check.clone())
+                .map_err(Error::ControlGrant)?;
+        }
         let reporting = GrantReporting::take(session)?;
         Ok(Self {
             broker: Some(broker),
@@ -116,6 +127,7 @@ impl Acquisition {
             current: None,
             ready: false,
             failure: None,
+            native_target_check,
         })
     }
     pub(super) async fn drive(

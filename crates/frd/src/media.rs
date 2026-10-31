@@ -28,6 +28,7 @@ mod capture_update;
 pub mod clock;
 mod cursor;
 mod snapshot;
+pub(crate) mod source_check;
 pub use cursor::CursorReply;
 pub mod decoder_startup;
 #[cfg(target_os = "linux")]

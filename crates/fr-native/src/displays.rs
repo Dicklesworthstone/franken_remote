@@ -3,12 +3,16 @@
 //! This blocking, thread-confined owner belongs in a supervised native process,
 //! never the broker's authority task. Xlib/server failure may terminate that
 //! process. Names, EDID and connector strings never leave this boundary.
-use crate::{BgraFrame, NativeError};
+#[cfg(feature = "linux-displays")]
+use crate::BgraFrame;
+use crate::NativeError;
 use core::{
     ffi::{c_char, c_int, c_long, c_ulong, c_void},
     marker::PhantomData,
     ptr::NonNull,
 };
+#[cfg(feature = "linux-input")]
+use fr_core::input::{DesktopPoint, InputBounds};
 use fr_core::{ids::DisplayGeometryGeneration, limits::ProtocolLimits};
 use fr_wire::display::{Catalog, Display, MAX_DISPLAYS};
 use std::{ffi::CString, rc::Rc};
@@ -56,7 +60,7 @@ unsafe extern "C" {
     fn XNextEvent(display: *mut c_void, event: *mut Event) -> c_int;
 }
 // An explicit system ABI dependency, not a downloaded library or peer-selected
-// path. The opt-in linux-displays feature needs libXrandr.so.2 at runtime.
+// path. Opt-in monitor capture/input need libXrandr.so.2 at runtime.
 #[link(name = "libXrandr.so.2", kind = "dylib", modifiers = "+verbatim")]
 unsafe extern "C" {
     fn XRRQueryExtension(display: *mut c_void, event: *mut c_int, error: *mut c_int) -> c_int;
@@ -70,6 +74,7 @@ unsafe extern "C" {
     ) -> *mut MonitorInfo;
     fn XRRFreeMonitors(monitors: *mut MonitorInfo);
 }
+#[cfg(feature = "linux-displays")]
 unsafe extern "C" {
     fn fr_x11_capture_rectangle(
         display: *mut c_void,
@@ -121,6 +126,7 @@ impl Drop for MonitorAllocation {
 /// Capture is already in the root's orientation, so no second rotation applies.
 pub struct X11Inventory {
     display: NonNull<c_void>,
+    #[cfg(feature = "linux-displays")]
     damage: Option<crate::damage::Damage>,
     root: c_ulong,
     event_base: c_int,
@@ -143,6 +149,7 @@ impl X11Inventory {
         // Establish the owner immediately so every later refusal closes Xlib.
         let mut this = Self {
             display,
+            #[cfg(feature = "linux-displays")]
             damage: None,
             root: 0,
             event_base: 0,
@@ -227,6 +234,30 @@ impl X11Inventory {
         }
         result
     }
+    /// Match one whole native monitor, never an arbitrary crop or the bounding
+    /// rectangle of several outputs. This inventory must remain alive
+    /// and be revalidated before positive input. A capture owner selected earlier
+    /// must independently revalidate after this admission before granting input;
+    /// equal rectangles alone do not establish cross-process display identity.
+    #[cfg(feature = "linux-input")]
+    pub(crate) fn bind_input(&mut self, bounds: InputBounds) -> Result<(), NativeError> {
+        self.revalidate()?;
+        let mut matching = self.catalog.displays().iter().filter(|display| {
+            InputBounds::new(
+                DesktopPoint {
+                    x: display.x,
+                    y: display.y,
+                },
+                display.pixel_width,
+                display.pixel_height,
+            ) == Some(bounds)
+        });
+        if matching.next().is_none() || matching.next().is_some() {
+            return Err(NativeError::GeometryChanged);
+        }
+        Ok(())
+    }
+    #[cfg(feature = "linux-displays")]
     pub fn select(mut self, handle: u128) -> Result<X11SelectedCapture, NativeError> {
         self.revalidate()?;
         let selected = self
@@ -261,6 +292,7 @@ impl X11Inventory {
             // Revalidation must not swallow source-change notifications. In
             // particular, CheckMonitor and post-encode barriers can run between
             // two captures; their DAMAGE evidence belongs to the next snapshot.
+            #[cfg(feature = "linux-displays")]
             if let Some(damage) = &mut self.damage {
                 damage.event(kind);
             }
@@ -355,6 +387,7 @@ impl X11Inventory {
 }
 impl Drop for X11Inventory {
     fn drop(&mut self) {
+        #[cfg(feature = "linux-displays")]
         drop(self.damage.take());
         // SAFETY: unique display owner; all query allocations were already freed.
         unsafe { XCloseDisplay(self.display.as_ptr()) };
@@ -363,17 +396,20 @@ impl Drop for X11Inventory {
 /// A single whole monitor, never the bounding framebuffer around other outputs.
 /// Reconfiguration is terminal in this initial profile, including unchanged-size
 /// monitor identity replacement. The caller must establish a new selected view.
+#[cfg(feature = "linux-displays")]
 pub struct X11SelectedCapture {
     inventory: X11Inventory,
     selected: Display,
     capture: *mut c_void,
 }
+#[cfg(feature = "linux-displays")]
 impl Drop for X11SelectedCapture {
     fn drop(&mut self) {
         // SAFETY: free the unique transfer before Rust drops the original inventory/display.
         unsafe { crate::image_transfer::fr_ximage_free(self.capture) };
     }
 }
+#[cfg(feature = "linux-displays")]
 impl X11SelectedCapture {
     pub fn transfer_statistics(&self) -> Result<crate::image_transfer::Statistics, NativeError> {
         let mut raw = crate::image_transfer::Raw::default();

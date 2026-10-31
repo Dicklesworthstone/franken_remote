@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 # Explicit protocol fixture. No physical monitor, HEVC decoder or OS effects.
-import struct, sys, time
+import os, struct, sys, time
 CATALOG = bytes.fromhex('@CATALOG@')
 MODE = '@MODE@'
 NALS = ['40010c01ffff01600000030090000003000003003cba0240',
@@ -19,6 +19,7 @@ def reply(h, k, b=b''):
     sys.stdout.buffer.flush()
 last = None
 actual_rate = None
+target_checked = False
 try:
     while True:
         h = read(36)
@@ -29,7 +30,19 @@ try:
             assert len(b) == 52
             actual_rate = int.from_bytes(b[12:16], 'big')
             reply(h, 270, b)
-        elif k == 13: reply(h, 271)
+        elif k == 13:
+            if last is not None:
+                if MODE == 'target-check-refused': raise SystemExit(0)
+                if MODE == 'target-check-stall': time.sleep(60)
+                if MODE.startswith('ordered-target-check:'):
+                    marker = MODE.partition(':')[2]
+                    # This marker is created only by the real native factory.
+                    # Exclusive creation also rejects a second check command.
+                    assert os.path.isfile(marker)
+                    with open(marker + '.checked', 'x') as log:
+                        log.write('checked original capture inventory\n')
+                target_checked = True
+            reply(h, 271)
         elif k == 8: reply(h, 266, b)
         elif k in (4, 6): reply(h, 261 if k == 4 else 264, b[:8])
         elif k == 5: reply(h, 262); break
@@ -40,7 +53,9 @@ try:
             frame, observed, flags, target_rate = struct.unpack('>QQBI', b)
             assert flags & ~3 == 0 and 10_000 <= target_rate <= 200_000_000
             assert actual_rate is not None and 10_000 <= actual_rate <= 200_000_000
-            if last is not None and MODE == 'stall': time.sleep(60)
+            if last is not None and (MODE == 'stall' or
+                                     (MODE == 'stall-after-target-check' and target_checked)):
+                time.sleep(60)
             if last is not None and flags & 2 and not flags & 1:
                 # Unchanged work does not claim to have applied the new target.
                 reply(h, 279, struct.pack('>QQQI', frame, last, observed, actual_rate))
@@ -50,7 +65,9 @@ try:
                 last = frame
         elif k in (2, 7):
             frame, observed, forced = struct.unpack('>QQB', b)
-            if last is not None and MODE == 'stall': time.sleep(60)
+            if last is not None and (MODE == 'stall' or
+                                     (MODE == 'stall-after-target-check' and target_checked)):
+                time.sleep(60)
             if last is not None and not forced:
                 reply(h, 265, struct.pack('>QQQ', frame, last, observed))
             else:

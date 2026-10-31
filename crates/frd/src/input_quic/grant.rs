@@ -6,7 +6,7 @@ use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US, ticke
 use crate::{
     input_agent::{self, AdmissionGate, Driver, Phase, Seat},
     input_watchdog::{Control, StopReason},
-    media::{Error as MediaError, ObservationControl, host_now},
+    media::{Error as MediaError, ObservationControl, host_now, source_check::InputTargetCheck},
 };
 use asupersync::{cx::Cx, net::quic_native::StreamRole};
 use fr_core::{
@@ -108,6 +108,7 @@ pub struct GrantBroker {
     terminal: bool,
     // The original media failure budget, not a new control-request allowance.
     recovery_until: Option<u64>,
+    native_target_check: Option<InputTargetCheck>,
 }
 impl GrantBroker {
     /// Consume completed configuration/input negotiation on this same session.
@@ -229,7 +230,21 @@ impl GrantBroker {
             last,
             terminal: false,
             recovery_until: None,
+            native_target_check: None,
         })
+    }
+    /// Installed by the original selected-source acquisition before any request.
+    /// A native Ready reply alone cannot prove that its inventory overlaps the
+    /// source that produced the displayed view. This one-use gate cannot reset.
+    pub(crate) fn require_native_target_check(
+        &mut self,
+        check: InputTargetCheck,
+    ) -> Result<(), Error> {
+        if self.waiting.is_some() || self.native.is_some() || self.native_target_check.is_some() {
+            return Err(Error::AlreadyAttached);
+        }
+        self.native_target_check = Some(check);
+        Ok(())
     }
     /// Inspect the original host's view gate without reserving the Seat,
     /// minting credentials or treating the remote request as consent.
@@ -598,6 +613,13 @@ impl GrantBroker {
         }
         if native.queued {
             return Ok(Event::GrantQueued);
+        }
+        if let Some(check) = &self.native_target_check
+            && !check
+                .after_native_ready()
+                .map_err(|()| Error::NativeNotReady)?
+        {
+            return Ok(Event::NativeStarting);
         }
         let result = connection.send(
             &self.cx,

@@ -343,7 +343,9 @@ async fn exercise(c: Cx, h: Cx, case: Case) {
         &c,
         &h,
         if case == Case::CaptureStall {
-            "stall"
+            // Let the newly ready input owner establish its causal topology
+            // overlap first; this case exercises held-input cleanup AFTER grant.
+            "stall-after-target-check"
         } else {
             "unchanged"
         },

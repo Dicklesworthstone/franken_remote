@@ -12,8 +12,11 @@ use core::{
     ptr::NonNull,
 };
 use fr_core::{
-    input::{DesktopPoint, InputBounds, KeyTransition, PointerButton},
-    input_submission::{Capabilities, Capability, InputSink, Operation, PlatformError, Submission},
+    input::{DesktopPoint, InputBounds, PointerButton},
+    input_submission::{
+        Capabilities, Capability, InputSink, Operation, PlatformError, Refusal, Submission,
+    },
+    time::HostInstant,
 };
 use scroll::WheelState;
 use std::{
@@ -105,6 +108,9 @@ pub struct X11Pointer {
     screen: c_int,
     root: c_ulong,
     dimensions: (u32, u32),
+    target_bounds: Option<InputBounds>,
+    #[cfg(any(feature = "linux-displays", feature = "linux-input-monitors"))]
+    target_inventory: Option<crate::displays::X11Inventory>,
     relative: bool,
     line_scroll: bool,
     wheel: WheelState,
@@ -139,6 +145,9 @@ impl X11Pointer {
             screen,
             root,
             dimensions: (0, 0),
+            target_bounds: None,
+            #[cfg(any(feature = "linux-displays", feature = "linux-input-monitors"))]
+            target_inventory: None,
             relative: false,
             line_scroll: false,
             wheel: WheelState::default(),
@@ -183,21 +192,69 @@ impl X11Pointer {
         Ok(owner)
     }
     /// Open the locally selected display and revalidate the exact granted
-    /// bounds and negotiated capabilities before any input is possible. The
-    /// single check shared by the in-process factory and the input executor.
+    /// bounds and negotiated capabilities before any input is possible. With
+    /// monitor support, EVERY exact target must match one current `RandR` monitor,
+    /// including a monitor covering the entire root. There is no root fallback.
+    /// Plain linux-input retains its original whole-root-only profile.
+    /// The original selected capture must revalidate AFTER native readiness
+    /// before the host grants input: equal bounds alone do not prove identity.
     pub fn open_exact(
         name: &str,
         expected_bounds: InputBounds,
         required: Capabilities,
     ) -> Result<Self, PlatformError> {
-        let sink = Self::open(name)?;
-        if sink.bounds() != expected_bounds {
-            return Err(PlatformError::GeometryChanged);
+        let mut sink = Self::open(name)?;
+        if cfg!(any(
+            feature = "linux-displays",
+            feature = "linux-input-monitors"
+        )) || sink.bounds() != expected_bounds
+        {
+            sink.bind_monitor(name, expected_bounds)?;
         }
         if !sink.capabilities().contains_all(required) {
             return Err(PlatformError::Unsupported);
         }
         Ok(sink)
+    }
+    #[cfg(any(feature = "linux-displays", feature = "linux-input-monitors"))]
+    fn bind_monitor(&mut self, name: &str, bounds: InputBounds) -> Result<(), PlatformError> {
+        let mut inventory =
+            crate::displays::X11Inventory::open(name, fr_core::limits::ProtocolLimits::ABSOLUTE)
+                .map_err(monitor_error)?;
+        inventory.bind_input(bounds).map_err(monitor_error)?;
+        if self.geometry()? != self.dimensions {
+            return Err(PlatformError::GeometryChanged);
+        }
+        inventory.revalidate().map_err(monitor_error)?;
+        self.target_bounds = Some(bounds);
+        self.target_inventory = Some(inventory);
+        Ok(())
+    }
+    #[cfg(not(any(feature = "linux-displays", feature = "linux-input-monitors")))]
+    fn bind_monitor(&mut self, _: &str, _: InputBounds) -> Result<(), PlatformError> {
+        Err(PlatformError::GeometryChanged)
+    }
+    /// Root dimensions and the original monitor lifetime both remain bound.
+    /// Release-only cleanup deliberately bypasses these positive-input checks.
+    fn validate_target(&mut self) -> Result<(), PlatformError> {
+        if self.geometry()? != self.dimensions {
+            return Err(PlatformError::GeometryChanged);
+        }
+        #[cfg(any(feature = "linux-displays", feature = "linux-input-monitors"))]
+        if let Some(inventory) = &mut self.target_inventory {
+            inventory.revalidate().map_err(monitor_error)?;
+        }
+        Ok(())
+    }
+    fn target_pointer(&self, point: DesktopPoint) -> Result<(), PlatformError> {
+        if self
+            .target_bounds
+            .is_some_and(|bounds| !bounds.contains(point))
+        {
+            Err(PlatformError::GeometryChanged)
+        } else {
+            Ok(())
+        }
     }
     /// Every native code this owner holds OR has prepared to press, including
     /// wheel buttons: the executor's last-resort release set. Pessimistic by
@@ -296,9 +353,6 @@ impl X11Pointer {
             self.prepared_button = Some(self.buttons[index].ok_or(PlatformError::Unsupported)?);
             return Ok(());
         }
-        if self.geometry()? != self.dimensions {
-            return Err(PlatformError::GeometryChanged);
-        }
         if self.buttons[index].is_some() {
             return Err(PlatformError::Permission);
         }
@@ -309,7 +363,9 @@ impl X11Pointer {
             PointerButton::Back => 8,
             PointerButton::Forward => 9,
         };
-        if logical <= 5 && self.query_pointer()?.1 & (1 << (7 + logical)) != 0 {
+        let (point, mask) = self.query_pointer()?;
+        self.target_pointer(point)?;
+        if logical <= 5 && mask & (1 << (7 + logical)) != 0 {
             return Err(PlatformError::Permission);
         }
         let mut mapping = [0u8; 256];
@@ -337,12 +393,14 @@ impl X11Pointer {
         Ok(())
     }
     pub fn bounds(&self) -> InputBounds {
-        InputBounds::new(
-            DesktopPoint { x: 0, y: 0 },
-            self.dimensions.0,
-            self.dimensions.1,
-        )
-        .expect("validated root geometry")
+        self.target_bounds.unwrap_or_else(|| {
+            InputBounds::new(
+                DesktopPoint { x: 0, y: 0 },
+                self.dimensions.0,
+                self.dimensions.1,
+            )
+            .expect("validated root geometry")
+        })
     }
     fn geometry(&self) -> Result<(u32, u32), PlatformError> {
         let (mut root, mut x, mut y, mut w, mut h, mut border, mut depth) = (0, 0, 0, 0, 0, 0, 0);
@@ -363,6 +421,8 @@ impl X11Pointer {
         };
         if ok == 0 || w == 0 || h == 0 {
             Err(PlatformError::Unavailable)
+        } else if root != self.root || x != 0 || y != 0 {
+            Err(PlatformError::GeometryChanged)
         } else {
             Ok((w, h))
         }
@@ -388,23 +448,23 @@ impl X11Pointer {
         {
             return Err(PlatformError::Unavailable);
         }
+        if root != self.root {
+            return Err(PlatformError::GeometryChanged);
+        }
         Ok((DesktopPoint { x, y }, mask))
     }
 }
 impl X11Pointer {
     fn prepare_native(&mut self, op: Operation) -> Result<(), PlatformError> {
+        if !op.is_release() {
+            self.validate_target()?;
+        }
         match op {
             Operation::Key { key, transition } => {
-                if transition != KeyTransition::Release && self.geometry()? != self.dimensions {
-                    return Err(PlatformError::GeometryChanged);
-                }
                 self.keyboard.prepare(key, transition)?;
             }
             Operation::Absolute(position) => {
                 if !self.bounds().contains(position) {
-                    return Err(PlatformError::GeometryChanged);
-                }
-                if self.geometry()? != self.dimensions {
                     return Err(PlatformError::GeometryChanged);
                 }
             }
@@ -412,14 +472,12 @@ impl X11Pointer {
                 if !self.relative || i16::try_from(x).is_err() || i16::try_from(y).is_err() {
                     return Err(PlatformError::Unsupported);
                 }
-                if self.geometry()? != self.dimensions {
-                    return Err(PlatformError::GeometryChanged);
-                }
                 // Refuse a known off-display target instead of relying on XTest
                 // to clamp it. Keep the operation relative: a local movement
                 // after this query must not be overwritten by a stale absolute
                 // position. The native receipt remains API-submitted evidence.
                 let current = self.query_pointer()?.0;
+                self.target_pointer(current)?;
                 let target = current.x.checked_add(x).zip(current.y.checked_add(y));
                 if !target.is_some_and(|(x, y)| self.bounds().contains(DesktopPoint { x, y })) {
                     return Err(PlatformError::GeometryChanged);
@@ -494,6 +552,64 @@ impl X11Pointer {
         }
         Submission::Submitted
     }
+
+    /// Revalidate a retained preparation, then let its authority owner make the
+    /// final decision immediately before the native call. The predicate runs
+    /// AFTER every blocking preflight and cache-lock acquisition. It must not
+    /// perform native work or enqueue/retry the operation. `held` includes the
+    /// refreshed physical codes for the executor's emergency release snapshot.
+    ///
+    /// Prepare and Submit can be separated by IPC, local input and topology or
+    /// mapping changes. Refresh the original operation, never trust an old
+    /// Prepared reply as current native evidence. Failure consumes preparation.
+    /// Release-only cleanup remains possible on a retired monitor inventory.
+    pub fn submit_checked<E>(
+        &mut self,
+        op: Operation,
+        final_check: impl FnOnce(NativeHeld) -> Result<(), E>,
+    ) -> Result<Submission, E> {
+        if self.prepared != Some(op) || self.xtest.is_none() {
+            self.cancel_prepared();
+            return Ok(Submission::NotSubmitted(PlatformError::Unsupported));
+        }
+        // Do not retain the process-global XTest cache guard over potentially
+        // blocking inventory/key/button queries. Keep the independent consent
+        // exclusion held until the native submission or confirmed cancellation.
+        self.xtest = None;
+        self.prepared = None;
+        self.prepared_button = None;
+        self.wheel.prepared = None;
+        self.keyboard.cancel_prepared();
+        if let Err(error) = self.prepare_native(op) {
+            self.cancel_prepared();
+            return Ok(Submission::NotSubmitted(error));
+        }
+        if let Err(error) = final_check(self.native_held()) {
+            self.cancel_prepared();
+            return Err(error);
+        }
+        // No further preflight follows the final decision. The existing sync
+        // below acknowledges the already-submitted request before consent UI
+        // exclusion ends; it is not another opportunity to authorize input.
+        let result = self.submit_native(op);
+        if self.approval.is_held() {
+            // SAFETY: live thread-confined display, ordering prior XTest work
+            // before another cooperating process may map an approval prompt.
+            unsafe { XSync(self.display.as_ptr(), 0) };
+        }
+        self.approval.leave();
+        Ok(result)
+    }
+}
+#[cfg(any(feature = "linux-displays", feature = "linux-input-monitors"))]
+fn monitor_error(error: crate::NativeError) -> PlatformError {
+    match error {
+        crate::NativeError::GeometryChanged | crate::NativeError::Closed => {
+            PlatformError::GeometryChanged
+        }
+        crate::NativeError::InvalidConfiguration => PlatformError::Unsupported,
+        _ => PlatformError::Unavailable,
+    }
 }
 impl InputSink for X11Pointer {
     fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
@@ -511,17 +627,19 @@ impl InputSink for X11Pointer {
         result
     }
     fn submit(&mut self, op: Operation) -> Submission {
-        let result = self.submit_native(op);
-        if self.approval.is_held() {
-            // SAFETY: live thread-confined display. This barriers prior XTest
-            // requests BEFORE allowing a prompt to map on another connection.
-            // It is server-processing order, not proof of application effects.
-            unsafe {
-                XSync(self.display.as_ptr(), 0);
-            }
+        match self.submit_checked(op, |_| Ok::<(), core::convert::Infallible>(())) {
+            Ok(result) => result,
+            Err(never) => match never {},
         }
-        self.approval.leave();
-        result
+    }
+    fn submit_authorized(
+        &mut self,
+        op: Operation,
+        authorize: &mut dyn FnMut() -> Result<HostInstant, Refusal>,
+    ) -> Result<Submission, Refusal> {
+        // The same-thread owner samples its clock and full authority AFTER
+        // final native revalidation; no clock-domain translation is needed.
+        self.submit_checked(op, |_| authorize().map(|_| ()))
     }
     fn locally_revoked(&mut self) -> bool {
         self.approval.revoked()

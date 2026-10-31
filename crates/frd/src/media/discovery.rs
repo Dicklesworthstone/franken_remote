@@ -228,6 +228,42 @@ impl Drop for SelectionGuard {
     }
 }
 impl CaptureSource {
+    /// Every genuinely selected source requires a new topology check after its
+    /// input owner is ready. Unselected legacy capture has no monitor inventory
+    /// to check; it cannot be used to construct the native selected publisher.
+    pub(crate) fn input_target_check(
+        &self,
+        control: &ObservationControl,
+    ) -> Result<Option<super::source_check::InputTargetCheck>, Error> {
+        control.check()?;
+        let Some(original) = &self.selected_control else {
+            return Ok(None);
+        };
+        if !original.same_owner(control) {
+            return Err(Error::InvalidFrame);
+        }
+        Ok(Some(super::source_check::InputTargetCheck::new(
+            &self.source,
+        )))
+    }
+
+    /// The command can only have been issued after native readiness. Check the
+    /// original inventory now, on its one existing worker, without capturing or
+    /// updating source freshness. A reply to earlier capture work never suffices.
+    pub(crate) async fn check_input_target(
+        &mut self,
+        control: &ObservationControl,
+        pending: super::source_check::PendingInputTargetCheck,
+    ) -> Result<(), Error> {
+        if !pending.matches(&self.source) {
+            return Err(Error::InvalidFrame);
+        }
+        self.check_selected_display(control).await?;
+        pending
+            .verified(&self.source)
+            .map_err(|()| Error::InvalidFrame)
+    }
+
     /// Only the selected native display, under the same original source consent.
     /// This is an immutable disclosure snapshot, not a new topology check,
     /// freshness witness or permission for another viewer. Neighboring displays

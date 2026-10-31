@@ -472,6 +472,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             credit,
             results,
             in_flight: None,
+            native_target_check: None,
             send_evidence: send_evidence::SendEvidence::default(),
             pacing: None,
             bitrate: None,

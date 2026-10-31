@@ -190,6 +190,7 @@ fn queued_grant_closure_before_broker_finish_has_only_the_original_lease_report(
             current: Some(target()),
             ready: false,
             failure: None,
+            native_target_check: None,
         };
         let mut owner = Host::Observe(host);
         let ((result, delivery, records), native) = Box::pin(support::both(

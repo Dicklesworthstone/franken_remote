@@ -55,7 +55,7 @@ These are the steps that ran live on 2026-10-13 between Ubuntu 25.10/26.04 hosts
 ```bash
 cargo build --release --locked -p frd --bin frd
 cargo build --release --locked -p fr-native \
-  --features linux-desktop,linux-displays,linux-input,linux-input-agent,linux-clipboard \
+  --features linux-desktop,linux-displays,linux-input-monitors,linux-input-agent,linux-clipboard \
   --bin fr --bin fr-media-worker --bin fr-input-agent
 ```
 

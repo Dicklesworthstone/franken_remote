@@ -12,6 +12,8 @@ pub use cursor_overlay::{CursorOverlay, Placement as OverlayPlacement};
 mod presentation;
 pub use presentation::PresentationMaintenance;
 
+use crate::NativeError;
+
 use core::{
     ffi::{c_char, c_int, c_ulong, c_void},
     fmt,
@@ -122,28 +124,6 @@ unsafe extern "C" {
     fn fr_x11_present(p: *mut c_void, bytes: *const u8, len: usize) -> c_int;
 }
 
-/// No native error string or screen content crosses into ordinary diagnostics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeError {
-    InvalidConfiguration,
-    Unavailable,
-    Allocation,
-    Codec,
-    GeometryChanged,
-    DisplayUnavailable,
-    NeedDrain,
-    NeedInput,
-    EndOfStream,
-    StaleGeneration,
-    UnsupportedBitstream,
-    Closed,
-}
-impl fmt::Display for NativeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{self:?}")
-    }
-}
-impl std::error::Error for NativeError {}
 pub(crate) fn status(code: c_int) -> Result<(), NativeError> {
     match code {
         0 => Ok(()),

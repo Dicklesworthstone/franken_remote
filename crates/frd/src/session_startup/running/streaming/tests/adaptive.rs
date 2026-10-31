@@ -218,6 +218,7 @@ fn empty_original_egress_does_not_report_ready_before_raw_capture_admission() {
             credit,
             results,
             in_flight: None,
+            native_target_check: None,
             send_evidence: send_evidence::SendEvidence::default(),
             pacing: stream.pacing.as_mut(),
             bitrate: None,

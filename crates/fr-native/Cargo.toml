@@ -57,6 +57,8 @@ linux-opus-process = ["linux-opus", "dep:fr-client"]
 linux-audio = ["linux-pulse-playback", "linux-opus-process"]
 linux-displays = ["linux-media"]
 linux-input = []
+# Exact RandR monitor input targets, without the media/FFmpeg worker boundary.
+linux-input-monitors = ["linux-input"]
 linux-clipboard = []
 linux-session-ui = ["dep:frd", "dep:asupersync"]
 # Original Host consent on one locally selected, logind-guarded X11 desktop.
@@ -65,7 +67,7 @@ linux-viewer-input = ["dep:frd"]
 linux-viewer-window = ["linux-viewer-input"]
 cli = ["dep:asupersync", "dep:frd", "dep:fr-tailnet", "dep:fr-client"]
 linux-desktop = ["cli", "linux-viewer-window", "dep:fr-files"]
-linux-input-agent = ["linux-input", "dep:frd", "dep:asupersync"]
+linux-input-agent = ["linux-input-monitors", "dep:frd", "dep:asupersync"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

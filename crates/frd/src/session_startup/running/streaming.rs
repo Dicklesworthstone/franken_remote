@@ -14,6 +14,7 @@ use crate::{
     media::receiver_feedback::{self as feedback, HostFeedback, Setup},
     media::{
         CaptureSource, CaptureUpdate, ObservationControl,
+        source_check::{InputTargetCheck, PendingInputTargetCheck},
         streaming::{Statistics, Stream},
     },
     media_egress::{Lane, Progress},
@@ -501,6 +502,9 @@ impl StreamingHost {
         };
         let (credit, requests) = mpsc::channel(1);
         let (completed, results) = mpsc::channel(1);
+        let native_target_check = acquisition
+            .as_ref()
+            .and_then(|a| a.native_target_check.clone());
         let cursor = self.cursor.as_deref();
         let mut producer = pin!(produce(
             &mut stream.source,
@@ -529,6 +533,7 @@ impl StreamingHost {
                 credit,
                 results,
                 in_flight: None,
+                native_target_check,
                 send_evidence: send_evidence::SendEvidence::default(),
                 pacing: stream.pacing.as_mut(),
                 bitrate: stream.bitrate.as_mut(),
@@ -558,6 +563,7 @@ impl StreamingHost {
                 )
                 .await?;
                 if services.video.in_flight.is_none()
+                    && !services.video.checking_input_target()
                     && let Some(demand) = services.pending.take()
                 {
                     return Ok(demand);
@@ -702,17 +708,32 @@ impl<F> Drop for Guarded<F> {
     }
 }
 
+enum SourceWork {
+    Capture(Option<u32>),
+    CheckInputTarget(PendingInputTargetCheck),
+}
+
 async fn produce(
     source: &mut CaptureSource,
     control: &ObservationControl,
     cursor: Option<&cursor::StreamCursor>,
-    mut requests: mpsc::Receiver<Option<u32>>,
+    mut requests: mpsc::Receiver<SourceWork>,
     completed: mpsc::Sender<CaptureUpdate>,
 ) -> Result<(), Error> {
     let cx = control.context();
     loop {
-        let bitrate = requests.recv(&cx).await.map_err(|_| Error::Closed)?;
+        let request = requests.recv(&cx).await.map_err(|_| Error::Closed)?;
         control.check().map_err(Error::Media)?;
+        let bitrate = match request {
+            SourceWork::Capture(bitrate) => bitrate,
+            SourceWork::CheckInputTarget(pending) => {
+                source
+                    .check_input_target(control, pending)
+                    .await
+                    .map_err(Error::Media)?;
+                continue;
+            }
+        };
         let update = match bitrate {
             Some(rate) => source.capture_at_rate(control, false, rate).await,
             None => source.capture_if_changed(control, false).await,
@@ -736,9 +757,10 @@ struct VideoServices<'a, S> {
     statistics: &'a mut Statistics,
     policy: crate::media::streaming::Policy,
     capacity: usize,
-    credit: mpsc::Sender<Option<u32>>,
+    credit: mpsc::Sender<SourceWork>,
     results: mpsc::Receiver<CaptureUpdate>,
     in_flight: Option<u64>,
+    native_target_check: Option<InputTargetCheck>,
     send_evidence: send_evidence::SendEvidence,
     pacing: Option<&'a mut pacing::Controller>,
     bitrate: Option<&'a mut fr_media::bitrate::Controller>,
@@ -755,6 +777,29 @@ struct VideoServices<'a, S> {
     other: &'a mut S,
 }
 impl<S> VideoServices<'_, S> {
+    fn checking_input_target(&self) -> bool {
+        self.native_target_check
+            .as_ref()
+            .is_some_and(InputTargetCheck::pending)
+    }
+
+    /// A queued capture must finish before another worker request. This check
+    /// uses that SAME capacity-one command channel, independently of video byte
+    /// credit/cadence, and carries no image or fresh-view claim.
+    fn check_input_target(&mut self) -> Result<(), Error> {
+        if self.in_flight.is_none()
+            && let Some(pending) = self
+                .native_target_check
+                .as_ref()
+                .and_then(InputTargetCheck::take_pending)
+        {
+            self.credit
+                .try_send(SourceWork::CheckInputTarget(pending))
+                .map_err(|_| Error::Order)?;
+        }
+        Ok(())
+    }
+
     /// After media records: the remote cursor (at most one reliable shape and
     /// one position datagram), then advisory receiver feedback.
     fn service_lanes(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<u64, Error> {
@@ -975,6 +1020,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
             }
         }
         let current = self.service_lanes(q, &cx)?;
+        self.check_input_target()?;
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, credit, observation)?;
         let wake = self.input_wake.due(
@@ -983,7 +1029,11 @@ impl<S: Services> Services for VideoServices<'_, S> {
             self.in_flight.is_some(),
             self.pacing.as_deref(),
         )?;
-        if self.in_flight.is_none() && (current >= self.next_capture || wake) && credit {
+        if self.in_flight.is_none()
+            && !self.checking_input_target()
+            && (current >= self.next_capture || wake)
+            && credit
+        {
             let capture = self
                 .bitrate
                 .as_mut()
@@ -991,7 +1041,9 @@ impl<S: Services> Services for VideoServices<'_, S> {
                 .transpose()
                 .map_err(bitrate_error)?;
             self.credit
-                .try_send(capture.map(fr_media::bitrate::Capture::bitrate))
+                .try_send(SourceWork::Capture(
+                    capture.map(fr_media::bitrate::Capture::bitrate),
+                ))
                 .map_err(|_| Error::Order)?;
             self.rate_in_flight = capture;
             if current < self.next_capture {
