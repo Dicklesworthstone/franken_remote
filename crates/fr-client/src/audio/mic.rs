@@ -29,6 +29,18 @@ pub enum MicControllerError {
     EncoderError(String),
     /// Configuration error.
     ConfigError(String),
+    /// A retired audio epoch cannot carry another talk segment.
+    GenerationRetired,
+    /// Reconfiguration must advance past every previously attempted generation.
+    GenerationNotAdvanced,
+    /// Captured PCM does not match the original format or sample timeline.
+    InvalidFrame,
+    /// Encoder output does not belong to the exact submitted frame/epoch.
+    InvalidPacket,
+    /// This synchronous capture boundary cannot retain deferred encoder work.
+    EncoderOutputPending,
+    /// A sequence, sample position, or emitted-packet counter was exhausted.
+    CounterOverflow,
 }
 
 impl fmt::Display for MicControllerError {
@@ -44,6 +56,16 @@ impl fmt::Display for MicControllerError {
             Self::NotTransmitting => write!(f, "microphone is muted or push-to-talk is inactive"),
             Self::EncoderError(e) => write!(f, "microphone encoder error: {e}"),
             Self::ConfigError(e) => write!(f, "microphone config error: {e}"),
+            Self::GenerationRetired => {
+                write!(f, "microphone talk requires a fresh audio generation")
+            }
+            Self::GenerationNotAdvanced => write!(f, "microphone generation did not advance"),
+            Self::InvalidFrame => write!(f, "microphone capture format or timeline mismatch"),
+            Self::InvalidPacket => write!(f, "microphone encoder output mismatch"),
+            Self::EncoderOutputPending => {
+                write!(f, "microphone encoder did not complete this frame")
+            }
+            Self::CounterOverflow => write!(f, "microphone audio counter exhausted"),
         }
     }
 }
@@ -65,6 +87,10 @@ pub struct ClientMicController {
     encoder: Box<dyn AudioEncoder>,
     /// Monotonic sequence counter for uplink packets.
     sequence: u64,
+    /// Each admitted source interval is consumed, even on encoder failure.
+    last_input_end: Option<u64>,
+    /// A fault is terminal for this generation; consent alone cannot clear it.
+    fault: Option<MicControllerError>,
     /// Last transmitted audio level (RMS energy in 0.0..=1.0 range).
     current_rms: f32,
     /// Total packets successfully transmitted.
@@ -97,6 +123,9 @@ impl ClientMicController {
         encoder
             .configure(config)
             .map_err(|e| MicControllerError::ConfigError(e.to_string()))?;
+        if encoder.configuration() != Some(config) {
+            return Err(MicControllerError::InvalidPacket);
+        }
 
         Ok(Self {
             explicit_enabled: false,
@@ -106,6 +135,8 @@ impl ClientMicController {
             config,
             encoder,
             sequence: 0,
+            last_input_end: None,
+            fault: None,
             current_rms: 0.0,
             total_packets_transmitted: 0,
         })
@@ -114,15 +145,10 @@ impl ClientMicController {
     /// Set operating system microphone permission state.
     pub fn set_permission(&mut self, permission: MicPermission) {
         self.permission = permission;
-        if matches!(
-            permission,
-            MicPermission::Denied | MicPermission::Restricted
-        ) {
-            // Immediately disable and mute if permission was denied or restricted
-            self.explicit_enabled = false;
-            self.talk_mode = MicTalkMode::Muted;
-            self.encoder.reset();
-            self.current_rms = 0.0;
+        if permission != MicPermission::Granted {
+            // Unknown permission is loss of authority too. A later OS grant
+            // must not restore a previous open-mic or held push-to-talk intent.
+            self.fence();
         }
     }
 
@@ -137,15 +163,15 @@ impl ClientMicController {
     /// Refuses with `MicControllerError::PermissionDenied` if OS permission is not granted.
     pub fn set_explicit_enabled(&mut self, enabled: bool) -> Result<(), MicControllerError> {
         if enabled {
+            if let Some(error) = &self.fault {
+                return Err(error.clone());
+            }
             if self.permission != MicPermission::Granted {
                 return Err(MicControllerError::PermissionDenied);
             }
             self.explicit_enabled = true;
         } else {
-            self.explicit_enabled = false;
-            self.talk_mode = MicTalkMode::Muted;
-            self.encoder.reset();
-            self.current_rms = 0.0;
+            self.fence();
         }
         Ok(())
     }
@@ -157,6 +183,9 @@ impl ClientMicController {
     }
 
     /// Update talk mode (e.g. key press for Push-to-Talk or Mute toggle).
+    /// Stopping an epoch which admitted PCM is terminal; a later talk segment
+    /// needs a fresh configuration and explicit enable, never a codec reset
+    /// which might preserve queued speech or reuse old packet identifiers.
     pub fn set_talk_mode(&mut self, mode: MicTalkMode) {
         if !self.explicit_enabled {
             self.talk_mode = MicTalkMode::Muted;
@@ -164,8 +193,11 @@ impl ClientMicController {
         }
         self.talk_mode = mode;
         if !mode.is_active() {
-            self.encoder.reset();
-            self.current_rms = 0.0;
+            if self.last_input_end.is_some() {
+                self.fence();
+            } else {
+                self.current_rms = 0.0;
+            }
         }
     }
 
@@ -186,12 +218,42 @@ impl ClientMicController {
         self.explicit_enabled
             && self.permission == MicPermission::Granted
             && self.talk_mode.is_active()
+            && self.fault.is_none()
+    }
+
+    /// Terminal failure of the current audio epoch. A strictly newer,
+    /// successfully configured epoch and fresh explicit consent are required.
+    pub fn error(&self) -> Option<&MicControllerError> {
+        self.fault.as_ref()
+    }
+
+    fn fence(&mut self) {
+        self.explicit_enabled = false;
+        self.talk_mode = MicTalkMode::Muted;
+        self.current_rms = 0.0;
+        if self.last_input_end.is_some() && self.fault.is_none() {
+            self.fault = Some(MicControllerError::GenerationRetired);
+        }
+        // Trait reset is best-effort: some native encoders refuse same-epoch
+        // configuration. Never treat it as proof that queued sound was erased
+        // or permit another frame in an epoch which held captured audio.
+        self.encoder.reset();
+    }
+
+    fn fail<T>(&mut self, error: MicControllerError) -> Result<T, MicControllerError> {
+        self.fault = Some(error.clone());
+        self.fence();
+        Err(error)
     }
 
     /// Process a captured PCM audio frame from the local recording device.
     ///
     /// Hot-mic guarantee: if `is_transmitting()` is false, returns `Ok(None)` immediately,
     /// dropping the audio without passing it to the encoder or wire.
+    /// The supplied encoder must complete one packet synchronously; deferred
+    /// work is refused so a later capture cannot release an older talk segment.
+    /// Run this on the supervised capture worker, never the authority thread.
+    /// The caller still owns capture-age, transport and current lease checks.
     pub fn process_captured_pcm(
         &mut self,
         frame: &AudioPcmFrame,
@@ -202,45 +264,87 @@ impl ClientMicController {
             return Ok(None);
         }
 
-        // Measure RMS energy for visual indicator
-        self.current_rms = frame.rms_energy();
-
-        // Submit PCM to encoder
-        self.encoder
-            .submit_pcm(frame)
-            .map_err(|e| MicControllerError::EncoderError(e.to_string()))?;
-
-        // Poll encoded access unit
-        if let Some(unit) = self
-            .encoder
-            .poll_packet()
-            .map_err(|e| MicControllerError::EncoderError(e.to_string()))?
+        if frame.generation() != self.generation
+            || frame.channels() != self.config.channels()
+            || frame.sample_rate() != self.config.sample_rate()
+            || u32::try_from(frame.samples_per_channel()).ok()
+                != Some(self.config.expected_samples_per_frame())
+            || self
+                .last_input_end
+                .is_some_and(|end| frame.timestamp_samples() != end)
         {
-            self.sequence = self.sequence.saturating_add(1);
-            self.total_packets_transmitted = self.total_packets_transmitted.saturating_add(1);
-            Ok(Some(unit))
-        } else {
-            Ok(None)
+            return self.fail(MicControllerError::InvalidFrame);
         }
+        let Some(end) = frame
+            .timestamp_samples()
+            .checked_add(u64::from(self.config.expected_samples_per_frame()))
+        else {
+            return self.fail(MicControllerError::CounterOverflow);
+        };
+        let Some(next) = self.sequence.checked_add(1) else {
+            return self.fail(MicControllerError::CounterOverflow);
+        };
+        let Some(total) = self.total_packets_transmitted.checked_add(1) else {
+            return self.fail(MicControllerError::CounterOverflow);
+        };
+        self.last_input_end = Some(end);
+        if let Err(error) = self.encoder.submit_pcm(frame) {
+            return self.fail(MicControllerError::EncoderError(error.to_string()));
+        }
+        let unit = match self.encoder.poll_packet() {
+            Ok(Some(unit)) => unit,
+            Ok(None) => return self.fail(MicControllerError::EncoderOutputPending),
+            Err(error) => return self.fail(MicControllerError::EncoderError(error.to_string())),
+        };
+        if unit.direction() != AudioDirection::Uplink
+            || unit.generation() != self.generation
+            || unit.sequence() != self.sequence
+            || unit.timestamp_samples() != frame.timestamp_samples()
+            || u32::from(unit.duration_samples()) != self.config.expected_samples_per_frame()
+        {
+            return self.fail(MicControllerError::InvalidPacket);
+        }
+        self.sequence = next;
+        self.total_packets_transmitted = total;
+        self.current_rms = frame.rms_energy();
+        Ok(Some(unit))
     }
 
     /// Handle audio generation change (e.g. device switch or reconnect).
-    /// Drops any buffered encoder state and resets sequence/timestamps.
-    pub fn reset_generation(&mut self, new_generation: AudioGeneration) {
+    /// Fence before reconfiguration, clear OS/talk consent, and consume a
+    /// strictly newer generation even when the encoder fails. No swallowed
+    /// configure error and no late reply can make the old epoch usable again.
+    pub fn reset_generation(
+        &mut self,
+        new_generation: AudioGeneration,
+    ) -> Result<(), MicControllerError> {
+        self.fence();
+        self.permission = MicPermission::NotRequested;
+        if !new_generation.supersedes(self.generation) {
+            return self.fail(MicControllerError::GenerationNotAdvanced);
+        }
         self.generation = new_generation;
-        if let Ok(new_config) = AudioStreamConfig::new(
+        let config = match AudioStreamConfig::new(
             AudioDirection::Uplink,
             new_generation,
             self.config.channels(),
             self.config.frame_duration_ms(),
             self.config.jitter_target_ms(),
         ) {
-            self.config = new_config;
-            let _ = self.encoder.configure(new_config);
-        }
-        self.encoder.reset();
+            Ok(config) => config,
+            Err(error) => return self.fail(MicControllerError::ConfigError(error.to_string())),
+        };
+        self.config = config;
         self.sequence = 0;
-        self.current_rms = 0.0;
+        self.last_input_end = None;
+        if let Err(error) = self.encoder.configure(config) {
+            return self.fail(MicControllerError::ConfigError(error.to_string()));
+        }
+        if self.encoder.configuration() != Some(config) {
+            return self.fail(MicControllerError::InvalidPacket);
+        }
+        self.fault = None;
+        Ok(())
     }
 
     /// Current live RMS energy (0.0 to 1.0) for VU meter UI.
@@ -249,12 +353,17 @@ impl ClientMicController {
         self.current_rms
     }
 
-    /// Total packets transmitted in this session.
+    /// Total packets emitted to the caller in this controller's lifetime.
+    /// This does not acknowledge network transmission or host audio submission.
     #[must_use]
     pub fn total_packets_transmitted(&self) -> u64 {
         self.total_packets_transmitted
     }
 }
+
+#[cfg(test)]
+#[path = "mic/lifecycle_tests.rs"]
+mod lifecycle_tests;
 
 #[cfg(test)]
 mod tests {

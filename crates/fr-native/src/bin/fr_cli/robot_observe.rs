@@ -93,7 +93,7 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
         }
         match flag {
             "--experimental-native" | "--by-name" | "--ipv6" | "--json" => {
-                connect.push(flag.to_owned())
+                connect.push(flag.to_owned());
             }
             "--display" | "--worker" | "--trust-roots" | "--x-display" | "--socket" | "--port"
             | "--fit" | "--evidence-level" => {
