@@ -143,7 +143,10 @@ impl AudioJitterBuffer {
     pub const fn metrics(&self) -> JitterBufferMetrics {
         self.metrics
     }
-    pub(super) fn contains_sequence(&self, sequence: u64) -> bool {
+    /// Read-only membership for the playout owner's bounded original-deadline
+    /// metadata. Admission may evict obsolete startup packets; their metadata
+    /// must leave with them. This does not grant output or renew packet age.
+    pub fn contains_sequence(&self, sequence: u64) -> bool {
         self.slots[..self.slot_count]
             .iter()
             .flatten()
@@ -306,7 +309,7 @@ impl AudioJitterBuffer {
     /// or trailing hole can be concealed only when its device slot is due.
     /// The owner must retain one outstanding decode and its original deadline;
     /// this is not permission to free-run the decoder or submit PCM early.
-    pub(super) fn predecode_packet(&mut self) -> Option<AudioAccessUnit> {
+    pub fn predecode_packet(&mut self) -> Option<AudioAccessUnit> {
         if self.error.is_some() || self.is_prebuffering {
             return None;
         }

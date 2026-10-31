@@ -13,6 +13,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "linux-microphone-playout")]
+#[path = "pipewire_microphone/uplink.rs"]
+mod uplink;
+
 fn configuration(generation: u64) -> AudioStreamConfig {
     AudioStreamConfig::new(
         AudioDirection::Uplink,
@@ -113,6 +117,9 @@ impl Server {
         server
     }
     fn recorder(&self, node: u32) -> OwnedChild {
+        self.recorder_mode(node, "raw")
+    }
+    fn recorder_mode(&self, node: u32, mode: &str) -> OwnedChild {
         // Include the repo-owned helper so the exact same test can also run
         // from an external dependency harness without pulling dev-dependencies.
         let script = self.directory.join("capture.py");
@@ -122,6 +129,7 @@ impl Server {
                 .arg(script)
                 .arg(&self.directory)
                 .arg(node.to_string())
+                .arg(mode)
                 .env("XDG_RUNTIME_DIR", &self.directory)
                 .env("PIPEWIRE_RUNTIME_DIR", &self.directory)
                 .env("PIPEWIRE_REMOTE", "pipewire-0")

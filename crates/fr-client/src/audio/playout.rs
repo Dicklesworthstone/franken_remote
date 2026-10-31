@@ -26,7 +26,7 @@ use fr_core::audio::{
 use fr_media::audio::{AudioAccessUnit, AudioMediaError, AudioPcmFrame};
 
 pub mod decoder;
-mod drift;
+pub mod drift;
 use decoder::PolledDecoder;
 
 const MAX_AGE_US: u64 = MAX_JITTER_CEILING_MS as u64 * 1000;

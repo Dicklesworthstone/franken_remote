@@ -5,6 +5,7 @@ exact test-owned node IDs, never select a user's device or change defaults.
 """
 import array
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -14,6 +15,8 @@ import wave
 
 directory = Path(sys.argv[1])
 source = int(sys.argv[2])
+mode = sys.argv[3] if len(sys.argv) > 3 else "raw"
+assert mode in ("raw", "opus", "silence"), "unknown qualification oracle"
 recorder_name = "frankenremote.mic.qualification.recorder"
 
 
@@ -94,16 +97,41 @@ with wave.open(str(path), "rb") as stream:
     samples = array.array("h", stream.readframes(stream.getnframes()))
 if sys.byteorder != "little":
     samples.byteswap()
-assert len(samples) >= 96000, "less than two seconds independently captured"
-audible = [value for value in samples if abs(value) > 100]
-assert len(audible) > 48000, "synthetic source audio never reached the recorder"
-assert max(map(abs, samples)) <= 12001
-matching = sum(abs(abs(value) - 12000) <= 1 for value in audible)
-assert matching / len(audible) > .95, "recorded PCM does not match submitted synthetic sound"
+assert len(samples) > 0, "independent recorder received no samples"
+matching = 0
+if mode == "silence":
+    assert max(map(abs, samples)) <= 1, "a fenced decoder published audible PCM"
+else:
+    assert len(samples) >= 96000, "less than two seconds independently captured"
+    audible = [value for value in samples if abs(value) > 100]
+    assert len(audible) > 48000, "synthetic source audio never reached the recorder"
+    if mode == "raw":
+        assert max(map(abs, samples)) <= 12001
+        matching = sum(abs(abs(value) - 12000) <= 1 for value in audible)
+        assert matching / len(audible) > .95, "recorded PCM does not match submitted synthetic sound"
+    else:
+        # Opus is lossy. Observe the independently recorded signal's frequency
+        # and energy, not the producer's submission counters or codec output.
+        def power(block, frequency):
+            coefficient = 2 * math.cos(2 * math.pi * frequency / 48000)
+            previous = older = 0.0
+            for value in block:
+                current = value + coefficient * previous - older
+                older, previous = previous, current
+            return previous * previous + older * older - coefficient * previous * older
+
+        assert max(map(abs, samples)) < 20000, "unexpected clipping or foreign signal"
+        for start in range(0, len(samples) - 4800 + 1, 4800):
+            block = samples[start:start + 4800]
+            signal = power(block, 500)
+            if signal > 1e12 and all(signal > 30 * power(block, other)
+                                     for other in (350, 400, 600, 650, 1000)):
+                matching += len(block)
+        assert matching > 48000, "the real Opus uplink did not deliver its 500 Hz fixture"
 # The final quarter second must stay silent even after fresh audible content
 # was queued immediately before the terminal fence.
 tail_peak = max(map(abs, samples[-12000:]))
 assert tail_peak <= 1, "expired or stopped sound reached the independent recorder"
-print(json.dumps({"independent_capture_passed": True, "recorded_frames": len(samples),
+print(json.dumps({"independent_capture_passed": True, "mode": mode, "recorded_frames": len(samples),
                   "matching_audible_frames": matching, "tail_peak": tail_peak,
                   "exact_source_removed": True}, sort_keys=True))

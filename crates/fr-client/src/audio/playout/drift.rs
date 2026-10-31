@@ -1,6 +1,12 @@
 //! Slow phase correction from admitted source samples and the LOCAL device clock.
 //! One scalar lower-envelope sample per second rejects positive arrival jitter;
 //! no arrival FIFO, source-clock inference from packet count, or growing history.
+//!
+//! Shared by periodic playout and native graph-demand owners. Both clocks use
+//! 48 kHz per-channel samples; local observation time uses monotonic microseconds.
+//! This estimator neither grants output nor replaces a native demand, original
+//! packet deadline, bounded queue, or permission check. A stopped or changed
+//! device requires a new owner and a fresh estimator, never relabeled counters.
 use fr_core::audio::OPUS_SAMPLE_RATE;
 use fr_media::audio::clock::MAX_CORRECTION_PPM;
 
@@ -9,14 +15,26 @@ const DEAD_BAND_SAMPLES: i128 = 96; // 2 ms, not a new retention budget.
 const SLEW_PPM: i32 = 100;
 const SETTLE_SECONDS: i128 = 10;
 
+/// One planned output interval with private fractional rounding credit. Keep it
+/// with the outstanding decode and commit it once after native admission.
 #[derive(Clone, Copy)]
-pub(super) struct Span {
+pub struct Span {
     pub(super) samples: u32,
     fraction: i64,
 }
+impl Span {
+    /// Actual output frames for this one planned nominal source frame. The
+    /// rounding credit stays private until the originating owner commits it.
+    pub const fn samples(self) -> u32 {
+        self.samples
+    }
+}
 
+/// Bounded local-device phase correction for one uninterrupted audio epoch.
+/// Begin with `Default` and retain this value alongside the native output owner.
+/// Source timestamps and device positions remain distinct throughout its life.
 #[derive(Default)]
-pub(super) struct Drift {
+pub struct Drift {
     anchor: Option<(u64, u64)>, // Next source sample and its scheduled device sample.
     latest_source: Option<u64>,
     window: Option<u64>,
@@ -25,12 +43,17 @@ pub(super) struct Drift {
     fraction: i64,
 }
 impl Drift {
-    pub(super) fn ppm(&self) -> i32 {
+    /// Current correction, clamped to the shared ±1000 ppm output limit.
+    pub const fn ppm(&self) -> i32 {
         self.ppm
     }
     /// Only uniquely admitted, forward-moving source samples are observations.
     /// Worker-inbox delay is part of arrival jitter, never a new source clock.
-    pub(super) fn observe(&mut self, source: u64, device: u64, now: u64, target: u64) {
+    /// `device` comes from actual native sample progress, never submitted packet
+    /// counts. `now` is fresh local monotonic microseconds; `target` is the
+    /// negotiated jitter target in samples. The containing owner rejects clock
+    /// regression or device discontinuity before calling this method.
+    pub fn observe(&mut self, source: u64, device: u64, now: u64, target: u64) {
         let Some((source_anchor, device_anchor)) = self.anchor else {
             return;
         };
@@ -67,7 +90,14 @@ impl Drift {
     /// Read-only plan. A pending decode retains this exact slot, even when new
     /// arrivals alter the estimate. Polling/backpressure cannot spend rounding
     /// credit or extend the pending slot. Commit only after actual submission.
-    pub(super) fn plan(&self, nominal: u32) -> Span {
+    /// `nominal` must be the validated configuration's per-channel sample count;
+    /// output adapters independently enforce `clock::valid_sample_count`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an invalid nominal count overflows the corrected `u32` count.
+    /// Negotiated audio frame sizes cannot reach that bound.
+    pub fn plan(&self, nominal: u32) -> Span {
         let scaled = self.fraction + i64::from(nominal) * i64::from(self.ppm);
         let adjustment = scaled / 1_000_000;
         Span {
@@ -76,7 +106,12 @@ impl Drift {
             fraction: scaled % 1_000_000,
         }
     }
-    pub(super) fn submitted(&mut self, span: Span, source_next: u64, device_next: u64) {
+    /// Commit the exact span accepted by this owner's bounded native output.
+    /// `source_next` advances by the NOMINAL decoded frame count; `device_next`
+    /// advances by `span.samples()`. These are scheduling anchors, never proof
+    /// that an application received sound. Do not commit on a rejected or unknown
+    /// submission, reuse a span, or use a span planned by another estimator.
+    pub fn submitted(&mut self, span: Span, source_next: u64, device_next: u64) {
         self.fraction = span.fraction;
         self.anchor = Some((source_next, device_next));
     }

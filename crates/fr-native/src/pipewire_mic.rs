@@ -26,8 +26,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod demand;
+pub use demand::Demand;
+#[cfg(feature = "linux-microphone-playout")]
+pub mod uplink;
+
 pub const MAX_QUEUED_BLOCKS: usize = 4;
-pub const MAX_BLOCK_FRAMES: usize = 960;
+pub const MAX_BLOCK_FRAMES: usize = 961;
 pub const MAX_RETAINED_AGE: Duration = Duration::from_millis(100);
 const STARTUP: Duration = Duration::from_secs(2);
 static INITIALIZE: Once = Once::new();
@@ -156,6 +161,9 @@ pub struct Microphone {
     until: Instant,
     last_end: Option<u64>,
     statistics: Statistics,
+    identity: u64,
+    demand_mode: bool,
+    demand_source_end: Option<u64>,
     _thread: PhantomData<Rc<()>>,
 }
 impl std::fmt::Debug for Microphone {
@@ -185,7 +193,7 @@ impl Microphone {
         {
             return Err(Error::InvalidServer);
         }
-        if !permitted() {
+        if !catch_unwind(AssertUnwindSafe(&mut permitted)).unwrap_or(false) {
             return Err(Error::PermissionEnded);
         }
         let origin = Instant::now();
@@ -195,7 +203,7 @@ impl Microphone {
             stopped: AtomicBool::new(false),
         }));
         let socket = UnixStream::connect(server).map_err(|_| Error::Unavailable)?;
-        if !permitted() {
+        if !catch_unwind(AssertUnwindSafe(&mut permitted)).unwrap_or(false) {
             return Err(Error::PermissionEnded);
         }
         if Instant::now() >= until {
@@ -241,6 +249,9 @@ impl Microphone {
             until,
             last_end: None,
             statistics: Statistics::default(),
+            identity: id,
+            demand_mode: false,
+            demand_source_end: None,
             _thread: PhantomData,
         };
         owner.check_permission(&mut permitted)?;
@@ -312,6 +323,9 @@ impl Microphone {
         mut permitted: impl FnMut() -> bool,
     ) -> Result<(), Error> {
         self.check_permission(&mut permitted)?;
+        if self.demand_mode {
+            return Err(Error::InvalidConfiguration);
+        }
         if self.state != State::Ready {
             return Err(Error::Unavailable);
         }
@@ -375,7 +389,10 @@ impl Microphone {
         if self.native.is_none() {
             return Err(Error::Closed);
         }
-        if self.control.is_stopped() || !permitted() {
+        if self.control.is_stopped()
+            || !catch_unwind(AssertUnwindSafe(permitted)).unwrap_or(false)
+            || self.control.is_stopped()
+        {
             self.close();
             return Err(Error::PermissionEnded);
         }

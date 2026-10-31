@@ -48,6 +48,8 @@ linux-pulse-playback = ["linux-audio-playout"]
 linux-microphone-capture = ["linux-pulse-playback"]
 # Explicit native virtual source; no CLI/GUI, capture, runtime or default enable.
 linux-pipewire-mic = []
+# Bound uplink Opus, isolated decoding and actual virtual-source graph demand.
+linux-microphone-playout = ["linux-pipewire-mic", "linux-audio-playout", "linux-opus-process"]
 # Host playback audio end to end: the worker's PulseAudio monitor-record +
 # Opus-encode role and `fr connect --audio` playback. Same libpulse/libopus
 # SONAMEs as above; frd itself never enables this feature or links either.

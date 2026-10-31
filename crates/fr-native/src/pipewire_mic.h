@@ -16,6 +16,19 @@ typedef struct {
     uint32_t node_id;
 } FrMicStatistics;
 
+/* A real graph request, not a submission-counter clock. The interval names
+ * one preparation cycle plus the asynchronous native handoff; until is fixed
+ * when that request is observed. */
+typedef struct {
+    uint64_t serial;
+    uint64_t graph_samples;
+    uint64_t output_start;
+    uint64_t output_end;
+    uint64_t until;
+    uint32_t available_blocks;
+    uint32_t frames;
+} FrMicDemand;
+
 void fr_pipewire_mic_init(void);
 /* fd is a connected Unix socket, consumed on every return path. */
 int fr_pipewire_mic_new(int fd, const char *name, uint32_t channels,
@@ -27,6 +40,15 @@ int fr_pipewire_mic_poll(FrPipewireMic *mic, FrMicPermission permission, void *c
  * Deadlines use the callback's original monotonic microsecond clock. */
 int fr_pipewire_mic_submit(FrPipewireMic *mic, const int16_t *pcm,
                           uint32_t frames, uint64_t until);
+/* Select demand mode before admitting any raw PCM. */
+int fr_pipewire_mic_enable_demand(FrPipewireMic *mic);
+/* 1 real streaming demand, 0 no consumer yet, -1 terminal graph failure. */
+int fr_pipewire_mic_demand(FrPipewireMic *mic, FrMicDemand *out);
+/* Admission preserves the exact original request/interval/deadline. A stale
+ * request cannot be retried under the next token. Same return codes as submit. */
+int fr_pipewire_mic_submit_demand(FrPipewireMic *mic, const int16_t *pcm,
+                                 uint32_t frames, uint64_t serial,
+                                 uint64_t start, uint64_t until);
 void fr_pipewire_mic_statistics(const FrPipewireMic *mic, FrMicStatistics *out);
 void fr_pipewire_mic_free(FrPipewireMic *mic);
 #endif
