@@ -8,12 +8,52 @@
 typedef struct FrPipewireMic FrPipewireMic;
 typedef int (*FrMicClock)(const void *, uint64_t *);
 typedef int (*FrMicPermission)(void *);
+/* Fixed, content-free first-failure evidence. No strings, PCM, allocation or
+ * callback logging. Codes are local diagnostic metadata, never wire values. */
+typedef struct {
+    uint32_t code, frames;
+    uint64_t observed, expected;
+    uint64_t cycle, stamp_nsec;
+    /* Previous cycle/stamp name the last completed callback; previous_samples
+     * can be a newer demand read's interpolated consumption estimate. */
+    uint64_t previous_cycle, previous_samples, previous_stamp_nsec;
+} FrMicFailure;
+
+enum FrMicFailureCode {
+    FR_MIC_NO_FAILURE = 0,
+    FR_MIC_GRAPH_STATE = 1, FR_MIC_GRAPH_POSITION = 2,
+    FR_MIC_GRAPH_SNAPSHOT = 3, FR_MIC_GRAPH_QUANTUM = 4,
+    FR_MIC_GRAPH_ID_RACE = 5, FR_MIC_GRAPH_FUTURE_STAMP = 6,
+    FR_MIC_GRAPH_ELAPSED = 7, FR_MIC_GRAPH_ARITHMETIC = 8,
+    FR_MIC_GRAPH_CLOCK_CHANGED = 9, FR_MIC_GRAPH_RATE_CHANGED = 10,
+    FR_MIC_GRAPH_QUANTUM_CHANGED = 11, FR_MIC_GRAPH_STAMP_REGRESSION = 12,
+    FR_MIC_GRAPH_ESTIMATE_REGRESSION = 13, FR_MIC_GRAPH_DELAY = 14,
+    FR_MIC_GRAPH_QUEUE = 15, FR_MIC_GRAPH_BUFFERED = 16,
+    FR_MIC_PROCESS_CYCLE = 20, FR_MIC_PROCESS_NO_BUFFER = 21,
+    FR_MIC_PROCESS_BUFFER = 22, FR_MIC_PROCESS_ARITHMETIC = 23,
+    FR_MIC_PROCESS_BLOCK = 24, FR_MIC_PROCESS_UNDERRUN = 25,
+    FR_MIC_PROCESS_FRESH_CYCLE = 26, FR_MIC_PROCESS_PUBLICATION = 27,
+    FR_MIC_PROCESS_TAIL = 28, FR_MIC_PROCESS_QUEUE = 29,
+    FR_MIC_PROCESS_NEXT_DEMAND = 30, FR_MIC_EXPIRED_BLOCK = 31,
+    FR_MIC_CORE_ERROR = 40, FR_MIC_STREAM_STATE = 41,
+    FR_MIC_POSITION_CHANGED = 42, FR_MIC_FORMAT = 43,
+    FR_MIC_BUFFERS = 44, FR_MIC_LOOP = 45,
+    FR_MIC_PROCESS_PERMISSION = 46, FR_MIC_RAW_BUFFER = 47,
+    FR_MIC_RAW_QUEUE = 48, FR_MIC_DEMAND_INVALID = 50,
+    FR_MIC_DEMAND_WALL = 51, FR_MIC_DEMAND_SAMPLES = 52,
+    FR_MIC_SUBMIT_INVALID = 60, FR_MIC_SUBMIT_SERIAL = 61,
+    FR_MIC_SUBMIT_INTERVAL = 62, FR_MIC_SUBMIT_ARITHMETIC = 63,
+    FR_MIC_SUBMIT_PASSED = 64, FR_MIC_SUBMIT_CONTINUITY = 65,
+    FR_MIC_POLL_INVALID = 70, FR_MIC_POLL_STATE = 71
+};
+
 typedef struct {
     uint64_t submitted_frames;
     uint64_t silent_frames;
     uint64_t expired_frames;
     uint32_t queued_frames;
     uint32_t node_id;
+    FrMicFailure failure;
 } FrMicStatistics;
 
 /* A real graph request, not a submission-counter clock. The interval names

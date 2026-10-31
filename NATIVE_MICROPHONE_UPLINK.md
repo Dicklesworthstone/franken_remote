@@ -6,12 +6,16 @@ records, bounded jitter buffer, isolated real Opus decoder and actual PipeWire
 virtual microphone. It implements the native receiving boundary for plan
 §15.4 and bead `fr-p2-audio-microphone-lz6`.
 
-The containing session still supplies the authenticated channel binding,
-controller authority, host observation approval, explicit microphone enable and
-original permission predicate. This feature does not advertise microphone
-support, attach protocol role 8, change `fr connect`, install a driver, or choose
-an OS default source. Network admission and visible talk indicators remain
-separate integration work. See [NATIVE_MICROPHONE_CAPTURE.md](NATIVE_MICROPHONE_CAPTURE.md)
+The same feature also exposes `fr_native::pipewire_mic::session::Receiver`,
+which binds that real receiving boundary to the original host `InputSession`.
+The containing session supplies the completed authenticated `AudioUp` attachment,
+its exact positive selection, separate local microphone approval and the original
+host clock. The receiver derives its permission checks from that original owner.
+
+Public microphone offers remain disabled. These native owners do not attach
+protocol role 8 themselves, change `fr connect`, install a driver, or choose an OS
+default source. Network coordination and visible talk/stop controls remain
+integration work. See [NATIVE_MICROPHONE_CAPTURE.md](NATIVE_MICROPHONE_CAPTURE.md)
 for the actual client recording/encoding boundary and [VIRTUAL_MIC.md](VIRTUAL_MIC.md)
 for explicit virtual-source selection and the underlying native owner.
 
@@ -28,7 +32,7 @@ The existing `ProcessDecoder` owns one bounded command/reply mailbox and a
 separate child for this generation. Its supervisor owns spawning, socket IPC,
 timeouts, termination and actual reaping. Codec execution stays outside the
 native source thread and the authority path; the source itself remains on its
-supervised worker thread. This is process containment, not an OS sandbox claim.
+original native worker thread. This is process containment, not an OS sandbox claim.
 No new runtime or dependency is introduced.
 
 `poll_ready` requires both the actual decoder configuration and a selectable
@@ -45,6 +49,53 @@ The control handle neither keeps the native connection alive nor affects a
 replacement owner. `decoder_retirement().is_complete()` separately reports
 actual child reaping; requesting stop or dropping the owner is not described
 as completed reaping.
+
+## Original controller and independent microphone consent
+
+`session::Authority::from_input` takes a reference to the actual original
+`InputSession`, a completed channel's metadata, the negotiated selection and
+separate local microphone approval. It refuses observation-only sessions,
+missing microphone selection, missing consent, mismatched session binding and
+invalid packet limits before native setup. A numeric lease or copied monitor
+cannot construct this handoff. The transport coordinator still proves the
+attachment's ownership and retains its one-use binding and generation floor;
+channel metadata alone is not that proof.
+
+The authority keeps the original input monitor and lease identity. A replacement
+controller with equal wire IDs cannot authorize the old receiver. Its clock is
+anchored before sampling the same host clock used by input, so time spent
+waiting for a worker cannot restart the original authority lifetime. Every setup,
+acknowledgement, receive and rendering boundary rechecks the original authority.
+Actual renewals of that original input owner remain visible; the microphone
+owner cannot issue a grant or manufacture a renewal.
+
+`session::Receiver::new` validates the exact bound uplink configuration, native
+Opus profile and complete datagram ceiling before creating a source or decoder.
+It owns the existing `Uplink` directly, with no mutable native escape. Positive
+acknowledgement requires both real owners to be ready and successful admission
+on the original authenticated route. The packet API takes the original receipt
+`Instant` and preserves it through the existing bounded jitter, decode and native
+submission path. A shorter transport deadline must also survive the containing
+worker handoff; sampling a fresh arrival at dequeue is invalid.
+
+`session::Control` provides an independent microphone-only stop. It first fences
+the native output gate and requests codec retirement, without running foreign
+code or revoking input. Its permission and stopped queries sample the original
+controller even when the native worker is idle. Losing or dropping the original
+input owner is terminal for the microphone, as is dropping its own authority.
+A matching bound `AudioStop` fences before any authority sampling or native poll.
+
+Requested stop, physical graph removal and child reaping are separate facts.
+`Receiver::state` reports native endpoint state as updated by its worker;
+`Control::is_stopped` reports the policy fence. The native worker must service or
+drop the receiver to destroy the endpoint, and the decoder retirement receipt
+reports actual reaping. The PipeWire owner still needs outer process supervision
+before integration into the daemon; this API does not claim to stop a stalled
+foreign call by itself. This receiver is an in-process native composition,
+not the future child IPC contract. The daemon must keep its original controller
+projection in a pure Rust module and pass bounded expiry/revocation envelopes to
+a native child; it must not load `fr-native` or reconstruct an `InputSession` in
+that child to use this API.
 
 ## Native graph demand and independent clocks
 
@@ -131,6 +182,21 @@ codec failure retire the same original owner. Replacement requires fresh
 session admission and a fresh generation; this API has no reconnect or resume
 operation.
 
+## Native failure evidence
+
+The existing native `Statistics` now retains a fixed 64-byte first-failure
+record through endpoint cleanup. Its code, operands and graph timestamps
+identify the first failed native check without retaining sound or error strings.
+There is no callback logging, allocation or second queue. The paired C header
+lists every local code; these values are diagnostic metadata, not wire protocol.
+
+This distinguishes actual PCM underfill, stale graph snapshots, nonconsecutive
+native callback cycles and an interpolated sample regression. The last completed
+callback and a later demand read's sample estimate are recorded separately.
+Diagnostics do not relax the native interval, final publication, packet expiry
+or permission checks, and they never turn requested retirement into evidence of
+completed cleanup.
+
 ## Executed native evidence
 
 On October 31, 2026, all eight checked-in PipeWire integration cases passed
@@ -162,6 +228,36 @@ This evidence covers synthetic encoded records and a private native graph. It
 does not establish physical client microphone consent, a network role-8 path,
 interactive talk controls, every hardware/graph configuration, or measured
 capture-to-application latency.
+
+### Original-controller receiver coverage
+
+The new original-controller owner passed its three policy/clock tests and
+strict library and exact-source harness Clippy. Those tests cover independent
+consent, observer and binding refusal before native setup, original owner drop,
+equal-ID replacement isolation and setup delay spending the original lease.
+
+The actual controller-revocation recorder scenario completed twice with the
+unchanged independent 500 Hz oracle. One retained run recorded 184,832 frames,
+including 148,800 frames matching the audible oracle, with zero final-tail peak
+and removal of the exact virtual source. These checks use a real `InputSession`
+policy fixture and real PipeWire/Opus processes; they do not establish native
+approval UI or network admission.
+
+The three new native fence scenarios did not achieve a clean qualification run
+in this environment. Later runs stopped before the controller-revocation,
+controller-drop or microphone-only-stop step because existing graph checks
+refused PCM underfill (160 of 256 required frames), a stale graph snapshot
+(546 elapsed samples against a 512-sample bound), or a skipped callback interval
+(512 rather than 256 samples). One measured run had CPU throttling; the final
+run did not, so driver/callback timing remains an unresolved qualification
+limit. No interpolated sample regression was observed, and no timing guard or
+recorder assertion was relaxed.
+
+Controller-drop and microphone-only-stop native acceptance therefore remain
+unqualified, and the earlier successful revocation observations are not a claim
+that sustained playout is reliable on this runner. The tests and content-free
+failure evidence are retained for qualification on the target native graph.
+Public microphone offers remain disabled.
 
 ## Qualification commands
 

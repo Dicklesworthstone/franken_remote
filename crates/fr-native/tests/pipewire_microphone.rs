@@ -17,6 +17,10 @@ use std::{
 #[path = "pipewire_microphone/uplink.rs"]
 mod uplink;
 
+#[cfg(feature = "linux-microphone-playout")]
+#[path = "pipewire_microphone/session.rs"]
+mod session;
+
 fn configuration(generation: u64) -> AudioStreamConfig {
     AudioStreamConfig::new(
         AudioDirection::Uplink,

@@ -29,6 +29,8 @@ use std::{
 mod demand;
 pub use demand::Demand;
 #[cfg(feature = "linux-microphone-playout")]
+pub mod session;
+#[cfg(feature = "linux-microphone-playout")]
 pub mod uplink;
 
 pub const MAX_QUEUED_BLOCKS: usize = 4;
@@ -67,6 +69,38 @@ pub enum State {
     Closed,
 }
 
+/// Fixed-size first native failure, retained through endpoint destruction.
+/// Code zero means no native failure was recorded. Numeric codes are local
+/// diagnostics defined by `FrMicFailureCode` in the matching C boundary, never
+/// wire protocol or native library strings. Values contain graph timing/counters
+/// only, including both sides of an apparent clock regression.
+#[repr(C)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NativeFailure {
+    /// Exact failed native check; zero means none. The matching C header lists
+    /// every named code. In particular: 7 = snapshot at least two quanta old,
+    /// 13 = interpolated sample regression, 20 = nonconsecutive callback cycle,
+    /// 25 = PCM underfill, 27 = final publication check, 51/52 = demand expiry
+    /// in the original wall/sample domain. These distinguish native timing
+    /// failures from original-controller permission loss.
+    pub code: u32,
+    /// Real native quantum, or zero before a usable snapshot exists.
+    pub frames: u32,
+    /// Actual/required operands of the named check, with no audio content.
+    pub observed: u64,
+    pub expected: u64,
+    /// Failed snapshot's real cycle and native monotonic timestamp. Zero when
+    /// the failure precedes a valid snapshot; neither is a submission counter.
+    pub cycle: u64,
+    pub stamp_nsec: u64,
+    /// Cycle of the last completed native callback, separate from the latest
+    /// interpolated estimate below, which may come from a later demand read.
+    pub previous_cycle: u64,
+    pub previous_samples: u64,
+    /// Native snapshot timestamp of that last completed callback.
+    pub previous_stamp_nsec: u64,
+}
+
 /// Content-free counters. Submitted means queued to `PipeWire`, never recorded by
 /// an application. The queue includes four fixed PCM blocks; native buffers are
 /// separately bounded to two 4096-frame buffers in the C boundary.
@@ -78,6 +112,7 @@ pub struct Statistics {
     pub expired_frames: u64,
     pub queued_frames: u32,
     pub node_id: u32,
+    pub failure: NativeFailure,
 }
 
 struct Gate {

@@ -56,6 +56,20 @@ struct FrPipewireMic {
     FrMicStatistics statistics;
 };
 
+/* Record once before cleanup erases queue state. Values are only bounded
+ * counters/timestamps; graph may be NULL before a real snapshot exists. */
+static int diagnose(FrPipewireMic *mic, uint32_t code, uint64_t observed,
+                    uint64_t expected, const FrMicGraph *graph) {
+    if (mic && !mic->statistics.failure.code) {
+        mic->statistics.failure = (FrMicFailure){
+            code, graph ? graph->frames : mic->graph_frames, observed, expected,
+            graph ? graph->cycle : 0, graph ? graph->stamp_nsec : 0,
+            mic->graph_cycle, mic->graph_samples, mic->graph_stamp
+        };
+    }
+    return -1;
+}
+
 static void erase_block(FrMicBlock *block) {
     /* Volatile writes keep retired private PCM out of subsequent allocations. */
     volatile int16_t *samples = block->samples;
@@ -88,7 +102,10 @@ static void expire(FrPipewireMic *mic, uint64_t now) {
     while (mic->count) {
         FrMicBlock *block = &mic->blocks[mic->head];
         if (now < block->until) break;
-        if (mic->demand_mode) mic->failed = 1;
+        if (mic->demand_mode) {
+            diagnose(mic, FR_MIC_EXPIRED_BLOCK, now, block->until, NULL);
+            mic->failed = 1;
+        }
         uint32_t frames = block->frames - block->read;
         mic->statistics.expired_frames += frames;
         mic->statistics.queued_frames -= frames;
@@ -99,7 +116,9 @@ static void on_core_error(void *data, uint32_t id, int seq, int res,
                           const char *message) {
     (void)id; (void)seq; (void)res; (void)message;
     /* Never retain or report untrusted native error strings. */
-    ((FrPipewireMic *)data)->failed = 1;
+    FrPipewireMic *mic = data;
+    diagnose(mic, FR_MIC_CORE_ERROR, (uint32_t)id, (uint32_t)res, NULL);
+    mic->failed = 1;
 }
 static const struct pw_core_events core_events = {
     PW_VERSION_CORE_EVENTS,
@@ -110,16 +129,20 @@ static void on_state(void *data, enum pw_stream_state old,
     (void)old; (void)error;
     FrPipewireMic *mic = data;
     if (state == PW_STREAM_STATE_ERROR ||
-        (mic->demand_mode && mic->graph_started && state != PW_STREAM_STATE_STREAMING))
+        (mic->demand_mode && mic->graph_started && state != PW_STREAM_STATE_STREAMING)) {
+        diagnose(mic, FR_MIC_STREAM_STATE, (uint32_t)state, (uint32_t)old, NULL);
         mic->failed = 1;
+    }
 }
 static void on_io(void *data, uint32_t id, void *area, uint32_t size) {
     FrPipewireMic *mic = data;
     if (id != SPA_IO_Position) return;
     const struct spa_io_position *position =
         area && size >= sizeof(struct spa_io_position) ? area : NULL;
-    if (mic->demand_mode && mic->graph_started && position != mic->position)
+    if (mic->demand_mode && mic->graph_started && position != mic->position) {
+        diagnose(mic, FR_MIC_POSITION_CHANGED, position != NULL, mic->position != NULL, NULL);
         mic->failed = 1;
+    }
     mic->position = position;
 }
 static void on_format(void *data, uint32_t id, const struct spa_pod *param) {
@@ -129,6 +152,7 @@ static void on_format(void *data, uint32_t id, const struct spa_pod *param) {
     if (spa_format_audio_raw_parse(param, &format) < 0 ||
         format.format != SPA_AUDIO_FORMAT_S16 || format.rate != 48000 ||
         format.channels != mic->channels) {
+        diagnose(mic, FR_MIC_FORMAT, format.rate, format.channels, NULL);
         mic->failed = 1;
         return;
     }
@@ -143,8 +167,10 @@ static void on_format(void *data, uint32_t id, const struct spa_pod *param) {
         SPA_PARAM_BUFFERS_size,
             SPA_POD_Int(FR_MIC_OUTPUT_FRAMES * mic->channels * sizeof(int16_t)),
         SPA_PARAM_BUFFERS_stride, SPA_POD_Int(mic->channels * sizeof(int16_t)));
-    if (!params[0] || pw_stream_update_params(mic->stream, params, 1) < 0)
+    if (!params[0] || pw_stream_update_params(mic->stream, params, 1) < 0) {
+        diagnose(mic, FR_MIC_BUFFERS, 0, 0, NULL);
         mic->failed = 1;
+    }
 }
 
 static int add_u64(uint64_t a, uint64_t b, uint64_t *out) {
@@ -163,9 +189,13 @@ static int samples_48k(uint64_t ticks, uint32_t num, uint32_t denom,
 /* PipeWire 1.0.5 returns success even before a live clock exists. Only a real
  * STREAMING snapshot is usable. Nothing here uses our submission counters. */
 static int graph_time(FrPipewireMic *mic, FrMicGraph *graph) {
-    if (pw_stream_get_state(mic->stream, NULL) != PW_STREAM_STATE_STREAMING)
-        return mic->graph_started ? -1 : 0;
-    if (!mic->position) return mic->graph_started ? -1 : 0;
+    *graph = (FrMicGraph){ 0 };
+    enum pw_stream_state state = pw_stream_get_state(mic->stream, NULL);
+    if (state != PW_STREAM_STATE_STREAMING)
+        return mic->graph_started ? diagnose(mic, FR_MIC_GRAPH_STATE,
+            (uint32_t)state, PW_STREAM_STATE_STREAMING, NULL) : 0;
+    if (!mic->position)
+        return mic->graph_started ? diagnose(mic, FR_MIC_GRAPH_POSITION, 0, 1, NULL) : 0;
     /* The public read-only position area identifies a driver replacement.
      * get_time_n deliberately rebases ticks on ID changes, so ticks alone
      * cannot fence a replacement. Read only this aligned scalar atomically;
@@ -174,38 +204,59 @@ static int graph_time(FrPipewireMic *mic, FrMicGraph *graph) {
     struct pw_time time = { 0 };
     if (pw_stream_get_time_n(mic->stream, &time, sizeof time) < 0 ||
         time.now <= 0 || !time.rate.num || !time.rate.denom || !time.size)
-        return mic->graph_started ? -1 : 0;
-    if (time.size > FR_MIC_DEMAND_FRAMES) return -1;
-    if (clock_id != __atomic_load_n(&mic->position->clock.id, __ATOMIC_ACQUIRE)) return -1;
+        return mic->graph_started ? diagnose(mic, FR_MIC_GRAPH_SNAPSHOT, 0, 1, NULL) : 0;
+    graph->stamp_nsec = (uint64_t)time.now;
+    graph->frames = (uint32_t)time.size;
+    if (time.size > FR_MIC_DEMAND_FRAMES)
+        return diagnose(mic, FR_MIC_GRAPH_QUANTUM, time.size, FR_MIC_DEMAND_FRAMES, graph);
+    uint32_t after_id = __atomic_load_n(&mic->position->clock.id, __ATOMIC_ACQUIRE);
+    if (clock_id != after_id)
+        return diagnose(mic, FR_MIC_GRAPH_ID_RACE, after_id, clock_id, graph);
     uint64_t now = pw_stream_get_nsec(mic->stream);
-    if (now < (uint64_t)time.now) return -1;
+    if (now < (uint64_t)time.now)
+        return diagnose(mic, FR_MIC_GRAPH_FUTURE_STAMP, now, (uint64_t)time.now, graph);
     uint64_t elapsed;
-    if (!samples_48k(now - (uint64_t)time.now, 1, 1000000000u, &elapsed) ||
-        elapsed >= time.size * 2u ||
-        !samples_48k(time.ticks, time.rate.num, time.rate.denom, &graph->cycle) ||
-        !add_u64(graph->cycle, elapsed, &graph->samples)) return -1;
-    if (mic->graph_started &&
-        (clock_id != mic->graph_clock_id ||
-         time.rate.num != mic->graph_rate_num || time.rate.denom != mic->graph_rate_denom ||
-         time.size != mic->graph_frames || (uint64_t)time.now < mic->graph_stamp ||
-         graph->samples < mic->graph_samples)) return -1;
+    if (!samples_48k(now - (uint64_t)time.now, 1, 1000000000u, &elapsed))
+        return diagnose(mic, FR_MIC_GRAPH_ARITHMETIC, now, (uint64_t)time.now, graph);
+    if (elapsed >= time.size * 2u)
+        return diagnose(mic, FR_MIC_GRAPH_ELAPSED, elapsed, time.size * 2u, graph);
+    if (!samples_48k(time.ticks, time.rate.num, time.rate.denom, &graph->cycle) ||
+        !add_u64(graph->cycle, elapsed, &graph->samples))
+        return diagnose(mic, FR_MIC_GRAPH_ARITHMETIC, time.ticks, elapsed, graph);
+    if (mic->graph_started) {
+        if (clock_id != mic->graph_clock_id)
+            return diagnose(mic, FR_MIC_GRAPH_CLOCK_CHANGED, clock_id, mic->graph_clock_id, graph);
+        if (time.rate.num != mic->graph_rate_num || time.rate.denom != mic->graph_rate_denom)
+            return diagnose(mic, FR_MIC_GRAPH_RATE_CHANGED,
+                ((uint64_t)time.rate.num << 32) | time.rate.denom,
+                ((uint64_t)mic->graph_rate_num << 32) | mic->graph_rate_denom, graph);
+        if (time.size != mic->graph_frames)
+            return diagnose(mic, FR_MIC_GRAPH_QUANTUM_CHANGED, time.size, mic->graph_frames, graph);
+        if ((uint64_t)time.now < mic->graph_stamp)
+            return diagnose(mic, FR_MIC_GRAPH_STAMP_REGRESSION,
+                (uint64_t)time.now, mic->graph_stamp, graph);
+        if (graph->samples < mic->graph_samples)
+            return diagnose(mic, FR_MIC_GRAPH_ESTIMATE_REGRESSION,
+                graph->samples, mic->graph_samples, graph);
+    }
     uint64_t delay = 0;
     if (time.delay > 0 &&
         !samples_48k((uint64_t)time.delay, time.rate.num, time.rate.denom, &delay))
-        return -1;
+        return diagnose(mic, FR_MIC_GRAPH_ARITHMETIC, (uint64_t)time.delay, 0, graph);
     graph->delay_frames = delay > elapsed ? delay - elapsed : 0;
     graph->queued = time.queued;
     graph->buffered = time.buffered;
     graph->now_nsec = now;
-    graph->stamp_nsec = (uint64_t)time.now;
-    graph->frames = (uint32_t)time.size;
     graph->rate_num = time.rate.num;
     graph->rate_denom = time.rate.denom;
     graph->clock_id = clock_id;
     /* At most two requested native buffers and one converter quantum. */
-    if (graph->queued > (uint64_t)graph->frames * 2u ||
-        graph->buffered > graph->frames || graph->delay_frames > 4800u)
-        return -1;
+    if (graph->queued > (uint64_t)graph->frames * 2u)
+        return diagnose(mic, FR_MIC_GRAPH_QUEUE, graph->queued, (uint64_t)graph->frames * 2u, graph);
+    if (graph->buffered > graph->frames)
+        return diagnose(mic, FR_MIC_GRAPH_BUFFERED, graph->buffered, graph->frames, graph);
+    if (graph->delay_frames > 4800u)
+        return diagnose(mic, FR_MIC_GRAPH_DELAY, graph->delay_frames, 4800, graph);
     return 1;
 }
 
@@ -224,22 +275,27 @@ static void process_demand(FrPipewireMic *mic) {
     /* Multiple process notifications may coalesce onto one graph snapshot.
      * They cannot manufacture another interval or consume PCM twice. */
     if (mic->graph_started && graph.cycle == mic->graph_cycle) return;
-    uint64_t expected_cycle;
+    uint64_t expected_cycle = 0;
     if (mic->graph_started &&
         (!add_u64(mic->graph_cycle, mic->graph_frames, &expected_cycle) ||
          graph.cycle != expected_cycle ||
          graph.frames != mic->graph_frames)) {
+        diagnose(mic, FR_MIC_PROCESS_CYCLE, graph.cycle, expected_cycle, &graph);
         mic->failed = 1;
         clear(mic);
         return;
     }
     struct pw_buffer *buffer = pw_stream_dequeue_buffer(mic->stream);
-    if (!buffer) { mic->failed = 1; clear(mic); return; }
+    if (!buffer) {
+        diagnose(mic, FR_MIC_PROCESS_NO_BUFFER, 0, 1, &graph);
+        mic->failed = 1; clear(mic); return;
+    }
     struct spa_buffer *raw = buffer->buffer;
     uint32_t stride = mic->channels * sizeof(int16_t);
     if (!raw || raw->n_datas != 1 || !raw->datas || !raw->datas[0].data ||
         !raw->datas[0].chunk || raw->datas[0].maxsize / stride < graph.frames ||
         (buffer->requested && buffer->requested != graph.frames)) {
+        diagnose(mic, FR_MIC_PROCESS_BUFFER, buffer->requested, graph.frames, &graph);
         mic->failed = 1;
         return;
     }
@@ -247,6 +303,7 @@ static void process_demand(FrPipewireMic *mic) {
     int16_t *output = plane->data;
     uint64_t publication_start;
     if (!add_u64(graph.cycle, graph.frames, &publication_start)) {
+        diagnose(mic, FR_MIC_PROCESS_ARITHMETIC, graph.cycle, graph.frames, &graph);
         mic->failed = 1;
         return;
     }
@@ -255,10 +312,11 @@ static void process_demand(FrPipewireMic *mic) {
     memset(output, 0, graph.frames * stride);
     while (copied < graph.frames && mic->count && !mic->failed) {
         FrMicBlock *block = &mic->blocks[mic->head];
-        uint64_t position, wanted;
+        uint64_t position = 0, wanted = 0;
         if (!add_u64(block->start, block->read, &position) ||
             !add_u64(publication_start, copied, &wanted) || position != wanted ||
             now >= block->until || graph.samples >= block->before) {
+            diagnose(mic, FR_MIC_PROCESS_BLOCK, position, wanted, &graph);
             mic->failed = 1;
             break;
         }
@@ -273,26 +331,39 @@ static void process_demand(FrPipewireMic *mic) {
         mic->statistics.queued_frames -= take;
         if (block->read == block->frames) retire_front(mic);
     }
-    if (mic->scheduled_started && copied != graph.frames) mic->failed = 1;
-    FrMicGraph fresh;
-    if (!current(mic, &now) || graph_time(mic, &fresh) != 1 ||
-        fresh.cycle != graph.cycle) mic->failed = 1;
+    if (mic->scheduled_started && copied != graph.frames) {
+        diagnose(mic, FR_MIC_PROCESS_UNDERRUN, copied, graph.frames, &graph);
+        mic->failed = 1;
+    }
+    FrMicGraph fresh = { 0 };
+    if (!current(mic, &now)) {
+        diagnose(mic, FR_MIC_PROCESS_PERMISSION, 0, 1, NULL);
+        mic->failed = 1;
+    } else if (graph_time(mic, &fresh) != 1 || fresh.cycle != graph.cycle) {
+        diagnose(mic, FR_MIC_PROCESS_FRESH_CYCLE, fresh.cycle, graph.cycle, &fresh);
+        mic->failed = 1;
+    }
     /* The authority callback may itself be delayed. Recheck it after the
      * native snapshot, then extrapolate that same snapshot with a fresh local
      * clock; no mainloop turn or native device query follows this last guard. */
-    if (!mic->failed && !current(mic, &now)) mic->failed = 1;
+    if (!mic->failed && !current(mic, &now)) {
+        diagnose(mic, FR_MIC_PROCESS_PERMISSION, 0, 1, NULL);
+        mic->failed = 1;
+    }
     if (!mic->failed) {
-        uint64_t native_now = pw_stream_get_nsec(mic->stream), elapsed;
+        uint64_t native_now = pw_stream_get_nsec(mic->stream), elapsed = 0;
         if (native_now < fresh.stamp_nsec ||
             !samples_48k(native_now - fresh.stamp_nsec, 1, 1000000000u, &elapsed) ||
             elapsed >= graph.frames ||
             !add_u64(fresh.cycle, elapsed, &fresh.samples) ||
-            fresh.clock_id != __atomic_load_n(&mic->position->clock.id, __ATOMIC_ACQUIRE))
+            fresh.clock_id != __atomic_load_n(&mic->position->clock.id, __ATOMIC_ACQUIRE)) {
+            diagnose(mic, FR_MIC_PROCESS_PUBLICATION, elapsed, graph.frames, &fresh);
             mic->failed = 1;
+        }
     }
     for (uint32_t i = 0; i < parts_count && !mic->failed; i++) {
         FrMicPart *part = &parts[i];
-        uint64_t tail, until;
+        uint64_t tail = 0, until = 0;
         /* Non-RT callbacks publish for a following cycle. Retain a whole
          * quantum of handoff allowance even when reported graph delay is zero.
          * This is a latency bound, never a consumed-sample clock. */
@@ -302,7 +373,10 @@ static void process_demand(FrPipewireMic *mic) {
             !add_u64(tail, delay, &tail) ||
             !add_u64(tail, (uint64_t)part->offset + part->frames, &tail) ||
             tail > 4800u || !add_u64(now, (tail * 1000u + 47u) / 48u, &until) ||
-            until >= part->until) mic->failed = 1;
+            until >= part->until) {
+            diagnose(mic, FR_MIC_PROCESS_TAIL, until, part->until, &fresh);
+            mic->failed = 1;
+        }
     }
     if (mic->failed || mic->stopped) {
         memset(output, 0, graph.frames * stride);
@@ -315,6 +389,7 @@ static void process_demand(FrPipewireMic *mic) {
     plane->chunk->size = graph.frames * stride;
     buffer->size = graph.frames;
     if (pw_stream_queue_buffer(mic->stream, buffer) < 0) {
+        diagnose(mic, FR_MIC_PROCESS_QUEUE, 0, 0, &graph);
         mic->failed = 1;
         clear(mic);
         return;
@@ -329,6 +404,7 @@ static void process_demand(FrPipewireMic *mic) {
         latest <= fresh.samples || latest - fresh.samples > 4800u ||
         !add_u64(now, ((latest - fresh.samples) * 1000u) / 48u, &until) ||
         mic->demand.serial == UINT64_MAX) {
+        diagnose(mic, FR_MIC_PROCESS_NEXT_DEMAND, fresh.samples, mic->demand.serial, &fresh);
         mic->failed = 1;
         clear(mic);
         return;
@@ -348,13 +424,17 @@ static void process_demand(FrPipewireMic *mic) {
 static void on_process(void *data) {
     FrPipewireMic *mic = data;
     /* No RT_PROCESS: a process callback is legal only inside our scoped poll. */
-    if (!mic->permission) mic->failed = 1;
+    if (!mic->permission) {
+        diagnose(mic, FR_MIC_PROCESS_PERMISSION, 0, 1, NULL);
+        mic->failed = 1;
+    }
     if (mic->demand_mode) { process_demand(mic); return; }
     struct pw_buffer *buffer = pw_stream_dequeue_buffer(mic->stream);
     if (!buffer) return;
     struct spa_buffer *raw = buffer->buffer;
     if (!raw || raw->n_datas != 1 || !raw->datas || !raw->datas[0].data ||
         !raw->datas[0].chunk) {
+        diagnose(mic, FR_MIC_RAW_BUFFER, 0, 0, NULL);
         mic->failed = 1;
         return;
     }
@@ -401,6 +481,7 @@ static void on_process(void *data) {
         copied = 0;
     }
     if (pw_stream_queue_buffer(mic->stream, buffer) < 0) {
+        diagnose(mic, FR_MIC_RAW_QUEUE, 0, 0, NULL);
         mic->failed = 1;
         return;
     }
@@ -486,7 +567,8 @@ failed:
 }
 
 int fr_pipewire_mic_poll(FrPipewireMic *mic, FrMicPermission permission, void *context) {
-    if (!mic || mic->failed || !permission || !context || mic->permission) return -1;
+    if (!mic || mic->failed || !permission || !context || mic->permission)
+        return diagnose(mic, FR_MIC_POLL_INVALID, 0, 0, NULL);
     mic->permission = permission;
     mic->permission_context = context;
     int result = -1;
@@ -496,10 +578,16 @@ int fr_pipewire_mic_poll(FrPipewireMic *mic, FrMicPermission permission, void *c
     if (mic->failed) goto done;
     int iteration = pw_loop_iterate(mic->loop, 0);
     if (mic->stopped) { result = 2; goto done; }
-    if (iteration < 0 || mic->failed) goto done;
+    if (iteration < 0 || mic->failed) {
+        if (iteration < 0) diagnose(mic, FR_MIC_LOOP, (uint32_t)iteration, 0, NULL);
+        goto done;
+    }
     if (!current(mic, &now)) { result = 2; goto done; }
     enum pw_stream_state state = pw_stream_get_state(mic->stream, NULL);
-    if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) goto done;
+    if (state == PW_STREAM_STATE_ERROR || state == PW_STREAM_STATE_UNCONNECTED) {
+        diagnose(mic, FR_MIC_POLL_STATE, (uint32_t)state, PW_STREAM_STATE_STREAMING, NULL);
+        goto done;
+    }
     mic->statistics.node_id = pw_stream_get_node_id(mic->stream);
     result = (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) &&
            mic->statistics.node_id != PW_ID_ANY ? 1 : 0;
@@ -533,13 +621,19 @@ int fr_pipewire_mic_enable_demand(FrPipewireMic *mic) {
     return 0;
 }
 int fr_pipewire_mic_demand(FrPipewireMic *mic, FrMicDemand *out) {
-    if (!mic || !out || !mic->demand_mode || mic->failed || mic->stopped) return -1;
+    if (!mic || !out || !mic->demand_mode || mic->failed || mic->stopped)
+        return diagnose(mic, FR_MIC_DEMAND_INVALID, 0, 0, NULL);
     uint64_t now;
     FrMicGraph graph;
     if (!current(mic, &now)) return -1;
     int result = graph_time(mic, &graph);
     if (result < 0 || (mic->graph_started &&
         (now >= mic->demand.until || graph.samples >= mic->demand.output_end))) {
+        if (result >= 0) {
+            if (now >= mic->demand.until)
+                diagnose(mic, FR_MIC_DEMAND_WALL, now, mic->demand.until, &graph);
+            else diagnose(mic, FR_MIC_DEMAND_SAMPLES, graph.samples, mic->demand.output_end, &graph);
+        }
         mic->failed = 1;
         clear(mic);
         return -1;
@@ -555,14 +649,22 @@ int fr_pipewire_mic_submit_demand(FrPipewireMic *mic, const int16_t *pcm,
                                  uint32_t frames, uint64_t serial,
                                  uint64_t start, uint64_t until) {
     if (!mic || !pcm || !mic->demand_mode || !mic->graph_started ||
-        !frames || frames > FR_MIC_BLOCK_FRAMES || mic->failed) return -1;
+        !frames || frames > FR_MIC_BLOCK_FRAMES || mic->failed)
+        return diagnose(mic, FR_MIC_SUBMIT_INVALID, frames, FR_MIC_BLOCK_FRAMES, NULL);
     uint64_t now, before;
     FrMicGraph graph;
     if (!current(mic, &now)) return 3;
-    if (graph_time(mic, &graph) != 1 || serial != mic->demand.serial ||
-        start < mic->demand.output_start || start >= mic->demand.output_end ||
-        !add_u64(start, frames, &before) || graph.samples >= before ||
-        (mic->scheduled_started && start != mic->scheduled_end)) return -1;
+    if (graph_time(mic, &graph) != 1) return -1;
+    if (serial != mic->demand.serial)
+        return diagnose(mic, FR_MIC_SUBMIT_SERIAL, serial, mic->demand.serial, &graph);
+    if (start < mic->demand.output_start || start >= mic->demand.output_end)
+        return diagnose(mic, FR_MIC_SUBMIT_INTERVAL, start, mic->demand.output_end, &graph);
+    if (!add_u64(start, frames, &before))
+        return diagnose(mic, FR_MIC_SUBMIT_ARITHMETIC, start, frames, &graph);
+    if (graph.samples >= before)
+        return diagnose(mic, FR_MIC_SUBMIT_PASSED, graph.samples, before, &graph);
+    if (mic->scheduled_started && start != mic->scheduled_end)
+        return diagnose(mic, FR_MIC_SUBMIT_CONTINUITY, start, mic->scheduled_end, &graph);
     if (now >= until || now >= mic->demand.until || until - now > FR_MIC_MAX_AGE_US)
         return 2;
     if (mic->count == FR_MIC_BLOCKS) return 1;

@@ -1,11 +1,24 @@
-name: Verify native audio output
+name: Verify native audio capture and output
 on:
   push:
     branches: [main]
     paths:
+      - 'crates/fr-native/Cargo.toml'
+      - 'crates/fr-native/src/lib.rs'
+      - 'crates/fr-native/src/clock.rs'
+      - 'crates/fr-native/src/audio_process*'
+      - 'crates/fr-native/src/audio_process/**'
+      - 'crates/fr-native/src/bin/audio_worker.rs'
+      - 'crates/fr-native/src/opus*'
+      - 'crates/fr-native/src/opus/**'
       - 'crates/fr-native/src/pulse*'
       - 'crates/fr-native/src/pulse/**'
       - 'crates/fr-native/tests/pulse*'
+      - 'crates/fr-native/tests/microphone*'
+      - 'crates/fr-client/src/audio/**'
+      - 'crates/fr-client/src/control_grant.rs'
+      - 'crates/fr-client/src/input*'
+      - 'crates/fr-client/src/input/**'
       - 'crates/fr-native/tests/pulse_support/**'
       - 'scripts/verify-pulse-playback.sh'
       - '.github/workflows/verify-pulse-playback.yml'
@@ -45,7 +58,7 @@ jobs:
           path: ${{ runner.temp }}/pulse-inputs/
           retention-days: 7
           if-no-files-found: error
-      - name: Exercise actual local server, output monitor and bounded retirement
+      - name: Exercise actual recording, wire transmission, output and bounded retirement
         run: |
           set -euo pipefail
           compiler="$(dirname "$(dirname "$(rustup which rustc)")")"
