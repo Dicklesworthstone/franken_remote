@@ -152,9 +152,6 @@ impl SavedPeers {
         Ok(bytes)
     }
     pub fn from_json(bytes: &[u8]) -> Result<Self, SavedPeerError> {
-        if bytes.len() > MAX_SAVED_PEER_BYTES {
-            return Err(SavedPeerError::TooLarge);
-        }
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
         struct Record {
@@ -168,6 +165,9 @@ impl SavedPeers {
         struct Document {
             schema_version: u8,
             hosts: Vec<Record>,
+        }
+        if bytes.len() > MAX_SAVED_PEER_BYTES {
+            return Err(SavedPeerError::TooLarge);
         }
         let doc: Document =
             serde_json::from_slice(bytes).map_err(|_| SavedPeerError::InvalidDocument)?;

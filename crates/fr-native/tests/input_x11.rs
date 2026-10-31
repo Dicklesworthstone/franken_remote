@@ -279,3 +279,105 @@ fn revoke_after_actual_motion_prevents_the_following_button_press() {
 
 #[path = "input_x11/relative.rs"]
 mod relative;
+
+/// Observe real server state after each production `XTest` submission. The query
+/// inserts no input; this is OS-state instrumentation, not application drag/drop
+/// success or an installed-tailnet qualification.
+#[test]
+fn two_reliable_buttons_move_while_held_before_release_at_the_drag_destination() {
+    struct Observed {
+        pointer: X11Pointer,
+        states: Vec<(Operation, DesktopPoint, bool)>,
+    }
+    impl InputSink for Observed {
+        fn prepare(&mut self, operation: Operation) -> Result<(), PlatformError> {
+            self.pointer.prepare(operation)
+        }
+        fn submit(&mut self, operation: Operation) -> Submission {
+            let result = self.pointer.submit(operation);
+            if result == Submission::Submitted {
+                let (position, mask) = self.pointer.query_pointer().unwrap();
+                self.states.push((operation, position, mask & 256 != 0));
+            }
+            result
+        }
+        fn cancel_prepared(&mut self) {
+            self.pointer.cancel_prepared();
+        }
+    }
+    let display = Display::start();
+    let pointer = X11Pointer::open(&display.name).unwrap();
+    let mut session = owner(&pointer);
+    let mut sink = Observed {
+        pointer,
+        states: Vec::new(),
+    };
+    let a = DesktopPoint { x: 30, y: 40 };
+    let b = DesktopPoint { x: 270, y: 180 };
+    let event = |pressed, position| InputEvent::Button {
+        button: PointerButton::Primary,
+        pressed,
+        position,
+        barrier: if pressed { 1 } else { 2 },
+    };
+    let pressed = receipt(send(
+        &mut session,
+        &mut sink,
+        credentials(),
+        0,
+        event(true, a),
+        10,
+    ));
+    assert_eq!(pressed.outcome, InputOutcome::SubmittedToOs);
+    assert_eq!(pressed.submitted_operations, 2);
+    let released = receipt(send(
+        &mut session,
+        &mut sink,
+        credentials(),
+        1,
+        event(false, b),
+        20,
+    ));
+    assert_eq!(released.outcome, InputOutcome::SubmittedToOs);
+    assert_eq!(released.submitted_operations, 2);
+    assert_eq!(
+        sink.states,
+        [
+            (Operation::Absolute(a), a, false),
+            (
+                Operation::Button {
+                    button: PointerButton::Primary,
+                    pressed: true
+                },
+                a,
+                true
+            ),
+            (Operation::Absolute(b), b, true),
+            (
+                Operation::Button {
+                    button: PointerButton::Primary,
+                    pressed: false
+                },
+                b,
+                false
+            ),
+        ]
+    );
+    // Exact duplicates return their original receipts and cannot move/repress.
+    for (sequence, down, position, original) in [(0, true, a, pressed), (1, false, b, released)] {
+        assert_eq!(
+            receipt(send(
+                &mut session,
+                &mut sink,
+                credentials(),
+                sequence,
+                event(down, position),
+                30,
+            )),
+            original
+        );
+    }
+    assert_eq!(sink.states.len(), 4);
+    assert_eq!(sink.pointer.query_pointer().unwrap().0, b);
+    assert_eq!(sink.pointer.query_pointer().unwrap().1 & 256, 0);
+}

@@ -293,6 +293,7 @@ fn status_cannot_smuggle_actions_or_replace_original_preconditions() {
         "--max-observation-age-ms 250",
         "--key 4",
         "--chord 224,4",
+        "--drag 1,-100,20,200,40",
         "--status",
         "--json",
     ] {
@@ -301,6 +302,7 @@ fn status_cannot_smuggle_actions_or_replace_original_preconditions() {
     for suffix in [
         "--key 4",
         "--chord 224,4",
+        "--drag 1,-100,20,200,40",
         "--scroll 0,0,0,1",
         "--click 1,0,0",
         "--request-id 10",
@@ -496,6 +498,7 @@ fn typed_refusal_codes_remain_machine_readable_and_content_free() {
         Refusal::Consumed,
         Refusal::InputUnavailable,
         Refusal::Stopped,
+        Refusal::OutOfBounds,
     ] {
         let output = Response::Refused { reason }.render(true).unwrap();
         assert_eq!(output.exit, 1);
@@ -601,4 +604,106 @@ fn raw_chord_requests_cannot_bypass_modifier_and_key_bounds() {
     let mut wire = serde_json::to_value(request).unwrap();
     wire["operation"]["repeat"] = 10.into();
     assert!(serde_json::from_value::<Request>(wire).is_err());
+}
+
+#[test]
+fn drags_preserve_both_signed_endpoints_in_one_bounded_request() {
+    let mut args = action("--drag", "5,-2147483648,2147483647,2147483647,-2147483648");
+    replace_value(&mut args, "--request-id", "18446744073709551615");
+    replace_value(&mut args, "--observation-id", "18446744073709551615");
+    replace_value(&mut args, "--max-observation-age-ms", "1000");
+    let request = command(&args).unwrap().request.unwrap();
+    let operation = Operation::Drag {
+        button: 5,
+        from_x: i32::MIN,
+        from_y: i32::MAX,
+        to_x: i32::MAX,
+        to_y: i32::MIN,
+    };
+    assert!(request.valid());
+    assert!(request.operation == operation);
+    assert_eq!(request.operation.count(), 2);
+    assert_eq!(
+        request.operation.drag_points(),
+        Some((
+            fr_core::input::DesktopPoint {
+                x: i32::MIN,
+                y: i32::MAX
+            },
+            fr_core::input::DesktopPoint {
+                x: i32::MAX,
+                y: i32::MIN
+            },
+        ))
+    );
+    let body = serde_json::to_vec(&request).unwrap();
+    assert!(body.len() <= 512);
+    assert!(serde_json::from_slice::<Request>(&body).unwrap() == request);
+    let value = serde_json::to_value(request).unwrap();
+    assert_eq!(
+        value["operation"],
+        serde_json::json!({
+            "kind": "drag", "button": 5,
+            "from_x": i32::MIN, "from_y": i32::MAX,
+            "to_x": i32::MAX, "to_y": i32::MIN,
+        })
+    );
+    // Appending drag preserves the existing local JSON operation tags.
+    for (flag, value, tag) in [
+        ("--scroll", "0,0,0,1", "scroll"),
+        ("--click", "1,0,0", "click"),
+        ("--key", "4", "key_tap"),
+        ("--chord", "224,4", "key_chord"),
+    ] {
+        let old = command(&action(flag, value)).unwrap().request.unwrap();
+        assert_eq!(serde_json::to_value(old).unwrap()["operation"]["kind"], tag);
+        assert!(old.operation.drag_points().is_none());
+    }
+}
+
+#[test]
+fn invalid_or_same_point_drags_cannot_become_a_click_or_an_open_held_button() {
+    for value in [
+        "0,0,0,1,1",
+        "6,0,0,1,1",
+        "256,0,0,1,1",
+        "-1,0,0,1,1",
+        "1,0,0,0,0",
+        "1,-17,29,-17,29",
+        "1,0,0,1",
+        "1,0,0,1,1,2",
+        "1,0,0,,1",
+        "1,0,0,1,",
+        "1,-2147483649,0,1,1",
+        "1,0,0,2147483648,1",
+        "1,0,0,1,private-destination",
+    ] {
+        let failure = refused(&action("--drag", value));
+        assert!(!format!("{failure:?}").contains("private-destination"));
+    }
+    let mut duplicate = action("--drag", "1,-100,20,200,40");
+    duplicate.extend(words("--drag 1,-100,20,201,40"));
+    refused(&duplicate);
+    let request = command(&action("--drag", "1,-100,20,200,40"))
+        .unwrap()
+        .request
+        .unwrap();
+    for button in [0, 6, 255] {
+        let mut body = serde_json::to_value(request).unwrap();
+        body["operation"]["button"] = button.into();
+        assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
+    }
+    let mut same_point = serde_json::to_value(request).unwrap();
+    same_point["operation"]["to_x"] = (-100).into();
+    same_point["operation"]["to_y"] = 20.into();
+    assert!(
+        !serde_json::from_value::<Request>(same_point)
+            .unwrap()
+            .valid()
+    );
+    for field in ["hold_ms", "steps", "repeat", "text"] {
+        let mut body = serde_json::to_value(request).unwrap();
+        body["operation"][field] = 1.into();
+        assert!(serde_json::from_value::<Request>(body).is_err());
+    }
 }

@@ -177,6 +177,7 @@ pub(super) fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
 #[derive(Clone, Copy)]
 struct Candidate {
     view: InputView,
+    bounds: fr_core::input::InputBounds,
     sample: fr_wire::presented::Sample,
     at: Instant,
 }
@@ -237,7 +238,8 @@ impl State {
         self.stopped = true;
         self.live = None;
         self.pinned = None;
-        self.observation.retire(fr_client::robot::live::Phase::Stopped);
+        self.observation
+            .retire(fr_client::robot::live::Phase::Stopped);
         if let Some(stop) = &self.stop {
             stop.stop();
         }
@@ -372,8 +374,13 @@ impl State {
                 return Err(Refusal::ObservationExpired);
             }
             let current = self.live.ok_or(Refusal::InputUnavailable)?;
-            if current.view != original.view {
+            if current.view != original.view || current.bounds != original.bounds {
                 return Err(Refusal::ViewChanged);
+            }
+            if let Some((from, to)) = request.operation.drag_points()
+                && (!original.bounds.contains(from) || !original.bounds.contains(to))
+            {
+                return Err(Refusal::OutOfBounds);
             }
             Ok(original)
         })();

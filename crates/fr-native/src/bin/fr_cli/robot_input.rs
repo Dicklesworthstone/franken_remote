@@ -35,13 +35,21 @@ pub(crate) enum Operation {
         modifiers: u8,
         usage: u16,
     },
+    /// One press at the source, then a held move and release at the destination.
+    Drag {
+        button: u8,
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+    },
 }
 impl Operation {
     #[cfg(any(target_os = "linux", test))]
     pub fn count(self) -> u8 {
         match self {
             Self::Scroll { .. } => 1,
-            Self::Click { .. } | Self::KeyTap { .. } => 2,
+            Self::Click { .. } | Self::KeyTap { .. } | Self::Drag { .. } => 2,
             Self::KeyChord { modifiers, .. } => {
                 // A byte has at most eight set bits, including invalid requests.
                 u8::try_from(2 * (modifiers.count_ones() + 1)).expect("bounded modifier set")
@@ -54,6 +62,13 @@ impl Operation {
                 (-120..=120).contains(&dx) && (-120..=120).contains(&dy) && (dx != 0 || dy != 0)
             }
             Self::Click { button, .. } => (1..=5).contains(&button),
+            Self::Drag {
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            } => (1..=5).contains(&button) && (from_x, from_y) != (to_x, to_y),
             Self::KeyTap { usage } => fr_core::input::PhysicalKey::new(usage).is_some(),
             Self::KeyChord { modifiers, usage } => {
                 (1..=4).contains(&modifiers.count_ones())
@@ -61,6 +76,55 @@ impl Operation {
                     && fr_core::input::PhysicalKey::new(usage).is_some()
             }
         }
+    }
+    /// Both endpoints of the single bounded drag, in signed desktop pixels.
+    #[cfg(any(feature = "linux-desktop", test))]
+    pub fn drag_points(
+        self,
+    ) -> Option<(fr_core::input::DesktopPoint, fr_core::input::DesktopPoint)> {
+        match self {
+            Self::Drag {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                ..
+            } => Some((
+                fr_core::input::DesktopPoint {
+                    x: from_x,
+                    y: from_y,
+                },
+                fr_core::input::DesktopPoint { x: to_x, y: to_y },
+            )),
+            _ => None,
+        }
+    }
+    fn parse(flag: &str, value: &str) -> Result<Self, Failure> {
+        let values = value
+            .split(',')
+            .map(str::parse::<i32>)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| usage())?;
+        Ok(match (flag, values.as_slice()) {
+            ("--scroll", &[x, y, dx, dy]) => Self::Scroll { x, y, dx, dy },
+            ("--click", &[button, x, y]) => Self::Click {
+                button: u8::try_from(button).map_err(|_| usage())?,
+                x,
+                y,
+            },
+            ("--drag", &[button, from_x, from_y, to_x, to_y]) => Self::Drag {
+                button: u8::try_from(button).map_err(|_| usage())?,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            },
+            ("--key", &[usage_value]) => Self::KeyTap {
+                usage: u16::try_from(usage_value).map_err(|_| usage())?,
+            },
+            ("--chord", values) => Self::chord(values)?,
+            _ => return Err(usage()),
+        })
     }
     fn chord(values: &[i32]) -> Result<Self, Failure> {
         let [modifiers @ .., key] = values else {
@@ -125,6 +189,7 @@ pub(crate) enum Refusal {
     Consumed,
     InputUnavailable,
     Stopped,
+    OutOfBounds,
 }
 #[cfg(any(target_os = "linux", test))]
 impl Refusal {
@@ -141,6 +206,7 @@ impl Refusal {
             Self::Consumed => "robot_request_consumed",
             Self::InputUnavailable => "robot_input_not_ready",
             Self::Stopped => "robot_owner_stopped",
+            Self::OutOfBounds => "robot_input_out_of_bounds",
         }
     }
 }
@@ -371,28 +437,11 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--request-id" => request_id = Some(value.parse().map_err(|_| usage())?),
             "--observation-id" => observation_id = Some(value.parse().map_err(|_| usage())?),
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
-            "--scroll" | "--click" | "--key" | "--chord" => {
+            "--scroll" | "--click" | "--key" | "--chord" | "--drag" => {
                 if operation.is_some() {
                     return Err(usage());
                 }
-                let values = value
-                    .split(',')
-                    .map(str::parse::<i32>)
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|_| usage())?;
-                operation = Some(match (flag, values.as_slice()) {
-                    ("--scroll", &[x, y, dx, dy]) => Operation::Scroll { x, y, dx, dy },
-                    ("--click", &[button, x, y]) => Operation::Click {
-                        button: u8::try_from(button).map_err(|_| usage())?,
-                        x,
-                        y,
-                    },
-                    ("--key", &[usage_value]) => Operation::KeyTap {
-                        usage: u16::try_from(usage_value).map_err(|_| usage())?,
-                    },
-                    ("--chord", values) => Operation::chord(values)?,
-                    _ => return Err(usage()),
-                });
+                operation = Some(Operation::parse(flag, value)?);
             }
             _ => return Err(usage()),
         }

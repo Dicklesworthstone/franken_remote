@@ -397,6 +397,12 @@ impl ControlledViewer {
     pub fn granted_capabilities(&self) -> fr_core::input_submission::Capabilities {
         self.input.capabilities()
     }
+    /// The original grant's display bounds, in signed host desktop pixels.
+    /// Coordinate metadata only: this does not grant input or refresh a view.
+    /// Every action still passes the ordinary authority, ticket and age checks.
+    pub const fn granted_input_bounds(&self) -> fr_core::input::InputBounds {
+        self.viewport.bounds()
+    }
     /// Content-free evidence from this original input owner. A local automation
     /// precondition cannot substitute a decoder receipt or renew old source age.
     /// The ordinary action path still rechecks authority and tickets at encoding

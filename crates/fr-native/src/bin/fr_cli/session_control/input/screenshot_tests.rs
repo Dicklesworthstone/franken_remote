@@ -32,6 +32,12 @@ fn image() -> fr_media::worker::presentation_snapshot::Snapshot {
 fn ready() -> (Shared, Channel) {
     let shared = Shared::new([1; 16], [2; 16]).unwrap();
     shared.locked().live = Some(Candidate {
+        bounds: fr_core::input::InputBounds::new(
+            fr_core::input::DesktopPoint { x: -800, y: 0 },
+            800,
+            600,
+        )
+        .unwrap(),
         view: InputView {
             geometry: DisplayGeometryGeneration::INITIAL,
             viewport: ViewportMappingGeneration::INITIAL,

@@ -1,8 +1,8 @@
 # Bounded input on the original foreground owner
 
 The Linux native desktop CLI can explicitly accept bounded robot input on its
-original authenticated control session. It supports a click, a physical key tap,
-or integer line scrolling. The owner retains the host lease, input ticket,
+original authenticated control session. It supports a click, a bounded drag,
+a physical key tap, a modifier shortcut, or integer line scrolling. The owner retains the host lease, input ticket,
 original viewport and reliable transport; local commands receive comparison
 handles and content-free results.
 
@@ -60,7 +60,9 @@ forms are:
 | Option | Meaning |
 | --- | --- |
 | `--click BUTTON,X,Y` | Press and release at the same host-desktop point. Buttons: 1 primary, 2 secondary, 3 middle, 4 back, 5 forward. |
+| `--drag BUTTON,X1,Y1,X2,Y2` | Press at the source, move once while held, then release at the destination. Both distinct endpoints must be inside the original granted display. Uses the same button numbers as click. |
 | `--key USB_USAGE` | Press and release one validated USB keyboard page-7 physical usage, in decimal; for example `4`. This is not Unicode or a keyboard-layout translation. |
+| `--chord MODIFIER,...,KEY` | Hold one to four distinct USB modifiers (224–231) through one physical key tap, then release in reverse order. For example, `224,225,19` requests Control–Shift–P. |
 | `--scroll X,Y,DX,DY` | Scroll at the host-desktop point by integer lines on each axis. Each delta is between −120 and 120; at least one is nonzero. |
 
 The age bound must be 1–1000 milliseconds. Existing host and viewer limits may
@@ -68,15 +70,43 @@ be stricter. Coordinates may be negative on desktops with a negative display
 origin; the original input encoder still checks the selected display bounds.
 The owner converts scroll lines to the existing fixed-point wire units. The
 caller must already know its target host coordinates; this status response
-does not provide a screenshot or a local-to-host coordinate transform. The
-read-only observation publisher is not attached to this automation owner.
+does not provide a screenshot or a local-to-host coordinate transform. An
+explicit [live screenshot](docs/native-client-cli.md#screenshots-from-an-existing-foreground-owner)
+can return pixels and the pictured frame's original input handles. It does not
+make a later input request atomic with the observation or refresh that evidence.
 
-Clicks and key taps contain two reliable actions. The release is admitted only
-after the original host reports successful submission of the press and the
-original observation, generations, focus and authority remain valid. There is
-one pending request, at most two encoded actions, and at most eight retained
-fixed-size reports. No persistent held keys, arbitrary batches, committed text,
+Clicks, drags and key taps contain two reliable actions. Modifier shortcuts
+contain at most ten. Each next action is admitted only after the original host
+reports successful submission of the preceding action and the original
+observation, generations, focus and authority remain valid. There is one pending
+request and at most eight retained fixed-size reports. No persistent held keys,
+arbitrary batches, committed text,
 relative pointer, pixel scrolling or pointer replay are exposed.
+
+### Drag with the original observation
+
+Use a fresh ready observation from the same owner and its supplied next request
+ID. For example, a primary-button drag between two signed host-desktop points:
+
+```bash
+fr robot input NODE_ID --connection-id CONNECTION_ID \
+  --lease LOCAL_LEASE --request-id NEXT_REQUEST_ID --observation-id OBSERVATION_ID \
+  --max-observation-age-ms 1000 --drag 1,-100,20,200,40 --json
+```
+
+Both endpoints are checked before the press can be encoded. An outside point
+returns `robot_input_out_of_bounds`; coordinates are never clamped. A changed
+display bound or generation cannot reinterpret an already accepted gesture.
+The two reliable button records carry their own absolute-position barriers:
+the destination motion happens while the button is still held, before release.
+This is one bounded move, without a duration, interpolated path or persistent
+held-button mode. A stationary drag is refused; use a click for that operation.
+
+The release keeps the press's original observation and deadline. Expiry,
+cancellation or focus loss after a submitted press retains the partial or
+unknown result and fences the original owner. Existing held-state cleanup can
+release the button, but does not undo a window move, selection or other effect.
+Changing either endpoint under an existing request ID cannot execute a new drag.
 
 ## Identity, expiry and cancellation
 
@@ -133,19 +163,27 @@ fr robot session close NODE_ID --connection-id CONNECTION_ID --json
 
 ## Verification boundary
 
-The `fr-client` request ledger and fail-closed precondition tests pass (77 library
-tests in the targeted client suite), as does that library's strict Clippy check.
-The production native focus gate passes three Rust tests; six direct production
-C ABI regressions pass against a real private Xvfb server and independent Xlib
-peer. The desktop C sources compile with `-Wall -Wextra -Werror`.
+The combined CLI validation scope passes 102 actual-source tests, covering saved
+hosts and command parsing, input action mapping, the local owner and request
+ledger, and control-screenshot observation pins. It passes strict Clippy. The
+tests use the real client/core/wire types and exercise endpoint bounds,
+immutable request fingerprints, original receipts, partial effects, cancellation
+and deadline retirement. The scoped harness omits socket I/O and the native
+`ControlledViewer` dispatcher; its unused control-handle boundary is
+uninhabited. These results establish the tested parser/state behavior, not a
+complete native network run.
 
-The 12 actual parser/render tests and 14 actual local-owner state tests pass
-in scoped, same-source unit harnesses using the real client/core/wire types.
-Those harnesses omit the native entry point, IPC and executor runtime; the
-state harness uses an unused stop-handle adapter. They establish the tested
-parser/state behavior, not a complete native build. The native end-to-end
-regression is wired into the existing namespace verification lane. Full native Cargo execution and real two-machine
-qualification of this new automation mode remain unqualified until their
-respective gates pass. This mode supplies input-readiness metadata; screenshot
-capture, application-semantic assertions and an atomic observe/act transaction
-remain separate work.
+Two actual X11 tests pass under private Xvfb: the existing
+`real_pointer_drag_barriers_duplicates_and_expiry_cleanup` and
+`two_reliable_buttons_move_while_held_before_release_at_the_drag_destination`.
+The latter observes server state after each production input submission:
+source/button-up, source/button-down, destination/button-down, then
+destination/button-up. Exact duplicate records return their retained receipts
+without additional OS submissions. Strict Clippy also passes for this native
+test scope. These checks verify native input ordering and cleanup; they do not
+establish application-level drag/drop success.
+
+The complete foreground CLI-to-host regression is wired into the existing
+namespace verification lane. Full native Cargo validation and real two-machine
+qualification remain separate gates. Application-semantic assertions and an
+atomic observe/act transaction remain separate work.

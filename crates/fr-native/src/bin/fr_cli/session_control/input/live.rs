@@ -27,6 +27,23 @@ impl Operation {
                 pressed: index == 0,
                 position: DesktopPoint { x, y },
             }),
+            Self::Drag {
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            } if self.valid() && index < 2 => {
+                // A reliable Button includes its own atomic absolute-position
+                // barrier. The release moves with the button still held before
+                // releasing it; it is not a second click or a lossy pointer hop.
+                let (x, y) = if index == 0 {
+                    (from_x, from_y)
+                } else {
+                    (to_x, to_y)
+                };
+                Self::Click { button, x, y }.action(index)
+            }
             Self::KeyTap { usage } if index < 2 => Some(Action::Key {
                 key: PhysicalKey::new(usage)?,
                 transition: if index == 0 {
@@ -93,7 +110,12 @@ impl Shared {
             viewer
                 .input_observation()
                 .ok()
-                .map(|(view, sample)| Candidate { view, sample, at })
+                .map(|(view, sample)| Candidate {
+                    view,
+                    sample,
+                    at,
+                    bounds: viewer.granted_input_bounds(),
+                })
         } else {
             None
         };
@@ -119,7 +141,9 @@ impl Shared {
         };
         let current = state.live;
         let valid = focused
-            && current.is_some_and(|live| live.view == pending.original.view)
+            && current.is_some_and(|live| {
+                live.view == pending.original.view && live.bounds == pending.original.bounds
+            })
             && pending
                 .original
                 .age(Instant::now())
@@ -249,6 +273,54 @@ mod tests {
         ] {
             for index in 0..=255 {
                 assert!(chord.action(index).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn a_drag_uses_only_a_press_at_source_and_reliable_release_at_destination() {
+        let a = DesktopPoint { x: -800, y: -200 };
+        let b = DesktopPoint { x: 799, y: 599 };
+        for button in 1..=5 {
+            let drag = Operation::Drag {
+                button,
+                from_x: a.x,
+                from_y: a.y,
+                to_x: b.x,
+                to_y: b.y,
+            };
+            assert_eq!(drag.count(), 2);
+            for (index, pressed, position) in [(0, true, a), (1, false, b)] {
+                let Some(Action::Button {
+                    button: actual,
+                    pressed: down,
+                    position: point,
+                }) = drag.action(index)
+                else {
+                    panic!("a drag must emit two reliable button transitions");
+                };
+                assert_eq!(actual as u8, button);
+                assert_eq!(down, pressed);
+                assert_eq!(point, position);
+            }
+            for index in 2..=255 {
+                assert!(drag.action(index).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_or_stationary_drags_do_not_encode_either_half() {
+        for (button, to_x, to_y) in [(0, 2, 3), (6, 2, 3), (255, 2, 3), (1, -100, 20)] {
+            let drag = Operation::Drag {
+                button,
+                from_x: -100,
+                from_y: 20,
+                to_x,
+                to_y,
+            };
+            for index in 0..=255 {
+                assert!(drag.action(index).is_none());
             }
         }
     }

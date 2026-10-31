@@ -34,7 +34,7 @@ fn private_file(path: &Path, bytes: &[u8]) {
 fn empty_read_creates_nothing_and_saves_survive_reopening() {
     let path = root().join("missing/app/hosts.json");
     let store = Store::new(&path).unwrap();
-    assert!(store.load().unwrap().list().is_empty());
+    assert_eq!(store.load().unwrap().list(), []);
     assert!(!path.parent().unwrap().exists());
     assert!(store.update(Change::Add(peer("office"))).unwrap().durable);
     let loaded = Store::new(&path).unwrap().load().unwrap();
@@ -44,7 +44,7 @@ fn empty_read_creates_nothing_and_saves_survive_reopening() {
         0o600
     );
     store.update(Change::Forget("office".into())).unwrap();
-    assert!(Store::new(&path).unwrap().load().unwrap().list().is_empty());
+    assert_eq!(Store::new(&path).unwrap().load().unwrap().list(), []);
 }
 #[test]
 fn publication_replaces_an_inode_without_truncating_existing_readers() {

@@ -28,6 +28,12 @@ fn view() -> InputView {
 fn candidate(age_upper_us: u64) -> Candidate {
     Candidate {
         view: view(),
+        bounds: fr_core::input::InputBounds::new(
+            fr_core::input::DesktopPoint { x: -800, y: -200 },
+            1600,
+            800,
+        )
+        .unwrap(),
         at: Instant::now(),
         sample: Sample {
             stamp: Stamp {
@@ -747,6 +753,260 @@ fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases
                     Err(Refusal::Stopped)
                 );
             }
+        }
+    }
+}
+
+fn drag_request(shared: &Shared) -> Request {
+    Request {
+        operation: Operation::Drag {
+            button: 1,
+            from_x: -800,
+            from_y: -200,
+            to_x: 799,
+            to_y: 599,
+        },
+        ..request(&snapshot(shared), 1)
+    }
+}
+
+#[test]
+fn either_out_of_bounds_drag_endpoint_refuses_before_the_press_is_encoded() {
+    // The original granted display is [-800,800) x [-200,600). Its signed
+    // corners are valid; each exclusive edge is checked before any press.
+    for (from_x, from_y, to_x, to_y) in [
+        (-801, -200, 799, 599),
+        (-800, -201, 799, 599),
+        (800, -200, 799, 599),
+        (-800, 600, 799, 599),
+        (-800, -200, -801, 599),
+        (-800, -200, 799, -201),
+        (-800, -200, 800, 599),
+        (-800, -200, 799, 600),
+        (i32::MIN, -200, i32::MAX, 599),
+    ] {
+        let shared = fresh();
+        let request = Request {
+            operation: Operation::Drag {
+                button: 1,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            },
+            ..drag_request(&shared)
+        };
+        assert_eq!(
+            shared.0.lock().unwrap().submit(request),
+            Err(Refusal::OutOfBounds)
+        );
+        let refused = retained(&shared, request);
+        assert_eq!(refused.actions_total, 2);
+        assert_eq!(refused.actions_encoded, 0);
+        assert_eq!(refused.submitted_operations, 0);
+        assert_eq!(refused.disposition, InputDisposition::Refused);
+        assert!(shared.0.lock().unwrap().pending.is_none());
+        assert_eq!(snapshot(&shared).next_request_id, Some(2));
+        assert_eq!(
+            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            refused
+        );
+        // Fixing coordinates cannot turn the consumed request into another drag.
+        let changed = Request {
+            operation: Operation::Drag {
+                button: 1,
+                from_x: -799,
+                from_y: -199,
+                to_x: 798,
+                to_y: 598,
+            },
+            ..request
+        };
+        assert_eq!(
+            shared.0.lock().unwrap().submit(changed),
+            Err(Refusal::RequestChanged)
+        );
+    }
+}
+
+#[test]
+fn changed_granted_bounds_cannot_reinterpret_an_original_drag() {
+    let shared = fresh();
+    let request = drag_request(&shared);
+    shared.0.lock().unwrap().live.as_mut().unwrap().bounds = fr_core::input::InputBounds::new(
+        fr_core::input::DesktopPoint { x: -800, y: -200 },
+        1599,
+        800,
+    )
+    .unwrap();
+    assert_eq!(
+        shared.0.lock().unwrap().submit(request),
+        Err(Refusal::ViewChanged)
+    );
+    assert_eq!(retained(&shared, request).actions_encoded, 0);
+    assert!(shared.0.lock().unwrap().pending.is_none());
+}
+
+#[test]
+fn a_drag_waits_for_both_original_receipts_and_fingerprints_each_endpoint() {
+    let shared = fresh();
+    let request = drag_request(&shared);
+    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    encoded(&shared, 1, 0);
+    assert!(!ready(&shared, 1));
+    for operation in [
+        Operation::Drag {
+            button: 2,
+            from_x: -800,
+            from_y: -200,
+            to_x: 799,
+            to_y: 599,
+        },
+        Operation::Drag {
+            button: 1,
+            from_x: -799,
+            from_y: -200,
+            to_x: 799,
+            to_y: 599,
+        },
+        Operation::Drag {
+            button: 1,
+            from_x: -800,
+            from_y: -199,
+            to_x: 799,
+            to_y: 599,
+        },
+        Operation::Drag {
+            button: 1,
+            from_x: -800,
+            from_y: -200,
+            to_x: 798,
+            to_y: 599,
+        },
+        Operation::Drag {
+            button: 1,
+            from_x: -800,
+            from_y: -200,
+            to_x: 799,
+            to_y: 598,
+        },
+    ] {
+        assert_eq!(
+            shared.0.lock().unwrap().submit(Request {
+                operation,
+                ..request
+            }),
+            Err(Refusal::RequestChanged)
+        );
+    }
+    shared
+        .0
+        .lock()
+        .unwrap()
+        .live
+        .as_mut()
+        .unwrap()
+        .sample
+        .stamp
+        .frame = 8;
+    let newer = snapshot(&shared);
+    assert_ne!(newer.observation_id, Some(request.observation_id));
+    {
+        let state = shared.0.lock().unwrap();
+        let pending = state.pending.as_ref().unwrap();
+        assert_eq!(pending.request.observation_id, request.observation_id);
+        assert_eq!(pending.original.sample.stamp.frame, 7);
+        assert_eq!(pending.encoded, 1);
+    }
+    shared.result(ResultEvent::Completed(receipt(0)));
+    assert!(ready(&shared, 1));
+    encoded(&shared, 1, 1);
+    shared.result(ResultEvent::Duplicate(receipt(0)));
+    assert!(!ready(&shared, 1));
+    shared.result(ResultEvent::Completed(receipt(1)));
+    let complete = retained(&shared, request);
+    assert_eq!(complete.disposition, InputDisposition::Committed);
+    assert_eq!(complete.actions_total, 2);
+    assert_eq!(complete.actions_encoded, 2);
+    assert_eq!(complete.actions_submitted, 2);
+    assert_eq!(complete.submitted_operations, 4);
+    assert_eq!(complete.unacknowledged_actions, 0);
+    assert_eq!(
+        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        complete
+    );
+    assert!(snapshot(&shared).ready);
+    assert!(shared.0.lock().unwrap().pending.is_none());
+}
+
+#[test]
+fn cancelled_or_expired_drags_preserve_effects_and_never_resume_the_release() {
+    // Stop before the press receipt, after it, after encoding the release, or
+    // on the original request deadline. No newer observation authorizes replay.
+    for progress in 0..4 {
+        let shared = fresh();
+        let request = drag_request(&shared);
+        let mut waiting = Box::pin(shared.submit(request));
+        assert!(poll(waiting.as_mut()).is_pending());
+        encoded(&shared, 1, 0);
+        if progress != 0 {
+            shared.result(ResultEvent::Completed(receipt(0)));
+        }
+        if progress == 2 {
+            encoded(&shared, 1, 1);
+        }
+        if progress == 3 {
+            let mut state = shared.0.lock().unwrap();
+            let now = state.now(Instant::now()).unwrap();
+            state.ledger.expire(now + 2_000_000).unwrap();
+            state.finish_if_retained();
+        }
+        drop(waiting);
+        let actual = retained(&shared, request);
+        assert_eq!(actual.actions_encoded, if progress == 2 { 2 } else { 1 });
+        assert_eq!(actual.actions_submitted, u8::from(progress != 0));
+        assert_eq!(
+            actual.submitted_operations,
+            if progress == 0 { 0 } else { 2 }
+        );
+        assert_eq!(
+            actual.unacknowledged_actions,
+            u8::from(progress == 0 || progress == 2)
+        );
+        assert_eq!(
+            actual.disposition,
+            if progress == 0 || progress == 2 {
+                InputDisposition::UnknownEffect
+            } else {
+                InputDisposition::Partial
+            }
+        );
+        if progress == 3 {
+            assert_eq!(actual.end, native::End::Expired);
+        }
+        {
+            let state = shared.0.lock().unwrap();
+            assert!(state.stopped && state.ledger.is_closed());
+            assert!(state.pending.is_none() && state.live.is_none() && state.pinned.is_none());
+        }
+        assert!(!snapshot(&shared).ready);
+        assert_eq!(
+            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            actual
+        );
+        assert_eq!(
+            shared.0.lock().unwrap().submit(Request {
+                request_id: 2,
+                ..request
+            }),
+            Err(Refusal::Stopped)
+        );
+        if progress == 0 || progress == 2 {
+            let sequence = u64::from(progress == 2);
+            shared.result(ResultEvent::Completed(receipt(sequence)));
+            assert_eq!(retained(&shared, request).unacknowledged_actions, 0);
+            assert!(!snapshot(&shared).ready);
+            assert!(shared.0.lock().unwrap().pending.is_none());
         }
     }
 }

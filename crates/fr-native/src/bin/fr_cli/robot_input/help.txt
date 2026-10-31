@@ -5,7 +5,8 @@ fr robot session open NODE_ID --foreground --role control --accept-input
 fr robot input NODE_ID --connection-id ID --status [--json]
 fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     --observation-id INTEGER --max-observation-age-ms 1..1000
-    (--click BUTTON,X,Y | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
+    (--click BUTTON,X,Y | --drag BUTTON,X1,Y1,X2,Y2 | --key USB_USAGE
+     | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
 
 Find the public connection ID with fr robot session status NODE_ID --json.
 Keep the foreground viewer focused. The explicit automation owner requests one
@@ -21,6 +22,11 @@ them with a subsequent --status read. Expired readiness clears those handles.
 Use increasing nonzero request IDs. Each action pins the ORIGINAL observation;
 a new status read cannot refresh an accepted command. Coordinates are signed
 host desktop pixels. Buttons are 1 primary, 2 secondary, 3 middle, 4 back, 5 forward.
+--drag presses at X1,Y1, moves once with the button held, then releases at X2,Y2.
+Both distinct endpoints must be inside the original granted display before any
+press is sent. Each of its two reliable actions waits for its original receipt;
+the original observation and deadline remain in force through the release.
+This is a bounded single move, with no recorded path or persistent held button.
 --key taps a physical USB page-7 usage (decimal), not Unicode or a keyboard-layout
 guess. Scroll deltas are integer lines on each axis, at most 120 in magnitude.
 --chord holds one to four distinct USB modifiers (224..231) through one
