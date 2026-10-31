@@ -165,11 +165,12 @@ pub enum Messages {
     /// and, only after `remote-cursor` selection, `CursorShape`. The session
     /// still refuses a shape the peer did not negotiate.
     MediaConfiguration,
-    /// The host's reliable `audio-down` lane: `AudioConfiguration` and
+    /// An audio source's reliable lane: `AudioConfiguration` and
     /// `AudioStop` only. `AudioPacket` never enters a reliable stream.
     AudioControl,
-    /// The viewer's reliable `audio-down` reply lane: `AudioConfigured` and a
-    /// receiver-side `AudioStop`. Neither can enable the other direction.
+    /// An audio receiver's reliable reply lane: `AudioConfigured` and a
+    /// receiver-side `AudioStop`. The attachment fixes the endpoint direction;
+    /// neither message enables the opposite audio direction.
     AudioReplies,
     /// Initial native control only, before the host installs a binding.
     Negotiation,

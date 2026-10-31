@@ -158,8 +158,8 @@ fn download_role_has_distinct_wire_identity_without_reassigning_audio_up() {
     assert_eq!(MediaRole::Files as u8, 6);
     assert_eq!(MediaRole::Files.primary_direction(), 2);
     assert_eq!(MediaRole::FilesDownload.primary_direction(), 1);
-    bytes[role_offset] = attachment::AUDIO_UP_RESERVED_ROLE;
-    assert_eq!(decode(&bytes), Err(WireError::UnsupportedKind));
+    bytes[role_offset] = MediaRole::AudioUp as u8;
+    assert_eq!(decode(&bytes), Err(WireError::WrongRole));
     bytes[role_offset] = 9;
     bytes[role_offset + 1] = 2;
     assert!(

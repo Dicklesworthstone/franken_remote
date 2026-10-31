@@ -105,7 +105,7 @@ pub struct AttachedChannel {
     pub outbound: StreamRoute,
     pub inbound: StreamRoute,
     pub byte_allowance: u64,
-    /// Video and Input activate their role-specific datagram only after ACK.
+    /// Video, input and audio activate their role-specific datagram after ACK.
     pub datagram: Option<DatagramRoute>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,6 +149,9 @@ pub struct MediaChannel {
     credit: bool,
     pub(super) files_direction: FileDirection,
     files_duplex: bool,
+    /// Sibling dispatch cannot defer a microphone offer absent from this
+    /// original connection's positive selection.
+    audio_up: bool,
 }
 impl fmt::Debug for MediaChannel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -261,6 +264,12 @@ fn validate_role(scope: &ChannelScope<'_>, role: MediaRole) -> Result<(), Error>
             }
             (fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION)
         }
+        MediaRole::AudioUp => {
+            if !fr_wire::audio_up::uplink_selected(scope.selection) {
+                return Err(Error::WrongRoute);
+            }
+            (fr_wire::audio_up::CAPABILITY, fr_wire::audio_up::VERSION)
+        }
     };
     if !scope
         .selection
@@ -282,6 +291,7 @@ fn datagram_route(role: MediaRole, host: bool) -> Option<(u16, bool)> {
         MediaRole::Video => Some((0x0034, host)),
         MediaRole::Input => Some((0x0042, !host)),
         MediaRole::AudioDown => Some((0x0062, host)),
+        MediaRole::AudioUp => Some((0x0062, !host)),
         MediaRole::Configuration
         | MediaRole::Recovery
         | MediaRole::Clipboard
@@ -314,6 +324,8 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Files | MediaRole::FilesDownload, _) => Messages::Files,
         (MediaRole::AudioDown, true) => Messages::AudioControl,
         (MediaRole::AudioDown, false) => Messages::AudioReplies,
+        (MediaRole::AudioUp, true) => Messages::AudioReplies,
+        (MediaRole::AudioUp, false) => Messages::AudioControl,
     }
 }
 impl QuicRecords {
@@ -434,14 +446,30 @@ impl QuicRecords {
         {
             return Err(Error::WrongRoute);
         }
-        // One audio-down stream per connection: a second would be a parallel
-        // generation domain. Retired reservations are not reusable either.
-        if d.role == MediaRole::AudioDown
+        // Microphone metadata belongs to the original controller's completed
+        // input attachment. This is not an input grant or microphone consent:
+        // the session must still check both before every native/send boundary.
+        if d.role == MediaRole::AudioUp
+            && !self
+                .attachments
+                .iter()
+                .any(|r| r.role == MediaRole::Input && r.state.load(Ordering::Acquire) == ACTIVE)
+        {
+            return Err(Error::WrongRoute);
+        }
+        // One generation domain per audio direction. Opposite directions have
+        // the same record kinds with reversed sender roles, but distinct
+        // attachment/ticket/binding ownership. Retired slots are never reusable.
+        if matches!(d.role, MediaRole::AudioDown | MediaRole::AudioUp)
             && (self.attachments.iter().any(|r| r.role == d.role)
-                || self
-                    .streams
-                    .iter()
-                    .any(|r| r.messages == Messages::AudioControl))
+                || self.streams.iter().any(|stream| {
+                    stream.messages == Messages::AudioControl
+                        && !self.attachments.iter().any(|r| {
+                            r.binding == stream.binding
+                                && matches!(r.role, MediaRole::AudioDown | MediaRole::AudioUp)
+                                && r.role != d.role
+                        })
+                }))
         {
             return Err(Error::WrongRoute);
         }
@@ -762,6 +790,7 @@ impl MediaChannel {
             allowance,
             credit: attachment::credit::selected(scope.selection),
             files_duplex: fr_wire::files::duplex_selected(scope.selection),
+            audio_up: fr_wire::audio_up::uplink_selected(scope.selection),
             files_direction: if descriptor.role == MediaRole::FilesDownload
                 || (!fr_wire::files::duplex_selected(scope.selection)
                     && scope.selection.capabilities.iter().any(|c| {

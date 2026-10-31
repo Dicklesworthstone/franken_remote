@@ -1,4 +1,4 @@
-//! Clipboard and files keep independent tickets while sharing CONTROL framing.
+//! Optional controller lanes keep independent tickets on shared CONTROL framing.
 //! This is dispatch only: the matching owner still validates every transition.
 use super::{
     ARMED, Error, InputDelivery, InputDirection, MediaChannel, MediaRole, Message, Ordering,
@@ -6,15 +6,17 @@ use super::{
 };
 
 /// Optional owners share only the original CONTROL parser; each still owns
-/// one independent, immutable ticket and stream pair. At most two siblings
-/// exist (clipboard, upload, download), so dispatch never allocates a queue.
+/// one independent, immutable ticket and stream pair. At most three siblings
+/// exist (clipboard, upload, download, microphone), so dispatch allocates no queue.
 pub(super) fn optional_siblings(a: MediaRole, b: MediaRole) -> bool {
-    a != b
-        && (a == MediaRole::Clipboard || a.is_files())
-        && (b == MediaRole::Clipboard || b.is_files())
+    a != b && optional(a) && optional(b)
 }
 
-type PendingSiblings = [Option<(u32, MediaRole)>; 2];
+fn optional(role: MediaRole) -> bool {
+    matches!(role, MediaRole::Clipboard | MediaRole::AudioUp) || role.is_files()
+}
+
+type PendingSiblings = [Option<(u32, MediaRole)>; 3];
 
 impl MediaChannel {
     /// Stream identifiers are reserved monotonically. Announce those pairs in
@@ -44,9 +46,10 @@ impl MediaChannel {
     fn sibling_role(&self, role: MediaRole) -> bool {
         optional_siblings(self.descriptor.role, role)
             && (role != MediaRole::FilesDownload || self.files_duplex)
+            && (role != MediaRole::AudioUp || self.audio_up)
     }
     pub(super) fn pending_siblings(&self, q: &QuicRecords) -> PendingSiblings {
-        let mut siblings = [None; 2];
+        let mut siblings = [None; 3];
         for (slot, reservation) in siblings.iter_mut().zip(q.attachments.iter().filter(|r| {
             self.sibling_role(r.role) && matches!(r.state.load(Ordering::Acquire), PENDING | ARMED)
         })) {
@@ -59,7 +62,7 @@ impl MediaChannel {
         bytes: &[u8],
         pending: PendingSiblings,
     ) -> Result<bool, Error> {
-        if self.descriptor.role != MediaRole::Clipboard && !self.descriptor.role.is_files() {
+        if !optional(self.descriptor.role) {
             return Ok(false);
         }
         // Validate the complete original-session record before classifying it.

@@ -8,6 +8,7 @@
 pub mod attachment;
 pub mod audio;
 pub mod audio_control;
+pub mod audio_up;
 pub mod authority;
 pub mod clipboard;
 pub mod clock;

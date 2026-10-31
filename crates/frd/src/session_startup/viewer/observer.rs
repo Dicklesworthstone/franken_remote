@@ -817,6 +817,7 @@ fn role_index(role: MediaRole, controlled: bool, audio: bool) -> Result<usize, E
         | MediaRole::Clipboard
         | MediaRole::Files
         | MediaRole::FilesDownload
+        | MediaRole::AudioUp
         | MediaRole::AudioDown => Err(Error::Order),
     }
 }

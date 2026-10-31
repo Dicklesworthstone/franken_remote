@@ -339,7 +339,7 @@ fn input_tickets_keep_the_exact_role_and_original_handshake_directions() {
 }
 
 #[test]
-fn audio_down_role_has_its_own_golden_byte_and_audio_up_stays_reserved() {
+fn audio_directions_have_distinct_golden_roles_and_cannot_claim_each_others_direction() {
     let d = Descriptor {
         role: MediaRole::AudioDown,
         ..descriptor()
@@ -363,16 +363,25 @@ fn audio_down_role_has_its_own_golden_byte_and_audio_up_stays_reserved() {
     let mut wrong = expected.clone();
     wrong[125] = 2;
     assert!(decode(&wrong, parent(), 7, &L, D::HostToViewer, T::Reliable).is_err());
-    // The reserved audio-up role is a typed refusal, never another role.
-    for direction in [1, 2] {
-        let mut up = expected.clone();
-        up[124] = AUDIO_UP_RESERVED_ROLE;
-        up[125] = direction;
-        assert_eq!(
-            decode(&up, parent(), 7, &L, D::HostToViewer, T::Reliable),
-            Err(fr_wire::WireError::UnsupportedKind)
-        );
-    }
+    // Role 8 is independently negotiated, with client-to-host application
+    // data. The attachment handshake itself remains host-initiated.
+    let uplink = Descriptor {
+        role: MediaRole::AudioUp,
+        ..d
+    };
+    let mut up = expected.clone();
+    up[124] = 8;
+    up[125] = 2;
+    assert_eq!(encoded(Message::Binding(uplink)), up);
+    assert_eq!(
+        decode(&up, parent(), 7, &L, D::HostToViewer, T::Reliable),
+        Ok(Message::Binding(uplink))
+    );
+    up[125] = 1;
+    assert_eq!(
+        decode(&up, parent(), 7, &L, D::HostToViewer, T::Reliable),
+        Err(fr_wire::WireError::WrongRole)
+    );
     let mut unknown = expected;
     unknown[124] = 10;
     assert_eq!(

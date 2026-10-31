@@ -663,5 +663,8 @@ mod files;
 #[path = "media_attachment/audio.rs"]
 mod audio;
 
+#[path = "media_attachment/audio_up.rs"]
+mod audio_up;
+
 #[path = "media_attachment/credit.rs"]
 mod credit;

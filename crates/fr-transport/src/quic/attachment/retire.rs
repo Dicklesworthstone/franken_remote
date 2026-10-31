@@ -10,12 +10,14 @@ const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
 const FILES_RETIRED: u64 = 0x4652_4649;
 const MEDIA_RETIRED: u64 = 0x4652_4d44;
 const AUDIO_RETIRED: u64 = 0x4652_4144;
+const MICROPHONE_RETIRED: u64 = 0x4652_4155;
 
 pub(super) fn retirement_code(role: MediaRole) -> Option<u64> {
     match role {
         MediaRole::Clipboard => Some(CLIPBOARD_RETIRED),
         MediaRole::Files | MediaRole::FilesDownload => Some(FILES_RETIRED),
         MediaRole::AudioDown => Some(AUDIO_RETIRED),
+        MediaRole::AudioUp => Some(MICROPHONE_RETIRED),
         MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video => Some(MEDIA_RETIRED),
         // Input has one ordering/authority domain for the connection lifetime.
         MediaRole::Input => None,
@@ -34,6 +36,20 @@ impl MediaChannel {
     /// and stream IDs; a second attachment cannot reset cumulative file quotas.
     pub fn retire_files(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         if !self.descriptor.role.is_files() {
+            return Err(Error::WrongRoute);
+        }
+        self.retire_optional(q, cx, self.descriptor.role)
+    }
+    /// Retire only this COMPLETED audio direction on its original connection.
+    /// The caller fences its native capture/output before retirement. The other
+    /// audio direction, video and control remain independent; consumed binding,
+    /// ticket and stream identities stay tombstones. Partial exchanges cannot
+    /// use this escape and retain their connection-fencing cancellation policy.
+    pub fn retire_audio(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
+        if !matches!(
+            self.descriptor.role,
+            MediaRole::AudioDown | MediaRole::AudioUp
+        ) {
             return Err(Error::WrongRoute);
         }
         self.retire_optional(q, cx, self.descriptor.role)

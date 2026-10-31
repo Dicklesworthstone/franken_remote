@@ -166,6 +166,7 @@ fn every_role_intersects_both_directions_without_mutating_the_reservation() {
         MediaRole::Files,
         MediaRole::FilesDownload,
         MediaRole::AudioDown,
+        MediaRole::AudioUp,
     ] {
         for host in [186, 512, 1150, 8192, 65_536] {
             for client in [186, 512, 1150, 8192, 65_536] {

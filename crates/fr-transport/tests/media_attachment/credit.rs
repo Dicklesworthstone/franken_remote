@@ -25,6 +25,7 @@ fn enable(l: &mut Link) {
         (fr_wire::clipboard::CAPABILITY, fr_wire::clipboard::VERSION),
         (fr_wire::files::CAPABILITY, fr_wire::files::VERSION),
         (fr_wire::audio::CAPABILITY, fr_wire::audio::VERSION),
+        (fr_wire::audio_up::CAPABILITY, fr_wire::audio_up::VERSION),
         (
             fr_wire::audio_control::CAPABILITY,
             fr_wire::audio_control::VERSION,
@@ -85,6 +86,7 @@ fn kinds(role: MediaRole) -> (u16, Option<u16>) {
         MediaRole::Clipboard => (0x51, Some(0x51)),
         MediaRole::Files | MediaRole::FilesDownload => (0x72, Some(0x72)),
         MediaRole::AudioDown => (0x60, Some(0x61)),
+        MediaRole::AudioUp => (0x61, Some(0x60)),
     }
 }
 
@@ -124,22 +126,28 @@ async fn bounded_records(l: &mut Link, cx: &Cx, h: AttachedChannel, c: AttachedC
         assert!(!q.is_closed());
     }
     if h.descriptor.role != MediaRole::Input
-        && let (Some(send), Some(receive)) = (h.datagram, c.datagram)
+        && let (Some(host_route), Some(client_route)) = (h.datagram, c.datagram)
     {
+        let (host, send, receive) = if host_route.outbound {
+            (true, host_route, client_route)
+        } else {
+            (false, client_route, host_route)
+        };
         assert!(send.outbound && !receive.outbound);
         let maximum = usize::try_from(h.byte_allowance).unwrap();
         transfer(
             l,
             cx,
-            true,
+            host,
             Route::Datagram(send),
             Route::Datagram(receive),
             &record(send.kind, send.binding, maximum),
         )
         .await;
-        let before = l.h.usage();
+        let q = if host { &mut l.h } else { &mut l.c };
+        let before = q.usage();
         assert_eq!(
-            l.h.send(
+            q.send(
                 cx,
                 Route::Datagram(send),
                 &record(send.kind, send.binding, maximum + 1),
@@ -148,7 +156,7 @@ async fn bounded_records(l: &mut Link, cx: &Cx, h: AttachedChannel, c: AttachedC
             ),
             Err(Error::TooLarge)
         );
-        assert_eq!(l.h.usage(), before);
+        assert_eq!(q.usage(), before);
     }
 }
 
@@ -176,6 +184,7 @@ fn every_role_intersects_the_actual_endpoint_caps_and_enforces_the_narrowed_rout
                 (4, MediaRole::Clipboard, 16_384),
                 (5, MediaRole::Files, 16_384),
                 (6, MediaRole::AudioDown, 640),
+                (7, MediaRole::AudioUp, 640),
             ] {
                 let (ho, co, h, c) = attach(&mut l, &cx, role, 8 + offset).await;
                 for a in [h, c] {
@@ -242,6 +251,84 @@ fn parallel_clipboard_and_files_accept_their_own_credit_in_reverse_ack_order() {
         }
         hc.retire_clipboard(&mut l.h, &cx).unwrap();
         assert!(hf.completed_on(&l.h).is_ok());
+        assert!(!l.h.is_closed());
+    });
+}
+
+#[test]
+fn microphone_dispatch_keeps_all_three_optional_siblings_with_reverse_ack_order() {
+    run_test!(cx, {
+        let mut l = link(&cx, Policy::default(), Policy::default()).await;
+        for (name, version) in [
+            (
+                fr_wire::files::DOWNLOAD_CAPABILITY,
+                fr_wire::files::DOWNLOAD_VERSION,
+            ),
+            (
+                fr_wire::files::DUPLEX_CAPABILITY,
+                fr_wire::files::DUPLEX_VERSION,
+            ),
+            (
+                fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+                fr_wire::files::CHANNEL_SCOPE_VERSION,
+            ),
+        ] {
+            l.selection.capabilities.push(Capability {
+                name: name.into(),
+                version,
+                required: false,
+            });
+        }
+        l.selection.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+        assert!(fr_wire::files::duplex_selected(&l.selection));
+        let _input = attach(&mut l, &cx, MediaRole::Input, 8).await;
+        let mut hosts = [
+            offer(&mut l, &cx, 9, MediaRole::Clipboard),
+            offer(&mut l, &cx, 10, MediaRole::Files),
+            offer(&mut l, &cx, 11, MediaRole::FilesDownload),
+            offer(&mut l, &cx, 12, MediaRole::AudioUp),
+        ];
+        let mut clients = Vec::with_capacity(4);
+        for host in &mut hosts {
+            clients.push(l.viewer(&cx, host).await);
+        }
+        let until = clock(&cx) + 1_500_000;
+        loop {
+            assert!(
+                clock(&cx) < until,
+                "four optional exchanges must complete independently"
+            );
+            for client in clients.iter_mut().rev() {
+                client.transmit(&mut l.c, &cx, || true).unwrap();
+            }
+            for host in &mut hosts {
+                host.transmit(&mut l.h, &cx, || true).unwrap();
+            }
+            l.drive(&cx).await;
+            // First poll the owner whose ACK arrived last. It must recognize
+            // all three original siblings, including the microphone.
+            for host in &mut hosts {
+                host.dispatch(&mut l.h, &cx, || true).unwrap();
+                host.finish(&mut l.h, &cx, || true).unwrap();
+            }
+            for client in clients.iter_mut().rev() {
+                client.dispatch(&mut l.c, &cx, || true).unwrap();
+                client.finish(&mut l.c, &cx, || true).unwrap();
+            }
+            if hosts.iter().chain(&clients).all(MediaChannel::is_complete) {
+                break;
+            }
+        }
+        for (host, client) in hosts.iter().zip(&clients) {
+            let h = host.completed_on(&l.h).unwrap();
+            let c = client.completed_on(&l.c).unwrap();
+            assert_eq!(h.descriptor, c.descriptor);
+            bounded_records(&mut l, &cx, h, c).await;
+        }
+        hosts[3].retire_audio(&mut l.h, &cx).unwrap();
+        for host in &hosts[..3] {
+            assert!(host.completed_on(&l.h).is_ok());
+        }
         assert!(!l.h.is_closed());
     });
 }

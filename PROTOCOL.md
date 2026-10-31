@@ -458,15 +458,46 @@ cannot enable host audio globally or install a virtual device/driver.
 
 The native profile's downlink is the optional capability `native-audio-down`
 v1 (offered by the host only with its local enable, by the client only on an
-explicit request) and one `ChannelAttach` role `AudioDown` (7) per connection,
-observers only: a reliable pair (host: 0x0060/0x0063; viewer: 0x0061/0x0063) and
-one `AudioPacket` (0x0062) datagram route; role 8 is reserved for `audio-up` and
-refuses as unsupported. The wire generation is the viewer lane's own epoch,
+explicit request) and one `ChannelAttach` role `AudioDown` (7) per connection:
+a reliable pair (host: 0x0060/0x0063; viewer: 0x0061/0x0063) and
+one `AudioPacket` (0x0062) datagram route. The legacy profile serves observers;
+controllers additionally select `native-audio-control` v1 as specified in
+`PROTOCOL_NATIVE_AUDIO_CONTROL.md`. The wire generation is the viewer lane's own epoch,
 strictly increasing per connection; the host starts a new epoch after a source
 restart or after the viewer's `AudioStop` with `DeviceChanged` (a local output
 reset, bounded per connection). No packet is sent before the matching
 `AudioConfigured`, and only audio captured after it; stale audio is dropped at
 the host rather than sent late.
+
+The independent optional `native-audio-up` v1 profile assigns `AudioUp` role 8,
+primary application direction 2 (controller to host). Both peers must positively
+select that exact version, `native-media-attachment` v1 and
+`native-input-attachment` v1 on a `RequestControl` session. Playback selection
+does not imply microphone support; uplink does not require playback. The original
+input attachment must already be complete before the microphone pair reserves
+resources. Attachment metadata is not a control grant, microphone permission,
+host approval or device readiness.
+
+Its reliable pair reverses playback: controller 0x0060/0x0063, host
+0x0061/0x0063; its 0x0062 datagram route admits controller-to-host packets only.
+Every audio payload carries `Uplink` and this direction's own strictly increasing
+generation. Each direction has a distinct one-use binding, ticket, stream pair,
+datagram route and finite record allowance. One up and one down attachment may
+coexist. Clipboard, upload, download and microphone attachment exchanges may
+share CONTROL framing, with at most three independently validated sibling
+reservations per owner and no extra record queue. Retiring a completed audio
+pair discards only that direction's retained work, keeps its consumed identities
+as tombstones, and cannot reopen it. An unfinished attachment retains the
+connection-fencing cancellation policy.
+
+Public native offers do not enable this capability merely because its wire and
+transport support is compiled. The operational owner must also install a
+qualified virtual source, independent host microphone approval, explicit
+per-session client talk and OS permission, visible controls at both ends, and
+original-controller lease/revocation fencing. No microphone capture starts
+before the exact host readiness acknowledgement, and no native readiness reply
+substitutes for that acknowledgement's transport admission. Device change,
+permission loss, disable or reconnect cannot resume an old generation.
 
 The native optional `file-duplex` v1 profile permits one upload and one
 download on the **same original controlled session**. Both endpoints must
@@ -474,9 +505,9 @@ positively select `native-media-attachment`, `native-input-attachment`,
 `native-file-receive`, `file-atp-full`, `file-download`, `file-channel-scope`, and
 `file-duplex`, all version 1. The new attachment role `FilesDownload` (9,
 primary direction 1) carries host-to-controller data; the original `Files` (6,
-primary direction 2) carries controller-to-host data. Role 8 remains reserved
-for audio-up. Without the complete duplex profile, the existing sole Files
-lane retains its legacy direction selected by `file-download`; merely offering
+primary direction 2) carries controller-to-host data. Role 8 belongs to the
+independently selected audio-up profile. Without the complete duplex profile,
+the existing sole Files lane retains its legacy direction selected by `file-download`; merely offering
 both endpoints does not authorize a second lane.
 
 Each file direction has a distinct one-use binding/ticket, channel-derived

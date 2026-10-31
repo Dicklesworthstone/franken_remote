@@ -29,7 +29,9 @@ pub(super) fn maximum(
         | MediaRole::Files
         | MediaRole::FilesDownload => base,
         // One cap covers reliable replies/progress and packet datagrams.
-        MediaRole::Video | MediaRole::AudioDown => base.min(datagram_bytes as u64),
+        MediaRole::Video | MediaRole::AudioDown | MediaRole::AudioUp => {
+            base.min(datagram_bytes as u64)
+        }
         MediaRole::Input => base.min(MAX_INPUT_RECORD_BYTES as u64),
     }
 }
@@ -85,7 +87,7 @@ mod tests {
                     critical as u64
                 );
             }
-            for role in [MediaRole::Video, MediaRole::AudioDown] {
+            for role in [MediaRole::Video, MediaRole::AudioDown, MediaRole::AudioUp] {
                 assert_eq!(
                     maximum(&limits, role, 65_536, critical, 131_072, 1150),
                     critical.min(1150) as u64
@@ -128,7 +130,7 @@ mod tests {
             maximum(&limits, MediaRole::Recovery, 65_536, 8192, 1024, 1150),
             1024
         );
-        for role in [MediaRole::Video, MediaRole::AudioDown] {
+        for role in [MediaRole::Video, MediaRole::AudioDown, MediaRole::AudioUp] {
             assert_eq!(maximum(&limits, role, 65_536, 8192, 131_072, 512), 512);
             assert_eq!(maximum(&limits, role, 256, 8192, 131_072, 1150), 256);
         }
@@ -146,6 +148,7 @@ mod tests {
             MediaRole::Files,
             MediaRole::FilesDownload,
             MediaRole::AudioDown,
+            MediaRole::AudioUp,
         ] {
             for stream in [0, 1, 64, 8192, 65_536, u64::MAX] {
                 for budget in [0, 1, 64, 8192, 131_072, usize::MAX] {
@@ -212,6 +215,7 @@ mod negotiation_tests {
                     MediaRole::Video,
                     MediaRole::Input,
                     MediaRole::AudioDown,
+                    MediaRole::AudioUp,
                 ] {
                     assert_eq!(
                         negotiated_maximum(&selection, role, 65_536, 8192, 131_072, 1150),
