@@ -7,6 +7,7 @@ mod cursor;
 mod disconnect;
 pub(in crate::session_startup) mod files;
 mod interactive;
+mod live_snapshot;
 mod native_turn;
 mod recovery;
 mod repair;
@@ -281,6 +282,11 @@ pub struct StreamingViewer {
     statistics: Statistics,
     served: bool,
     initial_snapshot_requested: bool,
+    snapshot_stamp: Option<fr_media::worker::presentation_snapshot::Stamp>,
+    snapshots: Option<(
+        fr_client::robot::snapshot::Channel,
+        fr_client::robot::snapshot::Handle,
+    )>,
     initial: Option<media::PresentationReceipt>,
     disconnect_outcome: Option<quic::CloseOutcome>,
 }
@@ -300,6 +306,7 @@ impl ViewerSession {
                 .observe_decoded(&initial.decoded)
                 .map_err(Error::Recovery)?;
         }
+        viewer.note_snapshot(initial.frame, initial.stage)?;
         viewer.initial = Some(initial);
         Ok(viewer)
     }
@@ -345,6 +352,7 @@ impl StreamingViewer {
         if let Some(recovery) = &mut viewer.recovery {
             recovery.observe_decoded(&initial.decoded).unwrap();
         }
+        viewer.note_snapshot(initial.frame, initial.stage).unwrap();
         viewer.initial = Some(initial);
         viewer
     }
@@ -452,6 +460,8 @@ impl StreamingViewer {
             statistics: Statistics::default(),
             served: false,
             initial_snapshot_requested: false,
+            snapshot_stamp: None,
+            snapshots: None,
             initial: None,
             disconnect_outcome: None,
         })
@@ -823,6 +833,9 @@ impl StreamingViewer {
                 &mut self.repair,
                 cx,
             )?;
+            if recovering {
+                self.clear_snapshot();
+            }
             // The loss already fenced the old receiver scope: a control grant
             // suspends now, before another turn could act on that view.
             if recovering && let Peer::Control(viewer) = &mut self.peer {
@@ -833,6 +846,7 @@ impl StreamingViewer {
                 && self.recovery_state() == Some(recovery_control::State::Requested)
             {
                 let event = self.resume_stream(ui, result, other).await?;
+                self.note_snapshot(event.frame, event.stage)?;
                 acquisition::notify(
                     &mut self.peer,
                     &self.receiver,
@@ -851,17 +865,27 @@ impl StreamingViewer {
                     continue;
                 }
             }
+            if !recovering {
+                self.service_snapshot(cx, ui, result, other).await?;
+                if self.receiver.state() == fr_media::delivery::ReceiveState::NeedsRecovery {
+                    continue;
+                }
+            }
             let ready = !recovering && self.peer.prepare_decode(&self.receiver)?;
             let job = if ready {
-                recovery::admit(
+                let admitted = recovery::admit(
                     &mut self.peer,
                     self.recovery.as_deref_mut(),
                     &mut self.receiver,
                     &mut self.repair,
                     cx,
                     |receiver| self.presenter.take_next(cx, receiver),
-                )?
-                .flatten()
+                );
+                live_snapshot::retire_stale(
+                    &self.receiver,
+                    self.snapshots.as_ref().map(|(channel, _)| channel),
+                );
+                admitted?.flatten()
             } else {
                 None
             };
@@ -871,6 +895,7 @@ impl StreamingViewer {
                     self.clipboard.as_mut(),
                     self.files.as_mut(),
                     &mut self.receiver,
+                    self.snapshots.as_ref().map(|(channel, _)| channel),
                     &mut self.repair,
                     self.recovery.as_deref_mut(),
                     &mut self.statistics,
@@ -901,6 +926,7 @@ impl StreamingViewer {
                             self.clipboard.as_mut(),
                             self.files.as_mut(),
                             &mut self.receiver,
+                            self.snapshots.as_ref().map(|(channel, _)| channel),
                             &mut self.repair,
                             self.recovery.as_deref_mut(),
                             &mut self.statistics,
@@ -933,7 +959,12 @@ impl StreamingViewer {
                 &mut self.repair,
                 cx,
                 |receiver| job.complete(cx, receiver),
-            )?;
+            );
+            live_snapshot::retire_stale(
+                &self.receiver,
+                self.snapshots.as_ref().map(|(channel, _)| channel),
+            );
+            let receipt = receipt?;
             if let Some(f) = &mut self.feedback {
                 f.complete(now(cx).map_err(Error::Session)?)
                     .map_err(Error::Feedback)?;
@@ -956,6 +987,7 @@ impl StreamingViewer {
             }
             self.peer.decoded(receipt)?;
             self.statistics.presented(stage);
+            self.note_snapshot(event.frame, stage)?;
             // Completion releases the original decode reservation only after native borrowing.
             acquisition::notify(
                 &mut self.peer,
@@ -1017,6 +1049,7 @@ async fn network(
     clipboard: Option<&mut crate::native_clipboard::Application>,
     files: Option<&mut files::Lane>,
     receiver: &mut ReceivePipeline,
+    snapshot_channel: Option<&fr_client::robot::snapshot::Channel>,
     repair: &mut Repair,
     mut recovery: Option<&mut recovery_control::Receiver>,
     statistics: &mut Statistics,
@@ -1039,14 +1072,18 @@ async fn network(
     {
         lane.viewer(viewer);
     }
-    recovery::prepare(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
+    let prepared = recovery::prepare(peer, recovery.as_deref_mut(), receiver, repair, cx);
+    live_snapshot::retire_stale(receiver, snapshot_channel);
+    prepared?;
     if repair_send::transmit(peer, receiver, repair, cx)? {
         statistics.repair_requests = statistics.repair_requests.saturating_add(1);
     }
     // The prepared repair may have expired during admission. Tick the ORIGINAL
     // receiver and suspend a control grant before any further network/native
     // work; negotiated recovery keeps the connection and original budget.
-    let recovering = recovery::service(peer, recovery.as_deref_mut(), receiver, repair, cx)?;
+    let recovering = recovery::service(peer, recovery.as_deref_mut(), receiver, repair, cx);
+    live_snapshot::retire_stale(receiver, snapshot_channel);
+    let recovering = recovering?;
     if recovering && let Peer::Control(viewer) = peer {
         viewer.enter_recovery().map_err(Error::Control)?;
     }
@@ -1108,11 +1145,12 @@ async fn network(
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
                 })?;
-                recovery::receive(receiver, *channel, bytes, current, allow_recovery).map_err(
-                    |error| {
-                        failure = Some(Error::Delivery(error));
-                    },
-                )?;
+                let received =
+                    recovery::receive(receiver, *channel, bytes, current, allow_recovery);
+                live_snapshot::retire_stale(receiver, snapshot_channel);
+                received.map_err(|error| {
+                    failure = Some(Error::Delivery(error));
+                })?;
                 Ok(Disposition::Consumed)
             } else {
                 other(route, bytes).map_err(|()| {
@@ -1125,7 +1163,9 @@ async fn network(
         return Err(error);
     }
     driven?;
-    let recovering = recovery::service(peer, recovery, receiver, repair, cx)?;
+    let recovering = recovery::service(peer, recovery, receiver, repair, cx);
+    live_snapshot::retire_stale(receiver, snapshot_channel);
+    let recovering = recovering?;
     if recovering && let Peer::Control(viewer) = peer {
         viewer.enter_recovery().map_err(Error::Control)?;
     }

@@ -24,6 +24,7 @@ pub mod live;
 pub mod observe;
 pub mod session;
 pub mod sha256;
+pub mod snapshot;
 pub mod status;
 
 pub use envelope::{

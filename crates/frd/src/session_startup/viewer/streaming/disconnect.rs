@@ -117,6 +117,7 @@ impl StreamingViewer {
     /// Independent of session cancellation so the already-fenced observation can
     /// retain its original socket ONLY for the typed terminal exchange.
     pub(super) fn close_media(&mut self) {
+        self.close_snapshots();
         self.receiver.close();
         self.presenter.abort();
         self.repair.clear();

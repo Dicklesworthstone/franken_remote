@@ -628,6 +628,7 @@ impl super::StreamingViewer {
         result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<Presentation, Error> {
+        self.clear_snapshot();
         self.initial = None;
         self.repair.clear();
         // Only lifetime counters cross epochs; old pending replies and source

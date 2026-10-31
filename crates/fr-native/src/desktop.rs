@@ -246,6 +246,19 @@ impl Desktop {
     ) -> Option<fr_media::worker::presentation_snapshot::Snapshot> {
         self.initial_snapshot.take()
     }
+    /// Explicitly enable a bounded pixel request handle during the ready
+    /// callback, before continuous serving. It is retired with this original
+    /// desktop and never creates a connection, capture or input grant.
+    pub fn snapshot_handle(&mut self) -> Result<fr_client::robot::snapshot::Handle, Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        self.observer
+            .as_mut()
+            .ok_or(Error::NotViewing)?
+            .snapshot_handle()
+            .map_err(Error::Observer)
+    }
     pub fn window(&self) -> Option<WindowControl> {
         self.window.as_ref().map(ViewerWindow::control)
     }

@@ -282,3 +282,6 @@ fn a_decode_only_request_cannot_bypass_native_bitstream_refusal() {
 
 #[path = "presentation_snapshot.rs"]
 mod presentation_snapshot;
+
+#[path = "live_snapshot.rs"]
+mod live_snapshot;

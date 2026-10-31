@@ -318,6 +318,7 @@ impl StreamingViewer {
                     self.clipboard.as_mut(),
                     self.files.as_mut(),
                     &mut self.receiver,
+                    self.snapshots.as_ref().map(|(channel, _)| channel),
                     &mut self.repair,
                     self.recovery.as_deref_mut(),
                     &mut self.statistics,

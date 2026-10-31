@@ -290,6 +290,12 @@ impl NativeObserver {
         let snapshot = self.viewer.snapshot_initial(self.initial.frame);
         async move { snapshot.await.map_err(Error::Streaming) }
     }
+    /// Opt in to bounded on-demand export on this same continuing viewer.
+    /// Requests carry an exact presentation stamp; no pixels are copied until
+    /// an authenticated local caller explicitly requests them.
+    pub fn snapshot_handle(&mut self) -> Result<fr_client::robot::snapshot::Handle, Error> {
+        self.viewer.snapshot_handle().map_err(Error::Streaming)
+    }
     /// Request metadata uses this actual selected display, not caller-guessed
     /// channel IDs or generations. Capabilities remain a request, not permission.
     pub fn control_request(
