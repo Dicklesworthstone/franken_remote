@@ -95,10 +95,7 @@ fn authenticated_terminal(error: Error) -> bool {
 
     matches!(
         error,
-        Error::Session(S::RemoteClosed(_))
-            | Error::Control(C::LeaseRevoked(_) | C::Session(S::RemoteClosed(_)))
-            | Error::Session(S::Transport(T::PeerClosed(_)))
-            | Error::Control(C::Session(S::Transport(T::PeerClosed(_))))
+        Error::Session(S::RemoteClosed(_) | S::Transport(T::PeerClosed(_)))
             | Error::Transport(T::PeerClosed(_))
             | Error::Recovery(crate::media_quic::recovery::Error::Transport(
                 T::PeerClosed(_)
@@ -114,7 +111,9 @@ fn authenticated_terminal(error: Error) -> bool {
                 _
             )))
             | Error::Control(
-                C::Media(crate::media_quic::Error::Transport(T::PeerClosed(_)))
+                C::LeaseRevoked(_)
+                    | C::Session(S::RemoteClosed(_) | S::Transport(T::PeerClosed(_)))
+                    | C::Media(crate::media_quic::Error::Transport(T::PeerClosed(_)))
                     | C::Input(crate::input_quic::Error::Transport(T::PeerClosed(_)))
             )
     )

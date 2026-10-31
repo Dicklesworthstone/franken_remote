@@ -3,6 +3,34 @@ use super::{Error, Peer, Repair, media, now, recovery_control};
 use asupersync::cx::Cx;
 use fr_media::delivery::{DeliveryError, ReceivePipeline};
 
+/// Attach the reporting owner only for a positively negotiated recovery role.
+pub(super) fn attach(
+    session: &super::ViewerSession,
+    media: &super::NegotiatedMedia,
+    receiver: &ReceivePipeline,
+) -> Result<Option<recovery_control::Receiver>, Error> {
+    session
+        .opened
+        .selection
+        .capabilities
+        .iter()
+        .any(|cap| {
+            cap.name == fr_wire::recovery_request::CAPABILITY
+                && cap.version == fr_wire::recovery_request::VERSION
+        })
+        .then(|| {
+            media
+                .recovery_receiver(
+                    &session.transport,
+                    session.routes,
+                    session.opened.binding,
+                    receiver,
+                )
+                .map_err(Error::Recovery)
+        })
+        .transpose()
+}
+
 pub(super) fn recoverable(error: DeliveryError) -> bool {
     matches!(
         error,
@@ -74,7 +102,7 @@ pub(super) fn service(
 }
 
 /// Preserve a horizon actually exhausted by this original receiver's service,
-/// after its connection/authority checks. Without negotiation, tick() already
+/// after its connection/authority checks. Without negotiation, `tick()` already
 /// returns the same Delivery error. Adding the reporting owner must not hide it
 /// and suppress bounded fresh viewing after cleanup. The ORIGINAL receiver must
 /// independently retain an expired horizon: a later recovery timeout cannot

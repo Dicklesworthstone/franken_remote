@@ -232,7 +232,7 @@ fn unsupported_metadata_cannot_be_authenticated_into_native_effects() {
             m.symlink_target_info = Some(
                 serde_json::from_value(serde_json::json!({"semantics":"portable_relative"}))
                     .unwrap(),
-            )
+            );
         },
     ];
     for edit in edits {

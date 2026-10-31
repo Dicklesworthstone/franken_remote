@@ -228,14 +228,19 @@ fn deadline_starts_before_first_poll_and_does_not_spawn_a_source() {
         let mut f = Running::new(&cx).await;
         let mut sender =
             Sender::new(cx.clone(), &f.link.c, &mut f.client, Policy::default()).unwrap();
+        // Admission itself checks identity and authority before accepting the
+        // deadline. Give that work time to finish, then expire the ORIGINAL
+        // budget without servicing the batch; a one-microsecond fixture can
+        // legitimately expire inside begin_batch before anything is accepted.
+        let lifetime = Duration::from_millis(100);
         sender
             .begin_batch(
                 &f.link.c,
                 selection(Path::new("/dev/null"), &["never"]),
-                Duration::from_micros(1),
+                lifetime,
             )
             .unwrap();
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::sleep(lifetime);
         assert_eq!(sender.service(&mut f.link.c, || true), Err(Error::Expired));
         let report = sender.take_batch_report().unwrap();
         assert_eq!(

@@ -366,7 +366,8 @@ impl Bridge {
             return Ok(State::Retired);
         }
         if self.lane.check(q).is_err() {
-            return self.on_refusal(q, Error::Closed);
+            let reason = self.retirement_reason(q);
+            return self.on_refusal(q, reason);
         }
         if self.inflight.iter().any(Option::is_some) {
             match self.lane.send_drained(q) {
@@ -391,6 +392,13 @@ impl Bridge {
             return self.on_refusal(q, reason);
         }
         Ok(State::Active)
+    }
+    fn retirement_reason(&self, q: &QuicRecords) -> Error {
+        if self.lane.receive_expired(q) {
+            Error::HandoffExpired
+        } else {
+            Error::Closed
+        }
     }
     fn on_refusal(&mut self, q: &mut QuicRecords, reason: Error) -> Result<State, Error> {
         if reason.is_suspended() {
@@ -484,10 +492,10 @@ impl Bridge {
         let mut turn = Turn::new(&self.shared);
         q.tick(&self.cx, &mut authorize).map_err(Error::Transport)?;
         if self.lane.check(q).is_err() {
-            self.reason = Some(Error::Closed);
-            self.retire(q)?;
+            let reason = self.retirement_reason(q);
+            let state = self.on_refusal(q, reason)?;
             turn.complete();
-            return Ok(State::Retired);
+            return Ok(state);
         }
         self.release_handoff()?;
         if self.pending.is_none()
@@ -541,6 +549,13 @@ impl Bridge {
                     self.release_handoff()?;
                 }
                 Err(quic::Error::Backpressure) => {}
+                Err(quic::Error::WrongRoute | quic::Error::Closed)
+                    if self.lane.receive_expired(q) =>
+                {
+                    let state = self.on_refusal(q, Error::HandoffExpired)?;
+                    turn.complete();
+                    return Ok(state);
+                }
                 Err(quic::Error::Expired) if !q.is_closed() => {
                     // send_prepared can hit its local deadline before invoking
                     // the record callback. Only an open connection proves this
@@ -577,17 +592,25 @@ impl Bridge {
         authorize: impl FnMut() -> bool,
     ) -> Result<Option<Error>, Error> {
         let mut refused = None;
-        self.lane
-            .dispatch(q, &self.cx, authorize, |bytes| match self.admission() {
-                Ok((local, host)) => self.shared.accept(bytes, local, host),
-                Err(reason) => {
-                    // Preserve the exact unconsumed record. A terminal race
-                    // retires just this lane after dispatch returns.
-                    refused = Some(reason);
-                    Ok(Disposition::Blocked)
-                }
-            })
-            .map_err(Error::Transport)?;
+        let dispatched =
+            self.lane
+                .dispatch(q, &self.cx, authorize, |bytes| match self.admission() {
+                    Ok((local, host)) => self.shared.accept(bytes, local, host),
+                    Err(reason) => {
+                        // Preserve the exact unconsumed record. A terminal race
+                        // retires just this lane after dispatch returns.
+                        refused = Some(reason);
+                        Ok(Disposition::Blocked)
+                    }
+                });
+        if matches!(
+            dispatched,
+            Err(quic::Error::WrongRoute | quic::Error::Closed)
+        ) && self.lane.receive_expired(q)
+        {
+            return Ok(Some(Error::HandoffExpired));
+        }
+        dispatched.map_err(Error::Transport)?;
         Ok(refused)
     }
     /// Drives the EXISTING connection. Keep the containing session's admission

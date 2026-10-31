@@ -95,13 +95,26 @@ impl QuicRecords {
     /// cancels this media/optional pair; it is not EOF on the critical input stream.
     /// So does the local owner's `request_retirement`.
     /// Retired reservations remain forever to prevent replay-ledger recreation.
-    pub(crate) fn service_optional_retirements(&mut self, cx: &Cx) -> Result<(), Error> {
+    pub(crate) fn service_optional_retirements(&mut self, cx: &Cx, now: u64) -> Result<(), Error> {
         for index in 0..self.attachments.len() {
             let r = &self.attachments[index];
             if retirement_code(r.role).is_none() {
                 continue;
             }
             if r.state.load(Ordering::Acquire) == ACTIVE {
+                // A complete clipboard record can wait behind its one-slot OS
+                // handoff. Its ORIGINAL framing deadline may be earlier than
+                // that handoff's deadline. Retire the optional pair at that
+                // existing bound before the generic framing check closes the
+                // connection. Never forgive an incomplete/malformed frame, an
+                // unfinished attachment, or a critical stream's expiry.
+                let receive_expired = r.role == MediaRole::Clipboard
+                    && self.inbound.iter().any(|s| {
+                        s.route.stream == r.inbound
+                            && !s.fin
+                            && s.blocked
+                            && s.framing.next_deadline().is_some_and(|until| now >= until)
+                    });
                 let streams = self
                     .native
                     .as_ref()
@@ -111,13 +124,15 @@ impl QuicRecords {
                     .streams();
                 let outgoing = streams.stream(r.outbound).map_err(|_| Error::Native)?;
                 let incoming = streams.stream(r.inbound).map_err(|_| Error::Native)?;
-                if r.retire.load(Ordering::Acquire)
+                if receive_expired
+                    || r.retire.load(Ordering::Acquire)
                     || outgoing.stop_sending_error_code.is_some()
                     || outgoing.send_reset.is_some()
                     || incoming.recv_reset.is_some()
                     || incoming.final_size.is_some()
                 {
                     self.retire_optional_at(cx, index)?;
+                    self.attachments[index].receive_expired = receive_expired;
                 }
             }
             if self.attachments[index].retired() {
@@ -184,6 +199,7 @@ impl QuicRecords {
                 receiver.framing.close();
                 receiver.remainder = Bytes::new();
                 receiver.fin = true;
+                receiver.blocked = false;
             }
         }
         // Keep numeric route entries as tombstones too: native stream counts

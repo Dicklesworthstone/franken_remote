@@ -10,6 +10,7 @@ use fr_wire::{
 use transport_support::{clock, runtime};
 
 mod batching;
+mod expiry;
 
 #[path = "../../../fr-native/tests/clipboard_network/attachment.rs"]
 #[allow(dead_code)]
@@ -25,7 +26,7 @@ struct Fixture {
     seed: WorkerSeed,
     peer: ClipboardChannel,
     grant: fr_wire::control::Granted,
-    _host: InputSession,
+    host: InputSession,
     _input: (quic::MediaChannel, quic::MediaChannel),
 }
 impl Fixture {
@@ -56,7 +57,7 @@ impl Fixture {
             seed,
             peer,
             grant,
-            _host: host,
+            host,
             _input: input,
         }
     }

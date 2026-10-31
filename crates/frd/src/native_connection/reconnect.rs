@@ -452,18 +452,16 @@ pub fn retryable(failure: Failure) -> bool {
             | fr_tailnet::Error::HandshakeTimeout
             | fr_tailnet::Error::Timeout,
         ))
-        | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Recovery(
-            crate::media_quic::recovery::Error::NamespaceExhausted(
+        | Failure::Observation(ObserverError::Streaming(
+            StreamingViewerError::Recovery(crate::media_quic::recovery::Error::NamespaceExhausted(
                 fr_wire::recovery_request::Reason::ReferenceExpired
                 | fr_wire::recovery_request::Reason::RecoveryExpired,
-            ),
-        )))
-        | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Media(
-            crate::media::Error::Worker(crate::worker::Error::Deadline),
-        )))
-        | Failure::Observation(ObserverError::Streaming(StreamingViewerError::Startup(
-            crate::media::decoder_startup::Error::Expired,
-        ))) => true,
+            ))
+            | StreamingViewerError::Media(crate::media::Error::Worker(
+                crate::worker::Error::Deadline,
+            ))
+            | StreamingViewerError::Startup(crate::media::decoder_startup::Error::Expired),
+        )) => true,
         Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Session(e)
             | StreamingViewerError::Control(ControlledViewerError::Session(e)),

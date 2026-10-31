@@ -41,6 +41,40 @@ GUI integration, or live-tailnet qualification. See
 [PROTOCOL_CLIPBOARD.md](PROTOCOL_CLIPBOARD.md) for the transfer and authority
 contracts used by the native worker.
 
+## A complete record blocked behind a stalled worker
+
+The native worker handoff has a three-second bound, while the transport's
+default record lifetime is two seconds from its first byte. A stalled worker
+can retain `Begin` in its one-slot inbox while the next complete `Chunk` waits
+in transport. The earlier transport expiry must retire the optional clipboard
+pair before a generic framing check closes the controlling session.
+
+The transport records backpressure only after a complete, validated record
+reaches its application callback and returns `Blocked`. At that record's
+original framing deadline, the next checked operation retires an **active
+clipboard attachment** while it owns the native connection. It resets the
+exact pair and preserves receive-credit accounting and one-use tombstones.
+Retries do not renew the deadline. Consumption or framing replacement clears
+the marker, so a later incomplete record cannot inherit this exception.
+Partial or malformed records, critical streams, incomplete attachments and
+native-I/O cancellation keep their existing terminal handling.
+
+The retired reservation retains a content-free expiry cause. The original
+bridge reports `HandoffExpired` and fences its worker, including expiry races
+during its own send or dispatch. A foreign or closed connection cannot supply
+this evidence. Neither the transport deadline nor the worker handoff was
+extended, and delayed clipboard bytes cannot be dispatched after retirement.
+
+The change follows the failing native session regression in Rust verification
+run `41220574048`, job `124594070123`. Four new regression tests cover the
+earlier record deadline, non-renewal, continued bidirectional control/input,
+consumed-to-partial transitions, critical expiry and the bridge's typed cause.
+Two independent source reviews and pinned formatting checks passed. Local
+compilation stopped in the pinned Asupersync dependency when the shared 8 GiB
+memory limit killed its compiler; the new runtime tests and the original
+native session regression remain pending CI. Source coverage is not recorded
+as executed native qualification.
+
 ## Authorization across a worker handoff
 
 `ChannelSession::transport` is a read-only view of the original authority and

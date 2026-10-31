@@ -49,6 +49,9 @@ pub(super) struct Reservation {
     pub(super) inbound: StreamId,
     outbound: StreamId,
     retired_receive_accounted: u64,
+    /// Original complete-record expiry retired this optional clipboard pair.
+    /// Retain the cause beside the one-use reservation after buffers are gone.
+    receive_expired: bool,
     role: MediaRole,
     files_duplex: bool,
     // True only after the host Binding entered the ordered control queue.
@@ -574,6 +577,7 @@ impl QuicRecords {
             framing,
             remainder: Bytes::new(),
             fin: false,
+            blocked: false,
         });
         self.attachments.push(Reservation {
             state: state.clone(),
@@ -583,6 +587,7 @@ impl QuicRecords {
             inbound: inbound.stream,
             outbound: outbound.stream,
             retired_receive_accounted: 0,
+            receive_expired: false,
             role: d.role,
             files_duplex,
             offered: false,
@@ -801,6 +806,15 @@ impl MediaChannel {
     }
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete && self.state.load(Ordering::Acquire) == ACTIVE
+    }
+    pub(super) fn receive_expired(&self, q: &QuicRecords) -> bool {
+        q.is_bound_to(&self.connection)
+            && !q.is_closed()
+            && q.attachments.iter().any(|reservation| {
+                Arc::ptr_eq(&reservation.state, &self.state)
+                    && reservation.retired()
+                    && reservation.receive_expired
+            })
     }
     /// Ask the original connection to retire this completed optional pair at
     /// its next checked operation, BEFORE that operation's framing, retained
@@ -1227,6 +1241,7 @@ impl MediaChannel {
             }
             q.inbound[slot].route = inbound;
             q.inbound[slot].framing = framing;
+            q.inbound[slot].blocked = false;
             q.senders[sender].route = outbound;
             if let Some(route) = datagram {
                 q.attachments[reservation].datagram_maximum =

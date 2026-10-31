@@ -139,6 +139,13 @@ impl ClipboardChannel {
         }
         Ok(())
     }
+    /// This original connection retired the pair because a complete record
+    /// remained blocked until its original framing deadline. This is terminal
+    /// metadata, never permission to dispatch or reopen the expired record.
+    /// Foreign or closed connections cannot supply that isolation evidence.
+    pub fn receive_expired(&self, q: &QuicRecords) -> bool {
+        self.attachment.receive_expired(q)
+    }
     /// Invalidate the original attachment; its connection's next checked
     /// operation fences retained data. It never mutates an unrelated connection.
     pub fn close(&mut self) {

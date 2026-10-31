@@ -413,23 +413,7 @@ impl StreamingViewer {
                 now(&cx).map_err(Error::Session)?,
             )
             .map_err(Error::PresentedState)?;
-            let recovery = if session.opened.selection.capabilities.iter().any(|cap| {
-                cap.name == fr_wire::recovery_request::CAPABILITY
-                    && cap.version == fr_wire::recovery_request::VERSION
-            }) {
-                Some(
-                    media
-                        .recovery_receiver(
-                            &session.transport,
-                            session.routes,
-                            session.opened.binding,
-                            &receiver,
-                        )
-                        .map_err(Error::Recovery)?,
-                )
-            } else {
-                None
-            };
+            let recovery = recovery::attach(session, media, &receiver)?;
             let cursor = cursor::ViewerCursor::attach(media, &session.transport)?;
             let audio = audio::ViewerAudio::attach(media, &session.transport)?;
             Ok((feedback, presentation, recovery, cursor, audio))
@@ -1145,10 +1129,9 @@ async fn network(
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
                 })?;
-                let received =
-                    recovery::receive(receiver, *channel, bytes, current, allow_recovery);
+                let outcome = recovery::receive(receiver, *channel, bytes, current, allow_recovery);
                 live_snapshot::retire_stale(receiver, snapshot_channel);
-                received.map_err(|error| {
+                outcome.map_err(|error| {
                     failure = Some(Error::Delivery(error));
                 })?;
                 Ok(Disposition::Consumed)
