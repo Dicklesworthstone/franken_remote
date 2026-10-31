@@ -14,7 +14,10 @@ use fr_tailnet::Admission;
 use fr_transport::quic::{
     self, ConnectionBinding, ControlRoutes, Disposition, Policy, QuicRecords, Route,
 };
-use fr_wire::negotiation::{self, ControlBinding, Message, Offer, Role, Selection};
+use fr_wire::{
+    inspection,
+    negotiation::{self, ControlBinding, Message, Offer, Role, Selection},
+};
 use std::{
     cell::Cell,
     fmt,
@@ -108,6 +111,11 @@ pub enum Error {
     ClockSynchronization,
     Cancelled,
     RemoteClosed(fr_wire::closure::Closed),
+    /// A required capability inspection ended without creating a session.
+    InspectionComplete,
+    /// A recognized inspection ended before its terminal exchange completed.
+    /// The original peer is closed; an independent listener may accept again.
+    InspectionAbandoned,
     Closed,
 }
 impl Error {
@@ -118,7 +126,7 @@ impl Error {
     pub const fn is_peer_departure(&self) -> bool {
         matches!(
             self,
-            Self::Renewal(crate::media::renewal::Error::PeerClosed)
+            Self::Renewal(crate::media::renewal::Error::PeerClosed) | Self::InspectionComplete
         )
     }
 }
@@ -367,6 +375,8 @@ pub struct Host {
     routes: ControlRoutes,
     config: Configuration,
     intersection: Option<Offer>,
+    inspection: bool,
+    created: u64,
     selected: Option<Selection>,
     authority: Option<SessionAuthority>,
     phase: Phase,
@@ -427,6 +437,8 @@ impl Host {
             routes,
             config,
             intersection: None,
+            inspection: false,
+            created: current,
             selected: None,
             authority: Some(authority),
             phase: Phase::Hello,
@@ -550,11 +562,31 @@ impl Host {
     }
     fn consume(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.check()?;
+        if self.phase == Phase::Selection && self.inspection {
+            if !self
+                .intersection
+                .as_ref()
+                .is_some_and(inspection::requested)
+            {
+                return Err(Error::Order);
+            }
+            // This extension cannot select a session, request approval, or
+            // reach observation authority even if the peer sends Selection.
+            inspection::decode_request(bytes, self.maximum).map_err(negotiation::Error::from)?;
+            return Err(Error::InspectionComplete);
+        }
         match (
             self.phase,
             negotiation::decode(bytes, self.maximum, self.routes.inbound.binding)?,
         ) {
             (Phase::Hello, Message::ClientHello(offer)) => {
+                self.inspection = inspection::requested(&offer);
+                if self.inspection {
+                    self.until = self
+                        .until
+                        .min(self.created.saturating_add(inspection::MAX_DURATION_US));
+                    self.check()?;
+                }
                 // Observation-only shared service never silently downgrades a
                 // controller or exposes approval/capabilities for that intent.
                 if self.observation_only && offer.role != Role::Observe {
@@ -564,7 +596,11 @@ impl Host {
                     .as_ref()
                     .ok_or(Error::Closed)?
                     .check(&self.cx, offer.role)?;
-                let intersection = self.config.offer.intersect(&offer)?;
+                let intersection = if self.inspection {
+                    inspection::intersect(&self.config.offer, &offer)?
+                } else {
+                    self.config.offer.intersect(&offer)?
+                };
                 self.maximum = (intersection.limits.max_control_message_bytes() as usize)
                     .min(negotiation::MAX_RECORD);
                 self.role = offer.role;

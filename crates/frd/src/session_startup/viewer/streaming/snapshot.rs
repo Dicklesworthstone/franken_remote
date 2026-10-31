@@ -42,6 +42,8 @@ impl StreamingViewer {
             }
             let result = attempt.viewer.snapshot_inner(frame).await;
             attempt.complete = result.is_ok();
+            // Capture and retire the complete guard, including on an unpolled drop.
+            drop(attempt);
             result
         }
     }

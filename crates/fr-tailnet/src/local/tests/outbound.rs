@@ -15,6 +15,10 @@ fn resolves_only_node_owned_targets_with_canonical_tls_name() {
         let cx = Cx::current().unwrap();
         for selector in [
             PeerSelector::StableId("n-peer"),
+            PeerSelector::Pinned {
+                stable_id: "n-peer",
+                certificate_name: "remote.fixture.ts.net",
+            },
             PeerSelector::Name("REMOTE.fixture.ts.net."),
             PeerSelector::Address("100.64.0.2".parse().unwrap()),
         ] {
@@ -35,7 +39,7 @@ fn resolves_only_node_owned_targets_with_canonical_tls_name() {
             assert!(!format!("{target:?}").contains("100.64"));
         }
     });
-    assert_eq!(server.calls.load(Ordering::SeqCst), 6);
+    assert_eq!(server.calls.load(Ordering::SeqCst), 8);
 }
 #[test]
 fn invalid_local_selectors_do_not_send_requests_and_no_dns_fallback_exists() {
@@ -427,5 +431,89 @@ fn destination_service_renews_past_initial_expiry_without_granting_permissions()
         );
         lease.revoke();
         assert_eq!(service.await, Err(Error::Revoked));
+    });
+}
+
+#[test]
+fn pinned_selection_refuses_renames_reassignments_and_noncanonical_names() {
+    for changed in ["name", "id", "saved_name"] {
+        let mut s = status();
+        if changed == "name" {
+            peer_mut(&mut s)["DNSName"] = json!("renamed.fixture.ts.net.");
+        }
+        if changed == "id" {
+            peer_mut(&mut s)["ID"] = json!("n-replacement");
+        }
+        let server = Server::new(vec![response(&s, true)], Duration::ZERO);
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let name = if changed == "saved_name" {
+                "REMOTE.fixture.ts.net"
+            } else {
+                "remote.fixture.ts.net"
+            };
+            let result = server
+                .client
+                .peer_target(
+                    &cx,
+                    PeerSelector::Pinned {
+                        stable_id: "n-peer",
+                        certificate_name: name,
+                    },
+                )
+                .await;
+            assert!(matches!(
+                result,
+                Err(Error::IdentityMismatch | Error::IdentityChanged)
+            ));
+        });
+    }
+}
+#[test]
+fn pinned_selection_checks_both_reads_and_uses_current_node_addresses() {
+    let original = status();
+    let mut renamed = original.clone();
+    peer_mut(&mut renamed)["DNSName"] = json!("changed.fixture.ts.net.");
+    let server = Server::new(
+        vec![response(&original, true), response(&renamed, true)],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        assert!(matches!(
+            server
+                .client
+                .peer_target(
+                    &cx,
+                    PeerSelector::Pinned {
+                        stable_id: "n-peer",
+                        certificate_name: "remote.fixture.ts.net"
+                    }
+                )
+                .await,
+            Err(Error::IdentityChanged)
+        ));
+    });
+    assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+    let mut current = original;
+    peer_mut(&mut current)["TailscaleIPs"] = json!(["100.64.0.3"]);
+    let server = Server::new(vec![response(&current, true)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let target = server
+            .client
+            .peer_target(
+                &cx,
+                PeerSelector::Pinned {
+                    stable_id: "n-peer",
+                    certificate_name: "remote.fixture.ts.net",
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            target.addresses(),
+            &["100.64.0.3".parse::<std::net::IpAddr>().unwrap()]
+        );
     });
 }

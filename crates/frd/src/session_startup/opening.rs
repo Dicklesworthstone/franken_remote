@@ -3,6 +3,7 @@
 use super::{Approval, Error, Host, HostSession, Role};
 use std::{future::Future, time::Duration};
 
+mod inspection;
 mod refusal;
 
 impl Host {
@@ -35,7 +36,17 @@ impl Host {
             }
             if let Err(error) = state.negotiate(network_turn).await {
                 if let Some(host) = &mut state.host {
+                    if error == Error::InspectionComplete {
+                        return Err(match inspection::report(host).await {
+                            Ok(()) => Error::InspectionComplete,
+                            Err(error) => inspection::terminal_error(error),
+                        });
+                    }
+                    let inspected = host.inspection;
                     refusal::report(host, error).await;
+                    if inspected {
+                        return Err(inspection::terminal_error(error));
+                    }
                 }
                 return Err(error);
             }

@@ -23,6 +23,24 @@ pub fn observation_offer() -> Offer {
     offer(Role::Observe, &[])
 }
 
+/// Inspect the implemented native capability intersection without requesting
+/// observation, control, auxiliary lanes or live codec admission. The required
+/// inspection marker makes older hosts refuse before any observation can open.
+/// Other capabilities describe protocol understanding, never local consent.
+pub fn inspection_offer() -> Result<Offer, fr_wire::negotiation::Error> {
+    let mut inspection = control_offer_with_duplex(true, true);
+    inspection.role = Role::Observe;
+    // Leave room for the required marker within the existing 24-entry bound.
+    // Bulk record sizing is an auxiliary detail, not a separate user feature.
+    inspection
+        .capabilities
+        .retain(|capability| capability.name != attachment::BULK_RECORD_CAPABILITY);
+    for capability in &mut inspection.capabilities {
+        capability.required = false;
+    }
+    fr_wire::inspection::prepare_offer(inspection)
+}
+
 /// The observation profile plus the OPTIONAL host playback downlink. Only an
 /// explicit local request (`fr connect --audio`) uses this offer; the host
 /// still decides (its own local enable) and a host without audio simply omits

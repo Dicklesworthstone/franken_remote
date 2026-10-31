@@ -92,7 +92,9 @@ fn peer_session(error: &crate::session_startup::Error) -> bool {
         | E::SharedPublication(_)
         | E::InvalidConfiguration
         | E::Clock => false,
-        E::ReferenceRecovery(_)
+        E::InspectionComplete
+        | E::InspectionAbandoned
+        | E::ReferenceRecovery(_)
         | E::DecoderStartup(_)
         | E::Clipboard(_)
         | E::ReceiverFeedback(_)
@@ -153,8 +155,10 @@ struct First {
 }
 /// What the first viewer's own connection scope awaits: its shared-viewer
 /// service, or the end of the exclusive controlled share (sender dropped),
-/// which the independent Driver serves on this same Host session.
+/// which the independent Driver serves on this same Host session. A capability
+/// inspection ends only its peer; the source factory remains unused and cold.
 enum FirstService {
+    Inspection(Result<(), crate::session_startup::Error>),
     Shared(HostService),
     Controlled(oneshot::Receiver<()>),
 }
@@ -263,6 +267,7 @@ impl Incoming {
                     .map_err(|_| Error::Startup(crate::session_startup::Error::Expired))?
                     .map_err(|_| Error::Closed)?;
                     match service {
+                        FirstService::Inspection(result) => result.map_err(Error::Startup),
                         FirstService::Shared(service) => service.await.map_err(Error::Viewers),
                         // The Driver owns and reports the controlled share; this
                         // scope only keeps the connection until it has ended.
@@ -399,7 +404,9 @@ impl Driver {
 
     /// Async source factory variant of serve. Native initialization may wait
     /// without blocking the reactor or moving source ownership into the first
-    /// peer's scope. Consent, deadlines, renewals and local events are unchanged.
+    /// peer's scope. Capability inspections retire only their original peer and
+    /// leave this same one-use factory cold for a later observation. Consent,
+    /// deadlines, renewals and local events are unchanged.
     #[allow(clippy::too_many_lines)]
     pub fn serve_async<'a, F, P, S, L>(
         &'a mut self,
@@ -438,70 +445,123 @@ impl Driver {
                 let mut initial = initial.ok_or(Error::Closed)?;
                 let owner = owner;
                 let this = &mut *owner.driver;
-                let first = {
-                    let mut timer = Wake {
-                        driver: this.cx.timer_driver().ok_or(Error::Clock)?,
-                        handle: None,
-                    };
-                    let mut receive = pin!(initial.recv(&this.cx));
-                    let mut previous = timer.driver.now();
-                    poll_fn(|task| {
-                        this.cx.checkpoint().map_err(|_| Error::Closed)?;
-                        if local(&mut this.agent, task)
-                            .map_err(|()| Error::from(super::super::Error::LocalEvent))?
-                            == LocalAction::Stop
-                            || this.agent.is_revoked()
-                        {
-                            return Poll::Ready(Err(Error::Closed));
-                        }
-                        if matches!(
-                            *this.shared.route.lock().map_err(|_| Error::Closed)?,
-                            Route::Closed
-                        ) {
-                            return Poll::Ready(Err(Error::Closed));
-                        }
-                        let now = timer.driver.now();
-                        if now < previous {
-                            return Poll::Ready(Err(Error::Clock));
-                        }
-                        previous = now;
-                        match receive.as_mut().poll(task) {
-                            Poll::Ready(value) => Poll::Ready(value.map_err(|_| Error::Closed)),
-                            Poll::Pending => {
-                                timer.arm(
-                                    Time::from_nanos(
-                                        now.as_nanos()
-                                            .checked_add(FIRST_PEER_PULSE_NS)
-                                            .ok_or(Error::Clock)?,
-                                    ),
-                                    task,
-                                );
-                                Poll::Pending
+                // Keep the original one-use source and choice until a genuine
+                // observation session needs them. A capability inspection never
+                // consumes either, even when its peer leaves before closing.
+                let mut factory = Some(factory);
+                let mut select = Some(select);
+                let (opened, reply) = loop {
+                    let first = {
+                        let mut timer = Wake {
+                            driver: this.cx.timer_driver().ok_or(Error::Clock)?,
+                            handle: None,
+                        };
+                        let mut receive = pin!(initial.recv(&this.cx));
+                        let mut previous = timer.driver.now();
+                        poll_fn(|task| {
+                            this.cx.checkpoint().map_err(|_| Error::Closed)?;
+                            if local(&mut this.agent, task)
+                                .map_err(|()| Error::from(super::super::Error::LocalEvent))?
+                                == LocalAction::Stop
+                                || this.agent.is_revoked()
+                            {
+                                return Poll::Ready(Err(Error::Closed));
                             }
-                        }
-                    })
-                    .await?
-                };
-                let First {
-                    host,
-                    notify,
-                    reply,
-                } = first;
-                let opened = this
-                    .agent
-                    .open_native_desktop_async(
+                            if matches!(
+                                *this.shared.route.lock().map_err(|_| Error::Closed)?,
+                                Route::Closed
+                            ) {
+                                return Poll::Ready(Err(Error::Closed));
+                            }
+                            let now = timer.driver.now();
+                            if now < previous {
+                                return Poll::Ready(Err(Error::Clock));
+                            }
+                            previous = now;
+                            match receive.as_mut().poll(task) {
+                                Poll::Ready(value) => Poll::Ready(value.map_err(|_| Error::Closed)),
+                                Poll::Pending => {
+                                    timer.arm(
+                                        Time::from_nanos(
+                                            now.as_nanos()
+                                                .checked_add(FIRST_PEER_PULSE_NS)
+                                                .ok_or(Error::Clock)?,
+                                        ),
+                                        task,
+                                    );
+                                    Poll::Pending
+                                }
+                            }
+                        })
+                        .await?
+                    };
+                    let First {
                         host,
-                        factory,
-                        select,
-                        this.policy,
-                        this.entropy.clone(),
                         notify,
-                        &mut local,
-                        this.interval,
-                    )
-                    .map_err(Error::from)?
-                    .await
-                    .map_err(Error::from)?;
+                        reply,
+                    } = first;
+                    let pending_factory = &mut factory;
+                    let pending_select = &mut select;
+                    let opened = this
+                        .agent
+                        .open_native_desktop_async(
+                            host,
+                            move || async move {
+                                let original = pending_factory.take().ok_or(())?;
+                                original().await
+                            },
+                            move |catalog| {
+                                let original = pending_select.take().ok_or(())?;
+                                original(catalog)
+                            },
+                            this.policy,
+                            this.entropy.clone(),
+                            notify,
+                            &mut local,
+                            this.interval,
+                        )
+                        .map_err(Error::from)?
+                        .await;
+                    match opened {
+                        Ok(opened) => break (opened, reply),
+                        Err(super::super::Error::Startup(
+                            error @ (crate::session_startup::Error::InspectionComplete
+                            | crate::session_startup::Error::InspectionAbandoned),
+                        )) => {
+                            // Only a positively recognized, pre-observation probe
+                            // may take this path. Never retry native preparation.
+                            if factory.is_none() || select.is_none() {
+                                return Err(Error::from(super::super::Error::SourceSetup));
+                            }
+                            this.cx.checkpoint().map_err(|_| Error::Closed)?;
+                            if this.agent.is_revoked() {
+                                return Err(Error::Closed);
+                            }
+                            let (send, receive) = oneshot::channel();
+                            {
+                                let mut route =
+                                    this.shared.route.lock().map_err(|_| Error::Closed)?;
+                                if !matches!(*route, Route::Starting(_)) {
+                                    return Err(Error::Closed);
+                                }
+                                *route = Route::Cold(send);
+                            }
+                            initial = receive;
+                            let result =
+                                if error == crate::session_startup::Error::InspectionComplete {
+                                    Ok(())
+                                } else {
+                                    Err(error)
+                                };
+                            // Opening already retired/dropped the original Host,
+                            // including its transport. Its peer Cx may be cancelled:
+                            // report with the independent owner's Cx, and tolerate
+                            // an abandoned receiver without stopping the source.
+                            let _ = reply.send(&this.cx, FirstService::Inspection(result));
+                        }
+                        Err(error) => return Err(Error::from(error)),
+                    }
+                };
                 this.desktop = Some(opened);
                 let desktop = match this.desktop.as_mut().ok_or(Error::Closed)? {
                     Opened::Shared(desktop) => desktop,

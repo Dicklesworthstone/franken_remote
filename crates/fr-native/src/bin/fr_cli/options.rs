@@ -28,6 +28,12 @@ pub struct InspectOptions {
     pub node: String,
     pub by_name: bool,
     pub port: u16,
+    pub probe: Option<InspectProbe>,
+}
+#[allow(dead_code)]
+pub struct InspectProbe {
+    pub roots: PathBuf,
+    pub ipv6: bool,
 }
 #[allow(dead_code)]
 pub struct DisconnectOptions {
@@ -264,6 +270,8 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
     let mut socket = None;
     let mut port = 8443_u16;
     let mut by_name = false;
+    let (mut probe, mut experimental, mut ipv6) = (false, false, false);
+    let mut roots = None;
     let mut seen = BTreeSet::new();
     while index < args.len() {
         let flag = args[index].as_str();
@@ -276,14 +284,32 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
             "--by-name" => by_name = true,
             "--port" => port = next_port(args, &mut index)?,
             "--socket" => socket = Some(next_path(args, &mut index)?),
+            "--probe" => probe = true,
+            "--experimental-native" => experimental = true,
+            "--trust-roots" => roots = Some(next_path(args, &mut index)?),
+            "--ipv6" => ipv6 = true,
             _ => return Err(usage()),
         }
+    }
+    if !probe && (experimental || roots.is_some() || ipv6) {
+        return Err(usage());
+    }
+    if probe && !experimental {
+        return Err(Failure::new(
+            "native_transport_unqualified",
+            "A capability probe opens the experimental native transport; explicitly select --experimental-native.",
+            2,
+        ));
     }
     Ok(Options {
         command: Command::Inspect(InspectOptions {
             node: node.clone(),
             by_name,
             port,
+            probe: probe.then(|| InspectProbe {
+                roots: roots.unwrap_or_else(|| PathBuf::from(fr_tailnet::trust::SYSTEM_BUNDLE)),
+                ipv6,
+            }),
         }),
         json,
         socket,
@@ -378,9 +404,8 @@ fn parse_robot(args: &[String]) -> Result<Options, Failure> {
                             "--json" => json = true,
                             "--lease" => lease = Some(next_arg(args, &mut index)?.to_string()),
                             "--connection-id" => {
-                                connection_id = Some(local_session::identifier(next_arg(
-                                    args, &mut index,
-                                )?)?);
+                                connection_id =
+                                    Some(local_session::identifier(next_arg(args, &mut index)?)?);
                             }
                             "--socket" => socket = Some(next_path(args, &mut index)?),
                             _ => return Err(usage()),
@@ -1702,3 +1727,7 @@ mod controlled_audio_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "options/probe_tests.rs"]
+mod probe_tests;

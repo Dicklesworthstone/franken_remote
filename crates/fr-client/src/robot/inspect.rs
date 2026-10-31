@@ -5,6 +5,8 @@
 //!   display count, and discovery state.
 //! - Shares the same underlying JSON envelope and human-readable formatting.
 
+pub mod capabilities;
+
 use serde::{Deserialize, Serialize};
 
 /// Detailed inspection data for a candidate host machine.

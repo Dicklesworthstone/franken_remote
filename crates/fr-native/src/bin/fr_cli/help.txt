@@ -4,6 +4,7 @@ fr hosts [--json] [--socket /absolute/tailscaled.sock]
 fr status [--json] [--socket /absolute/tailscaled.sock]
 fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]
 fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
+    [--probe --experimental-native [--trust-roots /absolute/ca-roots.pem] [--ipv6]]
 fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
 fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
     [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
@@ -31,6 +32,11 @@ fr robot input NODE_ID --connection-id ID --status [--json]
 
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Discovery lists machines, not installed/ready desktops or access permissions.
+Inspect --probe authenticates one native host, reports its advertised capability
+intersection and seven wire limits, then requires an acknowledged close before
+observation or approval. It starts no desktop worker; display inventory, approval
+policy and live hardware admission remain unknown. The original dial and probe
+have one five-second deadline. Older hosts refuse; no observation fallback opens.
 --trust-roots defaults to the distribution bundle /etc/ssl/certs/ca-certificates.crt;
 --worker defaults to the fr-media-worker installed beside fr.
 Displays requires host approval when configured; it starts no decoder or input.

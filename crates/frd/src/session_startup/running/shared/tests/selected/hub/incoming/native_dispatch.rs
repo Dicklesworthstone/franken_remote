@@ -471,3 +471,5 @@ fn incoming_dispatch_awaits_local_source_setup_on_the_independent_driver() {
         reap_driver(&mut driver, &mut retirement).await;
     }));
 }
+
+mod capability_inspection;

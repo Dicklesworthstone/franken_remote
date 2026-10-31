@@ -21,7 +21,7 @@ use std::{
 const MAX_CLI_OUTPUT_BYTES: usize = 8 * 1024;
 // The static help lists the supported command/capability contracts and exceeds
 // 8 KiB. Keep it finite without relaxing the tighter discovery/refusal bound.
-const MAX_HELP_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_HELP_OUTPUT_BYTES: usize = 32 * 1024;
 
 fn path(name: &str) -> PathBuf {
     static NEXT: AtomicUsize = AtomicUsize::new(0);

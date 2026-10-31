@@ -148,7 +148,7 @@ impl RecordStream {
         if self.binding == 0
             && !matches!(
                 u16::from_be_bytes([h[6], h[7]]),
-                0x0001..=0x0004 | 0x0010 | 0x0011
+                0x0001..=0x0004 | 0x0010 | 0x0011 | 0x001d | 0x001e
             )
         {
             return Err(WireError::UnsupportedKind);
@@ -156,6 +156,19 @@ impl RecordStream {
         let word = |i| u32::from_be_bytes([h[i], h[i + 1], h[i + 2], h[i + 3]]);
         if word(16) != self.binding {
             return Err(WireError::InvalidBinding);
+        }
+        // Bootstrap closes have one exact layout and never allocate a peer-
+        // chosen extension or payload length. State/marker checks remain with
+        // the startup owner; ordinary bound session closure is unchanged.
+        if self.binding == 0 {
+            let fixed = match u16::from_be_bytes([h[6], h[7]]) {
+                0x001d => Some(crate::inspection::REQUEST_BYTES - HEADER_BYTES),
+                0x001e => Some(crate::inspection::CLOSED_BYTES - HEADER_BYTES),
+                _ => None,
+            };
+            if fixed.is_some_and(|n| usize::try_from(word(12)) != Ok(n) || word(20) != 0) {
+                return Err(WireError::InvalidValue);
+            }
         }
         let payload = usize::try_from(word(12)).map_err(|_| WireError::ArithmeticOverflow)?;
         if word(20) > word(12) {

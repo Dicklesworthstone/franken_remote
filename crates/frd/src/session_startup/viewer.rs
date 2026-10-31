@@ -105,6 +105,9 @@ impl Viewer {
         let startup = self.startup.as_mut().ok_or(Error::Closed)?;
         let transport = self.transport.as_mut().ok_or(Error::Closed)?;
         startup.tick(current).map_err(Error::ClientStartup)?;
+        if startup.is_inspected() {
+            return Ok(());
+        }
         if transport.receive_ended(self.routes.inbound)? {
             return Err(Error::Closed);
         }
@@ -235,6 +238,39 @@ impl Viewer {
             }
             guard.complete = true;
             Ok(())
+        }
+    }
+    /// Inspect only the mutually advertised capability intersection and limits.
+    /// The original offer must contain the required inspection marker. This
+    /// consumes the owner at CALL time, including when its future is unpolled;
+    /// it never selects a session, notifies approval, or creates native workers.
+    /// Success requires the exact bootstrap `Closed` acknowledgement under the
+    /// original startup deadline. Display/approval/hardware readiness is unknown.
+    pub fn inspect_capabilities(mut self) -> impl Future<Output = Result<Offer, Error>> {
+        let prepared = now(&self.cx).and_then(|at| {
+            self.startup
+                .as_mut()
+                .ok_or(Error::Closed)?
+                .begin_inspection(at)
+                .map_err(Error::ClientStartup)
+        });
+        async move {
+            prepared?;
+            loop {
+                // Even if the initial tick receives Closed, drive the same
+                // bounded connection once to flush its transport acknowledgement.
+                self.drive(Duration::from_millis(10)).await?;
+                if self.startup.as_ref().is_some_and(Startup::is_inspected) {
+                    let result = self
+                        .startup
+                        .take()
+                        .ok_or(Error::Closed)?
+                        .finish_inspection(now(&self.cx)?)
+                        .map_err(Error::ClientStartup)?;
+                    self.close();
+                    return Ok(result);
+                }
+            }
         }
     }
     /// Transfer the SAME connection and its retained sends into steady-state

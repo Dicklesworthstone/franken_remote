@@ -11,7 +11,7 @@ pub(crate) struct Target {
 pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Target, Error> {
     let host = status.host_identity()?;
     let mut candidates = status.peers.iter().filter(|(_, peer)| match selector {
-        PeerSelector::StableId(id) => peer.id.0 == id,
+        PeerSelector::StableId(id) | PeerSelector::Pinned { stable_id: id, .. } => peer.id.0 == id,
         PeerSelector::Name(name) => peer.dns_name.as_ref().is_some_and(|dns| {
             dns.0
                 .trim_end_matches('.')
@@ -74,6 +74,14 @@ pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Tar
         })
     {
         return Err(Error::MalformedMetadata);
+    }
+    if let PeerSelector::Pinned {
+        certificate_name, ..
+    } = selector
+    {
+        if certificate_name != name {
+            return Err(Error::IdentityChanged);
+        }
     }
     Ok(Target {
         host,

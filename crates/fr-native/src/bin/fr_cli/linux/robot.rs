@@ -1,7 +1,8 @@
 //! `fr status`, `fr inspect`, `fr disconnect` and `fr robot`.
 //!
-//! Status and inspect report only what the installed Tailscale `LocalAPI`
-//! returns; anything not probed is unknown, never a plausible default. Robot
+//! Status and ordinary inspect report installed Tailscale metadata. Explicit
+//! inspect --probe adds an authenticated pre-observation capability intersection;
+//! anything not probed remains unknown, never a plausible default. Robot
 //! session-status identifies the authenticated original local foreground owner,
 //! not a remote grant. Local disconnect and robot session-close wait for that
 //! owner's actual native cleanup result. A comparison-only connection ID can
@@ -11,6 +12,9 @@
 use super::super::options::{DisconnectOptions, InspectOptions, RobotCommand};
 use super::{Cell, Cx, Failure, LocalApi, Runtime, Shutdown, failure, session_control, tailnet};
 use fr_client::robot::{AcknowledgementStage, RobotEnvelope, RobotInspectData, RobotStatusData};
+
+#[path = "robot/probe.rs"]
+mod probe;
 
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -106,6 +110,20 @@ pub(super) fn run_inspect(
         requires_approval: None,
         transport_path,
     };
+    if let Some(probe_options) = &opts.probe {
+        return probe::run(
+            runtime,
+            cx,
+            shutdown,
+            stopped,
+            api,
+            p,
+            opts,
+            probe_options,
+            data,
+            json,
+        );
+    }
     let envelope = RobotEnvelope::success(now_unix_ms(), AcknowledgementStage::Observed, data);
     if json {
         envelope
@@ -315,6 +333,7 @@ mod tests {
             node: node.into(),
             by_name,
             port: 8443,
+            probe: None,
         };
         assert!(exact_match(&peer, &opts("n-host", false)));
         assert!(exact_match(
@@ -355,8 +374,14 @@ mod tests {
                 assert_eq!(data["target"], "n-host");
                 assert_eq!(data["connection_id"], instance);
                 assert_eq!(data["local_owner_present"], true);
-                assert_eq!(data.get("remote_session_state"), Some(&serde_json::Value::Null));
-                assert_eq!(data.get("remote_control_granted"), Some(&serde_json::Value::Null));
+                assert_eq!(
+                    data.get("remote_session_state"),
+                    Some(&serde_json::Value::Null)
+                );
+                assert_eq!(
+                    data.get("remote_control_granted"),
+                    Some(&serde_json::Value::Null)
+                );
                 assert!(data.get("lease").is_none());
                 assert!(data.get("local_cleanup_confirmed").is_none());
             } else {

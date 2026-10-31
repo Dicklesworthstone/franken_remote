@@ -3,7 +3,10 @@
 //! decoder readiness, or input authority. A transport adapter calls `sent` only
 //! after admission, and `bound` only after installing the exact control pair.
 use fr_core::ids::RemoteSessionId;
-use fr_wire::negotiation::{self, ControlBinding, Message, Offer, Selection};
+use fr_wire::{
+    inspection,
+    negotiation::{self, ControlBinding, Message, Offer, Selection},
+};
 use std::fmt;
 
 const MAX_TIMEOUT_US: u64 = 60_000_000;
@@ -38,6 +41,9 @@ enum Phase {
     Bind,
     Ack,
     Complete,
+    InspectionClose,
+    InspectionClosed,
+    Inspected,
     Closed,
 }
 /// Metadata only. Neither this value nor a successful `BindingAccepted` is a
@@ -70,6 +76,9 @@ pub struct Startup {
     selection: Option<Selection>,
     opened: Option<Opened>,
     approval: Option<ApprovalNotice>,
+    inspection: bool,
+    inspected: Option<Offer>,
+    created_us: u64,
     phase: Phase,
     bytes: [u8; negotiation::MAX_RECORD],
     len: usize,
@@ -99,6 +108,9 @@ impl Startup {
             selection: None,
             opened: None,
             approval: None,
+            inspection: false,
+            inspected: None,
+            created_us: now_us,
             phase: Phase::Hello,
             bytes: [0; negotiation::MAX_RECORD],
             len: 0,
@@ -112,6 +124,21 @@ impl Startup {
             &mut this.bytes,
         )?;
         Ok(this)
+    }
+    /// Arm terminal inspection before the original `ClientHello` is sent. The
+    /// caller must have prepared its required marker in that original offer.
+    /// The two-second budget includes time parked since this owner's creation.
+    pub fn begin_inspection(&mut self, now_us: u64) -> Result<(), Error> {
+        self.tick(now_us)?;
+        if self.phase != Phase::Hello || self.inspection || !inspection::requested(&self.offer) {
+            self.close();
+            return Err(Error::Order);
+        }
+        self.inspection = true;
+        self.until_us = self
+            .until_us
+            .min(self.created_us.saturating_add(inspection::MAX_DURATION_US));
+        self.tick(now_us)
     }
     /// Never refreshed by polling, packet arrival, or approval notifications.
     pub const fn deadline_us(&self) -> u64 {
@@ -151,6 +178,7 @@ impl Startup {
             (Phase::Hello, true) => Phase::Capabilities,
             (Phase::Selection, true) => Phase::Open,
             (Phase::Ack, true) => Phase::Complete,
+            (Phase::InspectionClose, true) => Phase::InspectionClosed,
             _ => {
                 self.close();
                 return Err(Error::Order);
@@ -173,10 +201,27 @@ impl Startup {
         if self.len != 0 {
             return Err(Error::Order);
         }
+        if self.phase == Phase::InspectionClosed {
+            inspection::decode_closed(bytes, self.maximum).map_err(negotiation::Error::from)?;
+            self.phase = Phase::Inspected;
+            return Ok(());
+        }
         let message = negotiation::decode(bytes, self.maximum, 0)?;
         match (self.phase, message) {
             (Phase::Capabilities, Message::HostCapabilities(host)) => {
                 self.offer.check_host(&host)?;
+                if self.inspection {
+                    if !inspection::requested(&host) {
+                        return Err(negotiation::Error::RequiredCapability.into());
+                    }
+                    self.maximum = (host.limits.max_control_message_bytes() as usize)
+                        .min(negotiation::MAX_RECORD);
+                    self.len = inspection::encode_request(self.maximum, &mut self.bytes)
+                        .map_err(negotiation::Error::from)?;
+                    self.inspected = Some(host);
+                    self.phase = Phase::InspectionClose;
+                    return Ok(());
+                }
                 let selection = host.select()?;
                 self.maximum = (selection.limits.max_control_message_bytes() as usize)
                     .min(negotiation::MAX_RECORD);
@@ -283,12 +328,25 @@ impl Startup {
         }
         self.opened.take().ok_or(Error::Order)
     }
+    /// True only after the host's exact terminal acknowledgement. This is
+    /// separate from a selected configuration or an observation-capable session.
+    pub fn is_inspected(&self) -> bool {
+        self.phase == Phase::Inspected
+    }
+    pub fn finish_inspection(mut self, now_us: u64) -> Result<Offer, Error> {
+        self.tick(now_us)?;
+        if self.phase != Phase::Inspected {
+            return Err(Error::Order);
+        }
+        self.inspected.take().ok_or(Error::Order)
+    }
     pub fn close(&mut self) {
         self.phase = Phase::Closed;
         self.len = 0;
         self.opened = None;
         self.selection = None;
         self.approval = None;
+        self.inspected = None;
         self.bytes.fill(0);
     }
 }

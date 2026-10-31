@@ -188,7 +188,9 @@ impl Messages {
             Self::MediaConfiguration => matches!(kind, 0x0030 | 0x0038),
             Self::AudioControl => matches!(kind, 0x0060 | 0x0063),
             Self::AudioReplies => matches!(kind, 0x0061 | 0x0063),
-            Self::Negotiation => matches!(kind, 0x0001..=0x0004 | 0x0010 | 0x0011),
+            Self::Negotiation => {
+                matches!(kind, 0x0001..=0x0004 | 0x0010 | 0x0011 | 0x001d | 0x001e)
+            }
             Self::SessionControl => {
                 matches!(
                     kind,
@@ -1555,6 +1557,17 @@ fn validate_record(
         || u32::from_be_bytes(bytes[16..20].try_into().map_err(|_| Error::Malformed)?) != binding
     {
         return Err(Error::WrongRoute);
+    }
+    // The bootstrap family has two additional exact terminal forms, not a
+    // general zero-binding session-close route. No other reason, extension,
+    // nonzero session, or cleanup/effect claim can cross this family.
+    if messages == Messages::Negotiation {
+        match u16::from_be_bytes([bytes[6], bytes[7]]) {
+            0x001d => fr_wire::inspection::decode_request(bytes, maximum),
+            0x001e => fr_wire::inspection::decode_closed(bytes, maximum),
+            _ => Ok(()),
+        }
+        .map_err(|_| Error::Malformed)?;
     }
     let total = u32::from_be_bytes(bytes[12..16].try_into().map_err(|_| Error::Malformed)?);
     let extensions = u32::from_be_bytes(bytes[20..24].try_into().map_err(|_| Error::Malformed)?);

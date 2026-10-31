@@ -13,6 +13,12 @@ use std::{
 #[derive(Clone, Copy)]
 pub enum PeerSelector<'a> {
     StableId(&'a str),
+    /// Compare both fields against the same fresh daemon record. A saved name
+    /// never supplies an address or permission.
+    Pinned {
+        stable_id: &'a str,
+        certificate_name: &'a str,
+    },
     Name(&'a str),
     Address(IpAddr),
 }
@@ -24,6 +30,13 @@ impl fmt::Debug for PeerSelector<'_> {
 impl PeerSelector<'_> {
     fn validate(self) -> Result<(), Error> {
         match self {
+            Self::Pinned {
+                stable_id,
+                certificate_name,
+            } => {
+                Self::StableId(stable_id).validate()?;
+                Self::Name(certificate_name).validate()
+            }
             Self::StableId(s)
                 if !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control) =>
             {
