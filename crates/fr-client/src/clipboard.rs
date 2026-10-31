@@ -113,6 +113,26 @@ impl ProjectedClock {
             .ok_or(Error::Stopped)?
             .sample_cursor(now, &self.cursor, true)
     }
+    /// Worker checks can overtake each other after sampling one shared local
+    /// monotonic clock. Clamp only that concurrent cursor; the session owner
+    /// independently rejects clock regression on its ordered application path.
+    pub(crate) fn sample_concurrent(
+        &self,
+        now: ClientInstant,
+    ) -> Result<(HostInstant, ClientInstant), Error> {
+        self.state
+            .upgrade()
+            .ok_or(Error::Stopped)?
+            .sample_concurrent(now, &self.cursor)
+    }
+    /// Conservative local expiry of this original controller proof. A later
+    /// ticket never retimes a permit which already retained the returned cap.
+    pub(crate) fn local_deadline(&self, now: ClientInstant) -> Result<ClientInstant, Error> {
+        self.state
+            .upgrade()
+            .ok_or(Error::Stopped)?
+            .local_deadline(now, &self.cursor)
+    }
     fn sample_maintenance(&self, now: ClientInstant) -> Result<HostInstant, Error> {
         self.state
             .upgrade()
@@ -235,9 +255,13 @@ impl InputClient {
         ControllerImageClipboard::new(monitor, self.limits, true, clock, now)
     }
     pub(crate) fn clipboard_readiness(&self) {
-        for owner in [&self.clipboard_projection, &self.files_projection]
-            .into_iter()
-            .flatten()
+        for owner in [
+            &self.clipboard_projection,
+            &self.files_projection,
+            &self.microphone_projection,
+        ]
+        .into_iter()
+        .flatten()
         {
             let obligations = self
                 .pending

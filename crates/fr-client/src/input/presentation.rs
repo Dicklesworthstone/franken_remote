@@ -88,9 +88,13 @@ impl PresentedInput {
         {
             return Err(Error::ViewMismatch);
         }
-        for owner in [&input.clipboard_projection, &input.files_projection]
-            .into_iter()
-            .flatten()
+        for owner in [
+            &input.clipboard_projection,
+            &input.files_projection,
+            &input.microphone_projection,
+        ]
+        .into_iter()
+        .flatten()
         {
             owner.bind_receiver(view.receiver_lifetime());
         }
@@ -134,9 +138,13 @@ impl PresentedInput {
             return Err(Error::ViewMismatch);
         }
         let evidence = view.evidence(now.0)?;
-        for owner in [&input.clipboard_projection, &input.files_projection]
-            .into_iter()
-            .flatten()
+        for owner in [
+            &input.clipboard_projection,
+            &input.files_projection,
+            &input.microphone_projection,
+        ]
+        .into_iter()
+        .flatten()
         {
             owner.bind_receiver(view.receiver_lifetime());
         }
@@ -158,6 +166,7 @@ impl PresentedInput {
         for owner in [
             &self.input.clipboard_projection,
             &self.input.files_projection,
+            &self.input.microphone_projection,
         ]
         .into_iter()
         .flatten()
@@ -201,6 +210,7 @@ impl PresentedInput {
         for owner in [
             &self.input.clipboard_projection,
             &self.input.files_projection,
+            &self.input.microphone_projection,
         ]
         .into_iter()
         .flatten()
@@ -219,6 +229,23 @@ impl PresentedInput {
         let bound = self.input.follow_path_rtt(smoothed_rtt_us)?;
         self.view.set_max_source_age(bound)?;
         Ok(())
+    }
+    /// Join the separately selected/approved microphone lane to this original
+    /// decoder-backed controller. Capability or connection alone starts no mic.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_microphone(
+        &mut self,
+        parent: fr_wire::negotiation::ControlBinding,
+        channel: u32,
+        selection: &fr_wire::negotiation::Selection,
+        host_granted: bool,
+        profile: crate::audio::uplink::Profile,
+        now: ClientInstant,
+    ) -> Result<crate::audio::uplink::Sender, crate::audio::uplink::Error> {
+        self.tick(now)
+            .map_err(|_| crate::audio::uplink::Error::Stopped)?;
+        self.input
+            .attach_microphone(parent, channel, selection, host_granted, profile, now)
     }
     /// Join a separately admitted clipboard lane to this original grant and
     /// decoder-backed visible view. No input owner, media receiver or freshness
@@ -540,6 +567,7 @@ impl PresentedInput {
         for projection in [
             &mut self.input.clipboard_projection,
             &mut self.input.files_projection,
+            &mut self.input.microphone_projection,
         ] {
             if projection
                 .as_ref()

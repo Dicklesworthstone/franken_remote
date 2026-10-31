@@ -225,7 +225,11 @@ impl InputClient {
         now: ClientInstant,
     ) {
         let resumed = !self.awaiting_ticket && !self.awaiting_recovery_ticket;
-        for projection in [&mut self.clipboard_projection, &mut self.files_projection] {
+        for projection in [
+            &mut self.clipboard_projection,
+            &mut self.files_projection,
+            &mut self.microphone_projection,
+        ] {
             if projection.as_ref().is_some_and(|owner| {
                 match authority_until {
                     Some(until) => owner.authority_ticket(until, clock, now, resumed),

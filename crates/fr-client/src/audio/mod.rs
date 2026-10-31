@@ -12,6 +12,7 @@ pub mod jitter;
 pub mod mic;
 pub mod playout;
 pub mod sync;
+pub mod uplink;
 pub mod volume;
 
 pub use jitter::{AudioJitterBuffer, JitterBufferMetrics, JitterDrainResult};

@@ -316,7 +316,7 @@ impl Owner {
         }
         result
     }
-    pub(super) fn attach(
+    pub(crate) fn attach(
         &mut self,
         channel: u32,
         now: ClientInstant,
@@ -416,7 +416,20 @@ impl State {
         cursor: &Mutex<Cursor>,
         require_view: bool,
     ) -> Result<HostInstant, Error> {
-        let result = self.sample_cursor_inner(now, cursor, require_view);
+        let result = self
+            .sample_cursor_inner(now, cursor, require_view, false)
+            .map(|(host, _)| host);
+        if result.as_ref().is_err_and(|e| *e != Error::NotReady) {
+            self.stopped.store(true, Ordering::Release);
+        }
+        result
+    }
+    pub(super) fn sample_concurrent(
+        &self,
+        now: ClientInstant,
+        cursor: &Mutex<Cursor>,
+    ) -> Result<(HostInstant, ClientInstant), Error> {
+        let result = self.sample_cursor_inner(now, cursor, true, true);
         if result.as_ref().is_err_and(|e| *e != Error::NotReady) {
             self.stopped.store(true, Ordering::Release);
         }
@@ -427,12 +440,14 @@ impl State {
         now: ClientInstant,
         cursor: &Mutex<Cursor>,
         require_view: bool,
-    ) -> Result<HostInstant, Error> {
+        concurrent: bool,
+    ) -> Result<(HostInstant, ClientInstant), Error> {
         let mut c = cursor.lock().map_err(|_| Error::Stopped)?;
         let mut m = self.inner.lock().map_err(|_| Error::Stopped)?;
-        if now.0 < c.client {
+        if !concurrent && now.0 < c.client {
             return self.failure(Error::Clock);
         }
+        let now = ClientInstant(now.0.max(c.client));
         let local = now.0.max(m.last_client);
         self.lifecycle(&mut m, local)?;
         let rolling = c.host.checked_add(now.0 - c.client).ok_or(Error::Clock)?;
@@ -449,11 +464,14 @@ impl State {
         // Paused samples still advance this cursor, including maintenance
         // clocks. No fresh-looking fallback clock can extend a retained item.
         *c = Cursor {
-            client: now.0,
+            // The concurrent host sample already includes owner progress up
+            // to `local`. Pair it with that same instant so another overtaken
+            // sample cannot count the intervening duration a second time.
+            client: if concurrent { local } else { now.0 },
             host,
         };
         self.ready_at(&mut m, local, host, require_view)?;
-        Ok(HostInstant::from_micros(host))
+        Ok((HostInstant::from_micros(host), ClientInstant(local)))
     }
     fn lifecycle(&self, m: &mut Metadata, local: u64) -> Result<(), Error> {
         if self.stopped.load(Ordering::Acquire) {
@@ -502,6 +520,46 @@ impl State {
             return Err(Error::NotReady);
         }
         Ok(())
+    }
+    pub(super) fn local_deadline(
+        &self,
+        now: ClientInstant,
+        cursor: &Mutex<Cursor>,
+    ) -> Result<ClientInstant, Error> {
+        // A retiring worker may have sampled after this application call's
+        // timestamp. Preserve its conservative progress without treating that
+        // cross-thread overtaking as an ordered-clock regression.
+        self.sample_concurrent(now, cursor)?;
+        let c = cursor.lock().map_err(|_| Error::Stopped)?;
+        let m = self.inner.lock().map_err(|_| Error::Stopped)?;
+        let local = now.0.max(c.client).max(m.last_client);
+        let rolling = c.host.checked_add(local - c.client).ok_or(Error::Clock)?;
+        let base = m
+            .last_host
+            .checked_add(local - m.last_client)
+            .ok_or(Error::Clock)?;
+        let host = m
+            .clock
+            .age_upper_us(0, local)
+            .map_err(|_| Error::Clock)?
+            .max(rolling)
+            .max(base);
+        // A tighter clock model may move behind the already serviced host
+        // cursor. Its later mathematical deadline must not extend real custody.
+        let remaining = m.host_until.checked_sub(host).ok_or(Error::Expired)?;
+        let rolling_until = local.checked_add(remaining).ok_or(Error::Clock)?;
+        let until = m
+            .clock
+            .deadline_lower_us(m.host_until, local)
+            .map_err(|_| Error::Clock)?;
+        let until = until
+            .min(rolling_until)
+            .min(m.local_until)
+            .min(m.obligations_until);
+        if until <= local || self.stopped.load(Ordering::Acquire) {
+            return self.failure(Error::Expired);
+        }
+        Ok(ClientInstant(until))
     }
     pub(super) fn last_host(&self) -> Option<HostInstant> {
         self.inner

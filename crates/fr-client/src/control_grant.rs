@@ -167,7 +167,11 @@ impl RequestControl {
             .map_err(Error::Input)?;
         // Independent optional-lane lifetimes: a file failure never revokes
         // clipboard, and neither projection can manufacture an input grant.
-        for projection in [&mut input.clipboard_projection, &mut input.files_projection] {
+        for projection in [
+            &mut input.clipboard_projection,
+            &mut input.files_projection,
+            &mut input.microphone_projection,
+        ] {
             *projection = Some(crate::clipboard::Owner::new(grant, clock, now).map_err(
                 |error| {
                     if error == crate::clipboard::Error::Expired {

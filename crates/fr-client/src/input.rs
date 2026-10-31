@@ -153,6 +153,7 @@ pub(crate) struct Pending {
 pub struct InputClient {
     pub(crate) clipboard_projection: Option<crate::clipboard::Owner>,
     pub(crate) files_projection: Option<crate::clipboard::Owner>,
+    pub(crate) microphone_projection: Option<crate::clipboard::Owner>,
     viewport_owner: Arc<()>,
     credentials: InputCredentials,
     binding: ResultBinding,
@@ -219,6 +220,7 @@ impl InputClient {
         Ok(Self {
             clipboard_projection: None,
             files_projection: None,
+            microphone_projection: None,
             viewport_owner: Arc::new(()),
             credentials,
             binding: ResultBinding {
@@ -260,9 +262,13 @@ impl InputClient {
     }
     pub fn stop(&mut self, reason: StopReason) {
         self.stopped.get_or_insert(reason);
-        for owner in [&self.clipboard_projection, &self.files_projection]
-            .into_iter()
-            .flatten()
+        for owner in [
+            &self.clipboard_projection,
+            &self.files_projection,
+            &self.microphone_projection,
+        ]
+        .into_iter()
+        .flatten()
         {
             owner.stop();
         }
@@ -324,6 +330,13 @@ impl InputClient {
             .is_some_and(|owner| owner.check_files(now).is_err())
         {
             self.retire_files();
+        }
+        if self
+            .microphone_projection
+            .as_ref()
+            .is_some_and(|owner| owner.check_files(now).is_err())
+        {
+            drop(self.microphone_projection.take());
         }
         Ok(())
     }
