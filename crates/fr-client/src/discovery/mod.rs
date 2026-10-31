@@ -12,6 +12,7 @@
 //! - Discovery responses never carry screenshots, window/application titles, clipboard
 //!   previews, or audio.
 
+pub mod batch;
 pub mod cache;
 pub mod directory;
 pub mod prober;

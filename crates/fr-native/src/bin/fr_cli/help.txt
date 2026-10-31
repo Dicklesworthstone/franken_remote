@@ -1,6 +1,9 @@
 FrankenRemote development client
 
 fr hosts [--json] [--socket /absolute/tailscaled.sock]
+fr hosts --probe --experimental-native [--probe-limit 1..64]
+    [--port 8443] [--trust-roots /absolute/ca-roots.pem] [--ipv6]
+    [--json] [--socket /absolute/tailscaled.sock]
 fr status [--json] [--socket /absolute/tailscaled.sock]
 fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/local-ca-roots.pem] [--json]
 fr inspect NODE_ID [--by-name] [--port 8443] [--socket /absolute/tailscaled.sock] [--json]
@@ -30,7 +33,15 @@ fr robot input NODE_ID --connection-id ID --status [--json]
     See Explicit foreground robot control below for bounded input commands.
 
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
-Discovery lists machines, not installed/ready desktops or access permissions.
+Ordinary discovery lists machines from installed Tailscale metadata.
+hosts --probe additionally performs authenticated capability inspections on at
+most 64 of those exact peers (stable-ID order), with at most four in flight.
+One original 20-second budget covers discovery and all probes; each probe also
+has its own five-second ceiling. --probe-limit lowers the candidate count.
+Per-peer failures, unstarted peers and limit omissions remain visible. A timeout
+does not prove a machine is offline or lacks frd. No observation, approval,
+media worker or input grant is opened. A capability advertisement is not a ready
+desktop or access permission; connecting always performs fresh admission.
 --trust-roots defaults to the distribution bundle /etc/ssl/certs/ca-certificates.crt;
 --worker defaults to the fr-media-worker installed beside fr.
 Displays requires host approval when configured; it starts no decoder or input.

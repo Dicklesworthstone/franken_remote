@@ -54,6 +54,9 @@ impl ClientApi {
         Self::profile(true)
     }
     fn profile(dual_stack: bool) -> Self {
+        Self::with_status(client_status(dual_stack))
+    }
+    fn with_status(body: Vec<u8>) -> Self {
         let path = fixture::pki().join("client-api");
         let listener = UnixListener::bind(&path).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -84,13 +87,12 @@ impl ClientApi {
                 let text = String::from_utf8_lossy(&request).into_owned();
                 let path = text.split_whitespace().nth(1).unwrap_or("").to_string();
                 let reply = if path == "/localapi/v0/status?peers=true" {
-                    let body = client_status(dual_stack);
                     let mut reply = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                         body.len()
                     )
                     .into_bytes();
-                    reply.extend(body);
+                    reply.extend_from_slice(&body);
                     reply
                 } else {
                     b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -581,3 +583,6 @@ mod recovery;
 
 #[path = "shipped_client/refusal.rs"]
 mod refusal;
+
+#[path = "shipped_client/discovery.rs"]
+mod discovery;

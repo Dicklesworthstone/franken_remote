@@ -3,19 +3,20 @@
 use super::super::desktop::client::Client;
 use super::*;
 
-struct Hosted {
+pub(super) struct Hosted {
     tools: Tools,
     _api: fixture::Api,
-    roots: PathBuf,
-    events: Arc<Mutex<Vec<Event>>>,
+    pub(super) roots: PathBuf,
+    pub(super) events: Arc<Mutex<Vec<Event>>>,
+    pub(super) trace: PathBuf,
     stop: Arc<StopHandle>,
     thread: Option<JoinHandle<Result<(), host_run::Error>>>,
 }
 impl Hosted {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let api = fixture::Api::new();
         let tools = Tools::new();
-        let (worker, _) = super::super::persistent_desktop::source_script("normal");
+        let (worker, trace) = super::super::persistent_desktop::source_script("normal");
         let roots = fixture::pki().join("ca.pem");
         let options = Options {
             socket: Some(api.path.clone()),
@@ -50,13 +51,14 @@ impl Hosted {
             _api: api,
             roots,
             events,
+            trace,
             stop,
             thread: Some(thread),
         };
         hosted.wait_count(1, |e| matches!(e, Event::Listening { .. }));
         hosted
     }
-    fn count(&self, want: fn(&Event) -> bool) -> usize {
+    pub(super) fn count(&self, want: fn(&Event) -> bool) -> usize {
         self.events
             .lock()
             .unwrap()
@@ -64,7 +66,7 @@ impl Hosted {
             .filter(|e| want(e))
             .count()
     }
-    fn wait_count(&self, count: usize, want: fn(&Event) -> bool) {
+    pub(super) fn wait_count(&self, count: usize, want: fn(&Event) -> bool) {
         let until = Instant::now() + Duration::from_secs(10);
         while self.count(want) < count {
             assert!(
@@ -80,7 +82,7 @@ impl Hosted {
             thread::sleep(Duration::from_millis(5));
         }
     }
-    fn finish(mut self) {
+    pub(super) fn finish(mut self) {
         self.stop.request();
         assert_eq!(self.thread.take().unwrap().join().unwrap(), Ok(()));
         assert_eq!(self.count(|e| matches!(e, Event::CleanupFailed { .. })), 0);

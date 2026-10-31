@@ -11,6 +11,8 @@ mod doctor;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/files.rs"]
 mod files;
+#[path = "linux/hosts_probe.rs"]
+mod hosts_probe;
 #[cfg(any(test, feature = "linux-desktop"))]
 #[path = "linux/lapse.rs"]
 mod lapse;
@@ -363,6 +365,16 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
                 .map_err(tailnet)?;
             Ok(output::hosts(&snapshot, options.json))
         }
+        Command::ProbeHosts(probe) => hosts_probe::run(
+            &runtime,
+            &cx,
+            &mut shutdown,
+            &stopped,
+            &api,
+            options.socket.as_deref(),
+            probe,
+            options.json,
+        ),
         Command::SavedHosts(saved) => {
             let super::options::SavedHostAction::Save { node, .. } = &saved.action else {
                 unreachable!("local saved-host command handled above");

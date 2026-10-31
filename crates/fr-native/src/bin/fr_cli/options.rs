@@ -4,6 +4,8 @@ use std::{collections::BTreeSet, path::PathBuf};
 #[path = "options/receive.rs"]
 mod receive;
 pub use receive::ReceiveOptions;
+#[path = "options/hosts.rs"]
+mod hosts;
 #[path = "options/local_session.rs"]
 mod local_session;
 
@@ -15,6 +17,7 @@ pub struct Options {
 pub enum Command {
     Help,
     Hosts,
+    ProbeHosts(HostsProbeOptions),
     SavedHosts(SavedHostOptions),
     Connect(Connection),
     Displays(Target),
@@ -35,6 +38,11 @@ pub struct InspectOptions {
 pub struct InspectProbe {
     pub roots: PathBuf,
     pub ipv6: bool,
+}
+pub struct HostsProbeOptions {
+    pub port: u16,
+    pub limit: usize,
+    pub transport: InspectProbe,
 }
 #[allow(dead_code)]
 pub struct DisconnectOptions {
@@ -665,7 +673,7 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
         {
             parse_saved_hosts(args)
         }
-        "hosts" => parse_command(args, 1, None, false, false),
+        "hosts" => hosts::parse(args),
         "doctor" => parse_command(args, 1, None, false, true),
         "connect" | "displays" => {
             let node = args.get(1).ok_or_else(usage)?;

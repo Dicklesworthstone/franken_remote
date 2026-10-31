@@ -16,6 +16,48 @@ listener port and `--ipv6` restricts the native dial to IPv6. Probe-only flags
 without `--probe` are rejected. This command runs one bounded inspection;
 it does not scan the tailnet or open a desktop after a failed probe.
 
+## Bounded tailnet discovery
+
+An explicit sweep applies the same acknowledged inspection to a bounded set of
+machines returned by the installed Tailscale daemon:
+
+```sh
+fr hosts --probe --experimental-native --json
+fr hosts --probe --experimental-native --probe-limit 12 --port 8443
+```
+
+The default selects at most 64 candidates in stable-node-ID order;
+`--probe-limit 1..64` lowers that count. The original twenty-second deadline
+covers the LocalAPI discovery and all probes. Each probe additionally retains
+its own five-second limit, including its four-second dial allowance. At most
+four probes run concurrently. A peer's failure or close cannot cancel a
+sibling, monopolize a lookup slot, or reset the sweep's deadline. Cancellation
+and expiry drop the original pending futures and fence their native owners;
+there are no detached probe tasks or automatic retries.
+
+The JSON envelope's `data.scope` is `tailnet_capability_sweep`. It includes
+candidate, selected, omitted and exclusion counts, fixed resource/time bounds,
+`complete`, `budget_exhausted`, and an ordered `hosts` array. Each row has one
+of four states:
+
+| State | Meaning |
+| --- | --- |
+| `capabilities_observed` | The exact peer acknowledged the pre-observation inspection; `inspection` contains its advertised intersection. |
+| `probe_failed` | That peer's original probe ended with a content-free typed error and next action; the other probes continue. |
+| `probe_interrupted` | The sweep's original deadline interrupted that peer; no success is invented from a partial handshake. |
+| `not_probed` | The deadline ended before that candidate was contacted. |
+
+`complete` means every selected probe returned a result, including refusals;
+it does not mean every host is usable. Peers beyond the selection limit are
+counted in `omitted`. The original discovery's shared, expired and unusable
+exclusions remain visible. A timeout is not evidence that a host is offline or
+that FrankenRemote is absent. Successful rows preserve unknown display count,
+approval policy and live codec admission. Ordinary `fr hosts` remains a local
+metadata lookup, and a later connection always performs fresh authorization.
+
+This is an explicitly requested one-shot sweep. It creates no persistent
+capability cache, background network activity, subnet scan or observation.
+
 ## What success means
 
 A successful report means the selected host completed canonical native TLS and
@@ -87,7 +129,12 @@ real approved session. Report tests verify the exact seven transmitted limits
 and prevent unknown approval, display or hardware state from becoming success
 claims.
 
-This is an explicit single-host inspection. Automatic background probing,
-expiry-aware capability caching, mobile host-link import and an authenticated
+The sweep scheduler has deterministic tests for four-slot concurrency, stable
+result ordering, original-owner cancellation, unpolled abandonment, deadline
+crossings and cooperative immediate completions. Command-parser tests enforce
+the opt-in, candidate bound and strict options. These tests are not native
+network or live-tailnet qualification.
+
+Automatic background probing, expiry-aware capability caching, mobile host-link import and an authenticated
 directory remain separate work. Native transport and real hardware
 qualification retain their existing status.

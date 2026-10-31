@@ -158,6 +158,7 @@ jobs:
               'dual_stack::same_addresses_cannot_join_different_installed_node_identities',
               'dual_stack::partial_setup_reports_cleanup_failure_and_still_removes_the_other_rule',
               'real_control::fr_connect_control_uses_ipv6_while_host_also_listens_on_ipv4',
+              'shipped_client::discovery::shipped_fr_hosts_probe_keeps_peer_failures_separate_and_never_opens_observation',
           ]
           listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True)
           for test in tests:

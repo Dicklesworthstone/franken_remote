@@ -36,6 +36,20 @@ candidate/exclusion data. Candidate rows explicitly carry null
 `desktop_available` and `access_authorized`. This is a snapshot, not a reusable
 authority handle. Opaque identifiers are escaped in human terminal output.
 
+To explicitly check for FrankenRemote's native capability handshake on those
+known peers, use:
+
+```sh
+./target/debug/fr hosts --probe --experimental-native --probe-limit 16 --json
+```
+
+At most four probes run at once, with one original twenty-second deadline for
+discovery and probing, and at most five seconds per peer. Results name each
+peer's acknowledged capability intersection or typed failure; unfinished and
+omitted candidates stay explicit. This opens no observation, media or input.
+The advertisement does not qualify the current desktop or codec; see
+[bounded capability discovery](../NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery).
+
 ## Inspect approved remote displays without a local renderer
 
 ```sh
