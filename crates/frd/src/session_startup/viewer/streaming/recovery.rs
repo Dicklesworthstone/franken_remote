@@ -81,17 +81,17 @@ pub(super) fn service(
 /// relabel a decode failure, capacity fault or unknown cause as frame loss.
 /// This never resumes the failed chain or renews any deadline. Other wrappers
 /// retain their exact cause, including cancellation and authority failures.
-fn service_failure(
-    error: recovery_control::Error,
-    original: Option<DeliveryError>,
-) -> Error {
+fn service_failure(error: recovery_control::Error, original: Option<DeliveryError>) -> Error {
     match error {
         recovery_control::Error::Delivery(
             error @ (DeliveryError::ReferenceExpired | DeliveryError::RecoveryExpired),
         ) if matches!(
             original,
             Some(DeliveryError::ReferenceExpired | DeliveryError::RecoveryExpired)
-        ) => Error::Delivery(error),
+        ) =>
+        {
+            Error::Delivery(error)
+        }
         error => Error::Recovery(error),
     }
 }

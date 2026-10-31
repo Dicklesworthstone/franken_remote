@@ -5,7 +5,7 @@ use super::*;
 mod reconnect;
 use asupersync::{
     net::{
-        quic_core::{ConnectionId, PacketHeader, TransportParameters},
+        quic_core::{ConnectionId, LongPacketType, ProtectedHeaderPrefix, TransportParameters},
         quic_native::{
             NativeQuicConnectionConfig, QuicUdpEndpoint, QuicUdpEndpointConfig,
             handshake_driver::{QuicHandshakeDriver, server_config},
@@ -137,9 +137,16 @@ async fn accept(cx: &Cx, mut endpoint: QuicUdpEndpoint) -> NativeQuicUdpConnecti
     // Test-only first-flight loss to discover the random DCID. This is not the
     // pending production multiplexing listener or an ingress qualification.
     let packets = endpoint.receive_batch(cx, 1).await.unwrap();
-    let (PacketHeader::Long(header), _) = PacketHeader::decode(&packets[0].data, 0).unwrap() else {
+    // Header protection masks reserved and packet-number bits. Only invariant
+    // fields may be read before the real handshake authenticates this flight.
+    let ProtectedHeaderPrefix::Long(header) =
+        ProtectedHeaderPrefix::decode(&packets[0].data, 0).unwrap()
+    else {
         panic!("expected Initial")
     };
+    assert_eq!(header.packet_type, LongPacketType::Initial);
+    assert_eq!(header.version, 1);
+    header.packet_len(packets[0].data.len()).unwrap();
     let cfg = NativeQuicConnectionConfig {
         max_local_bidi: 0,
         max_local_uni: 8,

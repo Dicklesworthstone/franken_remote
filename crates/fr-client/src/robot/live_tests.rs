@@ -4,10 +4,17 @@ use std::time::Duration;
 
 fn display() -> Display {
     Display {
-        handle: 17, geometry: DisplayGeometryGeneration::INITIAL,
-        x: -1920, y: 0, pixel_width: 1920, pixel_height: 1080,
-        logical_width: 960, logical_height: 540,
-        scale_numerator: 2, scale_denominator: 1, rotation: 0,
+        handle: 17,
+        geometry: DisplayGeometryGeneration::INITIAL,
+        x: -1920,
+        y: 0,
+        pixel_width: 1920,
+        pixel_height: 1080,
+        logical_width: 960,
+        logical_height: 540,
+        scale_numerator: 2,
+        scale_denominator: 1,
+        rotation: 0,
     }
 }
 fn streaming(now: Instant) -> Observation {
@@ -30,7 +37,12 @@ fn first_frame_is_available_on_an_idle_screen_and_has_no_inferred_freshness() {
     assert_eq!(frame.origin_x, -1920);
     assert_eq!(frame.evidence_level, Evidence::Decoded);
     let json = serde_json::to_value(snapshot).unwrap();
-    for absent in ["source_freshness", "capture_timestamp_unix_ms", "configuration_generation", "control_authority"] {
+    for absent in [
+        "source_freshness",
+        "capture_timestamp_unix_ms",
+        "configuration_generation",
+        "control_authority",
+    ] {
         assert!(json["frame"].get(absent).is_none());
     }
 }
@@ -54,8 +66,13 @@ fn every_retirement_removes_geometry_and_reconnect_needs_a_new_receipt() {
         assert!(waiting.frame.is_none());
         let mut changed = display();
         changed.handle = 18;
-        value.ready(changed, 0, Evidence::SubmittedToCompositor, now).unwrap();
-        assert_eq!(value.snapshot(now).unwrap().frame.unwrap().display_handle, format!("{:032x}", 18));
+        value
+            .ready(changed, 0, Evidence::SubmittedToCompositor, now)
+            .unwrap();
+        assert_eq!(
+            value.snapshot(now).unwrap().frame.unwrap().display_handle,
+            format!("{:032x}", 18)
+        );
         assert!(old.frame.is_none(), "prior snapshot must not be mutated");
     }
 }
@@ -75,8 +92,18 @@ fn a_new_receipt_changes_only_its_actual_stage_serial_and_local_age() {
     let now = Instant::now();
     let mut value = streaming(now);
     let first = value.snapshot(now).unwrap();
-    value.presented(21, Evidence::SubmittedToCompositor, now + Duration::from_secs(1)).unwrap();
-    let current = value.snapshot(now + Duration::from_millis(1250)).unwrap().frame.unwrap();
+    value
+        .presented(
+            21,
+            Evidence::SubmittedToCompositor,
+            now + Duration::from_secs(1),
+        )
+        .unwrap();
+    let current = value
+        .snapshot(now + Duration::from_millis(1250))
+        .unwrap()
+        .frame
+        .unwrap();
     assert_eq!(current.receipt_age_ms, 250);
     assert_eq!(current.frame_serial, 21);
     assert_eq!(current.evidence_level, Evidence::SubmittedToCompositor);
@@ -88,7 +115,10 @@ fn clock_regression_cannot_turn_old_metadata_into_a_zero_age_receipt() {
     let now = Instant::now();
     let mut value = streaming(now + Duration::from_secs(1));
     assert_eq!(value.snapshot(now), Err(Error::Clock));
-    assert_eq!(value.presented(1, Evidence::Decoded, now), Err(Error::Clock));
+    assert_eq!(
+        value.presented(1, Evidence::Decoded, now),
+        Err(Error::Clock)
+    );
     assert!(value.snapshot(now).unwrap().frame.is_none());
 }
 
@@ -96,12 +126,18 @@ fn clock_regression_cannot_turn_old_metadata_into_a_zero_age_receipt() {
 fn invalid_display_or_illegal_phase_fences_the_slot() {
     let now = Instant::now();
     let mut value = Observation::default();
-    assert_eq!(value.ready(display(), 0, Evidence::Decoded, now), Err(Error::Order));
+    assert_eq!(
+        value.ready(display(), 0, Evidence::Decoded, now),
+        Err(Error::Order)
+    );
     value.begin(1).unwrap();
     value.authenticated().unwrap();
     let mut invalid = display();
     invalid.scale_denominator = 0;
-    assert_eq!(value.ready(invalid, 0, Evidence::Decoded, now), Err(Error::InvalidMetadata));
+    assert_eq!(
+        value.ready(invalid, 0, Evidence::Decoded, now),
+        Err(Error::InvalidMetadata)
+    );
     assert!(value.snapshot(now).unwrap().frame.is_none());
 }
 
@@ -131,7 +167,11 @@ fn bounded_wire_snapshot_validation_rejects_incoherence_and_bad_geometry() {
 fn repeated_initial_receipt_cannot_refresh_metadata_and_fractional_age_rounds_up() {
     let now = Instant::now();
     let mut value = streaming(now);
-    value.presented(0, Evidence::Decoded, now + Duration::from_secs(1)).unwrap();
-    let snapshot = value.snapshot(now + Duration::from_micros(1_000_001)).unwrap();
+    value
+        .presented(0, Evidence::Decoded, now + Duration::from_secs(1))
+        .unwrap();
+    let snapshot = value
+        .snapshot(now + Duration::from_micros(1_000_001))
+        .unwrap();
     assert_eq!(snapshot.frame.unwrap().receipt_age_ms, 1001);
 }

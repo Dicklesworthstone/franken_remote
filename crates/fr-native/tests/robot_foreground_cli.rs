@@ -3,8 +3,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    fs,
-    io,
+    fs, io,
     os::unix::net::UnixListener,
     path::PathBuf,
     process::{Child, Command, Output, Stdio},
@@ -59,7 +58,10 @@ impl Process {
     fn finish(mut self) -> Output {
         let until = Instant::now() + Duration::from_secs(5);
         while self.running() {
-            assert!(Instant::now() < until, "bounded foreground CLI did not finish");
+            assert!(
+                Instant::now() < until,
+                "bounded foreground CLI did not finish"
+            );
             thread::sleep(Duration::from_millis(5));
         }
         let output = self.0.take().unwrap().wait_with_output().unwrap();
@@ -163,7 +165,13 @@ fn foreground_view_cannot_obtain_control_only_capabilities_through_the_robot_ent
 #[test]
 fn legacy_broker_open_stays_unavailable_and_does_not_become_a_foreground_session() {
     let output = run(&[
-        "robot", "session", "open", "n-private", "--role", "view", "--json",
+        "robot",
+        "session",
+        "open",
+        "n-private",
+        "--role",
+        "view",
+        "--json",
     ]);
     refused(&output, "robot_surface_unavailable", 2);
 }

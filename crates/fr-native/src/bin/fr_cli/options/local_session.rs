@@ -39,7 +39,12 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> Result<Options, Failure> {
-        super::super::parse(&text.split_whitespace().map(str::to_owned).collect::<Vec<_>>())
+        super::super::parse(
+            &text
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
     }
 
     #[test]

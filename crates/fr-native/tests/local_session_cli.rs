@@ -5,7 +5,10 @@
 
 use std::{
     io::{self, Read, Write},
-    os::{linux::net::SocketAddrExt, unix::net::{SocketAddr, UnixListener, UnixStream}},
+    os::{
+        linux::net::SocketAddrExt,
+        unix::net::{SocketAddr, UnixListener, UnixStream},
+    },
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
     thread::{self, JoinHandle},
@@ -43,8 +46,12 @@ fn fixture(target: &str, exchanges: Vec<Exchange>) -> JoinHandle<()> {
     thread::spawn(move || {
         for exchange in exchanges {
             let mut stream = accept(&listener);
-            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
             let mut identify = [0; 8];
             stream.read_exact(&mut identify).unwrap();
             assert_eq!(&identify, b"FRSC1ID\0");
@@ -56,7 +63,11 @@ fn fixture(target: &str, exchanges: Vec<Exchange>) -> JoinHandle<()> {
             match exchange {
                 Exchange::Inspect => {
                     let mut byte = [0; 1];
-                    assert_eq!(stream.read(&mut byte).unwrap(), 0, "no STOP may follow inspection or a stale pin");
+                    assert_eq!(
+                        stream.read(&mut byte).unwrap(),
+                        0,
+                        "no STOP may follow inspection or a stale pin"
+                    );
                 }
                 Exchange::Close | Exchange::LoseReply => {
                     let mut stop = [0; 24];
@@ -81,7 +92,10 @@ fn accept(listener: &UnixListener) -> UnixStream {
         match listener.accept() {
             Ok((stream, _)) => return stream,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < until, "CLI never reached its local endpoint");
+                assert!(
+                    Instant::now() < until,
+                    "CLI never reached its local endpoint"
+                );
                 thread::sleep(Duration::from_millis(5));
             }
             Err(error) => panic!("fixture accept: {error}"),
@@ -110,7 +124,11 @@ fn cli(args: &[&str]) -> Output {
     }
     let output = child.wait_with_output().unwrap();
     assert!(output.stdout.len() < 16 * 1024);
-    assert!(output.stderr.is_empty(), "unexpected stderr: {:?}", output.stderr);
+    assert!(
+        output.stderr.is_empty(),
+        "unexpected stderr: {:?}",
+        output.stderr
+    );
     output
 }
 fn json(output: &Output) -> serde_json::Value {
@@ -130,13 +148,26 @@ fn separate_commands_inspect_and_close_the_same_pinned_invocation() {
     assert_eq!(data["scope"], "local_connection");
     assert_eq!(data["target"], target);
     assert_eq!(data["local_owner_present"], true);
-    assert_eq!(data.get("remote_session_state"), Some(&serde_json::Value::Null));
-    assert_eq!(data.get("remote_control_granted"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        data.get("remote_session_state"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(
+        data.get("remote_control_granted"),
+        Some(&serde_json::Value::Null)
+    );
     let id = data["connection_id"].as_str().unwrap();
     assert_eq!(id, "a3".repeat(16));
     let closed = cli(&[
-        "robot", "session", "close", &target, "--connection-id", id,
-        "--socket", "/absent/not-contacted-tailscaled.sock", "--json",
+        "robot",
+        "session",
+        "close",
+        &target,
+        "--connection-id",
+        id,
+        "--socket",
+        "/absent/not-contacted-tailscaled.sock",
+        "--json",
     ]);
     assert!(closed.status.success());
     let value = json(&closed);
@@ -151,7 +182,13 @@ fn stale_cli_pin_refuses_without_sending_stop_or_claiming_unknown_effects() {
     let target = target();
     let owner = fixture(&target, vec![Exchange::Inspect]);
     let output = cli(&[
-        "robot", "session", "close", &target, "--connection-id", &"b4".repeat(16), "--json",
+        "robot",
+        "session",
+        "close",
+        &target,
+        "--connection-id",
+        &"b4".repeat(16),
+        "--json",
     ]);
     assert_eq!(output.status.code(), Some(1));
     let value = json(&output);
@@ -166,7 +203,13 @@ fn lost_cleanup_reply_after_pinned_stop_is_unknown_not_refused() {
     let target = target();
     let owner = fixture(&target, vec![Exchange::LoseReply]);
     let output = cli(&[
-        "robot", "session", "close", &target, "--connection-id", &"a3".repeat(16), "--json",
+        "robot",
+        "session",
+        "close",
+        &target,
+        "--connection-id",
+        &"a3".repeat(16),
+        "--json",
     ]);
     assert_eq!(output.status.code(), Some(1));
     let value = json(&output);
@@ -191,8 +234,15 @@ fn absent_local_owner_is_not_reported_as_a_tailnet_or_display_failure() {
 fn a_connection_pin_never_enables_an_unissued_robot_lease() {
     let target = target();
     let output = cli(&[
-        "robot", "session", "close", &target,
-        "--connection-id", &"a3".repeat(16), "--lease", "private-unissued-lease", "--json",
+        "robot",
+        "session",
+        "close",
+        &target,
+        "--connection-id",
+        &"a3".repeat(16),
+        "--lease",
+        "private-unissued-lease",
+        "--json",
     ]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(json(&output)["error"]["code"], "local_lease_unavailable");

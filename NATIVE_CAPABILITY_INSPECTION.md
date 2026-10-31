@@ -49,7 +49,10 @@ TLS still verifies the canonical name and local roots, and the canonical dialer
 revalidates the identity after its handshake. A remembered name or address
 cannot substitute for current installed-tailnet identity.
 
-The entire native dial and inspection has one five-second budget. Application
+The entire native dial and inspection has one five-second budget. The dialer
+may use four of those seconds, shared between the verified address families;
+each family needs room for the pinned transport's 1.5-second cold-listener
+retransmission. This does not add time to the whole operation. Application
 startup additionally has a two-second deadline, and the host clamps recognized
 inspection work to its original two-second inspection budget. A stalled peer
 does not receive a fresh budget. Normal automatic address-family selection may

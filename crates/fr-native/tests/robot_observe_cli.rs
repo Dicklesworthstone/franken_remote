@@ -132,15 +132,32 @@ fn publisher_open_never_starts_recording_and_local_screenshot_requires_an_existi
     let artifact = fixture.0.join("PRIVATE-screen.png");
     let target = format!("n-PRIVATE-unopened-{}", std::process::id());
     let open = [
-        "robot", "session", "open", &target, "--foreground", "--role", "view",
-        "--publish-observations", "--experimental-native", "--display", "only",
-        "--screenshot", artifact.to_str().unwrap(), "--json",
+        "robot",
+        "session",
+        "open",
+        &target,
+        "--foreground",
+        "--role",
+        "view",
+        "--publish-observations",
+        "--experimental-native",
+        "--display",
+        "only",
+        "--screenshot",
+        artifact.to_str().unwrap(),
+        "--json",
     ];
     refused(&run(&open), "observation_artifact_unavailable", 2);
     assert!(!artifact.exists());
     let read = [
-        "robot", "observe", &target, "--connection-id", "00000000000000000000000000000001",
-        "--screenshot", artifact.to_str().unwrap(), "--json",
+        "robot",
+        "observe",
+        &target,
+        "--connection-id",
+        "00000000000000000000000000000001",
+        "--screenshot",
+        artifact.to_str().unwrap(),
+        "--json",
     ];
     refused(&run(&read), "no_local_session", 1);
     assert!(!artifact.exists());

@@ -185,10 +185,7 @@ fn replayed_offer_cannot_replace_publication_with_a_no_effect_reply() {
 // Exercise serialization failures directly: the native transport deliberately
 // supplies a full-sized buffer. Reuse its original input owner and negotiated
 // bindings, but give this wire-only receiver a separate, private test directory.
-fn wire_receiver(
-    f: &Running,
-    cx: &Cx,
-) -> (fr_files::wire::HostReceiver, fr_files::worker::Task) {
+fn wire_receiver(f: &Running, cx: &Cx) -> (fr_files::wire::HostReceiver, fr_files::worker::Task) {
     use std::os::unix::fs::DirBuilderExt;
     let directory = f.path.join("wire-only");
     fs::DirBuilder::new()
@@ -226,7 +223,10 @@ fn finish_wire_worker(task: &mut fr_files::worker::Task) {
             assert_eq!(result, Ok(()));
             break;
         }
-        assert!(std::time::Instant::now() < until, "wire worker cleanup stalled");
+        assert!(
+            std::time::Instant::now() < until,
+            "wire worker cleanup stalled"
+        );
         std::thread::yield_now();
     }
 }

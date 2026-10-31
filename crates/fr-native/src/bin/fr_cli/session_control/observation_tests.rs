@@ -1,16 +1,23 @@
 //! Actual abstract sockets prove snapshot reads do not become STOP requests.
-use super::*;
 use super::super::{Owner, hex, probe};
+use super::*;
 use asupersync::{runtime::RuntimeBuilder, types::Budget};
-use std::{future::{Future, poll_fn}, pin::pin};
+use std::{
+    future::{Future, poll_fn},
+    pin::pin,
+};
 
 async fn beside<T>(owner: &mut Owner, cx: &Cx, work: impl Future<Output = T>) -> T {
     let mut waiting = pin!(owner.wait_for_stop(cx));
     let mut work = pin!(work);
     poll_fn(|task| {
-        assert!(waiting.as_mut().poll(task).is_pending(), "observation requested STOP");
+        assert!(
+            waiting.as_mut().poll(task).is_pending(),
+            "observation requested STOP"
+        );
         work.as_mut().poll(task)
-    }).await
+    })
+    .await
 }
 fn target(cx: &Cx) -> String {
     let mut bytes = [0; 16];
@@ -18,7 +25,10 @@ fn target(cx: &Cx) -> String {
     format!("observation-{}", hex(&bytes))
 }
 fn runtime() -> asupersync::runtime::Runtime {
-    RuntimeBuilder::current_thread().enable_platform_reactor(true).build().unwrap()
+    RuntimeBuilder::current_thread()
+        .enable_platform_reactor(true)
+        .build()
+        .unwrap()
 }
 
 #[test]
@@ -28,23 +38,38 @@ fn successive_reads_reuse_the_original_owner_and_see_lifecycle_changes() {
     runtime.block_on(async {
         let target = target(&cx);
         let publisher = Publisher::default();
-        let mut owner = Owner::bind(&cx, &target).await.unwrap().with_observations(publisher.clone());
+        let mut owner = Owner::bind(&cx, &target)
+            .await
+            .unwrap()
+            .with_observations(publisher.clone());
         let id = owner.info().instance;
-        let first = beside(&mut owner, &cx, read(&cx, &target, &id)).await.unwrap();
+        let first = beside(&mut owner, &cx, read(&cx, &target, &id))
+            .await
+            .unwrap();
         assert_eq!(first.snapshot.phase, Phase::Starting);
         publisher.update(|state| state.begin(1)).unwrap();
         publisher.update(Observation::authenticated).unwrap();
         publisher.update(Observation::approval).unwrap();
-        let second = beside(&mut owner, &cx, read(&cx, &target, &id)).await.unwrap();
+        let second = beside(&mut owner, &cx, read(&cx, &target, &id))
+            .await
+            .unwrap();
         assert_eq!(second.info, first.info);
         assert_eq!(second.snapshot.phase, Phase::AwaitingApproval);
         publisher.retire(Phase::Cleaning);
-        let third = beside(&mut owner, &cx, read(&cx, &target, &id)).await.unwrap();
+        let third = beside(&mut owner, &cx, read(&cx, &target, &id))
+            .await
+            .unwrap();
         assert!(third.snapshot.frame.is_none());
         assert_eq!(third.snapshot.phase, Phase::Cleaning);
         assert!(owner.requester.is_none());
         assert!(!cx.is_cancel_requested());
-        assert_eq!(beside(&mut owner, &cx, probe(&cx, &target)).await.unwrap().instance, id);
+        assert_eq!(
+            beside(&mut owner, &cx, probe(&cx, &target))
+                .await
+                .unwrap()
+                .instance,
+            id
+        );
     });
 }
 
@@ -56,7 +81,10 @@ fn absent_publication_is_typed_absence_not_a_fabricated_empty_frame() {
         let target = target(&cx);
         let mut owner = Owner::bind(&cx, &target).await.unwrap();
         let id = owner.info().instance;
-        assert_eq!(beside(&mut owner, &cx, read(&cx, &target, &id)).await, Err(ReadError::Unavailable));
+        assert_eq!(
+            beside(&mut owner, &cx, read(&cx, &target, &id)).await,
+            Err(ReadError::Unavailable)
+        );
         assert!(owner.requester.is_none());
     });
 }
@@ -70,10 +98,19 @@ fn a_saved_pin_cannot_observe_a_replacement_and_a_bad_pin_does_no_io() {
         let old = Owner::bind(&cx, &target).await.unwrap();
         let old_id = old.info().instance;
         drop(old);
-        let mut next = Owner::bind(&cx, &target).await.unwrap().with_observations(Publisher::default());
+        let mut next = Owner::bind(&cx, &target)
+            .await
+            .unwrap()
+            .with_observations(Publisher::default());
         assert_ne!(old_id, next.info().instance);
-        assert_eq!(beside(&mut next, &cx, read(&cx, &target, &old_id)).await, Err(ReadError::Local(Error::WrongOwner)));
-        assert_eq!(read(&cx, &target, "not-a-pin").await, Err(ReadError::Local(Error::InvalidInstance)));
+        assert_eq!(
+            beside(&mut next, &cx, read(&cx, &target, &old_id)).await,
+            Err(ReadError::Local(Error::WrongOwner))
+        );
+        assert_eq!(
+            read(&cx, &target, "not-a-pin").await,
+            Err(ReadError::Local(Error::InvalidInstance))
+        );
         assert!(next.requester.is_none());
     });
 }
@@ -107,12 +144,24 @@ fn cancellation_and_busy_snapshot_storage_never_stop_or_invent_data() {
         let mut owner = Owner::bind(&cx, &target).await.unwrap();
         let cancelled = runtime.request_cx_with_budget(Budget::INFINITE);
         cancelled.cancel_fast(asupersync::types::CancelKind::User);
-        assert_eq!(read(&cancelled, &target, &owner.info().instance).await, Err(ReadError::Local(Error::Cancelled)));
+        assert_eq!(
+            read(&cancelled, &target, &owner.info().instance).await,
+            Err(ReadError::Local(Error::Cancelled))
+        );
         assert!(owner.requester.is_none());
         let publisher = Publisher::default();
         let held = publisher.0.lock().unwrap();
-        assert!(publisher.read().is_none(), "read must not block on a held slot");
+        assert!(
+            publisher.read().is_none(),
+            "read must not block on a held slot"
+        );
         drop(held);
-        assert_eq!(beside(&mut owner, &cx, probe(&cx, &target)).await.unwrap().target, target);
+        assert_eq!(
+            beside(&mut owner, &cx, probe(&cx, &target))
+                .await
+                .unwrap()
+                .target,
+            target
+        );
     });
 }

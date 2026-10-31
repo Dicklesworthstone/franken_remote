@@ -78,10 +78,9 @@ pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Tar
     if let PeerSelector::Pinned {
         certificate_name, ..
     } = selector
+        && certificate_name != name
     {
-        if certificate_name != name {
-            return Err(Error::IdentityChanged);
-        }
+        return Err(Error::IdentityChanged);
     }
     Ok(Target {
         host,

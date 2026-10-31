@@ -61,15 +61,24 @@ fn an_inspected_instance_cannot_close_a_replacement_at_the_same_target() {
     runtime.block_on(async {
         let target = target(&cx);
         let mut original = Owner::bind(&cx, &target).await.unwrap();
-        let previous = beside(&mut original, &cx, probe(&cx, &target)).await.unwrap();
+        let previous = beside(&mut original, &cx, probe(&cx, &target))
+            .await
+            .unwrap();
         drop(original);
         let mut successor = Owner::bind(&cx, &target).await.unwrap();
         assert_ne!(previous.instance, hex(&successor.instance));
         assert_eq!(
-            beside(&mut successor, &cx, stop_if(&cx, &target, &previous.instance)).await,
+            beside(
+                &mut successor,
+                &cx,
+                stop_if(&cx, &target, &previous.instance)
+            )
+            .await,
             Err(Error::WrongOwner)
         );
-        let current = beside(&mut successor, &cx, probe(&cx, &target)).await.unwrap();
+        let current = beside(&mut successor, &cx, probe(&cx, &target))
+            .await
+            .unwrap();
         assert_eq!(current.instance, hex(&successor.instance));
         assert!(successor.requester.is_none());
         assert!(!successor.completed);
@@ -152,7 +161,10 @@ fn cancelled_inspection_and_conditional_close_do_not_touch_the_live_owner() {
             Err(Error::Cancelled)
         );
         assert_eq!(
-            beside(&mut owner, &cx, probe(&cx, &target)).await.unwrap().instance,
+            beside(&mut owner, &cx, probe(&cx, &target))
+                .await
+                .unwrap()
+                .instance,
             instance
         );
         assert!(owner.requester.is_none());

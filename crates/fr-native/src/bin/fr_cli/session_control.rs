@@ -395,7 +395,13 @@ async fn peer(
         return Ok(None);
     }
     if request[..8] == screenshot::REQUEST {
-        screenshot::respond(&mut stream, instance, observations.as_ref(), automation.as_ref()).await?;
+        screenshot::respond(
+            &mut stream,
+            instance,
+            observations.as_ref(),
+            automation.as_ref(),
+        )
+        .await?;
         return Ok(None);
     }
     Err(Error::Protocol)

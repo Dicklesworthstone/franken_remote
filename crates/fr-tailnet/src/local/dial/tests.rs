@@ -5,7 +5,7 @@ use crate::PeerSelector;
 use asupersync::types::CancelKind;
 use asupersync::{
     net::{
-        quic_core::{ConnectionId, PacketHeader},
+        quic_core::{ConnectionId, LongPacketType, ProtectedHeaderPrefix},
         quic_native::{
             NativeQuicUdpConnection, QuicUdpEndpoint,
             handshake_driver::{QuicHandshakeDriver, server_config},
@@ -420,6 +420,55 @@ fn foreign_or_expired_target_and_bad_roots_never_start_a_handshake() {
 // Test-only listener: consume the first Initial to learn its random DCID, then
 // let the real client retransmit it. This intentionally exercises a lost flight;
 // it is NOT presented as the missing production multiplexing/ingress listener.
+fn initial_destination(data: &[u8]) -> Result<ConnectionId, ()> {
+    // The low first-byte bits and packet number are still protected. Reading
+    // them with PacketHeader::decode rejects valid flights whenever the random
+    // protection mask sets a reserved bit, before TLS can authenticate them.
+    let ProtectedHeaderPrefix::Long(header) =
+        ProtectedHeaderPrefix::decode(data, 0).map_err(|_| ())?
+    else {
+        return Err(());
+    };
+    if header.packet_type != LongPacketType::Initial
+        || header.version != 1
+        || header.packet_len(data.len()).is_err()
+    {
+        return Err(());
+    }
+    Ok(header.dst_cid)
+}
+
+#[test]
+fn discovery_reads_only_invariant_fields_for_every_protected_header_mask() {
+    use asupersync::net::quic_core::{LongHeader, PacketHeader};
+
+    let destination = ConnectionId::new(b"initial-destination").unwrap();
+    let mut data = Vec::new();
+    PacketHeader::Long(LongHeader {
+        packet_type: LongPacketType::Initial,
+        version: 1,
+        dst_cid: destination,
+        src_cid: ConnectionId::new(b"initial-source").unwrap(),
+        token: Vec::new(),
+        payload_length: 32,
+        packet_number: 0,
+        packet_number_len: 1,
+    })
+    .encode(&mut data)
+    .unwrap();
+    data.extend_from_slice(&[0; 31]);
+    for mask in 0..16 {
+        data[0] = 0xc0 | mask;
+        assert_eq!(initial_destination(&data), Ok(destination));
+        if mask & 0x0c != 0 {
+            assert!(PacketHeader::decode(&data, 0).is_err());
+        }
+    }
+    assert!(initial_destination(&data[..data.len() - 1]).is_err());
+    data[0] = 0xe0;
+    assert!(initial_destination(&data).is_err());
+}
+
 async fn accept(
     cx: &Cx,
     mut endpoint: QuicUdpEndpoint,
@@ -427,11 +476,7 @@ async fn accept(
     delay: Duration,
 ) -> Result<NativeQuicUdpConnection, ()> {
     let packets = endpoint.receive_batch(cx, 1).await.map_err(|_| ())?;
-    let (PacketHeader::Long(header), _) =
-        PacketHeader::decode(&packets[0].data, 0).map_err(|_| ())?
-    else {
-        return Err(());
-    };
+    let destination = initial_destination(&packets[0].data)?;
     sleep(cx.now(), delay).await;
     let config = server_config(
         vec![
@@ -453,7 +498,7 @@ async fn accept(
         cx,
         endpoint,
         driver,
-        header.dst_cid,
+        destination,
         ConnectionId::new(b"dial-test-server").unwrap(),
         super::super::dial::connection_config(),
         b"fr-remote/0",
@@ -531,17 +576,11 @@ fn native_dial_rejects_wrong_certificate_name_without_exposing_connection() {
             ),
         ))
         .await;
-        // No connection is exposed either way. Measured 2026-09-28: here the
-        // client ends in HandshakeTimeout even with a 12 s budget (the server's accept
-        // fails, the client never surfaces the rejection), so the typed
-        // PeerCertificateRejected path is covered by handshake_error's unit test
-        // and the missing prompt refusal is tracked on
-        // fr-rc-transport-client-trust-g9u.
+        // A valid protected Initial must reach the real TLS verifier. A timeout
+        // is not certificate-rejection evidence: the old fixture's unprotected
+        // header decoder could reject the flight before TLS even started.
         assert!(
-            matches!(
-                result,
-                Err(Error::PeerCertificateRejected | Error::HandshakeTimeout)
-            ),
+            matches!(result, Err(Error::PeerCertificateRejected)),
             "{:?}",
             result.err()
         );
@@ -638,13 +677,27 @@ fn native_dial_ipv6_uses_the_selected_node_addresses_and_expired_handoff_refuses
 #[test]
 #[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
 fn native_dial_falls_back_to_ipv6_with_one_original_timeout_and_no_application_replay() {
+    fallback_after_silent_ipv4(Duration::from_secs(6));
+}
+
+#[test]
+#[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
+fn native_dial_inspection_budget_reaches_ipv6_after_a_silent_ipv4() {
+    // The five-second inspection operation reserves at most four seconds for
+    // dialing. Each family must have time for the pinned stack's 1.5 s Initial
+    // PTO: the cold listener necessarily consumes its discovery packet. A 3 s
+    // total splits into two 1.5 s attempts, neither of which can complete.
+    fallback_after_silent_ipv4(Duration::from_secs(4));
+}
+
+fn fallback_after_silent_ipv4(budget: Duration) {
     let server = Server::new(
         vec![response(&dual_stack_metadata(), false)],
         Duration::ZERO,
     );
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
-        let dialer = client(&server, Duration::from_secs(6));
+        let dialer = client(&server, budget);
         // The preferred endpoint receives UDP but never services a handshake.
         // Keeping it bound avoids turning silence into an ICMP/refusal fixture.
         let silent = endpoint(&cx).await;
@@ -655,7 +708,7 @@ fn native_dial_falls_back_to_ipv6_with_one_original_timeout_and_no_application_r
         let started = now(&cx).unwrap();
         let (result, remote) = Box::pin(timeout(
             cx.now(),
-            Duration::from_secs(7),
+            budget + Duration::from_secs(1),
             both(
                 dialer
                     .dial_with_fallback(
@@ -675,7 +728,7 @@ fn native_dial_falls_back_to_ipv6_with_one_original_timeout_and_no_application_r
         assert_eq!(native.peer_addr(), ipv6_route(port).remote);
         assert_eq!(native.peer_addr(), remote.local_addr());
         assert_eq!(native.local_addr().ip(), ipv6_route(port).local);
-        assert!(now(&cx).unwrap() - started < 6_000_000);
+        assert!(u128::from(now(&cx).unwrap() - started) < budget.as_micros());
         assert!(
             server.calls.load(Ordering::SeqCst) >= 10,
             "metadata renews through both handshakes"

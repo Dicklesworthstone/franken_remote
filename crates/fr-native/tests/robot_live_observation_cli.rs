@@ -4,7 +4,10 @@
 #![forbid(unsafe_code)]
 use std::{
     io::{self, Read, Write},
-    os::{linux::net::SocketAddrExt, unix::net::{SocketAddr, UnixListener}},
+    os::{
+        linux::net::SocketAddrExt,
+        unix::net::{SocketAddr, UnixListener},
+    },
     process::{Command, Output, Stdio},
     sync::atomic::{AtomicUsize, Ordering},
     thread,
@@ -13,14 +16,25 @@ use std::{
 const INSTANCE: [u8; 16] = [0xa3; 16];
 fn target() -> String {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    format!("live-observe-cli-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "live-observe-cli-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
 }
-enum Reply { Snapshot(Vec<u8>), StalePin, Oversized }
+enum Reply {
+    Snapshot(Vec<u8>),
+    StalePin,
+    Oversized,
+}
 fn fixture(target: &str, replies: Vec<Reply>) -> thread::JoinHandle<()> {
     let (socket, _) = asupersync::net::unix::UnixStream::pair().unwrap();
     let uid = socket.peer_cred().unwrap().uid;
     let digest = fr_client::robot::sha256::sha256_hex(target.as_bytes());
-    let address = SocketAddr::from_abstract_name(format!("frankenremote.connect.v1.{uid}.{digest}").as_bytes()).unwrap();
+    let address = SocketAddr::from_abstract_name(
+        format!("frankenremote.connect.v1.{uid}.{digest}").as_bytes(),
+    )
+    .unwrap();
     let listener = UnixListener::bind_addr(&address).unwrap();
     listener.set_nonblocking(true).unwrap();
     let target = target.to_owned();
@@ -37,8 +51,12 @@ fn fixture(target: &str, replies: Vec<Reply>) -> thread::JoinHandle<()> {
                     Err(error) => panic!("accept: {error}"),
                 }
             };
-            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            stream.set_write_timeout(Some(Duration::from_secs(2))).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
             let mut identify = [0; 8];
             stream.read_exact(&mut identify).unwrap();
             assert_eq!(&identify, b"FRSC1ID\0");
@@ -48,7 +66,11 @@ fn fixture(target: &str, replies: Vec<Reply>) -> thread::JoinHandle<()> {
             identity.extend_from_slice(target.as_bytes());
             stream.write_all(&identity).unwrap();
             if matches!(reply, Reply::StalePin) {
-                assert_eq!(stream.read(&mut [0]).unwrap(), 0, "stale pin sent a request");
+                assert_eq!(
+                    stream.read(&mut [0]).unwrap(),
+                    0,
+                    "stale pin sent a request"
+                );
                 continue;
             }
             let mut query = [0; 24];
@@ -65,17 +87,31 @@ fn fixture(target: &str, replies: Vec<Reply>) -> thread::JoinHandle<()> {
             response.extend_from_slice(&size.to_be_bytes());
             response.extend_from_slice(&body);
             stream.write_all(&response).unwrap();
-            assert_eq!(stream.read(&mut [0]).unwrap(), 0, "query sent a follow-up action");
+            assert_eq!(
+                stream.read(&mut [0]).unwrap(),
+                0,
+                "query sent a follow-up action"
+            );
         }
     })
 }
 fn cli(args: &[&str]) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fr")).args(args)
-        .env_remove("DISPLAY").env_remove("XAUTHORITY")
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fr"))
+        .args(args)
+        .env_remove("DISPLAY")
+        .env_remove("XAUTHORITY")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
     let until = Instant::now() + Duration::from_secs(5);
     while child.try_wait().unwrap().is_none() {
-        if Instant::now() >= until { let _ = child.kill(); let _ = child.wait(); panic!("local observation stalled"); }
+        if Instant::now() >= until {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("local observation stalled");
+        }
         thread::sleep(Duration::from_millis(5));
     }
     let output = child.wait_with_output().unwrap();
@@ -93,20 +129,39 @@ fn snapshot() -> Vec<u8> {
     state.begin(1).unwrap();
     state.authenticated().unwrap();
     let now = Instant::now();
-    state.ready(fr_wire::display::Display {
-        handle: 17, geometry: DisplayGeometryGeneration::INITIAL,
-        x: 0, y: 0, pixel_width: 800, pixel_height: 600,
-        logical_width: 800, logical_height: 600,
-        scale_numerator: 1, scale_denominator: 1, rotation: 0,
-    }, 0, Evidence::Decoded, now).unwrap();
+    state
+        .ready(
+            fr_wire::display::Display {
+                handle: 17,
+                geometry: DisplayGeometryGeneration::INITIAL,
+                x: 0,
+                y: 0,
+                pixel_width: 800,
+                pixel_height: 600,
+                logical_width: 800,
+                logical_height: 600,
+                scale_numerator: 1,
+                scale_denominator: 1,
+                rotation: 0,
+            },
+            0,
+            Evidence::Decoded,
+            now,
+        )
+        .unwrap();
     serde_json::to_vec(&state.snapshot(now).unwrap()).unwrap()
 }
-fn json(output: &Output) -> serde_json::Value { serde_json::from_slice(&output.stdout).unwrap() }
+fn json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap()
+}
 
 #[test]
 fn repeated_cli_reads_need_neither_a_display_nor_a_new_remote_connection() {
     let target = target();
-    let owner = fixture(&target, vec![Reply::Snapshot(snapshot()), Reply::Snapshot(snapshot())]);
+    let owner = fixture(
+        &target,
+        vec![Reply::Snapshot(snapshot()), Reply::Snapshot(snapshot())],
+    );
     for _ in 0..2 {
         let output = query(&target, &"a3".repeat(16));
         assert!(output.status.success());
@@ -141,7 +196,20 @@ fn unavailable_owner_and_unsupported_privileges_are_never_tailnet_fallbacks() {
     let output = query(&target(), &"a3".repeat(16));
     assert_eq!(output.status.code(), Some(1));
     assert_eq!(json(&output)["error"]["code"], "no_local_session");
-    let output = cli(&["robot", "session", "open", "n-host", "--foreground", "--role", "control", "--publish-observations", "--experimental-native", "--display", "only", "--json"]);
+    let output = cli(&[
+        "robot",
+        "session",
+        "open",
+        "n-host",
+        "--foreground",
+        "--role",
+        "control",
+        "--publish-observations",
+        "--experimental-native",
+        "--display",
+        "only",
+        "--json",
+    ]);
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(json(&output)["error"]["code"], "invalid_arguments");
 }

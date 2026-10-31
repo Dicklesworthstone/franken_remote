@@ -222,7 +222,10 @@ fn actual_reference_expiry_retains_fresh_view_fallback_through_reporting() {
     // The actual receiver has failed at its ORIGINAL boundary. These two
     // explicit service-outcome fixtures exercise the production translation,
     // not a network recovery or a claim that a replacement decoder started.
-    for horizon in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+    for horizon in [
+        DeliveryError::ReferenceExpired,
+        DeliveryError::RecoveryExpired,
+    ] {
         let wrapped = super::recovery_control::Error::Delivery(horizon);
         let mapped = super::service_failure(wrapped, receiver.failure());
         assert_eq!(mapped, super::Error::Delivery(horizon));
@@ -233,11 +236,16 @@ fn actual_reference_expiry_retains_fresh_view_fallback_through_reporting() {
         );
         // An arbitrary wrapper outside this provenance-checked producer does
         // NOT become a retry instruction. Neither path revives the old view.
-        assert!(!reconnect::retryable(observation(super::Error::Recovery(wrapped))));
+        assert!(!reconnect::retryable(observation(super::Error::Recovery(
+            wrapped
+        ))));
         assert_eq!(receiver.state(), ReceiveState::NeedsRecovery);
         assert!(receiver.latest_progress().is_none());
         assert_eq!(receiver.reference_deadline(), None);
-        assert_eq!(receiver.tick(until + 1), Err(DeliveryError::ReferenceExpired));
+        assert_eq!(
+            receiver.tick(until + 1),
+            Err(DeliveryError::ReferenceExpired)
+        );
     }
 }
 
@@ -271,7 +279,10 @@ fn recovery_timeout_needs_the_original_receivers_expiry_not_just_an_error_code()
         Some(DeliveryError::ClockRegression),
         Some(DeliveryError::DecodeMismatch),
     ] {
-        for horizon in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+        for horizon in [
+            DeliveryError::ReferenceExpired,
+            DeliveryError::RecoveryExpired,
+        ] {
             let wrapped = super::recovery_control::Error::Delivery(horizon);
             let mapped = super::service_failure(wrapped, original);
             assert_eq!(mapped, super::Error::Recovery(wrapped));
@@ -280,8 +291,14 @@ fn recovery_timeout_needs_the_original_receivers_expiry_not_just_an_error_code()
     }
     // Both expired horizons are allowed when genuinely retained by the same
     // original receiver. The current service's precise error is preserved.
-    for original in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
-        for current in [DeliveryError::ReferenceExpired, DeliveryError::RecoveryExpired] {
+    for original in [
+        DeliveryError::ReferenceExpired,
+        DeliveryError::RecoveryExpired,
+    ] {
+        for current in [
+            DeliveryError::ReferenceExpired,
+            DeliveryError::RecoveryExpired,
+        ] {
             assert_eq!(
                 super::service_failure(
                     super::recovery_control::Error::Delivery(current),

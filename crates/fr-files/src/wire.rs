@@ -192,9 +192,9 @@ impl HostReceiver {
             && !self.atp.is_closed()
             && self.progress.is_none()
             && self.last.is_none_or(|last| message.id > last.id);
-        let result = self
-            .atp
-            .push_enveloped(self.atp.binding(), message.id, atp, Some(offer), profile);
+        let result =
+            self.atp
+                .push_enveloped(self.atp.binding(), message.id, atp, Some(offer), profile);
         if let Err(error) = result
             && fresh_offer
             && let Some(reason) = offer_refusal(error)

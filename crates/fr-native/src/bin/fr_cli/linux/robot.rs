@@ -14,7 +14,7 @@ use super::{Cell, Cx, Failure, LocalApi, Runtime, Shutdown, failure, session_con
 use fr_client::robot::{AcknowledgementStage, RobotEnvelope, RobotInspectData, RobotStatusData};
 
 #[path = "robot/probe.rs"]
-mod probe;
+pub(super) mod probe;
 
 fn now_unix_ms() -> u64 {
     std::time::SystemTime::now()
@@ -89,27 +89,7 @@ pub(super) fn run_inspect(
             "No machine with exactly that stable ID (or, with --by-name, canonical name) is in installed Tailscale discovery; run 'fr hosts'.",
         ));
     };
-    let (transport_path, is_derp) = match p.transport_path() {
-        fr_tailnet::PeerTransportPath::Direct { cur_addr } => {
-            (format!("direct ({cur_addr})"), false)
-        }
-        fr_tailnet::PeerTransportPath::DerpRelayed { relay } => {
-            (format!("derp_relayed ({relay})"), true)
-        }
-        fr_tailnet::PeerTransportPath::Unknown => ("unknown".to_string(), false),
-    };
-    let data = RobotInspectData {
-        host: opts.node.clone(),
-        certificate_name: p.certificate_name().to_string(),
-        addresses: p.addresses().iter().map(ToString::to_string).collect(),
-        port: opts.port,
-        is_derp_relayed: is_derp,
-        state: "discovered".into(),
-        // Neither is known without a host session; see `fr displays`.
-        displays_count: None,
-        requires_approval: None,
-        transport_path,
-    };
+    let data = inspection_identity(p, &opts.node, opts.port);
     if let Some(probe_options) = &opts.probe {
         return probe::run(
             runtime,
@@ -137,6 +117,34 @@ pub(super) fn run_inspect(
                 .map(RobotInspectData::render_human)
                 .as_deref(),
         ))
+    }
+}
+
+pub(super) fn inspection_identity(
+    p: &fr_tailnet::DiscoveredPeer,
+    node: &str,
+    port: u16,
+) -> RobotInspectData {
+    let (transport_path, is_derp) = match p.transport_path() {
+        fr_tailnet::PeerTransportPath::Direct { cur_addr } => {
+            (format!("direct ({cur_addr})"), false)
+        }
+        fr_tailnet::PeerTransportPath::DerpRelayed { relay } => {
+            (format!("derp_relayed ({relay})"), true)
+        }
+        fr_tailnet::PeerTransportPath::Unknown => ("unknown".to_string(), false),
+    };
+    RobotInspectData {
+        host: node.to_owned(),
+        certificate_name: p.certificate_name().to_string(),
+        addresses: p.addresses().iter().map(ToString::to_string).collect(),
+        port,
+        is_derp_relayed: is_derp,
+        state: "discovered".into(),
+        // Neither is known without a host session; see `fr displays`.
+        displays_count: None,
+        requires_approval: None,
+        transport_path,
     }
 }
 

@@ -87,9 +87,13 @@ try:
         futex = {0xc000003e: 202, 0xc00000b7: 98}.get(info.arch)
         assert futex is not None, f"unsupported Linux audit architecture {info.arch:#x}"
         entry = info.data.entry
-        if (entry.nr == futex and entry.args[1] == 137
-                and entry.args[2] == 0xffffffff and entry.args[3] != 0
-                and entry.args[5] == 0xffffffff):
+        # futex consumes these integer arguments as 32-bit values. The syscall
+        # registers are 64 bits; libc's variadic syscall entry may leave their
+        # upper words unspecified (observed for Rust's MATCH_ANY bitset). Match
+        # the kernel's values, retaining the full-width non-null timeout check.
+        if (entry.nr == futex and entry.args[1] & 0xffffffff == 137
+                and entry.args[2] & 0xffffffff == 0xffffffff and entry.args[3] != 0
+                and entry.args[5] & 0xffffffff == 0xffffffff):
             break
     else:
         raise TimeoutError("no lock-free clipboard park entry")

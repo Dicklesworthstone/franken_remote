@@ -198,9 +198,14 @@ fn an_expired_established_decoder_replacement_can_restart_but_initial_startup_ca
     for initial in [
         Failure::Observation(ObserverError::Decoder(Startup::Expired)),
         Failure::Observation(ObserverError::Expired),
-        Failure::Connection(ConnectionError::Session(crate::session_startup::Error::Expired)),
+        Failure::Connection(ConnectionError::Session(
+            crate::session_startup::Error::Expired,
+        )),
     ] {
-        assert!(!retryable(initial), "initial admission was retried: {initial:?}");
+        assert!(
+            !retryable(initial),
+            "initial admission was retried: {initial:?}"
+        );
     }
 }
 
@@ -218,14 +223,19 @@ fn replacement_timeout_does_not_make_configuration_protocol_or_native_faults_ret
         Startup::Media(crate::media::Error::InvalidFrame),
         Startup::Media(crate::media::Error::Worker(crate::worker::Error::Deadline)),
         Startup::Media(crate::media::Error::Worker(crate::worker::Error::Cancelled)),
-        Startup::Media(crate::media::Error::Worker(crate::worker::Error::ReapPending)),
+        Startup::Media(crate::media::Error::Worker(
+            crate::worker::Error::ReapPending,
+        )),
         Startup::Transport(Transport::Closed),
         Startup::Transport(Transport::Unauthorized),
         Startup::Transport(Transport::Malformed),
         Startup::Transport(Transport::Cancelled),
         Startup::Transport(Transport::Handler),
     ] {
-        assert!(!retryable(observation(StreamingViewerError::Startup(error))), "{error:?}");
+        assert!(
+            !retryable(observation(StreamingViewerError::Startup(error))),
+            "{error:?}"
+        );
     }
 }
 
@@ -236,9 +246,15 @@ fn replacement_expiry_never_reclassifies_input_expiry_or_uncertain_cleanup() {
 
     for error in [
         observation(StreamingViewerError::Control(Control::Expired)),
-        observation(StreamingViewerError::Control(Control::Unsent(SendLimit::View))),
-        observation(StreamingViewerError::Control(Control::Unsent(SendLimit::Ticket))),
-        observation(StreamingViewerError::Control(Control::Unsent(SendLimit::Receipt))),
+        observation(StreamingViewerError::Control(Control::Unsent(
+            SendLimit::View,
+        ))),
+        observation(StreamingViewerError::Control(Control::Unsent(
+            SendLimit::Ticket,
+        ))),
+        observation(StreamingViewerError::Control(Control::Unsent(
+            SendLimit::Receipt,
+        ))),
         Failure::Cleanup,
         Failure::CleanupExpired,
         Failure::Cancelled,
@@ -261,7 +277,11 @@ fn retained_host_evidence_vetoes_replacement_expiry_without_losing_known_effects
         fn run(&mut self, _: u8, _: Viewer) -> impl Future<Output = Result<(), ObserverError>> {
             std::future::ready(Err(ObserverError::Application))
         }
-        fn cleanup(&mut self, _: &Cx, _: Deadline) -> impl Future<Output = Result<(), CallbackError>> {
+        fn cleanup(
+            &mut self,
+            _: &Cx,
+            _: Deadline,
+        ) -> impl Future<Output = Result<(), CallbackError>> {
             std::future::ready(Ok(()))
         }
         fn status(&mut self, _: Status) -> Result<(), CallbackError> {
@@ -279,7 +299,10 @@ fn retained_host_evidence_vetoes_replacement_expiry_without_losing_known_effects
         let report = Closed {
             reason,
             cleanup: Cleanup::Unconfirmed,
-            effects: OutstandingEffects::Known { pending: 3, uncertain: 1 },
+            effects: OutstandingEffects::Known {
+                pending: 3,
+                uncertain: 1,
+            },
         };
         let terminal = ObserverError::Streaming(StreamingViewerError::Session(
             crate::session_startup::Error::RemoteClosed(report),
