@@ -63,7 +63,7 @@ impl NegotiatedMedia {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct CursorTurn {
     pub accepted: usize,
-    /// Backpressure: the next turn sends the then-current state instead.
+    /// Backpressure or unadmitted expiry: the next turn sends current state.
     pub pending: bool,
 }
 
@@ -141,6 +141,13 @@ impl HostLane {
                     turn.pending = true;
                     return Ok(turn);
                 }
+                // Only this unadmitted update expired: no shape reached the
+                // reliable queue and the viewer's cache is still unchanged.
+                // Retained-record expiry closes QUIC and remains terminal.
+                Err(quic::Error::Expired) if !transport.is_closed() => {
+                    turn.pending = true;
+                    return Ok(turn);
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -173,8 +180,16 @@ impl HostLane {
             }
             // Replaceable: the next turn sends the then-latest state instead.
             Err(quic::Error::Backpressure) => turn.pending = true,
+            // Do not turn a stale, never-admitted cursor position into loss of
+            // the desktop session. Its sequence stays consumed, and no sent
+            // position is recorded; a later turn samples the current target.
+            Err(quic::Error::Expired) if !transport.is_closed() => turn.pending = true,
             Err(error) => return Err(error),
         }
         Ok(turn)
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "cursor/tests.rs"]
+mod tests;
