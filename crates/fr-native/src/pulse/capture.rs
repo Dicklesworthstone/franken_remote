@@ -1,4 +1,4 @@
-//! Nonblocking PulseAudio RECORD of one locally selected playback monitor.
+//! Nonblocking PulseAudio RECORD of one locally selected source.
 //!
 //! Host playback capture (plan §15.4: "a selected output monitor through
 //! qualified Linux audio APIs"). Runs only in the supervised audio worker
@@ -7,12 +7,14 @@
 //! the negotiated channel count: the audio server converts/resamples the
 //! monitor's own format at this one boundary. The record queue is bounded in
 //! the server; a reader that falls behind loses the OLDEST audio there, it is
-//! never accumulated here. No microphone, autospawn, TCP server or fallback.
+//! never accumulated here. The client microphone wrapper supplies a separate
+//! explicit named selection and original permission check; it never chooses a
+//! default microphone. No autospawn, TCP server or fallback.
 use super::{Error, ffi};
 use fr_core::audio::AudioChannels;
 use fr_media::worker::audio::Monitor;
 use std::{
-    ffi::{CString, c_void},
+    ffi::{CStr, CString, c_void},
     path::Path,
     ptr::NonNull,
 };
@@ -30,6 +32,7 @@ const MAX_READ_TURNS: usize = 48;
 pub struct CaptureSelection {
     server: CString,
     source: CString,
+    stream_name: &'static CStr,
 }
 impl CaptureSelection {
     pub fn new(server_socket: &Path, monitor: &Monitor) -> Result<Self, Error> {
@@ -60,12 +63,30 @@ impl CaptureSelection {
         Ok(Self {
             server: CString::new(format!("unix:{socket}")).map_err(|_| Error::Selection)?,
             source: CString::new(source).map_err(|_| Error::Selection)?,
+            stream_name: c"Remote playback capture",
         })
+    }
+    #[cfg(feature = "linux-microphone-capture")]
+    pub(super) fn microphone(server_socket: &Path, source: &str) -> Result<Self, Error> {
+        // Reuse the socket validation; this never opens the temporary monitor
+        // selection. No @DEFAULT_SOURCE@, server alias, or device fallback.
+        let mut selection = Self::new(server_socket, &Monitor::DefaultSink)?;
+        if source.is_empty()
+            || source.len() > 255
+            || !source
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_-.".contains(&b))
+        {
+            return Err(Error::Selection);
+        }
+        selection.source = CString::new(source).map_err(|_| Error::Selection)?;
+        selection.stream_name = c"Remote microphone capture";
+        Ok(selection)
     }
 }
 impl std::fmt::Debug for CaptureSelection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("PulseCaptureSelection([local UNIX server and monitor])")
+        f.write_str("PulseCaptureSelection([local UNIX server and source])")
     }
 }
 
@@ -191,24 +212,34 @@ impl CaptureDevice {
     }
     /// At most four nonblocking native turns. Returns true once recording.
     pub fn poll(&mut self, now_us: u64) -> Result<bool, Error> {
-        let result = self.poll_inner(now_us);
+        self.poll_guarded(&mut || Ok(now_us))
+    }
+    pub(super) fn poll_guarded(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+    ) -> Result<bool, Error> {
+        let result = self.poll_inner(now);
         if let Err(error) = result {
             self.fail(error);
         }
         result
     }
-    fn poll_inner(&mut self, now_us: u64) -> Result<bool, Error> {
+    fn poll_inner(&mut self, now: &mut impl FnMut() -> Result<u64, Error>) -> Result<bool, Error> {
         for _ in 0..4 {
-            self.advance(now_us)?;
+            self.advance(now()?)?;
             self.iterate()?;
-            self.progress()?;
+            // Original permission and time are sampled after native work and
+            // before starting a RECORD stream, not merely at method entry.
+            self.advance(now()?)?;
+            self.progress(now)?;
+            self.advance(now()?)?;
             if self.stage == Stage::Ready {
                 break;
             }
         }
         Ok(self.stage == Stage::Ready)
     }
-    fn progress(&mut self) -> Result<(), Error> {
+    fn progress(&mut self, now: &mut impl FnMut() -> Result<u64, Error>) -> Result<(), Error> {
         let context = self.context.ok_or(Error::Closed)?;
         // SAFETY: owned handle, read-only state query.
         let state = unsafe { ffi::pa_context_get_state(context.as_ptr()) };
@@ -216,7 +247,7 @@ impl CaptureDevice {
             return Err(Error::Unavailable);
         }
         match self.stage {
-            Stage::Context if state == ffi::CONTEXT_READY => self.connect_stream(),
+            Stage::Context if state == ffi::CONTEXT_READY => self.connect_stream(now),
             Stage::Stream | Stage::Ready => {
                 let stream = self.stream.ok_or(Error::Closed)?;
                 // SAFETY: owned handle, read-only state query.
@@ -238,7 +269,10 @@ impl CaptureDevice {
             _ => Ok(()),
         }
     }
-    fn connect_stream(&mut self) -> Result<(), Error> {
+    fn connect_stream(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+    ) -> Result<(), Error> {
         let spec = ffi::SampleSpec {
             format: ffi::S16_NATIVE,
             rate: 48_000,
@@ -259,12 +293,19 @@ impl CaptureDevice {
             self.stream = Some(
                 NonNull::new(ffi::pa_stream_new(
                     self.context.ok_or(Error::Closed)?.as_ptr(),
-                    c"Remote playback capture".as_ptr(),
+                    self.selection.stream_name.as_ptr(),
                     &raw const spec,
                     std::ptr::null(),
                 ))
                 .ok_or(Error::Allocation)?,
             );
+        }
+        // Creating a stream can enter foreign code. Recheck the original
+        // permission/deadline at the actual recording-start boundary.
+        self.advance(now()?)?;
+        // SAFETY: the original owned stream and borrowed selection remain live;
+        // the bounded public buffer attributes are copied by libpulse.
+        unsafe {
             if ffi::pa_stream_connect_record(
                 self.stream.ok_or(Error::Closed)?.as_ptr(),
                 self.selection.source.as_ptr(),
@@ -324,9 +365,17 @@ impl CaptureDevice {
         &mut self,
         now_us: u64,
         max_bytes: usize,
+        sink: impl FnMut(Chunk<'_>) -> Result<(), Error>,
+    ) -> Result<(usize, bool), Error> {
+        self.read_guarded(&mut || Ok(now_us), max_bytes, sink)
+    }
+    pub(super) fn read_guarded(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+        max_bytes: usize,
         mut sink: impl FnMut(Chunk<'_>) -> Result<(), Error>,
     ) -> Result<(usize, bool), Error> {
-        let result = self.read_inner(now_us, max_bytes, &mut sink);
+        let result = self.read_inner(now, max_bytes, &mut sink);
         if let Err(error) = result {
             self.fail(error);
         }
@@ -334,11 +383,11 @@ impl CaptureDevice {
     }
     fn read_inner(
         &mut self,
-        now_us: u64,
+        now: &mut impl FnMut() -> Result<u64, Error>,
         max_bytes: usize,
         sink: &mut impl FnMut(Chunk<'_>) -> Result<(), Error>,
     ) -> Result<(usize, bool), Error> {
-        self.advance(now_us)?;
+        self.advance(now()?)?;
         if self.stage != Stage::Ready {
             return Err(Error::Pending);
         }
@@ -347,11 +396,14 @@ impl CaptureDevice {
         // this call busy. Each turn may move only one server fragment.
         let stream = self.stream.ok_or(Error::Closed)?.as_ptr();
         for _ in 0..MAX_READ_TURNS {
-            if self.iterate()? == 0 {
+            self.advance(now()?)?;
+            let dispatched = self.iterate()?;
+            self.advance(now()?)?;
+            if dispatched == 0 {
                 break;
             }
         }
-        self.progress()?;
+        self.progress(now)?;
         // SAFETY: owned live stream; read-only size query.
         let readable = unsafe { ffi::pa_stream_readable_size(stream) };
         if readable == usize::MAX {
@@ -362,6 +414,7 @@ impl CaptureDevice {
         });
         let mut delivered = 0_usize;
         while delivered < max_bytes {
+            self.advance(now()?)?;
             let mut data: *const c_void = std::ptr::null();
             let mut bytes = 0_usize;
             // SAFETY: out-pointers are valid locals. The returned fragment is
@@ -373,6 +426,14 @@ impl CaptureDevice {
             if bytes == 0 {
                 break;
             }
+            // Validate the native length before constructing a Rust slice.
+            // A malformed fragment still owns one matching native drop.
+            if bytes > usize::try_from(self.queue_bytes).map_err(|_| Error::BufferLimit)? {
+                // SAFETY: this successful non-empty peek has not yet been
+                // dropped; no borrowed slice has been constructed.
+                let _ = unsafe { ffi::pa_stream_drop(stream) };
+                return Err(Error::BufferLimit);
+            }
             let chunk = if data.is_null() {
                 Chunk::Hole(bytes)
             } else {
@@ -380,12 +441,14 @@ impl CaptureDevice {
                 // until the matching drop; the slice dies before that call.
                 Chunk::Bytes(unsafe { std::slice::from_raw_parts(data.cast::<u8>(), bytes) })
             };
-            let result = sink(chunk);
+            let result = now().and_then(|_| sink(chunk));
             // SAFETY: exactly one drop per successful non-empty peek.
-            if unsafe { ffi::pa_stream_drop(stream) } < 0 {
+            let dropped = unsafe { ffi::pa_stream_drop(stream) };
+            result?;
+            if dropped < 0 {
                 return Err(Error::Native);
             }
-            result?;
+            self.advance(now()?)?;
             delivered = delivered.saturating_add(bytes);
         }
         Ok((delivered, full))

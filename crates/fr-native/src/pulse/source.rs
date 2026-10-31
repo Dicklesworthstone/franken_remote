@@ -28,30 +28,23 @@ use std::path::Path;
 const MAX_FRAME_VALUES: usize = 2 * 960;
 /// Complete raw frames retained per pull, independently of the read budget.
 /// Same maximum encoder work as the former normal four-frame pull.
-const PULL_FRAMES: usize = 4;
+pub(super) const PULL_FRAMES: usize = 4;
 const _: () = assert!(PULL_FRAMES <= MAX_BATCH_PACKETS);
 
 mod recent;
 use recent::Recent;
 
+/// Host playback wrapper; the shared record/encode core also serves explicit
+/// microphone capture without reinterpreting a playback monitor as consent.
 pub struct PlaybackSource {
-    device: CaptureDevice,
-    encoder: Encoder,
+    source: RecordSource,
     capture: Capture,
-    frame: Box<[i16; MAX_FRAME_VALUES]>,
-    /// Fixed scratch, emptied on every pull; never a cross-pull PCM FIFO.
-    recent: Recent,
-    filled: usize,
-    carry: Option<u8>,
-    /// Source-timeline sample index of `frame[0]`.
-    start: u64,
-    counters: CaptureCounters,
 }
 impl std::fmt::Debug for PlaybackSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PlaybackSource")
             .field("capture", &self.capture)
-            .field("counters", &self.counters)
+            .field("counters", &self.source.counters)
             .finish_non_exhaustive()
     }
 }
@@ -68,22 +61,79 @@ impl PlaybackSource {
             DEFAULT_JITTER_TARGET_MS,
         )
         .map_err(|_| Error::Configuration)?;
+        let selection = CaptureSelection::new(Path::new(&capture.server), &capture.monitor)?;
+        let source = RecordSource::connect(
+            selection,
+            config,
+            capture.bitrate,
+            capture.max_packet_bytes,
+            now_us,
+        )?;
+        Ok(Self { source, capture })
+    }
+    /// Bounded native progress; true once the monitor stream records.
+    pub fn poll_ready(&mut self, now_us: u64) -> Result<bool, Error> {
+        self.source.poll_ready(&mut || Ok(now_us))
+    }
+    pub const fn capture(&self) -> &Capture {
+        &self.capture
+    }
+    /// Drain the bounded queue, then encode only its newest complete frames.
+    pub fn pull(&mut self, now_us: u64) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
+        self.source.pull(&mut || Ok(now_us))
+    }
+    pub fn disconnect(&mut self) {
+        self.source.disconnect();
+    }
+}
+
+/// One native stream and one real encoder; only direction/selection differ
+/// between the playback and microphone owners. Caller-supplied clock checks
+/// run around native reads and each codec invocation. No callback enters C.
+pub(super) struct RecordSource {
+    device: CaptureDevice,
+    encoder: Encoder,
+    config: AudioStreamConfig,
+    frame: Box<[i16; MAX_FRAME_VALUES]>,
+    /// Fixed scratch, emptied on every pull; never a cross-pull PCM FIFO.
+    recent: Recent,
+    filled: usize,
+    carry: Option<u8>,
+    /// Source-timeline sample index of `frame[0]`.
+    start: u64,
+    counters: CaptureCounters,
+}
+impl RecordSource {
+    pub(super) fn connect(
+        selection: CaptureSelection,
+        config: AudioStreamConfig,
+        bitrate: u32,
+        max_packet_bytes: u16,
+        now_us: u64,
+    ) -> Result<Self, Error> {
+        if config.generation().as_raw() == 0
+            || !matches!(config.frame_duration_ms(), 10 | 20)
+            || !(6_000..=192_000).contains(&bitrate)
+            || u64::from(bitrate) * u64::from(config.frame_duration_ms())
+                > u64::from(max_packet_bytes) * 8_000
+        {
+            return Err(Error::Configuration);
+        }
         let limits = CodecLimits::new(
-            usize::from(capture.max_packet_bytes),
-            u32::from(capture.frame_samples()),
+            usize::from(max_packet_bytes),
+            config.expected_samples_per_frame(),
         )
         .map_err(|_| Error::Configuration)?;
         let mut encoder =
-            Encoder::with_limits(limits, capture.bitrate, 5).map_err(|_| Error::Configuration)?;
+            Encoder::with_limits(limits, bitrate, 5).map_err(|_| Error::Configuration)?;
         encoder
             .configure(config)
             .map_err(|_| Error::Configuration)?;
-        let selection = CaptureSelection::new(Path::new(&capture.server), &capture.monitor)?;
-        let device = CaptureDevice::connect(selection, capture.channels, now_us)?;
+        let device = CaptureDevice::connect(selection, config.channels(), now_us)?;
         Ok(Self {
             device,
             encoder,
-            capture,
+            config,
             frame: Box::new([0; MAX_FRAME_VALUES]),
             recent: Recent::new(),
             filled: 0,
@@ -92,25 +142,38 @@ impl PlaybackSource {
             counters: CaptureCounters::default(),
         })
     }
-    /// Bounded native progress; true once the monitor stream records.
-    pub fn poll_ready(&mut self, now_us: u64) -> Result<bool, Error> {
-        self.device.poll(now_us)
+    pub(super) fn poll_ready(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+    ) -> Result<bool, Error> {
+        self.device.poll_guarded(now)
     }
-    pub const fn capture(&self) -> &Capture {
-        &self.capture
+    #[cfg(feature = "linux-microphone-capture")]
+    pub(super) fn partial_timestamp(&self) -> Option<u64> {
+        (self.filled != 0 || self.carry.is_some()).then_some(self.start)
     }
-    fn channels(&self) -> usize {
-        usize::from(self.capture.channels.count())
+    /// No codec call runs while a native fragment is borrowed. Original guard
+    /// checks bracket native and codec work. All scratch clears on every return.
+    pub(super) fn pull(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+    ) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
+        self.pull_policy(now, false)
     }
-    fn frame_values(&self) -> usize {
-        usize::from(self.capture.frame_samples()) * self.channels()
+    #[cfg(feature = "linux-microphone-capture")]
+    pub(super) fn pull_contiguous(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+    ) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
+        self.pull_policy(now, true)
     }
-    /// Drain the bounded queue, then encode only its newest complete frames.
-    /// No codec call runs while a `PulseAudio` fragment is borrowed. Error or
-    /// normal return empties the scratch; failure permanently retires the source.
-    pub fn pull(&mut self, now_us: u64) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
+    fn pull_policy(
+        &mut self,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+        require_contiguous: bool,
+    ) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
         self.recent.clear();
-        let result = self.pull_inner(now_us);
+        let result = self.pull_inner(now, require_contiguous);
         self.recent.clear();
         if result.is_err() {
             self.disconnect();
@@ -119,17 +182,20 @@ impl PlaybackSource {
     }
     fn pull_inner(
         &mut self,
-        now_us: u64,
+        now: &mut impl FnMut() -> Result<u64, Error>,
+        require_contiguous: bool,
     ) -> Result<(Vec<AudioAccessUnit>, CaptureCounters), Error> {
-        let values = self.frame_values();
-        let channels = self.channels();
-        // Do not leave newer server audio behind merely because four OLD
-        // frames were read. CaptureDevice validates this negotiated byte bound.
+        let channels = usize::from(self.config.channels().count());
+        let values = usize::try_from(self.config.expected_samples_per_frame())
+            .map_err(|_| Error::Configuration)?
+            * channels;
+        // Fetch the newest sound, not four OLD frames while newer native
+        // fragments remain queued. CaptureDevice validates this byte bound.
         let budget = usize::try_from(self.device.queue_bytes()).map_err(|_| Error::BufferLimit)?;
         let Self {
             device,
             encoder,
-            capture,
+            config,
             frame,
             recent,
             filled,
@@ -145,13 +211,11 @@ impl PlaybackSource {
             values,
             channels,
         };
-        let (_, full) = device.read(now_us, budget, |chunk| {
+        let (_, full) = device.read_guarded(now, budget, |chunk| {
             let bytes = match chunk {
                 Chunk::Bytes(bytes) => bytes.len(),
                 Chunk::Hole(bytes) => bytes,
             };
-            // Bound work even if a native fragment violates the queue contract.
-            // The read loop itself stops after budget bytes plus one fragment.
             if bytes > budget {
                 return Err(Error::BufferLimit);
             }
@@ -164,13 +228,23 @@ impl PlaybackSource {
         if full {
             counters.overruns = counters.overruns.saturating_add(1);
         }
+        // An Opus jitter epoch fixes sequence-to-sample spacing. A capture
+        // hole, dropped raw frame or unknown server overrun cannot silently
+        // become a timestamp jump with the next consecutive packet sequence.
+        // Retire before encoding; the caller must explicitly start a new epoch.
+        if require_contiguous && (counters.gaps != 0 || counters.overruns != 0) {
+            return Err(Error::CaptureDiscontinuity);
+        }
         let mut packets = Vec::with_capacity(PULL_FRAMES);
         for (pcm, timestamp) in recent.iter() {
-            packets.push(encode(encoder, capture, pcm, timestamp)?);
+            now()?;
+            let encoded = encode(encoder, *config, pcm, timestamp);
+            now()?;
+            packets.push(encoded?);
         }
         Ok((packets, *counters))
     }
-    pub fn disconnect(&mut self) {
+    pub(super) fn disconnect(&mut self) {
         self.device.disconnect();
         self.encoder.close();
         self.recent.clear();
@@ -179,14 +253,19 @@ impl PlaybackSource {
         self.carry = None;
     }
 }
+impl Drop for RecordSource {
+    fn drop(&mut self) {
+        self.disconnect();
+    }
+}
 fn encode(
     encoder: &mut Encoder,
-    capture: &Capture,
+    config: AudioStreamConfig,
     pcm: &[i16],
     timestamp: u64,
 ) -> Result<AudioAccessUnit, Error> {
     let frame =
-        AudioPcmFrame::from_interleaved(capture.generation, capture.channels, timestamp, pcm)
+        AudioPcmFrame::from_interleaved(config.generation(), config.channels(), timestamp, pcm)
             .map_err(|_| Error::Metadata)?;
     encoder.submit_pcm(&frame).map_err(|_| Error::Native)?;
     encoder

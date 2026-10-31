@@ -5,9 +5,10 @@
 //! bounded number of nonblocking turns; it creates no Rust runtime or application
 //! thread. Native calls still require process supervision for hangs. This is an
 //! output adapter, not audio permission. Call only after local enable and
-//! observation approval. No microphone, TCP server, reconnect or format fallback
-//! exists. With `linux-audio`, `capture`/`source` add playback-MONITOR recording
-//! for the host's separate audio worker process only.
+//! observation approval. No TCP server, reconnect or format fallback exists.
+//! With `linux-audio`, `capture`/`source` add host playback-monitor recording.
+//! The separate `linux-microphone-capture` feature adds an explicit named-source
+//! client microphone API, guarded by original per-session permission.
 
 mod driver;
 mod ffi;
@@ -17,11 +18,15 @@ mod output;
 pub mod playout;
 
 /// Host playback-monitor RECORD stream (audio worker only).
-#[cfg(feature = "linux-audio")]
+#[cfg(any(feature = "linux-audio", feature = "linux-microphone-capture"))]
 pub mod capture;
 /// Monitor capture plus real Opus encode into bounded packet batches.
-#[cfg(feature = "linux-audio")]
+#[cfg(any(feature = "linux-audio", feature = "linux-microphone-capture"))]
 pub mod source;
+
+/// Explicit, permission-gated client capture and real Opus uplink encoding.
+#[cfg(feature = "linux-microphone-capture")]
+pub mod microphone;
 
 use fr_client::{
     audio::playout::{AudioSubmission, PlayoutClock},
@@ -60,6 +65,8 @@ pub enum Error {
     Clock,
     BufferLimit,
     DeviceChanged,
+    /// Recording lost source time; a new explicitly admitted generation is required.
+    CaptureDiscontinuity,
     Suspended,
     Backpressure,
     Metadata,
