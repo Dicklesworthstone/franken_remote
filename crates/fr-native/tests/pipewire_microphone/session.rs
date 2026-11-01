@@ -14,7 +14,7 @@ use fr_core::{
     limits::ProtocolLimits,
     time::HostInstant,
 };
-use fr_media::audio::{AudioAccessUnit, AudioEncoder, AudioPcmFrame};
+use fr_media::audio::{AudioAccessUnit, AudioEncoder, AudioPcmFrame, authority::HostController};
 use fr_native::{
     opus::{Encoder, process::Retirement},
     pipewire_mic::{
@@ -136,7 +136,14 @@ fn configuration(offer: AudioConfiguration) -> Vec<u8> {
     bytes
 }
 fn authority(input: &InputSession, origin: Instant) -> Authority {
-    Authority::from_input(input, channel(), &selection(), true, || host(origin)).unwrap()
+    Authority::from_controller(
+        HostController::from_input(input),
+        channel(),
+        &selection(),
+        true,
+        || host(origin),
+    )
+    .unwrap()
 }
 fn receiver(input: &InputSession, origin: Instant, server: &Server) -> Receiver {
     let mut receiver = Receiver::new(
@@ -218,6 +225,32 @@ fn selection_consent_original_owner_and_packet_bound_precede_native_setup() {
         input.monitor().deadline(host(origin)).is_ok(),
         "microphone refusal cannot revoke input"
     );
+}
+
+#[test]
+fn controller_projection_requires_separate_consent_and_mic_stop_is_independent() {
+    let origin = Instant::now();
+    let original = input(host(origin));
+    let controller = HostController::from_input(&original);
+    assert_eq!(
+        Authority::from_controller(controller.clone(), channel(), &selection(), false, || {
+            panic!("controller proof alone cannot admit native audio")
+        })
+        .unwrap_err(),
+        Error::Permission
+    );
+    let owner =
+        Authority::from_controller(controller.clone(), channel(), &selection(), true, || {
+            host(origin)
+        })
+        .unwrap();
+    owner.control().stop();
+    assert!(owner.control().is_stopped());
+    assert!(controller.deadline(host(origin)).is_ok());
+    drop(owner);
+    assert!(original.monitor().deadline(host(origin)).is_ok());
+    drop(original);
+    assert!(controller.deadline(host(origin)).is_err());
 }
 
 #[test]

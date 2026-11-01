@@ -24,6 +24,7 @@
 //!   `testing` only): tagged placeholder bytes, never Opus and never evidence of
 //!   codec support. Production callers supply a real codec (fr-native's libopus).
 
+pub mod authority;
 pub mod clock;
 
 use core::fmt;

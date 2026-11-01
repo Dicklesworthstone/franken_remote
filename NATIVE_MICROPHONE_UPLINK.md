@@ -52,9 +52,18 @@ as completed reaping.
 
 ## Original controller and independent microphone consent
 
-`session::Authority::from_input` takes a reference to the actual original
-`InputSession`, a completed channel's metadata, the negotiated selection and
-separate local microphone approval. It refuses observation-only sessions,
+`fr_media::audio::authority::HostController` captures a sealed, pure Rust
+projection of the actual original `InputSession` before it moves to its input
+worker. `frd::input_agent::Agent` retains it alongside the clipboard/file
+projections; `QuicInput::microphone_controller` checks the original connection
+and admission before handing it to the session coordinator. Its scope numbers
+are metadata, and neither those numbers nor an arbitrary monitor can construct
+a controller proof. Clones remain bound to the same original input owner.
+
+`session::Authority::from_controller` consumes that projection, a completed
+channel's metadata, the negotiated selection and separate local microphone
+approval. The convenience `from_input` constructor delegates through the same
+projection. Both refuse observation-only sessions,
 missing microphone selection, missing consent, mismatched session binding and
 invalid packet limits before native setup. A numeric lease or copied monitor
 cannot construct this handoff. The transport coordinator still proves the
@@ -92,10 +101,10 @@ drop the receiver to destroy the endpoint, and the decoder retirement receipt
 reports actual reaping. The PipeWire owner still needs outer process supervision
 before integration into the daemon; this API does not claim to stop a stalled
 foreign call by itself. This receiver is an in-process native composition,
-not the future child IPC contract. The daemon must keep its original controller
-projection in a pure Rust module and pass bounded expiry/revocation envelopes to
-a native child; it must not load `fr-native` or reconstruct an `InputSession` in
-that child to use this API.
+not the future child IPC contract. The daemon now has the pure original-controller
+handoff; a child supervisor must retain it and pass bounded expiry/revocation
+envelopes to a native child. It must not load `fr-native` or reconstruct an
+`InputSession` in that child to use this API.
 
 ## Native graph demand and independent clocks
 
@@ -230,6 +239,15 @@ interactive talk controls, every hardware/graph configuration, or measured
 capture-to-application latency.
 
 ### Original-controller receiver coverage
+
+The pure daemon/native handoff passed four ownership tests and four native
+receiver policy tests, with strict `fr-media` library and targeted-test Clippy.
+The tests move the real input owner to a worker thread, check equal-ID replacement
+isolation, genuine original-owner renewal, inclusive terminal expiry, separate
+microphone consent and microphone-only stop. The new daemon input-agent handoff
+regression is authored but not executed locally because its Asupersync build
+exceeds the available build-memory budget. These checks do not change the native
+graph qualification limits below.
 
 The new original-controller owner passed its three policy/clock tests and
 strict library and exact-source harness Clippy. Those tests cover independent

@@ -153,6 +153,9 @@ impl SeatReservation {
         let clipboard_monitor = fr_core::clipboard::authority::Monitor::from_input(&session);
         #[cfg(target_os = "linux")]
         let file_authority = fr_files::session::Authority::from_input(&session);
+        #[cfg(target_os = "linux")]
+        let microphone_controller =
+            fr_media::audio::authority::HostController::from_input(&session);
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox::default()),
             control: control.clone(),
@@ -221,6 +224,8 @@ impl SeatReservation {
             clipboard_monitor,
             #[cfg(target_os = "linux")]
             file_authority,
+            #[cfg(target_os = "linux")]
+            microphone_controller,
         };
         let driver = Driver {
             watchdog,
@@ -433,8 +438,20 @@ pub struct Agent {
     clipboard_monitor: fr_core::clipboard::authority::Monitor,
     #[cfg(target_os = "linux")]
     file_authority: fr_files::session::Authority,
+    #[cfg(target_os = "linux")]
+    microphone_controller: fr_media::audio::authority::HostController,
 }
 impl Agent {
+    /// Original controller proof captured before moving `InputSession` to its
+    /// worker. This pure handoff grants neither microphone consent nor a new
+    /// lease. The microphone owner must check a fresh original-clock deadline
+    /// before every admission and maintain its own independent consent fence.
+    #[cfg(target_os = "linux")]
+    pub fn microphone_controller(&self) -> Option<fr_media::audio::authority::HostController> {
+        self.shared.check_admission();
+        (!self.shared.control.is_stopped()).then(|| self.microphone_controller.clone())
+    }
+
     /// The same read-only file authority retained BEFORE moving `InputSession` to
     /// its native worker. This creates no input owner, lease or file permission.
     #[cfg(target_os = "linux")]

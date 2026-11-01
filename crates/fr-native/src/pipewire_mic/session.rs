@@ -21,10 +21,11 @@ use super::{
 use crate::opus::process::Retirement;
 use fr_core::{
     audio::{AudioDirection, AudioStreamConfig, MAX_OPUS_PAYLOAD_BYTES},
-    ids::{InputLeaseId, InputTicketId},
-    input_submission::{InputMonitor, InputSession, Refusal},
+    ids::InputLeaseId,
+    input_submission::{InputSession, Refusal},
     time::HostInstant,
 };
+use fr_media::audio::authority::HostController;
 use fr_wire::{
     WireError,
     audio::{self, AudioConfiguration},
@@ -102,8 +103,7 @@ struct Native {
 }
 struct Shared {
     channel: Channel,
-    lease: InputLeaseId,
-    monitor: InputMonitor,
+    controller: HostController,
     clock: Clock,
     stopped: AtomicBool,
     native: Mutex<Native>,
@@ -132,7 +132,7 @@ impl Shared {
             return Err(Error::Stopped);
         }
         let checked = self.clock.now().and_then(|now| {
-            self.monitor.deadline(now).map_err(Error::Authority)?;
+            self.controller.deadline(now).map_err(Error::Authority)?;
             if self.stopped.load(Ordering::Acquire) {
                 return Err(Error::Stopped);
             }
@@ -220,13 +220,32 @@ impl Authority {
         approved: bool,
         now: impl FnOnce() -> HostInstant,
     ) -> Result<Self, Error> {
+        Self::from_controller(
+            HostController::from_input(input),
+            channel,
+            selection,
+            approved,
+            now,
+        )
+    }
+    /// Consume a pure original-controller projection retained before the input
+    /// owner moved to its worker. The daemon can retain/check that projection
+    /// without linking this native crate. It is neither microphone consent nor
+    /// proof of the transport route; those checks remain independent here.
+    pub fn from_controller(
+        controller: HostController,
+        channel: Channel,
+        selection: &Selection,
+        approved: bool,
+        now: impl FnOnce() -> HostInstant,
+    ) -> Result<Self, Error> {
         if !approved {
             return Err(Error::Permission);
         }
         if !fr_wire::audio_up::uplink_selected(selection) {
             return Err(Error::NotSelected);
         }
-        let scope = input.ticket_credentials(InputTicketId::from_raw(0));
+        let scope = controller.scope();
         if channel.parent.remote_session != scope.session
             || scope.lease.as_raw() == 0
             || channel.parent.id == 0
@@ -243,8 +262,7 @@ impl Authority {
         let owner = Self {
             shared: Arc::new(Shared {
                 channel,
-                lease: scope.lease,
-                monitor: input.monitor(),
+                controller,
                 clock: Clock::bind(now)?,
                 stopped: AtomicBool::new(false),
                 native: Mutex::new(Native::default()),
@@ -260,7 +278,7 @@ impl Authority {
         self.shared.channel
     }
     pub fn lease(&self) -> InputLeaseId {
-        self.shared.lease
+        self.shared.controller.scope().lease
     }
 }
 impl Drop for Authority {

@@ -214,6 +214,35 @@ fn route() -> Route {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+fn microphone_handoff_tracks_the_moved_input_owner_and_local_stop() {
+    let runtime = runtime();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let original = session(&cx, 3_000_000);
+    let trace_state = trace();
+    let seat = Seat::default();
+    let (agent, driver) = seat
+        .start(
+            cx.clone(),
+            original,
+            route(),
+            move || Ok(Sink::new(trace_state)),
+            clean,
+        )
+        .unwrap();
+    let runner = Runner::start(runtime, driver);
+    let controller = agent.microphone_controller().unwrap();
+    assert_eq!(controller.scope().session, credentials().session);
+    assert_eq!(controller.scope().lease, credentials().lease);
+    assert!(controller.deadline(host_now(&cx).unwrap()).is_ok());
+    agent.control().stop(StopReason::LocalRevoke);
+    assert!(agent.microphone_controller().is_none());
+    assert!(controller.deadline(host_now(&cx).unwrap()).is_err());
+    assert!(runner.finish().handoff_safe());
+    assert!(!seat.is_occupied());
+}
+
+#[test]
 fn idle_expiry_releases_without_another_record_then_allows_new_controller() {
     let rt = runtime();
     let cx = rt.request_cx_with_budget(Budget::INFINITE);

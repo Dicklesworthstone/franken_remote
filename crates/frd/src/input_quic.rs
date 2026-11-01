@@ -187,6 +187,22 @@ pub struct QuicInput {
     last_ticket: Option<fr_core::ids::InputTicketId>,
 }
 impl QuicInput {
+    /// Original input-owner proof for an independently approved microphone on
+    /// this exact connection. The projection remains pure Rust; obtaining it
+    /// does not open a device or enable/attach an audio channel.
+    pub fn microphone_controller(
+        &self,
+        q: &QuicRecords,
+    ) -> Result<fr_media::audio::authority::HostController, Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::WrongConnection);
+        }
+        if q.is_closed() {
+            return Err(Error::Closed);
+        }
+        self.agent.microphone_controller().ok_or(Error::Closed)
+    }
+
     pub(crate) fn file_authority(
         &self,
         q: &QuicRecords,
