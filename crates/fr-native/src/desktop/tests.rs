@@ -3,6 +3,9 @@ use super::*;
 use fr_client::input::{ClientInstant, InputClient, Policy, viewport::SurfaceRect};
 use fr_core::{ids::*, input::*, input_submission::Capabilities, limits::ProtocolLimits};
 
+#[path = "tests/display_switch.rs"]
+mod display_switch;
+
 #[test]
 fn file_panel_directions_retain_distinct_status_and_both_cleanup_owners() {
     use crate::file_progress::{Panel, Status as PanelStatus, StopReason};

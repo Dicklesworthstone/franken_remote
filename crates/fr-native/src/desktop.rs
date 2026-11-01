@@ -971,6 +971,7 @@ impl Desktop {
         let fitted = self.configuration.fit_window.is_some() || self.configuration.clipboard_space;
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let display_switching = self.display_switching;
+        let mut switch_mode = viewer_window::DisplaySwitchMode::Viewing;
         let window = self.window().ok_or(Error::NotViewing)?;
         window.enable_orderly_close().map_err(Error::Window)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
@@ -988,19 +989,21 @@ impl Desktop {
             policy,
             move |state, presentation| {
                 use frd::session_startup::InteractiveViewerState;
-                if matches!(
-                    window.status(),
-                    viewer_window::Status::CloseRequested
-                        | viewer_window::Status::DisplaySwitchRequested
-                ) {
+                if window.status() == viewer_window::Status::CloseRequested {
                     return Ok(std::ops::ControlFlow::Break(
                         fr_wire::closure::Reason::Requested,
                     ));
                 }
                 if display_switching {
-                    window
-                        .set_display_switch_mode(display_switch_mode(&state))
-                        .map_err(|error| report.set(Some(Error::Window(error))))?;
+                    let next = display_switch_mode(&state);
+                    if refresh_display_switch(&window, switch_mode, next)
+                        .map_err(|error| report.set(Some(Error::Window(error))))?
+                    {
+                        return Ok(std::ops::ControlFlow::Break(
+                            fr_wire::closure::Reason::Requested,
+                        ));
+                    }
+                    switch_mode = next;
                 }
                 let attached = match state {
                     InteractiveViewerState::Controlled(viewer) => {
@@ -1201,6 +1204,30 @@ fn display_switch_mode(
         InteractiveViewerState::Viewing(_) => DisplaySwitchMode::Viewing,
         InteractiveViewerState::Requesting(_) => DisplaySwitchMode::Disabled,
         InteractiveViewerState::Controlled(_) => DisplaySwitchMode::Controlled,
+    }
+}
+
+/// A native choice may arrive after the UI turn's initial status read. Only an
+/// unchanged mode may consume that original display intent; a mode transition
+/// must not reinterpret a gesture that was accepted under the previous mode.
+fn refresh_display_switch(
+    window: &WindowControl,
+    previous: viewer_window::DisplaySwitchMode,
+    next: viewer_window::DisplaySwitchMode,
+) -> Result<bool, viewer_window::Error> {
+    use viewer_window::{DisplaySwitchMode, Error, Status};
+    match window.set_display_switch_mode(next) {
+        Ok(()) => Ok(false),
+        Err(Error::NotReady) => match window.status() {
+            Status::CloseRequested => Ok(true),
+            Status::DisplaySwitchRequested
+                if previous == next && next != DisplaySwitchMode::Disabled =>
+            {
+                Ok(true)
+            }
+            _ => Err(Error::NotReady),
+        },
+        Err(error) => Err(error),
     }
 }
 
