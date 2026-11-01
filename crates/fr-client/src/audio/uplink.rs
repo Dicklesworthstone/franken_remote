@@ -14,7 +14,7 @@ use crate::{
     clipboard::{ProjectedClock, projection::Owner},
     input::{ClientInstant, InputClient},
 };
-pub use capture::{CaptureMonitor, CapturePermit, CaptureReceipt};
+pub use capture::{CaptureMonitor, CapturePermit, CaptureReceipt, ConfigurationPermit};
 use fr_core::{
     audio::{
         AudioChannels, AudioDirection, AudioGeneration, AudioStopReason, AudioStreamConfig,
@@ -244,6 +244,19 @@ impl Sender {
     }
     pub const fn configuration_deadline(&self) -> Option<ClientInstant> {
         self.configuration_until
+    }
+    /// Keep this exact proof with the configuration through every reliable send
+    /// queue. It remains weak and fixed even after the host ACK permits capture.
+    /// No capture permit exists before that ACK; this only fences control bytes.
+    pub fn configuration_permit(&self) -> Option<ConfigurationPermit> {
+        if !matches!(self.status, Status::Configuring | Status::AwaitingHost) {
+            return None;
+        }
+        Some(ConfigurationPermit {
+            epoch: Arc::downgrade(self.epoch.as_ref()?),
+            clock: self.clock.clone(),
+            until: self.configuration_until?,
+        })
     }
 
     /// Unknown permission is permission loss. A later grant cannot restore a

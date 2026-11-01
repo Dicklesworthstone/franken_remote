@@ -193,6 +193,83 @@ fn start(sender: &mut Sender, elapsed: u64) -> CapturePermit {
     sender.configuration_sent(now(elapsed)).unwrap();
     sender.configured(&ack(cfg), now(elapsed)).unwrap()
 }
+
+#[test]
+fn configuration_queue_permit_observes_original_owner_without_capture_ack() {
+    let (input, mut sender) = attached();
+    assert!(sender.configuration_permit().is_none());
+    sender.set_permission(MicPermission::Granted);
+    sender
+        .begin_talk(MicTalkMode::OpenMic { active: true }, now(0))
+        .unwrap();
+    let retained = sender.configuration_permit().unwrap();
+    assert_eq!(
+        retained.local_deadline(),
+        sender.configuration_deadline().unwrap()
+    );
+    sender.configuration_sent(now(1)).unwrap();
+    assert!(retained.valid(now(2)));
+    drop(input);
+    assert!(
+        !retained.valid(now(3)),
+        "queued configuration cannot outlive the original controller"
+    );
+}
+
+#[test]
+fn mute_and_permission_withdrawal_fence_retained_configuration_without_revival() {
+    for permission_loss in [false, true] {
+        let (_input, mut sender) = attached();
+        sender.set_permission(MicPermission::Granted);
+        let first = sender
+            .begin_talk(MicTalkMode::OpenMic { active: true }, now(0))
+            .unwrap();
+        let retained = sender.configuration_permit().unwrap();
+        sender.configuration_sent(now(1)).unwrap();
+        if permission_loss {
+            sender.set_permission(MicPermission::NotRequested);
+        } else {
+            sender.mute();
+        }
+        assert!(!retained.valid(now(2)));
+        sender.set_permission(MicPermission::Granted);
+        let next = sender
+            .begin_talk(MicTalkMode::OpenMic { active: true }, now(3))
+            .unwrap();
+        assert!(next.generation > first.generation);
+        assert!(sender.configuration_permit().unwrap().valid(now(4)));
+        assert!(
+            !retained.valid(now(4)),
+            "fresh talk never revives old configuration custody"
+        );
+    }
+}
+
+#[test]
+fn host_ack_does_not_extend_the_reliable_configuration_permit() {
+    let (mut input, mut sender) = attached();
+    sender.set_permission(MicPermission::Granted);
+    let offer = sender
+        .begin_talk(MicTalkMode::OpenMic { active: true }, now(0))
+        .unwrap();
+    let retained = sender.configuration_permit().unwrap();
+    let until = retained.local_deadline();
+    sender.configuration_sent(now(1)).unwrap();
+    let capture = sender.configured(&ack(offer), now(2)).unwrap();
+    assert!(
+        sender.configuration_permit().is_none(),
+        "an ACK cannot mint another config proof"
+    );
+    assert!(capture.local_deadline() > until);
+    ready(&mut input, 1_000_000);
+    ready(&mut input, 1_900_000);
+    assert!(!retained.valid(until));
+    assert!(
+        capture.valid(until),
+        "expiring old config custody cannot revoke newer capture authority"
+    );
+}
+
 fn packet(permit: &CapturePermit, sequence: u64, timestamp: u64) -> AudioAccessUnit {
     AudioAccessUnit::new(
         AudioDirection::Uplink,

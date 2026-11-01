@@ -4,6 +4,39 @@ use crate::{clipboard::ProjectedClock, input::ClientInstant};
 use fr_core::audio::AudioStreamConfig;
 use std::sync::{Arc, Weak};
 
+/// A reliable configuration record's immutable original authority. This is
+/// deliberately distinct from `CapturePermit`: it cannot open a microphone,
+/// submit PCM, or stand in for the exact positive host acknowledgement.
+/// Retain it until the original native reliable send/retransmit queue drains.
+#[derive(Clone)]
+pub struct ConfigurationPermit {
+    pub(super) epoch: Weak<Epoch>,
+    pub(super) clock: ProjectedClock,
+    pub(super) until: ClientInstant,
+}
+impl std::fmt::Debug for ConfigurationPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MicrophoneConfigurationPermit")
+            .field("until", &self.until)
+            .finish_non_exhaustive()
+    }
+}
+impl ConfigurationPermit {
+    pub const fn local_deadline(&self) -> ClientInstant {
+        self.until
+    }
+    pub fn check(&self, now: ClientInstant) -> Result<(), Error> {
+        let effective = sample(&self.epoch, &self.clock, now)?;
+        if effective >= self.until {
+            return Err(Error::Expired);
+        }
+        Ok(())
+    }
+    pub fn valid(&self, now: ClientInstant) -> bool {
+        self.check(now).is_ok()
+    }
+}
+
 /// An exact accepted host acknowledgement opens this original talk epoch.
 /// Explicit same-owner refreshes mint new immutable proofs within that epoch.
 /// Workers may share a proof through `Arc`; it cannot keep its `Sender` or the
