@@ -81,6 +81,29 @@ async fn isolate_blocked_route(through_readiness: bool) {
         }
     }
     assert_eq!(client.usage().remainder_bytes, audio.len());
+    let mut original_receipt = None;
+    assert_eq!(
+        client.receive_ready_with_receipts(
+            &cx,
+            || true,
+            |_| true,
+            |r, bytes, receipt| {
+                assert_eq!(r, Route::Datagram(incoming[0]));
+                assert_eq!(bytes, audio);
+                let receipt = receipt.expect("original datagram custody");
+                assert!(receipt.received_at_micros() <= clock(&cx));
+                assert_eq!(
+                    receipt.expires_at_micros() - receipt.received_at_micros(),
+                    100_000,
+                    "audio's original ceiling includes transport backpressure"
+                );
+                original_receipt = Some(receipt);
+                Ok(Disposition::Blocked)
+            }
+        ),
+        Ok(0)
+    );
+    assert!(original_receipt.is_some());
     server
         .send(
             &cx,
@@ -129,12 +152,14 @@ async fn isolate_blocked_route(through_readiness: bool) {
     // Becoming ready consumes exactly the original held audio, not a retry,
     // replacement, or new authority grant.
     assert_eq!(
-        client.receive(
+        client.receive_ready_with_receipts(
             &cx,
             || true,
-            |r, bytes| {
+            |_| true,
+            |r, bytes, receipt| {
                 assert_eq!(r, Route::Datagram(incoming[0]));
                 assert_eq!(bytes, audio);
+                assert_eq!(receipt, original_receipt, "no new lifetime at delivery");
                 Ok(Disposition::Consumed)
             }
         ),

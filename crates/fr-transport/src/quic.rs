@@ -21,6 +21,7 @@ use std::{
 
 mod admission;
 mod datagrams;
+pub use datagrams::DatagramReceipt;
 mod send_epoch;
 mod send_window;
 pub use admission::SendAdmission;
@@ -1215,9 +1216,29 @@ impl QuicRecords {
     pub fn receive_ready(
         &mut self,
         cx: &Cx,
+        authorize: impl FnMut() -> bool,
+        ready: impl FnMut(Route) -> bool,
+        mut handler: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    ) -> Result<usize, Error> {
+        self.receive_ready_with_receipts(cx, authorize, ready, |route, bytes, _| {
+            handler(route, bytes)
+        })
+    }
+    /// Receive with each datagram's original application receipt and inclusive
+    /// expiry, including time already spent blocked in this connection. A stream
+    /// record carries `None`: its partial/reliable-record deadline is a different
+    /// contract and must not be presented as a datagram receipt.
+    ///
+    /// Preserve the receipt with the same bytes through every worker handoff.
+    /// Consumers must keep the earlier negotiated expiry, rather than restarting
+    /// an audio jitter/capture budget when this callback or a worker runs. The
+    /// existing readiness, fairness, custody and terminal-error rules apply.
+    pub fn receive_ready_with_receipts(
+        &mut self,
+        cx: &Cx,
         mut authorize: impl FnMut() -> bool,
         mut ready: impl FnMut(Route) -> bool,
-        mut handler: impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        mut handler: impl FnMut(Route, &[u8], Option<DatagramReceipt>) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         let result = self.receive_inner(cx, &mut authorize, &mut ready, &mut handler);
         if result.is_err() {
@@ -1229,7 +1250,7 @@ impl QuicRecords {
         &mut self,
         current: u64,
         remaining: &mut usize,
-        handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        handler: &mut impl FnMut(Route, &[u8], DatagramReceipt) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         if self.pending_datagrams.receive_one(current, handler)? != 0 {
             return Ok(1);
@@ -1297,7 +1318,7 @@ impl QuicRecords {
         cx: &Cx,
         authorize: &mut impl FnMut() -> bool,
         ready: &mut impl FnMut(Route) -> bool,
-        handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        handler: &mut impl FnMut(Route, &[u8], Option<DatagramReceipt>) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         let mut count = 0;
         let mut datagram_budget = TURN_RECORDS;
@@ -1313,16 +1334,21 @@ impl QuicRecords {
             self.cursor = (self.cursor + 1) % lanes;
             let before = count;
             if which == self.inbound.len() {
-                count +=
-                    self.receive_datagram(current, &mut datagram_budget, &mut |route, bytes| {
+                count += self.receive_datagram(
+                    current,
+                    &mut datagram_budget,
+                    &mut |route, bytes, receipt| {
                         if ready(route) {
-                            handler(route, bytes)
+                            handler(route, bytes, Some(receipt))
                         } else {
                             Ok(Disposition::Blocked)
                         }
-                    })?;
+                    },
+                )?;
             } else {
-                count += self.receive_stream(which, current, cx, ready, handler)?;
+                count += self.receive_stream(which, current, cx, ready, &mut |route, bytes| {
+                    handler(route, bytes, None)
+                })?;
             }
             idle = if count == before { idle + 1 } else { 0 };
         }

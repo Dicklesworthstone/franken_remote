@@ -13,7 +13,7 @@ fn payload(value: u8) -> Bytes {
 }
 fn pop(inbox: &mut PendingDatagrams, now: u64, expected: DatagramRoute, value: u8) {
     assert_eq!(
-        inbox.receive_one(now, &mut |r, bytes| {
+        inbox.receive_one(now, &mut |r, bytes, _| {
             assert_eq!(r, Route::Datagram(expected));
             assert_eq!(bytes, &[value; 1150]);
             Ok(Disposition::Consumed)
@@ -58,7 +58,7 @@ fn a_stalled_audio_flood_cannot_park_video_or_pointer_arrivals() {
     for r in [video, pointer] {
         assert!(inbox.hold(r, payload(7), 1, 200_000).unwrap());
         assert_eq!(
-            inbox.receive_one(1, &mut |got, bytes| {
+            inbox.receive_one(1, &mut |got, bytes, _| {
                 if got == Route::Datagram(audio) {
                     assert_eq!(bytes, &[1; 1150]);
                     Ok(Disposition::Blocked)
@@ -92,7 +92,7 @@ fn audio_overflow_never_changes_video_parking_or_original_bytes() {
     );
     for value in [2, 3] {
         assert_eq!(
-            inbox.receive_one(1, &mut |r, bytes| {
+            inbox.receive_one(1, &mut |r, bytes, _| {
                 if r == Route::Datagram(audio) {
                     Ok(Disposition::Blocked)
                 } else {
@@ -124,14 +124,14 @@ fn promotion_preserves_first_receipt_deadlines_and_never_plays_expired_audio() {
     assert_eq!(inbox.dropped_audio, 2);
     assert_eq!(inbox.audio_len, 0);
     assert_eq!(
-        inbox.receive_one(149_999, &mut |_, bytes| {
+        inbox.receive_one(149_999, &mut |_, bytes, _| {
             assert_eq!(bytes, &[2; 1150]);
             Ok(Disposition::Blocked)
         }),
         Ok(0)
     );
     assert_eq!(
-        inbox.receive_one(150_000, &mut |_, _| panic!("expired audio")),
+        inbox.receive_one(150_000, &mut |_, _, _| panic!("expired audio")),
         Ok(0)
     );
     assert_eq!(inbox.dropped_audio, 3);
@@ -185,7 +185,7 @@ fn retirement_and_close_discard_audio_without_reusing_or_erasing_drop_evidence()
     }
     let before = inbox.bytes();
     assert_eq!(
-        inbox.receive_one(1, &mut |_, _| Err(())),
+        inbox.receive_one(1, &mut |_, _, _| Err(())),
         Err(Error::Handler)
     );
     assert_eq!(inbox.bytes(), before);
@@ -194,7 +194,7 @@ fn retirement_and_close_discard_audio_without_reusing_or_erasing_drop_evidence()
     assert_eq!(inbox.audio_len, 0);
     assert_eq!(inbox.dropped_audio, 1);
     assert_eq!(
-        inbox.receive_one(1, &mut |_, _| panic!("cleared audio")),
+        inbox.receive_one(1, &mut |_, _, _| panic!("cleared audio")),
         Ok(0)
     );
     // Saturation is content-free accounting, never a wrap into a smaller count.

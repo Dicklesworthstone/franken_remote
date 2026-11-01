@@ -183,6 +183,21 @@ it is not a claim about physical capture latency or network transit time.
 Future receipt times are refused. Expired arrivals are ignored without
 refreshing startup or retained work.
 
+`QuicRecords::receive_ready_with_receipts` exposes each datagram's original
+application receipt and inclusive expiry as immutable `DatagramReceipt`
+metadata. Blocked callbacks, audio overflow promotion and worker handoff do not
+restart either timestamp. The values use the original connection's Asupersync
+timer-driver microseconds; they are not capture times or native socket arrival
+evidence. A clock conversion must preserve both bounds conservatively, including
+any transport allowance shorter than 100 ms. Reliable stream records carry no
+datagram receipt. Existing receive callbacks remain available unchanged.
+
+The focused transport suite passed all 31 tests, including five new receipt
+custody regressions, using the exact production custody source and pinned
+Asupersync byte-buffer source. Strict scoped Clippy passed. The actual UDP/TLS
+route-isolation fixtures now also assert immutable receipt delivery; those
+fixtures have not been rerun in this resource-constrained environment.
+
 Binding, direction, generation, packet length and negotiated decoded duration
 are validated before copying payload into the jitter queue. The shared jitter
 buffer has 16 fixed slots and a 100 ms source-span ceiling. Original receipt

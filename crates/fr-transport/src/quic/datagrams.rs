@@ -22,10 +22,44 @@ const AUDIO_OVERFLOW: usize = 4;
 const AUDIO_PACKET: u16 = 0x0062;
 const AUDIO_LIFETIME_US: u64 = fr_core::audio::MAX_JITTER_CEILING_MS as u64 * 1000;
 
+/// Original local application custody of one admitted datagram, in this
+/// connection's Asupersync timer-driver microseconds. Neither value is a peer
+/// timestamp or evidence of time spent in earlier native/network queues.
+///
+/// Keep this value with the exact record through worker inboxes and decoding.
+/// A callback after backpressure does not start a new receipt lifetime. Audio
+/// expiry already includes the smaller of the configured custody allowance and
+/// its 100ms ceiling. Clock-domain conversion must preserve that earlier cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DatagramReceipt {
+    received_at_micros: u64,
+    expires_at_micros: u64,
+}
+impl DatagramReceipt {
+    pub const fn received_at_micros(self) -> u64 {
+        self.received_at_micros
+    }
+    /// Inclusive expiry: the record is unusable at this instant, not after it.
+    pub const fn expires_at_micros(self) -> u64 {
+        self.expires_at_micros
+    }
+    /// Remaining custody at a fresh sample of the SAME original clock. This
+    /// checks a retained deadline; it never grants another relative lifetime.
+    pub fn remaining_micros(self, now: u64) -> Result<u64, Error> {
+        if now < self.received_at_micros {
+            return Err(Error::Clock);
+        }
+        if now >= self.expires_at_micros {
+            return Err(Error::Expired);
+        }
+        Ok(self.expires_at_micros - now)
+    }
+}
+
 struct Pending {
     route: DatagramRoute,
     bytes: Bytes,
-    until: u64,
+    receipt: DatagramReceipt,
 }
 
 pub(super) struct PendingDatagrams {
@@ -68,7 +102,10 @@ impl PendingDatagrams {
         } else {
             lifetime
         };
-        let until = current.checked_add(lifetime).ok_or(Error::Clock)?;
+        let receipt = DatagramReceipt {
+            received_at_micros: current,
+            expires_at_micros: current.checked_add(lifetime).ok_or(Error::Clock)?,
+        };
         self.expire(current);
         if self.next.is_some() {
             return Err(Error::Backpressure);
@@ -81,7 +118,7 @@ impl PendingDatagrams {
                     self.audio[self.audio_len] = Some(Pending {
                         route,
                         bytes,
-                        until,
+                        receipt,
                     });
                     self.audio_len += 1;
                 }
@@ -90,7 +127,7 @@ impl PendingDatagrams {
             self.next = Some(Pending {
                 route,
                 bytes,
-                until,
+                receipt,
             });
             return Ok(false);
         }
@@ -105,7 +142,7 @@ impl PendingDatagrams {
         *slot = Some(Pending {
             route,
             bytes,
-            until,
+            receipt,
         });
         Ok(true)
     }
@@ -116,7 +153,7 @@ impl PendingDatagrams {
     pub(super) fn receive_one(
         &mut self,
         current: u64,
-        handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        handler: &mut impl FnMut(Route, &[u8], DatagramReceipt) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         self.expire(current);
         for _ in 0..MAX_DATAGRAMS {
@@ -125,8 +162,12 @@ impl PendingDatagrams {
             let Some(pending) = self.slots[index].as_ref() else {
                 continue;
             };
-            if handler(Route::Datagram(pending.route), &pending.bytes)
-                .map_err(|()| Error::Handler)?
+            if handler(
+                Route::Datagram(pending.route),
+                &pending.bytes,
+                pending.receipt,
+            )
+            .map_err(|()| Error::Handler)?
                 == Disposition::Consumed
             {
                 let route = pending.route;
@@ -152,7 +193,10 @@ impl PendingDatagrams {
 
     pub(super) fn expire(&mut self, current: u64) {
         for slot in self.slots.iter_mut().chain(std::iter::once(&mut self.next)) {
-            if slot.as_ref().is_some_and(|p| current >= p.until) {
+            if slot
+                .as_ref()
+                .is_some_and(|p| current >= p.receipt.expires_at_micros)
+            {
                 if slot.as_ref().is_some_and(|p| p.route.kind == AUDIO_PACKET) {
                     self.dropped_audio = self.dropped_audio.saturating_add(1);
                 }
@@ -163,7 +207,7 @@ impl PendingDatagrams {
         while index < self.audio_len {
             if self.audio[index]
                 .as_ref()
-                .is_some_and(|p| current >= p.until)
+                .is_some_and(|p| current >= p.receipt.expires_at_micros)
             {
                 self.remove_audio(index);
                 self.dropped_audio = self.dropped_audio.saturating_add(1);
@@ -260,6 +304,10 @@ impl super::QuicRecords {
 mod audio_tests;
 
 #[cfg(test)]
+#[path = "datagrams/receipt_tests.rs"]
+mod receipt_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -293,7 +341,7 @@ mod tests {
         let mut delivered = Vec::new();
         for _ in 0..2 {
             assert_eq!(
-                inbox.receive_one(11, &mut |r, _| {
+                inbox.receive_one(11, &mut |r, _, _| {
                     if r == Route::Datagram(audio) {
                         Ok(Disposition::Blocked)
                     } else {
@@ -310,7 +358,7 @@ mod tests {
         );
         assert_eq!(inbox.bytes(), 24);
         assert_eq!(
-            inbox.receive_one(12, &mut |r, bytes| {
+            inbox.receive_one(12, &mut |r, bytes, _| {
                 assert_eq!(r, Route::Datagram(audio));
                 assert_eq!(bytes, &[7; 24]);
                 Ok(Disposition::Consumed)
@@ -330,7 +378,7 @@ mod tests {
         assert_eq!(inbox.bytes(), 24 + 1150);
         // The held record keeps its original deadline; parking renews nothing.
         assert_eq!(
-            inbox.receive_one(109, &mut |_, bytes| {
+            inbox.receive_one(109, &mut |_, bytes, _| {
                 assert_eq!(bytes, &[1; 24]);
                 Ok(Disposition::Blocked)
             }),
@@ -339,7 +387,7 @@ mod tests {
         // It expires at 110; the parked arrival then takes the route's slot.
         assert!(!inbox.waiting(110));
         assert_eq!(
-            inbox.receive_one(110, &mut |_, bytes| {
+            inbox.receive_one(110, &mut |_, bytes, _| {
                 assert_eq!(bytes, &[2; 1150]);
                 Ok(Disposition::Consumed)
             }),
@@ -371,7 +419,7 @@ mod tests {
         assert_eq!(inbox.bytes(), (MAX_DATAGRAMS + 1) * 1150);
         let mut calls = 0;
         assert_eq!(
-            inbox.receive_one(1, &mut |_, _| {
+            inbox.receive_one(1, &mut |_, _, _| {
                 calls += 1;
                 Ok(Disposition::Blocked)
             }),
@@ -390,7 +438,7 @@ mod tests {
         for round in 0..8 {
             for expected in routes {
                 assert_eq!(
-                    inbox.receive_one(round, &mut |r, _| {
+                    inbox.receive_one(round, &mut |r, _, _| {
                         assert_eq!(r, Route::Datagram(expected));
                         Ok(Disposition::Consumed)
                     }),
@@ -409,7 +457,7 @@ mod tests {
         inbox.retire(1);
         assert_eq!(inbox.bytes(), 48);
         assert_eq!(
-            inbox.receive_one(1, &mut |r, _| {
+            inbox.receive_one(1, &mut |r, _, _| {
                 assert_eq!(r, Route::Datagram(route(2)));
                 Ok(Disposition::Blocked)
             }),
@@ -418,7 +466,7 @@ mod tests {
         inbox.clear();
         assert_eq!(inbox.bytes(), 0);
         assert_eq!(
-            inbox.receive_one(2, &mut |_, _| panic!("closed custody")),
+            inbox.receive_one(2, &mut |_, _, _| panic!("closed custody")),
             Ok(0)
         );
     }
@@ -449,7 +497,7 @@ mod tests {
         let mut inbox = PendingDatagrams::new();
         assert!(inbox.hold(route(1), payload(1, 24), 0, 100).unwrap());
         assert_eq!(
-            inbox.receive_one(1, &mut |_, _| Err(())),
+            inbox.receive_one(1, &mut |_, _, _| Err(())),
             Err(Error::Handler)
         );
         // receive_ready closes the owner on this result; do not label the
