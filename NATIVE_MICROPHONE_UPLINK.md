@@ -50,6 +50,27 @@ replacement owner. `decoder_retirement().is_complete()` separately reports
 actual child reaping; requesting stop or dropping the owner is not described
 as completed reaping.
 
+The same state machine also accepts `Uplink<SocketDecoder>::from_socket` for
+an Opus child owned by the containing supervisor. `SocketDecoder` reuses the
+existing worker framing, retains one bounded request/reply, and performs at most
+four nonblocking socket operations per poll. Configuration and decode deadlines
+are fixed before the first write; partial messages cannot restart them.
+
+Its `SocketFence` can only shut the exact original IPC channel. It has no process
+handle or reaping method. A containing supervisor must retain the actual codec
+`Child`, observe its exit, and own the device child separately. This avoids
+making device teardown depend on an unobserved codec grandchild. The existing
+`Uplink<ProcessDecoder>` constructor and actual retirement receipt remain
+available for the original in-process native owner.
+
+Four external-codec tests passed, including the actual sandboxed worker: six of
+six independently checked tone frames matched, PLC preserved its sample timeline,
+a frozen child could not block polling, and channel timeout did not claim
+reaping before the parent killed/waited for the child. Separate tests covered
+partial/malformed replies, fixed reply expiry and equal-ID replacement isolation.
+Strict native library and focused test-harness Clippy passed. These results
+qualify the external codec boundary, not a complete supervised PipeWire session.
+
 ## Original controller and independent microphone consent
 
 `fr_media::audio::authority::HostController` captures a sealed, pure Rust

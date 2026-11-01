@@ -5,6 +5,7 @@
 //! No automatic worker restart, native fallback or unbounded reaper queue.
 pub mod child;
 mod protocol;
+pub mod socket;
 mod supervisor;
 use super::CodecLimits;
 use fr_client::audio::playout::decoder::PolledDecoder;
@@ -152,6 +153,10 @@ impl ProcessDecoder {
             },
             receipt,
         ))
+    }
+    /// Exact original child custody; completion still requires an OS wait.
+    pub fn retirement(&self) -> Retirement {
+        Retirement(self.shared.clone())
     }
     fn fail(&mut self, error: AudioMediaError) -> AudioMediaError {
         self.shared.stop();

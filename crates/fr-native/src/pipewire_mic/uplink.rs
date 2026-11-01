@@ -11,7 +11,10 @@
 use super::{Demand, Error as DeviceError, Microphone, State, Statistics};
 use crate::opus::{
     CodecLimits,
-    process::{ProcessDecoder, Retirement},
+    process::{
+        ProcessDecoder, Retirement,
+        socket::{SocketDecoder, SocketFence},
+    },
 };
 use fr_client::audio::{
     AudioJitterBuffer, JitterDrainResult,
@@ -28,6 +31,7 @@ use fr_wire::{
     audio::{self, AudioConfiguration},
 };
 use std::{
+    os::unix::net::UnixStream,
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     time::{Duration, Instant},
@@ -75,14 +79,49 @@ pub enum RenderResult {
     },
 }
 
+/// Terminal control of the exact decoder transport. This is deliberately not
+/// a reaping interface: an external socket owner cannot prove process exit.
+pub trait DecoderStop: Clone {
+    fn stop(&self);
+}
+impl DecoderStop for Retirement {
+    fn stop(&self) {
+        Retirement::stop(self);
+    }
+}
+impl DecoderStop for SocketFence {
+    fn stop(&self) {
+        SocketFence::stop(self);
+    }
+}
+
+/// The existing native playout state machine accepts an owned codec process or
+/// a bounded socket to a codec owned by its containing process supervisor.
+pub trait UplinkDecoder: PolledDecoder {
+    type Stop: DecoderStop;
+    fn stop_handle(&self) -> Self::Stop;
+}
+impl UplinkDecoder for ProcessDecoder {
+    type Stop = Retirement;
+    fn stop_handle(&self) -> Self::Stop {
+        self.retirement()
+    }
+}
+impl UplinkDecoder for SocketDecoder {
+    type Stop = SocketFence;
+    fn stop_handle(&self) -> Self::Stop {
+        self.fence()
+    }
+}
+
 /// Stops the exact source before requesting decoder retirement. This handle
 /// cannot keep the native connection alive, reopen it, or stop its replacement.
 #[derive(Clone)]
-pub struct Control {
+pub struct Control<S: DecoderStop = Retirement> {
     native: super::Control,
-    decoder: Retirement,
+    decoder: S,
 }
-impl Control {
+impl<S: DecoderStop> Control<S> {
     pub fn stop(&self) {
         self.native.stop();
         self.decoder.stop();
@@ -111,13 +150,13 @@ struct Pending {
 /// No mutable native/decoder escape. One original configuration, one bounded
 /// jitter epoch and at most one child decode. All native access is confined to
 /// the creating worker; the caller supplies ordinary readiness/timer scheduling.
-pub struct Uplink {
+pub struct Uplink<D: UplinkDecoder = ProcessDecoder> {
     binding: u32,
     offer: AudioConfiguration,
     config: AudioStreamConfig,
     device: Microphone,
-    decoder: Option<ProcessDecoder>,
-    control: Control,
+    decoder: Option<D>,
+    control: Control<D::Stop>,
     jitter: AudioJitterBuffer,
     arrivals: [Option<Arrival>; JITTER_BUFFER_CAPACITY],
     drift: Drift,
@@ -131,15 +170,55 @@ pub struct Uplink {
     acknowledged: bool,
     error: Option<Error>,
 }
-impl Uplink {
-    /// `image` is the locally installed, absolute fr-opus-worker image. The
-    /// existing process adapter owns spawn, bounded IPC and actual reaping.
-    /// Successful construction is neither decoder readiness nor audio approval.
+impl Uplink<ProcessDecoder> {
+    /// `image` is the installed absolute codec image. Its existing supervisor
+    /// owns spawning, bounded IPC and actual reaping.
     pub fn new(
         binding: u32,
         offer: AudioConfiguration,
         device: Microphone,
         image: &Path,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::build(
+            binding,
+            offer,
+            device,
+            |limits| ProcessDecoder::new(image, limits).map(|(decoder, _)| decoder),
+            permitted,
+        )
+    }
+    /// Completion is separate from requested stop or dropping this owner.
+    pub fn decoder_retirement(&self) -> Retirement {
+        self.control.decoder.clone()
+    }
+}
+impl Uplink<SocketDecoder> {
+    /// The containing supervisor owns the actual codec child and its exit
+    /// receipt. This socket must be its original private connected IPC endpoint;
+    /// the device worker never launches or claims to reap a descendant.
+    pub fn from_socket(
+        binding: u32,
+        offer: AudioConfiguration,
+        device: Microphone,
+        socket: UnixStream,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::build(
+            binding,
+            offer,
+            device,
+            |limits| SocketDecoder::new(socket, limits),
+            permitted,
+        )
+    }
+}
+impl<D: UplinkDecoder> Uplink<D> {
+    fn build(
+        binding: u32,
+        offer: AudioConfiguration,
+        device: Microphone,
+        make_decoder: impl FnOnce(CodecLimits) -> Result<D, AudioMediaError>,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         let origin = Instant::now();
@@ -170,11 +249,11 @@ impl Uplink {
         .map_err(Error::Media)?;
         let jitter = AudioJitterBuffer::with_config(config).map_err(Error::Jitter)?;
         permission(&mut permitted)?;
-        let (mut decoder, retirement) = ProcessDecoder::new(image, limits).map_err(Error::Media)?;
+        let mut decoder = make_decoder(limits).map_err(Error::Media)?;
         decoder.configure(config).map_err(Error::Media)?;
         let control = Control {
             native: device.control(),
-            decoder: retirement,
+            decoder: decoder.stop_handle(),
         };
         let mut owner = Self {
             binding,
@@ -206,12 +285,8 @@ impl Uplink {
         Ok(owner)
     }
 
-    pub fn control(&self) -> Control {
+    pub fn control(&self) -> Control<D::Stop> {
         self.control.clone()
-    }
-    /// Completion is separate from requested stop or dropping this owner.
-    pub fn decoder_retirement(&self) -> Retirement {
-        self.control.decoder.clone()
     }
     pub const fn configuration(&self) -> AudioConfiguration {
         self.offer
@@ -574,7 +649,7 @@ impl Uplink {
         Ok(())
     }
 
-    fn decoder(&mut self) -> Result<&mut ProcessDecoder, Error> {
+    fn decoder(&mut self) -> Result<&mut D, Error> {
         self.decoder.as_mut().ok_or(Error::Closed)
     }
     fn poll_decoder(&mut self) -> Result<(), Error> {
@@ -639,17 +714,17 @@ impl Uplink {
         result
     }
 }
-impl Drop for Uplink {
+impl<D: UplinkDecoder> Drop for Uplink<D> {
     fn drop(&mut self) {
         self.stop();
     }
 }
 
-struct Guard<'a> {
-    owner: &'a mut Uplink,
+struct Guard<'a, D: UplinkDecoder> {
+    owner: &'a mut Uplink<D>,
     finished: bool,
 }
-impl Drop for Guard<'_> {
+impl<D: UplinkDecoder> Drop for Guard<'_, D> {
     fn drop(&mut self) {
         if !self.finished {
             self.owner.stop();
