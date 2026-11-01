@@ -183,7 +183,7 @@ pub trait Application {
     /// attempt, an explicit Reopen or a completion-action refusal, AFTER
     /// successful cleanup, and stops with this exact error even when a retryable
     /// local failure won the service race. For a successful run's completion
-    /// decision, expected ClientRequested session/released-lease reports are the
+    /// decision, expected `ClientRequested` session/released-lease reports are the
     /// application's validated completion, not a terminal failure; it must still
     /// return adverse reports. An ordinary
     /// successful Finish remains successful even with a report. Reset the evidence
@@ -391,22 +391,17 @@ impl Client {
                             // A bounded callback may cancel the supervisor, but
                             // cannot buy a new attempt after that cancellation.
                             clock.live(&cx)?;
-                            let action = match action {
-                                Ok(action) => action,
-                                Err(_) => {
-                                    // The application can refuse reopening for a
-                                    // retained protocol/authority failure in its
-                                    // closing exchange. Preserve that exact cause
-                                    // instead of replacing it with Notification.
-                                    let terminal = application.terminal_failure();
-                                    clock.live(&cx)?;
-                                    let failure = terminal
-                                        .map(Failure::Observation)
-                                        .unwrap_or(Failure::Notification);
-                                    let _ =
-                                        notify(application, Status::Stopped { attempt, failure });
-                                    return Err(failure);
-                                }
+                            let Ok(action) = action else {
+                                // The application can refuse reopening for a
+                                // retained protocol/authority failure in its
+                                // closing exchange. Preserve that exact cause
+                                // instead of replacing it with Notification.
+                                let terminal = application.terminal_failure();
+                                clock.live(&cx)?;
+                                let failure =
+                                    terminal.map_or(Failure::Notification, Failure::Observation);
+                                let _ = notify(application, Status::Stopped { attempt, failure });
+                                return Err(failure);
                             };
                             if action == CompletionAction::Reopen {
                                 let terminal = application.terminal_failure();

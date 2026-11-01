@@ -4,6 +4,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 command -v "${FR_PULSE_BINARY:-pulseaudio}" >/dev/null || { echo 'BLOCKED: real PulseAudio daemon required' >&2; exit 2; }
+type -P kill >/dev/null || { echo 'BLOCKED: external kill executable (procps) required for native child fault tests' >&2; exit 2; }
 command -v python3 >/dev/null
 harness="$(mktemp -d "${TMPDIR:-/tmp}/fr-pulse-source-tests.XXXXXX")"
 export FR_PULSE_CAPTURE_SCRIPT="$root/crates/fr-native/tests/pulse_support/capture.py"

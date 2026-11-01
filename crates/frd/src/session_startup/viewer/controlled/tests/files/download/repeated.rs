@@ -129,17 +129,17 @@ fn idle_host_lane_sends_later_batches_without_replaying_handles_or_extending_a_d
 
                 let mut request = selected(&source, "late");
                 request.lifetime = Duration::from_micros(1);
-                let late = intake.submit(request).unwrap();
+                let expired = intake.submit(request).unwrap();
                 asupersync::time::sleep_until(asupersync::types::Time::from_nanos(
                     (now(&h).unwrap() + 2_000) * 1000,
                 ))
                 .await;
                 lane.host(&mut state.host, view, &mut tickets);
                 assert_eq!(
-                    late.status().absence,
+                    expired.status().absence,
                     Some(Absence::Refused(SendError::Expired))
                 );
-                assert_eq!(late.snapshot().cleanup, Some(Ok(())));
+                assert_eq!(expired.snapshot().cleanup, Some(Ok(())));
                 assert!(intake.is_closed());
                 assert!(!dest.0.join("late").exists());
                 let (old, original) = previous.unwrap();
@@ -247,7 +247,7 @@ fn closing_the_host_command_surface_retires_queued_selection_without_a_source_or
             .expect_file_download(dest.config(), Duration::from_secs(2))
             .unwrap();
         let (selection, intake) = HostSelection::interactive();
-        let stale = selection.clone();
+        let retained_selector = selection.clone();
         let mut lane = HostLane::default();
         lane.add_host_download(selection.take(h.clone()).unwrap());
         let view = state.host_media.binding();
@@ -271,7 +271,10 @@ fn closing_the_host_command_surface_retires_queued_selection_without_a_source_or
                     intake.submit(late_selector),
                     Err(SendError::Closed)
                 ));
-                assert!(matches!(stale.take(h.clone()), Err(Absence::Unavailable)));
+                assert!(matches!(
+                    retained_selector.take(h.clone()),
+                    Err(Absence::Unavailable)
+                ));
                 assert_eq!(
                     queued.status().absence,
                     Some(Absence::Refused(SendError::Cancelled))

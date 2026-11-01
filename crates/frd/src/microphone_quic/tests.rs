@@ -6,6 +6,7 @@ use crate::{
     input_agent::{Driver, Route as InputRoute, Seat},
     input_quic::Routes,
     input_watchdog::StopReason,
+    test_support::{authority, transport_support},
 };
 use fr_core::{
     audio::{AudioChannels, AudioDirection, AudioGeneration},
@@ -16,15 +17,8 @@ use fr_wire::{attachment::MediaRole, audio::AudioConfiguration, negotiation::Rol
 use std::{path::Path, time::Duration};
 use transport_support::{clock, runtime};
 
-#[path = "../../../fr-transport/tests/support/mod.rs"]
-#[allow(dead_code)]
-mod transport_support;
-
 #[path = "tests/network.rs"]
 mod attachment;
-#[path = "../../../fr-native/tests/clipboard_network/authority.rs"]
-#[allow(dead_code)]
-mod authority;
 
 struct PolicyOnlyInput;
 impl InputSink for PolicyOnlyInput {

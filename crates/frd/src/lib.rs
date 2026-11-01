@@ -4,6 +4,9 @@
 #![recursion_limit = "256"]
 //! Host broker integration. Native capture/codec code runs in child processes,
 //! never in an authority task. Asupersync QUIC remains the primary transport.
+#[cfg(all(test, target_os = "linux"))]
+mod test_support;
+
 #[cfg(target_os = "linux")]
 pub mod worker;
 

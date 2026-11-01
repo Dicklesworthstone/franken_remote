@@ -86,7 +86,7 @@ fn final_native_validation_cannot_execute_a_ticket_that_expired_while_it_waited(
     assert_eq!(sink.authorizations, 1);
     assert_eq!(sink.inner.cancelled, 1);
     assert!(sink.inner.prepared.is_none());
-    assert!(sink.inner.effects.is_empty());
+    assert_eq!(sink.inner.effects, [] as [Operation; 0]);
     assert_eq!(owner.held_count(), 0);
     let duplicate = receipt(
         owner
@@ -145,7 +145,7 @@ fn revocation_during_final_native_validation_prevents_the_press() {
     assert_eq!(result.refusal, Some(Refusal::Revoked));
     assert_eq!(result.submitted_operations, 0);
     assert_eq!(sink.authorizations, 1);
-    assert!(sink.inner.effects.is_empty());
+    assert_eq!(sink.inner.effects, [] as [Operation; 0]);
     assert_eq!(owner.held_count(), 0);
 }
 
@@ -170,7 +170,7 @@ fn target_refusal_before_authorization_leaves_no_pessimistic_press() {
     assert_eq!(result.submitted_operations, 0);
     assert_eq!(sink.authorizations, 0);
     assert_eq!(sink.inner.cancelled, 1);
-    assert!(sink.inner.effects.is_empty());
+    assert_eq!(sink.inner.effects, [] as [Operation; 0]);
     assert_eq!(owner.held_count(), 0);
 }
 
@@ -191,7 +191,7 @@ fn panic_before_final_authorization_cancels_without_inventing_a_held_key() {
     assert_eq!(sink.inner.cancelled, 1);
     assert!(sink.inner.prepared.is_none());
     assert!(sink.monitor.is_revoked());
-    assert!(sink.inner.effects.is_empty());
+    assert_eq!(sink.inner.effects, [] as [Operation; 0]);
     assert_eq!(owner.held_count(), 0);
 }
 

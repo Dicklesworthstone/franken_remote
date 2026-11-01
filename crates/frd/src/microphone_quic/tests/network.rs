@@ -12,12 +12,7 @@ use fr_wire::{
 use std::{cell::Cell, time::Duration};
 
 pub fn parent() -> ControlBinding {
-    ControlBinding {
-        id: 7,
-        host_boot: HostBootId::from_raw(11),
-        os_session: OsSessionId::from_raw(12),
-        remote_session: RemoteSessionId::from_raw(13),
-    }
+    crate::test_support::attachment::parent()
 }
 fn binding(id: u32) -> Binding {
     Binding {

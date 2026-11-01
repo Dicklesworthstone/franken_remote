@@ -164,18 +164,25 @@ fn both_directions_publish_and_keep_input_on_the_original_controller() {
                         break;
                     }
                 }
-                let sent = state.viewer.file_batch_report().unwrap();
+                let upload_report = state.viewer.file_batch_report().unwrap();
                 let received = state.host.file_batch_report().unwrap();
                 assert_eq!(send.status().absence, None);
-                assert_eq!(send.status().report, Some(sent));
+                assert_eq!(send.status().report, Some(upload_report));
                 assert_eq!(receive.status().absence, None);
                 assert_eq!(receive.status().results.len(), 1);
-                assert_eq!((sent.started, sent.not_started(), sent.stop), (1, 0, None));
+                assert_eq!(
+                    (
+                        upload_report.started,
+                        upload_report.not_started(),
+                        upload_report.stop
+                    ),
+                    (1, 0, None)
+                );
                 assert_eq!(
                     (received.started, received.not_started(), received.stop),
                     (1, 0, None)
                 );
-                assert!(sent.receipts().all(|r| r.outcome
+                assert!(upload_report.receipts().all(|r| r.outcome
                     == Outcome::HostPublished {
                         bytes: upload.len() as u64,
                         publication: Publication::Durable,
@@ -209,7 +216,7 @@ fn both_directions_publish_and_keep_input_on_the_original_controller() {
                 download::retire(&mut state, &cleanup).await;
                 assert!(state.viewer.file_cleanup_finished());
                 assert_eq!(state.viewer.try_finish_file_cleanup(), Some(Ok(())));
-                assert_eq!(state.viewer.file_batch_report(), Some(sent));
+                assert_eq!(state.viewer.file_batch_report(), Some(upload_report));
                 assert_eq!(state.host.file_batch_report(), Some(received));
                 assert_eq!(
                     state.viewer.file_receive_status().unwrap().cleanup,
@@ -338,10 +345,11 @@ fn cancelling_either_partial_direction_preserves_the_other_and_input() {
                         }
                     }
                     if cancel_download {
-                        let sent = state.viewer.file_batch_report().unwrap();
-                        assert_eq!(sent.stop, None);
+                        let upload_report = state.viewer.file_batch_report().unwrap();
+                        assert_eq!(upload_report.stop, None);
                         assert!(
-                            sent.receipts()
+                            upload_report
+                                .receipts()
                                 .all(|r| matches!(r.outcome, Outcome::HostPublished { .. }))
                         );
                         assert_eq!(fs::read(host_dest.0.join("upload")).unwrap(), upload);

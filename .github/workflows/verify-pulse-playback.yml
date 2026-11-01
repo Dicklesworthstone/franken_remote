@@ -48,7 +48,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/pulse-inputs"
           docker run --rm -v "$RUNNER_TEMP/pulse-inputs:/out" debian:trixie-slim sh -ec '
             apt-get update
-            apt-get -y --download-only --no-install-recommends install pulseaudio pulseaudio-utils libpulse-dev
+            apt-get -y --download-only --no-install-recommends install pulseaudio pulseaudio-utils libpulse-dev procps
             cp /var/cache/apt/archives/*.deb /out/
             cd /out && sha256sum *.deb > SHA256SUMS
           '
@@ -64,7 +64,7 @@ jobs:
           compiler="$(dirname "$(dirname "$(rustup which rustc)")")"
           docker run --rm -v "$PWD:/repo:ro" -v "$compiler:/toolchain:ro" debian:trixie-slim sh -ec '
             apt-get update
-            apt-get install -y --no-install-recommends build-essential ca-certificates pulseaudio pulseaudio-utils python3 libopus0
+            apt-get install -y --no-install-recommends build-essential ca-certificates pulseaudio pulseaudio-utils python3 libopus0 procps
             useradd --create-home --uid 1000 frtest
             su frtest -s /bin/sh -c "cd /repo && PATH=/toolchain/bin:\$PATH CARGO_TARGET_DIR=/tmp/fr-pulse-target ./scripts/verify-pulse-playback.sh"
           '

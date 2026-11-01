@@ -356,7 +356,7 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
             0x0060_4050,
             0x0050_3070,
         ];
-        let (result, presented) = Box::pin(support::both(
+        let (result, picture_counts) = Box::pin(support::both(
             streaming.serve(|| nonce(&mut n), || None, block),
             async {
                 // Seven changes span renewal. Each quiet episode permits only
@@ -472,12 +472,12 @@ fn actual_hevc_streams_after_network_startup_and_stays_idle_between_updates() {
         ))
         .await;
         assert!(result.is_err());
-        let frame_count = presented.iter().sum::<u64>();
+        let frame_count = picture_counts.iter().sum::<u64>();
         assert!(
             frame_count > u64::try_from(colors.len()).unwrap(),
             "no optional refinement crossed the live media path"
         );
-        assert!(presented.iter().all(|count| (1..=2).contains(count)));
+        assert!(picture_counts.iter().all(|count| (1..=2).contains(count)));
         assert_eq!(streaming.statistics().encoded_updates, frame_count);
         assert!(streaming.statistics().unchanged_observations >= 20);
         assert!(streaming.statistics().repair_requests > 0);

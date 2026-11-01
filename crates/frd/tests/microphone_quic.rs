@@ -4,5 +4,8 @@
 //! authority, input agent and process supervisor are the actual frd library.
 pub use frd::{input_agent, input_quic, input_watchdog, microphone_process};
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+
 #[path = "../src/microphone_quic.rs"]
 pub mod microphone_quic;

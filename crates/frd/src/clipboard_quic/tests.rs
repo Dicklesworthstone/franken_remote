@@ -2,6 +2,7 @@
 //! Native-worker cancellation/publication is covered by `worker::tests`.
 use super::*;
 use crate::session_startup::test_network as transport_support;
+use crate::test_support::{attachment, authority};
 use fr_core::{clipboard::Binding, limits::ProtocolLimits};
 use fr_wire::{
     attachment::MediaRole,
@@ -11,13 +12,6 @@ use transport_support::{clock, runtime};
 
 mod batching;
 mod expiry;
-
-#[path = "../../../fr-native/tests/clipboard_network/attachment.rs"]
-#[allow(dead_code)]
-mod attachment;
-#[path = "../../../fr-native/tests/clipboard_network/authority.rs"]
-#[allow(dead_code)]
-mod authority;
 
 struct Fixture {
     cx: Cx,

@@ -8,7 +8,7 @@ use super::*;
 /// therefore prove real passive grabs, independently of FrankenRemote's active
 /// keyboard owner. The same bindings must work after that owner has ended.
 const PROBE: &str = r#"
-ACTIVE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control"
+ACTIVE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+F7 changes display - Ctrl+Alt+Shift+Escape releases control"
 sig(x.XGrabKey, I, D, I, U, W, I, I, I)
 sig(x.XGrabKeyboard, I, D, W, I, I, I, W)
 sig(x.XUngrabKeyboard, I, D, W)

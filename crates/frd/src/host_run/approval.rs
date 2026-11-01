@@ -312,6 +312,7 @@ mod tests {
                 false,
             ),
             true,
+            false,
         )
         .unwrap();
         let before = request.session.clone();

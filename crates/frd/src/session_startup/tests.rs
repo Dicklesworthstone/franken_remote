@@ -4,6 +4,7 @@ use super::*;
 use asupersync::types::Budget;
 #[path = "../../../fr-client/src/startup.rs"]
 mod client_startup;
+pub(crate) use crate::test_support::transport_support as support;
 use client_startup::Startup;
 use fr_core::{
     ids::{HostBootId, OsSessionId, RemoteSessionId},
@@ -15,9 +16,6 @@ use std::{
     sync::atomic::AtomicBool,
     task::{Context, Poll, Waker},
 };
-#[allow(dead_code)]
-#[path = "../../../fr-transport/tests/support/mod.rs"]
-pub(crate) mod support;
 
 fn config(approval: bool) -> Configuration {
     Configuration {

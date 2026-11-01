@@ -114,7 +114,7 @@ fn pre_request_viewing_recovers_without_authority_then_grants_only_the_current_v
         let mut mapped = false;
         let mut visible = None;
         let mut granted = false;
-        let mut sent = 0;
+        let mut actions_sent = 0;
         let ((host_result, viewer_result), ()) = Box::pin(support::both(
             support::both(
                 async {
@@ -241,12 +241,12 @@ fn pre_request_viewing_recovers_without_authority_then_grants_only_the_current_v
                                     if let Some(frame) = event {
                                         crate::session_startup::confirm_visible(controlled.visible(frame.frame.as_raw()));
                                     }
-                                    if sent == 0 {
+                                    if actions_sent == 0 {
                                         controlled.action(key(true)).unwrap();
-                                        sent = 1;
-                                    } else if sent == 1 && receipts.get() >= 1 {
+                                        actions_sent = 1;
+                                    } else if actions_sent == 1 && receipts.get() >= 1 {
                                         controlled.action(key(false)).unwrap();
-                                        sent = 2;
+                                        actions_sent = 2;
                                     }
                                     if receipts.get() == 2 {
                                         stop_host.revoke();
