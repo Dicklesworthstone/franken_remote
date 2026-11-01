@@ -20,6 +20,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 | `frd status [--json]` | Probes the installed Tailscale LocalAPI for this node's identity; every media/permission row stays `not_tested` (nothing is measured) | live |
 | `fr hosts [--json]` | Lists machines from installed Tailscale discovery (machines, not ready desktops) | live |
 | `fr hosts save/saved/forget`; `fr connect ALIAS --saved` | [Saved native hosts](NATIVE_SAVED_HOSTS.md), pinned to both the stable Tailscale node ID and certificate name; fresh authorization on every connection | source and regression coverage; live qualification pending |
+| `fr connect --choose-host --view-only --experimental-native --display choose` | [Native machine picker](docs/native-client-cli.md#choose-a-machine-in-the-native-window): paginated Tailscale peers, exact identity pin, then authenticated connection and display choice | discovery/lifecycle tests and actual Xvfb keyboard/cancellation/cleanup passed; full CLI and live qualification pending |
 | `fr inspect NODE_ID --probe --experimental-native [--json]` | Authenticated [native capability intersection](NATIVE_CAPABILITY_INSPECTION.md), acknowledged and closed before observation or approval | source and regression coverage; live qualification pending |
 | `fr hosts --probe --experimental-native [--probe-limit 1..64] [--json]` | Bounded [tailnet capability discovery](NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery), four peers at a time under one original deadline, with separate per-peer results | deterministic scheduler and command-parser tests; native CLI and live qualification tracked separately |
 | `fr doctor [--json]` | Node identity and service-port collision check; permission/capability rows `not_tested`; `--trust-roots` additionally fetches the host certificate | live (without `--trust-roots`) |
@@ -86,6 +87,11 @@ Host options:
 ./target/release/fr connect NODE_ID --view-only --experimental-native --display only --json
 ./target/release/fr connect NODE_ID --control --clipboard --experimental-native --display only --json
 ```
+
+To select the machine in a local window, replace `NODE_ID` with `--choose-host`.
+Use `--display choose` to select its monitor after authentication and approval.
+The machine picker shows the current Tailscale snapshot; it does not promise
+that a listed peer is hosting or that access will be granted.
 
 To choose uploads after connecting, add `--file-drop` to the control command
 and run the host with `--input-agent PATH --files DIR`. Once the upload panel

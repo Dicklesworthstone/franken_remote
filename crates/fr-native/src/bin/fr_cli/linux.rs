@@ -14,6 +14,9 @@ mod doctor;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/files.rs"]
 mod files;
+#[cfg(feature = "linux-desktop")]
+#[path = "linux/host_choice.rs"]
+mod host_choice;
 #[path = "linux/hosts_probe.rs"]
 mod hosts_probe;
 #[cfg(any(test, feature = "linux-desktop"))]
@@ -452,7 +455,18 @@ fn connect(
     json: bool,
     automation: bool,
 ) -> Result<String, Failure> {
-    let selected = super::saved_hosts::select(&connection.target)?;
+    let selected = if connection.choose_host {
+        if automation {
+            return Err(Failure::new(
+                "interactive_host_choice_required",
+                "Use fr connect --choose-host for a local human choice; foreground automation requires an explicit host identity.",
+                2,
+            ));
+        }
+        host_choice::select(runtime, cx, shutdown, stopped, &api, connection, json)?
+    } else {
+        super::saved_hosts::select(&connection.target)?
+    };
     let roots = read_roots(&connection.target.roots)?;
     let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
         failure(
@@ -2344,6 +2358,7 @@ mod tests {
     #[cfg(not(feature = "linux-desktop"))]
     fn connect_without_desktop_feature_returns_gui_unavailable() {
         let options = crate::options::Connection {
+            choose_host: false,
             target: crate::options::Target {
                 saved: None,
                 node: "node-1".into(),

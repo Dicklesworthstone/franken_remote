@@ -115,6 +115,34 @@ fn one_shot_keeps_explicit_transport_and_display_requirements() {
 }
 
 #[test]
+fn machine_choice_is_refused_for_one_shot_and_live_observation_before_setup() {
+    for (text, live) in [
+        (
+            "robot observe --choose-host --native-once --experimental-native --display only",
+            false,
+        ),
+        (
+            "robot session open --choose-host --foreground --role view --publish-observations --experimental-native --display only",
+            true,
+        ),
+    ] {
+        let original = args(text);
+        assert!(requested(&original));
+        let result = if live {
+            parse_live(&original)
+        } else {
+            parse(&original)
+        };
+        let failure = result
+            .err()
+            .expect("automation must select an explicit machine");
+        assert_eq!(failure.code, "invalid_arguments");
+        assert_eq!(failure.exit, 2);
+        assert!(!failure.unknown_effect);
+    }
+}
+
+#[test]
 fn legacy_commands_are_not_silently_converted_into_new_connections() {
     for text in [
         "robot observe n-host --json",

@@ -4,6 +4,9 @@ use std::{collections::BTreeSet, path::PathBuf};
 #[path = "options/receive.rs"]
 mod receive;
 pub use receive::ReceiveOptions;
+#[cfg(test)]
+#[path = "options/host_choice_tests.rs"]
+mod host_choice_tests;
 #[path = "options/hosts.rs"]
 mod hosts;
 #[path = "options/local_session.rs"]
@@ -123,6 +126,10 @@ pub struct Target {
 #[allow(dead_code)]
 pub struct Connection {
     pub target: Target,
+    /// Select one current installed-daemon peer in a local native window.
+    /// The target's node is empty until that explicit choice is resolved;
+    /// only the chosen pinned identity can reach the connection owner.
+    pub choose_host: bool,
     pub display: DisplayChoice,
     pub worker: PathBuf,
     pub x_display: Option<String>,
@@ -674,11 +681,21 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
             parse_saved_hosts(args)
         }
         "hosts" => hosts::parse(args),
-        "doctor" => parse_command(args, 1, None, false, true),
+        "doctor" => parse_command(args, 1, None, false, true, false),
         "connect" | "displays" => {
             let node = args.get(1).ok_or_else(usage)?;
-            validate_node(node)?;
-            parse_command(args, 2, Some(node.clone()), args[0] == "displays", false)
+            let choose_host = args[0] == "connect" && node == "--choose-host";
+            if !choose_host {
+                validate_node(node)?;
+            }
+            parse_command(
+                args,
+                2,
+                (!choose_host).then(|| node.clone()),
+                args[0] == "displays",
+                false,
+                choose_host,
+            )
         }
         _ => Err(usage()),
     }
@@ -704,8 +721,9 @@ fn parse_command(
     node: Option<String>,
     inspect: bool,
     doctor: bool,
+    choose_host: bool,
 ) -> Result<Options, Failure> {
-    let remote = node.is_some();
+    let remote = node.is_some() || choose_host;
     let connect = remote && !inspect;
     let mut seen = BTreeSet::new();
     let (mut json, mut socket, mut by_name, mut view_only, mut experimental, mut ipv6) =
@@ -797,10 +815,11 @@ fn parse_command(
         receive_max_session_bytes,
         receive_keep_both,
     )?;
-    if hosts_file.is_some() && !saved {
+    if (hosts_file.is_some() && !saved) || (choose_host && (saved || by_name)) {
         return Err(usage());
     }
-    let command = if let Some(node) = node {
+    let command = if remote {
+        let node = node.unwrap_or_default();
         if saved
             && (by_name
                 || seen.contains("--port")
@@ -888,6 +907,7 @@ fn parse_command(
         } else {
             Command::Connect(Connection {
                 target,
+                choose_host,
                 display: display.ok_or_else(usage)?,
                 worker: match worker {
                     Some(worker) => worker,

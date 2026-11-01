@@ -186,6 +186,20 @@ pub(super) struct Selection {
     name: Option<String>,
 }
 impl Selection {
+    /// Preserve exactly what the local picker displayed. The existing native
+    /// connector resolves BOTH fields again before opening the remote session.
+    #[cfg(any(test, feature = "linux-desktop"))]
+    pub(super) fn from_candidate(
+        candidate: &fr_client::discovery::picker::Candidate,
+        port: u16,
+    ) -> Self {
+        Self {
+            node: candidate.stable_id().to_owned(),
+            port,
+            by_name: false,
+            name: Some(candidate.certificate_name().to_owned()),
+        }
+    }
     pub(super) fn selector(&self) -> fr_tailnet::PeerSelector<'_> {
         if let Some(name) = &self.name {
             fr_tailnet::PeerSelector::Pinned {

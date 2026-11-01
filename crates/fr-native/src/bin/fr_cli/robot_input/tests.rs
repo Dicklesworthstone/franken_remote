@@ -125,6 +125,20 @@ fn accepting_input_requires_explicit_foreground_control_and_native_qualification
 }
 
 #[test]
+fn automation_open_refuses_interactive_machine_selection_before_setup() {
+    let original = words(&format!(
+        "robot session open --choose-host --foreground --role control --accept-input {NATIVE}"
+    ));
+    assert!(requested(&original));
+    let failure = opening(&original)
+        .err()
+        .expect("input automation must select an explicit machine");
+    assert_eq!(failure.code, "invalid_arguments");
+    assert_eq!(failure.exit, 2);
+    assert!(!failure.unknown_effect);
+}
+
+#[test]
 fn automation_open_cannot_enable_reconnect_auxiliary_lanes_or_duplicate_options() {
     for suffix in [
         "--attempts 2",

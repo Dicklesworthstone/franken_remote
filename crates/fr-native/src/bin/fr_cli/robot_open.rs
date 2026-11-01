@@ -32,6 +32,9 @@ pub(super) fn parse(args: &[String]) -> Result<options::Options, Failure> {
         return Err(usage());
     }
     let node = args.get(3).ok_or_else(usage)?;
+    if node == "--choose-host" {
+        return Err(usage());
+    }
     // A deliberate prefix makes the lifetime contract unambiguous and avoids
     // stripping an option-looking value out of another flag's argument slot.
     if args.get(4).map(String::as_str) != Some("--foreground")

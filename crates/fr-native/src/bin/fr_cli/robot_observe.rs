@@ -134,6 +134,9 @@ fn parse(args: &[String]) -> Result<Request, Failure> {
     let options::Command::Connect(connection) = options.command else {
         return Err(usage());
     };
+    if connection.choose_host {
+        return Err(usage());
+    }
     if connection.display == options::DisplayChoice::Choose {
         return Err(Failure::new(
             "observation_display_required",

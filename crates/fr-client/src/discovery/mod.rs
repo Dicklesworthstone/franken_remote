@@ -15,6 +15,7 @@
 pub mod batch;
 pub mod cache;
 pub mod directory;
+pub mod picker;
 pub mod prober;
 pub mod saved_hosts;
 pub mod saved_peers;

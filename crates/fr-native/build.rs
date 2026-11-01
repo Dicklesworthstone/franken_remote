@@ -7,6 +7,7 @@ fn main() {
     build_indicator();
     build_viewer_input();
     build_viewer_window();
+    build_host_picker();
     println!("cargo:rerun-if-changed=src/bridge.c");
     println!("cargo:rerun-if-changed=src/x11_image.c");
     println!("cargo:rerun-if-changed=src/x11_image.h");
@@ -418,6 +419,53 @@ fn build_viewer_window() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=frviewerwindow");
+    println!("cargo:rustc-link-lib=xcb");
+}
+
+fn build_host_picker() {
+    println!("cargo:rerun-if-changed=src/host_picker.c");
+    if (env::var_os("CARGO_FEATURE_LINUX_MEDIA").is_none()
+        && env::var_os("CARGO_FEATURE_LINUX_DESKTOP").is_none())
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "host picker cross-builds require a qualified native sysroot"
+    );
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-std=c11",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-c",
+                "src/host_picker.c",
+                "-o"
+            ])
+            .arg(out.join("hostpicker.o"))
+            .status()
+            .expect("native C compiler")
+            .success(),
+        "install XCB development headers (libxcb1-dev)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrhostpicker.a"))
+            .arg(out.join("hostpicker.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frhostpicker");
     println!("cargo:rustc-link-lib=xcb");
 }
 

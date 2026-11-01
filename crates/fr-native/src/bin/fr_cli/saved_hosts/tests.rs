@@ -139,3 +139,24 @@ fn defaults_and_durability_do_not_claim_more_than_is_known() {
     let error = failure(Error::Data(SavedPeerError::InvalidDocument));
     assert_eq!(error.code, "saved_hosts_invalid");
 }
+
+#[test]
+fn a_native_host_choice_keeps_the_exact_identity_pair_for_fresh_lookup() {
+    use fr_client::discovery::picker::{Candidate, PathHint};
+    let candidate = Candidate::new(
+        "n-selected".into(),
+        "selected.fixture.ts.net".into(),
+        PathHint::Unknown,
+    )
+    .unwrap();
+    let choice = Selection::from_candidate(&candidate, 9443);
+    assert_eq!(choice.node, "n-selected");
+    assert_eq!(choice.port, 9443);
+    assert!(matches!(
+        choice.selector(),
+        fr_tailnet::PeerSelector::Pinned {
+            stable_id: "n-selected",
+            certificate_name: "selected.fixture.ts.net"
+        }
+    ));
+}

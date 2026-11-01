@@ -22,6 +22,8 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
      [--audio-volume 0..100] [--audio-muted]] [--json]
+fr connect --choose-host --view-only|--control --experimental-native
+    --display HANDLE|only|choose [connect options except --by-name/--saved]
 fr robot session open NODE_ID --foreground --role view|control
     --experimental-native --display HANDLE|only|choose [connect options]
 fr robot session status NODE_ID [--json]
@@ -45,6 +47,20 @@ displays; choose opens a chooser in each approved connection. --fit enables CPU
 nearest-neighbour aspect fitting in a fixed local window, without resizing the
 remote display. Omit it for native pixels. Set local XAUTHORITY when required.
 Native transport/media remain unqualified. Close the window/Ctrl-C to stop.
+
+Native machine picker:
+Put --choose-host immediately after connect, in place of NODE_ID. The local X11
+window lists up to 1024 peers from installed Tailscale, sorted by canonical name.
+Arrows move, Page Up/Down or wheel changes page, Home/End reaches either end;
+release Enter or the left mouse button on a row to choose. Esc/window close or
+Ctrl-C cancels. Names, node IDs and route hints do not promise desktop access.
+The original choice expires after 120 seconds. The window must finish cleanup
+before any remote connection or local file selection starts. The exact chosen
+name and stable ID are checked again before every connection; all TLS, approval,
+role and display checks still apply. --port applies to the chosen host.
+--saved, --hosts-file and --by-name cannot combine with --choose-host. Robot
+commands require an explicit target. With --json, host_selected reports the
+chosen node ID before connection; use that ID for fr disconnect NODE_ID.
 
 Control and reconnect:
 Choose one role. --control requests input once after a fresh frame; the host

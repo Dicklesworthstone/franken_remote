@@ -36,6 +36,12 @@ pub use error::NativeError;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod capture;
 
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-media", feature = "linux-desktop")
+))]
+pub mod host_picker;
+
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod image_transfer;
 

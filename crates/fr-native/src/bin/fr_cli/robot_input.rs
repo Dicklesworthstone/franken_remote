@@ -387,7 +387,7 @@ fn opening(args: &[String]) -> Result<options::Options, Failure> {
     let options::Command::Connect(connection) = &parsed.command else {
         return Err(usage());
     };
-    if connection.display == options::DisplayChoice::Choose {
+    if connection.choose_host || connection.display == options::DisplayChoice::Choose {
         return Err(usage());
     }
     Ok(parsed)

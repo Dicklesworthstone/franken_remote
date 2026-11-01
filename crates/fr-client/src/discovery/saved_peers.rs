@@ -76,7 +76,7 @@ pub fn valid_alias(alias: &str) -> bool {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
 }
-fn valid_id(id: &str) -> bool {
+pub(super) fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
         && id.is_ascii()
@@ -85,7 +85,7 @@ fn valid_id(id: &str) -> bool {
             .bytes()
             .any(|b| b.is_ascii_control() || b.is_ascii_whitespace() || b"/:?#@\\".contains(&b))
 }
-fn valid_name(name: &str) -> bool {
+pub(super) fn valid_name(name: &str) -> bool {
     name.len() <= 253
         && name.contains('.')
         && name.split('.').all(|label| {

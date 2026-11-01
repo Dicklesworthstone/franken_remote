@@ -50,6 +50,78 @@ omitted candidates stay explicit. This opens no observation, media or input.
 The advertisement does not qualify the current desktop or codec; see
 [bounded capability discovery](../NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery).
 
+## Choose a machine in the native window
+
+```sh
+./target/debug/fr connect --choose-host \
+  --view-only --experimental-native --display choose
+```
+
+Place `--choose-host` immediately after `connect`, in place of the stable node
+ID. The first local X11 window lists machines from the installed Tailscale
+daemon. After the selection, the existing authenticated connection and host
+approval run; `--display choose` then opens the separate display chooser with
+that approved host's current catalog. Use `--display only` for the existing
+single-monitor policy, or `--control` for an explicit control request.
+
+The machine window shows each candidate's canonical certificate name, stable
+node ID and a direct/relayed/unknown route hint from that discovery snapshot.
+Names and IDs wrap rather than hiding their distinguishing suffixes. Up to
+1024 candidates are retained in name-then-ID order, with keyboard and mouse
+pagination through the entire list. Arrows move the highlight, Page Up/Down or
+the wheel changes page, and Home/End reaches the first/last candidate. A fresh
+Enter press and release, or a left-button press and release on the same row,
+makes the choice. Escape or closing the window cancels. The picker requires
+local focus and a supported, pinned keyboard map; changed mappings refuse the choice.
+
+Discovery is local metadata, not a desktop probe or admission result. No remote
+session, file source or destination is opened while the user is choosing. The
+selected ordinal indexes the same immutable catalog that supplied the visible
+rows; addresses are never retained in the choice. The stable node ID and exact
+certificate name are pinned together and freshly resolved before every dial,
+including reconnect. A renamed or reassigned peer refuses rather than silently
+connecting to a replacement. Strict TLS, host approval, role/capability checks
+and fresh display selection remain in the ordinary connection path.
+
+The native window must map within two seconds, and the original choice budget
+is 120 seconds. Activity and page changes do not extend it. Cancellation also
+works through Ctrl-C. A choice becomes usable only after the original native
+worker has actually joined. A failed open, timeout, cancellation or incomplete
+cleanup opens no remote connection; cleanup has its own two-second wait limit.
+The picker is a pre-session owner and grants no observation or input authority.
+
+Ordinary connection options, including `--port`, `--trust-roots`, `--socket`,
+`--x-display`, `--fit` and `--attempts`, still apply. `--saved`, `--hosts-file`
+and `--by-name` cannot be combined with this mode. Robot commands require an
+explicit target and refuse interactive machine selection. The selected machine
+is not automatically saved as a profile; [saved hosts](../NATIVE_SAVED_HOSTS.md)
+remain an explicit local choice.
+
+Human output prints the selected name and stable node ID before connection.
+With `--json`, the `host_selected` event has `schema_version: 1`, `node_id`,
+`certificate_name`, `port`, `selection_only: true`,
+`fresh_lookup_required: true`, `remote_session_started: false` and
+`input_requested: false`. This selection event is not connection success.
+Use its stable ID with `fr disconnect NODE_ID` to address a later foreground
+session.
+
+The discovery suite passed 19 focused tests and strict Clippy. The exact native
+picker sources passed eight lifecycle tests, including cancellation while a real
+thread-local destructor blocks cleanup, and three actual Xvfb integration tests.
+Those select ordinal 1023 from a 1024-row window with End/Enter, cancel through
+Escape, and drop a live picker while checking original native cleanup. The C
+boundary also passed compilation with `-Wall -Wextra -Werror`. These are component
+results, not installed-tailnet or physical-desktop qualification.
+
+Strict component Clippy also passed for the native owner, lifecycle tests and
+Xvfb integration tests. A joined but unconsumed choice remains subject to its
+original deadline; returning focus requests a fresh local input baseline.
+
+CLI/parser and pinned-selection regressions are included but remain unexecuted:
+the full CLI dependency graph's pinned Asupersync compilation exceeded shared
+memory. Complete CLI/TLS and live two-machine qualification for this entry point
+remain pending under bead `fr-nyab` (plan sections 6.4 and 16.1).
+
 ## Inspect approved remote displays without a local renderer
 
 ```sh
