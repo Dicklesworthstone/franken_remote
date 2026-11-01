@@ -741,6 +741,90 @@ fn peer_refusal_keeps_cold_desktop_available_for_next_authorized_client() {
 
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
+fn completed_capability_inspection_cannot_bypass_local_listener_stop() {
+    run(async |broker, supervisor, client, runtime| {
+        let api = fixture::Api::new();
+        let tools = Tools::new();
+        let mut server = bound(&broker, &api, &tools).await;
+        let source = runtime
+            .try_request_cx_with_budget(Budget::INFINITE)
+            .unwrap();
+        let mut driver = driver(source);
+        let requests = Arc::new(AtomicU64::new(0));
+        let requested = requests.clone();
+        let stop = supervisor.clone();
+        let serving = server.serve_desktop(
+            &mut driver,
+            supervisor.clone(),
+            runtime,
+            serial::Policy::default(),
+            Connections {
+                request: move |n| {
+                    requested.store(n, Ordering::Release);
+                    let mut request = request(n)?;
+                    request.session.offer.capabilities.push(Capability {
+                        name: fr_wire::inspection::CAPABILITY.into(),
+                        version: 1,
+                        required: false,
+                    });
+                    request.session.offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+                    Ok(request)
+                },
+                approval: |_, _| panic!("capability inspection cannot request approval"),
+                completed: move |stats: serial::Statistics, outcome: frd::native_connection::host::desktop::PeerResult| {
+                    assert_eq!(stats.attempts, 1);
+                    assert_eq!(outcome, Err(HostError::Cancelled));
+                    // The exact inspection receipt exists. Revoking the
+                    // independent listener BEFORE its retirement decision must
+                    // nevertheless prevent every replacement request.
+                    stop.cancel_fast(CancelKind::User);
+                    Ok(serial::Action::Continue)
+                },
+            },
+            || async { panic!("capability inspection cannot prepare a source") },
+            |_| panic!("capability inspection cannot select a display"),
+            |_, _| Ok(LocalAction::Continue),
+        );
+        let inspecting = async {
+            let native = fixture::client(&client, address()).await;
+            let viewer = Viewer::new(
+                client,
+                native,
+                fr_wire::inspection::prepare_offer(offer()).unwrap(),
+                quic::Policy::default(),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+            viewer.inspect_capabilities().await.unwrap()
+        };
+        let (end, _) = Box::pin(network::both(serving, inspecting)).await;
+        assert_eq!(
+            end,
+            End::Listener(Err(LinuxError::Serial(serial::Error::Cancelled)))
+        );
+        assert_eq!(requests.load(Ordering::Acquire), 1);
+        assert!(supervisor.is_cancel_requested());
+        assert!(!broker.is_cancel_requested());
+        assert!(driver.worker_id().is_none());
+        assert!(
+            driver
+                .reap(
+                    &broker,
+                    Deadline::after(&broker, Duration::from_secs(1)).unwrap()
+                )
+                .await
+                .unwrap()
+                .is_none()
+        );
+        server.stop(&broker).await.unwrap();
+        assert_eq!(tools.state()["created"], 1);
+        assert_eq!(tools.state()["deleted"], 1);
+        assert!(UdpSocket::bind(address()).is_ok());
+    });
+}
+
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
 fn departed_cold_observer_reports_completion_without_accepting_another_peer() {
     run(async |broker, supervisor, client, runtime| {
         let api = fixture::Api::new();

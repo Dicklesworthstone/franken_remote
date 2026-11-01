@@ -19,7 +19,10 @@ use fr_wire::{
 use std::{
     future::{Future, poll_fn},
     pin::{Pin, pin},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -152,6 +155,17 @@ struct First {
     host: Host,
     notify: Notify,
     reply: oneshot::Sender<FirstService>,
+    inspection: InspectionCompletion,
+}
+/// Read-only evidence for ONE original peer, marked only when its recognized
+/// pre-observation inspection has ended and the unchanged source is cold again.
+/// Peer cancellation, dropped work and observation completion never set it.
+#[derive(Clone)]
+pub(crate) struct InspectionCompletion(Arc<AtomicBool>);
+impl InspectionCompletion {
+    pub(crate) fn is_complete(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
 }
 /// What the first viewer's own connection scope awaits: its shared-viewer
 /// service, or the end of the exclusive controlled share (sender dropped),
@@ -216,6 +230,7 @@ impl Incoming {
     {
         let cx = host.cancellation_context();
         let mut fence = PeerFence(Some(cx.clone()));
+        let inspection = InspectionCompletion(Arc::new(AtomicBool::new(false)));
         // Without control every Host is restricted to observation before its
         // ClientHello. With control only a cold first viewer stays unrestricted
         // (the opener decides by its negotiated role); a warm join is restricted
@@ -248,6 +263,7 @@ impl Incoming {
                             host,
                             notify: Box::new(notify),
                             reply,
+                            inspection: inspection.clone(),
                         },
                     )
                     .is_err()
@@ -285,7 +301,11 @@ impl Incoming {
             Route::Starting(_) | Route::Closed => unreachable!(),
         };
         fence.0 = None;
-        Ok(Peer { cx, work })
+        Ok(Peer {
+            cx,
+            work,
+            inspection,
+        })
     }
     /// Stop this selected source and all its queued/active viewers. No new source
     /// is created automatically; another OS-share lifetime is an explicit choice.
@@ -499,6 +519,7 @@ impl Driver {
                         host,
                         notify,
                         reply,
+                        inspection,
                     } = first;
                     let pending_factory = &mut factory;
                     let pending_select = &mut select;
@@ -547,6 +568,12 @@ impl Driver {
                                 *route = Route::Cold(send);
                             }
                             initial = receive;
+                            // The native connection scope may already observe
+                            // the Host's cancellation before it can poll reply.
+                            // Record this exact terminal inspection separately:
+                            // the listener still has to prove transport retirement
+                            // and current independent hosting authority.
+                            inspection.0.store(true, Ordering::Release);
                             let result =
                                 if error == crate::session_startup::Error::InspectionComplete {
                                     Ok(())
@@ -750,6 +777,12 @@ impl Drop for PeerFence {
 pub struct Peer {
     cx: Cx,
     work: Pin<Box<dyn Future<Output = Result<(), Error>> + Send>>,
+    inspection: InspectionCompletion,
+}
+impl Peer {
+    pub(crate) fn inspection_completion(&self) -> InspectionCompletion {
+        self.inspection.clone()
+    }
 }
 impl Future for Peer {
     type Output = Result<(), Error>;

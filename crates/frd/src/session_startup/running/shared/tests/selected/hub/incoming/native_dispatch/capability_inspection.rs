@@ -72,6 +72,11 @@ async fn inspect(incoming: &Incoming, rt: &Runtime, id: u128) {
     let connection = incoming
         .serve_host(host, |_, _| panic!("inspection must not request approval"))
         .unwrap();
+    let completion = connection.inspection_completion();
+    assert!(
+        !completion.is_complete(),
+        "no receipt before actual inspection"
+    );
     let viewer = Viewer::new(
         c,
         native.unwrap(),
@@ -84,8 +89,33 @@ async fn inspect(incoming: &Incoming, rt: &Runtime, id: u128) {
     let advertised = result.unwrap();
     offer.check_host(&advertised).unwrap();
     assert_eq!(ended, Ok(()));
+    assert!(completion.is_complete());
     assert!(!alive.load(Ordering::Acquire));
     assert!(h.is_cancel_requested(), "original inspection peer retired");
+}
+
+#[test]
+fn unpolled_peer_cancellation_has_no_inspection_completion_receipt() {
+    let rt = support::runtime();
+    rt.block_on(Box::pin(async {
+        let (incoming, _driver, independent) = pair(&rt);
+        let Probe {
+            host, h, native, ..
+        } = probe(&rt, 130).await;
+        let _native = native.unwrap();
+        let connection = incoming
+            .serve_host(host, |_, _| panic!("unpolled peer cannot request approval"))
+            .unwrap();
+        let completion = connection.inspection_completion();
+        assert!(!completion.is_complete());
+        drop(connection);
+        assert!(h.is_cancel_requested());
+        assert!(
+            !completion.is_complete(),
+            "cancellation is not inspection evidence"
+        );
+        assert!(!independent.is_cancel_requested());
+    }));
 }
 
 #[test]
@@ -193,6 +223,8 @@ async fn abandon(incoming: &Incoming, rt: &Runtime) {
             panic!("abandoned probe must not request approval")
         })
         .unwrap();
+    let completion = connection.inspection_completion();
+    assert!(!completion.is_complete());
     let leave = async {
         let (mut transport, routes) =
             fr_transport::quic::QuicRecords::bootstrap(native.unwrap(), &c, Policy::default())
@@ -243,6 +275,7 @@ async fn abandon(incoming: &Incoming, rt: &Runtime) {
         ended,
         Err(DispatchError::Startup(OpenError::InspectionAbandoned))
     );
+    assert!(completion.is_complete());
     assert!(!alive.load(Ordering::Acquire));
     assert!(h.is_cancel_requested());
 }

@@ -122,6 +122,16 @@ pub trait Application {
     fn finishes_peer_on_cancel(&self) -> bool {
         false
     }
+    /// Whether this exact peer completed a recognized capability inspection
+    /// without starting observation, and its independent source was rearmed.
+    /// The original Host's close can cancel its native scope before the ordinary
+    /// completion future is polled. Generic cancellation or an abandoned future
+    /// is not this evidence. Defaults to terminal, including ordinary sessions.
+    /// Even positive evidence cannot bypass supervisor/security checks or actual
+    /// original transport retirement, and never reuses the cancelled peer.
+    fn cancelled_inspection_completed(&self) -> bool {
+        false
+    }
 }
 
 impl Server {
@@ -284,8 +294,13 @@ impl Server {
                     if Arc::strong_count(&marker) != 1 {
                         return Err(Error::RetainedTransport);
                     }
+                    inside()?;
+                    let inspected = served
+                        && failure == Some(HostError::Cancelled)
+                        && application.cancelled_inspection_completed();
                     if let Some(error) = failure
                         && !peer_refusal(error)
+                        && !inspected
                     {
                         // A healthy replacement policy may admit a NEW attempt,
                         // never refresh the retired connection's immutable lease.

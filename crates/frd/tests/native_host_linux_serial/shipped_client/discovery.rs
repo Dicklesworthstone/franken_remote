@@ -57,45 +57,52 @@ fn shipped_fr_hosts_probe_keeps_peer_failures_separate_and_never_opens_observati
     let _silent = UdpSocket::bind(("100.64.0.3", address().port())).unwrap();
     let api = ClientApi::with_status(candidates());
     let fr = shipped_client();
-    let output = run_probe(&fr, &api.path, &host.roots);
-    assert!(
-        output.status.success(),
-        "{} {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 1);
-    assert_eq!(report["outcome"], "success");
-    assert_eq!(report["stage"], "observed");
-    let data = &report["data"];
-    assert_eq!(data["scope"], "tailnet_capability_sweep");
-    assert_eq!(data["discovered"], 3);
-    assert_eq!(data["selected"], 3);
-    assert_eq!(data["omitted"], 0);
-    assert_eq!(data["complete"], true);
-    assert_eq!(data["budget_exhausted"], false);
-    assert_eq!(data["revalidate_on_connect"], true);
-    let hosts = data["hosts"].as_array().unwrap();
-    assert_eq!(hosts.len(), 3);
-    assert_eq!(hosts[0]["stable_id"], "n-a-silent");
-    assert_eq!(hosts[0]["state"], "probe_failed");
-    assert_eq!(hosts[0]["error"]["code"], "host_not_answering");
-    assert!(hosts[0]["inspection"].is_null());
-    assert_eq!(hosts[2]["stable_id"], "n-z-unreachable");
-    assert_eq!(hosts[2]["state"], "probe_failed");
-    assert_eq!(hosts[2]["error"]["code"], "tailnet_route_unavailable");
-    assert!(hosts[2]["inspection"].is_null());
-    assert_advertisement(&hosts[1]);
-    host.wait_count(1, |event| matches!(event, Event::PeerFinished { .. }));
-    assert_eq!(
-        host.count(|event| matches!(event, Event::ShareEnded { .. })),
-        0
-    );
-    assert!(
-        !host.trace.exists(),
-        "the sweep launched the capture worker"
-    );
+    for round in 1..=3 {
+        let output = run_probe(&fr, &api.path, &host.roots);
+        assert!(
+            output.status.success(),
+            "{} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["outcome"], "success");
+        assert_eq!(report["stage"], "observed");
+        let data = &report["data"];
+        assert_eq!(data["scope"], "tailnet_capability_sweep");
+        assert_eq!(data["discovered"], 3);
+        assert_eq!(data["selected"], 3);
+        assert_eq!(data["omitted"], 0);
+        assert_eq!(data["complete"], true);
+        assert_eq!(data["budget_exhausted"], false);
+        assert_eq!(data["revalidate_on_connect"], true);
+        let hosts = data["hosts"].as_array().unwrap();
+        assert_eq!(hosts.len(), 3);
+        assert_eq!(hosts[0]["stable_id"], "n-a-silent");
+        assert_eq!(hosts[0]["state"], "probe_failed");
+        assert_eq!(hosts[0]["error"]["code"], "host_not_answering");
+        assert!(hosts[0]["inspection"].is_null());
+        assert_eq!(hosts[2]["stable_id"], "n-z-unreachable");
+        assert_eq!(hosts[2]["state"], "probe_failed");
+        assert_eq!(hosts[2]["error"]["code"], "tailnet_route_unavailable");
+        assert!(hosts[2]["inspection"].is_null());
+        assert_advertisement(&hosts[1]);
+        host.wait_count(round, |event| matches!(event, Event::PeerFinished { .. }));
+        assert_eq!(
+            host.count(|event| matches!(event, Event::ShareEnded { .. })),
+            0
+        );
+        assert!(
+            !host.trace.exists(),
+            "the sweep launched the capture worker"
+        );
+        assert_eq!(
+            host.count(|event| matches!(event, Event::Listening { .. })),
+            1,
+            "inspections must retain the original protected listener"
+        );
+    }
 
     // A real later observation consumes the original cold source factory. This
     // also proves the absent trace above was a live launch sentinel, not a

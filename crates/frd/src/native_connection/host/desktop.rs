@@ -73,6 +73,7 @@ struct Completion {
 struct Application<R, N, C> {
     incoming: dispatch::Incoming,
     completion: Arc<Completion>,
+    inspection: Option<dispatch::InspectionCompletion>,
     callbacks: Connections<R, N, C>,
 }
 impl<R, N, C> serial::Application for Application<R, N, C>
@@ -83,6 +84,7 @@ where
 {
     type Output = Result<(), dispatch::Error>;
     fn request(&mut self, attempt: u64) -> Result<Request, serial::Error> {
+        self.inspection = None;
         if self.completion.ending.load(Ordering::Acquire) {
             return Err(serial::Error::Cancelled);
         }
@@ -95,7 +97,16 @@ where
         let peer = self
             .incoming
             .serve_host(host, self.callbacks.approval.clone());
+        self.inspection = peer
+            .as_ref()
+            .ok()
+            .map(dispatch::Peer::inspection_completion);
         async move { peer?.await }
+    }
+    fn cancelled_inspection_completed(&self) -> bool {
+        self.inspection
+            .as_ref()
+            .is_some_and(dispatch::InspectionCompletion::is_complete)
     }
     // A locally stopped share finishes its admitted peer on the way out, so the
     // viewer is told the host is stopping (see `Run::poll_drain`).
@@ -108,6 +119,8 @@ where
         result: PeerResult,
     ) -> Result<serial::Action, serial::Error> {
         self.completion.active.store(false, Ordering::Release);
+        // The listener samples this exact receipt after transport retirement;
+        // the next request clears it before a new peer can be admitted.
         let action = (self.callbacks.completed)(stats, result)?;
         Ok(if self.completion.ending.load(Ordering::Acquire) {
             serial::Action::Stop
@@ -173,6 +186,7 @@ impl LinuxServer {
         let mut application = Application {
             incoming,
             completion: completion.clone(),
+            inspection: None,
             callbacks: connections,
         };
         // Own the unused listener even before serial acceptance is polled.
