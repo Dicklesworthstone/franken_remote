@@ -34,6 +34,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "supervised.rs"]
+mod supervised;
+
 const BINDING: u32 = 73;
 const LEASE: u128 = 2;
 

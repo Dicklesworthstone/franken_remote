@@ -279,6 +279,7 @@ jobs:
                   'independent_capture_observes_pcm_expiry_terminal_stop_and_exact_cleanup',
                   'permission_revoked_during_a_native_turn_cannot_publish_queued_pcm',
                   'a_panicking_permission_callback_fences_without_unwinding_through_c',
+                  'session::supervised::real_supervised_microphone_reaches_a_host_consumer_and_original_owner_drop_silences_it',
               ],
               'host_microphone': [
                   'independent_consent_exact_scope_and_native_profile_precede_every_child',

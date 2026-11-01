@@ -431,3 +431,49 @@ The codec child deliberately clears its environment. Its installed image must
 resolve the qualified protected native library itself; a parent-only
 `LD_LIBRARY_PATH` does not establish that property. Test-only isolated library
 paths must not be mistaken for a shipping installation policy.
+
+
+### Supervised host-consumer delivery and native graph cadence
+
+The native source requests `512/48000` graph latency. The previously requested
+`480/48000` is rounded down to a 256-frame quantum by the qualified PipeWire
+1.0.5 default power-of-two policy, so it requested roughly 5.3 ms in practice.
+The [pinned graph scheduler](https://github.com/PipeWire/pipewire/blob/1.0.5/src/pipewire/context.c)
+applies `flp2` after selecting the latency. A 512-frame suggestion requests the
+intended approximately 10-ms cadence without forcing or locking the shared
+host graph. This is a real native profile choice, not permission to assume a
+512-frame clock: every actual graph interval, clock identity, discontinuity,
+queue bound, final publication check and original 100-ms packet ceiling remains
+independently enforced. A different consumer or host policy can still select a
+different quantum, which must pass those same checks.
+
+On November 1, 2026, the unchanged 480-frame profile delivered the direct 10-ms
+fixture but a direct 20-ms run stopped at the strict stale-snapshot check
+(native code 7, 514 elapsed samples against a 512-sample bound). A subsequent
+supervised run ended during initial silent graph service. These are retained
+negative results; no assertion, deadline, or native guard was relaxed.
+
+With the corrected latency suggestion, the complete exact-source PipeWire test
+binary passed all 16 cases with native cases explicitly enabled. The two direct
+Opus durations each produced 148,800 independently verified 500-Hz samples.
+The original-controller revoke, owner-drop, microphone-only stop, frozen-codec,
+raw-source expiry, and permission-panic cases also passed.
+
+The new `session::supervised` case feeds actual Opus records through the daemon's
+exact `microphone_process` implementation and its two separately owned native
+children, into a real virtual source selected by an independent `pw-cat` host
+consumer. Original controller renewals sustain the same children beyond the
+initial authority cap. The case then drops that original input owner with a
+fresh final tone queued for native admission, observes both real OS reaping receipts
+without another
+process/network service turn, and requires the terminal reason to be original
+authority revocation. Independent recording observed 185,344 frames, including
+144,000 matching the 500-Hz spectral oracle, a zero final-quarter-second peak,
+and removal of the exact source. Stop receipts remain complete after repeated
+terminal requests.
+
+The recorded signal and input establishment are fixtures. This is evidence of
+actual supervised host-application delivery and original-owner withdrawal; it
+does not establish physical client microphone permission, the complete network
+path, public talk controls, or capture-to-application latency. Native queue
+submission counters remain distinct from independently recorded audio.

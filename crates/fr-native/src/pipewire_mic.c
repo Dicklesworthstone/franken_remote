@@ -538,7 +538,12 @@ int fr_pipewire_mic_new(int fd, const char *name, uint32_t channels,
         PW_KEY_MEDIA_ROLE, "Communication",
         PW_KEY_MEDIA_CLASS, "Audio/Source",
         PW_KEY_NODE_VIRTUAL, "true",
-        PW_KEY_NODE_LATENCY, "480/48000",
+        /* The qualified 1.0.5 graph floors latency suggestions to a power
+         * of two. Asking for 480 selects 256 (5.3 ms), not the intended
+         * approximately 10-ms native cadence. Suggest 512 without forcing
+         * or locking the shared graph; actual timing and all original packet
+         * expiry/publication guards remain independently checked. */
+        PW_KEY_NODE_LATENCY, "512/48000",
         PW_KEY_OBJECT_LINGER, "false",
         "node.autoconnect", "false",
         "stream.dont-remix", "true", NULL);
