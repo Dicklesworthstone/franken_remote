@@ -6,8 +6,11 @@
 //! when the caller stops polling. A terminal private channel also withdraws the
 //! child's permission; no request, replacement or retained batch can revive it.
 //! Process separation contains native hangs/crashes, not a same-user sandbox.
-//! There is no network attachment, default source, automatic enable or runtime.
+//! The optional network coordinator retains the original authenticated attachment.
+//! There is no default source or automatic enable.
 pub mod child;
+#[cfg(feature = "linux-microphone-uplink")]
+pub mod network;
 mod protocol;
 mod supervisor;
 pub mod transmit;

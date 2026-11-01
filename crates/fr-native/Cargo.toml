@@ -11,6 +11,7 @@ fr-client = { workspace = true, optional = true }
 fr-files = { workspace = true, optional = true }
 fr-core.workspace = true
 fr-media.workspace = true
+fr-transport = { workspace = true, optional = true }
 fr-wire.workspace = true
 frd = { workspace = true, optional = true }
 asupersync = { workspace = true, optional = true }
@@ -48,6 +49,8 @@ linux-pulse-playback = ["linux-audio-playout"]
 linux-microphone-capture = ["linux-pulse-playback"]
 # Per-session, explicitly selected microphone capture in a supervised child.
 linux-microphone-process = ["linux-microphone-capture"]
+# Original authenticated uplink, independent of public CLI capability offers.
+linux-microphone-uplink = ["linux-microphone-process", "dep:fr-transport", "dep:asupersync"]
 # Explicit native virtual source; no CLI/GUI, capture, runtime or default enable.
 linux-pipewire-mic = []
 # Bound uplink Opus, isolated decoding and actual virtual-source graph demand.
