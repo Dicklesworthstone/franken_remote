@@ -129,3 +129,9 @@ required-features = ["linux-opus-process"]
 name = "fr-audio-worker"
 path = "src/bin/audio_worker.rs"
 required-features = ["linux-microphone-process"]
+
+# Host virtual microphone device; its containing supervisor owns the Opus sibling.
+[[bin]]
+name = "fr-microphone-worker"
+path = "src/bin/microphone_worker.rs"
+required-features = ["linux-microphone-playout"]

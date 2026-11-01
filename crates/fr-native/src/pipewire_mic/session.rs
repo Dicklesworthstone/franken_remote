@@ -407,11 +407,30 @@ impl Receiver {
     /// `arrived` is the ORIGINAL local application receipt before every inbox.
     /// The existing `Uplink` keeps its inclusive 100ms expiry through jitter,
     /// decode and actual graph submission. A later dequeue never supplies now.
-    /// The transport coordinator must preserve any shorter negotiated expiry.
+    /// Use `receive_record_until` when transport custody has a shorter expiry.
     pub fn receive_record_at(
         &mut self,
         bytes: &[u8],
         arrived: Instant,
+    ) -> Result<ReceiveResult, Error> {
+        self.receive(bytes, arrived, None)
+    }
+    /// Carry the exact earlier transport deadline across the worker handoff.
+    /// The underlying owner retains the minimum of this bound and the original
+    /// receipt's 100ms ceiling through jitter, decode and native submission.
+    pub fn receive_record_until(
+        &mut self,
+        bytes: &[u8],
+        arrived: Instant,
+        expires: Instant,
+    ) -> Result<ReceiveResult, Error> {
+        self.receive(bytes, arrived, Some(expires))
+    }
+    fn receive(
+        &mut self,
+        bytes: &[u8],
+        arrived: Instant,
+        earlier_expiry: Option<Instant>,
     ) -> Result<ReceiveResult, Error> {
         // A bound stop fences without sampling the clock or waiting for renewed
         // authority. Permission loss must never delay this terminal operation.
@@ -428,9 +447,13 @@ impl Receiver {
             return Err(Error::Configuration);
         }
         let control = self.control();
-        let result = self
-            .uplink
-            .receive_record_at(bytes, arrived, || control.permitted());
+        let result = if let Some(expires) = earlier_expiry {
+            self.uplink
+                .receive_record_until(bytes, arrived, expires, || control.permitted())
+        } else {
+            self.uplink
+                .receive_record_at(bytes, arrived, || control.permitted())
+        };
         self.result(result)
     }
     pub fn service(&mut self) -> Result<RenderResult, Error> {

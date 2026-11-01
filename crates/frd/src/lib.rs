@@ -20,6 +20,10 @@ pub mod input_agent;
 #[cfg(target_os = "linux")]
 pub mod input_process;
 
+// Original controller-bound virtual microphone with two supervised native children.
+#[cfg(target_os = "linux")]
+pub mod microphone_process;
+
 pub mod session_agent;
 
 pub mod status;

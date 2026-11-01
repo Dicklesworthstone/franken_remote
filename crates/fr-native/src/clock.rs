@@ -48,7 +48,10 @@ pub(crate) fn stamp_ns(at: std::time::Instant) -> Option<u64> {
 
 /// Translate an original child's absolute instant back without renewing it.
 /// Local time is sampled FIRST, so this conversion can only shorten lifetime.
-#[cfg(feature = "linux-microphone-process")]
+#[cfg(any(
+    feature = "linux-microphone-process",
+    feature = "linux-microphone-playout"
+))]
 pub(crate) fn local_instant(at_ns: u64) -> Option<std::time::Instant> {
     let local = std::time::Instant::now();
     let raw = monotonic_ns()?;

@@ -250,25 +250,56 @@ jobs:
           python3 - <<'PYTHON'
           import json, os, subprocess
           from pathlib import Path
-          binaries = []
+          root = Path.cwd()
+          targets = {
+              'pipewire_microphone': root / 'crates/fr-native/tests/pipewire_microphone.rs',
+              'host_microphone': root / 'crates/frd/tests/microphone_process.rs',
+          }
+          binaries = {name: [] for name in targets}
+          workers = {'fr-microphone-worker': [], 'fr-opus-worker': []}
           for line in Path(os.environ['RUNNER_TEMP'], 'pipewire-test.json').read_text().splitlines():
               row = json.loads(line)
-              if (row.get('reason') == 'compiler-artifact'
-                      and row.get('profile', {}).get('test')
-                      and row.get('target', {}).get('name') == 'pipewire_microphone'
-                      and row.get('executable')):
-                  binaries.append(os.path.abspath(row['executable']))
-          assert len(binaries) == 1, 'one exact native microphone test binary required'
-          listed = subprocess.check_output([binaries[0], '--list'], text=True)
-          for test in [
-              'permission_and_server_choice_are_explicit_before_native_setup',
-              'independent_capture_observes_pcm_expiry_terminal_stop_and_exact_cleanup',
-              'permission_revoked_during_a_native_turn_cannot_publish_queued_pcm',
-              'a_panicking_permission_callback_fences_without_unwinding_through_c',
-          ]:
-              assert listed.splitlines().count(f'{test}: test') == 1, f'native microphone regression must be present: {test}'
-          subprocess.run([binaries[0], '--include-ignored', '--test-threads=1', '--nocapture'],
-              check=True, timeout=120)
+              if row.get('reason') != 'compiler-artifact' or not row.get('executable'):
+                  continue
+              target = row.get('target', {})
+              executable = os.path.abspath(row['executable'])
+              if row.get('profile', {}).get('test'):
+                  for name, source in targets.items():
+                      if Path(target.get('src_path', '')).resolve() == source.resolve():
+                          binaries[name].append(executable)
+              elif target.get('name') in workers and 'bin' in target.get('kind', []):
+                  workers[target['name']].append(executable)
+          for name, paths in {**binaries, **workers}.items():
+              assert len(set(paths)) == 1, f'one exact native microphone artifact required: {name}'
+          required = {
+              'pipewire_microphone': [
+                  'permission_and_server_choice_are_explicit_before_native_setup',
+                  'independent_capture_observes_pcm_expiry_terminal_stop_and_exact_cleanup',
+                  'permission_revoked_during_a_native_turn_cannot_publish_queued_pcm',
+                  'a_panicking_permission_callback_fences_without_unwinding_through_c',
+              ],
+              'host_microphone': [
+                  'independent_consent_exact_scope_and_native_profile_precede_every_child',
+                  'original_controller_drop_reaps_both_real_siblings_and_removes_exact_source_while_idle',
+                  'failed_original_route_admission_never_arms_output_and_reaps_both_children',
+                  'frozen_device_is_bounded_by_parent_health_and_both_siblings_are_actually_reaped',
+                  'frozen_codec_is_reaped_on_idle_authority_loss_and_old_fences_cannot_stop_replacement',
+                  'malformed_owned_record_and_future_original_receipt_are_terminal',
+              ],
+          }
+          failed = []
+          for name, paths in binaries.items():
+              listed = subprocess.check_output([paths[0], '--list'], text=True)
+              for test in required[name]:
+                  assert listed.splitlines().count(f'{test}: test') == 1, f'native microphone regression must be present: {test}'
+              env = dict(os.environ,
+                  FR_TEST_MICROPHONE_WORKER=workers['fr-microphone-worker'][0],
+                  FR_TEST_OPUS_WORKER=workers['fr-opus-worker'][0])
+              result = subprocess.run([paths[0], '--include-ignored', '--test-threads=1', '--nocapture'],
+                  env=env, timeout=120)
+              if result.returncode:
+                  failed.append(name)
+          assert not failed, f'native microphone regressions failed: {failed}'
           PYTHON
       - name: Examples
         id: examples

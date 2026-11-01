@@ -21,6 +21,7 @@ const CONFIG_BYTES: usize = 28;
 pub mod audio;
 pub mod capture;
 pub mod cursor;
+pub mod microphone;
 pub mod overlay;
 pub mod presentation;
 pub mod presentation_snapshot;

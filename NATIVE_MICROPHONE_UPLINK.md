@@ -119,13 +119,63 @@ Requested stop, physical graph removal and child reaping are separate facts.
 `Receiver::state` reports native endpoint state as updated by its worker;
 `Control::is_stopped` reports the policy fence. The native worker must service or
 drop the receiver to destroy the endpoint, and the decoder retirement receipt
-reports actual reaping. The PipeWire owner still needs outer process supervision
-before integration into the daemon; this API does not claim to stop a stalled
-foreign call by itself. This receiver is an in-process native composition,
-not the future child IPC contract. The daemon now has the pure original-controller
-handoff; a child supervisor must retain it and pass bounded expiry/revocation
-envelopes to a native child. It must not load `fr-native` or reconstruct an
-`InputSession` in that child to use this API.
+reports actual reaping. The in-process `Receiver` does not itself stop a stalled foreign call. The
+supervised daemon composition below instead retains the pure original-controller
+projection and passes bounded expiry/revocation envelopes to a separate native
+device child. The daemon never loads `fr-native` or reconstructs an `InputSession`
+in that child.
+
+## Supervised host device and codec
+
+`frd::microphone_process::Process` owns one explicitly approved uplink epoch.
+It validates the original `HostController`, independent microphone approval,
+positive uplink selection, completed attachment metadata and exact configuration
+before launching native work. `Launch` accepts only explicit local absolute
+paths for the installed `fr-microphone-worker`, `fr-opus-worker` and PipeWire
+socket. No source, default device or public capability is selected implicitly.
+
+A bounded supervisor thread owns both actual OS child handles. The device and
+sandboxed codec are siblings: the device uses `Uplink<SocketDecoder>` and cannot
+spawn an unobserved codec grandchild. Their command, codec and terminal-revoke
+sockets are separate. The device installs parent-death binding before native
+setup; both images start with a cleared environment. The daemon contains only
+pure policy, framing and process supervision, with no native audio dependency
+or second async runtime.
+
+Configuration has two distinct acknowledgment stages. The private child reply
+proves actual codec readiness and a selectable virtual source. The parent checks
+its exact `AudioConfigured` bytes against the offer, then invokes the original
+route's admission callback once. Only successful network admission followed by
+a fresh authority check permits the private `Commit`. Packet admission opens
+only after the matching commit reply; failed, panicking or unknown admission
+fences the original owner. This is transport admission, not remote delivery or
+proof that an application heard sound.
+
+The supervisor checks the original controller while idle and during every
+exchange. Renewed worker authority must be acknowledged before the predecessor
+cap and the fixed exchange expiry. The device retains that earlier bound while
+its reply is pending, checks it inside native service, and checks again after
+the final reply write. A delayed exchange cannot revive an expired worker.
+Local microphone stop closes the dedicated revoke gate without revoking input.
+Original-owner loss, malformed admitted records, native failure, closed IPC and
+stalled exchanges all retire the same epoch; there is no automatic restart.
+
+One packet may be queued or awaiting collection at a time. Its original local
+receipt and earlier expiry are converted conservatively to the same-boot clock
+before entering that inbox. The device uses `receive_record_until`, retaining
+the smaller transport cap through jitter, codec and native PCM custody. Health
+polls and controller renewals never retime old audio. Snapshot counters report
+bounded local custody and exact node identity, not audible delivery.
+
+At most four supervisors are admitted globally, including cancelled owners
+whose children have not been reaped. Retirement signals both children before
+waiting for either and records each actual OS wait separately. `Retirement`
+distinguishes not-started, running, reaped and unresolved children; socket EOF,
+a stop request or a missing graph node is not a reaping receipt. An unresolved
+wait retains its admission slot. Read-only child IDs are copied from the original
+OS handles and kept as diagnostic metadata; stop and reaping never act on a
+caller-supplied PID. The original controller and separate local approval remain
+mandatory when integrating this owner into the network session.
 
 ## Native graph demand and independent clocks
 
@@ -181,7 +231,10 @@ before a bounded worker inbox. This is not a remote wall clock or the dequeue
 time. The 100 ms receipt budget includes jitter retention and decoder work;
 it is not a claim about physical capture latency or network transit time.
 Future receipt times are refused. Expired arrivals are ignored without
-refreshing startup or retained work.
+refreshing startup or retained work. `Uplink::receive_record_until` and the
+corresponding `session::Receiver` method also accept an earlier explicit
+transport expiry. The accepted deadline is the minimum of that bound and the
+original receipt's 100 ms ceiling; matching bound stop still fences first.
 
 `QuicRecords::receive_ready_with_receipts` exposes each datagram's original
 application receipt and inclusive expiry as immutable `DatagramReceipt`
@@ -313,6 +366,36 @@ that sustained playout is reliable on this runner. The tests and content-free
 failure evidence are retained for qualification on the target native graph.
 Public microphone offers remain disabled.
 
+### Supervised sibling-process coverage
+
+All six parent tests passed against the exact production parent module; five
+launched the actual standalone device and sandboxed codec. They establish real
+native readiness, exact route-acknowledgment ordering, bounded packet custody,
+terminal malformed/future-receipt refusal, idle original-controller revocation,
+frozen-device timeout, frozen-codec retirement and equal-ID replacement
+isolation. Both original child handles were actually waited for, and independent
+`pw-dump` queries verified the same source's presence before each lifecycle
+trigger and absence afterward. Owner-drop cases attributed retirement to
+`Revoked`, within 500 ms and before the saved original authority deadline.
+
+All 17 private IPC tests passed, covering bounded body/header parsing, exact
+scope and custody matching, partial I/O and original inclusive deadlines. The
+four codec/socket regression tests also passed again, including the actual
+worker's six of six checked tone frames and the PLC sample timeline. Strict media/native library and focused
+harness Clippy passed. These tests use controller policy fixtures and a route
+admission callback fixture; the new lifecycle cases deliberately have no audio
+consumer. They qualify process ownership and cleanup, not sustained audible
+playout or a complete authenticated network session.
+
+The isolated test images resolve verified native libraries through a test-only
+RPATH. A local device launcher supplies the verified extracted PipeWire module
+and configuration paths, then execs the actual device image in the same PID.
+Production does not forward that environment or use the test launcher. The
+existing native CI step also runs the new parent suite using exact worker
+artifacts from its all-feature build. Full workspace/runtime compilation remains
+blocked locally by the available build resources; no complete workspace result
+is inferred from the focused harness.
+
 ## Qualification commands
 
 The native integration tests use a private PipeWire daemon and independent
@@ -324,6 +407,23 @@ cargo test -p fr-native --no-default-features \
   --features linux-microphone-playout --test pipewire_microphone --locked -- \
   --include-ignored --test-threads=1 --nocapture
 ```
+
+The separate supervisor suite takes explicit absolute paths to the installed
+worker images. With Cargo's default target directory, build and run it with:
+
+```sh
+cargo build -p fr-native --no-default-features \
+  --features linux-microphone-playout \
+  --bin fr-microphone-worker --bin fr-opus-worker --locked
+FR_TEST_MICROPHONE_WORKER="$PWD/target/debug/fr-microphone-worker" \
+FR_TEST_OPUS_WORKER="$PWD/target/debug/fr-opus-worker" \
+cargo test -p frd --test microphone_process --locked -- \
+  --include-ignored --test-threads=1 --nocapture
+```
+
+Adjust the two absolute image paths when using another target or installation
+directory. The tests fail on missing native dependencies; they do not silently
+skip a requested native run.
 
 Required native packages include PipeWire, its standard modules and tools,
 Python 3, and a qualified libopus with the required decoder-complexity control.

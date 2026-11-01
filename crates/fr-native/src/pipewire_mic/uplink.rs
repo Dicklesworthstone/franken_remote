@@ -371,6 +371,29 @@ impl<D: UplinkDecoder> Uplink<D> {
         &mut self,
         bytes: &[u8],
         arrived: Instant,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<ReceiveResult, Error> {
+        self.receive(bytes, arrived, None, permitted)
+    }
+
+    /// Preserve an earlier original transport expiry through jitter, decoder
+    /// custody and native PCM. Neither this worker dequeue nor a later authority
+    /// renewal may extend it; the ordinary 100-ms ceiling still applies.
+    pub fn receive_record_until(
+        &mut self,
+        bytes: &[u8],
+        arrived: Instant,
+        expires: Instant,
+        permitted: impl FnMut() -> bool,
+    ) -> Result<ReceiveResult, Error> {
+        self.receive(bytes, arrived, Some(expires), permitted)
+    }
+
+    fn receive(
+        &mut self,
+        bytes: &[u8],
+        arrived: Instant,
+        earlier_expiry: Option<Instant>,
         mut permitted: impl FnMut() -> bool,
     ) -> Result<ReceiveResult, Error> {
         if let Ok(stop) = audio::decode_stop(bytes, self.binding)
@@ -409,7 +432,11 @@ impl<D: UplinkDecoder> Uplink<D> {
             if arrived > now {
                 return Err(Error::Clock);
             }
-            let expires = arrived.checked_add(MAX_AGE).ok_or(Error::Clock)?;
+            let ceiling = arrived.checked_add(MAX_AGE).ok_or(Error::Clock)?;
+            let expires = earlier_expiry.map_or(ceiling, |expiry| expiry.min(ceiling));
+            if expires <= arrived {
+                return Err(Error::Clock);
+            }
             if now >= expires {
                 return Ok(ReceiveResult::Ignored);
             }

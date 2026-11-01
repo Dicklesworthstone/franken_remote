@@ -29,6 +29,8 @@ use std::{
 mod demand;
 pub use demand::Demand;
 #[cfg(feature = "linux-microphone-playout")]
+pub mod process;
+#[cfg(feature = "linux-microphone-playout")]
 pub mod session;
 #[cfg(feature = "linux-microphone-playout")]
 pub mod uplink;
