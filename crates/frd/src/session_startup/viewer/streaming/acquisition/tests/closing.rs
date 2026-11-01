@@ -11,10 +11,25 @@ use std::ops::ControlFlow;
 
 async fn settled(c: &Cx, h: &Cx) -> Fixture {
     let mut f = Box::pin(fixture(c, h)).await;
-    // Retire ordinary attachment/clock ACK work before terminal custody.
-    for _ in 0..4 {
+    // A fixed number of drive turns is not proof that native retransmission
+    // custody ended. The terminal report must not flush old application data.
+    // Drain ordinary setup work BEFORE closing, under one fixed fixture bound.
+    let until = now(c).unwrap() + 500_000;
+    let mut nonce = 91_000_u128;
+    for _ in 0..500 {
+        assert!(
+            now(c).unwrap() < until,
+            "setup records were not acknowledged"
+        );
         let (host, viewer) = Box::pin(support::both(
-            f.host.drive(Duration::from_millis(1), || Ok(91_001), block),
+            f.host.drive(
+                Duration::from_millis(1),
+                || {
+                    nonce += 1;
+                    Ok(nonce)
+                },
+                block,
+            ),
             f.stream
                 .peer
                 .parts()
@@ -25,8 +40,16 @@ async fn settled(c: &Cx, h: &Cx) -> Fixture {
         .await;
         host.unwrap();
         viewer.unwrap();
+        let host = f.host.io().unwrap().0.usage();
+        let viewer = f.stream.peer.parts().unwrap().0.io().unwrap().0.usage();
+        if [host, viewer]
+            .into_iter()
+            .all(|usage| usage.retained_send_records == 0 && usage.retained_send_upper_bound == 0)
+        {
+            return f;
+        }
     }
-    f
+    panic!("setup records were not acknowledged within the bounded turn count")
 }
 
 fn arm(host: &mut HostSession, cleanup: &Cx) -> ClosedReport {
@@ -82,6 +105,88 @@ async fn reap(stream: &mut StreamingViewer, cleanup: &Cx) {
 }
 
 #[test]
+fn prepared_clock_enabled_close_keeps_only_terminal_io_live_until_original_guard_drop() {
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let mut f = Box::pin(settled(&c, &h)).await;
+        // Exercise the same original teardown guard and preparation primitive
+        // used by disconnect_unrequested, with its actual negotiated scope.
+        let ending = Operation {
+            viewer: &mut f.stream,
+        };
+        let (session, _) = ending.viewer.peer.parts().unwrap();
+        super::super::validate(session, &f.channels, f.request).unwrap();
+        assert!(session.clock_correlation().unwrap().is_some());
+        let prepared = session.begin_disconnect_before_control(Reason::Requested);
+        assert!(session.is_closed(), "ordinary session admission is fenced");
+        assert!(session.transport.is_closed());
+        assert_eq!(
+            session.transport.tick(&c, || true),
+            Err(quic::Error::Closed)
+        );
+        assert!(
+            c.checkpoint().is_ok(),
+            "stopping the clock must not cancel the original closing context"
+        );
+        drop(prepared);
+        drop(ending);
+        assert!(c.checkpoint().is_err());
+        assert!(f.stream.disconnect_outcome().is_none());
+        reap(&mut f.stream, &cleanup).await;
+    });
+}
+
+#[test]
+fn ordinary_session_reentry_refuses_and_cancels_the_prepared_close() {
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let mut f = Box::pin(settled(&c, &h)).await;
+        let ending = Operation {
+            viewer: &mut f.stream,
+        };
+        let (session, _) = ending.viewer.peer.parts().unwrap();
+        super::super::validate(session, &f.channels, f.request).unwrap();
+        let prepared = session.begin_disconnect_before_control(Reason::Requested);
+        assert!(c.checkpoint().is_ok());
+        assert_eq!(
+            session.io().err(),
+            Some(crate::session_startup::Error::Closed)
+        );
+        assert!(c.checkpoint().is_err());
+        assert_eq!(
+            prepared.await.unwrap().transport,
+            Err(quic::Error::Cancelled)
+        );
+        drop(ending);
+        reap(&mut f.stream, &cleanup).await;
+    });
+}
+
+#[test]
+fn the_original_external_stop_still_cancels_a_prepared_clock_enabled_close() {
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let mut f = Box::pin(settled(&c, &h)).await;
+        let ending = Operation {
+            viewer: &mut f.stream,
+        };
+        let (session, _) = ending.viewer.peer.parts().unwrap();
+        super::super::validate(session, &f.channels, f.request).unwrap();
+        let stop = session.control();
+        let prepared = session.begin_disconnect_before_control(Reason::Requested);
+        assert!(c.checkpoint().is_ok());
+        stop.stop();
+        assert!(c.checkpoint().is_err());
+        assert_eq!(
+            prepared.await.unwrap().transport,
+            Err(quic::Error::Cancelled)
+        );
+        drop(ending);
+        reap(&mut f.stream, &cleanup).await;
+    });
+}
+
+#[test]
 fn unrequested_interactive_viewing_closes_on_the_original_session_without_a_lease() {
     for reason in [ClosedReason::ClientRequested, ClosedReason::PermissionLost] {
         run(|c, h| async move {
@@ -120,6 +225,10 @@ fn unrequested_interactive_viewing_closes_on_the_original_session_without_a_leas
             let InteractiveCloseOutcome::Viewing(outcome) = outcome.unwrap() else {
                 panic!("advertisement cannot fabricate a granted controller");
             };
+            assert!(
+                c.checkpoint().is_err(),
+                "completed teardown cancels its original context"
+            );
             assert_eq!(sent, Some(Ok(())));
             assert_eq!(outcome.transport, Ok(()));
             assert_eq!(

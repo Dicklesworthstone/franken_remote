@@ -122,9 +122,10 @@ impl super::ViewerSession {
         // immutable transport guard continue to cancel that exchange normally.
         self.closed = true;
         self.responder.stop();
-        if let Some(clock) = &mut self.clock {
-            clock.stop();
-        }
+        // The closed session cannot service its retained clock again. Stopping
+        // ClockSync here would also cancel this SAME context before terminal
+        // I/O starts. The caller's original teardown guard stops it on exchange
+        // completion, refusal or abandonment, along with the rest of the owner.
         let prepared = ready.map(|until| {
             Box::pin(self.transport.close_with_request(
                 &self.cx,
