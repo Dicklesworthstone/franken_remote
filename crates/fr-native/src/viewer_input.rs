@@ -10,6 +10,7 @@
 //! Physical Ctrl+Alt+Shift+Escape is always a local stop, including when remote
 //! keyboard input was not negotiated. Its entire native batch is withheld. The
 //! host agent still owns release of previously submitted remote modifiers.
+pub(crate) mod display_switch;
 mod escape;
 mod file_keys;
 mod held;
@@ -74,6 +75,7 @@ unsafe extern "C" {
     fn fr_viewer_input_close(handle: *mut c_void);
     fn fr_viewer_input_barrier(handle: *mut c_void) -> c_int;
     fn fr_viewer_input_next(handle: *mut c_void, event: *mut Raw) -> c_int;
+    fn fr_viewer_input_display_switch(handle: *mut c_void, enabled: c_int) -> c_int;
 }
 
 /// Physical window size is fixed for this capture generation. Configure and
@@ -141,9 +143,20 @@ struct Shared {
     files: OnceLock<frd::native_files::SendControl>,
     file_keymap: AtomicU8,
     system_shortcuts: bool,
+    #[cfg(feature = "linux-viewer-window")]
+    window: Window,
+    #[cfg(feature = "linux-viewer-window")]
+    display_switch: OnceLock<crate::viewer_window::WindowControl>,
 }
 impl Shared {
     fn stop(&self, reason: StopReason) {
+        #[cfg(feature = "linux-viewer-window")]
+        if self.state.first_stop().is_none()
+            && !matches!(reason, StopReason::Local | StopReason::Closed)
+            && let Some(window) = self.display_switch.get()
+        {
+            window.cancel_display_switch();
+        }
         // Reserve the diagnostic cause before the fence wakes session cleanup.
         // Publish Stopped only after the original viewer has actually fenced.
         self.state.stop(reason, || self.control.stop());
@@ -157,6 +170,18 @@ impl CaptureControl {
     }
     pub fn status(&self) -> Status {
         state(self.0.state.load())
+    }
+    /// Bind the original capture to its exact local renderer's one-use switch
+    /// intent. No peer data, replacement window or second input owner is used.
+    #[cfg(feature = "linux-viewer-window")]
+    fn enable_display_switch(&self, window: &crate::viewer_window::WindowControl) -> bool {
+        self.0.state.load() < 2
+            && window.input_window().is_ok_and(|target| {
+                target.id == self.0.window.id
+                    && target.width == self.0.window.width
+                    && target.height == self.0.window.height
+            })
+            && self.0.display_switch.set(window.clone()).is_ok()
     }
     fn first_stop_after_fence(&self) -> Option<StopReason> {
         // A reservation alone is not an input fence. The Source's actual
@@ -266,6 +291,26 @@ impl X11InputCapture {
         layout: Layout,
         system_shortcuts: bool,
     ) -> Result<Self, Error> {
+        Self::start_bound(
+            display,
+            window,
+            source,
+            layout,
+            system_shortcuts,
+            #[cfg(feature = "linux-viewer-window")]
+            None,
+        )
+    }
+    fn start_bound(
+        display: &str,
+        window: Window,
+        source: Source,
+        layout: Layout,
+        system_shortcuts: bool,
+        #[cfg(feature = "linux-viewer-window")] display_switch: Option<
+            &crate::viewer_window::WindowControl,
+        >,
+    ) -> Result<Self, Error> {
         if !local_display(display) {
             return Err(Error::InvalidDisplay);
         }
@@ -280,7 +325,21 @@ impl X11InputCapture {
             files: OnceLock::new(),
             file_keymap: AtomicU8::new(0),
             system_shortcuts,
+            #[cfg(feature = "linux-viewer-window")]
+            window,
+            #[cfg(feature = "linux-viewer-window")]
+            display_switch: OnceLock::new(),
         }));
+        // The native producer must never export a first batch before its local
+        // command binding exists. This is construction-time wiring, not a live
+        // toggle after attachment or a second capture owner.
+        #[cfg(feature = "linux-viewer-window")]
+        if let Some(window) = display_switch
+            && !control.enable_display_switch(window)
+        {
+            control.0.stop(StopReason::NativeFailure);
+            return Err(Error::InvalidWindow);
+        }
         let shared = control.0.clone();
         let task = thread::Builder::new()
             .name("fr-viewer-input".into())
@@ -332,6 +391,27 @@ impl X11InputCapture {
     ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
         Self::attach_mode(viewer, display, window, layout, true)
     }
+    /// Install this exact window's local display-change command BEFORE the
+    /// original capture thread can run. The ordinary system-shortcut choice
+    /// remains explicit; this adds no control grant or automatic new selection.
+    #[cfg(feature = "linux-viewer-window")]
+    pub fn attach_with_display_switch(
+        viewer: &mut frd::session_startup::ControlledViewer,
+        display: &str,
+        window: Window,
+        layout: Layout,
+        system_shortcuts: bool,
+        display_switch: &crate::viewer_window::WindowControl,
+    ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
+        Self::attach_bound(
+            viewer,
+            display,
+            window,
+            layout,
+            system_shortcuts,
+            Some(display_switch),
+        )
+    }
     fn attach_mode(
         viewer: &mut frd::session_startup::ControlledViewer,
         display: &str,
@@ -339,11 +419,39 @@ impl X11InputCapture {
         layout: Layout,
         system_shortcuts: bool,
     ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
+        Self::attach_bound(
+            viewer,
+            display,
+            window,
+            layout,
+            system_shortcuts,
+            #[cfg(feature = "linux-viewer-window")]
+            None,
+        )
+    }
+    fn attach_bound(
+        viewer: &mut frd::session_startup::ControlledViewer,
+        display: &str,
+        window: Window,
+        layout: Layout,
+        system_shortcuts: bool,
+        #[cfg(feature = "linux-viewer-window")] display_switch: Option<
+            &crate::viewer_window::WindowControl,
+        >,
+    ) -> Result<CaptureControl, frd::session_startup::viewer_events::CaptureStartError<Error>> {
         let mut control = None;
         let mut local = None;
         let attached = viewer.capture_input_owned(&layout.clone(), |source| {
             let fence = source.control();
-            let mut capture = Self::start_mode(display, window, source, layout, system_shortcuts)?;
+            let mut capture = Self::start_bound(
+                display,
+                window,
+                source,
+                layout,
+                system_shortcuts,
+                #[cfg(feature = "linux-viewer-window")]
+                display_switch,
+            )?;
             control = Some(capture.control());
             // The remote cursor's local owner (plan §11.4) shares this
             // attachment's lifetime; failing to start it only leaves the
@@ -459,6 +567,15 @@ trait Target {
     }
     fn file_shortcut_map(&self, _available: bool) {}
     fn file_command(&self, _command: file_keys::Command) {}
+    fn display_switch_scope(&self) -> Option<display_switch::Scope> {
+        None
+    }
+    fn request_display_switch(&self, _scope: display_switch::Scope, _at: ClientInstant) -> bool {
+        false
+    }
+    fn display_switch_pending(&self) -> Option<std::time::Instant> {
+        None
+    }
     /// Fence the original input owner before any native cleanup can run.
     fn stop(&self, reason: StopReason);
 }
@@ -467,6 +584,37 @@ struct NativeTarget {
     shared: Arc<Shared>,
 }
 impl Target for NativeTarget {
+    #[cfg(feature = "linux-viewer-window")]
+    fn display_switch_scope(&self) -> Option<display_switch::Scope> {
+        self.shared.display_switch.get()?.display_switch_scope()
+    }
+    #[cfg(feature = "linux-viewer-window")]
+    fn request_display_switch(
+        &self,
+        scope: display_switch::Scope,
+        captured: ClientInstant,
+    ) -> bool {
+        let Some(window) = self.shared.display_switch.get() else {
+            return false;
+        };
+        // Anchor before reading the Source clock so suspension between clocks
+        // can only age the gesture, never give the original press a new life.
+        let observed = std::time::Instant::now();
+        let Ok(now) = self.source.clock() else {
+            return false;
+        };
+        let Some(age) = now.0.checked_sub(captured.0) else {
+            return false;
+        };
+        let Some(at) = observed.checked_sub(Duration::from_micros(age)) else {
+            return false;
+        };
+        window.request_display_switch(scope, at)
+    }
+    #[cfg(feature = "linux-viewer-window")]
+    fn display_switch_pending(&self) -> Option<std::time::Instant> {
+        self.shared.display_switch.get()?.display_switch_at()
+    }
     fn file_shortcuts_enabled(&self) -> bool {
         self.shared.files.get().is_some()
     }
@@ -607,24 +755,33 @@ fn run_events(
         system_shortcuts::acquire(native, target)?;
     }
     let mut shortcuts = file_keys::Shortcuts::new(names);
+    let mut display_switch = display_switch::Shortcut::new(names);
     target.file_shortcut_map(shortcuts.is_some());
     let mut decoder = Decoder::new(names, target.capabilities());
     let mut timeline: Option<Timeline> = None;
     let mut sampler = held::Sampler::new(target.clock()?)?;
     loop {
+        let switching = target.display_switch_pending();
+        if switching.is_some_and(|at| at.elapsed() >= display_switch::CLOSE_TIMEOUT) {
+            return Err(StopReason::Expired);
+        }
         // No native traffic with nothing held. Held input gets bounded periodic
         // release-only sampling even when no event arrives (e.g. a lost release).
         // The first dequeued event is retained, never retimestamped as fresh.
-        let first = if timeline.is_some() {
-            await_event(native, target, &decoder, &sampler, shortcuts.as_ref())?
+        let first = if timeline.is_some() && switching.is_none() {
+            await_event(
+                native,
+                target,
+                &decoder,
+                &sampler,
+                shortcuts.as_ref(),
+                display_switch.as_ref(),
+            )?
         } else {
             None
         };
         let before = target.clock()?;
-        let local_held = target.file_shortcuts_enabled()
-            && shortcuts
-                .as_ref()
-                .is_some_and(file_keys::Shortcuts::has_held);
+        let local_held = local_keys_held(target, shortcuts.as_ref(), display_switch.as_ref());
         let sample = timeline.is_some() && sampler.due_with_local(&decoder, local_held, before);
         if sample {
             sampler.begin(native, before)?;
@@ -641,34 +798,44 @@ fn run_events(
         } else {
             None
         };
+        // Park only this native producer while the original desktop performs
+        // its bounded orderly close. Keep observing escape/lifecycle failures;
+        // no triggering batch, repeat or subsequent release is exported.
+        if target.display_switch_pending().is_some() {
+            thread::sleep(TURN);
+            continue;
+        }
         // Inspect the ENTIRE batch for lifecycle changes before admitting any
         // action. Native timestamps retain pre-dequeue age via a server barrier.
         if let Some(timeline) = &mut timeline {
             timeline.barrier(barrier)?;
-            for event in &events[..used] {
-                target.clock()?;
-                if (1..=5).contains(&event.kind) {
-                    let captured_at = timeline.sample(event.time, barrier, before)?;
-                    if let Some(shortcuts) = &mut shortcuts {
-                        match shortcuts.event(*event, target.file_shortcuts_enabled()) {
-                            file_keys::Route::Local(command) => {
-                                if let Some(command) = command {
-                                    target.file_command(command);
-                                }
-                                continue;
-                            }
-                            file_keys::Route::Remote => {}
-                        }
-                    }
-                    if let Some(event) = decoder.event(*event, layout)? {
-                        target.push(event, captured_at)?;
-                    }
-                }
-            }
+            let Some(captured) = captured_batch(
+                &events[..used],
+                timeline,
+                barrier,
+                before,
+                target,
+                display_switch.as_mut(),
+            )?
+            else {
+                thread::sleep(TURN);
+                continue;
+            };
+            dispatch_batch(
+                &events[..used],
+                &captured,
+                layout,
+                target,
+                &mut decoder,
+                shortcuts.as_mut(),
+            )?;
             if let Some(snapshot) = snapshot.filter(|_| held::stable(&events[..used])) {
                 escape.reconcile(&snapshot.keys);
                 if let Some(shortcuts) = &mut shortcuts {
                     shortcuts.reconcile(&snapshot.keys);
+                }
+                if let Some(shortcut) = &mut display_switch {
+                    shortcut.reconcile(&snapshot.keys);
                 }
                 let observed = decoder.reconcile(&snapshot)?;
                 // Later native events occur after this server barrier. Preserve
@@ -677,27 +844,121 @@ fn run_events(
                 target.push(observed, before)?;
             }
         } else {
-            // Input occurring during initialization is never replayed. Refuse a
-            // still-held key/button rather than adopt half a native gesture.
-            for event in &events[..used] {
-                if let Some(shortcuts) = &mut shortcuts {
-                    let _ = shortcuts.event(*event, false);
-                }
-                let _ = decoder.event(*event, layout)?;
-            }
-            if decoder.has_held()
-                || (target.file_shortcuts_enabled()
-                    && shortcuts
-                        .as_ref()
-                        .is_some_and(file_keys::Shortcuts::has_held))
-            {
-                return Err(StopReason::InitialHeld);
-            }
+            initialize_batch(
+                &events[..used],
+                layout,
+                target,
+                &mut decoder,
+                shortcuts.as_mut(),
+                display_switch.as_mut(),
+            )?;
             timeline = Some(Timeline::new(barrier, before));
             target.ready();
         }
         thread::sleep(TURN);
     }
+}
+/// Initialization never replays input or adopts half a native gesture.
+fn initialize_batch(
+    events: &[Raw],
+    layout: &Layout,
+    target: &impl Target,
+    decoder: &mut Decoder,
+    mut shortcuts: Option<&mut file_keys::Shortcuts>,
+    mut display_switch: Option<&mut display_switch::Shortcut>,
+) -> Result<(), StopReason> {
+    for event in events {
+        if matches!(event.kind, 1 | 2)
+            && let Some(shortcut) = &mut display_switch
+        {
+            let _ = shortcut.key(event.detail, event.kind == 1, None, 0);
+        }
+        if let Some(shortcuts) = &mut shortcuts {
+            let _ = shortcuts.event(*event, false);
+        }
+        let _ = decoder.event(*event, layout)?;
+    }
+    if decoder.has_held()
+        || (target.file_shortcuts_enabled()
+            && shortcuts.is_some_and(|shortcuts| shortcuts.has_held()))
+        || (target.display_switch_scope().is_some()
+            && display_switch.is_some_and(|shortcut| shortcut.has_held()))
+    {
+        return Err(StopReason::InitialHeld);
+    }
+    Ok(())
+}
+fn dispatch_batch(
+    events: &[Raw],
+    captured: &CapturedBatch,
+    layout: &Layout,
+    target: &mut impl Target,
+    decoder: &mut Decoder,
+    mut shortcuts: Option<&mut file_keys::Shortcuts>,
+) -> Result<(), StopReason> {
+    for (index, event) in events.iter().enumerate() {
+        if let Some(at) = captured.at[index] {
+            if captured.local[index] {
+                continue;
+            }
+            if let Some(shortcuts) = &mut shortcuts {
+                match shortcuts.event(*event, target.file_shortcuts_enabled()) {
+                    file_keys::Route::Local(command) => {
+                        if let Some(command) = command {
+                            target.file_command(command);
+                        }
+                        continue;
+                    }
+                    file_keys::Route::Remote => {}
+                }
+            }
+            if let Some(event) = decoder.event(*event, layout)? {
+                target.push(event, at)?;
+            }
+        }
+    }
+    Ok(())
+}
+struct CapturedBatch {
+    at: [Option<ClientInstant>; MAX_NATIVE_EVENTS],
+    local: [bool; MAX_NATIVE_EVENTS],
+}
+/// A display change creates later positive work, unlike escape. Validate all
+/// native timestamps before latching intent or exporting a batch companion.
+/// None parks this original producer for its owner's bounded orderly close.
+fn captured_batch(
+    events: &[Raw],
+    timeline: &mut Timeline,
+    barrier: u32,
+    before: ClientInstant,
+    target: &impl Target,
+    mut shortcut: Option<&mut display_switch::Shortcut>,
+) -> Result<Option<CapturedBatch>, StopReason> {
+    let mut captured = CapturedBatch {
+        at: [None; MAX_NATIVE_EVENTS],
+        local: [false; MAX_NATIVE_EVENTS],
+    };
+    let scope = target.display_switch_scope();
+    let mut request = display_switch::BatchIntent::default();
+    for (index, event) in events.iter().enumerate() {
+        target.clock()?;
+        if (1..=5).contains(&event.kind) {
+            let at = timeline.sample(event.time, barrier, before)?;
+            captured.at[index] = Some(at);
+            if matches!(event.kind, 1 | 2)
+                && let Some(shortcut) = &mut shortcut
+            {
+                let route = shortcut.key(event.detail, event.kind == 1, scope, at.0);
+                captured.local[index] = route.local;
+                request.key(route);
+            }
+        }
+    }
+    let request = request.finish(shortcut.as_deref());
+    Ok((!request.is_some_and(|gesture| {
+        target.request_display_switch(gesture.scope, ClientInstant(gesture.captured))
+    }))
+    .then_some(captured))
 }
 fn batch(
     native: &Native,
@@ -759,16 +1020,30 @@ fn await_event(
     decoder: &Decoder,
     sampler: &held::Sampler,
     shortcuts: Option<&file_keys::Shortcuts>,
+    display_switch: Option<&display_switch::Shortcut>,
 ) -> Result<Option<Raw>, StopReason> {
     loop {
         target.clock()?;
+        // SAFETY: original capture connection; only its own existing shortcut
+        // title changes, and an unchanged value makes no X request.
+        if unsafe {
+            fr_viewer_input_display_switch(
+                native.0.as_ptr(),
+                c_int::from(target.display_switch_scope().is_some()),
+            )
+        } == 0
+        {
+            return Err(StopReason::NativeFailure);
+        }
+        if target.display_switch_pending().is_some() {
+            return Ok(None);
+        }
         let mut event = Raw::default();
         // SAFETY: unique owning thread, writable fixed-size event, no callbacks.
         match unsafe { fr_viewer_input_next(native.0.as_ptr(), &raw mut event) } {
             0 if sampler.due_with_local(
                 decoder,
-                target.file_shortcuts_enabled()
-                    && shortcuts.is_some_and(file_keys::Shortcuts::has_held),
+                local_keys_held(target, shortcuts, display_switch),
                 target.clock()?,
             ) =>
             {
@@ -779,6 +1054,15 @@ fn await_event(
             _ => return Err(StopReason::NativeFailure),
         }
     }
+}
+fn local_keys_held(
+    target: &impl Target,
+    files: Option<&file_keys::Shortcuts>,
+    display: Option<&display_switch::Shortcut>,
+) -> bool {
+    (target.file_shortcuts_enabled() && files.is_some_and(file_keys::Shortcuts::has_held))
+        || (target.display_switch_scope().is_some()
+            && display.is_some_and(display_switch::Shortcut::has_held))
 }
 struct Decoder {
     names: [[u8; 4]; 256],

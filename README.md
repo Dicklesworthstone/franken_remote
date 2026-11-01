@@ -96,14 +96,26 @@ repeat selections. See [native file sending](NATIVE_FILE_SEND.md#additional-sele
 
 For control, the viewer window must hold keyboard focus. A window manager gives it focus; without one, capture waits 30 s and then ends with `control_focus_lost`. The JSON completion names why a session ended. Typical causes: `host_not_answering` (the host is not running, is busy with another viewer, or UDP 8443 is blocked), `encoder_unavailable` (host startup), and `control_focus_lost`.
 
-The control request is made at most once per command. A transient link failure can
+The initial control request is made at most once per command. A transient link failure can
 use the remaining `--attempts` budget (five attempts by default) to reopen
 viewing after confirmed native cleanup. Input, clipboard and file requests are
 never repeated. User close, local release, explicit control revocation/refusal
-and input expiry remain terminal; start a new command to request control again. `--attempts 1`
+and input expiry remain terminal. On a recovered viewing window, a fresh local
+**F8** press and release can request new input control. `--attempts 1`
 disables automatic retries. Completion distinguishes the final
 `last_attempt_mode` and `viewing_reconnects` from the original control and transfer
 outcomes; see [native recovery and reconnect](NATIVE_RECOVERY_RECONNECT.md).
+
+To change the selected host display from a running native viewer, press and
+release **Ctrl+Alt+Shift+F7** with the viewer focused. The current session closes
+and completes native cleanup, then a fresh authenticated session shows the
+display picker. The new display starts in viewing mode; in a `--control`
+invocation, press **F8** to request a new grant. Original clipboard and file
+choices are not reused. This explicit change works with `--attempts 1`, does not
+reset the automatic retry budget, and remains subject to the invocation's
+32-session limit. The gesture is disabled while a control request is pending
+and during foreground automation. See [display changes](NATIVE_RECOVERY_RECONNECT.md#change-the-selected-display-from-the-running-viewer)
+for closing evidence and native qualification limits.
 
 ---
 

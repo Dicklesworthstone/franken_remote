@@ -191,6 +191,7 @@ pub struct Desktop {
     retirement: Option<Retirement>,
     stop: Option<StreamingViewerControl>,
     input: Option<crate::viewer_input::CaptureControl>,
+    display_switching: bool,
     // Status/intent only, not another source, queue, lease or lifetime. Never
     // copied into a new Desktop when the reconnect supervisor opens an attempt.
     file_controls: Option<frd::native_files::SendControl>,
@@ -217,6 +218,7 @@ impl Desktop {
             retirement: None,
             stop: None,
             input: None,
+            display_switching: false,
             file_controls: None,
             file_intake: None,
             file_drops: None,
@@ -261,6 +263,20 @@ impl Desktop {
     }
     pub fn window(&self) -> Option<WindowControl> {
         self.window.as_ref().map(ViewerWindow::control)
+    }
+    /// Enable the local change-display gesture on this original native owner.
+    /// It only asks the session to close; the reconnect adapter owns cleanup
+    /// and any subsequent authentication and catalog selection.
+    fn enable_display_switching(&mut self) -> Result<(), Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        self.window()
+            .ok_or(Error::NotViewing)?
+            .set_display_switch_mode(viewer_window::DisplaySwitchMode::Viewing)
+            .map_err(Error::Window)?;
+        self.display_switching = true;
+        Ok(())
     }
     /// Status/cancellation for the original attempt's native chooser. Consumed
     /// handles are retired and cannot stop the later viewing window.
@@ -806,7 +822,11 @@ impl Desktop {
         window.enable_orderly_close().map_err(Error::Window)?;
         let stop = observer.control();
         let inner = observer.serve_until(move |frame| {
-            if window.status() == viewer_window::Status::CloseRequested {
+            if matches!(
+                window.status(),
+                viewer_window::Status::CloseRequested
+                    | viewer_window::Status::DisplaySwitchRequested
+            ) {
                 Ok(std::ops::ControlFlow::Break(
                     fr_wire::closure::Reason::Requested,
                 ))
@@ -891,6 +911,7 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
+                                    None,
                                 )?);
                                 Ok(())
                             })(),
@@ -924,8 +945,9 @@ impl Desktop {
     /// becomes `Break(Requested)` at the next UI turn. After a grant, the
     /// original input owner fences inside that turn and the controller's
     /// terminal exchange runs on `cleanup` (independently provisioned on the
-    /// same runtime clock). Before a grant, the close stops locally without a
-    /// report. Emergency window events, callback errors, lost authority and
+    /// same runtime clock). An unrequested viewing session uses its ordinary
+    /// closing exchange; an in-flight control request still stops immediately.
+    /// Emergency window events, callback errors, lost authority and
     /// protocol failures keep their immediate behaviour.
     pub fn serve_interactive_until<'a>(
         &'a mut self,
@@ -940,7 +962,7 @@ impl Desktop {
         + 'a,
         result: impl FnMut(fr_client::input::ResultEvent) + 'a,
     ) -> Result<
-        impl Future<Output = Result<frd::session_startup::ControlCloseOutcome, Error>> + 'a,
+        impl Future<Output = Result<frd::session_startup::InteractiveCloseOutcome, Error>> + 'a,
         Error,
     > {
         if self.state() != State::Viewing {
@@ -948,6 +970,7 @@ impl Desktop {
         }
         let fitted = self.configuration.fit_window.is_some() || self.configuration.clipboard_space;
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
+        let display_switching = self.display_switching;
         let window = self.window().ok_or(Error::NotViewing)?;
         window.enable_orderly_close().map_err(Error::Window)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
@@ -958,17 +981,26 @@ impl Desktop {
         let stop = observer.control();
         let failure = Rc::new(Cell::new(None));
         let report = failure.clone();
-        let inner = observer.serve_interactive_control_until(
+        let inner = observer.serve_interactive_session_until(
             cleanup,
             sequence,
             capabilities,
             policy,
             move |state, presentation| {
                 use frd::session_startup::InteractiveViewerState;
-                if window.status() == viewer_window::Status::CloseRequested {
+                if matches!(
+                    window.status(),
+                    viewer_window::Status::CloseRequested
+                        | viewer_window::Status::DisplaySwitchRequested
+                ) {
                     return Ok(std::ops::ControlFlow::Break(
                         fr_wire::closure::Reason::Requested,
                     ));
+                }
+                if display_switching {
+                    window
+                        .set_display_switch_mode(display_switch_mode(&state))
+                        .map_err(|error| report.set(Some(Error::Window(error))))?;
                 }
                 let attached = match state {
                     InteractiveViewerState::Controlled(viewer) => {
@@ -991,6 +1023,7 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
+                                    display_switching.then_some(&window),
                                 )?);
                                 Ok(())
                             })(),
@@ -1159,6 +1192,18 @@ impl Drop for Desktop {
     }
 }
 
+fn display_switch_mode(
+    state: &frd::session_startup::InteractiveViewerState<'_>,
+) -> viewer_window::DisplaySwitchMode {
+    use frd::session_startup::InteractiveViewerState;
+    use viewer_window::DisplaySwitchMode;
+    match state {
+        InteractiveViewerState::Viewing(_) => DisplaySwitchMode::Viewing,
+        InteractiveViewerState::Requesting(_) => DisplaySwitchMode::Disabled,
+        InteractiveViewerState::Controlled(_) => DisplaySwitchMode::Controlled,
+    }
+}
+
 // The native decoder writes the full selected image at (0,0). A generic
 // Viewport can express crop/zoom/letterbox, but those do not describe THESE pixels.
 fn check_layout(
@@ -1260,9 +1305,9 @@ impl<F> Drop for Operation<'_, F> {
     }
 }
 
-/// Both interactive serving modes bind shortcuts only AFTER native attachment
-/// accepts the original viewer and confirmed layout. A failed capture creates
-/// no replacement owner; an absent upload leaves all function keys remote.
+/// Bind local display-switch intent before the native capture thread can export
+/// events. File controls retain their original attachment path; all shortcuts
+/// still belong to the original viewer and confirmed layout.
 fn attach_input(
     viewer: &mut frd::session_startup::ControlledViewer,
     display: &str,
@@ -1270,9 +1315,19 @@ fn attach_input(
     layout: frd::session_startup::viewer_events::Layout,
     capture_system_shortcuts: bool,
     files: Option<&frd::native_files::SendControl>,
+    display_switch: Option<&WindowControl>,
 ) -> Result<crate::viewer_input::CaptureControl, Error> {
     use crate::viewer_input::X11InputCapture;
-    let input = if capture_system_shortcuts {
+    let input = if let Some(original) = display_switch {
+        X11InputCapture::attach_with_display_switch(
+            viewer,
+            display,
+            window,
+            layout,
+            capture_system_shortcuts,
+            original,
+        )
+    } else if capture_system_shortcuts {
         X11InputCapture::attach_with_system_shortcuts(viewer, display, window, layout)
     } else {
         X11InputCapture::attach(viewer, display, window, layout)

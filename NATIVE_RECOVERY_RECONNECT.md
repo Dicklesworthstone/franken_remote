@@ -95,7 +95,7 @@ produced. The live loaded-client five-minute acceptance remains open under
 ## Control CLI: recover viewing without reacquiring input
 
 The shipped Linux `fr connect --control` uses the same finite `--attempts`
-budget as observation (default five; `--attempts 1` makes one attempt). Its
+budget as observation (default five; `--attempts 1` disables automatic retries). Its
 control decision is spent before submitting the first request, including a
 request whose admission or reply is uncertain. An established transient
 transport/media failure can then recover a fresh **viewing-only** desktop after
@@ -157,6 +157,71 @@ survives terminal errors and human-readable output. New `explicit_control_reques
 entries retain each fresh local request's own attempt, granted capabilities,
 input effects, end and cleanup reports. The fixed history covers the existing
 32-attempt maximum; it cannot replace or extend the original report.
+
+## Change the selected display from the running viewer
+
+In an ordinary native `fr connect` viewer, press and release
+**Ctrl+Alt+Shift+F7** while the viewer has focus to select another host display.
+The action is available while viewing or controlling and is advertised in the
+window title. It is disabled while a control request is pending, for one-shot
+observation, and for foreground automation.
+
+This is a deliberate fresh-session operation. The original viewer stops
+accepting input, performs its bounded closing exchange, and retains its decoder,
+window, input, clipboard and file owners until native cleanup completes. Only a
+successful original service result and positive native cleanup permit the
+supervisor's distinct `Reopening` notification. Cancellation, callback failure,
+WM close, local escape, capture failure, adverse authenticated host reports and
+known failed cleanup prevent a new connection. A successful close while still
+viewing uses an ordinary session close and never fabricates an input lease;
+staged or pending control requests retain immediate terminal cancellation.
+
+The new attempt repeats installed-tailnet identity checks, TLS, admission and
+approval, then opens a native picker for its newly received catalog. It cannot
+reuse the old display handle, viewport, frame witness, decoder generation, lease,
+ticket or held keys. This is not an in-place geometry change or simultaneous
+multi-display streaming. Automatic retries after the change also use a fresh
+picker. Cancelling that picker ends the invocation after cleanup.
+
+Every new selected session starts viewing. A display change also retires an
+**unused** initial `--control` decision; it does not mark that decision as a
+request that actually happened. A fresh F8 gesture on a later mapped window may
+request a new lease through the existing mapping, freshness and approval gates.
+Neither the initial file choices nor clipboard consent is configured again.
+Optional playback audio keeps its existing fresh-attempt observation policy.
+
+The shortcut is consumed locally. It requires the complete physical key chord,
+rejects synthetic or initially held gestures, and prevents repeats from renewing
+the original press time. It uses the original server/native capture
+time with a 250 ms age bound, and invalidates stale choices after focus, mapping
+or mode changes. During control, the original capture owner withholds the
+triggering batch and parks further exports until canonical session close; a
+500 ms fallback ends an unresponsive owner. No event or modifier from the
+gesture enters a new input queue.
+
+An explicit change is independent of the fixed automatic retry allowance, so
+it works with `--attempts 1` and never resets failure backoff or the remaining
+retry budget. All initial, automatic and explicitly reopened sessions share a
+monotonic maximum of 32 attempts with checked fresh worker epochs. Another
+explicit change at that ceiling reports `session_attempt_limit` after cleanup.
+
+Completion includes `display_changes` and `display_change_closes`: each accepted
+change's original attempt number, session close exchange and optional lease
+report. These remain visible when a later picker or connection fails. Unknown
+remote cleanup and outstanding effects stay unknown; `Fenced` is never upgraded
+to physical release. A bounded close timeout or closed transport can retain
+uncertainty while opening fresh viewing, but known protocol, authorization,
+clock or cancellation errors and adverse host reports veto reopening.
+`initial_control_decision_retired_at` distinguishes unused consent retired by a
+display change from an actual `control_request_attempt`.
+
+Regression sources cover the real production C/X11 boundary, Rust native intent
+and chord policy, session close custody, cleanup/report vetoes, consent retirement
+and the connector's identity, cancellation and attempt budgets. The C harness
+uses a private Xvfb and actual XTest events. The connector/streaming fixtures use
+the actual UDP/TLS session implementation; authoring them is not evidence that
+they ran. This change does not qualify a full physical multi-monitor desktop or
+the experimental native transport.
 
 Regression targets cover the spent request, later cleanup, late focus/escape
 stops, authenticated revocation, cleanup failure precedence and distinct original

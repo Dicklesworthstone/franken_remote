@@ -9,6 +9,8 @@ mod choice;
 pub(crate) mod file_drop;
 pub(crate) mod file_send;
 mod focus;
+use crate::viewer_input::display_switch;
+pub use crate::viewer_input::display_switch::Mode as DisplaySwitchMode;
 pub use file_send::{
     BatchStatus as DroppedBatchStatus, Control as FileDropControl, Error as FileDropError,
 };
@@ -65,6 +67,10 @@ unsafe extern "C" {
     fn fr_viewer_window_drop_complete(handle: *mut c_void, accepted: c_int);
     fn fr_viewer_window_control_age(handle: *mut c_void) -> u32;
     fn fr_viewer_window_control_reset(handle: *mut c_void);
+    fn fr_viewer_window_display_switch_offer(handle: *mut c_void, mode: c_int) -> c_int;
+    fn fr_viewer_window_display_switch_released(handle: *mut c_void) -> c_int;
+    fn fr_viewer_window_display_switch_age(handle: *mut c_void) -> u32;
+    fn fr_viewer_window_display_switch_reset(handle: *mut c_void);
     fn fr_viewer_window_focus_begin(handle: *mut c_void) -> c_int;
     fn fr_viewer_window_focus_poll(handle: *mut c_void) -> c_int;
 }
@@ -111,6 +117,9 @@ pub enum Status {
     /// Local WM close intent; no new target may be borrowed. The observation
     /// owner must retire media and close within the original bounded fallback.
     CloseRequested,
+    /// A fresh local display-change gesture. This original session must close
+    /// and reap successfully before the application may open a new selection.
+    DisplaySwitchRequested,
     Stopped(StopReason),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +137,7 @@ struct Shared {
     state: AtomicU8,
     orderly_close: AtomicU8,
     control_choice: choice::Choice,
+    display_switch: display_switch::Intent,
     automation_focus: focus::Gate,
     automation_focus_stop: AtomicU8,
     file_drops: file_drop::Inbox,
@@ -150,6 +160,12 @@ impl Shared {
         }
     }
     fn stop(&self, reason: StopReason) {
+        if !matches!(
+            reason,
+            StopReason::User | StopReason::OwnerDropped | StopReason::SessionEnded
+        ) {
+            self.display_switch.cancel();
+        }
         if matches!(reason, StopReason::FocusLost | StopReason::FocusUnavailable)
             && self.state.load(Ordering::Acquire) < 2
             && !self.session.is_stopped()
@@ -212,6 +228,7 @@ impl WindowControl {
             1 if self.0.orderly_close.load(Ordering::Acquire) == CLOSE_REQUESTED => {
                 Status::CloseRequested
             }
+            1 if self.display_switch_requested() => Status::DisplaySwitchRequested,
             1 => Status::Mapped,
             value => Status::Stopped(StopReason::from_state(value).expect("private state")),
         }
@@ -259,6 +276,43 @@ impl WindowControl {
         self.0
             .control_choice
             .take(ready && self.status() == Status::Mapped)
+    }
+    /// The local shell chooses which original native owner may consume the
+    /// display-change chord. Requesting control and automation keep it Disabled.
+    /// Changing mode invalidates in-flight gestures; an accepted choice is
+    /// one-use and cannot be erased by a subsequent request to disable it.
+    pub fn set_display_switch_mode(&self, mode: DisplaySwitchMode) -> Result<(), Error> {
+        if self.status() != Status::Mapped || !self.0.display_switch.set_mode(mode) {
+            return Err(Error::NotReady);
+        }
+        self.0.notify();
+        Ok(())
+    }
+    /// Historical local intent only. It survives ordinary cleanup, while a
+    /// genuine window close or native failure cancels it. It is never proof of
+    /// successful teardown, new session approval, or a selected display.
+    pub fn display_switch_requested(&self) -> bool {
+        self.0.display_switch.requested().is_some()
+            && self.0.orderly_close.load(Ordering::Acquire) != CLOSE_REQUESTED
+    }
+    pub(crate) fn display_switch_scope(&self) -> Option<display_switch::Scope> {
+        (self.status() == Status::Mapped)
+            .then(|| self.0.display_switch.scope())
+            .flatten()
+            .filter(|scope| scope.mode == DisplaySwitchMode::Controlled)
+    }
+    pub(crate) fn request_display_switch(&self, scope: display_switch::Scope, at: Instant) -> bool {
+        if self.status() != Status::Mapped || !self.0.display_switch.request(scope, at) {
+            return false;
+        }
+        self.0.notify();
+        self.display_switch_requested()
+    }
+    pub(crate) fn display_switch_at(&self) -> Option<Instant> {
+        self.0.display_switch.requested()
+    }
+    pub(crate) fn cancel_display_switch(&self) {
+        self.0.display_switch.cancel();
     }
     /// Only the observation-only Desktop service may arm this policy, after
     /// decoder startup. Default, control, bootstrap and direct stop stay terminal.
@@ -363,6 +417,7 @@ impl ViewerWindow {
             state: AtomicU8::new(0),
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
             control_choice: choice::Choice::default(),
+            display_switch: display_switch::Intent::default(),
             automation_focus: focus::Gate::default(),
             automation_focus_stop: AtomicU8::new(0),
             file_drops: file_drop::Inbox::default(),
@@ -592,6 +647,80 @@ impl ControlGesture {
         Ok(())
     }
 }
+#[derive(Default)]
+struct DisplayGesture {
+    scope: Option<display_switch::Scope>,
+    barrier_at: Option<Instant>,
+}
+impl DisplayGesture {
+    fn offer(&mut self, native: &Native<'_>) -> Result<(), ()> {
+        let scope = native.shared.display_switch.scope();
+        if scope == self.scope {
+            return Ok(());
+        }
+        let mode = scope.map_or(DisplaySwitchMode::Disabled, |scope| scope.mode);
+        // SAFETY: the original window thread exclusively owns this connection.
+        if unsafe { fr_viewer_window_display_switch_offer(native.handle.as_ptr(), mode as c_int) }
+            < 0
+        {
+            return Err(());
+        }
+        self.scope = scope;
+        self.barrier_at = None;
+        Ok(())
+    }
+    fn invalidate(&mut self, native: &Native<'_>) {
+        self.scope = None;
+        self.barrier_at = None;
+        native.shared.display_switch.invalidate();
+        // SAFETY: no native work beyond resetting this owner's gesture metadata.
+        unsafe { fr_viewer_window_display_switch_reset(native.handle.as_ptr()) };
+    }
+    fn finish(&mut self, native: &Native<'_>, chosen: bool, fresh: bool) -> Result<(), ()> {
+        if !fresh {
+            self.invalidate(native);
+            return Ok(());
+        }
+        let Some(scope) = self
+            .scope
+            .filter(|scope| scope.mode == DisplaySwitchMode::Viewing)
+        else {
+            return Ok(());
+        };
+        if !chosen {
+            return Ok(());
+        }
+        let before = self.barrier_at.take().ok_or(())?;
+        // SAFETY: original event's bounded scalar metadata; no native pointer escapes.
+        let age = unsafe { fr_viewer_window_display_switch_age(native.handle.as_ptr()) };
+        let Some(captured) = before.checked_sub(Duration::from_millis(u64::from(age))) else {
+            return Ok(());
+        };
+        if captured.elapsed() >= display_switch::MAX_AGE {
+            return Ok(());
+        }
+        // SAFETY: final focus/held query on the sole connection owner, before intent.
+        match unsafe { fr_viewer_window_display_switch_released(native.handle.as_ptr()) } {
+            0 => return Ok(()),
+            1 => {}
+            _ => return Err(()),
+        }
+        // Disable the old subscription before publishing one-shot intent. A
+        // mode change during any native query makes the exact scope refuse.
+        // SAFETY: original window owner; independent F8/file subscriptions remain.
+        if unsafe { fr_viewer_window_display_switch_offer(native.handle.as_ptr(), 0) } != 1 {
+            return Err(());
+        }
+        self.scope = None;
+        if native.shared.live()
+            && native.shared.orderly_close.load(Ordering::Acquire) != CLOSE_REQUESTED
+            && native.shared.display_switch.request(scope, captured)
+        {
+            native.shared.notify();
+        }
+        Ok(())
+    }
+}
 /// Local drag intent stays separate from the existing input-capture owner.
 /// A server timestamp barrier fixes the original age; neither a late selection
 /// reply nor polling the mailbox gives a drop another lifetime.
@@ -703,6 +832,7 @@ fn lifecycle_event(
         3 => Some(StopReason::WindowLost),
         4 => Some(StopReason::GeometryChanged),
         5 if *mapped && shared.orderly_close.load(Ordering::Acquire) != CLOSE_DISARMED => {
+            shared.display_switch.cancel();
             // The first WM request fixes the local deadline. Repeated
             // requests never reset it. Keep the drawable owned until the
             // original observation loop retires its decoder; all other
@@ -717,6 +847,7 @@ fn lifecycle_event(
             None
         }
         5 => {
+            shared.display_switch.cancel();
             // Publish native WM intent before stop cancels the session:
             // another thread may observe cancellation before User.
             // This unarmed path still stops immediately, with no grace.
@@ -728,19 +859,26 @@ fn lifecycle_event(
         _ => Some(StopReason::NativeFailure),
     }
 }
+#[derive(Default)]
+struct Gestures {
+    control: bool,
+    display: bool,
+    control_invalidated: bool,
+    display_invalidated: bool,
+}
 /// Publish neither gesture until the complete native batch passes lifecycle
 /// and flood checks. Every refusal fences the same original window owner.
 fn drain_events(
     native: &Native<'_>,
     gesture: &mut ControlGesture,
+    display: &mut DisplayGesture,
     files: &mut FileGesture,
     mapped: &mut bool,
     close_started: &mut Option<Instant>,
     turn: Instant,
-) -> Option<(bool, bool)> {
+) -> Option<Gestures> {
     let shared = native.shared;
-    let mut chosen = false;
-    let mut invalidated = false;
+    let mut observed = Gestures::default();
     for _ in 0..TURN_EVENTS {
         if !shared.live() {
             return None;
@@ -749,7 +887,7 @@ fn drain_events(
         let before = Instant::now();
         // SAFETY: single thread exclusively owns the handle; writable scalar.
         match unsafe { fr_viewer_window_next(native.handle.as_ptr(), &raw mut kind) } {
-            0 => return Some((chosen, invalidated)),
+            0 => return Some(observed),
             1 => {}
             _ => {
                 shared.stop(StopReason::NativeFailure);
@@ -758,12 +896,17 @@ fn drain_events(
         }
         let reason = match kind {
             6 => {
-                chosen = true;
+                observed.control = true;
                 None
             }
             7 | 8 => {
-                chosen = false;
-                invalidated = true;
+                observed.control = false;
+                observed.control_invalidated = true;
+                if kind == 8 {
+                    display.invalidate(native);
+                    observed.display = false;
+                    observed.display_invalidated = true;
+                }
                 gesture
                     .invalidate(native, kind == 8)
                     .err()
@@ -778,13 +921,30 @@ fn drain_events(
                 None
             }
             13 => {
-                chosen = false;
-                invalidated = true;
+                observed.control = false;
+                observed.control_invalidated = true;
+                observed.display = false;
+                observed.display_invalidated = true;
+                display.invalidate(native);
                 gesture
                     .invalidate(native, false)
                     .err()
                     .map(|()| StopReason::NativeFailure)
                     .or_else(|| shared.automation_focus.lost().err())
+            }
+            14 => {
+                observed.display = true;
+                None
+            }
+            15 | 16 => {
+                observed.display = false;
+                observed.display_invalidated = true;
+                display.invalidate(native);
+                None
+            }
+            17 => {
+                display.barrier_at = Some(turn);
+                None
             }
             _ => lifecycle_event(shared, mapped, close_started, kind),
         };
@@ -803,6 +963,7 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     let mut mapped = false;
     let mut close_started: Option<Instant> = None;
     let mut gesture = ControlGesture::default();
+    let mut display = DisplayGesture::default();
     let mut files = FileGesture::default();
     let mut focus = focus::Probe::default();
     let mut previous_turn = Instant::now();
@@ -810,7 +971,12 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
         if !shared.live() {
             return;
         }
-        if close_started.is_some_and(|at| at.elapsed() >= CLOSE_TIMEOUT) {
+        if close_started.is_some_and(|at| at.elapsed() >= CLOSE_TIMEOUT)
+            || shared
+                .display_switch
+                .requested()
+                .is_some_and(|at| at.elapsed() >= CLOSE_TIMEOUT)
+        {
             shared.stop(StopReason::CloseExpired);
             return;
         }
@@ -824,10 +990,15 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             shared.stop(StopReason::NativeFailure);
             return;
         }
+        if display.offer(&native).is_err() {
+            shared.stop(StopReason::NativeFailure);
+            return;
+        }
         files.tick(&native, fresh);
-        let Some((chosen, invalidated)) = drain_events(
+        let Some(observed) = drain_events(
             &native,
             &mut gesture,
+            &mut display,
             &mut files,
             &mut mapped,
             &mut close_started,
@@ -836,7 +1007,22 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
             return;
         };
         if gesture
-            .finish(&native, chosen, fresh && !invalidated)
+            .finish(
+                &native,
+                observed.control,
+                fresh && !observed.control_invalidated,
+            )
+            .is_err()
+        {
+            shared.stop(StopReason::NativeFailure);
+            return;
+        }
+        if display
+            .finish(
+                &native,
+                observed.display,
+                fresh && !observed.display_invalidated,
+            )
             .is_err()
         {
             shared.stop(StopReason::NativeFailure);
@@ -885,7 +1071,9 @@ impl Future for Ready<'_> {
         match self.window.control.status() {
             Status::Opening => Poll::Pending,
             Status::Mapped => Poll::Ready(self.window.control.target()),
-            Status::CloseRequested => Poll::Ready(Err(Error::NotReady)),
+            Status::CloseRequested | Status::DisplaySwitchRequested => {
+                Poll::Ready(Err(Error::NotReady))
+            }
             Status::Stopped(reason) => Poll::Ready(Err(Error::NativeStopped(reason))),
         }
     }

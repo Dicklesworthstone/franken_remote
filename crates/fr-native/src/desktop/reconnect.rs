@@ -15,7 +15,7 @@ use fr_core::input_submission::Capabilities;
 use fr_media::freshness::ClockPolicy;
 use fr_wire::{display::Catalog, negotiation::Offer};
 use frd::{
-    native_connection::reconnect::{Application, CallbackError, Status},
+    native_connection::reconnect::{Application, CallbackError, CompletionAction, Status},
     session_startup::{
         InteractiveViewerState, ObserverError, ObserverPolicy, Presentation,
         StreamingViewerControl, Viewer, ViewerCloseOutcome, ViewerStatistics,
@@ -116,11 +116,17 @@ pub struct Session<U> {
     mode: Mode,
     ui: U,
     one_shot: bool,
+    display_switching: bool,
+    select_fresh_display: bool,
+    /// Original native intent only; this handle cannot create another owner.
+    display_switch_window: Option<crate::viewer_window::WindowControl>,
     initial: Option<Observation>,
     initial_snapshot: Option<fr_media::worker::presentation_snapshot::Snapshot>,
     desktop: Option<Desktop>,
     opened: bool,
     last_attempt: u8,
+    current_attempt: u8,
+    service_succeeded: bool,
     error: Option<Error>,
     cleanup: Option<Cleanup>,
     cleanup_failure: Option<CleanupFailure>,
@@ -149,11 +155,16 @@ impl<U> Session<U> {
             mode,
             ui,
             one_shot: false,
+            display_switching: false,
+            select_fresh_display: false,
+            display_switch_window: None,
             initial: None,
             initial_snapshot: None,
             desktop: None,
             opened: false,
             last_attempt: 0,
+            current_attempt: 0,
+            service_succeeded: false,
             error: None,
             cleanup: None,
             cleanup_failure: None,
@@ -192,6 +203,16 @@ impl<U> Session<U> {
     #[must_use]
     pub fn with_cleanup_runtime(mut self, runtime: RuntimeHandle) -> Self {
         self.cleanup_runtime = Some(runtime);
+        self
+    }
+    /// Permit a trusted local change-display gesture. Every accepted change
+    /// closes and reaps the original owner before authenticating a fresh
+    /// session and showing its fresh native display catalog. A control-capable
+    /// caller must also supply `with_cleanup_runtime`; one-shot observations
+    /// never enable the gesture.
+    #[must_use]
+    pub fn with_display_switching(mut self) -> Self {
+        self.display_switching = true;
         self
     }
     pub fn desktop(&self) -> Option<&Desktop> {
@@ -246,7 +267,7 @@ impl<U> Session<U> {
             epoch,
         )
         .map(|mut configuration| {
-            configuration.display_picker = base.display_picker;
+            configuration.display_picker = base.display_picker || self.select_fresh_display;
             configuration.fit_window = base.fit_window;
             configuration.clipboard_space = base.clipboard_space;
             configuration.capture_system_shortcuts = base.capture_system_shortcuts;
@@ -254,6 +275,26 @@ impl<U> Session<U> {
             configuration
         })
         .map_err(|_| ObserverError::Application)
+    }
+    fn prepare_attempt(&mut self, attempt: u8) -> Result<(), ObserverError> {
+        let configuration = self.configuration(attempt)?;
+        self.initial = None;
+        self.initial_snapshot = None;
+        self.last_attempt = attempt;
+        self.current_attempt = attempt;
+        self.service_succeeded = false;
+        self.opened = false;
+        self.error = None;
+        self.cleanup = None;
+        self.cleanup_failure = None;
+        self.disconnect = None;
+        self.control_disconnect = None;
+        self.statistics = None;
+        self.input_stop = None;
+        self.display_switch_window = None;
+        // Store before ANY await or callback so interrupted work stays owned.
+        self.desktop = Some(Desktop::new(configuration));
+        Ok(())
     }
 }
 /// A control-capable attempt's service: an orderly window close when a
@@ -302,21 +343,8 @@ impl<U: Ui> Application for Session<U> {
         self.ui.offer(attempt, original)
     }
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
-        self.initial = None;
-        self.initial_snapshot = None;
-        let configuration = self.configuration(attempt)?;
+        self.prepare_attempt(attempt)?;
         let stop = viewer.control();
-        self.last_attempt = attempt;
-        self.opened = false;
-        self.error = None;
-        self.cleanup = None;
-        self.cleanup_failure = None;
-        self.disconnect = None;
-        self.control_disconnect = None;
-        self.statistics = None;
-        self.input_stop = None;
-        // Store before ANY await or callback so interrupted work stays owned.
-        self.desktop = Some(Desktop::new(configuration));
         let desktop = self.desktop.as_mut().ok_or(ObserverError::Order)?;
         let ui = std::cell::RefCell::new(&mut self.ui);
         let clock = match self.mode {
@@ -332,6 +360,7 @@ impl<U: Ui> Application for Session<U> {
             _ => None,
         };
         let one_shot = self.one_shot;
+        let display_switching = self.display_switching && !one_shot;
         let outcome = async {
             desktop
                 .open(
@@ -355,6 +384,13 @@ impl<U: Ui> Application for Session<U> {
                     display: observer.display(),
                     completion: observer.initial_presentation(),
                 });
+            }
+            if display_switching {
+                if matches!(self.mode, Mode::ControlCapable(_)) && cleanup.is_none() {
+                    return Err(Error::Observer(ObserverError::Order));
+                }
+                desktop.enable_display_switching()?;
+                self.display_switch_window = desktop.window();
             }
             callback(&stop, || ui.borrow_mut().ready(attempt, desktop))
                 .map_err(|_| Error::Observer(ObserverError::Application))?;
@@ -390,6 +426,7 @@ impl<U: Ui> Application for Session<U> {
             }
         }
         .await;
+        self.service_succeeded = outcome.is_ok();
         self.disconnect = desktop.disconnect_outcome();
         self.control_disconnect = desktop.control_disconnect_outcome();
         self.statistics = desktop.statistics();
@@ -451,6 +488,9 @@ impl<U: Ui> Application for Session<U> {
         }
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
+        if let Status::Connecting { attempt } = status {
+            self.current_attempt = attempt;
+        }
         match self
             .desktop
             .as_ref()
@@ -460,6 +500,136 @@ impl<U: Ui> Application for Session<U> {
             None => self.ui.status(status),
         }
     }
+    fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
+        let Some(window) = &self.display_switch_window else {
+            return Ok(CompletionAction::Finish);
+        };
+        if !window.display_switch_requested() || window.close_requested() {
+            return Ok(CompletionAction::Finish);
+        }
+        // The supervisor invokes this only after successful service and
+        // positive native cleanup. Recheck the retained original evidence;
+        // an unrelated stop or adverse host report cannot become a new dial.
+        if !self.display_switching
+            || self.one_shot
+            || !self.service_succeeded
+            || self.desktop.is_some()
+            || self.error.is_some()
+            || !requested_close_allows_reopen(CleanupSummary {
+                disconnect: self.disconnect,
+                control_disconnect: self.control_disconnect,
+                input_stop: self.input_stop,
+                failure: self.cleanup_failure,
+            })
+        {
+            return Err(CallbackError);
+        }
+        self.select_fresh_display = true;
+        self.display_switch_window = None;
+        Ok(CompletionAction::Reopen)
+    }
+    fn terminal_failure(&self) -> Option<ObserverError> {
+        // A failed later discovery cannot acquire the previous native owner's
+        // report. Original reports still remain available through their accessors.
+        if self.current_attempt != self.last_attempt {
+            return None;
+        }
+        if !self.service_succeeded {
+            // A failed or abandoned run cannot reinterpret any authenticated
+            // terminal report as its own successful close, even when the host
+            // used an otherwise expected ClientRequested/SessionEnded reason.
+            if let Some(report) = self
+                .control_disconnect
+                .and_then(|outcome| outcome.revocation)
+            {
+                return Some(ObserverError::Streaming(
+                    frd::session_startup::StreamingViewerError::Control(
+                        frd::session_startup::ControlledViewerError::LeaseRevoked(report),
+                    ),
+                ));
+            }
+            if let Some(report) = self
+                .disconnect
+                .or_else(|| self.control_disconnect.map(|outcome| outcome.exchange))
+                .and_then(|outcome| outcome.report)
+            {
+                return Some(ObserverError::Session(
+                    frd::session_startup::Error::RemoteClosed(report),
+                ));
+            }
+        }
+        closing_failure(CleanupSummary {
+            disconnect: self.disconnect,
+            control_disconnect: self.control_disconnect,
+            input_stop: self.input_stop,
+            failure: self.cleanup_failure,
+        })
+    }
+}
+
+/// A completed bounded exchange can retain unknown transport/remote cleanup
+/// evidence. A fresh viewing session does not claim release or replay input;
+/// known host failures, revoked permission and failed cleanup veto reopening.
+fn requested_close_allows_reopen(summary: CleanupSummary) -> bool {
+    use crate::viewer_input::StopReason;
+    summary.failure.is_none()
+        && !summary
+            .input_stop
+            .is_some_and(|reason| !matches!(reason, StopReason::Local | StopReason::Closed))
+        && (summary.disconnect.is_some() || summary.control_disconnect.is_some())
+        && closing_failure(summary).is_none()
+}
+
+/// Preserve exact adverse reports/errors when the completion callback refuses.
+/// An expected own-close report cannot relabel a later protocol/auth failure.
+fn closing_failure(summary: CleanupSummary) -> Option<ObserverError> {
+    use fr_wire::{closure, lease_revoked};
+    use frd::session_startup::{ControlledViewerError, StreamingViewerError};
+    if let Some(report) = summary
+        .control_disconnect
+        .and_then(|outcome| outcome.revocation)
+        .filter(|report| {
+            !matches!(
+                report.reason,
+                lease_revoked::Reason::ClientRequested | lease_revoked::Reason::SessionEnded
+            ) || report.cleanup == lease_revoked::CleanupStage::Failed
+        })
+    {
+        return Some(ObserverError::Streaming(StreamingViewerError::Control(
+            ControlledViewerError::LeaseRevoked(report),
+        )));
+    }
+    let exchanges = [
+        summary.disconnect,
+        summary.control_disconnect.map(|outcome| outcome.exchange),
+    ];
+    for report in exchanges
+        .into_iter()
+        .flatten()
+        .filter_map(|outcome| outcome.report)
+    {
+        if report.reason != closure::ClosedReason::ClientRequested
+            || report.cleanup == closure::Cleanup::Incomplete
+        {
+            return Some(ObserverError::Session(
+                frd::session_startup::Error::RemoteClosed(report),
+            ));
+        }
+    }
+    exchanges.into_iter().flatten().find_map(|outcome| {
+        outcome
+            .transport
+            .err()
+            .filter(|error| {
+                !matches!(
+                    error,
+                    fr_transport::quic::Error::Expired
+                        | fr_transport::quic::Error::Closed
+                        | fr_transport::quic::Error::Backpressure
+                )
+            })
+            .map(|error| ObserverError::Streaming(StreamingViewerError::Transport(error)))
+    })
 }
 impl<U> Session<U> {
     async fn finish_cleanup(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), CleanupFailure> {

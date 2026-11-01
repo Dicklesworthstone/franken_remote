@@ -4,6 +4,9 @@ mod audio;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/control.rs"]
 mod control;
+#[cfg(feature = "linux-desktop")]
+#[path = "linux/display_change.rs"]
+mod display_change;
 #[path = "linux/displays.rs"]
 mod displays;
 #[path = "linux/doctor.rs"]
@@ -503,6 +506,9 @@ fn connect(
     )
     // A controller's window close runs the closing exchange, as a viewer's does.
     .with_cleanup_runtime(runtime.handle());
+    if !automation {
+        application = application.with_display_switching();
+    }
     let selector = selected.selector();
     let cfg = Configuration {
         port: selected.port,
@@ -658,6 +664,8 @@ fn completed(
         if let Some(control) = progress.control {
             failure.control_history =
                 Some(Box::leak(Box::new(control_history(progress, &control))));
+        } else if progress.display_changes != 0 {
+            failure.control_history = Some(Box::leak(Box::new(display_change::history(progress))));
         }
         if let Some(downloads) = &progress.downloads {
             downloads.summary().preserve(&mut failure);
@@ -669,6 +677,9 @@ fn completed(
 /// lapse names the final end gets, else the generic code.
 #[cfg(feature = "linux-desktop")]
 fn end_code(failure: reconnect::Failure) -> &'static str {
+    if failure == reconnect::Failure::AttemptLimit {
+        return "session_attempt_limit";
+    }
     refusal::reconnect(failure)
         .or_else(|| lapse::reconnect(failure))
         .map_or("native_session_failed", |named| named.code)
@@ -758,6 +769,12 @@ fn completed_result(
     if let Err(error) = result
         && !progress.user_closed
     {
+        if error == reconnect::Failure::AttemptLimit {
+            return Err(failure(
+                "session_attempt_limit",
+                "The invocation reached its limit of 32 fresh sessions. Cleanup completed; start a new connection to choose another display.",
+            ));
+        }
         // Every attempt, including a recovered viewing-only connection, may
         // publish terminal evidence during cleanup. Name the current evidence
         // before consulting the separately retained control-request history.
@@ -765,7 +782,7 @@ fn completed_result(
             && let Some(named) = progress.cleanup.and_then(control_retry_stop).or_else(|| {
                 progress
                     .control
-                    .and_then(|control| control.latest_cleanup())
+                    .and_then(|control| control.current_cleanup())
                     .and_then(control_retry_stop)
             })
         {
@@ -871,6 +888,9 @@ struct Progress {
     automation_focus_stop: Option<StopReason>,
     attempts: u8,
     opened: u8,
+    /// Accepted local requests to open a fresh display picker after cleanup.
+    display_changes: u8,
+    display_change_closes: Vec<(u8, fr_native::desktop::reconnect::CleanupSummary)>,
     presented: u64,
     approval_pending: bool,
     missing_display: bool,
@@ -967,7 +987,7 @@ impl Ui for Interface {
             .borrow()
             .control
             .as_ref()
-            .is_some_and(|control| control.requested)
+            .is_some_and(|control| !control.initial_decision_available())
         {
             // The original source selections and receive consent were spent.
             // Keep a control-capable session for a NEW local input decision,
@@ -1158,6 +1178,25 @@ impl Ui for Interface {
                     return Err(CallbackError);
                 }
             }
+            Status::Reopening { attempt } => {
+                // This notification follows a successful explicit close and
+                // positive native cleanup. Expected own-close reports are
+                // retained; the Session separately vetoes adverse reports.
+                if progress.user_closed
+                    || progress.automation.is_some()
+                    || progress.automation_focus_stop.is_some()
+                    || !progress
+                        .window
+                        .as_ref()
+                        .is_some_and(WindowControl::display_switch_requested)
+                {
+                    return Err(CallbackError);
+                }
+                display_change::record(&mut progress, attempt)?;
+                // Selection comes only from the new authenticated catalog's
+                // native picker, never this invocation's previous handle.
+                self.display = DisplayChoice::Choose;
+            }
             _ => {}
         }
         Ok(())
@@ -1207,15 +1246,17 @@ fn completion_with_lease(
         return control_completion(progress, &control, json, closure, lease);
     }
     let audio = audio_completion(progress, json);
+    let changes = display_change::history(progress);
     if json {
         let closure = closure.map_or_else(|| "null".to_owned(), crate::closure::Report::json);
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{closure}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"observe\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{}{}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{closure}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
             progress.presented,
             media_json(progress.media.as_ref()),
+            changes.json,
         )
     } else {
         let closure = closure.map_or_else(
@@ -1226,8 +1267,8 @@ fn completion_with_lease(
             crate::closure::Report::text,
         );
         format!(
-            "View-only session stopped; {} attempt(s), {} opened session(s), local cleanup confirmed. {closure}{audio} Native transport/hardware remain unqualified.\n",
-            progress.attempts, progress.opened
+            "View-only session stopped; {} attempt(s), {} opened session(s), local cleanup confirmed. {closure}{}{audio} Native transport/hardware remain unqualified.\n",
+            progress.attempts, progress.opened, changes.text,
         )
     }
 }
@@ -1520,6 +1561,15 @@ fn control_history(progress: &Progress, control: &control::Counters) -> crate::C
     };
     history.json.push_str(&fresh.json);
     history.text.push_str(&fresh.text);
+    let changes = display_change::history(progress);
+    history.json.push_str(&changes.json);
+    history.text.push_str(&changes.text);
+    history.json.push_str(&format!(
+        ",\"initial_control_decision_retired_at\":{}",
+        control
+            .initial_decision_retired_at
+            .map_or_else(|| "null".to_owned(), |attempt| attempt.to_string())
+    ));
     history
 }
 #[cfg(test)]

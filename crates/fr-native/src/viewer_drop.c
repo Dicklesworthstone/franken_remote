@@ -60,7 +60,8 @@ int fr_viewer_window_drop_offer(struct fr_viewer_window *h, int enabled) {
     /* Keep the independently owned control-request event subscription intact. */
     uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE |
         XCB_EVENT_MASK_PROPERTY_CHANGE;
-    if (h->control_key) mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE;
+    if (h->control_key || (h->switch_mode == 1 && h->switch_keys[6]))
+        mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE;
     return checked(h, xcb_change_window_attributes_checked(h->c, h->window,
         XCB_CW_EVENT_MASK, &mask));
 }

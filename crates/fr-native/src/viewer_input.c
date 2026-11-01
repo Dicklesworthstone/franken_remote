@@ -37,6 +37,7 @@ struct fr_viewer_input {
     int map_failed;
     uint32_t grab_focus, grab_geometry, grab_attributes, grab_keys, grab_query, grab_sequence;
     int grab_state, grab_attempted, grab_title, grab_focus_out;
+    int display_switch;
     uint32_t release_query;
     int release_state;
 };
@@ -80,7 +81,8 @@ static xcb_atom_t input_atom(struct fr_viewer_input *h, const char *name) {
     free(r); return atom;
 }
 static int shortcuts_title(struct fr_viewer_input *h, int active) {
-    const char *title = active ?
+    const char *title = active && h->display_switch ?
+        "FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+F7 changes display - Ctrl+Alt+Shift+Escape releases control" : active ?
         "FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control" :
         "FrankenRemote";
     uint32_t length = (uint32_t)strlen(title);
@@ -89,6 +91,12 @@ static int shortcuts_title(struct fr_viewer_input *h, int active) {
     xcb_change_property(h->c, XCB_PROP_MODE_REPLACE, h->window,
                         h->net_name, h->utf8, 8, length, title);
     return xcb_flush(h->c) > 0;
+}
+int fr_viewer_input_display_switch(struct fr_viewer_input *h, int enabled) {
+    if (!h || xcb_connection_has_error(h->c)) return 0;
+    if (h->display_switch == !!enabled) return 1;
+    h->display_switch = !!enabled;
+    return !h->grab_title || shortcuts_title(h, 1);
 }
 void fr_viewer_input_close(struct fr_viewer_input *h) {
     if (!h) return;

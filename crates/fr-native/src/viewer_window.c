@@ -3,6 +3,8 @@
  * No callbacks, Xlib globals, grabs, native input injection or peer strings. */
 #include <xcb/xcb.h>
 #include <xcb/xcbext.h>
+#include <X11/extensions/XKBproto.h>
+#include <sys/uio.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,11 +25,16 @@ struct fr_viewer_window {
     uint16_t control_locks;
     xcb_atom_t control_clock;
     uint32_t control_sequence, control_baseline, control_press_at, control_release_at, control_age;
+    uint8_t switch_mode, switch_keys[7], switch_held[7], switch_xkb;
+    uint8_t switch_pressed, switch_released, switch_blocked, switch_ready, switch_barrier_kind;
+    xcb_atom_t switch_clock;
+    uint32_t switch_sequence, switch_baseline, switch_press_at, switch_release_at, switch_age;
     uint32_t focus_query;
     uint8_t focus_changed;
 };
 enum { IGNORE, MAPPED, HIDDEN, LOST, RESIZED, STOP, CONTROL_CHOSEN,
-       CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK, FOCUS_LEFT = 13 };
+       CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK, FOCUS_LEFT = 13,
+       SWITCH_CHOSEN, SWITCH_RESET, SWITCH_REMAP, SWITCH_CLOCK };
 static int checked(struct fr_viewer_window *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -177,6 +184,7 @@ static int control_lock_mask(struct fr_viewer_window *h, const xcb_setup_t *s,
     }
     free(r); free(e); return 1;
 }
+#include "viewer_switch.c"
 /* Local UI only: no grab, pixel overlay, viewport change or input grant. */
 int fr_viewer_window_control_offer(struct fr_viewer_window *h, int enabled) {
     if (!h || xcb_connection_has_error(h->c)) return -1;
@@ -211,17 +219,7 @@ int fr_viewer_window_control_offer(struct fr_viewer_window *h, int enabled) {
         if (!h->control_clock) h->control_clock = atom(h, "_FR_VIEWER_CONTROL_CLOCK");
         if (!h->control_clock) return -1;
     }
-    const char *title = !enabled ? "FrankenRemote" : h->control_key ?
-        "FrankenRemote - View only - F8 requests control" :
-        "FrankenRemote - View only - F8 unavailable";
-    uint32_t mask = XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE;
-    if (h->control_key) mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE |
-        XCB_EVENT_MASK_PROPERTY_CHANGE;
-    if (h->files) mask |= XCB_EVENT_MASK_PROPERTY_CHANGE;
-    if (!checked(h, xcb_change_window_attributes_checked(h->c, h->window,
-        XCB_CW_EVENT_MASK, &mask)) ||
-        !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) ||
-        !property(h, h->net_name, h->utf8, 8, (uint32_t)strlen(title), title)) return -1;
+    if (!switch_surface(h, enabled)) return -1;
     if (h->control_key && !control_barrier(h, 1)) return -1;
     return !enabled || h->control_key ? 1 : 0;
 }
@@ -281,6 +279,15 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
                 if (!control_barrier(h, 1)) return -1;
             }
         }
+        if (h->switch_mode == 1 && h->switch_keys[6] && h->switch_blocked &&
+            !h->switch_sequence) {
+            int held = control_held(h);
+            if (held < 0) return -1;
+            if (!held) {
+                h->switch_blocked = h->switch_ready = 0;
+                if (!switch_barrier(h, 1)) return -1;
+            }
+        }
         return xcb_connection_has_error(h->c) ? -1 : 0;
     }
     *kind = IGNORE;
@@ -288,6 +295,8 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     uint8_t type = e->response_type & 0x7f;
     int synthetic = (e->response_type & 0x80) != 0;
     if (!type) { free(e); return -1; }
+    uint32_t switch_kind = IGNORE;
+    if (!switch_event(h, e, &switch_kind)) { free(e); return -1; }
     switch (type) {
     case XCB_MAP_NOTIFY:
         if (!synthetic && ((xcb_map_notify_event_t *)e)->window == h->window)
@@ -371,6 +380,8 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
     }
     default: break;
     }
+    if (switch_kind != IGNORE && (*kind == IGNORE || *kind == CONTROL_RESET))
+        *kind = switch_kind;
     /* Synthetic requests can only close/refuse. They cannot prove mapping or
      * visibility, raise the window, grant input, or select a replacement target.
      * Each consumed event is returned, even ignored ones: Rust bounds work. */

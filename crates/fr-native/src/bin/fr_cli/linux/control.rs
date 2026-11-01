@@ -225,6 +225,9 @@ pub(super) struct Counters {
     pub(super) viewing_reconnects: u8,
     pub(super) current_attempt: u8,
     pub(super) request_attempt: Option<u8>,
+    /// A display change retires an unused command-line decision without
+    /// pretending that a control request was sent on the original session.
+    pub(super) initial_decision_retired_at: Option<u8>,
     /// Original request-bearing native owner, including late input-stop causes.
     pub(super) cleanup: Option<CleanupSummary>,
     /// Some when this controller's clipboard policy is enabled.
@@ -234,12 +237,19 @@ pub(super) struct Counters {
     pub(super) fresh: [Option<renewal::Fresh>; renewal::MAX_ATTEMPTS],
 }
 impl Counters {
+    pub(super) const fn initial_decision_available(&self) -> bool {
+        !self.requested && self.initial_decision_retired_at.is_none()
+    }
+    pub(super) fn retire_initial_decision(&mut self) {
+        self.initial_decision_retired_at
+            .get_or_insert(self.current_attempt);
+    }
     pub(super) fn begin_attempt(&mut self, attempt: u8) {
         self.current_attempt = attempt;
-        self.mode = if self.requested {
-            AttemptMode::ViewingOnly
-        } else {
+        self.mode = if self.initial_decision_available() {
             AttemptMode::Control
+        } else {
+            AttemptMode::ViewingOnly
         };
     }
     pub(super) fn opened(&mut self) -> AttemptMode {
@@ -272,6 +282,7 @@ impl Counters {
         if self.mode != AttemptMode::ViewingOnly
             || self
                 .request_attempt
+                .or(self.initial_decision_retired_at)
                 .is_none_or(|first| self.current_attempt <= first)
         {
             return Err(CallbackError);
@@ -294,6 +305,7 @@ impl Counters {
             .flatten()
             .find(|f| f.attempt == self.current_attempt)
     }
+    #[cfg(test)]
     pub(super) fn latest_cleanup(&self) -> Option<CleanupSummary> {
         self.fresh
             .iter()
@@ -301,6 +313,20 @@ impl Counters {
             .flatten()
             .find_map(|f| f.cleanup)
             .or(self.cleanup)
+    }
+    /// Only this attempt's original input owner may veto its automatic retry
+    /// or name its current failure. Older successful display-change reports
+    /// stay in history; they cannot stop a later, freshly admitted viewer.
+    pub(super) fn current_cleanup(&self) -> Option<CleanupSummary> {
+        if self.request_attempt == Some(self.current_attempt) {
+            self.cleanup
+        } else {
+            self.fresh
+                .iter()
+                .flatten()
+                .find(|fresh| fresh.attempt == self.current_attempt)
+                .and_then(|fresh| fresh.cleanup)
+        }
     }
     fn control_metrics(&mut self, viewer: &ControlledViewer) -> Result<(), CallbackError> {
         let capabilities = viewer.granted_capabilities();
@@ -324,7 +350,7 @@ impl Counters {
         Ok(())
     }
     pub(super) fn retry_stopped(&self) -> bool {
-        self.latest_cleanup().is_some_and(|summary| {
+        self.current_cleanup().is_some_and(|summary| {
             summary.input_stop.is_some_and(|reason| {
                 !matches!(
                     reason,
@@ -525,12 +551,25 @@ impl Attempt {
                     self.witness(frame, &result);
                 }
                 let ready = view.evidence().is_ok();
-                if self.mode == AttemptMode::Control && !counters.requested && ready {
+                if self.mode == AttemptMode::Control
+                    && counters.initial_decision_available()
+                    && ready
+                {
+                    self.window
+                        .set_display_switch_mode(
+                            fr_native::viewer_window::DisplaySwitchMode::Disabled,
+                        )
+                        .map_err(|_| CallbackError)?;
                     counters.spend_request();
                     view.request_control().map_err(|_| CallbackError)?;
                 } else if self.mode == AttemptMode::ViewingOnly
                     && self.window.take_control_request(ready)
                 {
+                    self.window
+                        .set_display_switch_mode(
+                            fr_native::viewer_window::DisplaySwitchMode::Disabled,
+                        )
+                        .map_err(|_| CallbackError)?;
                     counters.spend_fresh_request()?;
                     self.mode = AttemptMode::ExplicitControl;
                     view.request_control().map_err(|_| CallbackError)?;

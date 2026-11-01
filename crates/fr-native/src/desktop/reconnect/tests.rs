@@ -2,6 +2,9 @@
 use super::*;
 use std::path::Path;
 
+#[path = "tests/display_change.rs"]
+mod display_change;
+
 fn session(epoch: u128) -> Session<()> {
     Session::new(
         Configuration::new(Path::new("/usr/bin/false"), ":0", None, epoch).unwrap(),
