@@ -12,7 +12,7 @@
 //! own queue boundary. Native capture and encoding stay in the child process.
 use super::{CaptureOptions, MicrophoneCapture, Retirement};
 use fr_client::{
-    audio::uplink::{self, CapturePermit, CaptureReceipt, Sender},
+    audio::uplink::{self, CapturePermit, CaptureReceipt, ConfigurationPermit, Sender},
     input::ClientInstant,
 };
 use fr_core::audio::{MicPermission, MicTalkMode};
@@ -131,6 +131,20 @@ struct Packets {
     packets: std::vec::IntoIter<AudioAccessUnit>,
 }
 
+/// Original weak authority for the reliable configuration queue before a
+/// host ACK. This grants no capture or packet admission; it must be retained
+/// until those exact configuration bytes have left native transport custody.
+#[derive(Clone)]
+pub struct ConfigurationEgress {
+    permit: ConfigurationPermit,
+    clock: Clock,
+}
+impl ConfigurationEgress {
+    pub fn is_open(&self) -> bool {
+        self.clock.now().is_ok_and(|now| self.permit.valid(now))
+    }
+}
+
 /// Read-only fence for retained output under one immutable capture proof.
 /// After an acknowledged renewal, new output obtains a new `Egress`; an older
 /// clone still expires at its original cap and cannot borrow the successor.
@@ -223,6 +237,14 @@ impl Transmitter {
     /// Actual child reaping is distinct from stopping recording admission.
     pub fn retirement(&self) -> Option<Retirement> {
         self.retirement.clone()
+    }
+    /// The immutable pre-ACK configuration guard, never a capture capability.
+    /// Snapshot before admitting the reliable record and retain through drain.
+    pub fn configuration_egress(&self) -> Option<ConfigurationEgress> {
+        Some(ConfigurationEgress {
+            permit: self.sender.configuration_permit()?,
+            clock: self.clock,
+        })
     }
     /// The final queue/send guard, available only after the host ACK and
     /// process admission. Sample this for each new transport handoff: a later

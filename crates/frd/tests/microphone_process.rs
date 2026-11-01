@@ -339,10 +339,13 @@ fn ready(process: &Process) -> u32 {
     }
 }
 fn commit(process: &mut Process) {
+    let original = process.ready_acknowledgement().unwrap().unwrap();
+    assert_eq!(process.ready_acknowledgement().unwrap(), Some(original));
     let mut callbacks = 0;
     process
         .acknowledge(|record| {
             callbacks += 1;
+            assert_eq!(record, original);
             let ack = audio::decode_configured(record, BINDING).unwrap();
             assert!(ack.accepted);
             assert_eq!(ack.generation, AudioGeneration::from_raw(7));
@@ -352,6 +355,7 @@ fn commit(process: &mut Process) {
         })
         .unwrap();
     assert_eq!(callbacks, 1);
+    assert!(process.ready_acknowledgement().unwrap().is_none());
     let until = Instant::now() + Duration::from_millis(200);
     while process.state() != State::Running {
         assert_eq!(

@@ -184,6 +184,35 @@ fn no_process_opens_before_explicit_talk_and_exact_positive_host_ack() {
 }
 
 #[test]
+fn retained_configuration_egress_observes_owner_talk_and_permission_without_native_ack() {
+    for withdrawal in 0..3 {
+        let (input, mut transmitter, _) = transmitter(Path::new("/nonexistent/fr-microphone"));
+        let mut input = Some(input);
+        assert!(transmitter.configuration_egress().is_none());
+        begin(&mut transmitter);
+        let retained = transmitter.configuration_egress().unwrap();
+        assert!(retained.is_open());
+        match withdrawal {
+            0 => {
+                drop(input.take());
+            }
+            1 => {
+                transmitter.mute();
+            }
+            _ => transmitter.set_permission(MicPermission::Denied),
+        }
+        assert!(
+            !retained.is_open(),
+            "queued configuration lost its original consent"
+        );
+        assert!(
+            transmitter.retirement().is_none(),
+            "configuration evidence must not open capture"
+        );
+    }
+}
+
+#[test]
 fn muted_ticks_and_early_talk_refusal_preserve_a_later_explicit_enable() {
     let (_input, mut transmitter, _) = transmitter(Path::new("/nonexistent/fr-microphone"));
     assert_eq!(

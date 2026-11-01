@@ -86,6 +86,7 @@ pub struct Channel {
 
 /// Locally installed absolute images and explicitly selected `PipeWire` socket.
 /// Never derive paths, arguments or environment from a remote message.
+#[derive(Clone)]
 pub struct Launch {
     device: PathBuf,
     codec: PathBuf,
@@ -448,6 +449,21 @@ impl Process {
         Ok((mail.state == State::Ready)
             .then_some(mail.snapshot)
             .flatten())
+    }
+    /// Inspect the exact, already validated native positive reply without
+    /// consuming the one-shot admission. A bounded transport may retry these
+    /// same bytes after ordinary backpressure; only successful admission of
+    /// this record permits the subsequent [`Self::acknowledge`] commit.
+    pub fn ready_acknowledgement(
+        &self,
+    ) -> Result<Option<[u8; audio::AUDIO_CONFIGURED_RECORD_BYTES]>, Error> {
+        self.shared.check()?;
+        let mail = self.shared.lock();
+        if mail.state == State::Ready {
+            mail.positive.ok_or(Error::Protocol).map(Some)
+        } else {
+            Ok(None)
+        }
     }
     /// Success from `send` must mean admission of these exact bytes to the
     /// original authenticated route. This method queues the second Commit;
