@@ -124,12 +124,7 @@ impl SeatReservation {
         F: FnOnce() -> Result<S, PlatformError> + Send + 'static,
         C: FnMut(&mut S) -> bool + Send + 'static,
     {
-        let watchdog = match Watchdog::new(cx.clone(), session.monitor()) {
-            Ok(w) => w,
-            Err(e) => {
-                return Err(Error::Clock(e));
-            }
-        };
+        let watchdog = Watchdog::new(cx.clone(), session.monitor()).map_err(Error::Clock)?;
         let control = watchdog.control();
         // Register before spawning: an approval barrier either sees and fences
         // this exact owner or invalidates its pre-existing reservation.

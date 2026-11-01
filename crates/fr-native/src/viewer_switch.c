@@ -17,7 +17,7 @@ static void *switch_reply(struct fr_viewer_window *h, uint32_t sequence) {
     free(error); return reply;
 }
 static int switch_map(struct fr_viewer_window *h) {
-    static const char names[7][4] = {
+    static const char names[7][5] = {
         "LCTL", "RCTL", "LALT", "RALT", "LFSH", "RTSH", "FK07"
     };
     const xcb_query_extension_reply_t *extension = xcb_get_extension_data(h->c, &switch_xkb);
