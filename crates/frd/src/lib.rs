@@ -24,6 +24,9 @@ pub mod input_process;
 #[cfg(target_os = "linux")]
 pub mod microphone_process;
 
+#[cfg(target_os = "linux")]
+pub mod microphone_quic;
+
 pub mod session_agent;
 
 pub mod status;

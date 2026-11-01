@@ -254,6 +254,8 @@ jobs:
           targets = {
               'pipewire_microphone': root / 'crates/fr-native/tests/pipewire_microphone.rs',
               'host_microphone': root / 'crates/frd/tests/microphone_process.rs',
+              'microphone_network': root / 'crates/fr-native/tests/microphone_network.rs',
+              'host_microphone_quic': root / 'crates/frd/tests/microphone_quic.rs',
           }
           binaries = {name: [] for name in targets}
           workers = {'fr-microphone-worker': [], 'fr-opus-worker': []}
@@ -285,6 +287,15 @@ jobs:
                   'frozen_device_is_bounded_by_parent_health_and_both_siblings_are_actually_reaped',
                   'frozen_codec_is_reaped_on_idle_authority_loss_and_old_fences_cannot_stop_replacement',
                   'malformed_owned_record_and_future_original_receipt_are_terminal',
+              ],
+              'microphone_network': [
+                  'real_capture_traverses_the_original_authenticated_uplink_and_drained_mute_keeps_control',
+                  'muting_with_native_audio_still_queued_fences_before_any_further_network_poll',
+              ],
+              'host_microphone_quic': [
+                  'microphone_quic::tests::device::real_ack_backpressure_does_not_commit_or_replace_the_original_native_reply',
+                  'microphone_quic::tests::device::real_datagram_receipts_expire_and_explicit_retalk_waits_for_both_original_children',
+                  'microphone_quic::tests::device::consent_loss_between_receive_rounds_retires_the_real_ack_without_closing_input',
               ],
           }
           failed = []

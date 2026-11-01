@@ -203,6 +203,14 @@ impl QuicInput {
         self.agent.microphone_controller().ok_or(Error::Closed)
     }
 
+    /// Retain the original input owner's cancellation region and monotonic
+    /// clock for microphone receipt/deadline translation. A new clock with equal
+    /// numeric session IDs is not a substitute for this connection's authority.
+    pub fn microphone_context(&self, q: &QuicRecords) -> Result<Cx, Error> {
+        self.microphone_controller(q)?;
+        Ok(self.cx.clone())
+    }
+
     pub(crate) fn file_authority(
         &self,
         q: &QuicRecords,
