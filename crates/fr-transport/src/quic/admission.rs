@@ -119,12 +119,15 @@ fn bulk_recovery_fits(
 }
 
 fn limited_metadata(route: StreamRoute, bytes: &[u8], streams: &[StreamRoute]) -> bool {
-    // Classify the RECORD, not its lane: PresentedState and renewal responses
-    // share SessionControl. A per-lane reservation penalizes both equally.
+    // Classify the RECORD, not its lane: presentation and optional decoder
+    // metrics share SessionControl with renewals. The telemetry owner's one
+    // pending query does not bound already admitted, unacknowledged records.
     route.priority == Priority::Critical
         && bytes.get(6..8).is_some_and(|kind| {
             let kind = u16::from_be_bytes([kind[0], kind[1]]);
-            kind == Kind::Progress as u16 || kind == Kind::PresentedState as u16
+            kind == Kind::Progress as u16
+                || kind == Kind::PresentedState as u16
+                || kind == Kind::StageMetrics as u16
         })
         && streams.iter().any(|stream| {
             stream.outbound
@@ -179,10 +182,12 @@ mod tests {
     }
 
     #[test]
-    fn only_frame_metadata_is_limited_even_on_a_mixed_control_lane() {
+    fn only_advisory_metadata_is_limited_even_on_a_mixed_control_lane() {
         let control = route(Messages::SessionControl);
         for kind in 0..=u16::MAX {
-            let expected = kind == Kind::Progress as u16 || kind == Kind::PresentedState as u16;
+            let expected = kind == Kind::Progress as u16
+                || kind == Kind::PresentedState as u16
+                || kind == Kind::StageMetrics as u16;
             assert_eq!(
                 limited_metadata(control, &header(kind), &[control]),
                 expected
@@ -190,6 +195,28 @@ mod tests {
         }
         assert!(!limited_metadata(control, &[], &[control]));
         assert!(!limited_metadata(control, &[0; 7], &[control]));
+    }
+
+    #[test]
+    fn decoder_queries_and_replies_cannot_spend_either_renewal_slot() {
+        let policy = Policy::default();
+        let control = route(Messages::SessionControl);
+        assert!(limited_metadata(
+            control,
+            &header(Kind::StageMetrics as u16),
+            &[control]
+        ));
+        for size in [
+            fr_wire::receiver_metrics::QUERY_BYTES,
+            fr_wire::receiver_metrics::REPLY_BYTES,
+        ] {
+            assert!(metadata_fits(policy, (13 * size, 13), size));
+            assert!(!metadata_fits(policy, (14 * size, 14), size));
+            assert!(!metadata_fits(policy, (15 * size, 15), size));
+        }
+        for kind in [Kind::Challenge, Kind::ChallengeResponse] {
+            assert!(!limited_metadata(control, &header(kind as u16), &[control]));
+        }
     }
 
     #[test]

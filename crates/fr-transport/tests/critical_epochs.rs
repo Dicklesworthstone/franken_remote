@@ -13,6 +13,9 @@ use fr_wire::{
 use std::time::Duration;
 use support::{clock, drive, pair, runtime};
 
+#[path = "critical_epochs/metrics.rs"]
+mod metrics;
+
 fn packet(sequence: u64) -> Vec<u8> {
     let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 1150, 16384, 64).unwrap();
     let mut out = vec![0; 1150];

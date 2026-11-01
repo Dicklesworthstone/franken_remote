@@ -25,6 +25,25 @@ controller retain their previous behavior.
 
 `frd run` enables adaptive capture only with the explicit `--adaptive-capture`
 option; it remains off by default for controlled and shared observation sessions.
+That same local option now adds the optional decoder-metrics capability to the
+real host offer, including observation, control, playback audio, clipboard and
+both file directions. Previously the host's ordinary offer omitted it, so the
+running adaptive controller could not receive negotiated decoder-load reports.
+A legacy viewer that omits the capability still provides no receiver measurement
+and retains existing local-only pacing. When metrics are negotiated, missing or
+late reports remain unknown and cannot justify a headroom probe.
+
+Native client runtime offers retain decoder metrics even with audio, clipboard
+and duplex files together. At the existing 24-capability ceiling, the adaptive
+host and the full client profile omit only the optional bulk-record sizing
+extension added for larger auxiliary records; they use its bounded legacy
+record size. The full duplex profile's existing fixed attachment-credit fallback
+is unchanged. Required control and privacy boundaries, cursor, recovery, wheel
+support and numeric limits remain intact. The host offer helper returns a typed
+negotiation refusal if feedback cannot fit without removing a required boundary.
+Terminal capability inspection omits decoder metrics to make room for its
+required inspection marker: inspection never opens a decoder or solicits load.
+
 Measured 2026-10-14 (namespace, controlled share,
 the client pinned to one core shared with CPU hogs, busy host content, 60 s,
 debug builds):
@@ -69,6 +88,17 @@ transport admission checks. Each side retains at most one original immutable
 pending record, using the existing pure request/reply owners. Backpressure does
 not replace its bytes, sequence, sample or deadline. Only an expired unadmitted
 record can be retired; an admitted reliable record retains its transport lifetime.
+
+`StageMetrics` queries and replies now share the existing advisory-metadata
+reservation with progress and presentation records. The transport classifies
+individual records on the mixed session-control lane, so metrics cannot use the
+room reserved for renewal challenges and responses. At the default policy this
+leaves two records and 512 bytes within the original 16-record, 8192-byte critical
+allowance. All retained charges count, including records already staged into
+native reliable buffers but not acknowledged. Tiny custom profiles retain the
+existing proportional reservation and empty-flight exception. No queue, native
+credit, congestion allowance or lifetime is increased; a reserved admission slot
+does not guarantee delivery through congestion or loss.
 
 Metrics processing remains outside the native input mailbox. Canonical renewal,
 input receipts, repair and connection service continue while the supervised

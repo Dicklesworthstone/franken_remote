@@ -20,6 +20,31 @@ fn is_request(bytes: &[u8]) -> bool {
     bytes.get(6..8) == Some(&0x0036_u16.to_be_bytes())
 }
 impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
+    fn discard_feedback(
+        &self,
+        route: Route,
+        bytes: &[u8],
+        mut view: Binding,
+    ) -> Result<Disposition, ()> {
+        if route != Route::Stream(self.routes.inbound) {
+            return Err(());
+        }
+        // A failed generation makes its solicited reports obsolete; it does
+        // not admit a capability, direction or view that was never selected.
+        Setup::selected(self.selection, self.parent, view)
+            .map_err(|_| ())?
+            .ok_or(())?;
+        view.parent = self.parent;
+        fr_wire::receiver_metrics::decode(
+            bytes,
+            view,
+            &self.selection.limits,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .map_err(|_| ())?;
+        Ok(Disposition::Consumed)
+    }
     fn discard_presentation(
         &self,
         route: Route,
@@ -199,9 +224,12 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
                     .discard_presentation(route, bytes, handoff.previous)
                     .map(Some);
             }
-            if route == handoff.repair
-                || (route == Route::Stream(self.routes.inbound) && feedback::is_feedback(bytes))
-            {
+            if feedback::is_feedback(bytes) {
+                return self
+                    .discard_feedback(route, bytes, handoff.previous)
+                    .map(Some);
+            }
+            if route == handoff.repair {
                 return Ok(Some(Disposition::Consumed));
             }
         }
@@ -212,11 +240,10 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
         if presented::is_report(bytes) && self.discard_local_presentation(route, bytes)? {
             return Ok(Some(Disposition::Consumed));
         }
-        if route == Route::Stream(self.routes.inbound)
-            && feedback::is_feedback(bytes)
-            && self.subscriber.awaits_recovery_request().map_err(|_| ())?
+        if feedback::is_feedback(bytes)
+            && let Some(view) = self.subscriber.locally_failed_view().map_err(|_| ())?
         {
-            return Ok(Some(Disposition::Consumed));
+            return self.discard_feedback(route, bytes, view).map(Some);
         }
         Ok(None)
     }

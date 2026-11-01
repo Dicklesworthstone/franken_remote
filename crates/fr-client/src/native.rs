@@ -31,10 +31,11 @@ pub fn inspection_offer() -> Result<Offer, fr_wire::negotiation::Error> {
     let mut inspection = control_offer_with_duplex(true, true);
     inspection.role = Role::Observe;
     // Leave room for the required marker within the existing 24-entry bound.
-    // Bulk record sizing is an auxiliary detail, not a separate user feature.
+    // Inspection never opens a decoder, so it cannot solicit decoder load.
+    // Runtime offers retain that feedback, including their full duplex profile.
     inspection
         .capabilities
-        .retain(|capability| capability.name != attachment::BULK_RECORD_CAPABILITY);
+        .retain(|capability| capability.name != receiver_metrics::CAPABILITY);
     for capability in &mut inspection.capabilities {
         capability.required = false;
     }
@@ -154,15 +155,11 @@ pub fn control_offer_with_files() -> Offer {
 }
 
 /// Explicit combined workflow within the negotiation capability bound.
-/// Keep all required control gates, recovery and cursor forwarding. Only the
-/// optional solicited decoder-load extension is omitted in this profile; no
-/// records for that extension may be sent. Neither clipboard nor file consent
-/// implies the other, and older hosts may omit either optional family.
+/// Keep all required control gates, recovery, cursor and optional solicited
+/// decoder load. Neither clipboard nor file consent implies the other, and
+/// older hosts may omit either optional family.
 pub fn control_offer_with_clipboard_and_files() -> Offer {
     let mut combined = control_offer_with_clipboard();
-    combined
-        .capabilities
-        .retain(|cap| cap.name != receiver_metrics::CAPABILITY);
     for (name, version) in [
         (attachment::FILES_CAPABILITY, attachment::FILES_VERSION),
         (fr_wire::files::CAPABILITY, fr_wire::files::VERSION),
@@ -250,9 +247,14 @@ pub fn control_offer_with_duplex(clipboard: bool, audio: bool) -> Offer {
             required: false,
         });
     }
-    // The fullest profile needs one optional slot. Use the existing fixed
-    // attachment allowance path; keep all authority, privacy, input and recovery
-    // boundaries and do not raise the negotiation or queue bounds.
+    // At capacity, keep decoder-load feedback and use the legacy bounded bulk
+    // record size. The fullest profile also keeps its existing fixed attachment
+    // allowance path; no authority/privacy gate or numeric limit is changed.
+    if offer.capabilities.len() > fr_wire::negotiation::MAX_CAPABILITIES {
+        offer
+            .capabilities
+            .retain(|cap| cap.name != attachment::BULK_RECORD_CAPABILITY);
+    }
     if offer.capabilities.len() > fr_wire::negotiation::MAX_CAPABILITIES {
         offer
             .capabilities

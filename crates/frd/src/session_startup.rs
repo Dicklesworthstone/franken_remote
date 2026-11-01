@@ -36,6 +36,7 @@ mod native_control;
 pub use native_control::{
     CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
     host_offer_with_download, host_offer_with_duplex, host_offer_with_files, with_line_scroll,
+    with_receiver_metrics,
 };
 mod opening;
 mod running;

@@ -322,10 +322,8 @@ fn messages(role: MediaRole, host_direction: bool) -> Messages {
         (MediaRole::Input, false) => Messages::InputActions,
         (MediaRole::Clipboard, _) => Messages::Clipboard,
         (MediaRole::Files | MediaRole::FilesDownload, _) => Messages::Files,
-        (MediaRole::AudioDown, true) => Messages::AudioControl,
-        (MediaRole::AudioDown, false) => Messages::AudioReplies,
-        (MediaRole::AudioUp, true) => Messages::AudioReplies,
-        (MediaRole::AudioUp, false) => Messages::AudioControl,
+        (MediaRole::AudioDown, true) | (MediaRole::AudioUp, false) => Messages::AudioControl,
+        (MediaRole::AudioDown, false) | (MediaRole::AudioUp, true) => Messages::AudioReplies,
     }
 }
 impl QuicRecords {

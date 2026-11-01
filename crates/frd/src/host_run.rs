@@ -44,7 +44,7 @@ use crate::{
     session_monitor::{self, Monitor, Status as Lifetime},
     session_startup::{
         Configuration, host_offer_with_download, host_offer_with_duplex, host_offer_with_files,
-        shared_viewers, with_line_scroll,
+        shared_viewers, with_line_scroll, with_receiver_metrics,
     },
     worker::{Deadline, EncoderProbe, Launch, Retirement},
 };
@@ -400,7 +400,27 @@ fn request(
     scope: Scope,
     (control, clipboard, files, download): (Option<Capabilities>, bool, bool, bool),
     audio: bool,
+    adaptive_capture: bool,
 ) -> Result<Request, serial::Error> {
+    let offer = if download {
+        let selected = if files {
+            host_offer_with_duplex(control.is_some(), clipboard, audio)
+        } else {
+            host_offer_with_download(control.is_some(), clipboard, audio, true)
+        };
+        if control.is_some_and(|c| c.contains(Capability::LineScroll)) {
+            with_line_scroll(selected)
+        } else {
+            selected
+        }
+    } else {
+        offer(control, clipboard, audio, files)
+    };
+    let offer = if adaptive_capture {
+        with_receiver_metrics(offer).map_err(|_| serial::Error::Configuration)?
+    } else {
+        offer
+    };
     let fresh = |_| serial::Error::Configuration;
     Ok(Request {
         connection_id: ConnectionId::new(&random_bytes::<16>().map_err(fresh)?)
@@ -410,20 +430,7 @@ fn request(
             ..GrantPolicy::default()
         },
         session: Configuration {
-            offer: if download {
-                let selected = if files {
-                    host_offer_with_duplex(control.is_some(), clipboard, audio)
-                } else {
-                    host_offer_with_download(control.is_some(), clipboard, audio, true)
-                };
-                if control.is_some_and(|c| c.contains(Capability::LineScroll)) {
-                    with_line_scroll(selected)
-                } else {
-                    selected
-                }
-            } else {
-                offer(control, clipboard, audio, files)
-            },
+            offer,
             binding: ControlBinding {
                 id: u32::try_from(attempt % u64::from(u32::MAX))
                     .unwrap_or(1)
@@ -1225,6 +1232,7 @@ impl Share<'_> {
                 .is_some_and(crate::native_files::HostSelection::is_available),
         );
         let audio = self.options.audio.is_some();
+        let adaptive_capture = self.options.adaptive_capture;
         let report = self.report.clone();
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
@@ -1239,8 +1247,15 @@ impl Share<'_> {
                 serial::Policy::default(),
                 Connections {
                     request: move |attempt| {
-                        let mut request =
-                            request(attempt, host_boot, os_session, scope, control, audio)?;
+                        let mut request = request(
+                            attempt,
+                            host_boot,
+                            os_session,
+                            scope,
+                            control,
+                            audio,
+                            adaptive_capture,
+                        )?;
                         if require_approval {
                             approval::require(&mut request);
                         }
@@ -1567,6 +1582,41 @@ mod tests {
     }
 
     #[test]
+    fn only_explicit_adaptive_requests_offer_receiver_metrics_including_full_duplex() {
+        for profile in [
+            (None, false, false, false),
+            (Some(core()), false, false, false),
+            (Some(core()), true, true, false),
+            (Some(core()), true, false, true),
+            (Some(core()), true, true, true),
+        ] {
+            for adaptive in [false, true] {
+                let request = request(
+                    1,
+                    HostBootId::from_raw(9),
+                    5,
+                    Scope::OwnUser,
+                    profile,
+                    true,
+                    adaptive,
+                )
+                .unwrap();
+                let offer = request.session.offer;
+                offer.validate().unwrap();
+                assert_eq!(offer.limits, ProtocolLimits::ABSOLUTE);
+                assert_eq!(
+                    offer.capabilities.iter().any(|cap| {
+                        cap.name == fr_wire::receiver_metrics::CAPABILITY
+                            && cap.version == fr_wire::receiver_metrics::VERSION
+                            && !cap.required
+                    }),
+                    adaptive
+                );
+            }
+        }
+    }
+
+    #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
         let a = request(
@@ -1575,6 +1625,7 @@ mod tests {
             5,
             Scope::OwnUser,
             (None, false, false, false),
+            false,
             false,
         )
         .unwrap();
@@ -1585,6 +1636,7 @@ mod tests {
             Scope::OwnUser,
             (Some(core()), false, false, false),
             false,
+            false,
         )
         .unwrap();
         let c = request(
@@ -1593,6 +1645,7 @@ mod tests {
             5,
             Scope::OwnUser,
             (Some(core()), true, false, false),
+            false,
             false,
         )
         .unwrap();
@@ -1603,6 +1656,7 @@ mod tests {
             Scope::OwnUser,
             (None, false, false, false),
             true,
+            false,
         )
         .unwrap();
         let files = request(
@@ -1611,6 +1665,7 @@ mod tests {
             5,
             Scope::OwnUser,
             (Some(core()), false, true, false),
+            false,
             false,
         )
         .unwrap();

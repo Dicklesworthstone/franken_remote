@@ -2,8 +2,8 @@
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     attachment, clock, control, decoder,
-    negotiation::{Capability, Offer, Role},
-    presented,
+    negotiation::{self, Capability, Offer, Role},
+    presented, receiver_metrics,
 };
 
 /// The native host's offer. The four observation bootstrap capabilities are
@@ -257,6 +257,50 @@ pub fn with_line_scroll(mut offer: Offer) -> Offer {
     bound_duplex_offer(&mut offer);
     offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     offer
+}
+
+/// Enable the implemented, solicited decoder-load feedback for an explicitly
+/// adaptive host. Selection is optional and reports neither attachment credit
+/// nor presentation or input authority. An older viewer may omit it entirely.
+///
+/// At the capability ceiling, prefer feedback over the OPTIONAL bulk-record
+/// sizing extension: that peer keeps the existing bounded legacy record size.
+/// No required capability or numeric limit is removed or widened. An offer
+/// that still cannot fit, or already has an incompatible metrics boundary, is
+/// refused instead of silently losing the requested feedback.
+pub fn with_receiver_metrics(mut offer: Offer) -> Result<Offer, negotiation::Error> {
+    offer.validate()?;
+    if let Some(existing) = offer
+        .capabilities
+        .iter()
+        .find(|cap| cap.name == receiver_metrics::CAPABILITY)
+    {
+        return if existing.version == receiver_metrics::VERSION && !existing.required {
+            Ok(offer)
+        } else {
+            Err(negotiation::Error::RequiredCapability)
+        };
+    }
+    if offer.capabilities.len() == negotiation::MAX_CAPABILITIES {
+        offer
+            .capabilities
+            .retain(|cap| cap.name != attachment::BULK_RECORD_CAPABILITY || cap.required);
+    }
+    if offer.capabilities.len() >= negotiation::MAX_CAPABILITIES {
+        return Err(negotiation::Error::Invalid);
+    }
+    offer
+        .capabilities
+        .try_reserve_exact(1)
+        .map_err(|_| negotiation::Error::Allocation)?;
+    offer.capabilities.push(Capability {
+        name: receiver_metrics::CAPABILITY.into(),
+        version: receiver_metrics::VERSION,
+        required: false,
+    });
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer.validate()?;
+    Ok(offer)
 }
 
 #[cfg(test)]
