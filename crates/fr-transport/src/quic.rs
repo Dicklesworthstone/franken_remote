@@ -33,6 +33,7 @@ pub use lifetime::terminal::{
     ControlCloseSignal, RevocationRegistration, RevocationReport,
 };
 
+pub mod audio;
 pub mod budget;
 pub mod clipboard;
 pub mod files;
@@ -120,6 +121,9 @@ pub enum Error {
     /// protected output. The connection is terminal; this does not confirm
     /// per-stream cleanup, payload delivery, or rollback of earlier effects.
     OptionalRetirementDuringIo,
+    /// Microphone retirement cannot selectively retract admitted native audio
+    /// datagrams or uncertain protected output. The original connection closes.
+    RetainedMicrophoneOutput,
     Unauthorized,
     Cancelled,
     Closed,

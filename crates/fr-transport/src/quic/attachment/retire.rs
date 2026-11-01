@@ -45,6 +45,9 @@ impl MediaChannel {
     /// audio direction, video and control remain independent; consumed binding,
     /// ticket and stream identities stay tombstones. Partial exchanges cannot
     /// use this escape and retain their connection-fencing cancellation policy.
+    /// Microphone retirement closes the original connection if outbound native
+    /// datagrams or uncertain protected output may still contain its audio;
+    /// deleting a route cannot revoke bytes already admitted to that queue.
     pub fn retire_audio(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         if !matches!(
             self.descriptor.role,
@@ -169,7 +172,28 @@ impl QuicRecords {
         let r = &self.attachments[index];
         let code = retirement_code(r.role).ok_or(Error::WrongRoute)?;
         let (outbound, inbound, binding) = (r.outbound, r.inbound, r.binding);
+        // The native DATAGRAM queue mixes routes and exposes no selective erase.
+        // Check before removing this binding, on all three retirement paths:
+        // explicit local retirement, a callback request, and peer reset/FIN.
+        // Host-side AudioUp cannot queue audio datagrams, so unrelated host
+        // video/playback must not turn an ordinary microphone stop into a close.
+        let outgoing_microphone = r.role == MediaRole::AudioUp
+            && self
+                .datagrams
+                .iter()
+                .any(|route| route.binding == binding && route.outbound);
         let native = self.native.as_mut().ok_or(Error::Closed)?;
+        if r.role == MediaRole::AudioUp
+            && (self.native_io_unsettled
+                || (outgoing_microphone
+                    && native
+                        .connection()
+                        .inner()
+                        .pending_outbound_datagram_count()
+                        != 0))
+        {
+            return Err(Error::RetainedMicrophoneOutput);
+        }
         let outgoing = native
             .connection()
             .inner()

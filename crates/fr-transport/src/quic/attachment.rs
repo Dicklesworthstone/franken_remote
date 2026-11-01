@@ -834,6 +834,19 @@ impl MediaChannel {
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete && self.state.load(Ordering::Acquire) == ACTIVE
     }
+    /// Exact original reservation tombstone, never inferred from a missing
+    /// route or a closed/foreign connection. Only optional-lane owners use it.
+    pub(super) fn retired_on(&self, q: &QuicRecords) -> Result<bool, Error> {
+        if !q.is_bound_to(&self.connection) {
+            return Err(Error::WrongRoute);
+        }
+        if q.is_closed() {
+            return Err(Error::Closed);
+        }
+        Ok(q.attachments.iter().any(|reservation| {
+            Arc::ptr_eq(&reservation.state, &self.state) && reservation.retired()
+        }))
+    }
     pub(super) fn receive_expired(&self, q: &QuicRecords) -> bool {
         q.is_bound_to(&self.connection)
             && !q.is_closed()
