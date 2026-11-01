@@ -733,3 +733,193 @@ fn an_overtaken_sample_cannot_validate_a_fixed_permit_after_controller_renewal()
     assert_eq!(replacement.local_deadline(), now(5_000_000));
     assert!(replacement.valid(now(3_000_002)));
 }
+
+fn renewed_input(input: &mut InputClient, sequence: u64, elapsed: u64, until: u64) {
+    let mut ticket = grant().initial_ticket();
+    ticket.sequence = sequence;
+    ticket.credentials.ticket = InputTicketId::from_raw(100 + u128::from(sequence));
+    ticket.issued_at_us = H + elapsed;
+    ticket.expires_at_us = H + elapsed + 500_000;
+    let mut bytes = [0; fr_wire::input_ticket::AUTHORITY_TICKET_BYTES];
+    fr_wire::input_ticket::encode_authority(
+        fr_wire::input_ticket::AuthorityTicket {
+            ticket,
+            authority_until_us: H + until,
+        },
+        &mut bytes,
+        &ProtocolLimits::ABSOLUTE,
+        9,
+        InputDirection::HostToViewer,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    input
+        .accept_authority_ticket(&bytes, correlation(elapsed), now(elapsed))
+        .unwrap();
+    ready(input, elapsed);
+}
+
+#[test]
+fn explicit_successor_keeps_old_capture_proofs_fixed_and_same_epoch_live() {
+    let (mut input, mut sender) = attached();
+    let original = start(&mut sender, 0);
+    let monitor = original.monitor();
+    ready(&mut input, 1_000_000);
+    renewed_input(&mut input, 1, 2_000_000, 5_000_000);
+    let successor = sender
+        .refresh_capture(&original, now(2_000_000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(successor.configuration(), original.configuration());
+    assert_eq!(original.local_deadline(), now(3_000_000));
+    assert_eq!(successor.local_deadline(), now(5_000_000));
+    assert_eq!(original.check(now(3_000_000)), Err(Error::Expired));
+    assert!(successor.valid(now(3_000_000)));
+    assert!(monitor.valid(now(3_000_000)));
+    let receipt = sender
+        .begin_capture(&successor, now(3_000_001), now(3_100_001))
+        .unwrap();
+    assert_eq!(receipt.expires(), now(3_100_001));
+    sender.mute();
+    assert!(!successor.valid(now(3_000_002)));
+    assert!(!monitor.valid(now(3_000_002)));
+}
+
+#[test]
+fn successor_cannot_extend_backpressured_packet_custody() {
+    let (mut input, mut sender) = attached();
+    let original = start(&mut sender, 0);
+    ready(&mut input, 1_000_000);
+    renewed_input(&mut input, 1, 2_000_000, 5_000_000);
+    let mut receipt = sender
+        .begin_capture(&original, now(2_000_000), now(2_050_000))
+        .unwrap();
+    let successor = sender
+        .refresh_capture(&original, now(2_000_001))
+        .unwrap()
+        .unwrap();
+    assert_eq!(receipt.expires(), now(2_050_000));
+    sender
+        .submit(&mut receipt, &packet(&original, 0, 0), now(2_000_002))
+        .unwrap();
+    assert!(
+        !sender
+            .try_send(now(2_000_003), |_, until| {
+                assert_eq!(until, now(2_050_000));
+                Ok(false)
+            })
+            .unwrap()
+    );
+    assert_eq!(
+        sender.try_send(now(2_050_000), |_, _| panic!("expired speech escaped")),
+        Err(Error::Expired)
+    );
+    assert!(!successor.valid(now(2_050_000)));
+    assert_eq!(input.stopped(), None);
+}
+
+#[test]
+fn late_or_foreign_refresh_cannot_revive_capture_authority() {
+    let (mut input, mut sender) = attached();
+    let original = start(&mut sender, 0);
+    let (_other_input, mut other_sender) = attached();
+    let foreign = start(&mut other_sender, 0);
+    assert_eq!(
+        sender.refresh_capture(&foreign, now(1)).unwrap_err(),
+        Error::WrongScope
+    );
+    assert!(original.valid(now(1)));
+    ready(&mut input, 1_000_000);
+    renewed_input(&mut input, 1, 2_000_000, 5_000_000);
+    assert_eq!(
+        sender
+            .refresh_capture(&original, now(3_000_000))
+            .unwrap_err(),
+        Error::Expired
+    );
+    assert!(!original.monitor().valid(now(3_000_000)));
+    assert!(sender.refresh_capture(&original, now(3_000_001)).is_err());
+    assert_eq!(input.stopped(), None);
+}
+
+#[test]
+fn refresh_requires_useful_fresh_proof_and_current_predecessor() {
+    let (mut input, mut sender) = attached();
+    let original = start(&mut sender, 0);
+    renewed_input(&mut input, 1, 1_000_000, 4_000_000);
+    assert!(
+        sender
+            .refresh_capture(&original, now(1_000_000))
+            .unwrap()
+            .is_none()
+    );
+    ready(&mut input, 2_000_000);
+    let next = sender
+        .refresh_capture(&original, now(2_000_000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        sender
+            .refresh_capture(&original, now(2_000_001))
+            .unwrap_err(),
+        Error::Order
+    );
+    assert!(
+        sender
+            .refresh_capture(&next, now(2_000_002))
+            .unwrap()
+            .is_none()
+    );
+    assert!(next.valid(now(2_000_002)));
+}
+
+#[test]
+fn a_shorter_authenticated_cap_fences_all_original_monitors_without_waiting_for_refresh_rate() {
+    let (mut input, mut sender) = attached();
+    let original = start(&mut sender, 0);
+    let monitor = original.monitor();
+    ready(&mut input, 1_000_000);
+    renewed_input(&mut input, 1, 2_000_000, 2_500_000);
+    let shorter = sender
+        .refresh_capture(&original, now(2_000_000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(shorter.local_deadline(), now(2_500_000));
+    assert_eq!(original.local_deadline(), now(3_000_000));
+    assert!(monitor.valid(now(2_499_999)));
+    assert_eq!(original.check(now(2_500_000)), Err(Error::Expired));
+    assert!(!shorter.valid(now(2_500_000)));
+    assert!(!monitor.valid(now(2_500_000)));
+}
+
+#[test]
+fn capture_renewal_coalesces_tiny_advances_and_bounds_control_exchange_rate() {
+    let (mut input, mut sender) = attached();
+    let original = start(&mut sender, 0);
+    ready(&mut input, 1_000_000);
+    renewed_input(&mut input, 1, 2_000_000, 3_000_001);
+    assert!(
+        sender
+            .refresh_capture(&original, now(2_000_000))
+            .unwrap()
+            .is_none()
+    );
+    renewed_input(&mut input, 2, 2_010_000, 3_150_000);
+    let next = sender
+        .refresh_capture(&original, now(2_010_000))
+        .unwrap()
+        .unwrap();
+    renewed_input(&mut input, 3, 2_020_000, 3_350_000);
+    assert!(
+        sender
+            .refresh_capture(&next, now(2_020_000))
+            .unwrap()
+            .is_none()
+    );
+    let third = sender
+        .refresh_capture(&next, now(2_260_000))
+        .unwrap()
+        .unwrap();
+    assert_eq!(third.local_deadline(), now(3_350_000));
+    assert_eq!(next.local_deadline(), now(3_150_000));
+}

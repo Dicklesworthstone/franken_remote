@@ -2,7 +2,7 @@
 //! transport, authority endpoint, default source or native fallback.
 use super::{
     Error,
-    protocol::{self, CONFIGURE, Header, PULL},
+    protocol::{self, CONFIGURE, Header, RENEW},
 };
 use crate::pulse::microphone::MicrophoneSource;
 use std::{
@@ -12,7 +12,8 @@ use std::{
 };
 
 /// The original parent holds the sole other end. A byte, EOF, socket error,
-/// unknown clock or elapsed original deadline all permanently withdraw capture.
+/// unknown clock or elapsed installed deadline all permanently withdraw capture.
+/// Only an in-sequence renewal accepted before that deadline can replace it.
 struct Guard {
     channel: UnixStream,
     authorization_ns: u64,
@@ -105,14 +106,25 @@ fn serve(input: &mut impl Read, output: &mut impl Write, channel: UnixStream) ->
     loop {
         let request = Header::read(input, false)?;
         serial = serial.checked_add(1).ok_or(Error::Protocol)?;
-        if request.kind != PULL
-            || request.serial != serial
-            || request.generation != first.generation
-            || request.authorization_ns != first.authorization_ns
-            || request.bytes != 0
-        {
+        if !request.follows(serial, first.generation, guard.authorization_ns) {
             source.close();
             return refuse(output, request, Error::Protocol);
+        }
+        if request.kind == RENEW {
+            // No native call or PCM mutation occurs in this exchange. A partial
+            // frame keeps the original pull's expiry across the new future cap.
+            if !guard.permitted(request.expires_ns) {
+                source.close();
+                return refuse(output, request, Error::Denied);
+            }
+            guard.authorization_ns = request.authorization_ns;
+            if !guard.permitted(request.expires_ns) {
+                source.close();
+                return refuse(output, request, Error::Denied);
+            }
+            request.write(output, true, &[])?;
+            output.flush().map_err(|_| Error::Native)?;
+            continue;
         }
         let result = (|| {
             if !guard.permitted(request.expires_ns) {

@@ -368,3 +368,131 @@ fn idle_child_crash_is_observed_and_reaped_without_another_request() {
     assert_eq!(source.poll_ready(|| true), Err(Error::Native));
     assert_recording_stopped(&server);
 }
+
+fn renewed(source: &mut MicrophoneCapture) {
+    let until = Instant::now() + Duration::from_millis(100);
+    while !source.poll_renewed(|| true).unwrap() {
+        assert!(
+            Instant::now() < until,
+            "original renewal exchange did not finish"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+#[ignore = "actual private PulseAudio, original child renewal and independent pipe source; explicit native CI"]
+fn acknowledged_renewal_keeps_original_child_and_capture_sequence_past_old_cap() {
+    let server = Server::start();
+    let _feeder = Feeder::start(&server);
+    let allowed = Arc::new(AtomicBool::new(true));
+    let old_until = Instant::now() + Duration::from_secs(1);
+    let mut source = start(&server, 7, old_until, allowed.clone());
+    ready(&mut source);
+    let retirement = source.retirement();
+    let original_pid = retirement.process_id().unwrap();
+    let retained = nonempty(&mut source);
+    let retained_until = retained.expires();
+    let next_until = Instant::now() + Duration::from_secs(3);
+    source.renew_authority(next_until, || true).unwrap();
+    assert_eq!(
+        source.request(Instant::now() + Duration::from_millis(80), || true),
+        Err(Error::Backpressure)
+    );
+    renewed(&mut source);
+    assert_eq!(source.authorization_deadline().unwrap(), next_until);
+    assert_eq!(retirement.process_id(), Some(original_pid));
+    assert_eq!(
+        retained.expires(),
+        retained_until,
+        "renewal never retimes old PCM custody"
+    );
+    let mut expected = (0_u64, 0_u64);
+    for packet in retained.consume(|| true).unwrap() {
+        assert_eq!((packet.sequence(), packet.timestamp_samples()), expected);
+        expected = (packet.sequence() + 1, packet.timestamp_samples() + 960);
+    }
+    let mut after_old_cap = 0;
+    let until = old_until + Duration::from_millis(250);
+    while Instant::now() < until {
+        for packet in pull(&mut source).consume(|| true).unwrap() {
+            assert_eq!(packet.generation().as_raw(), 7);
+            assert_eq!((packet.sequence(), packet.timestamp_samples()), expected);
+            expected = (packet.sequence() + 1, packet.timestamp_samples() + 960);
+            after_old_cap += usize::from(Instant::now() >= old_until);
+        }
+        assert_eq!(retirement.process_id(), Some(original_pid));
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        after_old_cap >= 5,
+        "no continuous capture under the acknowledged successor"
+    );
+    allowed.store(false, Ordering::Release);
+    retired(&retirement);
+    assert_recording_stopped(&server);
+    println!(
+        "same microphone child: {} packets, {after_old_cap} after old cap; artifacts={}",
+        expected.0,
+        server.directory.display()
+    );
+}
+
+#[test]
+#[ignore = "actual private PulseAudio and SIGSTOP of original renewing child; explicit native CI"]
+fn frozen_renewal_never_installs_new_authority_and_reaps_on_control_deadline() {
+    let server = Server::start();
+    let _feeder = Feeder::start(&server);
+    let old_until = Instant::now() + Duration::from_secs(5);
+    let mut source = start(&server, 7, old_until, Arc::new(AtomicBool::new(true)));
+    ready(&mut source);
+    let retirement = source.retirement();
+    assert!(
+        Command::new("kill")
+            .args(["-STOP", &retirement.process_id().unwrap().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let started = Instant::now();
+    source
+        .renew_authority(old_until + Duration::from_secs(3), || true)
+        .unwrap();
+    assert!(!source.poll_renewed(|| true).unwrap());
+    assert_eq!(source.authorization_deadline().unwrap(), old_until);
+    assert_eq!(
+        source.request(Instant::now() + Duration::from_millis(80), || true),
+        Err(Error::Backpressure)
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(30),
+        "renewal ran native work on caller"
+    );
+    retired(&retirement);
+    assert!(
+        Instant::now() < old_until,
+        "renewal waited for the longer input lease"
+    );
+    assert_eq!(source.authorization_deadline().unwrap(), old_until);
+    assert_eq!(source.poll_renewed(|| true), Err(Error::Expired));
+    assert_recording_stopped(&server);
+}
+
+#[test]
+#[ignore = "actual private PulseAudio and uncollected original renewal ACK; explicit native CI"]
+fn uncollected_renewal_ack_expires_without_caller_service() {
+    let server = Server::start();
+    let _feeder = Feeder::start(&server);
+    let old_until = Instant::now() + Duration::from_secs(5);
+    let mut source = start(&server, 7, old_until, Arc::new(AtomicBool::new(true)));
+    ready(&mut source);
+    source
+        .renew_authority(old_until + Duration::from_secs(3), || true)
+        .unwrap();
+    // Even an acknowledged successor does not excuse an uncollected control
+    // result: the original 100 ms exchange still bounds the occupied mailbox.
+    retired(&source.retirement());
+    assert!(Instant::now() < old_until);
+    assert_eq!(source.poll_renewed(|| true), Err(Error::Expired));
+    assert_recording_stopped(&server);
+}

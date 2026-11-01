@@ -117,6 +117,41 @@ source failure and owner destruction close every retained clone. A new talk
 cannot launch a replacement until the previous child is positively reaped, so
 the original cleanup receipt is never overwritten while work is still alive.
 
+## Continuous talk across original-controller renewals
+
+`Sender::refresh_capture` may issue a successor `CapturePermit` only within the
+same still-live talk epoch, after fresh accepted authority from its original
+controller and before the currently installed cap expires. It cannot adopt a
+replacement controller with equal numeric IDs. Each permit remains immutable;
+expiration of a superseded permit refuses that item without revoking a valid
+successor. Expiration of the current epoch cap remains terminal.
+
+`CaptureMonitor` is a read-only original-owner projection for the independently
+serviced supervisor. It observes explicitly installed sender refreshes, but it
+cannot mint a permit or renew a grant. A retained packet still needs its own
+fixed capture receipt and send deadline.
+
+The same child accepts a bounded `RENEW` command through its existing one-slot
+mailbox. Its serial and generation must match, and the exact acknowledgement
+must complete before both the old authorization cap and the fixed 100 ms
+exchange deadline. The parent installs the successor only after that reply and
+a fresh original-owner permission check. A partial, frozen, late or uncollected
+acknowledgement cannot extend the exchange. The child independently fences at
+its installed same-boot deadline; neither side can revive an expired owner.
+
+`Transmitter` renews only at a drained pull boundary and yields both when staging
+the exchange and after collecting its acknowledgement. Only subsequent turns
+may capture or admit speech under the successor. Existing partial PCM, captured
+batches, wire records and escaped `Egress` guards keep their original caps.
+The containing transport snapshots `egress()` before each service turn and
+retains that exact guard with any record admitted during that turn.
+
+Extensions occur only within the final second of the current cap, require at
+least 100 ms of useful advancement, and are limited to four exchanges per second.
+A tighter authority cap is applied immediately. Renewal preserves the selected
+source, original child PID, audio generation and contiguous source timeline;
+it never implies new consent, source replacement or automatic recording restart.
+
 ## Executed native evidence
 
 On October 31, 2026, the repository-owned `pulse_microphone` test executed
@@ -177,10 +212,21 @@ The cleared-environment worker must resolve qualified libraries from its
 installed image. The isolated local test build uses a verified, test-only
 RPATH for PulseAudio/libopus; it is not a production installation policy.
 
-The capture permit and native owner deliberately keep one fixed authorization
-cap. Continuous talk across authenticated controller renewals still needs an
-explicit same-owner renewal integration; an old permit cannot borrow a new
-lease lifetime. These tests do not establish uninterrupted production talk.
+The subsequent continuous-talk extension passed all 45 focused tests: 20 client
+uplink tests, eight private protocol/clock tests, ten worker-process tests and
+seven transmitter tests. Strict client/native library and focused harness
+Clippy passed. The actual unchanged capture child produced 61 packets, including
+13 after its original cap. A 4.3-second controller-renewal run produced 209 real
+wire Opus packets, all decoding as the independently supplied tone, including
+58 after the original three-second cap. PID, generation, sequence and sample
+timeline stayed continuous; the old `Egress` remained expired while the refreshed
+guard stayed live. Mute then retired and actually reaped the child. Frozen
+renewal and uncollected-acknowledgement cases independently verified terminal
+expiry without installing another lifetime.
+
+These are actual native capture/codec results composed with synthetic controller
+and presentation policy fixtures. They do not establish uninterrupted talk over
+an authenticated network, physical-device qualification, or user-visible consent.
 
 The wire/transport role and client sender are implemented, but public native
 offers remain disabled pending host session integration, separate host approval

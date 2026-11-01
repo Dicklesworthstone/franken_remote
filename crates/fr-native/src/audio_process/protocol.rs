@@ -7,6 +7,7 @@ use std::io::{Read, Write};
 
 pub(super) const CONFIGURE: u8 = 1;
 pub(super) const PULL: u8 = 2;
+pub(super) const RENEW: u8 = 3;
 const HEADER_BYTES: usize = 48;
 const CONFIG_BYTES: usize = 16;
 const BATCH_BYTES: usize = 12;
@@ -31,7 +32,7 @@ impl Header {
         input.read_exact(&mut b).map_err(|_| Error::Native)?;
         if &b[..4] != (if reply { b"FRMR" } else { b"FRMC" })
             || b[4] != 1
-            || !matches!(b[5], CONFIGURE | PULL)
+            || !matches!(b[5], CONFIGURE | PULL | RENEW)
             || b[44..] != [0; 4]
         {
             return Err(Error::Protocol);
@@ -75,7 +76,7 @@ impl Header {
             || header.expires_ns > header.authorization_ns
             || usize::try_from(header.bytes).map_or(true, |size| size > MAX_BODY_BYTES)
             || (header.error.is_some() && header.bytes != 0)
-            || (!reply && header.kind == PULL && header.bytes != 0)
+            || (!reply && matches!(header.kind, PULL | RENEW) && header.bytes != 0)
         {
             return Err(Error::Protocol);
         }
@@ -108,6 +109,21 @@ impl Header {
             .write_all(&b)
             .and_then(|()| output.write_all(body))
             .map_err(|_| Error::Native)
+    }
+    /// Continuations belong to one private child, generation and serial chain.
+    /// A renewal spends the OLD authority cap; its proposed cap is not proof
+    /// that a late or replayed request was accepted before that expiry.
+    pub fn follows(self, serial: u64, generation: u64, authorization_ns: u64) -> bool {
+        self.serial == serial
+            && self.generation == generation
+            && self.bytes == 0
+            && match self.kind {
+                PULL => self.authorization_ns == authorization_ns,
+                RENEW => {
+                    self.authorization_ns != authorization_ns && self.expires_ns <= authorization_ns
+                }
+                _ => false,
+            }
     }
     pub fn matches_reply(self, request: Self) -> bool {
         self.kind == request.kind

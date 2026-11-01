@@ -14,7 +14,7 @@ use crate::{
     clipboard::{ProjectedClock, projection::Owner},
     input::{ClientInstant, InputClient},
 };
-pub use capture::{CapturePermit, CaptureReceipt};
+pub use capture::{CaptureMonitor, CapturePermit, CaptureReceipt};
 use fr_core::{
     audio::{
         AudioChannels, AudioDirection, AudioGeneration, AudioStopReason, AudioStreamConfig,
@@ -30,13 +30,16 @@ use fr_wire::{
     negotiation::{ControlBinding, Selection},
 };
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
 pub const MAX_CAPTURE_CUSTODY_US: u64 = 100_000;
 pub const MAX_CAPTURE_PACKETS: u8 = 4;
 pub const CONFIGURATION_TIMEOUT_US: u64 = 2_000_000;
+const RENEW_MARGIN_US: u64 = 1_000_000;
+const RENEW_INTERVAL_US: u64 = 250_000;
+const RENEW_ADVANCE_US: u64 = 100_000;
 const MAX_RECORD_BYTES: usize = audio::AUDIO_PACKET_OVERHEAD + MAX_OPUS_PAYLOAD_BYTES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,6 +114,7 @@ pub enum Status {
 }
 struct Epoch {
     live: AtomicBool,
+    until: Mutex<ClientInstant>,
     configuration: AudioConfiguration,
 }
 impl Epoch {
@@ -138,6 +142,7 @@ pub struct Sender {
     generation: AudioGeneration,
     epoch: Option<Arc<Epoch>>,
     configuration_until: Option<ClientInstant>,
+    refresh_after: ClientInstant,
     configuration_bytes: [u8; audio::AUDIO_CONFIGURATION_RECORD_BYTES],
     next: Option<(u64, u64)>,
     pending_len: usize,
@@ -200,6 +205,7 @@ impl InputClient {
             generation: AudioGeneration::INITIAL,
             epoch: None,
             configuration_until: None,
+            refresh_after: now,
             configuration_bytes: [0; audio::AUDIO_CONFIGURATION_RECORD_BYTES],
             next: None,
             pending_len: 0,
@@ -350,6 +356,7 @@ impl Sender {
             .map_err(Error::Wire)?;
         self.epoch = Some(Arc::new(Epoch {
             live: AtomicBool::new(true),
+            until: Mutex::new(until),
             configuration,
         }));
         self.configuration_until = Some(until);
@@ -401,6 +408,7 @@ impl Sender {
             cfg.jitter_target_ms,
         )
         .map_err(|_| Error::Configuration)?;
+        *epoch.until.lock().map_err(|_| Error::Retired)? = until;
         let permit = CapturePermit {
             epoch: Arc::downgrade(epoch),
             clock: self.clock.clone(),
@@ -411,6 +419,63 @@ impl Sender {
         self.status = Status::Capturing;
         self.configuration_until = None;
         Ok(permit)
+    }
+    /// Mint a successor only from a still-live capture proof of this same talk
+    /// epoch. Only accepted original-input tickets can advance its authority.
+    /// Existing permits, captures and queued records keep their original caps.
+    /// Extensions are admitted at most four times per second, within the last
+    /// second of the old proof, for at least another 100ms of authority; tighter
+    /// authority is applied without that delay. Clock rounding is not a renewal.
+    /// Native owners must install and acknowledge the successor before the OLD
+    /// cap expires. A failed/unknown native renewal must stop this sender.
+    pub fn refresh_capture(
+        &mut self,
+        previous: &CapturePermit,
+        now: ClientInstant,
+    ) -> Result<Option<CapturePermit>, Error> {
+        self.check(now)?;
+        if self.status != Status::Capturing || self.permission != MicPermission::Granted {
+            return Err(Error::NotTalking);
+        }
+        let epoch = self.epoch.as_ref().ok_or(Error::Retired)?;
+        if !previous.belongs_to(epoch) {
+            return Err(Error::WrongScope);
+        }
+        previous.check(now)?;
+        let until = self.clock.local_deadline(now).map_err(Error::Authority)?;
+        // A newer clock/proof cannot rescue a predecessor which expired while
+        // that proof was being sampled. Check its effective ordered time again.
+        previous.check(now)?;
+        let mut current = epoch.until.lock().map_err(|_| Error::Retired)?;
+        if !epoch.is_live() {
+            return Err(Error::Retired);
+        }
+        if *current != previous.until {
+            return Err(Error::Order);
+        }
+        if until == previous.until
+            || (until > previous.until
+                && (now < self.refresh_after
+                    || until.0 - previous.until.0 < RENEW_ADVANCE_US
+                    || previous.until.0.saturating_sub(now.0) > RENEW_MARGIN_US))
+        {
+            return Ok(None);
+        }
+        if now >= previous.until || now >= until {
+            epoch.stop();
+            return Err(Error::Expired);
+        }
+        let refresh_after =
+            ClientInstant(now.0.checked_add(RENEW_INTERVAL_US).ok_or(Error::Clock)?);
+        *current = until;
+        drop(current);
+        self.refresh_after = refresh_after;
+        Ok(Some(CapturePermit {
+            epoch: Arc::downgrade(epoch),
+            clock: self.clock.clone(),
+            configuration: previous.configuration,
+            until,
+        }))
     }
     pub fn receive_stop(&mut self, bytes: &[u8], now: ClientInstant) -> Result<(), Error> {
         self.check(now)?;

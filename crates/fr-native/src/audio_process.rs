@@ -26,6 +26,7 @@ use std::{
 };
 
 const SETUP: Duration = Duration::from_secs(2);
+const RENEWAL_EXCHANGE: Duration = Duration::from_millis(100);
 const MONITOR_TURN: Duration = Duration::from_millis(10);
 const MAX_WORKERS: usize = 4;
 static WORKERS: AtomicUsize = AtomicUsize::new(0);
@@ -152,13 +153,26 @@ struct Packets {
     counters: CaptureCounters,
     expires: Instant,
 }
+#[derive(Clone, Copy)]
+struct Authorization {
+    until: Instant,
+    ns: u64,
+}
+enum Request {
+    Pull(Instant),
+    Renew {
+        authorization: Authorization,
+        expires: Instant,
+    },
+}
 enum Reply {
     Ready,
+    Renewed,
     Packets(Packets),
 }
 #[derive(Default)]
 struct Mailbox {
-    request: Option<Instant>,
+    request: Option<Request>,
     reply: Option<Reply>,
     error: Option<Error>,
     revoke: Option<std::os::unix::net::UnixStream>,
@@ -169,8 +183,7 @@ struct Shared {
     stopped: AtomicBool,
     retired: AtomicBool,
     pid: AtomicU32,
-    authorized_until: Instant,
-    authorization_ns: u64,
+    authorization: Mutex<Authorization>,
     monitor: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 impl Shared {
@@ -194,17 +207,48 @@ impl Shared {
             .and_then(|mail| mail.error)
             .unwrap_or(Error::Stopped)
     }
+    fn authorization(&self) -> Result<Authorization, Error> {
+        self.authorization
+            .lock()
+            .map(|authorization| *authorization)
+            .map_err(|_| Error::Stopped)
+    }
+    fn install_authorization(
+        &self,
+        old_ns: u64,
+        next: Authorization,
+        exchange_until: Instant,
+    ) -> Result<(), Error> {
+        self.check()?;
+        {
+            let mut current = self.authorization.lock().map_err(|_| Error::Stopped)?;
+            if current.ns != old_ns || self.stopped.load(Ordering::Acquire) {
+                return Err(Error::Stopped);
+            }
+            // The child acknowledgement, not request enqueue, commits this
+            // future cap. A delayed acknowledgement cannot revive the old one.
+            let now = Instant::now();
+            if now >= current.until || now >= next.until || now >= exchange_until {
+                return Err(Error::Expired);
+            }
+            *current = next;
+        }
+        self.check()
+    }
     fn check(&self) -> Result<(), Error> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(self.error());
         }
         // Application callbacks never execute while holding a mailbox lock.
-        let error = if Instant::now() >= self.authorized_until {
+        let before_callback = self.authorization()?;
+        let error = if Instant::now() >= before_callback.until {
             Some(Error::Expired)
         } else if !catch_unwind(AssertUnwindSafe(|| (self.monitor)())).unwrap_or(false) {
             Some(Error::Denied)
         } else if self.stopped.load(Ordering::Acquire) {
             Some(self.error())
+        } else if Instant::now() >= self.authorization()?.until {
+            Some(Error::Expired)
         } else {
             None
         };
@@ -235,7 +279,11 @@ impl Control {
         self.0.stop(Error::Stopped);
     }
     pub fn is_stopped(&self) -> bool {
-        self.0.stopped.load(Ordering::Acquire) || Instant::now() >= self.0.authorized_until
+        self.0.stopped.load(Ordering::Acquire)
+            || !self
+                .0
+                .authorization()
+                .is_ok_and(|authorization| Instant::now() < authorization.until)
     }
 }
 impl std::fmt::Debug for Control {
@@ -312,6 +360,7 @@ enum Phase {
     Starting,
     Idle,
     Pulling,
+    Renewing,
     Stopped,
 }
 /// Nonblocking caller-side owner. Native setup, capture, encode, IPC and reap
@@ -333,7 +382,9 @@ impl MicrophoneCapture {
     /// and the original controlling session's admitted microphone capability.
     /// `monitor` must independently observe their revocation and be nonblocking;
     /// it is retained and evaluated even if the caller stops servicing this API.
-    /// `authorization_until` is the original local deadline, never a new lease.
+    /// `authorization_until` is the initial original-owner proof deadline.
+    /// Later fresh proof requires an explicit acknowledged `renew_authority`
+    /// exchange; neither polling nor new capture requests extend it.
     pub fn start(
         image: &Path,
         options: CaptureOptions,
@@ -348,8 +399,10 @@ impl MicrophoneCapture {
             stopped: AtomicBool::new(false),
             retired: AtomicBool::new(true),
             pid: AtomicU32::new(0),
-            authorized_until: authorization_until,
-            authorization_ns,
+            authorization: Mutex::new(Authorization {
+                until: authorization_until,
+                ns: authorization_ns,
+            }),
             monitor: Arc::new(monitor),
         });
         shared.check()?;
@@ -367,7 +420,7 @@ impl MicrophoneCapture {
         let (image, worker) = (image.to_owned(), shared.clone());
         if std::thread::Builder::new()
             .name("fr-microphone-owner".into())
-            .spawn(move || supervisor::run(image, options, until, &worker, slot))
+            .spawn(move || supervisor::run(image, &options, until, &worker, slot))
             .is_err()
         {
             shared.retired.store(true, Ordering::Release);
@@ -409,11 +462,14 @@ impl MicrophoneCapture {
             .reply
             .take();
         gate(&self.shared, permitted)?;
+        if self.until.is_some_and(|until| Instant::now() >= until) {
+            return Err(self.fail(Error::Expired));
+        }
         Ok(reply)
     }
     pub fn poll_ready(&mut self, mut permitted: impl FnMut() -> bool) -> Result<bool, Error> {
         gate(&self.shared, &mut permitted)?;
-        if matches!(self.phase, Phase::Idle | Phase::Pulling) {
+        if matches!(self.phase, Phase::Idle | Phase::Pulling | Phase::Renewing) {
             return Ok(true);
         }
         if self.phase != Phase::Starting {
@@ -447,7 +503,7 @@ impl MicrophoneCapture {
         if expires > now.checked_add(MAX_CAPTURE_CUSTODY).ok_or(Error::Clock)? {
             return Err(self.fail(Error::Configuration));
         }
-        let expires = expires.min(self.shared.authorized_until);
+        let expires = expires.min(self.shared.authorization()?.until);
         {
             let mut mail = self.shared.mail.lock().map_err(|_| Error::Stopped)?;
             if self.shared.stopped.load(Ordering::Acquire) {
@@ -456,12 +512,86 @@ impl MicrophoneCapture {
             if mail.request.is_some() || mail.reply.is_some() {
                 return Err(Error::Backpressure);
             }
-            mail.request = Some(expires);
+            mail.request = Some(Request::Pull(expires));
         }
         self.phase = Phase::Pulling;
         self.until = Some(expires);
         self.shared.wake.notify_one();
         Ok(())
+    }
+    /// Stage one renewal from the original permission monitor. This only
+    /// queues a bounded control exchange; the installed process cap remains
+    /// unchanged until the child acknowledges before the OLD cap expires.
+    /// No pull may overlap the exchange. Existing partial PCM keeps its own
+    /// capture deadline and can never borrow the proposed authorization.
+    pub fn renew_authority(
+        &mut self,
+        authorization_until: Instant,
+        mut permitted: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        gate(&self.shared, &mut permitted)?;
+        if self.phase != Phase::Idle {
+            return Err(Error::Backpressure);
+        }
+        let current = self.shared.authorization()?;
+        let now = Instant::now();
+        if now >= authorization_until {
+            return Err(self.fail(Error::Expired));
+        }
+        let ns = crate::clock::stamp_ns(authorization_until).ok_or(Error::Clock)?;
+        if ns == current.ns {
+            return Err(Error::Configuration);
+        }
+        let expires = now
+            .checked_add(RENEWAL_EXCHANGE)
+            .ok_or(Error::Clock)?
+            .min(current.until)
+            .min(authorization_until);
+        let authorization = Authorization {
+            until: authorization_until,
+            ns,
+        };
+        {
+            let mut mail = self.shared.mail.lock().map_err(|_| Error::Stopped)?;
+            if self.shared.stopped.load(Ordering::Acquire) {
+                return Err(mail.error.unwrap_or(Error::Stopped));
+            }
+            if mail.request.is_some() || mail.reply.is_some() {
+                return Err(Error::Backpressure);
+            }
+            mail.request = Some(Request::Renew {
+                authorization,
+                expires,
+            });
+        }
+        self.phase = Phase::Renewing;
+        self.until = Some(expires);
+        self.shared.wake.notify_one();
+        Ok(())
+    }
+    /// Collect the exact renewal acknowledgement. Unknown, late or mismatched
+    /// completion is terminal; it is never transparently replayed.
+    pub fn poll_renewed(&mut self, mut permitted: impl FnMut() -> bool) -> Result<bool, Error> {
+        gate(&self.shared, &mut permitted)?;
+        if self.phase != Phase::Renewing {
+            return Err(Error::Backpressure);
+        }
+        match self.collect(&mut permitted)? {
+            None => Ok(false),
+            Some(Reply::Renewed) => {
+                self.phase = Phase::Idle;
+                self.until = None;
+                Ok(true)
+            }
+            Some(_) => Err(self.fail(Error::Protocol)),
+        }
+    }
+    /// Last positively acknowledged native authorization. A staged renewal
+    /// never changes this value. This is metadata, not a permission grant.
+    pub fn authorization_deadline(&self) -> Result<Instant, Error> {
+        self.shared
+            .authorization()
+            .map(|authorization| authorization.until)
     }
     pub fn poll_batch(
         &mut self,
@@ -473,7 +603,7 @@ impl MicrophoneCapture {
         }
         match self.collect(&mut permitted)? {
             None => Ok(None),
-            Some(Reply::Ready) => Err(self.fail(Error::Protocol)),
+            Some(Reply::Ready | Reply::Renewed) => Err(self.fail(Error::Protocol)),
             Some(Reply::Packets(packets)) => {
                 if Instant::now() >= packets.expires {
                     return Err(self.fail(Error::Expired));

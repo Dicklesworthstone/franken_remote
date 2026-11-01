@@ -166,3 +166,68 @@ fn capture_batches_require_exact_timeline_and_bounded_payloads() {
         Err(Error::CaptureDiscontinuity)
     ));
 }
+
+#[test]
+fn renewal_requires_the_original_serial_generation_and_unexpired_predecessor_bound() {
+    let renewal = Header {
+        kind: RENEW,
+        serial: 8,
+        authorization_ns: 20_000,
+        expires_ns: 9_000,
+        ..header(PULL)
+    };
+    let encoded = encoded_header(renewal, &[], false);
+    assert_eq!(
+        Header::read(&mut encoded.as_slice(), false).unwrap(),
+        renewal
+    );
+    assert!(renewal.follows(8, 7, 10_000));
+    for rejected in [
+        Header {
+            serial: 7,
+            ..renewal
+        },
+        Header {
+            generation: 8,
+            ..renewal
+        },
+        Header {
+            authorization_ns: 10_000,
+            ..renewal
+        },
+        Header {
+            expires_ns: 10_001,
+            ..renewal
+        },
+        Header {
+            bytes: 1,
+            ..renewal
+        },
+        Header {
+            kind: CONFIGURE,
+            ..renewal
+        },
+    ] {
+        assert!(!rejected.follows(8, 7, 10_000));
+    }
+    let tighter = Header {
+        authorization_ns: 8_000,
+        expires_ns: 7_000,
+        ..renewal
+    };
+    assert!(tighter.follows(8, 7, 10_000));
+    assert!(
+        !Header {
+            kind: PULL,
+            ..renewal
+        }
+        .follows(8, 7, 10_000)
+    );
+    assert!(
+        !Header {
+            authorization_ns: 10_000,
+            ..renewal
+        }
+        .matches_reply(renewal)
+    );
+}

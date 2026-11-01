@@ -131,7 +131,9 @@ struct Packets {
     packets: std::vec::IntoIter<AudioAccessUnit>,
 }
 
-/// Read-only fence for retained transport output from this exact talk epoch.
+/// Read-only fence for retained output under one immutable capture proof.
+/// After an acknowledged renewal, new output obtains a new `Egress`; an older
+/// clone still expires at its original cap and cannot borrow the successor.
 /// It cannot retain the original controller/sender or enable a replacement.
 /// The containing transport still owns its authenticated route and must retire
 /// that route when this gate closes; this handle grants no channel ownership.
@@ -164,6 +166,7 @@ pub struct Transmitter {
     clock: Clock,
     offer: Option<AudioConfiguration>,
     permit: Option<Arc<CapturePermit>>,
+    pending_permit: Option<Arc<CapturePermit>>,
     capture: Option<MicrophoneCapture>,
     retirement: Option<Retirement>,
     request: Option<CaptureReceipt>,
@@ -193,6 +196,7 @@ impl Transmitter {
             clock: Clock::bind(now),
             offer: None,
             permit: None,
+            pending_permit: None,
             capture: None,
             retirement: None,
             request: None,
@@ -221,7 +225,9 @@ impl Transmitter {
         self.retirement.clone()
     }
     /// The final queue/send guard, available only after the host ACK and
-    /// process admission. Mute, source failure, consent loss, replacement or
+    /// process admission. Sample this for each new transport handoff: a later
+    /// acknowledged renewal never extends an already returned clone.
+    /// Mute, source failure, consent loss, replacement or
     /// owner destruction also invalidate every previously returned clone.
     pub fn egress(&self) -> Option<Egress> {
         Some(Egress {
@@ -311,7 +317,7 @@ impl Transmitter {
                     .map_err(Error::Consent)?,
             );
             let clock = self.clock;
-            let monitored = Arc::clone(&permit);
+            let monitored = permit.monitor();
             let capture = MicrophoneCapture::start(
                 &self.image,
                 CaptureOptions {
@@ -323,7 +329,7 @@ impl Transmitter {
                         .map_err(|_| Error::Order)?,
                 },
                 self.clock.deadline(permit.local_deadline())?,
-                move || clock.permits(&monitored),
+                move || clock.now().is_ok_and(|now| monitored.valid(now)),
             )
             .map_err(Error::Capture)?;
             self.retirement = Some(capture.retirement());
@@ -354,6 +360,9 @@ impl Transmitter {
             self.sender
                 .pending_configuration(self.clock.now()?)
                 .map_err(Error::Consent)?;
+            return Ok(Progress::default());
+        }
+        if self.collect_renewal()? {
             return Ok(Progress::default());
         }
         let permit = self.permit.as_ref().ok_or(Error::Order)?;
@@ -416,6 +425,20 @@ impl Transmitter {
                 }
             }
             let now = self.clock.now()?;
+            if let Some(successor) = self
+                .sender
+                .refresh_capture(permit, now)
+                .map_err(Error::Consent)?
+            {
+                let successor = Arc::new(successor);
+                capture
+                    .renew_authority(self.clock.deadline(successor.local_deadline())?, || {
+                        clock.permits(&successor)
+                    })
+                    .map_err(Error::Capture)?;
+                self.pending_permit = Some(successor);
+                return Ok(progress);
+            }
             let until = ClientInstant(
                 now.0
                     .checked_add(CUSTODY_US)
@@ -432,6 +455,22 @@ impl Transmitter {
             self.request = Some(receipt);
             return Ok(progress);
         }
+    }
+    /// Publish the new immutable egress proof only after the exact child ACK.
+    /// Yield this turn so the owner can snapshot it before any new admission.
+    fn collect_renewal(&mut self) -> Result<bool, Error> {
+        let Some(proposed) = self.pending_permit.as_ref() else {
+            return Ok(false);
+        };
+        let clock = self.clock;
+        let capture = self.capture.as_mut().ok_or(Error::Order)?;
+        if capture
+            .poll_renewed(|| clock.permits(proposed))
+            .map_err(Error::Capture)?
+        {
+            self.permit = self.pending_permit.take();
+        }
+        Ok(true)
     }
     /// Fences locally first. The caller may send this stop on its original
     /// reliable attachment; network availability never delays local muting.
@@ -469,6 +508,7 @@ impl Transmitter {
             capture.stop();
         }
         self.permit = None;
+        self.pending_permit = None;
         self.request = None;
         self.packets = None;
     }

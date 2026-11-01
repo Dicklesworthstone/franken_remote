@@ -148,6 +148,26 @@ fn reaped(retirement: &Retirement) {
     assert_eq!(retirement.process_id(), None);
 }
 
+fn has_independent_tone(decoder: &mut Decoder, packet: audio::AudioPacket<'_>) -> bool {
+    let packet = AudioAccessUnit::new(
+        packet.direction,
+        packet.generation,
+        packet.sequence,
+        packet.timestamp_samples,
+        packet.duration_samples,
+        false,
+        packet.payload,
+    )
+    .unwrap();
+    decoder.submit_packet(&packet).unwrap();
+    let pcm = decoder.poll_pcm().unwrap().unwrap();
+    let tone = power(pcm.samples(), 1000.0);
+    tone > 1.0e11
+        && [600.0, 800.0, 1200.0, 1500.0]
+            .into_iter()
+            .all(|hz| tone > 30.0 * power(pcm.samples(), hz))
+}
+
 #[test]
 fn no_process_opens_before_explicit_talk_and_exact_positive_host_ack() {
     let (_input, mut transmitter, _) = transmitter(Path::new("/nonexistent/fr-microphone"));
@@ -243,26 +263,7 @@ fn accepted_controller_talk_records_real_wire_opus_and_mutes_locally() {
                     assert_eq!(packet.sequence, 0);
                 }
                 next = Some((packet.sequence + 1, packet.timestamp_samples + 960));
-                let packet = AudioAccessUnit::new(
-                    packet.direction,
-                    packet.generation,
-                    packet.sequence,
-                    packet.timestamp_samples,
-                    packet.duration_samples,
-                    false,
-                    packet.payload,
-                )
-                .unwrap();
-                decoder.submit_packet(&packet).unwrap();
-                let pcm = decoder.poll_pcm().unwrap().unwrap();
-                let tone = power(pcm.samples(), 1000.0);
-                if tone > 1.0e11
-                    && [600.0, 800.0, 1200.0, 1500.0]
-                        .into_iter()
-                        .all(|hz| tone > 30.0 * power(pcm.samples(), hz))
-                {
-                    tones += 1;
-                }
+                tones += usize::from(has_independent_tone(&mut decoder, packet));
                 packets += 1;
                 Ok(true)
             })
@@ -395,4 +396,128 @@ fn idle_child_crash_removes_recording_status_without_an_application_turn() {
     assert_eq!(retirement.process_id(), None);
     assert_eq!(transmitter.state(), State::Stopped);
     assert_recording_stopped(&server);
+}
+
+fn renew_controller(input: &mut InputClient, sequence: u64, elapsed: u64) {
+    let mut ticket = authority::grant().initial_ticket();
+    ticket.sequence = sequence;
+    ticket.credentials.ticket = fr_core::ids::InputTicketId::from_raw(100 + u128::from(sequence));
+    ticket.issued_at_us = authority::H + elapsed;
+    ticket.expires_at_us = authority::H + elapsed + 1_000_000;
+    let mut bytes = [0; fr_wire::input_ticket::AUTHORITY_TICKET_BYTES];
+    fr_wire::input_ticket::encode_authority(
+        fr_wire::input_ticket::AuthorityTicket {
+            ticket,
+            authority_until_us: authority::H + elapsed + 3_000_000,
+        },
+        &mut bytes,
+        &authority::L,
+        authority::grant().input_channel,
+        fr_wire::input::InputDirection::HostToViewer,
+        fr_wire::input::InputDelivery::Reliable,
+    )
+    .unwrap();
+    input
+        .accept_authority_ticket(
+            &bytes,
+            authority::correlation(elapsed),
+            authority::client(elapsed),
+        )
+        .unwrap();
+}
+
+#[test]
+#[ignore = "original controller renewals, real PulseAudio/Opus child and immutable wire custody; explicit native CI"]
+fn renewed_original_controller_continues_talk_without_reviving_old_egress() {
+    let server = Server::start();
+    let _feeder = Feeder::start(&server);
+    let (mut input, mut transmitter, origin) = transmitter(&server.socket);
+    let offer = begin(&mut transmitter);
+    transmitter.configured(&acknowledgement(offer)).unwrap();
+    let retirement = transmitter.retirement().unwrap();
+    let initial_egress = transmitter.egress().unwrap();
+    let mut original_pid = None;
+    let mut decoder = Decoder::new();
+    decoder
+        .configure(
+            AudioStreamConfig::new(
+                AudioDirection::Uplink,
+                offer.generation,
+                offer.channels,
+                offer.frame_duration_ms,
+                offer.jitter_target_ms,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let (mut serial, mut sequence, mut presented, mut renewed_at) = (0, 0, 0, 0);
+    let (mut packets, mut tones, mut after_old_cap) = (0_usize, 0_usize, 0_usize);
+    let mut next = (0_u64, 0_u64);
+    while origin.elapsed() < Duration::from_millis(4300) {
+        let elapsed = u64::try_from(origin.elapsed().as_micros()).unwrap();
+        if elapsed - presented >= 500_000 {
+            serial += 1;
+            authority::ready(&mut input, serial, elapsed);
+            presented = elapsed;
+        }
+        if elapsed - renewed_at >= 1_000_000 {
+            sequence += 1;
+            renew_controller(&mut input, sequence, elapsed);
+            renewed_at = elapsed;
+        }
+        // The owner samples Egress before this service turn. A renewal ACK
+        // yields before any audio admitted under its successor proof.
+        let egress = transmitter.egress().unwrap();
+        let progress = transmitter
+            .service(|bytes, expiry| {
+                assert!(egress.is_open());
+                assert!(
+                    now(origin) < expiry,
+                    "audio retained its original capture deadline"
+                );
+                let packet = audio::decode_packet(bytes, CHANNEL).unwrap();
+                assert_eq!(packet.direction, AudioDirection::Uplink);
+                assert_eq!(packet.generation, offer.generation);
+                assert_eq!(packet.duration_samples, 960);
+                assert_eq!((packet.sequence, packet.timestamp_samples), next);
+                next = (packet.sequence + 1, packet.timestamp_samples + 960);
+                tones += usize::from(has_independent_tone(&mut decoder, packet));
+                packets += 1;
+                after_old_cap += usize::from(elapsed >= 3_100_000);
+                Ok(true)
+            })
+            .unwrap();
+        assert!(progress.admitted_packets <= 4);
+        if transmitter.state() == State::Ready {
+            let pid = retirement.process_id().unwrap();
+            assert_eq!(*original_pid.get_or_insert(pid), pid);
+        }
+        if elapsed >= 3_100_000 {
+            assert!(
+                !initial_egress.is_open(),
+                "old queued speech borrowed new authority"
+            );
+            assert!(transmitter.egress().unwrap().is_open());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        after_old_cap >= 30,
+        "too few packets after initial authority expired"
+    );
+    assert!(
+        tones * 2 > packets,
+        "independent tone decoded in {tones}/{packets}"
+    );
+    let final_egress = transmitter.egress().unwrap();
+    assert_eq!(transmitter.mute().unwrap().generation, offer.generation);
+    assert!(!final_egress.is_open());
+    assert!(!initial_egress.is_open());
+    reaped(&retirement);
+    assert_recording_stopped(&server);
+    input.tick(now(origin)).unwrap();
+    println!(
+        "same controller and child: {packets} wire records, {tones} tones, {after_old_cap} after initial cap; artifacts={}",
+        server.directory.display()
+    );
 }

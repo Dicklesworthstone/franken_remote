@@ -1,9 +1,9 @@
 //! One bounded supervisor owns native process creation, IPC and actual reaping.
 //! No application callback or OS wait runs with the mailbox mutex held.
 use super::{
-    Arc, CaptureOptions, Error, Instant, MONITOR_TURN, Ordering, Packets, PathBuf, Reply, Shared,
-    Slot,
-    protocol::{self, CONFIGURE, Header, PULL},
+    Arc, CaptureOptions, Error, Instant, MONITOR_TURN, Ordering, Packets, PathBuf, Reply, Request,
+    Shared, Slot,
+    protocol::{self, CONFIGURE, Header, PULL, RENEW},
 };
 use std::{
     io::{Read, Write},
@@ -44,7 +44,12 @@ impl Exchange<'_> {
             .check()
             .map_err(|_| std::io::ErrorKind::PermissionDenied)?;
         self.until
-            .min(self.shared.authorized_until)
+            .min(
+                self.shared
+                    .authorization()
+                    .map_err(|_| std::io::ErrorKind::PermissionDenied)?
+                    .until,
+            )
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
             .map(|remaining| remaining.min(MONITOR_TURN))
@@ -90,13 +95,13 @@ impl Write for Exchange<'_> {
 
 pub(super) fn run(
     image: PathBuf,
-    options: CaptureOptions,
+    options: &CaptureOptions,
     until: Instant,
     shared: &Arc<Shared>,
     slot: Slot,
 ) {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        serve(image, &options, until, shared, slot)
+        serve(image, options, until, shared, slot)
     }))
     .unwrap_or(Err(Error::Native));
     if let Err(error) = result {
@@ -181,14 +186,15 @@ fn session(
 ) -> Result<(), Error> {
     let body = protocol::configuration(options)?;
     let shared = exchange.shared;
+    let original = shared.authorization()?;
     let mut header = Header {
         kind: CONFIGURE,
         serial: 1,
         generation: options.configuration.generation().as_raw(),
-        authorization_ns: shared.authorization_ns,
+        authorization_ns: original.ns,
         expires_ns: crate::clock::stamp_ns(exchange.until)
             .ok_or(Error::Clock)?
-            .min(shared.authorization_ns),
+            .min(original.ns),
         bytes: u32::try_from(body.len()).map_err(|_| Error::Protocol)?,
         error: None,
     };
@@ -199,22 +205,20 @@ fn session(
     }
     shared.reply(Reply::Ready)?;
     loop {
-        // A child can fail between pulls. Observe and reap its original PID
-        // even when no caller is polling or submitting another IPC request.
-        // Child::wait below retains this cached successful wait result.
+        // Observe the original child even without another caller request. A
+        // successful try_wait is retained by Child's later final wait.
         if child.try_wait().map_err(|_| Error::Native)?.is_some() {
             return Err(Error::Native);
         }
-        // Idle does not mean authorized forever. The original durable monitor
-        // is checked at least every 10 ms, independent of caller service turns.
         shared.check()?;
-        let until = {
+        let current = shared.authorization()?;
+        let request = {
             let mut mail = shared.mail.lock().map_err(|_| Error::Stopped)?;
             if shared.stopped.load(Ordering::Acquire) {
                 return Err(mail.error.unwrap_or(Error::Stopped));
             }
             let reply_until = match mail.reply.as_ref() {
-                Some(Reply::Ready) => Some(exchange.until),
+                Some(Reply::Ready | Reply::Renewed) => Some(exchange.until),
                 Some(Reply::Packets(packets)) => Some(packets.expires),
                 None => None,
             };
@@ -224,9 +228,9 @@ fn session(
             if let Some(request) = mail.request.take() {
                 Some(request)
             } else {
-                let timeout = shared
-                    .authorized_until
-                    .min(reply_until.unwrap_or(shared.authorized_until))
+                let timeout = current
+                    .until
+                    .min(reply_until.unwrap_or(current.until))
                     .saturating_duration_since(Instant::now())
                     .min(MONITOR_TURN);
                 drop(
@@ -238,17 +242,34 @@ fn session(
                 None
             }
         };
-        let Some(until) = until else { continue };
+        let Some(request) = request else { continue };
         shared.check()?;
+        let (until, renewed) = match request {
+            Request::Pull(until) => (until, None),
+            Request::Renew {
+                authorization,
+                expires,
+            } => (expires, Some(authorization)),
+        };
         exchange.until = until;
-        header.kind = PULL;
+        header.kind = if renewed.is_some() { RENEW } else { PULL };
         header.serial = header.serial.checked_add(1).ok_or(Error::Protocol)?;
+        header.authorization_ns = renewed.map_or(current.ns, |authorization| authorization.ns);
         header.expires_ns = crate::clock::stamp_ns(until)
             .ok_or(Error::Clock)?
-            .min(shared.authorization_ns);
+            .min(current.ns)
+            .min(header.authorization_ns);
         header.bytes = 0;
         header.write(exchange, false, &[])?;
         let (received, body) = reply(exchange, header)?;
+        if let Some(authorization) = renewed {
+            if received.expires_ns != header.expires_ns || !body.is_empty() {
+                return Err(Error::Protocol);
+            }
+            shared.install_authorization(current.ns, authorization, exchange.until)?;
+            shared.reply(Reply::Renewed)?;
+            continue;
+        }
         let expires = crate::clock::local_instant(received.expires_ns)
             .ok_or(Error::Clock)?
             .min(until);
