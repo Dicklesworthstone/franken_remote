@@ -431,7 +431,11 @@ mod control;
 pub use control::{SendControl, SendSnapshot};
 mod intake;
 pub use intake::SendIntake;
+mod host_intake;
+pub use host_intake::HostSendIntake;
 mod download;
+pub mod local;
+pub(crate) use download::HostDownload;
 pub use download::{
     HostSelection, MAX_RECEIVE_RESULTS, ReceiveControl, ReceivePhase, ReceiveRequest, ReceiveStatus,
 };

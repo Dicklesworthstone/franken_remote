@@ -4,6 +4,7 @@
 //! services this lane only after input and renewal; no application callback sees
 //! its records. Retirement never erases an already committed publication.
 mod download;
+pub(in crate::session_startup::running) use download::send_error;
 mod negotiation;
 mod slots;
 use super::ControlledHost;
@@ -46,6 +47,7 @@ pub enum Cleanup {
 #[derive(Default)]
 pub(super) struct Slot {
     used: bool,
+    stopped: bool,
     pending: Option<Pending>,
     receiver: Option<HostReceiver>,
     sender: Option<Box<download::Outgoing>>,
@@ -54,6 +56,7 @@ pub(super) struct Slot {
 }
 impl Slot {
     pub(super) fn stop(&mut self) {
+        self.stopped = true;
         if self.pending.take().is_some() {
             self.reason.get_or_insert(Error::Cancelled);
         }
@@ -98,6 +101,7 @@ impl Slot {
                 Ok(Advance::Waiting | Advance::Ready) => {}
                 Ok(Advance::PeerRetired) => {
                     self.pending = None;
+                    self.stopped = true;
                     self.reason.get_or_insert(Error::Cancelled);
                 }
                 Err(error) => {
@@ -113,6 +117,9 @@ impl Slot {
         q: &mut QuicRecords,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<(), quic::Error> {
+        if self.stopped {
+            return Ok(());
+        }
         if let Some(pending) = &mut self.pending {
             match pending.advance(q, &mut authorize) {
                 Ok(Advance::Waiting) => return Ok(()),
@@ -121,6 +128,7 @@ impl Slot {
                     // The transport retired the original reservation. Dropping
                     // this spent owner cannot abandon the desktop connection.
                     self.pending = None;
+                    self.stopped = true;
                     self.reason.get_or_insert(Error::Cancelled);
                     return Ok(());
                 }
@@ -152,6 +160,7 @@ impl Slot {
         if let Some(outgoing) = &mut self.sender {
             if let Err(error) = outgoing.service(q, &mut authorize) {
                 self.reason.get_or_insert(Error::Sender(error));
+                self.stopped = true;
                 if error == fr_files::sender::Error::WrongConnection || q.is_closed() {
                     return Err(quic::Error::Handler);
                 }
@@ -325,6 +334,7 @@ impl ControlledHost {
             self.close();
             return Err(Error::Cancelled);
         }
+        self.files.download.stopped = true;
         if let Some(outgoing) = &mut self.files.download.sender {
             outgoing
                 .sender

@@ -45,6 +45,84 @@ attempt after reviewing the previous result.
 A client's remaining `--attempts` may recover viewing if a new session is admitted;
 its original download consent and results are never replayed or replaced.
 
+## Select more files during the same session
+
+On Linux, `--send-control NAME` opens an explicit local command endpoint for
+the original foreground host. It requires `--once` and `--input-agent`, and
+cannot be combined with startup `--send` selections:
+
+```bash
+frd run --software-explicit --display :0 \
+  --input-agent /opt/fr/fr-input-agent --once --send-control desk --json
+
+fr connect NODE_ID --control --experimental-native --display only \
+  --receive /home/bob/received --json
+```
+
+The host establishes its original download attachment after control is granted,
+even while no source has been selected. This starts no source read or empty ATP
+transfer. Once `ready` is true, use another terminal on the **host**, under the
+same effective user, to select a batch:
+
+```bash
+frd send --target desk --status --json
+frd send --target desk /home/alice/report.pdf /home/alice/project --json
+```
+
+Each batch accepts up to eight absolute file or portable-directory paths, without
+parent traversal. Selection pins the existing no-follow source descriptors on
+one bounded local worker; content reads and tree traversal remain in the existing
+authorized transfer worker. A full or unready lane refuses the command. It never
+queues a selection for an unknown future controller.
+
+The successful command returns `operation: "send_admitted"`, the original
+32-digit hexadecimal `instance`, and a nonzero `request` number. This confirms
+**local admission only**. Save that instance and request to inspect or cancel the
+same batch later. Replace `ORIGINAL_INSTANCE` and `1` in these examples with the
+values returned for the batch:
+
+```bash
+frd send --target desk --instance ORIGINAL_INSTANCE --status --request 1 --json
+frd send --target desk --instance ORIGINAL_INSTANCE --cancel 1 --json
+```
+
+| Status field | Meaning |
+| --- | --- |
+| `ready` | The original intake has capacity for a new explicit selection. The controller still rechecks authority before starting its source. |
+| `published` / `durability_unknown` | Actual recipient publication receipts, with uncertain crash durability counted separately. |
+| `refused`, `interrupted`, `publication_unknown` | Distinct retained outcomes; none can be inferred from queued-byte progress. |
+| `complete` / `failed` | Whether the batch reached a terminal report and whether it failed. Completion alone is not success. |
+| `queued_bytes` / `total_bytes` | Source progress when available; a full byte count does not confirm publication. |
+| `cleanup` | Separately observed source cleanup: `unknown`, `confirmed`, or `failed`. |
+
+After a successful batch, wait for `ready: true` before submitting another
+`frd send --target desk /absolute/path`. Later batches reuse the same authenticated
+attachment, monotonically increasing transfer IDs and original receiving quota
+owner. Per-object and cumulative session quotas, original control authority and
+absolute transfer deadlines remain in force. A new batch cannot reset them.
+Up to 64 original command handles are retained for the life of the endpoint;
+exhaustion refuses further admission instead of discarding earlier results.
+
+Historical status and cancellation require the original instance explicitly.
+If a host exits and another process reuses `desk`, an old command refuses instead
+of acting on that replacement. Commands without an explicit instance discover
+the current owner once and pin that instance for their operation. A lost reply
+can produce `file_command_outcome_unknown`; inspect that original instance before
+making another explicit selection. The command never automatically resends.
+
+Cancelling an active batch retires its original download lane. Desktop control
+and an independently negotiated upload can continue, but further downloads need
+a fresh, explicitly configured session. Cancelling an already completed request
+does not cancel a later batch. Earlier publications and uncertain effects remain
+in their original results; cancellation is not rollback.
+
+The local endpoint uses a same-effective-user Linux abstract Unix socket, with
+bounded peers, payloads and command deadlines. It is not exposed to the tailnet.
+Closing the host immediately fences selection admission; a delayed filesystem
+operation cannot submit into another session. Thread completion is reported only
+after the original workers have actually joined. This feature adds explicit
+full-object sends, not standing folder-sync jobs, resumption or remote browsing.
+
 ## Transfer in both directions
 
 The same original controlled connection can carry one upload and one download

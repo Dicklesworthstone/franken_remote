@@ -121,7 +121,7 @@ impl Sending {
             deferred: false,
         }
     }
-    fn deferred(policy: Policy, control: SendControl) -> Self {
+    pub(in crate::session_startup) fn deferred(policy: Policy, control: SendControl) -> Self {
         control.update(|status| status.phase = SendPhase::WaitingForSelection);
         Self {
             request: None,
@@ -133,6 +133,17 @@ impl Sending {
             original_deadline: None,
             deferred: true,
         }
+    }
+    pub(in crate::session_startup) fn set_intake(&mut self, intake: SendIntake) {
+        self.intake = Some(intake);
+    }
+    pub(in crate::session_startup) fn needs_attachment(&self) -> bool {
+        !self.expecting
+    }
+    pub(in crate::session_startup) fn stop(&mut self) {
+        self.close_intake();
+        self.request = None;
+        self.control.cancel();
     }
     /// No source read, blocking join, alternate transport pump or renewed grant.
     pub(in crate::session_startup) fn viewer(&mut self, viewer: &mut impl Endpoint) {
@@ -244,7 +255,7 @@ impl Sending {
         // stays open. Its stopped Slot no longer runs ordinary sender service.
         self.poll_cleanup(viewer);
     }
-    fn poll_cleanup(&self, viewer: &mut impl Endpoint) {
+    pub(in crate::session_startup) fn poll_cleanup(&self, viewer: &mut impl Endpoint) {
         self.control.cleaned(viewer.cleanup());
         self.observe(viewer);
     }

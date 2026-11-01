@@ -172,3 +172,12 @@ explicit unknown-effect outcomes apply in either direction.
 `fr connect NODE --control --receive DIR` expose this workflow. See
 [NATIVE_FILE_DOWNLOAD.md](NATIVE_FILE_DOWNLOAD.md) for selection, cancellation and
 retained-receipt semantics.
+
+For repeated explicit host selections on that same original session, Linux
+hosts can use `frd run --once --input-agent PATH --send-control NAME` and local
+`frd send --target NAME /absolute/path` commands. The initial download attachment
+starts idle; later batches reuse its sender, transfer IDs and receiving quotas.
+No network file kind or ATP profile is added. Commands are fenced to the original
+host instance, and each admitted batch keeps its own result and cancellation
+handle. See [live host selections](NATIVE_FILE_DOWNLOAD.md#select-more-files-during-the-same-session)
+for status, bounded history, cancellation and uncertain-admission semantics.

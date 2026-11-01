@@ -56,12 +56,126 @@ impl ControlledHost {
             request,
             handle,
             super::negotiation::Target::Send {
-                selection,
+                batch: Some((selection, lifetime)),
                 permission,
                 policy,
-                lifetime,
             },
         )
+    }
+    /// Establish this controller's original download lane without selecting a
+    /// source. Later local batches use the same sender, transfer IDs and peer
+    /// quota owner; no empty transfer or publication is manufactured.
+    pub(crate) fn offer_file_download_idle(
+        &mut self,
+        request: ChannelRequest,
+        permission: Permission,
+        policy: Policy,
+    ) -> Result<(), Error> {
+        crate::session_startup::native_control::file_download_lane(&self.session.opened.selected)
+            .map_err(|_| Error::NotNegotiated)?;
+        let handle = u128::from(request.binding.parent.id);
+        self.offer_file_target(
+            request,
+            handle,
+            super::negotiation::Target::Send {
+                batch: None,
+                permission,
+                policy,
+            },
+        )
+    }
+    pub(crate) fn send_download_files(
+        &mut self,
+        selection: batch::Selection,
+        lifetime: Duration,
+    ) -> Result<(), sender::Error> {
+        self.admit_file_download()?;
+        self.files
+            .download
+            .sender
+            .as_mut()
+            .ok_or(sender::Error::Closed)?
+            .sender
+            .begin_batch(&self.session.opened.transport, selection, lifetime)
+    }
+    pub(crate) fn send_download_files_before(
+        &mut self,
+        selection: batch::Selection,
+        until_us: u64,
+    ) -> Result<(), sender::Error> {
+        self.admit_file_download()?;
+        self.files
+            .download
+            .sender
+            .as_mut()
+            .ok_or(sender::Error::Closed)?
+            .sender
+            .begin_batch_before(&self.session.opened.transport, selection, until_us)
+    }
+    pub(crate) fn can_select_download_files(&mut self) -> bool {
+        self.file_send_stage() == Some(sender::Stage::Idle) && self.admit_file_download().is_ok()
+    }
+    fn admit_file_download(&mut self) -> Result<(), sender::Error> {
+        self.session.check().map_err(|_| sender::Error::Closed)?;
+        if self.files.download.pending.is_some() {
+            return Err(sender::Error::Busy);
+        }
+        if self.control().is_stopped()
+            || !self.renewal.permitted()
+            || self.files.download.stopped
+            || self.files.download.reason.is_some()
+        {
+            return Err(sender::Error::Closed);
+        }
+        let outgoing = self
+            .files
+            .download
+            .sender
+            .as_ref()
+            .ok_or(sender::Error::Closed)?;
+        let now = crate::session_startup::now(&outgoing.cx).map_err(|_| sender::Error::Clock)?;
+        if !outgoing.permission.is_approved()
+            || self.session.opened.control.check().is_err()
+            || outgoing
+                .authority
+                .deadline(HostInstant::from_micros(now))
+                .is_err()
+        {
+            return Err(sender::Error::Cancelled);
+        }
+        Ok(())
+    }
+    pub(crate) fn set_download_paused(&mut self, paused: bool) -> Result<(), sender::Error> {
+        if self.files.download.stopped {
+            return Err(sender::Error::Closed);
+        }
+        self.files
+            .download
+            .sender
+            .as_mut()
+            .ok_or(sender::Error::Closed)?
+            .sender
+            .set_paused(&self.session.opened.transport, paused)
+    }
+    pub(crate) fn download_is_paused(&self) -> Option<bool> {
+        self.files
+            .download
+            .sender
+            .as_ref()
+            .map(|s| s.sender.is_paused())
+    }
+    pub(crate) fn file_send_failure(&self) -> Option<sender::Error> {
+        self.files.download.reason.map(send_error)
+    }
+    /// Nonblocking original-source collection also works after parent closure.
+    pub(crate) fn try_finish_download_cleanup(&mut self) -> Option<Result<(), sender::Error>> {
+        if !self.files.download.stopped || self.files.download.pending.is_some() {
+            return None;
+        }
+        match self.files.download.sender.as_mut() {
+            Some(outgoing) => outgoing.sender.try_finish_cleanup(),
+            None => Some(Ok(())),
+        }
     }
     /// Original, ordered receipts. `ControllerPublished` means the receiver
     /// verified ATP and reported publication; transport acknowledgements do not.
@@ -106,5 +220,17 @@ impl ControlledHost {
             .pending
             .as_ref()
             .is_some_and(super::negotiation::Pending::is_download)
+    }
+}
+
+pub(in crate::session_startup::running) fn send_error(error: Error) -> sender::Error {
+    match error {
+        Error::Sender(error) => error,
+        Error::Transport(error) => sender::Error::Transport(error),
+        Error::AlreadyAttached => sender::Error::Busy,
+        Error::NotNegotiated | Error::WrongBinding => sender::Error::WrongRole,
+        Error::PermissionRequired | Error::Cancelled => sender::Error::Cancelled,
+        Error::Clock => sender::Error::Clock,
+        Error::Closed | Error::CleanupPending | Error::Receiver(_) => sender::Error::Closed,
     }
 }

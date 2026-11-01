@@ -37,6 +37,10 @@ fn published(id: u64) -> ResultReceipt {
 
 #[test]
 fn selection_clones_cannot_send_twice_or_reopen_a_replaced_path() {
+    let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
+    let cx = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
     let selected = Selected::new();
     let host = HostSelection::select(std::slice::from_ref(&selected.0)).unwrap();
     let clone = host.clone();
@@ -44,11 +48,12 @@ fn selection_clones_cannot_send_twice_or_reopen_a_replaced_path() {
     // reopen a disappeared name or give another session a second request.
     fs::remove_file(&selected.0).unwrap();
     assert!(host.is_available() && clone.is_available());
-    let first = std::thread::spawn(move || clone.take_request().is_ok());
-    let second = host.take_request().is_ok();
+    let other = cx.clone();
+    let first = std::thread::spawn(move || clone.take(other).is_ok());
+    let second = host.take(cx.clone()).is_ok();
     assert_ne!(first.join().unwrap(), second);
     assert!(!host.is_available());
-    assert!(matches!(host.take_request(), Err(Absence::Unavailable)));
+    assert!(matches!(host.take(cx), Err(Absence::Unavailable)));
     let debug = format!("{host:?}");
     assert!(!debug.contains(selected.0.to_str().unwrap()));
 }

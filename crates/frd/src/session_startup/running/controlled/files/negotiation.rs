@@ -23,10 +23,11 @@ pub(super) enum Advance {
 pub(super) enum Target {
     Receive(Configuration),
     Send {
-        selection: batch::Selection,
+        /// None establishes an idle sender for later explicit local selections.
+        /// It is not an empty ATP batch and starts no source worker.
+        batch: Option<(batch::Selection, Duration)>,
         permission: Permission,
         policy: sender::Policy,
-        lifetime: Duration,
     },
 }
 impl Target {
@@ -147,14 +148,15 @@ impl Pending {
                     .map_err(Error::Receiver)
             }
             Target::Send {
-                selection,
+                batch,
                 permission,
                 policy,
-                lifetime,
             } => {
                 let mut sender =
                     Sender::owning(self.cx.clone(), q, lane, policy).map_err(Error::Sender)?;
-                if let Err(error) = sender.begin_batch(q, selection, lifetime) {
+                if let Some((selection, lifetime)) = batch
+                    && let Err(error) = sender.begin_batch(q, selection, lifetime)
+                {
                     let _ = sender.cancel(q);
                     return Err(Error::Sender(error));
                 }

@@ -1,5 +1,9 @@
 //! Explicit local download selection and bounded, content-free receive status.
-use super::{Absence, Directory, MAX_SESSION_FILES, SelectRefusal, Selection, SendRequest};
+use super::{
+    Absence, Directory, HostSendIntake, MAX_SESSION_FILES, SelectRefusal, Selection, SendIntake,
+    SendRequest,
+};
+use asupersync::cx::Cx;
 use fr_files::{session::Progress, wire::ResultReceipt, worker};
 use std::{
     fmt,
@@ -7,22 +11,47 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-/// One operator selection, shared by startup profiles without duplicating the
-/// right to send it. Taking it consumes the original request across all clones.
+/// One initial selection or deferred local command surface, shared by startup
+/// profiles without duplicating the right to bind it. Taking it consumes the
+/// original configuration across all clones; it never follows another session.
 #[derive(Clone)]
-pub struct HostSelection(Arc<Mutex<Option<SendRequest>>>);
+pub struct HostSelection(Arc<Mutex<Option<SelectionKind>>>);
+enum SelectionKind {
+    Initial(SendRequest),
+    Interactive(HostSendIntake),
+}
+pub(crate) enum HostDownload {
+    Initial(SendRequest),
+    Interactive(SendIntake),
+}
 impl HostSelection {
     pub fn select(paths: &[PathBuf]) -> Result<Self, SelectRefusal> {
         let request = Selection::select(paths)?.request()?;
-        Ok(Self(Arc::new(Mutex::new(Some(request)))))
+        let selected = SelectionKind::Initial(request);
+        Ok(Self(Arc::new(Mutex::new(Some(selected)))))
+    }
+    /// Prepare one empty local command surface. The original host session must
+    /// consume this configuration once and establish its download attachment
+    /// before the returned intake accepts any explicit local selection.
+    pub fn interactive() -> (Self, HostSendIntake) {
+        let intake = HostSendIntake::new();
+        (
+            Self(Arc::new(Mutex::new(Some(SelectionKind::Interactive(
+                intake.clone(),
+            ))))),
+            intake,
+        )
     }
     pub fn is_available(&self) -> bool {
         self.lock().is_some()
     }
-    pub(crate) fn take_request(&self) -> Result<SendRequest, Absence> {
-        self.lock().take().ok_or(Absence::Unavailable)
+    pub(crate) fn take(&self, cx: Cx) -> Result<HostDownload, Absence> {
+        match self.lock().take().ok_or(Absence::Unavailable)? {
+            SelectionKind::Initial(request) => Ok(HostDownload::Initial(request)),
+            SelectionKind::Interactive(intake) => intake.bind(cx).map(HostDownload::Interactive),
+        }
     }
-    fn lock(&self) -> MutexGuard<'_, Option<SendRequest>> {
+    fn lock(&self) -> MutexGuard<'_, Option<SelectionKind>> {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)

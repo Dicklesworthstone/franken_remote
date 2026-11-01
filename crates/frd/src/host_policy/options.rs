@@ -71,6 +71,9 @@ pub struct RunOptions {
     pub files: Option<PathBuf>,
     /// Explicit host source files or portable directory roots for one control lease.
     pub send: Vec<PathBuf>,
+    /// Opt-in same-user command endpoint for later selections on one original
+    /// controlled session. Requires `once` and an input agent.
+    pub send_control: Option<String>,
     /// Local collision handling for both files and whole trees. Absent: reject.
     pub files_conflict: Option<ConflictPolicy>,
     /// Per-file byte limit for `--files` (default in `native_files`).
@@ -178,6 +181,7 @@ impl RunOptions {
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
                 "--files" => set(&mut options.files, PathBuf::from(value))?,
                 "--send" => options.send.push(PathBuf::from(value)),
+                "--send-control" => set(&mut options.send_control, value.to_owned())?,
                 "--files-conflict" => {
                     set(&mut options.files_conflict, files::parse_conflict(value)?)?;
                 }

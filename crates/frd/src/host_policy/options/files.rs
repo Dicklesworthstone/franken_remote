@@ -13,6 +13,13 @@ impl RunOptions {
     /// A host selection is consumed once. Never persist it in a restartable
     /// daemon or infer control consent from a source path.
     pub fn validate_file_send(&self) -> Result<(), Error> {
+        if let Some(target) = &self.send_control {
+            crate::native_files::local::validate_target(target)
+                .map_err(|_| Error::InvalidArgument)?;
+            if !self.send.is_empty() || !self.once || self.input_agent.is_none() {
+                return Err(Error::InvalidArgument);
+            }
+        }
         if self.send.is_empty() {
             return Ok(());
         }

@@ -203,9 +203,10 @@ impl StreamingHost {
             .add_upload(directory);
         Ok(())
     }
-    /// Consume one host-selected batch for this positively negotiated attempt.
-    /// Merely moving pinned descriptors reads no content. The one-use offer and
-    /// source worker wait for the original grant and completed Files attachment.
+    /// Consume one selected batch or one deferred local command surface for
+    /// this positively negotiated attempt. Neither reads source content. The
+    /// one-use offer waits for the original grant; an interactive sender then
+    /// remains idle until a separately selected local batch is admitted.
     pub(crate) fn configure_file_download(
         &mut self,
         selection: &crate::native_files::HostSelection,
@@ -224,7 +225,7 @@ impl StreamingHost {
         }
         self.files
             .get_or_insert_with(files::Lane::default)
-            .add_download(selection.take_request()?);
+            .add_host_download(selection.take(session.opened.cx.clone())?);
         Ok(())
     }
     /// Fence at call time, then observe the ORIGINAL disk worker joined under
@@ -235,13 +236,20 @@ impl StreamingHost {
         cx: &Cx,
         deadline: crate::worker::Deadline,
     ) -> Result<super::controlled::files::Cleanup, super::controlled::files::Error> {
+        if let Some(lane) = &mut self.files {
+            lane.close();
+        }
         let Host::Control(host) = &mut self.host else {
             return Ok(super::controlled::files::Cleanup::NotStarted);
         };
         if host.file_receive_negotiating() || host.file_send_negotiating() {
             host.close();
         }
-        host.reap_files(cx, deadline).await
+        let result = host.reap_files(cx, deadline).await;
+        if let Some(lane) = &self.files {
+            lane.observe(host);
+        }
+        result
     }
     pub(crate) fn file_download_report(&self) -> Option<fr_files::sender::batch::Report> {
         match &self.host {
@@ -341,6 +349,9 @@ impl StreamingHost {
     /// cleanup/late receipts remain with its original independently polled Driver.
     pub fn close(&mut self) {
         self.host.close();
+        if let Some(lane) = &mut self.files {
+            lane.close();
+        }
         if let Some(app) = &mut self.clipboard {
             app.close();
         }

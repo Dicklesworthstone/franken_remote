@@ -6,6 +6,8 @@ use fr_files::{sender::batch::Selection, worker::Completion};
 use fr_transport::quic::ChannelRequest;
 use fr_wire::{attachment::Ticket, decoder::Binding, negotiation::ControlBinding};
 
+mod repeated;
+
 async fn setup_download(c: &Cx, h: &Cx) -> Fixture {
     Box::pin(fixture_with_clipboard(
         c,

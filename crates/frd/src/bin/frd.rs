@@ -24,6 +24,10 @@ FrankenRemote host daemon management tool
 
 USAGE:
     frd run [OPTIONS]
+    frd send --target NAME /absolute/file ... [--json]
+    frd send --target NAME --status [--json]
+    frd send --target NAME --instance HEX --status --request N [--json]
+    frd send --target NAME --instance HEX --cancel N [--json]
     frd status [--json]
     frd approval [get | set local | set none]
     frd sharing [get | set own-user | set tailnet]
@@ -85,6 +89,14 @@ OPTIONS:
                     Repeat up to 8 times. May combine with --files for independent
                     transfers in both directions when both peers support them.
                     No browsing or automatic replay.
+    --send-control NAME  With --once and --input-agent: enable same-user local
+                    `frd send` commands for later file/directory selections on
+                    this original controlled session. The client must opt in
+                    with --receive DIR. Cannot combine with --send. NAME is
+                    1..64 ASCII letters/digits/dots/underscores/hyphens.
+                    Commands report admission separately from publication;
+                    retain the reported instance and request for status/cancel.
+                    Ending the session closes the intake; no reconnect replay.
     --files DIR     With --input-agent: the controller may send files or portable
                     directory trees
                     (fr connect --control --send) into DIR, an existing absolute
@@ -150,14 +162,17 @@ OPTIONS:
 #[path = "frd/install.rs"]
 mod local_install;
 
+#[cfg(target_os = "linux")]
+#[path = "frd/file_commands.rs"]
+mod file_commands;
+#[cfg(target_os = "linux")]
+#[path = "frd/file_commands_host.rs"]
+mod file_commands_host;
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
-    if args.is_empty()
-        || args
-            .iter()
-            .any(|a| a == "--help" || a == "-h" || a == "help")
-    {
+    if args.is_empty() || args.iter().any(|a| a == "--help" || a == "-h") {
         print!("{HELP}");
         return ExitCode::SUCCESS;
     }
@@ -176,10 +191,21 @@ fn main() -> ExitCode {
         .collect();
 
     match cmd {
+        "help" => {
+            print!("{HELP}");
+            ExitCode::SUCCESS
+        }
         "status" => execute_status(&args, json),
         "approval" => execute_policy(&args, true, json),
         "sharing" => execute_policy(&args, false, json),
         "run" => execute_run(&args, json),
+        #[cfg(target_os = "linux")]
+        "send" => file_commands::execute(&args, json),
+        #[cfg(not(target_os = "linux"))]
+        "send" => {
+            eprintln!("host_file_commands_unsupported: local host file commands require Linux");
+            ExitCode::from(2)
+        }
         "install" => local_install::execute(&args, json),
         "uninstall" => execute_uninstall(&args, json),
         "service-status" => execute_service_status(&args, json),
@@ -626,7 +652,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(monitor) => monitor,
         Err(code) => return code,
     };
-    let run_options = Options {
+    let mut run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
         interface: options
@@ -671,6 +697,19 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     // are overrides: copying saved effective values here would freeze them and
     // defeat later approval/scope changes. Every revision still fences old grants.
     let policy = run_policy(&options, effective);
+    // This optional endpoint never grants file/control authority. It is opened
+    // after local configuration is valid, and the intake becomes ready only
+    // after the original controlled download attachment has completed.
+    let file_owner = match options.send_control.as_deref() {
+        Some(target) => match file_commands_host::open(target, json) {
+            Ok((selection, owner)) => {
+                run_options.file_send = Some(selection);
+                Some(owner)
+            }
+            Err(code) => return code,
+        },
+        None => None,
+    };
     let result = if let Some(approval) = local_ui {
         host_run::run_with_desktop_approval(
             &run_options,
@@ -698,9 +737,16 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             }
         }
     };
+    let files_cleaned = file_commands_host::finish(file_owner.as_ref());
     drop(headless);
     match result {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(()) if files_cleaned => ExitCode::SUCCESS,
+        Ok(()) => run_refusal(
+            json,
+            "cleanup_incomplete",
+            "the original local file-command worker has not exited after its intake was fenced",
+            1,
+        ),
         Err((code, detail)) => run_refusal(json, code, &detail, 1),
     }
 }
