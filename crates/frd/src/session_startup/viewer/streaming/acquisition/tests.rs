@@ -1,6 +1,7 @@
 //! Real UDP/TLS, broker, worker-process supervision and stream ownership. The
 //! decoder replies, local consent, source checks, visibility and OS sink are
 //! explicitly simulated; these tests do not qualify HEVC pixels or hardware.
+mod closing;
 mod handoff;
 use super::*;
 use crate::{

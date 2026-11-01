@@ -12,6 +12,7 @@ use crate::{
     session_startup::viewer::{ViewerSession, controlled::Error as ControlError, now},
 };
 use asupersync::{cx::Cx, types::CancelKind};
+pub use closing::InteractiveCloseOutcome;
 use fr_client::{
     control_grant::RequestControl,
     input::{ClientInstant, Policy, ResultEvent},

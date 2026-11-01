@@ -7,6 +7,49 @@ use fr_wire::closure::Reason;
 use std::{future::Future, ops::ControlFlow};
 
 impl NativeObserver {
+    /// End this original interactive session after an explicit UI choice. An
+    /// unrequested viewing owner sends an ordinary session close; a granted
+    /// controller retains its actual lease-specific close evidence. A pending
+    /// request (even one staged in that callback) remains terminal. No input or
+    /// auxiliary permission is created or carried to another native observer.
+    pub fn serve_interactive_session_until<'a>(
+        &'a mut self,
+        cleanup: &'a Cx,
+        sequence: u64,
+        capabilities: Capabilities,
+        policy: Policy,
+        ui: impl FnMut(
+            streaming::InteractiveState<'_>,
+            Option<streaming::Presentation>,
+        ) -> Result<ControlFlow<Reason>, ()>
+        + 'a,
+        result: impl FnMut(ResultEvent) + 'a,
+    ) -> impl Future<Output = Result<streaming::InteractiveCloseOutcome, Error>> + 'a {
+        let cx = self.cx.clone();
+        let request = self.negotiated_request(sequence, capabilities);
+        let future = request.and_then(|request| {
+            self.input
+                .take()
+                .ok_or(Error::InvalidConfiguration)
+                .map(|input| {
+                    self.viewer.serve_interactive_session_until(
+                        input,
+                        request,
+                        policy,
+                        cleanup,
+                        ui,
+                        result,
+                        |_, _| Err(()),
+                    )
+                })
+        });
+        Attempt {
+            cx,
+            complete: false,
+            inner: Box::pin(async move { future?.await.map_err(Error::Streaming) }),
+        }
+    }
+
     /// Continue the original native control-capable bootstrap through watching,
     /// a local control request, actual grant, and an explicit terminal exchange.
     /// Neither an input attachment nor watching reserves a lease or input Seat.

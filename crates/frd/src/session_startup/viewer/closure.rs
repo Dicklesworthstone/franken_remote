@@ -89,8 +89,27 @@ impl super::ViewerSession {
         &mut self,
         reason: closure::Reason,
     ) -> impl std::future::Future<Output = Result<quic::CloseOutcome, Error>> + use<> {
+        self.begin_disconnect_role(reason, fr_wire::negotiation::Role::Observe)
+    }
+
+    /// Only the streaming owner's unrequested `Peer::Viewing` branch may call
+    /// this after checking its original negotiated input and absent request.
+    /// A control-capable advertisement alone does not create a lease. Pending
+    /// or granted requests must use their existing cancellation/lease cleanup.
+    pub(super) fn begin_disconnect_before_control(
+        &mut self,
+        reason: closure::Reason,
+    ) -> impl std::future::Future<Output = Result<quic::CloseOutcome, Error>> + use<> {
+        self.begin_disconnect_role(reason, fr_wire::negotiation::Role::RequestControl)
+    }
+
+    fn begin_disconnect_role(
+        &mut self,
+        reason: closure::Reason,
+        role: fr_wire::negotiation::Role,
+    ) -> impl std::future::Future<Output = Result<quic::CloseOutcome, Error>> + use<> {
         let ready = self.check().and_then(|()| {
-            if self.opened.selection.role != fr_wire::negotiation::Role::Observe {
+            if self.opened.selection.role != role {
                 return Err(Error::Order);
             }
             Ok(self

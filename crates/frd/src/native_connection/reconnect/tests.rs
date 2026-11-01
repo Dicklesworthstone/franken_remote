@@ -59,6 +59,9 @@ impl Application for App {
         self.terminal_reads.set(self.terminal_reads.get() + 1);
         self.terminal
     }
+    fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
+        panic!("a failed-discovery attempt cannot request a successful reopen")
+    }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         self.events.push(status);
         if (self.fail_terminal_status && matches!(status, Status::Stopped { .. }))

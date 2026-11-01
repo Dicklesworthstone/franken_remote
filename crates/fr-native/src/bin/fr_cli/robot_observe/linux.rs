@@ -385,7 +385,7 @@ impl Ui for Interface {
                     state.retire(Phase::Cleaning);
                     Ok(())
                 }
-                Status::Reconnecting { .. } => {
+                Status::Reconnecting { .. } | Status::Reopening { .. } => {
                     state.retire(Phase::Reconnecting);
                     Ok(())
                 }

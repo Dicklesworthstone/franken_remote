@@ -69,7 +69,7 @@ pub use viewer::streaming::audio::{
     Unavailable as ViewerAudioUnavailable,
 };
 pub use viewer::streaming::{
-    ControlState as ViewerControlState, Error as StreamingViewerError,
+    ControlState as ViewerControlState, Error as StreamingViewerError, InteractiveCloseOutcome,
     InteractiveState as InteractiveViewerState, PendingControl as PendingViewerControl,
     Presentation, Statistics as ViewerStatistics, StreamingViewer, StreamingViewerControl,
     ViewingControl as ViewingViewerControl,

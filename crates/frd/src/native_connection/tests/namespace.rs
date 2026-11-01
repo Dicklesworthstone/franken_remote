@@ -3,6 +3,7 @@
 //! TLS and production startup/renewal. Identity, CA and host admission are fixtures.
 use super::*;
 mod reconnect;
+mod reopen;
 use asupersync::{
     net::{
         quic_core::{ConnectionId, LongPacketType, ProtectedHeaderPrefix, TransportParameters},

@@ -24,7 +24,9 @@ use std::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
-    /// Includes the initial attempt. Success/traffic does not reset the counter.
+    /// Initial attempt plus the maximum number of automatic retries. Explicit
+    /// successful user choices do not spend or reset this lifetime retry budget.
+    /// All attempts, including those choices, share the 32-owner ceiling.
     pub max_attempts: u8,
     pub initial_backoff: Duration,
     pub maximum_backoff: Duration,
@@ -76,6 +78,8 @@ pub enum Failure {
     Observation(ObserverError),
     Cleanup,
     CleanupExpired,
+    /// A fresh explicit choice would exceed the finite native-owner namespace.
+    AttemptLimit,
 }
 impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -102,6 +106,11 @@ pub enum Status {
         delay: Duration,
         failure: Failure,
     },
+    /// Successful local completion and confirmed cleanup, followed by an
+    /// explicit new viewing choice. This is not a transient-failure retry.
+    Reopening {
+        attempt: u8,
+    },
     Completed {
         attempt: u8,
     },
@@ -119,6 +128,15 @@ impl std::fmt::Display for CallbackError {
     }
 }
 impl std::error::Error for CallbackError {}
+
+/// A successful attempt's local disposition after its original native owners
+/// have been reaped. Reopen carries no previous selection, lease or permission.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum CompletionAction {
+    #[default]
+    Finish,
+    Reopen,
+}
 
 /// The application owns its native observer until cleanup finishes. `run` is
 /// called afresh only after authentic TLS admission; it must not replay retained
@@ -148,13 +166,27 @@ pub trait Application {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>>;
     fn status(&mut self, status: Status) -> Result<(), CallbackError>;
+    /// Called only after a successful run and successful mandatory cleanup,
+    /// with a still-live supervisor. The default completes the invocation.
+    /// Reopen requires one retained, explicit local choice and the original
+    /// attempt's successful close evidence; it must consume that choice once.
+    /// It cannot reinterpret a failure or restore input/auxiliary consent.
+    /// The new attempt repeats identity, TLS, approval and display selection.
+    /// A refusal stops; notification/cancellation can still veto reopening.
+    fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
+        Ok(CompletionAction::Finish)
+    }
     /// Bounded terminal evidence retained by this attempt's original owner.
-    /// Return only an actually validated peer/session report; this grants no
-    /// authority and must not infer a report from socket or native cleanup.
-    /// The supervisor reads it only for a failed attempt, AFTER successful
-    /// cleanup, and stops with this exact error even when a retryable local
-    /// failure won the service race. A successful user-requested shutdown stays
-    /// successful even if its closing exchange has a report. Reset the evidence
+    /// Return only an error or validated peer/session report retained by the
+    /// original owner; this grants no authority and must not infer evidence
+    /// from socket or native cleanup. The supervisor reads it for a failed
+    /// attempt, an explicit Reopen or a completion-action refusal, AFTER
+    /// successful cleanup, and stops with this exact error even when a retryable
+    /// local failure won the service race. For a successful run's completion
+    /// decision, expected ClientRequested session/released-lease reports are the
+    /// application's validated completion, not a terminal failure; it must still
+    /// return adverse reports. An ordinary
+    /// successful Finish remains successful even with a report. Reset the evidence
     /// when a new `Connecting` attempt begins. Cleanup failure still dominates,
     /// and returning `Some` can only prevent another attempt.
     fn terminal_failure(&self) -> Option<ObserverError> {
@@ -258,7 +290,8 @@ impl Client {
                 }
                 let mut identity = None;
                 let mut clock = Clock::new(&cx)?;
-                for attempt in 1..=policy.max_attempts {
+                let mut retries = 0;
+                for attempt in 1..=32 {
                     clock.live(&cx)?;
                     notify(application, Status::Connecting { attempt })?;
                     clock.live(&cx)?;
@@ -354,12 +387,61 @@ impl Client {
                     }
                     match outcome {
                         Ok(value) => {
+                            let action = application.completion_action();
+                            // A bounded callback may cancel the supervisor, but
+                            // cannot buy a new attempt after that cancellation.
+                            clock.live(&cx)?;
+                            let action = match action {
+                                Ok(action) => action,
+                                Err(_) => {
+                                    // The application can refuse reopening for a
+                                    // retained protocol/authority failure in its
+                                    // closing exchange. Preserve that exact cause
+                                    // instead of replacing it with Notification.
+                                    let terminal = application.terminal_failure();
+                                    clock.live(&cx)?;
+                                    let failure = terminal
+                                        .map(Failure::Observation)
+                                        .unwrap_or(Failure::Notification);
+                                    let _ =
+                                        notify(application, Status::Stopped { attempt, failure });
+                                    return Err(failure);
+                                }
+                            };
+                            if action == CompletionAction::Reopen {
+                                let terminal = application.terminal_failure();
+                                clock.live(&cx)?;
+                                if let Some(error) = terminal {
+                                    let failure = Failure::Observation(error);
+                                    let _ =
+                                        notify(application, Status::Stopped { attempt, failure });
+                                    return Err(failure);
+                                }
+                                if attempt == 32 {
+                                    let failure = Failure::AttemptLimit;
+                                    let _ =
+                                        notify(application, Status::Stopped { attempt, failure });
+                                    return Err(failure);
+                                }
+                                notify(
+                                    application,
+                                    Status::Reopening {
+                                        attempt: attempt + 1,
+                                    },
+                                )?;
+                                continue;
+                            }
                             notify(application, Status::Completed { attempt })?;
                             clock.live(&cx)?;
                             return Ok(value);
                         }
-                        Err(error) if retryable(error) && attempt < policy.max_attempts => {
-                            let delay = policy.delay(attempt);
+                        Err(error)
+                            if retryable(error)
+                                && retries < policy.max_attempts - 1
+                                && attempt < 32 =>
+                        {
+                            retries += 1;
+                            let delay = policy.delay(retries);
                             // Notification time counts against this fixed wait.
                             let until = after(clock.live(&cx)?, delay)?;
                             notify(

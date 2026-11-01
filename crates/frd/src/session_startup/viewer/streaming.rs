@@ -33,7 +33,7 @@ use fr_media::{
     delivery::{BudgetUsage, DeliveryError, ReceivePipeline},
 };
 use fr_transport::quic::{self, Disposition, Route};
-pub use interactive::{InteractiveState, ViewingControl};
+pub use interactive::{InteractiveCloseOutcome, InteractiveState, ViewingControl};
 use repair::Repair;
 use std::{
     future::{Future, poll_fn},
