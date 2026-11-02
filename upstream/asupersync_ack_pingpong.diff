@@ -1,0 +1,146 @@
+--- a/src/net/quic_native/connection.rs
++++ b/src/net/quic_native/connection.rs
+@@ -2688,7 +2688,28 @@
+         }
+ 
+         if ack_eliciting {
+-            self.queue_ack_frame(space, packet_number);
++            // A packet whose only ack-eliciting content is window updates (the
++            // peer re-attaching its own MAX_STREAM_DATA/MAX_DATA to an ACK) is
++            // acknowledged with a plain ACK. Re-attaching OUR advertisements
++            // here made that ACK ack-eliciting too, and two peers with bounded
++            // windows answered each other forever at round-trip speed. Any
++            // other frame (data, PING probes, STREAM_DATA_BLOCKED) still gets
++            // the re-attached advertisements, so a lost update cannot wedge a
++            // credit-blocked sender.
++            let window_only = frames.iter().all(|frame| {
++                matches!(
++                    frame,
++                    QuicFrame::Ack { .. }
++                        | QuicFrame::MaxStreamData { .. }
++                        | QuicFrame::MaxData { .. }
++                        | QuicFrame::Padding { .. }
++                )
++            });
++            if window_only {
++                self.queue_plain_ack_frame(space, packet_number);
++            } else {
++                self.queue_ack_frame(space, packet_number);
++            }
+         } else {
+             self.observe_non_ack_eliciting_packet(space, packet_number);
+         }
+@@ -3770,6 +3791,17 @@
+     /// packet carries this number along.
+     fn observe_non_ack_eliciting_packet(&mut self, space: PacketNumberSpace, packet_number: u64) {
+         self.received_ack_trackers[packet_number_space_idx(space)].observe(packet_number);
++    }
++
++    fn queue_plain_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
++        let tracker = &mut self.received_ack_trackers[packet_number_space_idx(space)];
++        tracker.observe(packet_number);
++        let Some(frame) = tracker.ack_frame() else {
++            return;
++        };
++        self.pending_control_frames
++            .retain(|frame| !matches!(frame, QuicFrame::Ack { .. }));
++        self.pending_control_frames.push_back(frame);
+     }
+ 
+     fn queue_ack_frame(&mut self, space: PacketNumberSpace, packet_number: u64) {
+@@ -4622,9 +4654,95 @@
+         assert!(frames.contains(&QuicFrame::MaxStreamData {
+             stream_id: VarInt(stream.0),
+             maximum_stream_data: VarInt(140),
++        }));
++    }
++
++    /// Two peers with bounded windows each re-attached MAX_STREAM_DATA to every
++    /// ACK, which made every ACK ack-eliciting: an endless ACK ping-pong at
++    /// round-trip speed on an idle connection. A packet carrying only ACK or
++    /// window updates now gets a plain ACK; a PING (or data) still gets the
++    /// re-attached advertisement, so a credit-blocked sender's probe cannot
++    /// wedge on a lost update.
++    #[test]
++    fn a_window_update_only_packet_gets_a_plain_ack_but_a_ping_gets_advertisements() {
++        let cx = test_cx();
++        let mut conn = established_conn();
++        let space = PacketNumberSpace::ApplicationData;
++        let stream = conn.open_local_bidi(&cx).expect("open");
++        conn.configure_stream_recv_window(&cx, stream, 100)
++            .expect("configure window");
++        let _ = conn.generate_frames(&cx, space, 1_024).expect("drain");
++
++        let window_only = [QuicFrame::MaxStreamData {
++            stream_id: VarInt(stream.0),
++            maximum_stream_data: VarInt(500),
++        }];
++        conn.process_packet_frames(&cx, space, 5, &window_only, 10_000)
++            .expect("window update 5");
++        let frames = conn.generate_frames(&cx, space, 1_024).expect("plain ack");
++        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
++        assert!(
++            !frames
++                .iter()
++                .any(crate::net::quic_native::connection_manager::is_ack_eliciting),
++            "{frames:?}"
++        );
++
++        conn.process_packet_frames(&cx, space, 6, &[QuicFrame::Ping], 10_100)
++            .expect("ping 6");
++        let frames = conn
++            .generate_frames(&cx, space, 1_024)
++            .expect("ack with advertisement");
++        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
++        assert!(frames.contains(&QuicFrame::MaxStreamData {
++            stream_id: VarInt(stream.0),
++            maximum_stream_data: VarInt(100),
+         }));
+     }
+ 
++    /// Two peers with bounded windows each re-attached MAX_STREAM_DATA to every
++    /// ACK, which made every ACK ack-eliciting: an endless ACK ping-pong at
++    /// round-trip speed on an idle connection. A packet carrying only ACK or
++    /// window updates now gets a plain ACK; a PING (or data) still gets the
++    /// re-attached advertisement, so a credit-blocked sender's probe cannot
++    /// wedge on a lost update.
++    #[test]
++    fn a_window_update_only_packet_gets_a_plain_ack_but_a_ping_gets_advertisements() {
++        let cx = test_cx();
++        let mut conn = established_conn();
++        let space = PacketNumberSpace::ApplicationData;
++        let stream = conn.open_local_bidi(&cx).expect("open");
++        conn.configure_stream_recv_window(&cx, stream, 100)
++            .expect("configure window");
++        let _ = conn.generate_frames(&cx, space, 1_024).expect("drain");
++
++        let window_only = [QuicFrame::MaxStreamData {
++            stream_id: VarInt(stream.0),
++            maximum_stream_data: VarInt(500),
++        }];
++        conn.process_packet_frames(&cx, space, 5, &window_only, 10_000)
++            .expect("window update 5");
++        let frames = conn.generate_frames(&cx, space, 1_024).expect("plain ack");
++        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
++        assert!(
++            !frames
++                .iter()
++                .any(crate::net::quic_native::connection_manager::is_ack_eliciting),
++            "{frames:?}"
++        );
++
++        conn.process_packet_frames(&cx, space, 6, &[QuicFrame::Ping], 10_100)
++            .expect("ping 6");
++        let frames = conn
++            .generate_frames(&cx, space, 1_024)
++            .expect("ack with advertisement");
++        assert!(frames.iter().any(|f| matches!(f, QuicFrame::Ack { .. })));
++        assert!(frames.contains(&QuicFrame::MaxStreamData {
++            stream_id: VarInt(stream.0),
++            maximum_stream_data: VarInt(100),
++        }));
++    }
++
+     /// A stream whose sender has finished, or that was reset, needs no more
+     /// credit (RFC 9000 3.2), yet every ACK re-advertised its window, and the
+     /// re-attach rescanned the control queue once per stream.
