@@ -108,6 +108,69 @@ impl Report {
         )
     }
 }
+/// A session the HOST ended, named by its authenticated final report. The
+/// report's cleanup and outstanding-effect stages ride along unchanged. This
+/// client sent no close request, so none is shown as acknowledged, and
+/// nothing is claimed undone, retried or replayed.
+#[cfg(target_os = "linux")]
+pub(super) fn host_closed(report: Closed) -> Option<Failure> {
+    let (code, next) = closed_code(report.reason)?;
+    let mut failure = Failure::new(code, next, 1);
+    failure.closure = Some(Report {
+        request_acknowledged: false,
+        transport_completed: false,
+        host: Some(report),
+    });
+    Some(failure)
+}
+/// The same reason carried only by the host's close code (no Closed report
+/// arrived): named alike, with no host report and nothing about its cleanup.
+#[cfg(target_os = "linux")]
+pub(super) fn host_close_code(reason: fr_wire::closure::ClosedReason) -> Option<Failure> {
+    let (code, _specific) = closed_code(reason)?;
+    Some(Failure::new(
+        code,
+        "The host ended this session and closed the connection with this reason, but no Closed report arrived, so its cleanup and outstanding effects are unknown. Previously submitted actions are not rolled back.",
+        1,
+    ))
+}
+#[cfg(target_os = "linux")]
+fn closed_code(reason: fr_wire::closure::ClosedReason) -> Option<(&'static str, &'static str)> {
+    use fr_wire::closure::ClosedReason;
+    Some(match reason {
+        // An answer to this client's own request is a completion, not an end
+        // the host chose.
+        ClosedReason::ClientRequested => return None,
+        ClosedReason::HostStopping => (
+            "host_stopped",
+            "The host ended this session: it stopped sharing or stopped serving this viewer. Nothing is replayed or retried. Start a new session once the host is sharing. Previously submitted actions are not rolled back.",
+        ),
+        ClosedReason::AuthorityExpired => (
+            "host_authority_expired",
+            "The host's authority for this session expired without renewal, so the host ended it. Nothing is replayed. A new session needs the host's approval again. Previously submitted actions are not rolled back.",
+        ),
+        ClosedReason::PermissionLost => (
+            "host_permission_lost",
+            "The host lost a permission this session depended on (its sharing scope, tailnet policy or ingress) and ended it. Check the host's sharing and Tailscale state; this client cannot restore it. Previously submitted actions are not rolled back.",
+        ),
+        ClosedReason::ViewInvalidated => (
+            "host_view_invalidated",
+            "The host's shared display or configuration changed in a way this session could not follow, so the host ended it. Start a new session against the current display. Previously submitted actions are not rolled back.",
+        ),
+        ClosedReason::ProtocolError => (
+            "host_protocol_error",
+            "The host ended the session on a protocol error. Check that the client and host builds are compatible; nothing is replayed. Previously submitted actions are not rolled back.",
+        ),
+        ClosedReason::HostFailure => (
+            "host_failure",
+            "The host ended the session after a failure on its side (capture, encoder or its own service). Check the host's status before starting a new session; nothing is replayed. Previously submitted actions are not rolled back.",
+        ),
+        ClosedReason::SessionReplaced => (
+            "host_session_replaced",
+            "Another session replaced this one on the host. Nothing is replayed; start a new session only if this viewer should take over. Previously submitted actions are not rolled back.",
+        ),
+    })
+}
 const fn cleanup(stage: Cleanup) -> &'static str {
     match stage {
         Cleanup::Unconfirmed => "unconfirmed",
@@ -122,7 +185,7 @@ const fn cleanup(stage: Cleanup) -> &'static str {
 #[cfg(target_os = "linux")]
 pub(super) fn failure(value: Closed) -> Failure {
     let mut error = Failure::new(
-        closed_code(value.reason),
+        close_code_name(value.reason),
         "The host ended this session. Check its reported reason, cleanup and outstanding effects before starting a new session; previously submitted actions are not rolled back.",
         1,
     );
@@ -138,13 +201,13 @@ pub(super) fn failure(value: Closed) -> Failure {
 #[cfg(all(target_os = "linux", any(test, feature = "linux-desktop")))]
 pub(super) fn close_code_failure(reason: fr_wire::closure::ClosedReason) -> Failure {
     Failure::new(
-        closed_code(reason),
+        close_code_name(reason),
         "The host ended this session and closed the connection with this reason, but no Closed report arrived, so its cleanup and outstanding effects are unknown. Previously submitted actions are not rolled back.",
         1,
     )
 }
 #[cfg(target_os = "linux")]
-const fn closed_code(reason: fr_wire::closure::ClosedReason) -> &'static str {
+const fn close_code_name(reason: fr_wire::closure::ClosedReason) -> &'static str {
     use fr_wire::closure::ClosedReason;
     match reason {
         ClosedReason::ClientRequested => "host_session_closed",

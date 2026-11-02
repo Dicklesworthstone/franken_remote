@@ -78,11 +78,11 @@ all QUIC transport error codes, which lie far below these values) stays
 `frd::native_connection::reconnect::peer_close` extracts the reason through
 every session and streaming transport wrapper. It is never retried. `fr`
 names it with the same codes as the corresponding report: a session reason
-like a `Closed` report (`host_stopping`, `host_failure`, ..., the table in
+like a `Closed` report (`host_stopped` on the CLI, `host_stopping` on the wire, `host_failure`, ..., the table in
 `fr_cli/closure.rs` from 60158e8), a lease reason like a `LeaseRevoked` report
 (`host_control_revoked`, ...). No `host_report` or `revocation` object is
 printed, because none arrived; the next action says cleanup and effects are
-unknown.
+unknown. `ClientRequested` is not an error.
 
 Tests: `peer_close` unit tests (every assigned reason round-trips, nothing
 else decodes); `terminal_close_packet` (the application peer now ends with

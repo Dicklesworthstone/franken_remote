@@ -87,7 +87,7 @@ pub(super) fn session(error: session_startup::Error) -> Option<Failure> {
         | session_startup::Error::ClientStartup(fr_client::startup::Error::Protocol(
             negotiation::Error::Refused(value),
         )) => message(value),
-        session_startup::Error::RemoteClosed(report) => Some(crate::closure::failure(report)),
+        session_startup::Error::RemoteClosed(report) => crate::closure::host_closed(report),
         session_startup::Error::ClientStartup(fr_client::startup::Error::ApprovalUnanswered) => {
             Some(failure(
                 "host_approval_unanswered",
@@ -120,9 +120,7 @@ pub(super) fn observation(error: ObserverError) -> Option<Failure> {
 pub(super) fn reconnect(error: native_connection::reconnect::Failure) -> Option<Failure> {
     use native_connection::reconnect::PeerClose;
     match native_connection::reconnect::peer_close(error) {
-        Some(PeerClose::Session(reason)) => {
-            return Some(crate::closure::close_code_failure(reason));
-        }
+        Some(PeerClose::Session(reason)) => return crate::closure::host_close_code(reason),
         Some(PeerClose::Lease(reason)) => return Some(crate::terminal::closed_by_code(reason)),
         None => {}
     }
@@ -250,13 +248,68 @@ mod tests {
     }
 
     #[test]
+    fn a_session_the_host_ended_is_named_by_its_report_and_keeps_the_reported_stages() {
+        use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
+        let cases = [
+            (ClosedReason::HostStopping, "host_stopped"),
+            (ClosedReason::AuthorityExpired, "host_authority_expired"),
+            (ClosedReason::PermissionLost, "host_permission_lost"),
+            (ClosedReason::ViewInvalidated, "host_view_invalidated"),
+            (ClosedReason::ProtocolError, "host_protocol_error"),
+            (ClosedReason::HostFailure, "host_failure"),
+            (ClosedReason::SessionReplaced, "host_session_replaced"),
+        ];
+        let mut codes = std::collections::BTreeSet::new();
+        for (reason, expected) in cases {
+            assert!(codes.insert(expected));
+            let report = Closed {
+                reason,
+                cleanup: Cleanup::Incomplete,
+                effects: OutstandingEffects::Known {
+                    pending: 2,
+                    uncertain: 1,
+                },
+            };
+            let error = session_startup::Error::RemoteClosed(report);
+            for failure in [
+                native_connection::reconnect::Failure::Connection(
+                    native_connection::Error::Session(error),
+                ),
+                native_connection::reconnect::Failure::Observation(ObserverError::Session(error)),
+                native_connection::reconnect::Failure::Observation(ObserverError::Streaming(
+                    StreamingViewerError::Session(error),
+                )),
+            ] {
+                // The host decided; a new connection would not be this session.
+                assert!(!native_connection::reconnect::retryable(failure));
+                let named = reconnect(failure).unwrap();
+                assert_eq!((named.code, named.exit), (expected, 1));
+                let json = named.closure.unwrap().json();
+                assert!(json.contains("\"request_acknowledged\":false"), "{json}");
+                assert!(json.contains(&format!("\"reason\":\"{}\"", reason.code())));
+                assert!(json.contains("\"cleanup_stage\":\"incomplete\""), "{json}");
+                assert!(json.contains("\"pending\":2,\"uncertain\":1"), "{json}");
+            }
+        }
+        // The host's answer to this client's own close request is not an error.
+        assert_eq!(
+            session(session_startup::Error::RemoteClosed(Closed {
+                reason: ClosedReason::ClientRequested,
+                cleanup: Cleanup::Complete,
+                effects: OutstandingEffects::Unknown,
+            })),
+            None
+        );
+    }
+
+    #[test]
     fn a_host_close_code_is_named_like_its_report_without_claiming_one() {
         use fr_transport::quic::{Error as Transport, PeerClose};
         use fr_wire::{closure::ClosedReason, lease_revoked::Reason as Lease};
         let cases = [
             (
                 PeerClose::Session(ClosedReason::HostStopping),
-                "host_stopping",
+                "host_stopped",
             ),
             (
                 PeerClose::Session(ClosedReason::HostFailure),
@@ -282,6 +335,17 @@ mod tests {
                 assert!(named.closure.is_none() && named.revocation.is_none());
             }
         }
+        // The host's answer to this client's own close request is not an error.
+        assert_eq!(
+            reconnect(native_connection::reconnect::Failure::Observation(
+                ObserverError::Streaming(StreamingViewerError::Session(
+                    session_startup::Error::Transport(Transport::PeerClosed(PeerClose::Session(
+                        ClosedReason::ClientRequested
+                    )))
+                ))
+            )),
+            None
+        );
     }
 
     #[test]

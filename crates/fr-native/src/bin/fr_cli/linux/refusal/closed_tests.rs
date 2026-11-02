@@ -26,9 +26,14 @@ fn failures(error: session_startup::Error) -> [ReconnectFailure; 4] {
 
 #[test]
 fn every_host_closed_reason_reaches_cli_through_observation_control_and_reconnect() {
+    let client_requested = session_startup::Error::RemoteClosed(report(ClosedReason::ClientRequested));
+    assert_eq!(session(client_requested), None);
+    for failure in failures(client_requested) {
+        assert_eq!(reconnect(failure), None);
+        assert!(!retryable(failure), "a completed client close is not retried");
+    }
     let cases = [
-        (ClosedReason::ClientRequested, "host_session_closed"),
-        (ClosedReason::HostStopping, "host_stopping"),
+        (ClosedReason::HostStopping, "host_stopped"),
         (ClosedReason::AuthorityExpired, "host_authority_expired"),
         (ClosedReason::PermissionLost, "host_permission_lost"),
         (ClosedReason::ViewInvalidated, "host_view_invalidated"),
