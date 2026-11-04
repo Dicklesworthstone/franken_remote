@@ -54,8 +54,17 @@ Dropping or cancelling the outer serve operation fences authority before native
 cleanup. Failure is terminal for this single-source session, not an excuse to
 allocate a fresh sender or replenish its recovery allowance.
 
-Old advisory reports are discarded during handoff. New feedback/presentation
-owners begin with unknown evidence; only lifetime report counters survive.
+Old advisory reports are discarded during handoff only after canonical decoding
+against their original scope. Presentation and receiver metrics still require
+their positively negotiated report owners and the original compound view
+(session, display, geometry, configuration, recovery and viewport). Repairs retain
+their original reliable channel, binding and fragment limits. Malformed, foreign,
+wrong-direction and unselected records terminate the session instead of being
+silently consumed. These checks apply both while admitting recovery after a
+local sender failure and while waiting for replacement attachments. Valid old
+reports cannot refresh evidence, change recovery allowance or extend the original
+deadline. New feedback/presentation owners begin with unknown evidence; only
+lifetime report counters survive.
 `Statistics::recovered_streams` counts completed attachment/decoder handshakes,
 not physical visibility or input authorization. The original local stop handle,
 connection proof, capture worker and viewer decoder survive successful recovery.
@@ -77,6 +86,18 @@ and connection. TLS/UDP and subprocess IPC are real; the capture/decoder data
 and injected scheduling boundary remain fixtures, not live-tailnet evidence.
 
 ## Validation
+
+The 2026-11-04 regressions in `recovery/tests/obsolete.rs` exercise both private
+recovery dispatchers with the existing late-capture child and authentic session
+attachments. They check every component of the old view, optional capability
+selection, canonical repairs, unchanged report counts and failure deadlines,
+and terminal handling of an invalid incoming record over real TLS/UDP. Codec
+payloads remain fixtures. The new tests are awaiting execution on the full daemon
+build; the historical results below do not validate this change.
+
+```bash
+cargo test -p frd --lib session_startup::running::streaming::recovery::tests::obsolete --locked -- --test-threads=1
+```
 
 Eight new tests cover real capture-in-flight admission, foreign source refusal,
 source retirement, drain expiry, both canonical peers recovering and then running

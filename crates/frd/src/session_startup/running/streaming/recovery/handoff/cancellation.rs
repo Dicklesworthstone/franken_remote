@@ -34,15 +34,29 @@ impl Services for Permission {
         Ok(Disposition::Blocked)
     }
 }
-fn view(parent: ControlBinding) -> Binding {
-    Binding {
+fn obsolete(session: &HostSession) -> ObsoleteMetadata {
+    let parent = session.opened.binding;
+    ObsoleteMetadata::new(
+        Binding {
+            parent,
+            display: 1,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+            viewport: ViewportMappingGeneration::INITIAL,
+        },
         parent,
-        display: 1,
-        geometry: DisplayGeometryGeneration::INITIAL,
-        configuration: CodecConfigurationGeneration::INITIAL,
-        recovery: RecoveryGeneration::INITIAL,
-        viewport: ViewportMappingGeneration::INITIAL,
-    }
+        fr_wire::MediaLimits::new(
+            session.opened.selected.limits,
+            1150,
+            fr_wire::MAX_FRAGMENTS,
+            fr_wire::MAX_REPAIR_RANGES,
+        )
+        .unwrap(),
+        false,
+        false,
+    )
+    .unwrap()
 }
 
 #[derive(Clone, Copy)]
@@ -67,8 +81,7 @@ fn early_failure(failure: Failure) {
                     2_000_000
                 },
             routes,
-            previous: view(session.opened.binding),
-            limits: session.opened.selected.limits,
+            obsolete: obsolete(&session),
             repair: Route::Stream(routes.inbound),
             other: &mut permission,
         };
@@ -139,8 +152,7 @@ fn cancelling_an_in_flight_handoff_fences_before_the_native_future_is_dropped() 
             control: &control,
             until: now(&h).unwrap() + 2_000_000,
             routes,
-            previous: view(session.opened.binding),
-            limits: session.opened.selected.limits,
+            obsolete: obsolete(&session),
             repair: Route::Stream(routes.inbound),
             other: &mut permission,
         };

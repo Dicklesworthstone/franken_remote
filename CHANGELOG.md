@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-04 — private recovery retains the original feedback scope
+
+- Validate obsolete presentation, decoder metrics and repair records before
+  discarding them during private reference recovery. Foreign, malformed and
+  unnegotiated traffic now ends the session through the normal protocol handler.
+- Both local-failure admission and replacement waiting retain the old binding,
+  capability selection and original recovery deadline. Drained reports cannot
+  refresh presentation evidence or refill recovery allowance (`fr-c4i5`).
+
 ## 2026-10-01 — host failures in the granting round are named too
 
 - The `host_failure` label (134b6d7) missed the common case. When control

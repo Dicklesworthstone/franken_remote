@@ -382,36 +382,121 @@ impl<S: Services> Services for Admission<'_, S> {
         }
     }
     fn receive(&mut self, route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
-        if self.media.is_none() {
+        let Some(media) = self.media else {
             return self.video.receive(route, bytes);
-        }
+        };
         if route == Route::Stream(self.routes.inbound) && is_request(bytes) {
             return Ok(Disposition::Blocked);
         }
-        if self.recovering()
-            && obsolete_metadata(
-                route,
-                bytes,
-                self.routes,
-                self.video.sender.stream_repair_route(),
-            )
-        {
+        if !self.recovering() {
+            return self.video.receive(route, bytes);
+        }
+        if !self.permitted() {
+            return Err(());
+        }
+        let obsolete = ObsoleteMetadata::new(
+            media.binding(),
+            self.parent,
+            media.limits(),
+            self.video.presentation.is_some(),
+            self.video.feedback.is_some(),
+        )?;
+        if obsolete.discard(
+            route,
+            bytes,
+            self.routes,
+            self.video.sender.stream_repair_route(),
+        )? {
             return Ok(Disposition::Consumed);
         }
-        if self.recovering() {
-            self.video.other.receive(route, bytes)
-        } else {
-            self.video.receive(route, bytes)
-        }
+        self.video.other.receive(route, bytes)
     }
 }
 fn is_request(bytes: &[u8]) -> bool {
     bytes.get(6..8) == Some(&0x0036_u16.to_be_bytes())
 }
-fn obsolete_metadata(route: Route, bytes: &[u8], routes: ControlRoutes, repair: Route) -> bool {
-    route == repair
-        || (route == Route::Stream(routes.inbound)
-            && (presented::is_report(bytes) || feedback::is_feedback(bytes)))
+/// Old reports may drain during recovery, but retain their original wire scope.
+/// The capability flags come from the positively negotiated report owners, not
+/// from a peer's record kind. Parsing never feeds either evidence verifier.
+struct ObsoleteMetadata {
+    previous: Binding,
+    limits: fr_wire::MediaLimits,
+    presentation: bool,
+    feedback: bool,
+}
+impl ObsoleteMetadata {
+    fn new(
+        mut previous: Binding,
+        parent: ControlBinding,
+        limits: fr_wire::MediaLimits,
+        presentation: bool,
+        feedback: bool,
+    ) -> Result<Self, ()> {
+        if previous.parent.host_boot != parent.host_boot
+            || previous.parent.os_session != parent.os_session
+            || previous.parent.remote_session != parent.remote_session
+        {
+            return Err(());
+        }
+        previous.parent = parent;
+        previous.validate().map_err(|_| ())?;
+        Ok(Self {
+            previous,
+            limits,
+            presentation,
+            feedback,
+        })
+    }
+    fn discard(
+        &self,
+        route: Route,
+        bytes: &[u8],
+        routes: ControlRoutes,
+        repair: Route,
+    ) -> Result<bool, ()> {
+        use fr_wire::input::{InputDelivery, InputDirection};
+        if route == repair {
+            let Route::Stream(stream) = repair else {
+                return Err(());
+            };
+            let record = fr_wire::Record::decode(
+                bytes,
+                &self.limits,
+                stream.binding,
+                fr_wire::Channel::Control,
+            )
+            .map_err(|_| ())?;
+            fr_wire::decode_repair(record, self.limits.max_fragments(), &self.limits)
+                .map_err(|_| ())?;
+        } else if presented::is_report(bytes) {
+            if route != Route::Stream(routes.inbound) || !self.presentation {
+                return Err(());
+            }
+            fr_wire::presented::decode(
+                bytes,
+                self.previous,
+                self.limits.protocol(),
+                InputDirection::ViewerToHost,
+                InputDelivery::Reliable,
+            )
+            .map_err(|_| ())?;
+        } else if feedback::is_feedback(bytes) {
+            if route != Route::Stream(routes.inbound) || !self.feedback {
+                return Err(());
+            }
+            fr_wire::receiver_metrics::decode(
+                bytes,
+                self.previous,
+                self.limits.protocol(),
+                InputDirection::ViewerToHost,
+                InputDelivery::Reliable,
+            )
+            .map_err(|_| ())?;
+        } else {
+            return Ok(false);
+        }
+        Ok(true)
+    }
 }
 
 /// Continue consent/renewal and unrelated application work, but discard obsolete
@@ -421,8 +506,7 @@ struct Waiting<'a, S> {
     control: &'a ObservationControl,
     until: u64,
     routes: ControlRoutes,
-    previous: Binding,
-    limits: fr_core::limits::ProtocolLimits,
+    obsolete: ObsoleteMetadata,
     repair: Route,
     other: &'a mut S,
 }
@@ -467,15 +551,18 @@ impl<S: Services> Services for Waiting<'_, S> {
         if route == Route::Stream(self.routes.inbound) && is_request(bytes) {
             recovery_request::decode(
                 bytes,
-                self.previous,
-                &self.limits,
+                self.obsolete.previous,
+                self.obsolete.limits.protocol(),
                 fr_wire::input::InputDirection::ViewerToHost,
                 fr_wire::input::InputDelivery::Reliable,
             )
             .map_err(|_| ())?;
             return Ok(Disposition::Consumed);
         }
-        if obsolete_metadata(route, bytes, self.routes, self.repair) {
+        if self
+            .obsolete
+            .discard(route, bytes, self.routes, self.repair)?
+        {
             return Ok(Disposition::Consumed);
         }
         self.other.receive(route, bytes)

@@ -50,8 +50,14 @@ pub(super) async fn replace(
         control: &control,
         until,
         routes,
-        previous,
-        limits: *media.limits().protocol(),
+        obsolete: ObsoleteMetadata::new(
+            previous,
+            parent,
+            media.limits(),
+            host.presentation.is_some(),
+            host.feedback.is_some(),
+        )
+        .map_err(|()| Error::Order)?,
         repair: host.stream.sender.stream_repair_route(),
         other,
     };

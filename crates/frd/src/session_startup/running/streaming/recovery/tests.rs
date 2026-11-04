@@ -1,6 +1,7 @@
 //! Both canonical host and viewer loops, actual TLS/UDP and supervised child IPC.
 //! Only the source/decoder payloads are fixtures; no hardware/HEVC claim is made.
 mod dispatch_progress;
+mod obsolete;
 mod sender_wait;
 mod viewing;
 use super::*;
