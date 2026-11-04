@@ -178,6 +178,45 @@ fn separate_commands_inspect_and_close_the_same_pinned_invocation() {
 }
 
 #[test]
+fn disconnect_by_saved_alias_closes_the_saved_hosts_stable_id() {
+    use std::os::unix::fs::PermissionsExt;
+    let target = target();
+    let directory = std::env::temp_dir().join(format!("{target}-hosts"));
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = directory.join("hosts.json");
+    std::fs::write(
+        &file,
+        format!(
+            r#"{{"schema_version":1,"hosts":[{{"alias":"office","stable_id":"{target}","certificate_name":"office.fixture.ts.net","port":8443}}]}}"#
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let owner = fixture(&target, vec![Exchange::Close]);
+    let closed = cli(&[
+        "disconnect",
+        "office",
+        "--saved",
+        "--hosts-file",
+        file.to_str().unwrap(),
+        "--socket",
+        "/absent/not-contacted-tailscaled.sock",
+        "--json",
+    ]);
+    assert!(closed.status.success());
+    let value = json(&closed);
+    assert_eq!(value["data"]["target"], target);
+    assert_eq!(value["data"]["closed"], true);
+    owner.join().unwrap();
+    // Without saved mode the same word names a stable ID, which no owner holds.
+    let plain = cli(&["disconnect", "office", "--json"]);
+    assert_eq!(json(&plain)["error"]["code"], "no_local_session");
+    std::fs::remove_file(&file).unwrap();
+    std::fs::remove_dir(&directory).unwrap();
+}
+
+#[test]
 fn stale_cli_pin_refuses_without_sending_stop_or_claiming_unknown_effects() {
     let target = target();
     let owner = fixture(&target, vec![Exchange::Inspect]);

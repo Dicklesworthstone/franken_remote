@@ -15,8 +15,8 @@ fr hosts forget workstation --json
 ```
 
 A custom port is selected when saving: `fr hosts save workstation NODE_ID --port 9443`.
-The alias is explicit: `--saved` is accepted by ordinary `connect` and
-`displays`. It cannot be combined with `--by-name` or `--port`.
+The alias is explicit: `--saved` is accepted by ordinary `connect`, `displays`,
+`inspect` and `disconnect`. It cannot be combined with `--by-name` or `--port`.
 An unknown saved alias refuses instead of falling back to live hostname or node-ID
 selection. Existing commands without `--saved` keep their current behavior.
 
@@ -45,8 +45,12 @@ the explicit view/control role, display choice, host approval and current
 authorization are all still required. Address changes can be discovered
 normally; a changed identity must be consciously saved again.
 
-Local session-control endpoints use the resolved stable node ID. Use that ID
-from `fr hosts saved --json` with `fr disconnect NODE_ID` or
+`fr inspect ALIAS --saved` looks the host up by its saved stable ID and refuses
+if its certificate name has changed. `fr disconnect ALIAS --saved` closes the
+local connection for that saved host.
+
+Local session-control endpoints use the resolved stable node ID. For robot
+commands, use that ID from `fr hosts saved --json` with
 `fr robot session close NODE_ID`. Robot commands do not silently adopt saved
 alias mode.
 
@@ -55,7 +59,8 @@ alias mode.
 The default store is `$XDG_CONFIG_HOME/franken_remote/hosts.json`, or
 `$HOME/.config/franken_remote/hosts.json` when XDG configuration is unset.
 The `--hosts-file /absolute/path/hosts.json` option selects another local
-store for saved-host commands and `connect`/`displays` in saved mode.
+store for saved-host commands and for `connect`, `displays`, `inspect` and
+`disconnect` in saved mode.
 
 The versioned JSON document is limited to 100 profiles and 128 KiB. Loading
 validates every record, duplicate alias/endpoint and schema field. Unknown

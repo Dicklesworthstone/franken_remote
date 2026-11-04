@@ -79,3 +79,40 @@ fn aliases_are_opt_in_and_never_override_profile_identity_or_port() {
     assert!(!connection.clipboard);
     assert!(connection.target.saved.is_some());
 }
+
+#[test]
+fn inspect_and_disconnect_accept_only_an_explicit_saved_alias() {
+    let options = parsed("inspect office --saved --hosts-file /tmp/hosts.json --json").unwrap();
+    let Command::Inspect(inspect) = options.command else {
+        panic!("inspect command");
+    };
+    assert_eq!(inspect.node, "office");
+    assert_eq!(
+        inspect.saved.unwrap().file,
+        Some(PathBuf::from("/tmp/hosts.json"))
+    );
+    let Command::Disconnect(disconnect) = parsed("disconnect office --saved").unwrap().command
+    else {
+        panic!("disconnect command");
+    };
+    assert_eq!(disconnect.node, "office");
+    assert!(disconnect.saved.unwrap().file.is_none());
+    // Ordinary use stays a live selector.
+    let Command::Disconnect(live) = parsed("disconnect n-peer").unwrap().command else {
+        panic!("disconnect command");
+    };
+    assert!(live.saved.is_none());
+    for command in [
+        "inspect office --hosts-file /tmp/hosts.json",
+        "inspect office --saved --by-name",
+        "inspect office --saved --port 9443",
+        "inspect Office --saved",
+        "inspect office --saved --saved",
+        "inspect office --saved --hosts-file relative",
+        "disconnect office --hosts-file /tmp/hosts.json",
+        "disconnect Office --saved",
+        "disconnect office --saved --saved",
+    ] {
+        assert!(parsed(command).is_err(), "{command}");
+    }
+}

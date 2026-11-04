@@ -1,7 +1,7 @@
 //! Explicit local aliases. Profiles never contain authority or addresses.
 use super::{
     Failure,
-    options::{SavedHostAction, SavedHostOptions, Target},
+    options::{SavedHostAction, SavedHostOptions, SavedSelection, Target},
     output,
 };
 use fr_client::discovery::saved_peers::{SavedPeer, SavedPeerError, SavedPeers};
@@ -186,6 +186,10 @@ pub(super) struct Selection {
     name: Option<String>,
 }
 impl Selection {
+    /// The saved certificate name, when this selection pins one.
+    pub(super) fn pinned_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
     /// Preserve exactly what the local picker displayed. The existing native
     /// connector resolves BOTH fields again before opening the remote session.
     #[cfg(any(test, feature = "linux-desktop"))]
@@ -213,21 +217,24 @@ impl Selection {
         }
     }
 }
+pub(super) fn select_alias(saved: &SavedSelection, alias: &str) -> Result<Selection, Failure> {
+    let peers = Store::new(&path(saved.file.as_ref()).map_err(failure)?)
+        .map_err(failure)?
+        .load()
+        .map_err(failure)?;
+    let peer = peers
+        .get(alias)
+        .ok_or_else(|| failure(Error::Data(SavedPeerError::NotFound)))?;
+    Ok(Selection {
+        node: peer.stable_id().to_owned(),
+        port: peer.port(),
+        by_name: false,
+        name: Some(peer.certificate_name().to_owned()),
+    })
+}
 pub(super) fn select(target: &Target) -> Result<Selection, Failure> {
     if let Some(saved) = &target.saved {
-        let peers = Store::new(&path(saved.file.as_ref()).map_err(failure)?)
-            .map_err(failure)?
-            .load()
-            .map_err(failure)?;
-        let peer = peers
-            .get(&target.node)
-            .ok_or_else(|| failure(Error::Data(SavedPeerError::NotFound)))?;
-        Ok(Selection {
-            node: peer.stable_id().to_owned(),
-            port: peer.port(),
-            by_name: false,
-            name: Some(peer.certificate_name().to_owned()),
-        })
+        select_alias(saved, &target.node)
     } else {
         Ok(Selection {
             node: target.node.clone(),

@@ -32,6 +32,7 @@ pub enum Command {
 }
 #[allow(dead_code)]
 pub struct InspectOptions {
+    pub saved: Option<SavedSelection>,
     pub node: String,
     pub by_name: bool,
     pub port: u16,
@@ -49,6 +50,7 @@ pub struct HostsProbeOptions {
 }
 #[allow(dead_code)]
 pub struct DisconnectOptions {
+    pub saved: Option<SavedSelection>,
     pub node: String,
 }
 #[allow(dead_code)]
@@ -307,6 +309,7 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
     let mut by_name = false;
     let (mut probe, mut experimental, mut ipv6) = (false, false, false);
     let mut roots = None;
+    let (mut saved, mut hosts_file) = (false, None);
     let mut seen = BTreeSet::new();
     while index < args.len() {
         let flag = args[index].as_str();
@@ -319,6 +322,8 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
             "--by-name" => by_name = true,
             "--port" => port = next_port(args, &mut index)?,
             "--socket" => socket = Some(next_path(args, &mut index)?),
+            "--saved" => saved = true,
+            "--hosts-file" => hosts_file = Some(next_path(args, &mut index)?),
             "--probe" => probe = true,
             "--experimental-native" => experimental = true,
             "--trust-roots" => roots = Some(next_path(args, &mut index)?),
@@ -336,8 +341,11 @@ fn parse_inspect(args: &[String]) -> Result<Options, Failure> {
             2,
         ));
     }
+    let identity_flag = by_name || seen.contains("--port");
+    let saved = saved_alias_mode(saved, hosts_file, node, identity_flag)?;
     Ok(Options {
         command: Command::Inspect(InspectOptions {
+            saved,
             node: node.clone(),
             by_name,
             port,
@@ -414,12 +422,27 @@ fn parse_saved_hosts(args: &[String]) -> Result<Options, Failure> {
     })
 }
 
+/// `--saved` names one local alias; it never mixes with a live identity selector.
+fn saved_alias_mode(
+    saved: bool,
+    file: Option<PathBuf>,
+    alias: &str,
+    identity_flag: bool,
+) -> Result<Option<SavedSelection>, Failure> {
+    let valid = fr_client::discovery::saved_peers::valid_alias(alias);
+    if (file.is_some() && !saved) || (saved && (identity_flag || !valid)) {
+        return Err(usage());
+    }
+    Ok(saved.then_some(SavedSelection { file }))
+}
+
 fn parse_disconnect(args: &[String]) -> Result<Options, Failure> {
     let node = args.get(1).ok_or_else(usage)?;
     validate_node(node)?;
     let mut index = 2;
     let mut json = false;
     let mut socket = None;
+    let (mut saved, mut hosts_file) = (false, None);
     let mut seen = BTreeSet::new();
     while index < args.len() {
         let flag = args[index].as_str();
@@ -430,11 +453,17 @@ fn parse_disconnect(args: &[String]) -> Result<Options, Failure> {
         match flag {
             "--json" => json = true,
             "--socket" => socket = Some(next_path(args, &mut index)?),
+            "--saved" => saved = true,
+            "--hosts-file" => hosts_file = Some(next_path(args, &mut index)?),
             _ => return Err(usage()),
         }
     }
+    let saved = saved_alias_mode(saved, hosts_file, node, false)?;
     Ok(Options {
-        command: Command::Disconnect(DisconnectOptions { node: node.clone() }),
+        command: Command::Disconnect(DisconnectOptions {
+            saved,
+            node: node.clone(),
+        }),
         json,
         socket,
     })

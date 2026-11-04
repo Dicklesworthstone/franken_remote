@@ -10,7 +10,9 @@
 //! Session-open, observation and input automation still need live integration.
 
 use super::super::options::{DisconnectOptions, InspectOptions, RobotCommand};
-use super::{Cell, Cx, Failure, LocalApi, Runtime, Shutdown, failure, session_control, tailnet};
+use super::{
+    Cell, Cx, Failure, LocalApi, Runtime, Shutdown, TailnetError, failure, session_control, tailnet,
+};
 use fr_client::robot::{AcknowledgementStage, RobotEnvelope, RobotInspectData, RobotStatusData};
 
 #[path = "robot/probe.rs"]
@@ -76,20 +78,39 @@ pub(super) fn run_inspect(
     opts: &InspectOptions,
     json: bool,
 ) -> Result<String, Failure> {
+    // An unknown alias refuses before any lookup, and never falls back to a live name.
+    let saved = opts
+        .saved
+        .as_ref()
+        .map(|saved| crate::saved_hosts::select_alias(saved, &opts.node))
+        .transpose()?;
+    let (node, port) = saved.as_ref().map_or((opts.node.as_str(), opts.port), |s| {
+        (s.node.as_str(), s.port)
+    });
     let snapshot = runtime
         .block_on(shutdown.run(cx, stopped, api.discover(cx)))
         .map_err(tailnet)?;
     if stopped.get() {
         return Err(Failure::new("cancelled", "Host inspection cancelled.", 130));
     }
-    let peer = snapshot.peers().iter().find(|p| exact_match(p, opts));
+    let peer = snapshot
+        .peers()
+        .iter()
+        .find(|p| exact_match(p, node, opts.by_name));
     let Some(p) = peer else {
         return Err(failure(
             "peer_not_found",
             "No machine with exactly that stable ID (or, with --by-name, canonical name) is in installed Tailscale discovery; run 'fr hosts'.",
         ));
     };
-    let data = inspection_identity(p, &opts.node, opts.port);
+    if saved
+        .as_ref()
+        .and_then(crate::saved_hosts::Selection::pinned_name)
+        .is_some_and(|name| name != p.certificate_name())
+    {
+        return Err(tailnet(TailnetError::IdentityChanged));
+    }
+    let data = inspection_identity(p, node, port);
     if let Some(probe_options) = &opts.probe {
         return probe::run(
             runtime,
@@ -98,7 +119,7 @@ pub(super) fn run_inspect(
             stopped,
             api,
             p,
-            opts,
+            port,
             probe_options,
             data,
             json,
@@ -149,11 +170,11 @@ pub(super) fn inspection_identity(
 }
 
 /// Exact identity only: a prefix could select a different machine.
-fn exact_match(peer: &fr_tailnet::DiscoveredPeer, opts: &InspectOptions) -> bool {
-    if opts.by_name {
-        peer.certificate_name() == opts.node
+fn exact_match(peer: &fr_tailnet::DiscoveredPeer, node: &str, by_name: bool) -> bool {
+    if by_name {
+        peer.certificate_name() == node
     } else {
-        peer.stable_id() == opts.node
+        peer.stable_id() == node
     }
 }
 
@@ -216,7 +237,15 @@ pub(super) fn run_disconnect(
     opts: &DisconnectOptions,
     json: bool,
 ) -> Result<String, Failure> {
-    close(runtime, cx, shutdown, stopped, &opts.node, None, json)
+    let saved = opts
+        .saved
+        .as_ref()
+        .map(|saved| crate::saved_hosts::select_alias(saved, &opts.node))
+        .transpose()?;
+    let node = saved
+        .as_ref()
+        .map_or(opts.node.as_str(), |s| s.node.as_str());
+    close(runtime, cx, shutdown, stopped, node, None, json)
 }
 
 pub(super) fn run_robot(
@@ -337,17 +366,8 @@ mod tests {
             vec!["100.64.0.2".parse().unwrap()],
             fr_tailnet::PeerTransportPath::Unknown,
         );
-        let opts = |node: &str, by_name| InspectOptions {
-            node: node.into(),
-            by_name,
-            port: 8443,
-            probe: None,
-        };
-        assert!(exact_match(&peer, &opts("n-host", false)));
-        assert!(exact_match(
-            &peer,
-            &opts("workstation.fixture.ts.net", true)
-        ));
+        assert!(exact_match(&peer, "n-host", false));
+        assert!(exact_match(&peer, "workstation.fixture.ts.net", true));
         for (node, by_name) in [
             ("n-hos", false),
             ("workstation.fixture.ts.net", false),
@@ -355,10 +375,7 @@ mod tests {
             ("workstation.fixture", true),
             ("n-host", true),
         ] {
-            assert!(
-                !exact_match(&peer, &opts(node, by_name)),
-                "{node} {by_name}"
-            );
+            assert!(!exact_match(&peer, node, by_name), "{node} {by_name}");
         }
     }
 

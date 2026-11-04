@@ -1,8 +1,7 @@
 //! Explicit native capability inspection on the canonical authenticated dialer.
 //! Only an acknowledged pre-observation close produces a successful report.
 use super::{
-    Cell, Cx, Failure, InspectOptions, LocalApi, RobotInspectData, Runtime, Shutdown, failure,
-    now_unix_ms, tailnet,
+    Cell, Cx, Failure, LocalApi, RobotInspectData, Runtime, Shutdown, failure, now_unix_ms, tailnet,
 };
 use crate::options::InspectProbe;
 use asupersync::{tls::Certificate, types::CancelKind};
@@ -31,7 +30,7 @@ pub(super) fn run(
     stopped: &Cell<bool>,
     api: &LocalApi,
     peer: &DiscoveredPeer,
-    options: &InspectOptions,
+    port: u16,
     probe: &InspectProbe,
     identity: RobotInspectData,
     json: bool,
@@ -42,7 +41,7 @@ pub(super) fn run(
         api.clone(),
         roots,
         peer,
-        options.port,
+        port,
         probe.ipv6,
         identity,
     );

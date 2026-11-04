@@ -92,7 +92,27 @@ fn saved_host_cli_persists_selection_and_refuses_a_renamed_peer() {
         &listed,
         "assert x['changed'] is False and len(x['hosts'])==1",
     );
+    let (inspected, calls) = metadata_command(
+        fixture(),
+        &["inspect", "office", "--saved", "--hosts-file", file],
+    );
+    assert!(inspected.status.success());
+    assert_eq!(calls, 1);
+    json(
+        &inspected,
+        "assert x['data']['host']=='n-peer' and x['data']['port']==9443",
+    );
     let renamed = fixture().replace("remote.fixture.ts.net.", "renamed.fixture.ts.net.");
+    let (refused, calls) = metadata_command(
+        renamed.clone(),
+        &["inspect", "office", "--saved", "--hosts-file", file],
+    );
+    assert_eq!(refused.status.code(), Some(1));
+    assert_eq!(calls, 1);
+    json(
+        &refused,
+        "assert x['error']['code']=='tailnet_identity_refused'",
+    );
     let (refused, calls) = metadata_command(
         renamed,
         &[
@@ -129,6 +149,28 @@ fn saved_host_cli_persists_selection_and_refuses_a_renamed_peer() {
         &missing,
         "assert x['error']['code']=='saved_host_not_found'",
     );
+}
+#[test]
+fn an_unknown_alias_refuses_inspect_and_disconnect_without_any_lookup() {
+    let directory = path("saved-host-unknown");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let file = directory.join("hosts.json");
+    let file = file.to_str().unwrap();
+    for command in ["inspect", "disconnect"] {
+        // The socket does not exist: reaching it would be a different refusal.
+        let output = run_cli(&[
+            command,
+            "office",
+            "--saved",
+            "--hosts-file",
+            file,
+            "--socket",
+            "/absent/not-contacted-tailscaled.sock",
+            "--json",
+        ]);
+        json(&output, "assert x['error']['code']=='saved_host_not_found'");
+    }
 }
 #[test]
 fn saved_list_does_not_create_directories_or_require_localapi() {
