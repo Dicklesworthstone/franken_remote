@@ -3,16 +3,18 @@
 //! and two real, independently supervised native children. No listener, lease,
 //! approval, endpoint discovery or capability advertisement is created here.
 //!
-//! Call [`Host::service`] between the existing connection's I/O turns and include
-//! [`Host::permits_io`] in every original connection authorization callback. A
-//! configuration ACK is admitted to that exact transport before private Commit;
+//! Call [`Host::service`] between the existing connection's I/O turns. Its
+//! append-only transport guard retains original ACK custody even when another
+//! helper drives or dispatches that connection. A configuration ACK is admitted
+//! to that exact transport before private Commit;
 //! packet custody keeps the transport's original immutable receipt and expiry.
 use crate::{input_quic::QuicInput, microphone_process as native};
 use asupersync::cx::Cx;
 use fr_core::{audio::AudioStopReason, input_submission::Refusal, time::HostInstant};
 use fr_media::{audio::authority::HostController, worker::microphone::Snapshot};
 use fr_transport::quic::{
-    self, ConnectionBinding, Disposition, QuicRecords, Route, SendAdmission, audio::AudioUpChannel,
+    self, ConnectionBinding, Disposition, QuicRecords, Route, SendAdmission,
+    audio::{AudioUpChannel, RetirementRequest},
 };
 use fr_wire::{audio, negotiation::Selection};
 use std::sync::{
@@ -26,6 +28,7 @@ use epoch::{Epoch, Parameters};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    AlreadyAttached,
     WrongConnection,
     WrongRole,
     NotSelected,
@@ -62,7 +65,7 @@ pub struct AttachError {
     lane: Box<AudioUpChannel>,
 }
 impl AttachError {
-    fn new(reason: Error, lane: AudioUpChannel) -> Self {
+    pub(crate) fn new(reason: Error, lane: AudioUpChannel) -> Self {
         Self {
             reason,
             lane: Box::new(lane),
@@ -106,49 +109,92 @@ pub struct Statistics {
     pub packets_ignored: u64,
 }
 
+/// Fixed-size custody shared with the original transport. It is released only
+/// by a real drain witness or successful retirement of the original pair.
+#[derive(Default, Clone)]
+struct IoState {
+    inflight: Option<u64>,
+    setup: Option<u64>,
+    retired: bool,
+    native: Option<native::Control>,
+}
 #[derive(Default)]
 struct Shared {
     stopped: AtomicBool,
     native: Mutex<Option<native::Control>>,
+    io: Mutex<IoState>,
 }
 impl Shared {
+    fn snapshot(&self) -> Result<IoState, ()> {
+        self.io.try_lock().map(|state| state.clone()).map_err(|_| ())
+    }
+    fn publish(
+        &self,
+        inflight: Option<u64>,
+        setup: Option<u64>,
+        retired: bool,
+        native: Option<native::Control>,
+    ) {
+        *self.io.lock().unwrap_or_else(PoisonError::into_inner) = IoState {
+            inflight,
+            setup,
+            retired,
+            native,
+        };
+    }
+    fn fence_io(&self, native: Option<&native::Control>) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(native) = native {
+            native.request_stop();
+        }
+    }
     fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
-        if let Some(native) = self
+        let native = self
             .native
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-        {
+            .clone();
+        if let Some(native) = native {
             native.stop();
         }
     }
     fn clear_epoch(&self) {
-        self.native
+        let native = self
+            .native
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
+        if let Some(native) = native {
+            native.request_stop();
+        }
     }
     fn install(&self, native: native::Control) -> Result<(), Error> {
-        let mut current = self.native.lock().unwrap_or_else(PoisonError::into_inner);
+        {
+            let mut current = self.native.lock().unwrap_or_else(PoisonError::into_inner);
+            if self.stopped.load(Ordering::Acquire) {
+                drop(current);
+                native.request_stop();
+                return Err(Error::Closed);
+            }
+            *current = Some(native.clone());
+        }
         if self.stopped.load(Ordering::Acquire) {
-            native.stop();
+            native.request_stop();
             return Err(Error::Closed);
         }
-        *current = Some(native);
         Ok(())
     }
     fn check(&self) -> Result<(), Error> {
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
-        if self
+        let native = self
             .native
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .is_some_and(native::Control::is_stopped)
-        {
+            .clone();
+        if native.as_ref().is_some_and(native::Control::is_stopped) {
             return Err(Error::Native(native::Error::Stopped));
         }
         Ok(())
@@ -258,6 +304,11 @@ impl Host {
                 return Err(AttachError::new(reason, lane));
             }
         };
+        if let Err(error) = retain_io(q, &cx, &controller, &shared, &lane) {
+            shared.stop();
+            let error = lane.retire(q, &cx).err().unwrap_or(error);
+            return Err(AttachError::new(Error::Transport(error), lane));
+        }
         Ok(Self {
             lane,
             connection: q.binding(),
@@ -313,7 +364,15 @@ impl Host {
             Err(Error::WrongConnection)
         }
     }
-    /// Include this gate in the containing driver's authorization callback.
+    fn publish_io(&self) {
+        self.shared.publish(
+            self.epoch.inflight,
+            self.epoch.precommit_deadline(),
+            self.retired,
+            self.epoch.process.as_ref().map(native::Process::control),
+        );
+    }
+    /// The transport also retains this gate for unrelated connection helpers.
     /// Before a native poll, retained ACK bytes require immediate retirement on
     /// authority loss. With no retained ACK, the already-fenced optional owner
     /// can wait for the next maintenance turn without disrupting other lanes.
@@ -321,11 +380,13 @@ impl Host {
         if self.retired {
             return true;
         }
+        let native = self.epoch.process.as_ref().map(native::Process::control);
         permits_io(
             &self.cx,
             &self.controller,
             &self.shared,
-            &self.lane,
+            &self.lane.retirement_request(),
+            native.as_ref(),
             self.epoch.inflight,
             self.epoch.precommit_deadline(),
         )
@@ -337,13 +398,14 @@ impl Host {
         self.shared.stop();
         self.epoch.stop(&self.shared);
         if !self.retired {
-            self.retired = true;
             if q.is_closed() {
                 self.lane.request_retirement();
             } else {
                 self.lane.retire(q, &self.cx).map_err(Error::Transport)?;
             }
+            self.retired = true;
         }
+        self.publish_io();
         Ok(())
     }
     fn refuse(&mut self, q: &mut QuicRecords, reason: Error) -> Result<State, Error> {
@@ -396,6 +458,7 @@ impl Host {
                 .map_err(Error::Transport)?
         {
             self.epoch.inflight = None;
+            self.publish_io();
         }
         let result = admission(&self.cx, &self.controller, &self.shared).and_then(|now| {
             self.epoch.check_deadlines(now.as_micros())?;
@@ -404,6 +467,7 @@ impl Host {
         if let Err(reason) = result {
             return self.refuse(q, reason);
         }
+        self.publish_io();
         Ok(self.state())
     }
     /// One bounded control/datagram dispatch and one ACK admission attempt. No
@@ -448,6 +512,7 @@ impl Host {
         mut authorize: impl FnMut() -> bool,
     ) -> Result<State, Error> {
         let packet_ready = self.epoch.packet_ready();
+        let native = self.epoch.process.as_ref().map(native::Process::control);
         let inflight = self.epoch.inflight;
         let setup = self.epoch.precommit_deadline();
         let parameters = Parameters {
@@ -471,20 +536,32 @@ impl Host {
                     &self.cx,
                     &self.controller,
                     &self.shared,
-                    &self.lane,
+                    &self.lane.retirement_request(),
+                    native.as_ref(),
                     inflight,
                     setup,
                 ) && authorize()
             },
             |route| matches!(route, Route::Stream(_)) || packet_ready,
-            |_, bytes, receipt| match self.epoch.receive(bytes, receipt, &parameters) {
-                Ok(disposition) => Ok(disposition),
-                Err(reason) => {
-                    // An optional semantic refusal must not become a whole
-                    // connection handler error. Retire after dispatch returns.
-                    refusal = Some(reason);
-                    self.shared.stop();
-                    Ok(Disposition::Consumed)
+            |_, bytes, receipt| {
+                let result = self.epoch.receive(bytes, receipt, &parameters);
+                // Subsequent dispatch checks see this exact configuration cap,
+                // including a replacement still waiting for old child exits.
+                self.shared.publish(
+                    self.epoch.inflight,
+                    self.epoch.precommit_deadline(),
+                    false,
+                    self.epoch.process.as_ref().map(native::Process::control),
+                );
+                match result {
+                    Ok(disposition) => Ok(disposition),
+                    Err(reason) => {
+                        // Optional semantic refusal does not become a parent
+                        // handler error. Retire after dispatch returns.
+                        refusal = Some(reason);
+                        self.shared.stop();
+                        Ok(Disposition::Consumed)
+                    }
                 }
             },
         );
@@ -540,6 +617,7 @@ impl Host {
             Ok(SendAdmission::Accepted) => {
                 self.epoch.acknowledgement = None;
                 self.epoch.inflight = Some(until);
+                self.publish_io();
                 self.epoch.statistics.acknowledgements_admitted = self
                     .epoch
                     .statistics
@@ -605,33 +683,88 @@ fn admission(cx: &Cx, controller: &HostController, shared: &Shared) -> Result<Ho
     Ok(now)
 }
 
+/// Registration is one-use and cannot be replaced by an arbitrary caller's
+/// per-operation predicate. The closure owns no channel or controller grant.
+fn retain_io(
+    q: &mut QuicRecords,
+    cx: &Cx,
+    controller: &HostController,
+    shared: &Arc<Shared>,
+    lane: &AudioUpChannel,
+) -> Result<(), quic::Error> {
+    let clock = cx.clone();
+    let controller = controller.clone();
+    let shared = shared.clone();
+    let retirement = lane.retirement_request();
+    q.retain_operation_check(
+        cx,
+        Arc::new(move || {
+            // Only the exclusive Host/Q owner publishes this snapshot, between
+            // Q calls. Neither local controls nor native threads write it.
+            let Ok(state) = shared.snapshot() else {
+                shared.fence_io(None);
+                return false;
+            };
+            state.retired
+                || permits_io(
+                    &clock,
+                    &controller,
+                    &shared,
+                    &retirement,
+                    state.native.as_ref(),
+                    state.inflight,
+                    state.setup,
+                )
+        }),
+    )
+}
+
 fn permits_io(
     cx: &Cx,
     controller: &HostController,
     shared: &Shared,
-    lane: &AudioUpChannel,
+    retirement: &RetirementRequest,
+    native: Option<&native::Control>,
     inflight: Option<u64>,
     setup: Option<u64>,
 ) -> bool {
-    let result = admission(cx, controller, shared).and_then(|now| {
-        if inflight.is_some_and(|until| now.as_micros() >= until) {
-            Err(Error::AcknowledgementExpired)
-        } else if setup.is_some_and(|until| now.as_micros() >= until) {
-            Err(Error::SetupExpired)
-        } else {
-            Ok(())
+    // The exact epoch handle came from immutable custody, not a second lookup
+    // through the local-control mutex. No blocking native/mailbox work runs here.
+    // Mailbox contention cannot prove private Commit. Keep the same setup cap
+    // until a positive Running state; the original atomic stop remains visible.
+    let state = native.and_then(native::Control::try_state);
+    let result = (|| {
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let now = HostInstant::from_micros(
+            cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000,
+        );
+        controller.deadline(now).map_err(Error::Authority)?;
+        if shared.stopped.load(Ordering::Acquire) {
+            return Err(Error::Closed);
         }
-    });
+        if state == Some(native::State::Stopped) {
+            return Err(Error::Native(native::Error::Stopped));
+        }
+        if inflight.is_some_and(|until| now.as_micros() >= until) {
+            return Err(Error::AcknowledgementExpired);
+        }
+        if setup.is_some_and(|until| now.as_micros() >= until)
+            && state != Some(native::State::Running)
+        {
+            return Err(Error::SetupExpired);
+        }
+        Ok(())
+    })();
     match result {
         Ok(()) => true,
         Err(Error::Clock | Error::Cancelled) => {
-            shared.stop();
+            shared.fence_io(native);
             false
         }
         Err(_) => {
-            shared.stop();
+            shared.fence_io(native);
             if inflight.is_some() {
-                lane.request_retirement();
+                retirement.request();
             }
             true
         }
@@ -640,4 +773,4 @@ fn permits_io(
 
 #[cfg(test)]
 #[path = "microphone_quic/tests.rs"]
-mod tests;
+pub(crate) mod tests;

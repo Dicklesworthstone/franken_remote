@@ -254,6 +254,15 @@ async fn fixture_capabilities(
     files: bool,
 ) -> Fixture {
     let capabilities = extended_capabilities(synchronized, files);
+    Box::pin(fixture_selected(c, h, gate, synchronized, capabilities)).await
+}
+async fn fixture_selected(
+    c: &Cx,
+    h: &Cx,
+    gate: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+    synchronized: bool,
+    capabilities: Vec<WireCapability>,
+) -> Fixture {
     let mut initial_until = 0;
     let (mut host, mut viewer) = pair_initialized(c, h, capabilities, |host| {
         let a = host.authority.as_mut().unwrap();
@@ -539,6 +548,7 @@ fn pending_admission_refresh_keeps_control_tickets_and_input_results_progressing
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
+            microphone: &mut host.microphone,
                     files: &mut host.files,
                     clipboard: &mut host.clipboard,
                     clipboard_setup: &mut host.clipboard_setup,
@@ -835,6 +845,7 @@ fn buffered_ordered_input_cannot_take_a_due_tickets_fair_turn() {
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
+            microphone: &mut host.microphone,
                     files: &mut host.files,
                     clipboard: &mut host.clipboard,
                     clipboard_setup: &mut host.clipboard_setup,
@@ -891,6 +902,7 @@ fn revoke_during_refresh_poll_blocks_shared_udp_before_the_next_service_turn() {
         let mut other = block;
         let mut services = InputServices {
             input: &mut host.input,
+            microphone: &mut host.microphone,
             files: &mut host.files,
             clipboard: &mut host.clipboard,
             clipboard_setup: &mut host.clipboard_setup,
@@ -1103,3 +1115,6 @@ mod input_wake;
 
 #[path = "tests/files.rs"]
 mod files;
+
+#[path = "tests/microphone.rs"]
+mod microphone;

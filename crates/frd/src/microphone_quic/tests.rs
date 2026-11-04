@@ -338,4 +338,21 @@ fn original_controller_revocation_and_foreign_retirement_cannot_cross_connection
 }
 
 #[path = "tests/native.rs"]
-mod device;
+pub(crate) mod device;
+
+#[test]
+fn unrelated_transport_dispatch_cannot_bypass_the_original_microphone_controller() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        let mut host = f.host(true, absent_launch()).unwrap();
+        assert!(!host.control().is_stopped());
+        f.input.control().stop(StopReason::LocalRevoke);
+        // This helper deliberately omits Host::permits_io and Host::service.
+        // The transport-retained gate must fence microphone output itself.
+        f.link.h.tick(&f.cx, || true).unwrap();
+        assert!(host.control().is_stopped());
+        assert!(!f.link.h.is_closed(), "no retained ACK requires parent closure");
+        assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
+        f.link.h.tick(&f.cx, || true).unwrap();
+    });
+}

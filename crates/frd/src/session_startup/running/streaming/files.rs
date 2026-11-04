@@ -184,13 +184,7 @@ fn request(
     view: Binding,
     nonce: &mut impl FnMut() -> Result<u128, ()>,
 ) -> Option<ChannelRequest> {
-    let id = host
-        .io()
-        .ok()?
-        .0
-        .next_channel_binding()
-        .ok()
-        .filter(|&id| id != 0)?;
+    let id = host.next_channel_binding().ok().filter(|&id| id != 0)?;
     let ticket = nonce().ok().filter(|&ticket| ticket != 0)?;
     Some(ChannelRequest {
         binding: Binding {

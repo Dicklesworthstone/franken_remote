@@ -17,7 +17,7 @@ use std::{
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 static SERIAL: Mutex<()> = Mutex::new(());
-struct Server {
+pub(crate) struct Server {
     socket: PathBuf,
     child: Child,
 }
@@ -28,7 +28,7 @@ impl Drop for Server {
     }
 }
 impl Server {
-    fn start() -> Self {
+    pub(crate) fn start() -> Self {
         let directory = std::env::temp_dir().join(format!(
             "fr-host-mic-quic-{}-{}",
             std::process::id(),
@@ -58,7 +58,7 @@ impl Server {
         }
         server
     }
-    fn launch(&self) -> native::Launch {
+    pub(crate) fn launch(&self) -> native::Launch {
         let device = std::env::var_os("FR_TEST_MICROPHONE_WORKER")
             .map(PathBuf::from)
             .expect("FR_TEST_MICROPHONE_WORKER must name the actual installed image");
@@ -404,5 +404,36 @@ fn real_datagram_receipts_expire_and_explicit_retalk_waits_for_both_original_chi
         assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
         assert!(!f.link.h.is_closed());
         assert!(!f.input.control().is_stopped());
+    });
+}
+
+#[test]
+#[ignore = "requires real PipeWire and installed device/Opus worker images"]
+fn unrelated_transport_tick_retires_the_real_ack_before_further_native_io() {
+    let _serial = SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let server = Server::start();
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        let mut host = f.host(true, server.launch()).unwrap();
+        f.send(&configuration(7, AudioDirection::Uplink));
+        let until = clock(&f.cx) + 1_000_000;
+        while host.statistics().acknowledgements_admitted == 0 {
+            assert!(clock(&f.cx) < until, "actual native ACK must be admitted");
+            f.drive(&host).await;
+            host.service(&mut f.link.h, || true).unwrap();
+        }
+        assert!(host.epoch.inflight.is_some());
+        let retirement = host.retirement().unwrap();
+        host.control().stop();
+        // No Host callback services this operation. The immutable original
+        // guard must retire its queued ACK before this unrelated helper returns.
+        f.link.h.tick(&f.cx, || true).unwrap();
+        assert!(host.lane.is_retired(&f.link.h).unwrap());
+        assert!(!f.link.h.is_closed());
+        assert!(!f.input.control().is_stopped());
+        assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
+        reaped(&f.cx, &retirement).await;
     });
 }

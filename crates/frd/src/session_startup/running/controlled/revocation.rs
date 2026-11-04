@@ -45,6 +45,7 @@ impl ControlledHost {
         let control = self.input.control();
         control.stop(requested);
         let reason = control.reason().unwrap_or(requested);
+        self.microphone.stop();
         self.files.stop();
         if let Some(clipboard) = &self.clipboard {
             clipboard.stop();

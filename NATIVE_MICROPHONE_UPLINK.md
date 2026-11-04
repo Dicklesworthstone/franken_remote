@@ -12,12 +12,58 @@ The containing session supplies the completed authenticated `AudioUp` attachment
 its exact positive selection, separate local microphone approval and the original
 host clock. The receiver derives its permission checks from that original owner.
 
-Public microphone offers remain disabled. These native owners do not attach
-protocol role 8 themselves, change `fr connect`, install a driver, or choose an OS
-default source. Network coordination and visible talk/stop controls remain
-integration work. See [NATIVE_MICROPHONE_CAPTURE.md](NATIVE_MICROPHONE_CAPTURE.md)
-for the actual client recording/encoding boundary and [VIRTUAL_MIC.md](VIRTUAL_MIC.md)
-for explicit virtual-source selection and the underlying native owner.
+The original `ControlledHost` now owns the role-8 attachment and the existing
+supervised receiver as part of its normal control session. The library API below
+requires a separate local microphone approval and retains the original input
+controller. Public `fr connect` and `frd run` microphone offers remain disabled:
+visible client/host talk and stop controls are still required before enabling
+those command paths. No driver or OS default source is selected implicitly.
+See [NATIVE_MICROPHONE_CAPTURE.md](NATIVE_MICROPHONE_CAPTURE.md) for the actual
+client recording/encoding boundary and [VIRTUAL_MIC.md](VIRTUAL_MIC.md) for
+explicit virtual-source selection and the underlying native owner.
+
+## Controlled host integration
+
+After the original input grant, `ControlledHost::offer_microphone` takes the
+original selected channel request, independent local approval and explicit
+`microphone_process::Launch` paths. Missing approval or positive microphone
+selection refuses before allocating a route. Normal controlled-session drive
+turns complete the one-use role, binding and ticket exchange under its original
+fixed deadline; callers do not manually dispatch microphone records.
+
+The exchange retains the original controller, connection identity and positive
+selection. Native processes still start only after the viewer explicitly
+configures a talk generation. `attach_microphone` also accepts an already
+completed original `AudioUpChannel`; a foreign or duplicate attachment is
+returned intact on refusal, rather than dropped into another connection's
+lifecycle. The optional slot cannot be silently replaced or reattached.
+
+Input and its renewal are serviced before bounded microphone supervisor work.
+The session retains microphone authority and pending acknowledgement checks
+across connection I/O, including operations invoked by other media owners.
+An active microphone prevents a bare mutable transport loan; the new
+`next_channel_binding` accessor provides allocation metadata without granting
+transport authority. Clipboard and file setup use that accessor.
+
+`microphone_control` exposes the existing independent microphone stop once the
+attachment completes. `retire_microphone` fences native output first and retires
+the exact optional pair. A completed, drained retirement preserves desktop
+control; an unfinished exchange or unwithdrawable native microphone output
+conservatively fences the original connection. Session close and revocation
+stop microphone admission before teardown, with no automatic talk restart.
+
+Negotiation, native state, typed failure, bounded statistics and actual
+device/codec retirement receipts are available separately. A stop request is
+not a child-reaping receipt; `Running` is not proof that a local application
+selected or heard the virtual microphone. This integration does not add new
+physical microphone, desktop application or live-tailnet qualification.
+
+The new controlled-session regression cases cover refusal before allocation,
+fixed-deadline cancellation, original-owner fencing, optional worker failure
+and native readiness/stop through the canonical drive loop. They are authored
+but have not completed execution in this change's unavailable build environment.
+The earlier native results below qualify the existing component owners; they
+do not substitute for executing this new session composition.
 
 ## Acknowledgement and ownership
 

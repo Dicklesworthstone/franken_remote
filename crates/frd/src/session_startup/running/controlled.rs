@@ -3,6 +3,7 @@
 use super::{Error, HostSession, ObservationControl, Services};
 mod clipboard;
 pub(crate) mod files;
+mod microphone;
 pub(super) mod revocation;
 use crate::{
     input_agent::{InputReply, Reply, Status},
@@ -27,6 +28,7 @@ pub struct ControlledHost {
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
     files: files::Slots,
+    microphone: microphone::Slot,
     terminal_report: Option<Result<(), fr_transport::quic::Error>>,
     terminal_registered: bool,
 }
@@ -71,6 +73,7 @@ impl HostSession {
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
             files: files::Slots::default(),
+            microphone: microphone::Slot::default(),
             terminal_report: None,
             terminal_registered: false,
         };
@@ -103,20 +106,39 @@ impl ControlledHost {
     pub fn observation_renewed_until(&self) -> Option<HostInstant> {
         self.session.renewed_until()
     }
-    /// Loan the same checked connection to its bounded media/clock owners.
-    /// Replacing the connection is not supported and is fenced on the next turn.
+    /// Loan the same checked connection only while no live microphone owns it.
+    /// Microphone ACK custody must be checked on every original connection turn;
+    /// its negotiated service therefore runs through `drive`.
     pub fn io(&mut self) -> Result<(&mut QuicRecords, ControlRoutes), Error> {
         if self.input.control().is_stopped() {
             self.close();
             return Err(Error::Closed);
         }
+        if !self.microphone.raw_io_available() {
+            return Err(Error::Order);
+        }
         self.session.io()
+    }
+    /// Inspect the next unused attachment ID without lending mutable transport.
+    /// This creates no route, ticket, permission or additional native owner.
+    pub fn next_channel_binding(&mut self) -> Result<u32, Error> {
+        if self.input.control().is_stopped() {
+            self.close();
+            return Err(Error::Closed);
+        }
+        self.session.check()?;
+        self.session
+            .opened
+            .transport
+            .next_channel_binding()
+            .map_err(Error::Transport)
     }
     /// Fence input before ending observation or cancelling this viewer's region.
     /// Native cleanup and destruction progress through the original Driver, not
     /// through this call. Other viewers' share-session capture is not cancelled.
     pub fn close(&mut self) {
         self.input.control().stop(StopReason::LocalRevoke);
+        self.microphone.stop();
         self.files.stop();
         if let Some(clipboard) = &self.clipboard {
             clipboard.stop();
@@ -167,6 +189,7 @@ impl ControlledHost {
         }
         let mut services = InputServices {
             input: &mut self.input,
+            microphone: &mut self.microphone,
             files: &mut self.files,
             clipboard: &mut self.clipboard,
             clipboard_setup: &mut self.clipboard_setup,
@@ -233,6 +256,7 @@ impl Drop for Operation<'_> {
 }
 struct InputServices<'a, T, F> {
     input: &'a mut QuicInput,
+    microphone: &'a mut microphone::Slot,
     files: &'a mut files::Slots,
     clipboard: &'a mut Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: &'a mut crate::session_startup::clipboard::Setup,
@@ -246,39 +270,11 @@ struct InputServices<'a, T, F> {
     ticket: &'a mut T,
     other: &'a mut F,
 }
-fn is_input(routes: Routes, route: Route) -> bool {
-    route == Route::Stream(routes.actions())
-        || routes
-            .pointer()
-            .is_some_and(|p| route == Route::Datagram(p))
-}
-impl<T, F> Services for InputServices<'_, T, F>
-where
-    T: FnMut() -> Option<InputTicketId>,
-    F: Services,
-{
-    fn permitted(&mut self) -> bool {
-        self.files.permitted()
-            && self.clipboard_setup.permits_io()
-            && self.renewal.permitted()
-            && self.other.permitted()
-            && self
-                .clipboard
-                .as_ref()
-                .is_none_or(crate::clipboard_quic::Bridge::permits_io)
-    }
-    fn maintain<N: FnMut() -> Result<u128, ()>>(
-        &mut self,
-        q: &mut QuicRecords,
-        nonce: &mut N,
-    ) -> Result<(), Error> {
-        // Local lifecycle permission must be refreshed before draining queued
-        // input, including inside a long admission refresh. Native submission
-        // still checks its own independent authority and platform state.
-        if !self.other.permitted() {
-            self.input.control().stop(StopReason::ViewInvalidated);
-            return Err(Error::Closed);
-        }
+impl<T, F> InputServices<'_, T, F> {
+    fn prepare_optional(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+        // Consume actual ACK drain witnesses before checking their immutable
+        // caps. A completed microphone may retire without ending input authority.
+        self.microphone.maintain(q).map_err(Error::Microphone)?;
         // The viewer may finish Files before this host's next turn. Retire or
         // promote its staged final exchange before generic receive; handshake
         // transmission and disk work retain their post-input turn below.
@@ -308,6 +304,44 @@ where
                 .service(q, || self.observation.check().is_ok())
                 .map_err(Error::Clipboard)?;
         }
+        Ok(())
+    }
+}
+fn is_input(routes: Routes, route: Route) -> bool {
+    route == Route::Stream(routes.actions())
+        || routes
+            .pointer()
+            .is_some_and(|p| route == Route::Datagram(p))
+}
+impl<T, F> Services for InputServices<'_, T, F>
+where
+    T: FnMut() -> Option<InputTicketId>,
+    F: Services,
+{
+    fn permitted(&mut self) -> bool {
+        self.microphone.permitted()
+            && self.files.permitted()
+            && self.clipboard_setup.permits_io()
+            && self.renewal.permitted()
+            && self.other.permitted()
+            && self
+                .clipboard
+                .as_ref()
+                .is_none_or(crate::clipboard_quic::Bridge::permits_io)
+    }
+    fn maintain<N: FnMut() -> Result<u128, ()>>(
+        &mut self,
+        q: &mut QuicRecords,
+        nonce: &mut N,
+    ) -> Result<(), Error> {
+        // Local lifecycle permission must be refreshed before draining queued
+        // input, including inside a long admission refresh. Native submission
+        // still checks its own independent authority and platform state.
+        if !self.other.permitted() {
+            self.input.control().stop(StopReason::ViewInvalidated);
+            return Err(Error::Closed);
+        }
+        self.prepare_optional(q)?;
         self.renewal
             .receive(q, |_, _| Ok(Disposition::Blocked))
             .map_err(Error::ControlRenewal)?;
@@ -357,6 +391,11 @@ where
         if !self.renewal.permitted() {
             return Err(Error::Closed);
         }
+        self.microphone
+            .service(q, self.input, || {
+                self.renewal.permitted() && self.observation.check().is_ok()
+            })
+            .map_err(Error::Microphone)?;
         // Bulk work gets one bounded receive/reply turn AFTER native input and
         // renewal. Its disk worker never blocks this authority/transport owner.
         self.files
@@ -370,7 +409,8 @@ where
         // These records belong to the owners serviced immediately before/after
         // observation dispatch, never to an application callback or a new queue.
         let kind = bytes.get(6..8);
-        if self.files.owns(route, bytes)
+        if self.microphone.owns(route, bytes)
+            || self.files.owns(route, bytes)
             || self
                 .clipboard
                 .as_ref()

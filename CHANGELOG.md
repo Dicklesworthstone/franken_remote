@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-04 — microphone joins the original controlled host
+
+- The running host can negotiate one separately approved microphone attachment
+  and service the existing native device/codec owner alongside input renewal.
+  Negotiation retains the original controller, connection, selection and deadline.
+- Microphone stop, setup failure and session revocation retain native fences and
+  actual child retirement receipts. A drained optional stop preserves control;
+  foreign attachments and spent microphone slots cannot be silently reused.
+- Original acknowledgement and setup guards remain on the connection even
+  when clipboard, files or other media helpers perform I/O.
+- This is the controlled-session library integration. Public command offers
+  remain disabled pending visible client and host talk/stop controls. New
+  session regression tests are authored; full execution remains a CI gate.
+
 ## 2026-11-04 — bounded CLI help and lifecycle regression repairs
 
 - Keep an earlier source failure authoritative when a later resize arrives

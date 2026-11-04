@@ -29,7 +29,7 @@ use std::{
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
-        Arc, Condvar, Mutex, MutexGuard, PoisonError,
+        Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -216,7 +216,7 @@ struct Shared {
     controller: HostController,
     clock: Clock,
     stopped: AtomicBool,
-    revoke: Mutex<Option<Arc<UnixStream>>>,
+    revoke: OnceLock<Arc<UnixStream>>,
     mail: Mutex<Mail>,
     wake: Condvar,
     device_exit: AtomicU8,
@@ -229,16 +229,17 @@ impl Shared {
     fn lock(&self) -> MutexGuard<'_, Mail> {
         self.mail.lock().unwrap_or_else(PoisonError::into_inner)
     }
-    fn stop(&self) {
+    /// Fence the same original child channel without taking the mailbox lock.
+    /// Shutdown is local and never waits for a peer reply or a native worker.
+    fn request_stop(&self) {
         self.stopped.store(true, Ordering::Release);
-        let socket = self
-            .revoke
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone();
-        if let Some(socket) = socket {
+        if let Some(socket) = self.revoke.get() {
             let _ = socket.shutdown(Shutdown::Both);
         }
+        self.wake.notify_all();
+    }
+    fn stop(&self) {
+        self.request_stop();
         let mut mail = self.lock();
         mail.state = State::Stopped;
         mail.job = None;
@@ -281,12 +282,20 @@ impl Shared {
         checked
     }
     fn bind_revoke(&self, socket: Arc<UnixStream>) -> Result<(), Error> {
-        let mut installed = self.revoke.lock().map_err(|_| Error::Stopped)?;
-        if installed.is_some() || self.stopped.load(Ordering::Acquire) {
+        if self.stopped.load(Ordering::Acquire) {
             let _ = socket.shutdown(Shutdown::Both);
             return Err(Error::Stopped);
         }
-        *installed = Some(socket);
+        self.revoke.set(socket.clone()).map_err(|socket| {
+            let _ = socket.shutdown(Shutdown::Both);
+            Error::Stopped
+        })?;
+        // A stop may have sampled the empty cell before publication. This
+        // postcheck closes that exact socket before startup can spawn children.
+        if self.stopped.load(Ordering::Acquire) {
+            let _ = socket.shutdown(Shutdown::Both);
+            return Err(Error::Stopped);
+        }
         Ok(())
     }
 }
@@ -301,6 +310,24 @@ impl Control {
     }
     pub fn is_stopped(&self) -> bool {
         self.0.check().is_err()
+    }
+    /// Original child fence for transport permission callbacks. No mailbox
+    /// mutex, native driver call or child wait belongs on this path.
+    pub(crate) fn request_stop(&self) {
+        self.0.request_stop();
+    }
+    /// Actual matching private Commit state, without waiting on its mailbox.
+    /// None cannot prove Running or release an original setup deadline.
+    pub(crate) fn try_state(&self) -> Option<State> {
+        if self.0.stopped.load(Ordering::Acquire) {
+            return Some(State::Stopped);
+        }
+        let state = self.0.mail.try_lock().ok().map(|mail| mail.state);
+        if self.0.stopped.load(Ordering::Acquire) {
+            Some(State::Stopped)
+        } else {
+            state
+        }
     }
 }
 impl std::fmt::Debug for Control {
@@ -391,7 +418,7 @@ impl Process {
             controller,
             clock: Clock::bind(now)?,
             stopped: AtomicBool::new(false),
-            revoke: Mutex::new(None),
+            revoke: OnceLock::new(),
             mail: Mutex::new(Mail {
                 state: State::Starting,
                 job: None,

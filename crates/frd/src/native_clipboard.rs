@@ -306,12 +306,10 @@ impl Application {
         nonce: &mut impl FnMut() -> Result<u128, ()>,
     ) -> Result<(), Error> {
         self.turn(host, |host, timeout, consent| {
-            let id = host
-                .io()
-                .map_err(|_| Error::Closed)?
-                .0
-                .next_channel_binding()
-                .map_err(Error::Transport)?;
+            let id = host.next_channel_binding().map_err(|error| match error {
+                crate::session_startup::Error::Transport(error) => Error::Transport(error),
+                _ => Error::Closed,
+            })?;
             let ticket = nonce().map_err(|()| Error::Limit)?;
             if id == 0 || ticket == 0 {
                 return Err(Error::Limit);
