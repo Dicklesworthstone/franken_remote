@@ -611,7 +611,11 @@ int fr_viewer_input_next(struct fr_viewer_input *h, struct fr_viewer_event *out)
         break;
     case XCB_CONFIGURE_NOTIFY: {
         xcb_configure_notify_event_t *v = (void*)e;
-        if (v->window == h->window) { out->kind = GEOMETRY; out->x=v->width; out->y=v->height; }
+        if (v->window == h->window) {
+            out->kind = (e->response_type & 0x80) &&
+                (v->width != h->width || v->height != h->height) ? SYNTHETIC : GEOMETRY;
+            out->x=v->width; out->y=v->height;
+        }
         break;
     }
     case XCB_VISIBILITY_NOTIFY:

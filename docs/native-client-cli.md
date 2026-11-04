@@ -527,8 +527,22 @@ does not mutate process-global credentials or use peer-supplied paths.
 The existing reconnect supervisor owns bounded backoff, fresh identity checks,
 new native windows/decoder epochs, and independent cleanup deadlines. No prior
 session state is replayed. Each renderer is created only after approved display
-selection, at the selected native pixel dimensions. Unsupported sizes, hide,
-resize or window loss retain the existing terminal behavior.
+selection. An ordinary interactive viewer can be resized after its first frame
+is ready. A checked native window-manager resize immediately fences the original
+input and session, waits for positive native cleanup, and opens fresh viewing
+fitted to the requested window. It applies the local display preference to a
+fresh catalog and creates a new viewport mapping and decoder epoch. Original
+control, clipboard and file consent is not restored. Explicit resizes share the
+32-attempt lifetime ceiling with display changes and automatic retries, without
+resetting the automatic retry allowance.
+
+The checked target must fit the selected image and local screen limits, with
+even dimensions from 16 to 8192 and at most 16,777,216 pixels. Unsupported or
+synthetic sizes, hide/unmap, focus loss during resize, window loss, adverse host
+reports and uncertain cleanup do not authorize reopening. One-shot observation
+and foreground automation retain fixed window behavior. Completion preserves
+each accepted resize in `window_resizes`, including the original close exchange
+and lease report when available; missing remote cleanup evidence remains unknown.
 
 In an already-running view-only session, normal window-manager close now retires
 local media and sends one `CloseRequest` over the original connection, retaining
@@ -538,7 +552,7 @@ restart it. A native 500 ms fallback stops a parked close handler. Bootstrap and
 control-capable windows still stop immediately. No close replays input, reuses
 control, or automatically reconnects a normally closed window.
 
-Direct stop, emergency input, hide/resize/window loss and SIGINT/Ctrl-C, SIGTERM
+Direct stop, emergency input, hide/window loss and SIGINT/Ctrl-C, SIGTERM
 or SIGHUP remain immediate cancellation. A signal cancels the original supervisor
 but does not abandon its future: the same independent cleanup path still runs. Native cleanup failure takes precedence over a friendly
 "cancelled" result. A genuine user-close decision is sampled before cleanup;

@@ -6,6 +6,8 @@ use std::path::Path;
 mod display_change;
 #[path = "tests/geometry.rs"]
 mod geometry;
+#[path = "tests/resize.rs"]
+mod resize;
 
 fn session(epoch: u128) -> Session<()> {
     Session::new(

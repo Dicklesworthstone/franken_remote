@@ -106,8 +106,9 @@ pub enum Status {
         delay: Duration,
         failure: Failure,
     },
-    /// Successful local completion and confirmed cleanup, followed by an
-    /// explicit new viewing choice. This is not a transient-failure retry.
+    /// A local display choice or checked local window resize, after confirmed
+    /// cleanup. The previous attempt's result remains in Cleaning; reopening
+    /// never relabels an interrupted resize as successful service.
     Reopening {
         attempt: u8,
     },
@@ -136,6 +137,13 @@ pub enum CompletionAction {
     #[default]
     Finish,
     Reopen,
+}
+
+/// A checked local change that requires new native owners. This carries no
+/// permission, layout, input action or reusable session identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalLayoutChange {
+    WindowResize,
 }
 
 /// The application owns its native observer until cleanup finishes. `run` is
@@ -175,6 +183,19 @@ pub trait Application {
     /// A refusal stops; notification/cancellation can still veto reopening.
     fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
         Ok(CompletionAction::Finish)
+    }
+    /// Called only for an authenticated application's resize-compatible native
+    /// interruption, after successful mandatory cleanup and terminal-report
+    /// checks. Return WindowResize only from this attempt's checked native
+    /// ConfigureNotify, after its first frame, with old input fenced and no
+    /// competing focus/hide/local-stop failure. Consume one bounded target.
+    /// The default never reopens. Original failure history is unchanged; every
+    /// new owner repeats admission and starts without previous input consent.
+    fn local_layout_change(
+        &mut self,
+        _failure: Failure,
+    ) -> Result<Option<LocalLayoutChange>, CallbackError> {
+        Ok(None)
     }
     /// Bounded terminal evidence retained by this attempt's original owner.
     /// Return only an error or validated peer/session report retained by the
@@ -305,6 +326,7 @@ impl Client {
                     let viewing = runtime
                         .try_request_cx_with_budget(cx.budget())
                         .map_err(|_| Failure::MissingRuntime)?;
+                    let mut application_started = false;
                     let mut outcome = guarded(
                         &cx,
                         &mut clock,
@@ -332,6 +354,7 @@ impl Client {
                                         notify(application, Status::Authenticated { attempt })?;
                                         cx.checkpoint().map_err(|_| Failure::Cancelled)?;
                                         session.checkpoint().map_err(|_| Failure::Cancelled)?;
+                                        application_started = true;
                                         application
                                             .run(attempt, viewer)
                                             .await
@@ -396,6 +419,33 @@ impl Client {
                             // report or its known external-effect stages.
                             let _ = notify(application, Status::Stopped { attempt, failure });
                             return Err(failure);
+                        }
+                    }
+                    if terminal.is_none()
+                        && application_started
+                        && let Err(failure) = outcome.as_ref()
+                        && resize_interrupted(*failure)
+                    {
+                        let change = application.local_layout_change(*failure);
+                        clock.live(&cx)?;
+                        if let Some(LocalLayoutChange::WindowResize) =
+                            change.map_err(|_| Failure::Notification)?
+                        {
+                            // The callback cannot hide an original report that
+                            // arrived during cleanup or bypass the owner ceiling.
+                            if let Some(error) = application.terminal_failure() {
+                                let failure = Failure::Observation(error);
+                                let _ = notify(application, Status::Stopped { attempt, failure });
+                                return Err(failure);
+                            }
+                            clock.live(&cx)?;
+                            if attempt == 32 {
+                                let failure = Failure::AttemptLimit;
+                                let _ = notify(application, Status::Stopped { attempt, failure });
+                                return Err(failure);
+                            }
+                            notify(application, Status::Reopening { attempt: attempt + 1 })?;
+                            continue;
                         }
                     }
                     match outcome {
@@ -506,6 +556,46 @@ fn failed_attempt_terminal<A: Application>(
         .filter(|failure| {
             !geometry_changed(*failure) || outcome.as_ref().err().copied().is_some_and(retryable)
         })
+}
+
+/// These failures alone cannot cause any retry. An established application's
+/// separately checked local resize receipt, successful cleanup and live
+/// supervisor are also required. Protocol, permission, native I/O uncertainty,
+/// ordinary geometry absence and arbitrary codec failures stay terminal.
+pub fn resize_interrupted(failure: Failure) -> bool {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    matches!(
+        failure,
+        Failure::Cancelled
+            | Failure::Connection(ConnectionError::Cancelled)
+            | Failure::Observation(
+                ObserverError::Application
+                    | ObserverError::Session(
+                        S::Cancelled | S::Transport(fr_transport::quic::Error::Cancelled)
+                    )
+                    | ObserverError::Streaming(
+                        StreamingViewerError::Application
+                            | StreamingViewerError::Closed
+                            | StreamingViewerError::Session(
+                                S::Cancelled | S::Transport(fr_transport::quic::Error::Cancelled)
+                            )
+                            | StreamingViewerError::Control(C::Closed)
+                            | StreamingViewerError::Control(C::Capture(
+                                crate::session_startup::viewer_events::Error::Closed
+                            ))
+                            | StreamingViewerError::Control(C::Session(
+                                S::Cancelled | S::Transport(fr_transport::quic::Error::Cancelled)
+                            ))
+                            | StreamingViewerError::Transport(fr_transport::quic::Error::Cancelled)
+                            | StreamingViewerError::Media(crate::media::Error::Worker(
+                                crate::worker::Error::Cancelled
+                                    | crate::worker::Error::WorkerRefused(
+                                        fr_media::worker::Error::GeometryChanged
+                                    )
+                            ))
+                    )
+            )
+    )
 }
 
 /// Retry explicit transient transport/availability outcomes, exhausted media

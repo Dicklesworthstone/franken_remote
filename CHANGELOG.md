@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-04 — fresh viewing after a checked local window resize
+
+- Let ordinary interactive native viewers accept a real window-manager resize
+  after first-frame readiness. Fence the old input mapping immediately, retain
+  one bounded native resize request, and require positive cleanup before fresh
+  admission, a new decoder epoch and a viewport fitted to the requested size.
+- Preserve the display preference against the new catalog and retire original
+  control, clipboard and file choices. Explicit resizes share the existing
+  32-attempt lifetime ceiling without resetting the automatic retry allowance.
+- Retain original resize/cleanup history even if a later connection fails. Add
+  regressions for native event provenance, racing publishers, competing display
+  changes, cleanup and terminal-cause precedence, fresh epochs and consent.
+- New native tests remain unexecuted: the resource-constrained build environment
+  disconnected, and hosted verification is pending. No physical desktop result
+  is claimed.
+
 ## 2026-11-04 — clipboard continues after an unpublished incoming item expires
 
 - Expire a complete queued or explicitly deferred clipboard record through the

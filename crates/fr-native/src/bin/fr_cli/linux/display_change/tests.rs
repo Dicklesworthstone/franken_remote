@@ -298,3 +298,91 @@ fn a_later_notification_failure_is_not_named_after_the_prior_successful_close() 
     assert_eq!(progress.control.unwrap().request_attempt, Some(1));
     assert!(history(&progress).text.contains("client_requested"));
 }
+
+#[test]
+fn local_resize_retires_original_consent_and_reports_its_own_viewport_history() {
+    let mut progress = progress();
+    progress.cleanup.as_mut().unwrap().input_stop =
+        Some(fr_native::viewer_input::StopReason::WindowResized);
+    record_resize(&mut progress, 2, (960, 540)).unwrap();
+    assert_eq!(progress.display_changes, 0);
+    assert!(progress.display_change_closes.is_empty());
+    assert_eq!(progress.window_resizes.len(), 1);
+    assert!(!progress.control.unwrap().initial_decision_available());
+    assert!(!progress.control.unwrap().requested);
+    progress.begin(2);
+    assert_eq!(progress.control.as_mut().unwrap().opened(), control::AttemptMode::ViewingOnly);
+    let report = history(&progress);
+    let json: serde_json::Value =
+        serde_json::from_str(&format!("{{\"fixture\":true{}}}", report.json)).unwrap();
+    assert_eq!(json["display_changes"], 0);
+    assert_eq!(json["window_resizes"][0]["attempt"], 1);
+    assert_eq!(json["window_resizes"][0]["width"], 960);
+    assert_eq!(json["window_resizes"][0]["height"], 540);
+    assert!(!report.text.contains("Display change"));
+    assert!(report.text.contains("host cleanup remains unknown"));
+    let mut ui = interface(progress);
+    let offer = ui.offer(2, &fr_client::native::control_offer_with_files()).unwrap();
+    assert!(offer.capabilities.iter().all(|capability| !matches!(
+        capability.name.as_str(),
+        fr_wire::attachment::FILES_CAPABILITY | fr_wire::files::CAPABILITY
+            | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+    )));
+}
+
+#[test]
+fn resize_only_observer_history_survives_a_later_failed_dial() {
+    use crate::linux::{DesktopConfiguration, Mode, ObserverPolicy, Session};
+    let mut progress = progress();
+    progress.control = None;
+    progress.ended.push(1, "native_session_failed");
+    record_resize(&mut progress, 2, (640, 480)).unwrap();
+    progress.begin(2);
+    let session = Session::new(
+        DesktopConfiguration::new(std::path::Path::new("/usr/bin/false"), ":0", None, 1).unwrap(),
+        ObserverPolicy::default(),
+        Mode::Observe,
+        interface(Progress::default()),
+    );
+    let failed = crate::linux::completed(
+        &session,
+        Err(frd::native_connection::reconnect::Failure::Notification),
+        false,
+        &progress,
+        true,
+    ).unwrap_err();
+    assert_eq!(failed.code, "native_session_failed");
+    let retained = failed.control_history.expect("resize history was discarded");
+    assert!(retained.json.contains("\"window_resizes\""));
+    assert!(retained.json.contains("\"attempt\":1"));
+    assert!(retained.text.contains("Window resize"));
+}
+
+#[test]
+fn resize_bounds_duplicate_intents_and_adverse_cleanup_cannot_spend_consent() {
+    for size in [(0, 480), (641, 480), (640, 481), (8192, 8192)] {
+        let mut value = progress();
+        assert_eq!(record_resize(&mut value, 2, size), Err(CallbackError));
+        assert!(value.control.unwrap().initial_decision_available());
+        assert!(value.window_resizes.is_empty());
+    }
+    for reason in [
+        fr_native::viewer_input::StopReason::FocusLost,
+        fr_native::viewer_input::StopReason::WindowChanged,
+        fr_native::viewer_input::StopReason::LocalEscape,
+    ] {
+        let mut value = progress();
+        value.cleanup.as_mut().unwrap().input_stop = Some(reason);
+        assert_eq!(record_resize(&mut value, 2, (640, 480)), Err(CallbackError));
+        assert!(value.control.unwrap().initial_decision_available());
+    }
+    let mut failed = progress();
+    failed.cleanup.as_mut().unwrap().failure =
+        Some(fr_native::desktop::reconnect::CleanupFailure::Media);
+    assert_eq!(record_resize(&mut failed, 2, (640, 480)), Err(CallbackError));
+    let mut duplicate = progress();
+    record_resize(&mut duplicate, 2, (640, 480)).unwrap();
+    assert_eq!(record_resize(&mut duplicate, 2, (640, 480)), Err(CallbackError));
+    assert_eq!(record(&mut duplicate, 2), Err(CallbackError));
+    assert_eq!(duplicate.window_resizes.len(), 1);
+}

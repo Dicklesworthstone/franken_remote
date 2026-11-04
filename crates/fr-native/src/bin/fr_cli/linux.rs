@@ -91,7 +91,11 @@ fn input_stopped(reason: fr_native::viewer_input::StopReason) -> Option<Failure>
         ),
         R::WindowChanged => (
             "control_window_changed",
-            "The viewer window was resized, hidden, obscured or unmapped, so control ended; reconnect to acquire control again.",
+            "The viewer window was hidden, obscured or unmapped, so control ended; reconnect to acquire control again.",
+        ),
+        R::WindowResized => (
+            "control_window_resized",
+            "The viewer window changed size, so its original input mapping and control ended. A confirmed local resize may reopen viewing after cleanup; no old input or auxiliary choice is restored.",
         ),
         R::InitialHeld => (
             "control_input_held_at_start",
@@ -521,7 +525,7 @@ fn connect(
     // A controller's window close runs the closing exchange, as a viewer's does.
     .with_cleanup_runtime(runtime.handle());
     if !automation {
-        application = application.with_display_switching();
+        application = application.with_display_switching().with_window_resizing();
     }
     let selector = selected.selector();
     let cfg = Configuration {
@@ -678,7 +682,7 @@ fn completed(
         if let Some(control) = progress.control {
             failure.control_history =
                 Some(Box::leak(Box::new(control_history(progress, &control))));
-        } else if progress.display_changes != 0 {
+        } else if progress.display_changes != 0 || !progress.window_resizes.is_empty() {
             failure.control_history = Some(Box::leak(Box::new(display_change::history(progress))));
         }
         if let Some(downloads) = &progress.downloads {
@@ -776,7 +780,7 @@ fn completed_result(
         if error == reconnect::Failure::AttemptLimit {
             return Err(failure(
                 "session_attempt_limit",
-                "The invocation reached its limit of 32 fresh sessions. Cleanup completed; start a new connection to choose another display.",
+                "The invocation reached its limit of 32 fresh sessions. Cleanup completed; start a new connection to continue viewing.",
             ));
         }
         // Every attempt, including a recovered viewing-only connection, may
@@ -895,6 +899,8 @@ struct Progress {
     /// Accepted local requests to open a fresh display picker after cleanup.
     display_changes: u8,
     display_change_closes: Vec<(u8, fr_native::desktop::reconnect::CleanupSummary)>,
+    /// Confirmed local viewport changes, distinct from choosing another display.
+    window_resizes: Vec<(u8, (u32, u32), fr_native::desktop::reconnect::CleanupSummary)>,
     presented: u64,
     approval_pending: bool,
     missing_display: bool,
@@ -1183,23 +1189,26 @@ impl Ui for Interface {
                 }
             }
             Status::Reopening { attempt } => {
-                // This notification follows a successful explicit close and
-                // positive native cleanup. Expected own-close reports are
-                // retained; the Session separately vetoes adverse reports.
+                // Both local changes require positive native cleanup and a
+                // retained original receipt. The Session rejects adverse host,
+                // focus, input and cleanup evidence before this notification.
                 if progress.user_closed
                     || progress.automation.is_some()
                     || progress.automation_focus_stop.is_some()
-                    || !progress
-                        .window
-                        .as_ref()
-                        .is_some_and(WindowControl::display_switch_requested)
                 {
                     return Err(CallbackError);
                 }
-                display_change::record(&mut progress, attempt)?;
-                // Selection comes only from the new authenticated catalog's
-                // native picker, never this invocation's previous handle.
-                self.display = DisplayChoice::Choose;
+                let window = progress.window.as_ref().ok_or(CallbackError)?;
+                if let Some(size) = window.resize_requested() {
+                    display_change::record_resize(&mut progress, attempt, size)?;
+                    // Apply the same local display preference to the new
+                    // authenticated catalog. Never reuse the old display owner.
+                } else if window.display_switch_requested() {
+                    display_change::record(&mut progress, attempt)?;
+                    self.display = DisplayChoice::Choose;
+                } else {
+                    return Err(CallbackError);
+                }
             }
             _ => {}
         }

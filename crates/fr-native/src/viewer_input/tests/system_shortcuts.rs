@@ -284,7 +284,7 @@ fn keymap_window_and_synthetic_fences_release_the_owned_native_grab() {
     let _serial = SERIAL.lock().unwrap();
     for (command, reason) in [
         ("remap", StopReason::KeymapChanged),
-        ("resize", StopReason::WindowChanged),
+        ("resize", StopReason::WindowResized),
         ("synthetic", StopReason::SyntheticInput),
         ("synthetic_focus", StopReason::FocusLost),
         ("unmap", StopReason::WindowChanged),

@@ -120,6 +120,9 @@ pub enum StopReason {
     EscapeUnavailable,
     LocalEscape,
     SystemShortcutsUnavailable,
+    /// A real ConfigureNotify changed this original target's dimensions.
+    /// Separate from hide, unmap, obscuring and unverified window changes.
+    WindowResized,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -152,10 +155,11 @@ impl Shared {
     fn stop(&self, reason: StopReason) {
         #[cfg(feature = "linux-viewer-window")]
         if self.state.first_stop().is_none()
-            && !matches!(reason, StopReason::Local | StopReason::Closed)
+            && !matches!(reason, StopReason::Local | StopReason::Closed | StopReason::WindowResized)
             && let Some(window) = self.display_switch.get()
         {
             window.cancel_display_switch();
+            window.cancel_resize();
         }
         // Reserve the diagnostic cause before the fence wakes session cleanup.
         // Publish Stopped only after the original viewer has actually fenced.
@@ -166,6 +170,15 @@ impl Shared {
 pub struct CaptureControl(Arc<Shared>);
 impl CaptureControl {
     pub fn stop(&self) {
+        // An explicit local stop vetoes reopening even when resize won the
+        // original diagnostic race. Native cleanup uses retire() below.
+        #[cfg(feature = "linux-viewer-window")]
+        if let Some(window) = self.0.display_switch.get() {
+            window.cancel_resize();
+        }
+        self.retire();
+    }
+    fn retire(&self) {
         self.0.stop(StopReason::Local);
     }
     pub fn status(&self) -> Status {
@@ -239,6 +252,7 @@ fn state(value: u8) -> Status {
         16 => Status::Stopped(R::EscapeUnavailable),
         17 => Status::Stopped(R::LocalEscape),
         18 => Status::Stopped(R::SystemShortcutsUnavailable),
+        19 => Status::Stopped(R::WindowResized),
         _ => Status::Stopped(R::Queue),
     }
 }
@@ -508,6 +522,10 @@ impl X11InputCapture {
         if let Some(task) = self.task.take()
             && task.join().is_err()
         {
+            #[cfg(feature = "linux-viewer-window")]
+            if let Some(window) = self.control.0.display_switch.get() {
+                window.cancel_resize();
+            }
             self.control.0.stop(StopReason::NativeFailure);
         }
         match self.control.status() {
@@ -523,7 +541,7 @@ impl fmt::Debug for X11InputCapture {
 }
 impl Drop for X11InputCapture {
     fn drop(&mut self) {
-        self.control.stop();
+        self.control.retire();
         if let Some(cursor) = &self.cursor {
             cursor.stop();
         }
@@ -576,6 +594,7 @@ trait Target {
     fn display_switch_pending(&self) -> Option<std::time::Instant> {
         None
     }
+    fn window_resized(&self, _width: u32, _height: u32) {}
     /// Fence the original input owner before any native cleanup can run.
     fn stop(&self, reason: StopReason);
 }
@@ -584,6 +603,21 @@ struct NativeTarget {
     shared: Arc<Shared>,
 }
 impl Target for NativeTarget {
+    fn window_resized(&self, width: u32, height: u32) {
+        // Reserve the precise native cause before the window's immediate fence
+        // wakes cleanup. An earlier input stop cannot become resize intent.
+        self.shared.state.stop(StopReason::WindowResized, || {
+            #[cfg(feature = "linux-viewer-window")]
+            if self.shared.state.first_stop() == Some(StopReason::WindowResized)
+                && let Some(window) = self.shared.display_switch.get()
+            {
+                window.record_resize(width, height);
+            }
+            #[cfg(not(feature = "linux-viewer-window"))]
+            let _ = (width, height);
+            self.shared.control.stop();
+        });
+    }
     #[cfg(feature = "linux-viewer-window")]
     fn display_switch_scope(&self) -> Option<display_switch::Scope> {
         self.shared.display_switch.get()?.display_switch_scope()
@@ -999,7 +1033,10 @@ fn batch(
             9 if event.x != i32::try_from(window.width).unwrap()
                 || event.y != i32::try_from(window.height).unwrap() =>
             {
-                return Err(StopReason::WindowChanged);
+                let width = u32::try_from(event.x).map_err(|_| StopReason::WindowChanged)?;
+                let height = u32::try_from(event.y).map_err(|_| StopReason::WindowChanged)?;
+                target.window_resized(width, height);
+                return Err(StopReason::WindowResized);
             }
             10 => return Err(StopReason::KeymapChanged),
             11 => return Err(StopReason::SyntheticInput),
@@ -1151,7 +1188,7 @@ impl Decoder {
 
 impl frd::session_startup::viewer_events::NativeCapture for X11InputCapture {
     fn stop(&self) {
-        self.control.stop();
+        self.control.retire();
         if let Some(cursor) = &self.cursor {
             cursor.stop();
         }

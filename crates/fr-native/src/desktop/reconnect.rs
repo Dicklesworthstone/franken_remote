@@ -15,7 +15,9 @@ use fr_core::input_submission::Capabilities;
 use fr_media::freshness::ClockPolicy;
 use fr_wire::{display::Catalog, negotiation::Offer};
 use frd::{
-    native_connection::reconnect::{Application, CallbackError, CompletionAction, Status},
+    native_connection::reconnect::{
+        Application, CallbackError, CompletionAction, Failure, LocalLayoutChange, Status,
+    },
     session_startup::{
         InteractiveViewerState, ObserverError, ObserverPolicy, Presentation,
         StreamingViewerControl, Viewer, ViewerCloseOutcome, ViewerStatistics,
@@ -137,9 +139,12 @@ pub struct Session<U> {
     ui: U,
     one_shot: bool,
     display_switching: bool,
+    window_resizing: bool,
     select_fresh_display: bool,
     /// Original native intent only; this handle cannot create another owner.
     display_switch_window: Option<crate::viewer_window::WindowControl>,
+    /// Set only after first-frame startup and a successful ready callback.
+    resize_window: Option<crate::viewer_window::WindowControl>,
     initial: Option<Observation>,
     initial_snapshot: Option<fr_media::worker::presentation_snapshot::Snapshot>,
     desktop: Option<Desktop>,
@@ -176,8 +181,10 @@ impl<U> Session<U> {
             ui,
             one_shot: false,
             display_switching: false,
+            window_resizing: false,
             select_fresh_display: false,
             display_switch_window: None,
+            resize_window: None,
             initial: None,
             initial_snapshot: None,
             desktop: None,
@@ -233,6 +240,16 @@ impl<U> Session<U> {
     #[must_use]
     pub fn with_display_switching(mut self) -> Self {
         self.display_switching = true;
+        self
+    }
+    /// Permit a real local window-manager resize after first-frame startup.
+    /// The old session is immediately fenced, then every native owner is
+    /// reaped before a newly authenticated observation uses the fitted target.
+    /// Synthetic events, lifecycle loss, failed cleanup and one-shot runs
+    /// never reopen. No previous input or auxiliary choice is restored.
+    #[must_use]
+    pub fn with_window_resizing(mut self) -> Self {
+        self.window_resizing = true;
         self
     }
     pub fn desktop(&self) -> Option<&Desktop> {
@@ -312,6 +329,7 @@ impl<U> Session<U> {
         self.statistics = None;
         self.input_stop = None;
         self.display_switch_window = None;
+        self.resize_window = None;
         // Store before ANY await or callback so interrupted work stays owned.
         self.desktop = Some(Desktop::new(configuration));
         Ok(())
@@ -381,6 +399,7 @@ impl<U: Ui> Application for Session<U> {
         };
         let one_shot = self.one_shot;
         let display_switching = self.display_switching && !one_shot;
+        let window_resizing = self.window_resizing && !one_shot;
         let outcome = async {
             desktop
                 .open(
@@ -414,6 +433,10 @@ impl<U: Ui> Application for Session<U> {
             }
             callback(&stop, || ui.borrow_mut().ready(attempt, desktop))
                 .map_err(|_| Error::Observer(ObserverError::Application))?;
+            if window_resizing {
+                desktop.enable_window_resizing()?;
+                self.resize_window = desktop.window();
+            }
             match self.mode {
                 Mode::Observe => desktop
                     .serve_until(|frame| {
@@ -548,6 +571,45 @@ impl<U: Ui> Application for Session<U> {
         self.display_switch_window = None;
         Ok(CompletionAction::Reopen)
     }
+    fn local_layout_change(
+        &mut self,
+        failure: Failure,
+    ) -> Result<Option<LocalLayoutChange>, CallbackError> {
+        let Some(window) = &self.resize_window else {
+            return Ok(None);
+        };
+        let Some((width, height)) = window.resize_requested() else {
+            return Ok(None);
+        };
+        let summary = CleanupSummary {
+            disconnect: self.disconnect,
+            control_disconnect: self.control_disconnect,
+            input_stop: self.input_stop,
+            failure: self.cleanup_failure,
+        };
+        if !self.window_resizing
+            || self.one_shot
+            || self.current_attempt != self.last_attempt
+            || self.service_succeeded
+            || self.desktop.is_some()
+            || window.close_requested()
+            || window.display_switch_requested()
+            || !frd::native_connection::reconnect::resize_interrupted(failure)
+            || !resize_local_error(self.error)
+            || !resize_cleanup_allows_reopen(summary, self.cleanup.as_ref())
+        {
+            window.cancel_resize();
+            return Ok(None);
+        }
+        // A new configuration creates a new renderer, mapping and worker epoch.
+        // Retain only scalar fit dimensions; no old native/input owner survives.
+        fr_media::worker::presentation::X11Target::new(1, width, height)
+            .map_err(|_| CallbackError)?;
+        self.configuration.fit_window = Some((width, height));
+        self.resize_window = None;
+        self.display_switch_window = None;
+        Ok(Some(LocalLayoutChange::WindowResize))
+    }
     fn terminal_failure(&self) -> Option<ObserverError> {
         // A failed later discovery cannot acquire the previous native owner's
         // report. Original reports still remain available through their accessors.
@@ -564,6 +626,41 @@ impl<U: Ui> Application for Session<U> {
             !self.service_succeeded,
         )
     }
+}
+
+fn resize_local_error(error: Option<Error>) -> bool {
+    match error {
+        // A fenced native owner can wake the supervisor before run returns.
+        None | Some(Error::NotViewing) => true,
+        // A callback refusal is a distinct local cause even when the native
+        // resize fence arrived concurrently. Never turn it into a new attempt.
+        Some(Error::Observer(
+            ObserverError::Application
+                | ObserverError::Streaming(frd::session_startup::StreamingViewerError::Application),
+        )) => false,
+        Some(Error::Observer(error)) => {
+            frd::native_connection::reconnect::resize_interrupted(Failure::Observation(error))
+        }
+        Some(Error::Window(crate::viewer_window::Error::NativeStopped(
+            crate::viewer_window::StopReason::GeometryChanged,
+        ))) => true,
+        _ => false,
+    }
+}
+fn resize_cleanup_allows_reopen(summary: CleanupSummary, cleanup: Option<&Cleanup>) -> bool {
+    use crate::{viewer_input::StopReason, viewer_window};
+    summary.failure.is_none()
+        && summary.input_stop.is_none_or(|reason| {
+            matches!(reason, StopReason::Local | StopReason::Closed | StopReason::WindowResized)
+        })
+        && retained_failure(summary, true).is_none()
+        && cleanup.is_some_and(|report| {
+            matches!(
+                report.window,
+                WindowCleanup::Complete(viewer_window::StopReason::GeometryChanged)
+            ) && cleaned(report) == Ok(true)
+                && matches!(report.media, Ok(Some(_)))
+        })
 }
 
 /// A completed bounded exchange can retain unknown transport/remote cleanup

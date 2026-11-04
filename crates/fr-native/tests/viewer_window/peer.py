@@ -31,8 +31,30 @@ class Client(c.Structure):
 class Focus(c.Structure):
     _fields_ = [("type", c.c_int), ("serial", c.c_ulong), ("synthetic", c.c_int),
                 ("display", D), ("window", W), ("mode", c.c_int), ("detail", c.c_int)]
+class Configure(c.Structure):
+    _fields_ = [("type", c.c_int), ("serial", c.c_ulong), ("synthetic", c.c_int),
+                ("display", D), ("event", W), ("window", W),
+                ("x", c.c_int), ("y", c.c_int), ("width", c.c_int), ("height", c.c_int),
+                ("border_width", c.c_int), ("above", W), ("override_redirect", c.c_int)]
 class Event(c.Union):
-    _fields_ = [("client", Client), ("focus", Focus), ("pad", c.c_long * 24)]
+    _fields_ = [("client", Client), ("focus", Focus), ("configure", Configure),
+                ("pad", c.c_long * 24)]
+def close_event(display, window):
+    e = Event()
+    e.client.type = 33
+    e.client.display = display
+    e.client.window = window
+    e.client.message_type = x.XInternAtom(display, b"WM_PROTOCOLS", 0)
+    e.client.format = 32
+    e.client.data[0] = x.XInternAtom(display, b"WM_DELETE_WINDOW", 0)
+    assert x.XSendEvent(display, window, 0, 0, c.byref(e))
+def synthetic_resize(display, window):
+    e = Event()
+    e.configure.type = 22
+    e.configure.display = display
+    e.configure.event = e.configure.window = window
+    e.configure.width, e.configure.height = 400, 300
+    assert x.XSendEvent(display, window, 0, 1 << 17, c.byref(e))
 d = x.XOpenDisplay(sys.argv[1].encode("ascii"))
 assert d, "test display missing"
 w, op = int(sys.argv[2]), sys.argv[3]
@@ -46,6 +68,29 @@ try:
             if children: x.XFree(children)
     elif op == "move": x.XMoveWindow(d, w, 30, 40)
     elif op == "resize": x.XResizeWindow(d, w, 322, 240)
+    elif op == "resize_burst":
+        x.XResizeWindow(d, w, 322, 240)
+        x.XResizeWindow(d, w, 400, 300)
+    elif op == "resize_return":
+        x.XResizeWindow(d, w, 322, 240)
+        x.XResizeWindow(d, w, 320, 240)
+    elif op == "resize_odd": x.XResizeWindow(d, w, 321, 240)
+    elif op == "resize_unmap":
+        x.XResizeWindow(d, w, 322, 240)
+        x.XUnmapWindow(d, w)
+    elif op == "resize_destroy":
+        x.XResizeWindow(d, w, 322, 240)
+        x.XDestroyWindow(d, w)
+    elif op == "resize_close":
+        # Intern before queuing the lifecycle sequence (no intermediate flush).
+        x.XInternAtom(d, b"WM_PROTOCOLS", 0)
+        x.XInternAtom(d, b"WM_DELETE_WINDOW", 0)
+        x.XResizeWindow(d, w, 322, 240)
+        close_event(d, w)
+    elif op == "resize_synthetic":
+        x.XResizeWindow(d, w, 322, 240)
+        synthetic_resize(d, w)
+    elif op == "synthetic_resize": synthetic_resize(d, w)
     elif op == "unmap": x.XUnmapWindow(d, w)
     elif op == "destroy": x.XDestroyWindow(d, w)
     elif op == "focus": x.XSetInputFocus(d, w, 2, 0)

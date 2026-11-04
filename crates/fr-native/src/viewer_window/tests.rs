@@ -216,3 +216,98 @@ fn unarmed_wm_close_retains_intent_but_programmatic_stop_does_not() {
         assert_eq!(control.close_requested(), requested);
     }
 }
+
+#[test]
+fn real_resize_fences_old_target_then_coalesces_one_checked_native_size() {
+    let display = Display::new();
+    for (event, expected) in [
+        ("resize", (322, 240)),
+        ("resize_burst", (400, 300)),
+        ("resize_return", (320, 240)),
+    ] {
+        let (_rt, viewer, mut window) = window(&display.name);
+        let control = window.control();
+        let id = control.target().unwrap().window();
+        control.enable_resize(640, 480).unwrap();
+        display.event(id, event);
+        wait(|| matches!(control.status(), Status::Stopped(_)));
+        assert!(viewer.control().is_stopped(), "terminal status preceded input fence");
+        assert_eq!(control.target(), Err(Error::NotReady));
+        wait(|| window.finish().is_some());
+        assert_eq!(window.finish(), Some(StopReason::GeometryChanged));
+        assert_eq!(control.resize_requested(), Some(expected));
+        // A retained receipt is not permission to override a later local stop.
+        control.stop();
+        assert_eq!(control.resize_requested(), None);
+    }
+}
+
+#[test]
+fn synthetic_invalid_and_negative_lifecycle_events_never_supply_replacement_intent() {
+    let display = Display::new();
+    for event in [
+        "synthetic_resize", "resize_synthetic", "resize_odd",
+        "resize_unmap", "resize_destroy", "resize_close",
+    ] {
+        let (_rt, viewer, mut window) = window(&display.name);
+        let control = window.control();
+        let id = control.target().unwrap().window();
+        control.enable_resize(640, 480).unwrap();
+        display.event(id, event);
+        wait(|| window.finish().is_some());
+        assert!(viewer.control().is_stopped());
+        assert_eq!(control.resize_requested(), None, "{event}");
+    }
+}
+
+#[test]
+fn input_side_fence_without_window_confirmation_cannot_reopen() {
+    let display = Display::new();
+    let (_rt, viewer, mut window) = window(&display.name);
+    let control = window.control();
+    control.enable_resize(640, 480).unwrap();
+    // This is only a tentative receipt from the separate input connection.
+    // No ConfigureNotify was delivered to the original window owner.
+    assert!(control.record_resize(322, 240));
+    assert!(viewer.control().is_stopped());
+    assert_eq!(control.resize_requested(), None);
+    wait(|| window.finish().is_some());
+    assert_eq!(control.resize_requested(), None);
+    assert_eq!(window.finish(), Some(StopReason::GeometryChanged));
+}
+
+#[test]
+fn prior_stop_and_disabled_resize_cannot_acquire_a_replacement_request() {
+    let display = Display::new();
+    for prior in [None, Some(StopReason::Hidden), Some(StopReason::FocusLost)] {
+        let (_rt, viewer, mut window) = window(&display.name);
+        let control = window.control();
+        if let Some(reason) = prior {
+            control.enable_resize(640, 480).unwrap();
+            control.0.stop(reason);
+        }
+        assert!(!control.record_resize(322, 240));
+        control.stop();
+        wait(|| window.finish().is_some());
+        assert!(viewer.control().is_stopped());
+        assert_eq!(control.resize_requested(), None);
+    }
+}
+
+#[test]
+fn published_display_choice_cancels_resize_without_confusing_offered_capability() {
+    let display = Display::new();
+    let (_rt, viewer, mut window) = window(&display.name);
+    let control = window.control();
+    control.enable_resize(640, 480).unwrap();
+    control.set_display_switch_mode(DisplaySwitchMode::Controlled).unwrap();
+    assert!(control.resize_enabled(), "offered capability is not a choice");
+    let scope = control.display_switch_scope().unwrap();
+    assert!(control.request_display_switch(scope, Instant::now()));
+    assert!(!control.resize_enabled(), "published choice did not cancel resize");
+    assert!(!control.record_resize(322, 240));
+    control.stop();
+    wait(|| window.finish().is_some());
+    assert!(viewer.control().is_stopped());
+    assert_eq!(control.resize_requested(), None);
+}

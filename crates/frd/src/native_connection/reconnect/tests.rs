@@ -1,6 +1,8 @@
 //! Retry policy and public connector failure paths. No fabricated successful dial.
 #[path = "tests/geometry.rs"]
 mod geometry;
+#[path = "tests/resize.rs"]
+mod resize;
 use super::*;
 use crate::native_connection::tests::{offer, roots};
 use crate::session_startup::ObserverPolicy;
@@ -63,6 +65,12 @@ impl Application for App {
     }
     fn completion_action(&mut self) -> Result<CompletionAction, CallbackError> {
         panic!("a failed-discovery attempt cannot request a successful reopen")
+    }
+    fn local_layout_change(
+        &mut self,
+        _: Failure,
+    ) -> Result<Option<LocalLayoutChange>, CallbackError> {
+        panic!("a failed-discovery attempt cannot claim native resize intent")
     }
     fn status(&mut self, status: Status) -> Result<(), CallbackError> {
         self.events.push(status);

@@ -20,7 +20,7 @@ struct fr_viewer_window {
     xcb_connection_t *c;
     xcb_window_t window;
     xcb_atom_t protocols, close, net_name, utf8;
-    uint16_t width, height;
+    uint16_t width, height, max_width, max_height, resize_width, resize_height;
     uint8_t control_key, control_pressed, control_blocked, control_ready, control_barrier_kind;
     uint16_t control_locks;
     xcb_atom_t control_clock;
@@ -34,7 +34,7 @@ struct fr_viewer_window {
 };
 enum { IGNORE, MAPPED, HIDDEN, LOST, RESIZED, STOP, CONTROL_CHOSEN,
        CONTROL_RESET, CONTROL_REMAP, CONTROL_CLOCK, FOCUS_LEFT = 13,
-       SWITCH_CHOSEN, SWITCH_RESET, SWITCH_REMAP, SWITCH_CLOCK };
+       SWITCH_CHOSEN, SWITCH_RESET, SWITCH_REMAP, SWITCH_CLOCK, UNVERIFIED_RESIZE };
 static int checked(struct fr_viewer_window *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -93,9 +93,16 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
      * optional clipboard may refuse independently; it never creates overlap. */
     if (it.data->width_in_pixels < width || it.data->height_in_pixels < height) goto fail;
     h->width = (uint16_t)width; h->height = (uint16_t)height;
+    h->max_width = it.data->width_in_pixels & ~1u;
+    h->max_height = it.data->height_in_pixels & ~1u;
+    if (origin) {
+        h->max_width = ((uint32_t)it.data->width_in_pixels - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
+        h->max_height = ((uint32_t)it.data->height_in_pixels -
+            FR_CLIPBOARD_HEIGHT - FR_CLIPBOARD_GAP - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
+    }
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { it.data->black_pixel,
-        XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE };
+        XCB_EVENT_MASK_STRUCTURE_NOTIFY | XCB_EVENT_MASK_FOCUS_CHANGE | XCB_EVENT_MASK_VISIBILITY_CHANGE };
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
         h->window, it.data->root, origin, origin, h->width, h->height, 0,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
@@ -108,7 +115,8 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
     const char class[] = "franken-remote\0FrankenRemote\0";
     /* This first layout is immutable. Clipboard layout may have selected a
      * smaller target before creation; Rust must use fitted decoding AND its
-     * matching viewport. A later resize is terminal, never an implicit remap. */
+     * matching viewport. Only an established desktop may later offer resizing;
+     * that still retires this original target before creating a new mapping. */
     uint32_t size[18] = {0};
     size[0] = (1u << 4) | (1u << 5); /* ICCCM PMinSize | PMaxSize */
     if (origin) {
@@ -136,6 +144,76 @@ struct fr_viewer_window *fr_viewer_window_open_with_controls(const char *display
         uint32_t width, uint32_t height, uint32_t *window,
         uint32_t *actual_width, uint32_t *actual_height) {
     return viewer_window_open(display, width, height, 1, window, actual_width, actual_height);
+}
+/* Called once by the original window thread after the desktop established its
+ * first frame. The limits are the selected image's checked dimensions, further
+ * bounded by this local screen. Even increments retain the admitted 4:2:0 target. */
+int fr_viewer_window_resize_offer(struct fr_viewer_window *h,
+        uint32_t max_width, uint32_t max_height) {
+    if (!h || !h->c || max_width < 16 || max_height < 16 ||
+        max_width > 8192 || max_height > 8192 || (max_width & 1) || (max_height & 1) ||
+        (uint64_t)max_width * max_height > 16777216u) return 0;
+    if (max_width > h->max_width) max_width = h->max_width;
+    if (max_height > h->max_height) max_height = h->max_height;
+    uint32_t size[18] = {0};
+    size[0] = (1u << 4) | (1u << 5) | (1u << 6); /* min, max, resize increments */
+    size[5] = size[6] = 16;
+    size[7] = max_width; size[8] = max_height;
+    size[9] = size[10] = 2;
+    return property(h, XCB_ATOM_WM_NORMAL_HINTS, XCB_ATOM_WM_SIZE_HINTS, 32, 18, size);
+}
+/* Scalar metadata from the last real ConfigureNotify; this never queries or
+ * changes the drawable. Synthetic notifications cannot populate these fields. */
+int fr_viewer_window_resized(struct fr_viewer_window *h, uint32_t *width, uint32_t *height) {
+    if (!h || !width || !height || !h->resize_width || !h->resize_height) return 0;
+    *width = h->resize_width; *height = h->resize_height;
+    return 1;
+}
+/* After the first resize fence, drain only queued lifecycle metadata. No
+ * shortcut barrier, held-key query, drag selection or other positive native
+ * work is serviced while the old session is retiring. */
+int fr_viewer_window_resize_next(struct fr_viewer_window *h, uint32_t *kind) {
+    if (!h || !kind || !h->c || xcb_connection_has_error(h->c)) return -1;
+    xcb_generic_event_t *e = xcb_poll_for_event(h->c);
+    if (!e) return xcb_connection_has_error(h->c) ? -1 : 0;
+    *kind = IGNORE;
+    uint8_t type = e->response_type & 0x7f;
+    if (!type) { free(e); return -1; }
+    switch (type) {
+    case XCB_CONFIGURE_NOTIFY: {
+        xcb_configure_notify_event_t *v = (void *)e;
+        if (v->window == h->window) {
+            if (e->response_type & 0x80) *kind = UNVERIFIED_RESIZE;
+            else {
+                h->resize_width = v->width; h->resize_height = v->height;
+                *kind = RESIZED;
+            }
+        }
+        break;
+    }
+    case XCB_UNMAP_NOTIFY:
+        if (((xcb_unmap_notify_event_t *)e)->window == h->window) *kind = HIDDEN;
+        break;
+    case XCB_DESTROY_NOTIFY:
+        if (((xcb_destroy_notify_event_t *)e)->window == h->window) *kind = LOST;
+        break;
+    case XCB_VISIBILITY_NOTIFY:
+        if (((xcb_visibility_notify_event_t *)e)->window == h->window &&
+            ((xcb_visibility_notify_event_t *)e)->state != XCB_VISIBILITY_UNOBSCURED) *kind = HIDDEN;
+        break;
+    case XCB_FOCUS_OUT:
+        if (((xcb_focus_out_event_t *)e)->event == h->window) *kind = FOCUS_LEFT;
+        break;
+    case XCB_CLIENT_MESSAGE: {
+        xcb_client_message_event_t *v = (void *)e;
+        if (v->window == h->window && v->type == h->protocols &&
+            v->format == 32 && v->data.data32[0] == h->close) *kind = STOP;
+        break;
+    }
+    default: break;
+    }
+    free(e);
+    return 1;
 }
 /* A server timestamp barrier, following the existing viewer input boundary.
  * Its exact request sequence excludes another local client's property write. */
@@ -310,8 +388,14 @@ int fr_viewer_window_next(struct fr_viewer_window *h, uint32_t *kind) {
         break;
     case XCB_CONFIGURE_NOTIFY: {
         xcb_configure_notify_event_t *v = (xcb_configure_notify_event_t *)e;
-        if (v->window == h->window && (v->width != h->width || v->height != h->height))
-            *kind = RESIZED;
+        if (v->window == h->window &&
+            (v->width != h->width || v->height != h->height || h->resize_width)) {
+            if (synthetic) *kind = UNVERIFIED_RESIZE;
+            else {
+                h->resize_width = v->width; h->resize_height = v->height;
+                *kind = RESIZED;
+            }
+        }
         break;
     }
     case XCB_PROPERTY_NOTIFY: {

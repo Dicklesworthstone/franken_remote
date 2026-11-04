@@ -41,6 +41,52 @@ cleanup ordering, finite retries and local stop; native adapter tests cover
 conflicting reports, retained effects and fresh owner construction. These are
 protocol and ownership regressions, not live-tailnet or hardware qualification.
 
+## Resize the local viewer window
+
+An ordinary interactive `fr connect` enables native window resizing only after
+the first approved frame is ready. A real window-manager configuration event
+immediately fences the original input and cancels that session. The window owner
+retains one bounded resize intent and coalesces at most 64 native events for at
+most 100 ms, requiring two quiet turns before sealing the latest checked size.
+The input capture owner can request the fence but cannot certify or overwrite
+the target. Returning to the original size still retires the old mapping.
+
+The target uses the existing checked X11 limits: even width and height from 16
+to 8192, at most 16,777,216 pixels, and no dimensions beyond the selected image
+or local screen hints. Synthetic events, malformed dimensions, hide/unmap,
+obscuring or focus changes during the resize, user close, an event flood, a
+thread panic or a competing display-selection request cancel the intent. The
+original input/session fence precedes publication of the terminal window state.
+
+After positive cleanup of every original native owner, the desktop adapter may
+consume that exact sealed intent. It accepts only the narrowly classified
+interruption caused by retiring the old session. Original callback failures,
+protocol/authorization errors, earlier input stops, adverse authenticated host
+reports and failed cleanup retain their precedence. The canonical reconnect
+supervisor repeats identity lookup, TLS, admission and approval before a fresh
+observation, window, decoder epoch and fitted viewport can be created. The local
+display preference is checked against the new catalog; no old display handle,
+mapping, input lease, ticket or queued action crosses the attempt boundary.
+
+Like an explicit display change, a resize works with `--attempts 1`, does not
+reset or consume the automatic failure allowance, and shares the monotonic
+32-attempt ceiling. It retires any unused initial control decision and all
+original clipboard/file choices. A later explicit control request uses the
+existing admission and freshness checks. One-shot observation and foreground
+automation do not opt into this path.
+
+Completion records accepted changes in a separate `window_resizes` history,
+including the original attempt, dimensions, close exchange and lease report.
+The history survives a later connection or selection failure in both view-only
+and control-capable sessions. An absent close exchange remains unknown remote
+cleanup; fencing never becomes a claim that host keys were physically released.
+
+Regression sources cover native event provenance and bounded coalescing, racing
+window/input publishers, cleanup and terminal-cause precedence, fresh worker
+epochs, precise cancellation classification, consent retirement and completion
+history. Their presence is not evidence of a physical desktop or live-tailnet
+qualification; execution results must be recorded separately.
+
 ## Exhausted reference-recovery namespace
 
 The native observation profile can recover a lost reference chain without

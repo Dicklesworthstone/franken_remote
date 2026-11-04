@@ -4,8 +4,10 @@
 //! decoder. One locally created drawable is shared with the supervised decoder
 //! and the existing input capture adapter. Mapping is not optical visibility,
 //! observation permission, or an input grant. The local clipboard-space policy
-//! may choose a smaller initial target; later geometry changes remain terminal.
+//! may choose a smaller initial target. A checked resize always retires that
+//! target; an opted-in supervisor may open fresh viewing only after cleanup.
 mod choice;
+mod resize;
 pub(crate) mod file_drop;
 pub(crate) mod file_send;
 mod focus;
@@ -58,6 +60,9 @@ unsafe extern "C" {
     ) -> *mut c_void;
     fn fr_viewer_window_close(handle: *mut c_void);
     fn fr_viewer_window_next(handle: *mut c_void, kind: *mut u32) -> c_int;
+    fn fr_viewer_window_resize_offer(handle: *mut c_void, width: u32, height: u32) -> c_int;
+    fn fr_viewer_window_resized(handle: *mut c_void, width: *mut u32, height: *mut u32) -> c_int;
+    fn fr_viewer_window_resize_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_viewer_window_control_offer(handle: *mut c_void, enabled: c_int) -> c_int;
     fn fr_viewer_window_control_released(handle: *mut c_void) -> c_int;
     fn fr_viewer_window_drop_offer(handle: *mut c_void, enabled: c_int) -> c_int;
@@ -135,9 +140,11 @@ pub enum Error {
 struct Shared {
     session: StreamingViewerControl,
     state: AtomicU8,
+    first_stop: AtomicU8,
     orderly_close: AtomicU8,
     control_choice: choice::Choice,
     display_switch: display_switch::Intent,
+    resize: resize::Intent,
     automation_focus: focus::Gate,
     automation_focus_stop: AtomicU8,
     file_drops: file_drop::Inbox,
@@ -160,6 +167,13 @@ impl Shared {
         }
     }
     fn stop(&self, reason: StopReason) {
+        let first = self.first_stop.compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
+        let cause = first.unwrap_or_else(|first| first);
+        let cause = if cause == 0 { reason as u8 } else { cause };
+        if !matches!(reason, StopReason::GeometryChanged | StopReason::SessionEnded | StopReason::OwnerDropped)
+        {
+            self.resize.cancel();
+        }
         if !matches!(
             reason,
             StopReason::User | StopReason::OwnerDropped | StopReason::SessionEnded
@@ -189,7 +203,7 @@ impl Shared {
         let _ = self
             .state
             .try_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (state < 2).then_some(reason as u8)
+                (state < 2).then_some(cause)
             });
         self.notify();
     }
@@ -210,7 +224,40 @@ impl Shared {
 pub struct WindowControl(Arc<Shared>);
 impl WindowControl {
     pub fn stop(&self) {
+        self.0.resize.cancel();
         self.0.stop(StopReason::User);
+    }
+    /// Original-owner cleanup, distinct from a new explicit local stop. A
+    /// checked resize receipt remains diagnostic after its session was fenced.
+    pub(crate) fn retire(&self) {
+        self.0.stop(StopReason::SessionEnded);
+    }
+    /// Enable local resize only after the original desktop completed startup.
+    /// The selected image bounds the replacement viewport; no upscaling or
+    /// mutation of this window's existing decoder/input mapping is permitted.
+    pub(crate) fn enable_resize(&self, width: u32, height: u32) -> Result<(), Error> {
+        if self.status() != Status::Mapped || !self.0.resize.enable(width, height) {
+            return Err(Error::NotReady);
+        }
+        self.0.notify();
+        Ok(())
+    }
+    /// One checked native size, retained through cleanup. It is no evidence of
+    /// native retirement, remote release, approval or a replacement input grant.
+    pub fn resize_requested(&self) -> Option<(u32, u32)> {
+        self.0.resize.requested()
+    }
+    pub(crate) fn resize_enabled(&self) -> bool {
+        self.0.resize.limits().is_some()
+    }
+    pub(crate) fn cancel_resize(&self) {
+        self.0.resize.cancel();
+    }
+    /// Only native window/input event owners call this after a real server
+    /// ConfigureNotify. The first cause is reserved before cancellation wakes
+    /// cleanup; the one target may coalesce within the bounded native drain.
+    pub(crate) fn record_resize(&self, width: u32, height: u32) -> bool {
+        record_resize(&self.0, width, height, false)
     }
     pub(crate) fn file_drop_inbox(&self) -> file_drop::Inbox {
         self.0.file_drops.clone()
@@ -305,6 +352,9 @@ impl WindowControl {
         if self.status() != Status::Mapped || !self.0.display_switch.request(scope, at) {
             return false;
         }
+        // A published choice wins even if the separate window reader reserved
+        // a resize concurrently. Cancellation is sticky through native cleanup.
+        self.0.resize.cancel();
         self.0.notify();
         self.display_switch_requested()
     }
@@ -415,9 +465,11 @@ impl ViewerWindow {
         let control = WindowControl(Arc::new(Shared {
             session,
             state: AtomicU8::new(0),
+            first_stop: AtomicU8::new(0),
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
             control_choice: choice::Choice::default(),
             display_switch: display_switch::Intent::default(),
+            resize: resize::Intent::default(),
             automation_focus: focus::Gate::default(),
             automation_focus_stop: AtomicU8::new(0),
             file_drops: file_drop::Inbox::default(),
@@ -517,7 +569,11 @@ impl Drop for Native<'_> {
     fn drop(&mut self) {
         // Also fence BEFORE window destruction during unwinding. An outer task
         // guard alone would run too late, after this native owner's destructor.
-        self.shared.stop(StopReason::NativeFailure);
+        self.shared.stop(if thread::panicking() {
+            StopReason::NativeFailure
+        } else {
+            StopReason::SessionEnded
+        });
         // SAFETY: unique handle allocated and always used on this native thread.
         unsafe {
             fr_viewer_window_close(self.handle.as_ptr());
@@ -716,6 +772,7 @@ impl DisplayGesture {
             && native.shared.orderly_close.load(Ordering::Acquire) != CLOSE_REQUESTED
             && native.shared.display_switch.request(scope, captured)
         {
+            native.shared.resize.cancel();
             native.shared.notify();
         }
         Ok(())
@@ -833,6 +890,7 @@ fn lifecycle_event(
         4 => Some(StopReason::GeometryChanged),
         5 if *mapped && shared.orderly_close.load(Ordering::Acquire) != CLOSE_DISARMED => {
             shared.display_switch.cancel();
+            shared.resize.cancel();
             // The first WM request fixes the local deadline. Repeated
             // requests never reset it. Keep the drawable owned until the
             // original observation loop retires its decoder; all other
@@ -848,6 +906,7 @@ fn lifecycle_event(
         }
         5 => {
             shared.display_switch.cancel();
+            shared.resize.cancel();
             // Publish native WM intent before stop cancels the session:
             // another thread may observe cancellation before User.
             // This unarmed path still stops immediately, with no grace.
@@ -858,6 +917,82 @@ fn lifecycle_event(
         }
         _ => Some(StopReason::NativeFailure),
     }
+}
+fn record_resize(shared: &Shared, width: u32, height: u32, native: bool) -> bool {
+    if shared.orderly_close.load(Ordering::Acquire) == CLOSE_REQUESTED
+        || shared.display_switch.requested().is_some()
+        || !shared.resize.begin(width, height, || {
+            shared.state.load(Ordering::Acquire) == 1
+                && !shared.session.is_stopped()
+                && shared.first_stop.compare_exchange(
+                    0, StopReason::GeometryChanged as u8, Ordering::AcqRel, Ordering::Acquire,
+                ).is_ok()
+        })
+        || (native && !shared.resize.observe(width, height))
+    {
+        shared.resize.cancel();
+        return false;
+    }
+    // First-cause reservation above is not public Stopped. Fence before publishing.
+    shared.stop(StopReason::GeometryChanged);
+    true
+}
+fn native_resize(native: &Native<'_>) -> bool {
+    let (mut width, mut height) = (0, 0);
+    // SAFETY: sole native owner and writable scalars. These values came only
+    // from a real ConfigureNotify on this exact owned drawable.
+    (unsafe { fr_viewer_window_resized(native.handle.as_ptr(), &raw mut width, &raw mut height) } == 1)
+        && record_resize(native.shared, width, height, true)
+}
+/// Input is already fenced. Coalesce at most 64 native events and 100 ms,
+/// ending after two quiet turns; lifecycle/flood failures erase the request.
+/// No new native query, input event, gesture or file operation is admitted.
+fn drain_resize_events(native: &Native<'_>) {
+    let until = Instant::now() + Duration::from_millis(100);
+    let mut quiet = Instant::now() + TURN * 2;
+    let mut events = 0;
+    while events < TURN_EVENTS {
+        if !native.shared.resize.pending() {
+            return;
+        }
+        let mut kind = 0;
+        // SAFETY: original exclusive native owner, one writable scalar.
+        match unsafe { fr_viewer_window_resize_next(native.handle.as_ptr(), &raw mut kind) } {
+            0 if Instant::now() >= until
+                || (native.shared.resize.observed() && Instant::now() >= quiet) =>
+            {
+                native.shared.resize.seal();
+                return;
+            }
+            0 => {
+                thread::sleep(TURN);
+                continue;
+            }
+            1 if Instant::now() >= until => {
+                native.shared.resize.cancel();
+                return;
+            }
+            1 => events += 1,
+            _ => {
+                native.shared.resize.cancel();
+                return;
+            }
+        }
+        match kind {
+            4 if native_resize(native) => {
+                quiet = Instant::now() + TURN * 2;
+            }
+            0 | 1 | 6..=12 | 14..=17 => {}
+            _ => {
+                if kind == 5 {
+                    native.shared.orderly_close.store(CLOSE_REQUESTED, Ordering::Release);
+                }
+                native.shared.resize.cancel();
+                return;
+            }
+        }
+    }
+    native.shared.resize.cancel();
 }
 #[derive(Default)]
 struct Gestures {
@@ -895,6 +1030,11 @@ fn drain_events(
             }
         }
         let reason = match kind {
+            4 if native_resize(native) => return None,
+            18 => {
+                shared.resize.cancel();
+                Some(StopReason::GeometryChanged)
+            }
             6 => {
                 observed.control = true;
                 None
@@ -960,6 +1100,16 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     let Some(native) = open_native(shared, display) else {
         return;
     };
+    run_window(&native, started);
+    // Close the first-cause reservation before checking for a pending resize.
+    // An input reader cannot start a new intent after this retirement fence.
+    shared.stop(StopReason::SessionEnded);
+    if shared.resize.pending() {
+        drain_resize_events(&native);
+    }
+}
+fn run_window(native: &Native<'_>, started: Instant) {
+    let shared = native.shared;
     let mut mapped = false;
     let mut close_started: Option<Instant> = None;
     let mut gesture = ControlGesture::default();
@@ -967,7 +1117,11 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
     let mut files = FileGesture::default();
     let mut focus = focus::Probe::default();
     let mut previous_turn = Instant::now();
+    let mut resize_offered = false;
     loop {
+        if shared.resize.pending() {
+            return;
+        }
         if !shared.live() {
             return;
         }
@@ -986,6 +1140,14 @@ fn run(shared: &Shared, display: &CString, started: Instant) {
         }
         let turn = Instant::now();
         let fresh = turn.duration_since(previous_turn) < choice::MAX_AGE;
+        if !resize_offered && let Some((width, height)) = shared.resize.limits() {
+            // SAFETY: only this native thread changes the original window's hints.
+            if unsafe { fr_viewer_window_resize_offer(native.handle.as_ptr(), width, height) } != 1 {
+                shared.stop(StopReason::NativeFailure);
+                return;
+            }
+            resize_offered = true;
+        }
         if gesture.offer(&native).is_err() {
             shared.stop(StopReason::NativeFailure);
             return;

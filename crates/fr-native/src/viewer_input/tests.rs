@@ -124,6 +124,7 @@ struct Probe {
     file_controls: AtomicBool,
     file_keymap: AtomicU8,
     file_commands: Mutex<Vec<file_keys::Command>>,
+    resize: Mutex<Option<(u32, u32)>>,
 }
 struct Recording {
     start: Instant,
@@ -131,6 +132,10 @@ struct Recording {
     caps: Capabilities,
 }
 impl Target for Recording {
+    fn window_resized(&self, width: u32, height: u32) {
+        *self.probe.resize.lock().unwrap() = Some((width, height));
+        self.probe.stopped.store(true, Ordering::Release);
+    }
     fn file_shortcuts_enabled(&self) -> bool {
         self.probe.file_controls.load(Ordering::Acquire)
     }
@@ -286,7 +291,7 @@ fn focus_window_keymap_and_synthetic_changes_stop_without_dispatching_the_change
     for (command, reason) in [
         ("focus", StopReason::FocusLost),
         ("unmap", StopReason::WindowChanged),
-        ("resize", StopReason::WindowChanged),
+        ("resize", StopReason::WindowResized),
         ("remap", StopReason::KeymapChanged),
         ("synthetic", StopReason::SyntheticInput),
     ] {
@@ -307,6 +312,11 @@ fn focus_window_keymap_and_synthetic_changes_stop_without_dispatching_the_change
             assert_eq!(result, Err(reason));
         }
         assert!(probe.events.lock().unwrap().is_empty());
+        assert_eq!(
+            probe.resize.lock().unwrap().is_some(),
+            command == "resize",
+            "only a real changed geometry publishes the resize fence"
+        );
     }
 }
 #[test]

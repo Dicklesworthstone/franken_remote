@@ -278,6 +278,19 @@ impl Desktop {
         self.display_switching = true;
         Ok(())
     }
+    /// Opt in only after this original desktop completed its first frame.
+    /// The selected image bounds a future fitted viewport; no active mapping
+    /// or decoder is changed by enabling the local window-manager gesture.
+    fn enable_window_resizing(&mut self) -> Result<(), Error> {
+        if self.state() != State::Viewing {
+            return Err(Error::NotViewing);
+        }
+        let display = self.display().ok_or(Error::NotViewing)?;
+        self.window()
+            .ok_or(Error::NotViewing)?
+            .enable_resize(display.pixel_width, display.pixel_height)
+            .map_err(Error::Window)
+    }
     /// Status/cancellation for the original attempt's native chooser. Consumed
     /// handles are retired and cannot stop the later viewing window.
     pub fn picker(&self) -> Option<display_picker::Control> {
@@ -911,7 +924,7 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
-                                    None,
+                                    window.resize_enabled().then_some(&window),
                                 )?);
                                 Ok(())
                             })(),
@@ -1026,7 +1039,7 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
-                                    display_switching.then_some(&window),
+                                    (display_switching || window.resize_enabled()).then_some(&window),
                                 )?);
                                 Ok(())
                             })(),
@@ -1089,7 +1102,7 @@ impl Desktop {
             owner.stop();
         }
         if let Some(window) = &self.window {
-            window.control().stop();
+            window.control().retire();
         }
         self.state = State::Stopped;
     }
@@ -1332,7 +1345,7 @@ impl<F> Drop for Operation<'_, F> {
     }
 }
 
-/// Bind local display-switch intent before the native capture thread can export
+/// Bind local display-switch/resize intent before the native capture thread can export
 /// events. File controls retain their original attachment path; all shortcuts
 /// still belong to the original viewer and confirmed layout.
 fn attach_input(
