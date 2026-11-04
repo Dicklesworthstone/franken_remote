@@ -210,6 +210,11 @@ impl RunOptions {
         if options.observation_indicator.is_some() && options.input_agent.is_some() {
             return Err(Error::InvalidArgument);
         }
+        // A private Xvfb belongs to no logind session. Watching some other session
+        // would look like lock protection without providing any.
+        if options.headless && options.logind_session.is_some() {
+            return Err(Error::InvalidArgument);
+        }
         // A seat or monitor image without the selected session selects nothing.
         if options.logind_session.is_none()
             && (options.logind_seat.is_some() || options.session_monitor.is_some())
@@ -466,6 +471,20 @@ mod tests {
     fn session_lifetime_is_an_explicit_local_selection() {
         let off = parse(&["--software-explicit"]).unwrap();
         assert!(off.logind_session.is_none() && off.session_monitor.is_none());
+        assert!(
+            parse(&["--software-explicit", "--headless"])
+                .unwrap()
+                .headless
+        );
+        assert!(matches!(
+            parse(&[
+                "--software-explicit",
+                "--headless",
+                "--logind-session",
+                "c2"
+            ]),
+            Err(Error::InvalidArgument)
+        ));
         let on = parse(&[
             "--logind-session",
             "c2",

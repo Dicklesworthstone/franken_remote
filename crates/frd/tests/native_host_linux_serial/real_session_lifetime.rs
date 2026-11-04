@@ -66,6 +66,11 @@ fn a_lock_of_the_selected_session_ends_control_and_the_run_with_a_typed_cause() 
     }
     let revoked =
         revoked.unwrap_or_else(|| panic!("control survived the session lock: {}", s.daemon.dump()));
+    assert!(
+        revoked < Duration::from_millis(250),
+        "the lock revoked control only after {revoked:?}: {}",
+        s.daemon.dump()
+    );
     // Viewer motion no longer reaches the host.
     assert!(
         !s.pointer_follows((330, 260), Duration::from_secs(2)),

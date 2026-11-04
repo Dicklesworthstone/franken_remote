@@ -149,7 +149,8 @@ inherited pipes, and every status check re-expires the child's evidence on
   the cause before the run's supervisor fences it.
 * Without `--logind-session`, `frd run` states at every listen that locking or
   logging out does NOT end sharing. A private `--headless` Xvfb has no logind
-  session; this limit applies there.
+  session; this limit applies there, and combining `--headless` with
+  `--logind-session` is refused rather than watching an unrelated session.
 
 Evidence: `crates/frd/tests/session_monitor.rs` proves the startup refusal
 (no fresh evidence -> no certificate fetch, no listener) with the synthetic
