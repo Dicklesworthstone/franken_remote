@@ -12,6 +12,32 @@ use std::{
 };
 
 impl QuicRecords {
+    /// Retain one additional application-operation guard on this exact owner.
+    /// Optional media may attach after startup, so registration is allowed
+    /// after application traffic. This guard can only narrow the immutable
+    /// connection lifetime: neither guard can be replaced or removed, and a
+    /// per-call authorization callback cannot bypass either one.
+    ///
+    /// The callback runs before every record admission, receive dispatch and
+    /// native I/O poll. It must be bounded and nonblocking. Keep original send
+    /// permits/deadlines until actual drain evidence releases their custody;
+    /// returning false closes this connection before any further ordinary I/O.
+    /// A drained optional lane can return true to preserve its parent control.
+    /// Terminal reports still require their independent empty-payload proof
+    /// and original terminal security gate; this installs no cleanup authority.
+    pub fn retain_operation_check(
+        &mut self,
+        cx: &Cx,
+        check: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(), Error> {
+        if self.operation_check.is_some() {
+            return Err(Error::InvalidPolicy);
+        }
+        self.check(cx, &mut || true)?;
+        self.operation_check = Some(check);
+        self.check(cx, &mut || true).map(|_| ())
+    }
+
     /// Install exactly once, before application traffic. Every later record
     /// admission, receive dispatch and native I/O poll also checks this guard.
     /// The callback must be bounded and nonblocking; do not do `LocalAPI` I/O here.

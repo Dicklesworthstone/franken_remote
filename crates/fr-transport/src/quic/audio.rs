@@ -8,6 +8,8 @@ use fr_core::{audio::AudioDirection, limits::ProtocolLimits};
 use fr_wire::{attachment::MediaRole, audio, negotiation::ControlBinding};
 use std::cell::Cell;
 
+pub use super::attachment::RetirementRequest;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
     Host,
@@ -317,6 +319,11 @@ impl AudioUpChannel {
     }
     pub fn request_retirement(&self) {
         self.attachment.request_retirement();
+    }
+    /// Retain only a one-way retirement request for an I/O authorization guard.
+    /// This does not clone the channel or permit dispatch, sending or reattachment.
+    pub fn retirement_request(&self) -> RetirementRequest {
+        self.attachment.retirement_request()
     }
     pub fn retire(&mut self, q: &mut QuicRecords, cx: &Cx) -> Result<(), Error> {
         self.attachment.retire_audio(q, cx)

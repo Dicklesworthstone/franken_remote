@@ -36,6 +36,24 @@ mod record_limit;
 mod retire;
 const MAX_WAIT_US: u64 = 2_000_000;
 
+/// A one-way request to retire one original optional attachment. Cloning this
+/// handle never grants route ownership, data access or attachment authority.
+#[derive(Clone)]
+pub struct RetirementRequest(Arc<AtomicBool>);
+
+impl fmt::Debug for RetirementRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RetirementRequest([original optional attachment])")
+    }
+}
+impl RetirementRequest {
+    /// Request retirement at the original connection's next checked operation.
+    /// The native owner still enforces all drain and protected-output checks.
+    pub fn request(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 /// Retained through connection closure: consumed bindings and ticket identities
 /// never re-enter the allocation pool. The fixed stream limit also bounds
 /// consumed recovery generations and both optional file directions.
@@ -866,6 +884,9 @@ impl MediaChannel {
     /// output cannot be selectively retracted at that late boundary.
     pub fn request_retirement(&self) {
         self.retire.store(true, Ordering::Release);
+    }
+    pub(super) fn retirement_request(&self) -> RetirementRequest {
+        RetirementRequest(self.retire.clone())
     }
     pub fn close(&mut self) {
         // A completed optional lane may already have been reset on its original

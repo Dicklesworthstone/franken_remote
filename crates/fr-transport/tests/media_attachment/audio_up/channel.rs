@@ -268,7 +268,7 @@ fn packet_backpressure_preserves_receipt_and_allows_reliable_mute() {
 #[test]
 fn explicit_and_requested_retirement_fence_unwithdrawable_native_microphone_bytes() {
     run_test!(cx, {
-        for requested in [false, true] {
+        for requested in 0..3 {
             let mut l = Link::new(&cx).await;
             enable(&mut l);
             let _input = attach(&mut l, &cx, MediaRole::Input, 8).await;
@@ -286,11 +286,17 @@ fn explicit_and_requested_retirement_fence_unwithdrawable_native_microphone_byte
                 )
                 .unwrap();
             assert!(!client.datagrams_send_drained(&l.c).unwrap());
-            let result = if requested {
-                client.request_retirement();
-                l.c.tick(&cx, || true)
-            } else {
-                client.retire(&mut l.c, &cx)
+            let result = match requested {
+                0 => client.retire(&mut l.c, &cx),
+                1 => {
+                    client.request_retirement();
+                    l.c.tick(&cx, || true)
+                }
+                _ => {
+                    let request = client.retirement_request().clone();
+                    request.request();
+                    l.c.tick(&cx, || true)
+                }
             };
             assert_eq!(result, Err(Error::RetainedMicrophoneOutput));
             assert!(l.c.is_closed());
@@ -351,5 +357,34 @@ fn host_microphone_retirement_preserves_queued_video_and_tombstones_the_lane() {
         assert!(host.datagrams_send_drained(&l.h).unwrap());
         host.retire(&mut l.h, &cx).unwrap();
         l.h.tick(&cx, || true).unwrap();
+    });
+}
+
+#[test]
+fn cloned_retirement_request_preserves_parent_and_cannot_retarget_equal_bindings() {
+    run_test!(cx, {
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let _input = attach(&mut l, &cx, MediaRole::Input, 8).await;
+        let (h, _c, _, _) = attach(&mut l, &cx, MediaRole::AudioUp, 9).await;
+        let host = AudioUpChannel::new(&l.h, h).unwrap();
+        let request = host.retirement_request();
+        let copy = request.clone();
+        let mut foreign = Link::new(&cx).await;
+        enable(&mut foreign);
+        let _foreign_input = attach(&mut foreign, &cx, MediaRole::Input, 8).await;
+        let (h, _c, _, _) = attach(&mut foreign, &cx, MediaRole::AudioUp, 9).await;
+        let foreign_host = AudioUpChannel::new(&foreign.h, h).unwrap();
+        request.request();
+        l.h.tick(&cx, || true).unwrap();
+        assert_eq!(host.is_retired(&l.h), Ok(true));
+        assert!(!l.h.is_closed());
+        foreign.h.tick(&cx, || true).unwrap();
+        foreign_host.check(&foreign.h).unwrap();
+        assert_eq!(foreign_host.is_retired(&foreign.h), Ok(false));
+        copy.request();
+        l.h.tick(&cx, || true).unwrap();
+        assert_eq!(host.is_retired(&l.h), Ok(true));
+        assert!(!l.h.is_closed());
     });
 }

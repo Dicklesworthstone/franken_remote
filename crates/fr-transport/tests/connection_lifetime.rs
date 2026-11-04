@@ -8,6 +8,9 @@ use fr_wire::{MediaLimits, RecoveryChunk, encode_recovery};
 use std::{future::Future, pin::pin, task::Poll, time::Duration};
 use support::{clock, drive, pair, runtime};
 
+#[path = "connection_lifetime/operation.rs"]
+mod operation;
+
 fn recovery_packet(binding: u32, count: usize) -> Vec<u8> {
     let mut out = vec![0; 65536];
     let data = vec![81; count];

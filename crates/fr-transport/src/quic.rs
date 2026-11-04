@@ -430,6 +430,7 @@ pub struct QuicRecords {
     deferred_revocation: Option<Box<lifetime::terminal::Armed>>,
     lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     terminal_lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    operation_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     clock_attached: bool,
     display_selection_claimed: bool,
     attachments: Vec<attachment::Reservation>,
@@ -543,6 +544,7 @@ impl QuicRecords {
             identity: Arc::new(()),
             lifetime_check: None,
             terminal_lifetime_check: None,
+            operation_check: None,
             deferred_revocation: None,
             clock_attached: false,
             display_selection_claimed: false,
@@ -685,7 +687,10 @@ impl QuicRecords {
             self.close();
             return Err(Error::Cancelled);
         }
-        if self.lifetime_check.as_ref().is_some_and(|check| !check()) || !authorize() {
+        if self.lifetime_check.as_ref().is_some_and(|check| !check())
+            || self.operation_check.as_ref().is_some_and(|check| !check())
+            || !authorize()
+        {
             self.close();
             return Err(Error::Unauthorized);
         }
@@ -940,7 +945,12 @@ impl QuicRecords {
         wait: Duration,
         authorize: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        let gate = self.lifetime_check.clone();
+        let lifetime = self.lifetime_check.clone();
+        let operation = self.operation_check.clone();
+        let gate = || {
+            lifetime.as_ref().is_none_or(|check| check())
+                && operation.as_ref().is_none_or(|check| check())
+        };
         let mut bulk_opportunity = false;
         for _ in 0..TURN_SEND_PREFIXES {
             let current = self.check(cx, authorize)?;
@@ -952,7 +962,7 @@ impl QuicRecords {
             let (native, boundary) = held.io_parts();
             let result = lifetime::poll_io_at_boundary(
                 cx,
-                gate.as_deref(),
+                Some(&gate),
                 authorize,
                 boundary,
                 current,
@@ -977,7 +987,7 @@ impl QuicRecords {
         let (native, boundary) = held.io_parts();
         let result = lifetime::poll_io_at_boundary(
             cx,
-            gate.as_deref(),
+            Some(&gate),
             authorize,
             boundary,
             current,
