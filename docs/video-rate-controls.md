@@ -144,3 +144,55 @@ reduced bitrate can reduce picture quality. They do not qualify hardware,
 resolution changes, or live impaired-path recovery. Full workspace/Cargo and
 daemon verification remain blocked by the shared host's exhausted disk/memory
 and incomplete pinned runtime dependency checkout.
+
+## Software encoder cadence and motion search
+
+The software profile allows up to 60 seconds of active encoding between natural
+IDRs, and it adds `me=umh:merange=64` to x265's ultrafast preset. Startup,
+configuration replacement, rate changes, recovery and late joins still force an
+immediate IDR, so nothing waits for a natural one. A static screen still sends
+nothing.
+
+A natural IDR is expensive on a desktop. An IDR of a sharp text page needs far
+more than the 200 ms VBV allows, so x265 caps it at QP 33-37 and every still
+glyph softens for about a second. At the old 2-second bound, 427 of 540 pictures
+of a static page sat more than 1 dB below the level reached just before the IDR.
+
+Motion search matters once a scroll or drag passes about 32 pixels per picture,
+which a 30 fps stream reaches at ordinary fling speed. Ultrafast's diamond search
+loses the motion and spends its budget on intra blocks.
+
+Measured with libx265 4.1 and FFmpeg 8.0.1 on x86-64, using this encoder's
+parameters. Workloads are synthetic 1080p30 text at the stated rate, and PSNR is
+luma against the source, paired by exact frame index.
+
+| 20 s workload, target | 2 s GOP, diamond | 60 s GOP, UMH |
+|---|---|---|
+| Scroll 12 px/picture, 8 Mb/s | 3.81 Mb/s, 46.14 dB (p5 35.10) | 3.40 Mb/s, 60.45 dB (p5 47.80) |
+| Scroll 12 px/picture, 2 Mb/s | 1.36 Mb/s, 31.19 dB (p5 25.47) | 1.60 Mb/s, 43.13 dB (p5 33.08) |
+| Moving corner over still text, 8 Mb/s | 4.98 Mb/s, 46.85 dB | 7.52 Mb/s, 53.49 dB |
+| Moving corner over still text, 2 Mb/s | 1.14 Mb/s, 32.85 dB | 1.77 Mb/s, 43.03 dB |
+
+The longer GOP uses more of the moving-corner target because the rate controller
+is no longer giving back budget around each IDR. It stays within the target.
+
+| 5 s at 8 Mb/s, 60 s GOP | Diamond | UMH |
+|---|---|---|
+| Scroll 32 px/picture | 4.48 Mb/s, 43.16 dB, 8.6 ms | 4.51 Mb/s, 44.02 dB, 9.0 ms |
+| Scroll 48 px/picture | 4.15 Mb/s, 30.02 dB, 10.8 ms | 5.33 Mb/s, 43.50 dB, 10.0 ms |
+| Scroll 64 px/picture | 4.47 Mb/s, 30.05 dB, 10.7 ms | 6.30 Mb/s, 39.94 dB, 10.6 ms |
+| Scroll 96 px/picture | 8.03 Mb/s, 24.62 dB, 17.4 ms | 6.45 Mb/s, 36.10 dB, 11.2 ms |
+| Window drag 81 px/picture | 7.32 Mb/s, 32.47 dB, 11.6 ms | 6.15 Mb/s, 40.51 dB, 11.4 ms |
+
+The times are mean encode milliseconds per picture.
+
+These runs use FFmpeg's libx265 wrapper with FR's parameters, not `frd`. Hardware
+encoders, real desktops and perceived quality are not covered. A long GOP also
+means a decoder that silently diverged would recover later; no such divergence is
+known, and every detected loss already triggers repair or a forced IDR.
+
+`crates/fr-native/src/linux/encoder_policy_tests.rs` runs the cadence through the
+real encoder. It also decodes a 720p fast scroll: 17.4 dB with UMH and 11.8 dB
+without it, against a 15 dB floor. That fixture uses random bit-noise glyphs, so
+only the separation is meaningful.
+

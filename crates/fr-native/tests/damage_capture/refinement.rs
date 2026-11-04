@@ -217,8 +217,14 @@ fn damage_during_a_pending_refinement_is_preserved_and_gets_priority() {
 fn a_due_natural_idr_skips_polish_without_disabling_idle_damage_suppression() {
     let display = Display::start(true);
     let mut source = display.source();
-    let cfg = configuration(2_000_000);
-    let mut owner = enabled(&display, cfg.bitrate);
+    // A 1 fps policy gives a 60-picture bound, which keeps this boundary test short.
+    let cfg = Configuration {
+        fps: 1,
+        ..configuration(2_000_000)
+    };
+    let mut owner = display.capture_with_policy_fps(cfg.bitrate, cfg.fps);
+    assert!(owner.enable_damage_tracking().unwrap());
+    assert!(owner.enable_settle_refinement().unwrap());
     let start = Instant::now();
     let gop = u64::from(cfg.codec().unwrap().gop().max_gop_frames());
     for frame in 0..gop {

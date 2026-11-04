@@ -23,7 +23,7 @@ use core::{
 use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
-    config::{CodecConfiguration, ColorInfo},
+    config::{CodecConfiguration, ColorInfo, GopPolicy},
     hevc::{HevcGuard, framing::annex_b_to_length_prefixed},
 };
 use std::{collections::VecDeque, ffi::CString, rc::Rc};
@@ -261,7 +261,7 @@ impl HevcEncoder {
         if config.color() != ColorInfo::sdr_bt709()
             || !(1..=240).contains(&fps)
             || !(10_000..=200_000_000).contains(&bitrate)
-            || config.gop().max_gop_frames() > 480
+            || config.gop().max_gop_frames() > GopPolicy::MAX_ADMITTED_FRAMES
         {
             return Err(NativeError::InvalidConfiguration);
         }
@@ -1178,7 +1178,7 @@ fn annex_b_idr(bytes: &[u8]) -> Result<bool, NativeError> {
 mod tests {
     use super::*;
     use fr_core::ids::CodecConfigurationGeneration;
-    use fr_media::config::{CodedGeometry, GopPolicy};
+    use fr_media::config::CodedGeometry;
     fn config() -> CodecConfiguration {
         CodecConfiguration::new_baseline(
             CodecConfigurationGeneration::INITIAL,
@@ -1277,3 +1277,6 @@ mod admission_tests;
 
 #[cfg(test)]
 mod rate_tests;
+
+#[cfg(test)]
+mod encoder_policy_tests;

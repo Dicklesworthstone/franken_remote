@@ -227,18 +227,27 @@ pub struct GopPolicy {
     max_gop_frames: u32,
 }
 
+/// Seconds of active encoding allowed between natural IDRs.
+const ACTIVE_GOP_SECONDS: u32 = 60;
+
 impl GopPolicy {
-    /// The provisional baseline: a maximum GOP of two seconds of *active*
-    /// encoding at the given frame rate. This never means waking a static
-    /// screen every two seconds — it bounds the reference chain only while
-    /// frames are actually being produced (plan section 8.1).
+    /// The largest bound any admitted frame rate (at most 240 fps) can produce.
+    /// The native encoder refuses a larger request, and bridge.c repeats this value.
+    pub const MAX_ADMITTED_FRAMES: u32 = 240 * ACTIVE_GOP_SECONDS;
+
+    /// The baseline: at most sixty seconds of *active* encoding between natural
+    /// IDRs. This never means waking a static screen, and it never delays a
+    /// startup, configuration or recovery IDR, which are forced on demand.
+    ///
+    /// A VBV-capped IDR of a text page visibly softens all still text until
+    /// later pictures rebuild it, so this bound is only a safety net. See
+    /// `docs/video-rate-controls.md` for the measurements behind it.
     pub fn baseline_for_frame_rate(frames_per_second: u32) -> Result<Self, ConfigError> {
         if frames_per_second == 0 {
             return Err(ConfigError::ZeroFrameRate);
         }
-        // Two seconds of active encoding.
         let max_gop_frames = frames_per_second
-            .checked_mul(2)
+            .checked_mul(ACTIVE_GOP_SECONDS)
             .ok_or(ConfigError::GopOverflow)?;
         Ok(Self { max_gop_frames })
     }
@@ -454,7 +463,13 @@ mod tests {
         let l = ProtocolLimits::ABSOLUTE;
         let geom = CodedGeometry::new(&l, 1920, 1088, 1920, 1080, 16).unwrap();
         let gop = GopPolicy::baseline_for_frame_rate(60).unwrap();
-        assert_eq!(gop.max_gop_frames(), 120);
+        assert_eq!(gop.max_gop_frames(), 3_600);
+        assert_eq!(
+            GopPolicy::baseline_for_frame_rate(240)
+                .unwrap()
+                .max_gop_frames(),
+            GopPolicy::MAX_ADMITTED_FRAMES
+        );
 
         let ok = CodecConfiguration::new_baseline(gen0(), geom, ColorInfo::sdr_bt709(), gop);
         assert!(ok.is_ok());

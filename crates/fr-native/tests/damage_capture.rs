@@ -55,7 +55,14 @@ impl Display {
         self.capture_at_rate(2_000_000)
     }
     fn capture_at_rate(&self, bitrate: u32) -> ChangeAwareCapture {
-        let configuration = configuration(bitrate);
+        self.capture_with_policy_fps(bitrate, 30)
+    }
+    /// `policy_fps` sets only the GOP bound. Encoding stays at 30 fps.
+    fn capture_with_policy_fps(&self, bitrate: u32, policy_fps: u16) -> ChangeAwareCapture {
+        let configuration = Configuration {
+            fps: policy_fps,
+            ..configuration(bitrate)
+        };
         let limits = configuration.limits().unwrap();
         ChangeAwareCapture::new(
             X11Surface::capture(Some(&self.name), limits).unwrap(),

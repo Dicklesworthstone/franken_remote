@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-04 — sharper software video on text and fast motion
+
+- Allow 60 seconds of active encoding between natural IDRs instead of two. Forced
+  IDRs for startup, recovery, rate changes and late joins are unchanged. On
+  synthetic 1080p text scrolling at 8 Mb/s, mean luma PSNR rose from 46.1 to
+  60.5 dB at a lower actual rate.
+- Add UMH motion search to x265's ultrafast preset. A 48 px/picture scroll at
+  8 Mb/s rose from 30.0 to 43.5 dB. See `docs/video-rate-controls.md`.
+
 ## 2026-11-04 — fresh viewing after a checked local window resize
 
 - Let ordinary interactive native viewers accept a real window-manager resize

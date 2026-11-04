@@ -77,7 +77,7 @@ static int qualified_level(int level) {
 }
 int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level_idc,FrEncoder **out) {
     if (!out) return FR_INVALID; *out=NULL;
-    if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>200000000 || gop<1 || gop>480) return FR_INVALID;
+    if (!geometry(w,h) || fps<1 || fps>240 || bitrate<10000 || bitrate>200000000 || gop<1 || gop>14400) return FR_INVALID;
     if (!qualified_level(level_idc) || (level_idc && backend!=2)) return FR_INVALID;
     const char *name = backend==0?"hevc_nvenc":backend==1?"hevc_vaapi":backend==2?"libx265":NULL;
     if (!name) return FR_INVALID;
@@ -139,8 +139,11 @@ int fr_encoder_new(int backend,int w,int h,int fps,int bitrate,int gop,int level
         /* A small positive AQ strength keeps per-frame ROI offsets enabled
          * without the normal AQ redistribution. Zero disables ROI in x265.
          * Ordinary frames carry zero offsets; one admitted settle refinement
-         * uses -6 QP, still under this encoder's original bitrate and VBV. */
-        int written=snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error:aq-mode=1:aq-strength=0.01%s",gop,gop,level);
+         * uses -6 QP, still under this encoder's original bitrate and VBV.
+         * Ultrafast's diamond search misses scrolls and drags beyond about
+         * 32 px per picture, which a 30 fps stream reaches at ordinary fling
+         * speed. UMH finds them; see docs/video-rate-controls.md. */
+        int written=snprintf(params,sizeof(params),"bframes=0:rc-lookahead=0:ref=1:keyint=%d:min-keyint=%d:scenecut=0:open-gop=0:repeat-headers=1:aud=1:pools=4:frame-threads=1:log-level=error:aq-mode=1:aq-strength=0.01:me=umh:merange=64%s",gop,gop,level);
         if (written<0 || (size_t)written>=sizeof(params)) { av_dict_free(&opts); fr_encoder_free(e); return FR_INVALID; }
         av_dict_set(&opts,"preset","ultrafast",0); av_dict_set(&opts,"tune","zerolatency",0);
         av_dict_set(&opts,"x265-params",params,0); av_dict_set(&opts,"forced-idr","1",0);
