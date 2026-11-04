@@ -73,7 +73,7 @@ linux-local-approval = ["linux-session-ui", "linux-logind"]
 linux-viewer-input = ["dep:frd"]
 linux-viewer-window = ["linux-viewer-input"]
 cli = ["dep:asupersync", "dep:frd", "dep:fr-tailnet", "dep:fr-client"]
-linux-desktop = ["cli", "linux-viewer-window", "dep:fr-files"]
+linux-desktop = ["cli", "linux-viewer-window", "dep:fr-files", "dep:fr-transport"]
 linux-input-agent = ["linux-input-monitors", "dep:frd", "dep:asupersync"]
 
 [lints.rust]

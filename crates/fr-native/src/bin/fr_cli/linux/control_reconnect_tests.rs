@@ -160,7 +160,8 @@ fn a_later_view_close_cannot_replace_the_original_control_exchange_or_input_resu
             exchange: frd::session_startup::ViewerCloseOutcome {
                 request_acknowledged: true,
                 report: None,
-                transport: Err(fr_transport::quic::Error::Native),
+                // A closing path that expired; a native failure would veto the retry.
+                transport: Err(fr_transport::quic::Error::Expired),
             },
             revocation: None,
         }),

@@ -329,7 +329,16 @@ fn local_resize_retires_original_consent_and_reports_its_own_viewport_history() 
     assert_eq!(json["window_resizes"][0]["width"], 960);
     assert_eq!(json["window_resizes"][0]["height"], 540);
     assert!(!report.text.contains("Display change"));
-    assert!(report.text.contains("host cleanup remains unknown"));
+    assert!(
+        report
+            .text
+            .contains("Window resize after attempt 1: new viewing viewport 960x540")
+            && report
+                .text
+                .contains("host cleanup and outstanding effects are unknown"),
+        "{}",
+        report.text
+    );
     let mut ui = interface(progress);
     let offer = ui
         .offer(2, &fr_client::native::control_offer_with_files())
