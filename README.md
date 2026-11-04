@@ -56,9 +56,11 @@ These are the steps that ran live on 2026-10-13 between Ubuntu 25.10/26.04 hosts
 ```bash
 cargo build --release --locked -p frd --bin frd
 cargo build --release --locked -p fr-native \
-  --features linux-desktop,linux-displays,linux-input-monitors,linux-input-agent,linux-clipboard \
-  --bin fr --bin fr-media-worker --bin fr-input-agent
+  --features linux-desktop,linux-displays,linux-input-monitors,linux-input-agent,linux-clipboard,linux-audio \
+  --bin fr --bin fr-media-worker --bin fr-input-agent --bin fr-opus-worker
 ```
+
+Without `linux-audio` a `fr connect --audio` refuses with `audio_unavailable_in_build`, and `--audio` also needs `fr-opus-worker` installed beside `fr`. The live run above predates audio; it is covered by namespace tests.
 
 **Host prerequisites.**
 - Tailscale with its kernel interface (`tailscale0`) and HTTPS certificates enabled for the tailnet.
@@ -76,6 +78,7 @@ sudo env DISPLAY=:0 XAUTHORITY="$XAUTHORITY" ./target/release/frd run --software
 
 Host options:
 - Add `--input-agent "$PWD/target/release/fr-input-agent"` to allow control, plus `--clipboard` for the text clipboard.
+- Add `--audio` to offer host playback audio. It is off unless both ends ask for it.
 - Add `--files DIR` to receive files. DIR must be owned by the user running `frd` and not writable by others.
 - Add `--once --send PATH` to offer explicitly selected files or directories to a controlling client using `--receive DIR`; see [native downloads](NATIVE_FILE_DOWNLOAD.md).
 - Use `--encoder nvenc` instead of `--software-explicit` on an NVIDIA host. It is probed at startup.
@@ -86,6 +89,7 @@ Host options:
 ./target/release/fr hosts                      # node IDs, names and paths
 ./target/release/fr connect NODE_ID --view-only --experimental-native --display only --json
 ./target/release/fr connect NODE_ID --control --clipboard --experimental-native --display only --json
+./target/release/fr connect NODE_ID --view-only --audio --experimental-native --display only --json
 ```
 
 To select the machine in a local window, replace `NODE_ID` with `--choose-host`.

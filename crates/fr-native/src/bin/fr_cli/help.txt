@@ -3,18 +3,18 @@ FrankenRemote development client
 fr hosts [--json] [--socket /absolute/tailscaled.sock]
 fr hosts --probe --experimental-native [--probe-limit 1..64]
     [--port 8443] [--trust-roots /absolute/ca-roots.pem] [--ipv6]
-    [--json] [--socket /absolute/tailscaled.sock]
-fr status [--json] [--socket /absolute/tailscaled.sock]
-fr doctor [--port 8443] [--socket /absolute/tailscaled.sock] [--trust-roots /absolute/ca-roots.pem] [--json]
+    [--json] [--socket PATH]
+fr status [--json] [--socket PATH]
+fr doctor [--port 8443] [--socket PATH] [--trust-roots /absolute/ca-roots.pem] [--json]
 fr inspect NODE_ID [--by-name] [--probe --experimental-native] [--port 8443]
-    [--trust-roots /absolute/ca-roots.pem] [--ipv6] [--socket /absolute/tailscaled.sock] [--json]
-fr disconnect NODE_ID [--socket /absolute/tailscaled.sock] [--json]
+    [--trust-roots /absolute/ca-roots.pem] [--ipv6] [--socket PATH] [--json]
+fr disconnect NODE_ID [--socket PATH] [--json]
 fr displays NODE_ID --experimental-native [--trust-roots /absolute/ca-roots.pem]
-    [--by-name] [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6] [--json]
+    [--by-name] [--socket PATH] [--port 8443] [--ipv6] [--json]
 fr connect NODE_ID --view-only|--control --experimental-native
     --display HANDLE|only|choose [--worker /absolute/fr-media-worker]
     [--trust-roots /absolute/ca-roots.pem] [--by-name] [--x-display :0]
-    [--socket /absolute/tailscaled.sock] [--port 8443] [--ipv6]
+    [--socket PATH] [--port 8443] [--ipv6]
     [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
     [--capture-system-shortcuts] [--send /absolute/file-or-directory]...
     [--file-drop] [--receive /absolute/private-directory]
@@ -28,7 +28,7 @@ fr robot session open NODE_ID --foreground --role view|control
     --experimental-native --display HANDLE|only|choose [connect options]
 fr robot session status NODE_ID [--json]
 fr robot session close NODE_ID [--connection-id ID] [--lease LEASE]
-    [--socket /absolute/tailscaled.sock] [--json]
+    [--socket PATH] [--json]
 
 Discovery and connection:
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
@@ -36,7 +36,7 @@ Discovery/inspect uses installed Tailscale metadata. --by-name requires an exact
 canonical tailnet FQDN, never arbitrary DNS/a URL. --probe reads authenticated frd
 capabilities, opening no approval, observation or input; it grants no access.
 hosts --probe: up to 64 peers in stable-ID order, four concurrently, one 20-second
-discovery/probe budget, five seconds/probe. --probe-limit lowers the count.
+discovery/probe budget, five seconds/probe.
 Refusals/unstarted peers/omissions stay visible; timeout cannot prove offline.
 --trust-roots defaults to /etc/ssl/certs/ca-certificates.crt; --worker defaults
 to fr-media-worker beside fr. Each connection rechecks identity and strict TLS.
@@ -52,7 +52,6 @@ lists up to 1024 installed-Tailscale peers by canonical name. Arrows move;
 Page Up/Down/wheel pages; Home/End jumps. Release Enter/left button to choose;
 Esc/window close/Ctrl-C cancels. Names/IDs/route hints promise no access.
 Choice expires after 120 seconds; cleanup precedes connection/file selection.
-Each connection rechecks exact name/stable ID, TLS, approval, role and display.
 --choose-host excludes --saved/--hosts-file/--by-name and robot commands.
 --json emits host_selected before connecting; use its ID for disconnect.
 
@@ -62,6 +61,9 @@ frd run --input-agent. Input: keys, buttons, absolute pointer, line-wheel;
 no text/pixel-scroll. Refusal, revocation, expiry and local release are terminal.
 After transient failure or a checked host geometry change, --attempts may
 reconnect VIEWING ONLY after proven cleanup. Control/clipboard/files never repeat.
+In a --control viewing window, press and release F8 for a new control request.
+Ctrl+Alt+Shift+F7 reopens with the display picker; a window resize reopens viewing
+at the new size. Both end input, clipboard and file choices.
 --capture-system-shortcuts (--control, Linux X11) grabs the keyboard after the
 grant for Alt+Tab and similar shortcuts; the title identifies this mode.
 Ctrl+Alt+Shift+Escape releases locally. Focus/input fences release the grab.
@@ -92,11 +94,10 @@ file_drop_unavailable.
 --receive DIR must be absolute, owned by you, not group/other writable, with no
 symlink components. Host: frd run --once --input-agent PATH --send PATH... .
 Items publish atomically, never open/run. Defaults: 256 MiB/selection, 1 GiB/session.
---receive-max-file-bytes and --receive-max-session-bytes must be positive;
-session >= file. Directories count total content; cancelled admitted attempts
+Both --receive-max-* limits must be positive; session >= file. Directories count total content; cancelled admitted attempts
 spend budget. --receive-conflict reject is default; keep-both uses a bounded
 .fr-conflict- name. Neither overwrites, merges, retries or resumes.
-Download Cancel affects only that direction; closing its panel hides it.
+Download Cancel affects only downloads.
 Upload/download may coexist with clipboard/audio; legacy peers may admit one
 direction. Permissions/limits/cancellation remain separate under the original
 control lease. Receipts report index/size/durability/cleanup, never paths;
@@ -104,7 +105,7 @@ progress does not prove publication.
 
 Playback audio:
 --audio requests playback in either role; host: frd run --audio; builds: linux-audio.
-Without it no audio is offered. Missing support is typed absence; video continues.
+Missing support is typed absence; video continues.
 Output uses --audio-server, else PULSE_SERVER, else $XDG_RUNTIME_DIR/pulse/native,
 and the default sink or --audio-sink. --audio-volume: local 0..100 (default 100);
 --audio-muted starts muted. Remote audio offers Quieter/Louder/Mute / unmute.
@@ -124,7 +125,7 @@ session open TARGET --foreground --role view|control uses the native owner/optio
 TLS, approval and display selection. It requires a local desktop and runs until
 shutdown, reporting completion, never an opened lease. Inspect/close from another
 process; detached opens are unavailable. Robot input requires --accept-input and
-original connection/lease/observation handles. More robot options follow below.
+original connection/lease/observation handles.
 
 Saved local hosts:
 fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]
@@ -132,6 +133,7 @@ fr hosts saved [--hosts-file PATH] [--json]
 fr hosts forget ALIAS [--hosts-file PATH] [--json]
 fr connect ALIAS --saved [--hosts-file PATH] [connect options above]
 fr displays ALIAS --saved [--hosts-file PATH] --experimental-native [display options]
+fr inspect|disconnect ALIAS --saved [--hosts-file PATH] [their other options]
 ALIAS is 1..64 lowercase letters, digits, '.', '_' or '-', starting alphanumeric.
 Saving resolves/stores stable node ID and exact canonical TLS name/port via
 installed Tailscale, never addresses/permissions. Connections recheck identity;
