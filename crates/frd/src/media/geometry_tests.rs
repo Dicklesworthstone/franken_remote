@@ -216,12 +216,20 @@ fn an_existing_terminal_cause_survives_a_later_checked_geometry_failure() {
         StopReason::LocalRevoke,
         StopReason::NativeFailure,
         StopReason::AuthorityEnded,
+        StopReason::ViewInvalidated,
     ] {
         let control = owner(&rt, 1);
         let signal = Arc::new(AtomicU8::new(0));
         control.retain_closure_reason(signal.clone()).unwrap();
         control.note_end(previous);
-        control.note_geometry_changed().unwrap();
+        // Label-only first cause: its caller has not fenced authority yet.
+        assert!(control.check().is_ok());
+        assert_eq!(
+            control.capture_failure(worker::Error::WorkerRefused(
+                fr_media::worker::Error::GeometryChanged,
+            )),
+            Error::Worker(worker::Error::Cancelled)
+        );
         assert_eq!(control.end_reason(), Some(previous));
         assert_eq!(signal.load(Ordering::Acquire), 0);
     }

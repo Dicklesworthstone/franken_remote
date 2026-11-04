@@ -106,9 +106,38 @@ fn hot_mic_security_test_activation_requires_explicit_enable() {
     assert!(ctrl.process_captured_pcm(&frame).unwrap().is_none());
     assert_eq!(ctrl.total_packets_transmitted(), 1);
 
-    // Invariant 8: Explicit disable immediately resets talk mode and transmission
+    // Invariant 8: A used, stopped epoch cannot resume old consent or speech.
+    assert!(!ctrl.is_explicitly_enabled());
+    assert_eq!(ctrl.error(), Some(&MicControllerError::GenerationRetired));
+    ctrl.set_talk_mode(MicTalkMode::OpenMic { active: true });
+    assert!(!ctrl.is_transmitting());
+    assert_eq!(
+        ctrl.set_explicit_enabled(true),
+        Err(MicControllerError::GenerationRetired)
+    );
+    let resumed_generation = generation.next().unwrap();
+    ctrl.reset_generation(resumed_generation).unwrap();
+    assert_eq!(ctrl.permission(), MicPermission::NotRequested);
+    assert_eq!(
+        ctrl.set_explicit_enabled(true),
+        Err(MicControllerError::PermissionDenied)
+    );
+    ctrl.set_permission(MicPermission::Granted);
+    ctrl.set_explicit_enabled(true).unwrap();
+    assert!(!ctrl.is_transmitting());
     ctrl.set_talk_mode(MicTalkMode::OpenMic { active: true });
     assert!(ctrl.is_transmitting());
+    let resumed =
+        AudioPcmFrame::from_interleaved(resumed_generation, AudioChannels::Mono, 0, &samples)
+            .unwrap();
+    let unit = ctrl.process_captured_pcm(&resumed).unwrap().unwrap();
+    assert_eq!(
+        (unit.generation(), unit.sequence()),
+        (resumed_generation, 0)
+    );
+    assert_eq!(ctrl.total_packets_transmitted(), 2);
+
+    // Invariant 9: Explicit disable immediately resets talk mode and transmission.
     ctrl.set_explicit_enabled(false).unwrap();
     assert!(!ctrl.is_explicitly_enabled());
     assert!(!ctrl.is_transmitting());

@@ -173,6 +173,10 @@ impl Members {
             Error::Media(MediaError::Worker(worker::Error::WorkerRefused(
                 fr_media::worker::Error::GeometryChanged,
             )))
+        } else if matches!(error, Error::Media(error) if error.is_geometry_changed()) {
+            // Only the source's recorded first cause authorizes this label
+            // for its subscribers, even before an earlier stop is fenced.
+            Error::Closed
         } else {
             error
         };

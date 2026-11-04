@@ -320,10 +320,15 @@ impl ObservationControl {
     /// may be relabelled as permission to reconnect after a resize.
     pub(super) fn capture_failure(&self, error: worker::Error) -> Error {
         let error = Error::Worker(error);
-        if error.is_geometry_changed()
-            && let Err(authority) = self.note_geometry_changed()
-        {
-            return authority;
+        if error.is_geometry_changed() {
+            if let Err(authority) = self.note_geometry_changed() {
+                return authority;
+            }
+            if self.end_reason() != Some(crate::input_watchdog::StopReason::GeometryChanged) {
+                // A prior cause may be recorded before its fence runs. Do not
+                // let the losing native error authorize a subscriber retry.
+                return worker::Error::Cancelled.into();
+            }
         }
         error
     }

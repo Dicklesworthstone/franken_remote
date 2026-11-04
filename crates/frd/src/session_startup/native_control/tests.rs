@@ -435,13 +435,20 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, consent: bool, visible: bool, profi
                                     if let Err(error) =
                                         pending.confirm_mapping(request.parent, target.view)
                                     {
-                                        // Without consent the request ends unanswered.
-                                        // Under load its own deadline can pass before
-                                        // the host's refusal ends this viewer; that is
-                                        // an error end too (asserted below). Nothing
-                                        // else may fail here.
+                                        // Either missing prerequisite leaves the
+                                        // request unanswered. Its original deadline
+                                        // can expire here before the host's refusal
+                                        // reaches the viewer. Only that typed expiry
+                                        // is expected in these negative cases.
+                                        assert_eq!(
+                                            error,
+                                            session_startup::StreamingViewerError::Control(
+                                                session_startup::ControlledViewerError::Expired
+                                            )
+                                        );
                                         assert!(
-                                            !consent && now(&c).unwrap() >= pending.deadline().0,
+                                            (!consent || !visible)
+                                                && now(&c).unwrap() >= pending.deadline().0,
                                             "{error:?}"
                                         );
                                         return Err(());
@@ -693,8 +700,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         host_offer(false)
     );
     // Concatenating the independent lanes carries 22 capabilities within the
-    // existing bound. The combined profile below still omits only the
-    // solicited decoder-load extension.
+    // existing bound, including the optional solicited decoder-load extension.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
     both_lanes.capabilities.extend(
         files
@@ -713,7 +719,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
     assert_eq!(files_lane(&clipboard), Ok(()));
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     assert!(combined.validate().is_ok());
-    assert_eq!(combined.capabilities.len(), 21);
+    assert_eq!(combined, both_lanes, "no independent capability is omitted");
     for (clipboard, files) in [(false, false), (true, false), (false, true), (true, true)] {
         let selection = select(
             host_offer_with_files(true, clipboard, false, files),

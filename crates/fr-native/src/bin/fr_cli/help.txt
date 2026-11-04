@@ -32,123 +32,112 @@ fr robot session close NODE_ID [--connection-id ID] [--lease LEASE]
 
 Discovery and connection:
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
-Ordinary discovery/inspect uses installed Tailscale metadata. --by-name means an
-exact canonical tailnet FQDN, never arbitrary DNS or a URL. --probe asks an
-authenticated frd for advertised capabilities without opening observation,
-approval, media, clipboard, files or input. An advertisement grants no access.
-hosts --probe visits at most 64 peers in stable-ID order, four concurrently:
-one original 20-second budget covers discovery and probes, each capped at five
-seconds. --probe-limit lowers the count. Refusals, unstarted peers and omissions
-remain visible; timeout does not prove a host offline or unsupported.
+Discovery/inspect uses installed Tailscale metadata. --by-name requires an exact
+canonical tailnet FQDN, never arbitrary DNS/a URL. --probe reads authenticated frd
+capabilities, opening no approval, observation or input; it grants no access.
+hosts --probe: up to 64 peers in stable-ID order, four concurrently, one 20-second
+discovery/probe budget, five seconds/probe. --probe-limit lowers the count.
+Refusals/unstarted peers/omissions stay visible; timeout cannot prove offline.
 --trust-roots defaults to /etc/ssl/certs/ca-certificates.crt; --worker defaults
 to fr-media-worker beside fr. Each connection rechecks identity and strict TLS.
-Displays requires host approval when configured. --display only refuses multiple
-displays; choose opens a chooser in each approved connection. --fit enables CPU
-nearest-neighbour aspect fitting in a fixed local window, without resizing the
-remote display. Omit it for native pixels. Set local XAUTHORITY when required.
+Displays requires configured host approval. --display only refuses multiple
+displays; choose opens a chooser per approved connection. --fit uses CPU
+nearest-neighbour aspect fitting in a fixed local window; remote size is unchanged.
+Omit it for native pixels. Set local XAUTHORITY when required.
 Native transport/media remain unqualified. Close the window/Ctrl-C to stop.
 
 Native machine picker:
-Put --choose-host immediately after connect, in place of NODE_ID. The local X11
-window lists up to 1024 peers from installed Tailscale, sorted by canonical name.
-Arrows move, Page Up/Down or wheel changes page, Home/End reaches either end;
-release Enter or the left mouse button on a row to choose. Esc/window close or
-Ctrl-C cancels. Names, node IDs and route hints do not promise desktop access.
-The original choice expires after 120 seconds. The window must finish cleanup
-before any remote connection or local file selection starts. The exact chosen
-name and stable ID are checked again before every connection; all TLS, approval,
-role and display checks still apply. --port applies to the chosen host.
---saved, --hosts-file and --by-name cannot combine with --choose-host. Robot
-commands require an explicit target. With --json, host_selected reports the
-chosen node ID before connection; use that ID for fr disconnect NODE_ID.
+--choose-host immediately replaces NODE_ID after connect. The local X11 window
+lists up to 1024 installed-Tailscale peers by canonical name. Arrows move;
+Page Up/Down/wheel pages; Home/End jumps. Release Enter/left button to choose;
+Esc/window close/Ctrl-C cancels. Names/IDs/route hints promise no access.
+Choice expires after 120 seconds; cleanup precedes connection/file selection.
+Each connection rechecks exact name/stable ID, TLS, approval, role and display.
+--choose-host excludes --saved/--hosts-file/--by-name and robot commands.
+--json emits host_selected before connecting; use its ID for disconnect.
 
 Control and reconnect:
-Choose one role. --control requests input once after a fresh frame; the host
-needs frd run --input-agent. Input: keys, buttons, absolute pointer, line-wheel;
+Choose one role. --control requests input once after a fresh frame; host:
+frd run --input-agent. Input: keys, buttons, absolute pointer, line-wheel;
 no text/pixel-scroll. Refusal, revocation, expiry and local release are terminal.
-After transient failure and proven cleanup, --attempts may reconnect VIEWING
-ONLY. Control, clipboard and files are never repeated.
+After transient failure or a checked host geometry change, --attempts may
+reconnect VIEWING ONLY after proven cleanup. Control/clipboard/files never repeat.
 --capture-system-shortcuts (--control, Linux X11) grabs the keyboard after the
 grant for Alt+Tab and similar shortcuts; the title identifies this mode.
 Ctrl+Alt+Shift+Escape releases locally. Focus/input fences release the grab.
 Without it shortcuts stay local; unavailable capture ends control with
-system_shortcuts_unavailable. Reserved X-server shortcuts remain platform limits.
+system_shortcuts_unavailable. Reserved X-server shortcuts remain limited.
 
 Clipboard:
-With --control, UTF-8 sharing defaults on when both builds support linux-clipboard:
-up to 1 MiB per item, only after control and visible privacy controls.
---no-clipboard disables it; --clipboard explicitly selects the default.
-Turn off in either Clipboard sharing window, or close that window, to end this
-lane for the session. Missing permission/support reports typed absence while
-the desktop continues. An incomplete transfer that cannot stop independently
-closes the connection. View-only sessions never access either clipboard.
+--control defaults to UTF-8 sharing with linux-clipboard in both builds:
+1 MiB/item, after control and visible privacy controls. --no-clipboard disables;
+--clipboard selects the default. Turn off/close either Clipboard sharing window
+to end sharing. Missing permission/support is typed absence; desktop continues.
+An incomplete transfer unable to stop independently closes the connection.
+View-only never accesses clipboard.
 
 Files:
---send PATH needs --control and host frd run --files DIR. Up to 8 regular files
-or portable directory roots go in order. Symlinks/special files refuse, empty
-items survive, existing destination names refuse.
-The upload panel separates progress/receipts and offers Pause / Resume / Cancel
-upload. Closing hides it; accepted work continues. Pausing never extends expiry.
+--send PATH needs --control and host frd run --files DIR: up to 8 regular files
+or portable directory roots, in order. Symlinks/special files/existing names
+refuse; empty items survive. The upload panel separates progress/receipts: Pause /
+Resume / Cancel. Closing hides it; accepted work continues. Pause cannot extend expiry.
 With viewer focus, physical Ctrl+Alt+Shift+F8/F9/F10 pause/resume/cancel only the
 original --send selection. Release each key; ambiguous keys disable shortcuts.
-An open panel accepts later X11 file-manager Copy drops. --file-drop enables the
-first drop without --send: wait for Ready to send files. Only local file URIs and
-Copy: 8 selections/batch, 8 retained batches, original cumulative limits.
-Wait for completion before another drop; use its panel buttons. Hiding stops
-future drops; Cancel before the first drop ends sharing. Reconnect never restores
-drops or repeats selections. Missing controls report file_drop_unavailable.
+An open panel accepts X11 file-manager Copy drops. --file-drop works without
+--send: wait for Ready to send files. Local file URIs/Copy only; 8 selections/batch,
+8 retained batches, original cumulative limits. Complete one drop before the next;
+use panel buttons. Hiding stops drops; Cancel before the first ends sharing.
+Reconnect never restores drops/repeats selections. Missing controls:
+file_drop_unavailable.
 --receive DIR must be absolute, owned by you, not group/other writable, with no
 symlink components. Host: frd run --once --input-agent PATH --send PATH... .
-Items publish atomically and never open/run. Defaults: 256 MiB/selection,
-1 GiB/session. --receive-max-file-bytes and --receive-max-session-bytes must be
-positive; session >= file. Directories count total content; cancelled admitted
-attempts still spend budget. --receive-conflict reject is default; keep-both uses
-a bounded .fr-conflict- name. Neither overwrites, merges, retries or resumes.
+Items publish atomically, never open/run. Defaults: 256 MiB/selection, 1 GiB/session.
+--receive-max-file-bytes and --receive-max-session-bytes must be positive;
+session >= file. Directories count total content; cancelled admitted attempts
+spend budget. --receive-conflict reject is default; keep-both uses a bounded
+.fr-conflict- name. Neither overwrites, merges, retries or resumes.
 Download Cancel affects only that direction; closing its panel hides it.
-Negotiated upload/download may coexist with clipboard/audio; legacy peers may
-admit one direction. Permissions, limits and cancellation stay separate under
-the original control lease. Receipts report index/size/durability/cleanup,
-without paths; progress alone never proves publication.
+Upload/download may coexist with clipboard/audio; legacy peers may admit one
+direction. Permissions/limits/cancellation remain separate under the original
+control lease. Receipts report index/size/durability/cleanup, never paths;
+progress does not prove publication.
 
 Playback audio:
---audio asks for host playback in either viewing role; the host needs frd run
---audio and both builds need linux-audio. Without the flag no audio capability
-is offered. Missing host support is typed absence while video continues.
+--audio requests playback in either role; host: frd run --audio; builds: linux-audio.
+Without it no audio is offered. Missing support is typed absence; video continues.
 Output uses --audio-server, else PULSE_SERVER, else $XDG_RUNTIME_DIR/pulse/native,
-and the default sink unless --audio-sink selects one. --audio-volume is local
-0..100 (default 100); --audio-muted starts muted. The Remote audio panel provides
-Quieter, Louder and Mute / unmute. Preferences survive recovery and reconnect;
-changes affect new submissions, with already queued sound draining briefly.
-No host, microphone or system volume changes. Closing the panel keeps settings.
+and the default sink or --audio-sink. --audio-volume: local 0..100 (default 100);
+--audio-muted starts muted. Remote audio offers Quieter/Louder/Mute / unmute.
+Settings survive recovery/reconnect/panel close. Changes affect new submissions;
+queued sound drains briefly. Host, microphone and system volume stay unchanged.
 
 Local foreground sessions:
-disconnect TARGET / robot session close TARGET stop the same-user local owner,
-kernel-authenticated, for the exact connect target. Closure proves local cleanup,
-not remote release/rollback; host reports stay in the original connect result.
+disconnect TARGET / robot session close TARGET stop the kernel-authenticated
+same-user owner for the exact target. Closure proves local cleanup, not remote
+release/rollback; host reports stay in the connect result.
 session status contacts neither Tailscale nor the host; remote state is unknown.
 connection_id is not a remote session or input lease. close --connection-id ID
 refuses a replacement with local_session_changed; it survives viewing reconnects
 but not a new invocation. Omit it to stop the current owner. Lost replies remain
 unknown_external_effect; do not retry another invocation.
-session open TARGET --foreground --role view|control uses the same native owner,
-connect options, TLS, approval and display selection. A local desktop is required;
-it runs until shutdown and reports completion, never a fabricated opened lease.
-Inspect/close from another process. Detached opens remain unavailable. Robot
-input also needs --accept-input and original connection/lease/observation handles.
-Detailed observation, screenshot and robot-command options follow below.
+session open TARGET --foreground --role view|control uses the native owner/options,
+TLS, approval and display selection. It requires a local desktop and runs until
+shutdown, reporting completion, never an opened lease. Inspect/close from another
+process; detached opens are unavailable. Robot input requires --accept-input and
+original connection/lease/observation handles. More robot options follow below.
 
 Saved local hosts:
 fr hosts save ALIAS NODE_ID [--port PORT] [--hosts-file PATH] [--socket PATH] [--json]
 fr hosts saved [--hosts-file PATH] [--json]
 fr hosts forget ALIAS [--hosts-file PATH] [--json]
-fr connect ALIAS --saved [--hosts-file PATH] --view-only|--control --display only|choose|HANDLE --experimental-native [connect options]
+fr connect ALIAS --saved [--hosts-file PATH] [connect options above]
 fr displays ALIAS --saved [--hosts-file PATH] --experimental-native [display options]
 ALIAS is 1..64 lowercase letters, digits, '.', '_' or '-', starting alphanumeric.
-Saving resolves a stable node ID through installed Tailscale and stores its exact
-canonical TLS name/port, never addresses or permissions. Connections resolve
-both identity fields again; rename/reassignment refuses until explicitly resaved.
+Saving resolves/stores stable node ID and exact canonical TLS name/port via
+installed Tailscale, never addresses/permissions. Connections recheck identity;
+rename/reassignment refuses until resaved.
 --saved cannot combine with --by-name or --port. Without it, targets remain node IDs.
 Profiles: $XDG_CONFIG_HOME/franken_remote/hosts.json, else
 $HOME/.config/franken_remote/hosts.json. Local list/forget needs no Tailscale.
-Private atomic storage is bounded to 100 entries/128 KiB; symlinks, duplicates
-and malformed profiles refuse. Saving neither contacts frd nor enables hosting.
+Private atomic storage: 100 entries/128 KiB; symlinks/duplicates/malformed profiles
+refuse. Saving never contacts frd or enables hosting.

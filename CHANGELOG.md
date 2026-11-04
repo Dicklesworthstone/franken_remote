@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-04 — bounded CLI help and lifecycle regression repairs
+
+- Keep an earlier source failure authoritative when a later resize arrives
+  before its outer fence; shared viewers cannot inherit a false geometry retry.
+- Keep the complete `fr --help` output below its existing 16-KiB ceiling while
+  retaining the documented commands, permissions and recovery limits.
+- Correct microphone, control-bootstrap and shortcut-capture fixtures to assert
+  their current production contracts: fresh consent after a retired epoch,
+  required visibility before control, and the actual controlled-window title.
+- Drain the original duplex file payloads with their real receive/receipt owners
+  still running. Both sources stay paused; the original drain deadline and
+  unchanged-byte assertions prevent the fixture from hiding extra admissions.
+
 ## 2026-11-04 — fresh viewing after host display geometry changes
 
 - Preserve a checked native resize/topology failure through source teardown,

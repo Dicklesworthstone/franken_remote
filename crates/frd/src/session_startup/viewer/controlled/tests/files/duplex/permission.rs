@@ -8,9 +8,8 @@ use std::{
     task::Poll,
 };
 
-async fn quiet(state: &mut Fixture, c: &Cx, h: &Cx) {
+async fn quiet(state: &mut Fixture, c: &Cx, n: &mut u128, t: &mut u128) {
     let until = now(c).unwrap() + 200_000;
-    let host_control = state.host.control();
     loop {
         let host = state.host.io().unwrap().0;
         let viewer = &mut state.viewer;
@@ -25,16 +24,21 @@ async fn quiet(state: &mut Fixture, c: &Cx, h: &Cx) {
             break;
         }
         assert!(now(c).unwrap() < until, "original payload must drain");
-        // No application service runs in this short boundary fixture, so neither
-        // direction can append a new source record while existing bytes drain.
+        // Pause source admission, not receive service. Raw QUIC drive alone
+        // cannot return stream credit when a file flight fills the receive
+        // window. Keep the real receiver/receipt owners running, without the
+        // enclosing fixture turn's periodic new media announcements.
         let (host, viewer) = Box::pin(support::both(
-            host.drive(h, Duration::from_millis(1), || !host_control.is_stopped()),
-            viewer
-                .session
-                .transport
-                .drive(c, Duration::from_millis(1), || {
-                    viewer.files.permits_io() && permitted(&mut viewer.input, &viewer.control, c)
-                }),
+            state.host.drive(
+                Duration::from_millis(1),
+                || nonce(n),
+                || {
+                    *t += 1;
+                    Some(InputTicketId::from_raw(*t))
+                },
+                block,
+            ),
+            state.viewer.drive(Duration::from_millis(1), |_| {}, block),
         ))
         .await;
         host.unwrap();
@@ -94,6 +98,7 @@ fn assert_download(state: &Fixture, destination: &Disk, expected: &[u8]) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn revoked_upload_during_empty_native_wait_preserves_sibling_download_and_input() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
@@ -123,18 +128,41 @@ fn revoked_upload_during_empty_native_wait_preserves_sibling_download_and_input(
                     .viewer
                     .send_file(viewer_source.source(&upload), "upload")
                     .unwrap();
-                while !state
-                    .viewer
-                    .file_progress()
-                    .is_some_and(|p| p.queued_bytes > 0 && p.queued_bytes < upload.len() as u64)
-                {
-                    assert!(now(&c).unwrap() < until, "bounded partial upload");
+                loop {
+                    if let Some(progress) = state.viewer.file_progress()
+                        && progress.queued_bytes > 0
+                    {
+                        assert!(progress.queued_bytes < upload.len() as u64);
+                        state.viewer.set_files_paused(true).unwrap();
+                    }
+                    if let Some(progress) = state.host.file_send_progress()
+                        && progress.queued_bytes > 0
+                    {
+                        assert!(progress.queued_bytes < download.len() as u64);
+                        state.host.set_download_paused(true).unwrap();
+                    }
+                    if state.viewer.file_is_paused() == Some(true)
+                        && state.host.download_is_paused() == Some(true)
+                    {
+                        break;
+                    }
+                    assert!(now(&c).unwrap() < until, "bounded partial duplex payloads");
                     drive(&mut state, &c, &h, &mut n, &mut t).await;
                 }
-                state.viewer.set_files_paused(true).unwrap();
-                quiet(&mut state, &c, &h).await;
+                let upload_queued = state.viewer.file_progress().unwrap().queued_bytes;
+                let download_queued = state.host.file_send_progress().unwrap().queued_bytes;
+                quiet(&mut state, &c, &mut n, &mut t).await;
+                assert_eq!(
+                    state.viewer.file_progress().unwrap().queued_bytes,
+                    upload_queued
+                );
+                assert_eq!(
+                    state.host.file_send_progress().unwrap().queued_bytes,
+                    download_queued
+                );
                 assert!(!state.host.file_batch_report().unwrap().complete);
                 revoke_during_pending_receive(&mut state.viewer, &c, &permission).await;
+                state.host.set_download_paused(false).unwrap();
                 assert!(state.viewer.session.transport.is_bound_to(&connection));
                 assert!(!state.viewer.is_closed());
                 assert_eq!(state.viewer.file_send_failure(), Some(SendError::Cancelled));
@@ -194,7 +222,8 @@ fn revoked_upload_after_native_staging_still_fences_the_parent() {
         let driver = state.driver.take().unwrap();
         let ((), done) = Box::pin(support::both(
             async {
-                quiet(&mut state, &c, &h).await;
+                let (mut n, mut t) = (80_000, 90_000);
+                quiet(&mut state, &c, &mut n, &mut t).await;
                 state
                     .viewer
                     .send_file(source.source(b"selected upload"), "denied")
