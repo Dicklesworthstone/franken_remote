@@ -183,7 +183,9 @@ impl Pending {
                         if d.role == MediaRole::Clipboard
                             || (fr_wire::files::duplex_selected(&self.selection)
                                 && d.role.is_files()
-                                && d.role != self.role) =>
+                                && d.role != self.role)
+                            || (d.role == MediaRole::AudioUp
+                                && fr_wire::audio_up::uplink_selected(&self.selection)) =>
                     {
                         return Ok(Disposition::Blocked);
                     }

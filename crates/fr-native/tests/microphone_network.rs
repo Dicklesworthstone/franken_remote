@@ -671,6 +671,10 @@ fn muting_with_native_audio_still_queued_fences_before_any_further_network_poll(
         let (host, client) = link.microphone(&cx).await;
         let (mut input, origin) = link.controller(&cx).await;
         let mut uplink = link.uplink(&cx, client, &mut input, origin, &server.socket);
+        let retained = uplink.operation_check();
+        link.client
+            .retain_operation_check(&cx, retained.clone())
+            .unwrap();
         uplink.set_permission(MicPermission::Granted).unwrap();
         let offer = uplink
             .begin_talk(MicTalkMode::OpenMic { active: true })
@@ -707,7 +711,12 @@ fn muting_with_native_audio_still_queued_fences_before_any_further_network_poll(
             std::thread::sleep(Duration::from_millis(1));
         }
         let retirement = uplink.retirement().unwrap();
+        assert!(retained(), "actual queued packet guard was not published");
         uplink.mute().unwrap();
+        assert!(
+            !retained(),
+            "retained original operation guard missed local mute"
+        );
         assert!(
             !uplink.permits_io(),
             "mute must invalidate retained exact egress"
@@ -722,5 +731,95 @@ fn muting_with_native_audio_still_queued_fences_before_any_further_network_poll(
         );
         reaped(&retirement);
         assert_recording_stopped(&server);
+    });
+}
+
+#[test]
+fn retained_operation_check_retires_revoked_configuration_before_unrelated_session_io() {
+    run_test!(cx, {
+        let mut link = Link::new(&cx).await;
+        let (_host, client) = link.microphone(&cx).await;
+        let (mut input, origin) = link.controller(&cx).await;
+        let mut uplink = link.uplink(
+            &cx,
+            client,
+            &mut input,
+            origin,
+            Path::new("/nonexistent/private-pulse"),
+        );
+        link.client
+            .retain_operation_check(&cx, uplink.operation_check())
+            .unwrap();
+        uplink.set_permission(MicPermission::Granted).unwrap();
+        uplink
+            .begin_talk(MicTalkMode::OpenMic { active: true })
+            .unwrap();
+        uplink.service(&mut link.client, || true).unwrap();
+        assert!(link.client.usage().retained_send_records > 0);
+        uplink.mute().unwrap();
+        // A sibling clock/control/media operation supplies no microphone
+        // closure. The transport-retained original guard still retires the
+        // configuration BEFORE staging or flushing it.
+        link.client.tick(&cx, || true).unwrap();
+        uplink.maintain(&mut link.client).unwrap();
+        assert_eq!(uplink.state(), State::Stopped);
+        assert_eq!(link.client.usage().retained_send_records, 0);
+        assert!(uplink.retirement().is_none());
+        link.assert_original_control_usable(&cx).await;
+    });
+}
+
+#[cfg(feature = "linux-microphone-session")]
+#[test]
+fn concrete_session_adapter_preserves_permission_talk_and_native_failure_status() {
+    use frd::session_startup::viewer_microphone::{
+        NativeMicrophone, Retirement as Reap, State as Ui,
+    };
+    run_test!(cx, {
+        let mut link = Link::new(&cx).await;
+        let (host, client) = link.microphone(&cx).await;
+        let (mut input, origin) = link.controller(&cx).await;
+        let mut uplink = link.uplink(
+            &cx,
+            client,
+            &mut input,
+            origin,
+            Path::new("/nonexistent/private-pulse"),
+        );
+        let native: &mut dyn NativeMicrophone = &mut uplink;
+        link.client
+            .retain_operation_check(&cx, native.operation_check())
+            .unwrap();
+        assert_eq!(native.status().state, Ui::Muted);
+        assert_eq!(native.status().retirement, Reap::NotStarted);
+        assert!(
+            native
+                .begin_talk(MicTalkMode::OpenMic { active: true })
+                .is_err()
+        );
+        native.set_permission(MicPermission::Granted).unwrap();
+        assert_eq!(native.status().state, Ui::Muted);
+        native
+            .begin_talk(MicTalkMode::OpenMic { active: true })
+            .unwrap();
+        native.service(&mut link.client, &mut || true).unwrap();
+        assert_eq!(native.status().state, Ui::AwaitingHost);
+        let bytes = link.next_record(&cx, &mut uplink, &host).await;
+        let offer = audio::decode_configuration(&bytes, CHANNEL).unwrap();
+        link.acknowledge(&cx, &host, offer, false);
+        let until = network::clock(&cx) + 500_000;
+        while uplink.state() != State::Stopped {
+            assert!(network::clock(&cx) < until);
+            link.drive_uplink(&cx, &mut uplink).await;
+        }
+        let status = NativeMicrophone::status(&uplink);
+        assert_eq!(status.state, Ui::Stopped);
+        assert!(status.reason.is_some());
+        assert_eq!(
+            status.retirement,
+            Reap::NotStarted,
+            "negative ACK opened native capture"
+        );
+        link.assert_original_control_usable(&cx).await;
     });
 }

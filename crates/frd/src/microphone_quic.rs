@@ -126,7 +126,10 @@ struct Shared {
 }
 impl Shared {
     fn snapshot(&self) -> Result<IoState, ()> {
-        self.io.try_lock().map(|state| state.clone()).map_err(|_| ())
+        self.io
+            .try_lock()
+            .map(|state| state.clone())
+            .map_err(|_| ())
     }
     fn publish(
         &self,

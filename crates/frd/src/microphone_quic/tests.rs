@@ -351,7 +351,10 @@ fn unrelated_transport_dispatch_cannot_bypass_the_original_microphone_controller
         // The transport-retained gate must fence microphone output itself.
         f.link.h.tick(&f.cx, || true).unwrap();
         assert!(host.control().is_stopped());
-        assert!(!f.link.h.is_closed(), "no retained ACK requires parent closure");
+        assert!(
+            !f.link.h.is_closed(),
+            "no retained ACK requires parent closure"
+        );
         assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
         f.link.h.tick(&f.cx, || true).unwrap();
     });

@@ -366,7 +366,9 @@ impl Pending {
                     | Message::Ticket(attachment::Grant { descriptor: d, .. })
                         if d.role == MediaRole::Files
                             || (d.role == MediaRole::FilesDownload
-                                && fr_wire::files::duplex_selected(&self.selection)) =>
+                                && fr_wire::files::duplex_selected(&self.selection))
+                            || (d.role == MediaRole::AudioUp
+                                && fr_wire::audio_up::uplink_selected(&self.selection)) =>
                     {
                         return Ok(Disposition::Blocked);
                     }

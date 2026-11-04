@@ -313,12 +313,12 @@ impl Control {
     }
     /// Original child fence for transport permission callbacks. No mailbox
     /// mutex, native driver call or child wait belongs on this path.
-    pub(crate) fn request_stop(&self) {
+    pub fn request_stop(&self) {
         self.0.request_stop();
     }
     /// Actual matching private Commit state, without waiting on its mailbox.
     /// None cannot prove Running or release an original setup deadline.
-    pub(crate) fn try_state(&self) -> Option<State> {
+    pub fn try_state(&self) -> Option<State> {
         if self.0.stopped.load(Ordering::Acquire) {
             return Some(State::Stopped);
         }

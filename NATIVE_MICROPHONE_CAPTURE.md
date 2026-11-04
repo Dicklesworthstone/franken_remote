@@ -152,6 +152,49 @@ A tighter authority cap is applied immediately. Renewal preserves the selected
 source, original child PID, audio generation and contiguous source timeline;
 it never implies new consent, source replacement or automatic recording restart.
 
+## Original controlled-viewer integration
+
+The opt-in `linux-microphone-session` feature adds the concrete bridge from
+`fr_native::audio_process::network::Uplink` to the original
+`frd::session_startup::ControlledViewer`. It reuses the existing real capture
+process, transmitter and authenticated transport; the daemon acquires no native
+audio dependency and no new runtime or codec implementation is introduced.
+
+Call `Uplink::expect_on(&mut viewer, options, timeout)` after the original input
+grant and positive microphone selection. The options retain explicit local
+worker image, source and bounded audio profile. The fixed expectation starts at
+that call, including time before the first host offer. Its transport guard
+cannot be replaced; successful negotiation binds the native guard exactly once.
+The factory receives the original `PresentedInput` and completed `AudioUp`
+channel only after the selected compound media binding has been checked.
+
+Attachment starts muted with OS permission `NotRequested`. Applications supply
+a real permission result with `set_microphone_permission`, then a separate
+visible local action with `begin_microphone_talk`. Neither permission nor
+reconnection starts capture. Recording still waits for the matching positive
+host configuration acknowledgement. `mute_microphone` fences recording, while
+`retire_microphone` permanently spends this optional attachment.
+`microphone_status` reports negotiation/talk state, permission, a typed cause,
+and actual capture-process retirement separately.
+
+Normal controller turns service microphone work after input. Clock, recovery,
+clipboard and file operations cannot flush microphone packets under their own
+unrelated permission checks: the original transport retains at most four exact
+capture permits and their original deadlines, plus bounded configuration/stop
+custody. A guard is released only by original native drain evidence or actual
+retirement/closure; a newer talk permit cannot refresh an older queued packet.
+Dropping, cancelling or closing the original controller stops the same capture
+owner. Drained optional retirement can keep desktop control; unwithdrawable
+native audio conservatively closes its original connection.
+
+Session and concrete native-adapter regressions are authored, including absent
+selection, fixed no-offer expiry, cancellation, foreign bindings, configuration
+revocation and queued-audio mute. Whole-workspace formatting on the pinned
+toolchain and manifest checks pass. Compilation and execution of the new
+composition remain pending after environment failures and insufficient build
+memory; the hosted jobs remain queued at this checkpoint. The native evidence
+below describes earlier component tests and is not new session qualification.
+
 ## Executed native evidence
 
 On October 31, 2026, the repository-owned `pulse_microphone` test executed
@@ -228,9 +271,10 @@ These are actual native capture/codec results composed with synthetic controller
 and presentation policy fixtures. They do not establish uninterrupted talk over
 an authenticated network, physical-device qualification, or user-visible consent.
 
-The wire/transport role and client sender are implemented, but public native
-offers remain disabled pending host session integration, separate host approval
-and visible client/host talk controls. Physical microphone consent, hardware
-device-change behavior, and end-to-end latency remain qualification work. The host output
-boundary is described in [VIRTUAL_MIC.md](VIRTUAL_MIC.md); the codec contract
-is in [NATIVE_OPUS.md](NATIVE_OPUS.md).
+The controlled host and viewer now retain the microphone protocol and native
+owners through their library APIs. Public native command offers remain disabled
+pending visible client/host approval and talk/stop controls. Physical microphone
+consent, hardware device changes and end-to-end latency remain qualification
+work. The host composition is described in
+[NATIVE_MICROPHONE_UPLINK.md](NATIVE_MICROPHONE_UPLINK.md), its output boundary in
+[VIRTUAL_MIC.md](VIRTUAL_MIC.md), and the codec contract in [NATIVE_OPUS.md](NATIVE_OPUS.md).

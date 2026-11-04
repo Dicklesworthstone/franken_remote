@@ -1,9 +1,7 @@
 //! Optional microphone retained by the original running controller.
 use super::ControlledHost;
 use crate::{microphone_process as native, microphone_quic as uplink};
-use fr_transport::quic::{
-    ChannelRequest, ChannelScope, QuicRecords, Route, audio::AudioUpChannel,
-};
+use fr_transport::quic::{ChannelRequest, ChannelScope, QuicRecords, Route, audio::AudioUpChannel};
 
 mod negotiation;
 use negotiation::Pending;
@@ -140,10 +138,16 @@ impl ControlledHost {
         launch: native::Launch,
     ) -> Result<uplink::Control, uplink::AttachError> {
         if let Err(error) = lane.check(&self.session.opened.transport) {
-            return Err(uplink::AttachError::new(uplink::Error::Transport(error), lane));
+            return Err(uplink::AttachError::new(
+                uplink::Error::Transport(error),
+                lane,
+            ));
         }
         if self.microphone.used {
-            return Err(uplink::AttachError::new(uplink::Error::AlreadyAttached, lane));
+            return Err(uplink::AttachError::new(
+                uplink::Error::AlreadyAttached,
+                lane,
+            ));
         }
         if self.session.check().is_err() {
             return Err(uplink::AttachError::new(uplink::Error::Closed, lane));
@@ -185,7 +189,10 @@ impl ControlledHost {
 
     /// Actual device AND codec exit receipts, separate from requested stop.
     pub fn microphone_retirement(&self) -> Option<native::Retirement> {
-        self.microphone.host.as_ref().and_then(uplink::Host::retirement)
+        self.microphone
+            .host
+            .as_ref()
+            .and_then(uplink::Host::retirement)
     }
 
     /// Fence native output first and retire the original optional pair.
@@ -196,13 +203,9 @@ impl ControlledHost {
             self.close();
             return Err(uplink::Error::Cancelled);
         }
-        let result = self
-            .microphone
-            .host
-            .as_mut()
-            .map_or(Ok(()), |host| {
-                host.retire(&mut self.session.opened.transport)
-            });
+        let result = self.microphone.host.as_mut().map_or(Ok(()), |host| {
+            host.retire(&mut self.session.opened.transport)
+        });
         if result.is_err() {
             // An unsafe retained native send has already fenced transport.
             // End the original input owner in this same public operation.

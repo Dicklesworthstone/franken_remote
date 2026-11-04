@@ -62,6 +62,7 @@ pub use fr_transport::ControlCloseOutcome;
 pub use fr_transport::quic::CloseOutcome as ViewerCloseOutcome;
 pub use viewer::controlled::events as viewer_events;
 pub use viewer::controlled::local_cursor as viewer_local_cursor;
+pub use viewer::controlled::microphone as viewer_microphone;
 pub use viewer::controlled::{ControlledViewer, Error as ControlledViewerError, ViewerControl};
 pub use viewer::observer::{Error as ObserverError, NativeObserver, Policy as ObserverPolicy};
 pub use viewer::streaming::audio::{

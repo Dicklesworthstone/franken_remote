@@ -60,10 +60,12 @@ physical microphone, desktop application or live-tailnet qualification.
 
 The new controlled-session regression cases cover refusal before allocation,
 fixed-deadline cancellation, original-owner fencing, optional worker failure
-and native readiness/stop through the canonical drive loop. They are authored
-but have not completed execution in this change's unavailable build environment.
-The earlier native results below qualify the existing component owners; they
-do not substitute for executing this new session composition.
+and native readiness/stop through the canonical drive loop. At this checkpoint,
+whole-workspace formatting on the pinned toolchain and manifest checks pass.
+The new tests remain unexecuted locally after environment failures and
+insufficient build memory; hosted verification remains queued. The earlier
+native results below qualify the existing component owners and do not
+substitute for executing this new session composition.
 
 ## Acknowledgement and ownership
 

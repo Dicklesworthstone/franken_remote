@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-04 — explicit native microphone on the controlled viewer
+
+- The original viewer now owns a bounded AudioUp expectation, exact selected
+  media binding, native capture factory and permission/talk/mute lifecycle.
+  The setup deadline starts before the first host offer and remains on every
+  clock, media and recovery I/O path.
+- The opt-in `linux-microphone-session` bridge uses the real recorder and
+  transmitter. Attachment stays muted; permission, an explicit talk action and
+  the matching host acknowledgement are all required before capture starts.
+- Exact original configuration and packet guards remain retained through native
+  queue custody. Safe optional retirement preserves the terminal exchange;
+  cancelling the original controller fences the same capture owner.
+- Clipboard and file negotiation preserve the positively selected microphone
+  exchange. CI now includes the new actual-worker session and ACK cases.
+  Public command offers remain disabled; native session execution is pending.
+
 ## 2026-11-04 — microphone joins the original controlled host
 
 - The running host can negotiate one separately approved microphone attachment

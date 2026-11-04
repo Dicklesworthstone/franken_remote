@@ -148,8 +148,12 @@ impl ControlledViewer {
         self.fence_input_on(None);
     }
     fn fence_input_on(&mut self, cleanup: Option<&Cx>) {
-        self.control.stop();
         self.input.stop(StopReason::Disconnected);
+        // Original input is fenced before native cleanup. Retire a drained
+        // microphone while its context is still live; cancelling first would
+        // turn even an idle optional reset into a failed terminal exchange.
+        self.microphone.stop(&mut self.session.transport);
+        self.control.stop();
         self.pending = None;
         self.events = None;
         self.clock.stop();

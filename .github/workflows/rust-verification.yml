@@ -257,6 +257,7 @@ jobs:
               'host_microphone': root / 'crates/frd/tests/microphone_process.rs',
               'microphone_network': root / 'crates/fr-native/tests/microphone_network.rs',
               'host_microphone_quic': root / 'crates/frd/tests/microphone_quic.rs',
+              'controlled_microphone': root / 'crates/frd/src/lib.rs',
           }
           binaries = {name: [] for name in targets}
           workers = {'fr-microphone-worker': [], 'fr-opus-worker': []}
@@ -298,6 +299,10 @@ jobs:
                   'microphone_quic::tests::device::real_ack_backpressure_does_not_commit_or_replace_the_original_native_reply',
                   'microphone_quic::tests::device::real_datagram_receipts_expire_and_explicit_retalk_waits_for_both_original_children',
                   'microphone_quic::tests::device::consent_loss_between_receive_rounds_retires_the_real_ack_without_closing_input',
+                  'microphone_quic::tests::device::unrelated_transport_tick_retires_the_real_ack_before_further_native_io',
+              ],
+              'controlled_microphone': [
+                  'session_startup::running::controlled::tests::microphone::normal_controller_turns_commit_native_microphone_then_mute_and_reap_both_children',
               ],
           }
           failed = []
@@ -308,8 +313,12 @@ jobs:
               env = dict(os.environ,
                   FR_TEST_MICROPHONE_WORKER=workers['fr-microphone-worker'][0],
                   FR_TEST_OPUS_WORKER=workers['fr-opus-worker'][0])
-              result = subprocess.run([paths[0], '--include-ignored', '--test-threads=1', '--nocapture'],
-                  env=env, timeout=120)
+              arguments = [paths[0], '--include-ignored', '--test-threads=1', '--nocapture']
+              if name == 'controlled_microphone':
+                  # Run the new session test from the already-built frd library.
+                  # Other ignored library tests require their own native harnesses.
+                  arguments.extend(['--exact', required[name][0]])
+              result = subprocess.run(arguments, env=env, timeout=120)
               if result.returncode:
                   failed.append(name)
           assert not failed, f'native microphone regressions failed: {failed}'

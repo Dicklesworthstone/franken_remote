@@ -4,7 +4,7 @@
 //! source identity, child freezes, kernel exits and independent graph queries
 //! are real. These tests make no claim that an application recorded audio.
 #[path = "../src/microphone_process.rs"]
-mod microphone_process;
+pub mod microphone_process;
 
 use fr_core::{
     audio::{AudioChannels, AudioDirection, AudioGeneration},

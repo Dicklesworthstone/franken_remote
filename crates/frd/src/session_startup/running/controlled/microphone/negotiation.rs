@@ -21,7 +21,12 @@ pub(super) struct Pending {
 }
 fn at(cx: &Cx) -> Result<u64, uplink::Error> {
     cx.checkpoint().map_err(|_| uplink::Error::Cancelled)?;
-    Ok(cx.timer_driver().ok_or(uplink::Error::Clock)?.now().as_nanos() / 1000)
+    Ok(cx
+        .timer_driver()
+        .ok_or(uplink::Error::Clock)?
+        .now()
+        .as_nanos()
+        / 1000)
 }
 impl Pending {
     pub(super) fn check(&mut self) -> Result<(), uplink::Error> {
@@ -68,9 +73,8 @@ impl Pending {
         let channel = q
             .offer_media_role(cx, scope, request, MediaRole::AudioUp, || {
                 authorize()
-                    && at(cx).is_ok_and(|t| {
-                        controller.deadline(HostInstant::from_micros(t)).is_ok()
-                    })
+                    && at(cx)
+                        .is_ok_and(|t| controller.deadline(HostInstant::from_micros(t)).is_ok())
             })
             .map_err(uplink::Error::Transport)?;
         Ok(Self {

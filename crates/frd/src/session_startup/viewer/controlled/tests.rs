@@ -192,6 +192,8 @@ enum ClipboardMode {
     FileDownload,
     FileDuplex,
     Combined,
+    Microphone,
+    MicrophoneCombined,
 }
 #[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 async fn fixture_with_clipboard(
@@ -223,6 +225,7 @@ async fn fixture_with_clipboard(
             | ClipboardMode::Negotiate
             | ClipboardMode::NegotiatePaused
             | ClipboardMode::Combined
+            | ClipboardMode::MicrophoneCombined
     ) {
         for name in [
             attachment::CLIPBOARD_CAPABILITY,
@@ -237,7 +240,10 @@ async fn fixture_with_clipboard(
     }
     if matches!(
         clipboard,
-        ClipboardMode::Negotiate | ClipboardMode::NegotiatePaused | ClipboardMode::Combined
+        ClipboardMode::Negotiate
+            | ClipboardMode::NegotiatePaused
+            | ClipboardMode::Combined
+            | ClipboardMode::MicrophoneCombined
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::clipboard::startup::CAPABILITY.into(),
@@ -253,6 +259,7 @@ async fn fixture_with_clipboard(
             | ClipboardMode::FileDownload
             | ClipboardMode::FileDuplex
             | ClipboardMode::Combined
+            | ClipboardMode::MicrophoneCombined
     ) {
         for name in [attachment::FILES_CAPABILITY, fr_wire::files::CAPABILITY] {
             wire_capabilities.push(WireCapability {
@@ -264,7 +271,10 @@ async fn fixture_with_clipboard(
     }
     if matches!(
         clipboard,
-        ClipboardMode::FileDrop | ClipboardMode::FileDuplex | ClipboardMode::Combined
+        ClipboardMode::FileDrop
+            | ClipboardMode::FileDuplex
+            | ClipboardMode::Combined
+            | ClipboardMode::MicrophoneCombined
     ) {
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::CHANNEL_SCOPE_CAPABILITY.into(),
@@ -286,6 +296,16 @@ async fn fixture_with_clipboard(
         wire_capabilities.push(WireCapability {
             name: fr_wire::files::DUPLEX_CAPABILITY.into(),
             version: fr_wire::files::DUPLEX_VERSION,
+            required: false,
+        });
+    }
+    if matches!(
+        clipboard,
+        ClipboardMode::Microphone | ClipboardMode::MicrophoneCombined
+    ) {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::audio_up::CAPABILITY.into(),
+            version: fr_wire::audio_up::VERSION,
             required: false,
         });
     }
@@ -1477,3 +1497,5 @@ fn original_context_stop_is_visible_to_the_promoted_input_owner_immediately() {
 mod files;
 
 mod maintenance;
+
+mod microphone;

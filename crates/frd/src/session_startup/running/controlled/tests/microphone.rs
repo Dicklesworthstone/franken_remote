@@ -46,19 +46,10 @@ fn request(host: &ControlledHost, timeout: Duration) -> ChannelRequest {
 #[allow(clippy::unnecessary_wraps)]
 fn only_application(route: Route, bytes: &[u8]) -> Result<Disposition, ()> {
     assert!(!matches!(route, Route::Stream(r) if r.binding == 14));
-    assert!(!matches!(
-        bytes.get(6..8),
-        Some([0, 0x18..=0x1c])
-    ));
+    assert!(!matches!(bytes.get(6..8), Some([0, 0x18..=0x1c])));
     Ok(Disposition::Blocked)
 }
-async fn step(
-    host: &mut ControlledHost,
-    viewer: &mut View,
-    c: &Cx,
-    n: &mut u128,
-    t: &mut u128,
-) {
+async fn step(host: &mut ControlledHost, viewer: &mut View, c: &Cx, n: &mut u128, t: &mut u128) {
     let (result, ()) = Box::pin(support::both(
         host.drive(
             Duration::from_millis(2),
@@ -81,7 +72,10 @@ async fn negotiate(
     let until = now(c).unwrap() + 1_000_000;
     let mut peer: Option<MediaChannel> = None;
     loop {
-        assert!(now(c).unwrap() < until, "ordinary turns must finish AudioUp");
+        assert!(
+            now(c).unwrap() < until,
+            "ordinary turns must finish AudioUp"
+        );
         if let Some(peer) = &mut peer {
             peer.transmit(viewer.session.io().unwrap().0, c, || true)
                 .unwrap();
@@ -99,8 +93,7 @@ async fn negotiate(
                     || true,
                     |route, bytes| {
                         if matches!(route, Route::Stream(r) if r.binding == 7)
-                            && bytes.get(6..8)
-                                == Some(&(Kind::StreamBinding as u16).to_be_bytes())
+                            && bytes.get(6..8) == Some(&(Kind::StreamBinding as u16).to_be_bytes())
                         {
                             offer = Some(bytes.to_vec());
                             Ok(Disposition::Consumed)
@@ -239,7 +232,9 @@ fn ordinary_control_turns_join_microphone_and_isolate_native_start_failure() {
                     Some(uplink::Error::Native(native::Error::Spawn))
                 );
                 assert_eq!(
-                    host.microphone_statistics().unwrap().acknowledgements_admitted,
+                    host.microphone_statistics()
+                        .unwrap()
+                        .acknowledgements_admitted,
                     0
                 );
                 assert!(!host.control().is_stopped());
@@ -380,7 +375,9 @@ fn normal_controller_turns_commit_native_microphone_then_mute_and_reap_both_chil
                     .unwrap();
                 }
                 assert_eq!(
-                    host.microphone_statistics().unwrap().acknowledgements_admitted,
+                    host.microphone_statistics()
+                        .unwrap()
+                        .acknowledgements_admitted,
                     1
                 );
                 let retirement = host.microphone_retirement().unwrap();

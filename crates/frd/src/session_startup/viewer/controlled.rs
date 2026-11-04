@@ -5,6 +5,7 @@ mod disconnect;
 pub mod events;
 mod files;
 pub mod local_cursor;
+pub mod microphone;
 pub mod request;
 mod viewport;
 use super::{ViewerSession, now};
@@ -39,6 +40,7 @@ use std::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Clipboard(crate::clipboard_quic::Error),
+    Microphone(microphone::Error),
     Files(fr_files::sender::Error),
     Session(super::Error),
     Input(input_quic::Error),
@@ -120,6 +122,7 @@ pub struct ControlledViewer {
     clipboard: Option<crate::clipboard_quic::Bridge>,
     clipboard_setup: crate::session_startup::clipboard::Setup,
     files: Box<files::Slots>,
+    microphone: Box<microphone::Slot>,
     /// The platform owner of the local pointer image (remote cursor, §11.4).
     local_cursor: Option<Box<dyn local_cursor::LocalCursor>>,
     /// Positions this viewer encoded for the host, to tell lag from divergence.
@@ -230,6 +233,7 @@ impl ViewerSession {
             clipboard: None,
             clipboard_setup: crate::session_startup::clipboard::Setup::default(),
             files: Box::default(),
+            microphone: Box::default(),
             local_cursor: None,
             pointer_history: Box::default(),
         })
@@ -291,6 +295,12 @@ impl ControlledViewer {
     /// The parent session a reference recovery keeps serving through this
     /// grant's own drive (renewals, tickets, results, clock).
     pub(super) fn session_mut(&mut self) -> &mut ViewerSession {
+        // Recovery/playback loans still consume the original native drain
+        // witnesses before another transport operation checks retained guards.
+        if let Err(error) = self.microphone.maintain(&mut self.session.transport) {
+            self.microphone.failure.get_or_insert(error);
+            self.close();
+        }
         &mut self.session
     }
     /// A reference loss was found: suspend this grant's input now and stop
@@ -454,6 +464,9 @@ impl ControlledViewer {
         if self.is_closed() {
             return Err(Error::Closed);
         }
+        self.microphone
+            .maintain(&mut self.session.transport)
+            .map_err(Error::Microphone)?;
         self.files.check_pending().map_err(Error::Files)?;
         self.session.check()?;
         self.channels
@@ -702,6 +715,7 @@ impl ControlledViewer {
         result: &mut impl FnMut(ResultEvent),
         other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
     ) -> Result<(), Error> {
+        self.service_microphone()?;
         // Complete or retire only a proven final Files exchange before a
         // generic receive can frame its early payload/reset under handshake rules.
         self.files
@@ -765,6 +779,7 @@ impl ControlledViewer {
         let files = &self.files;
         let clipboard = &self.clipboard;
         let clipboard_setup = &self.clipboard_setup;
+        let microphone = &self.microphone;
         let ticket_profile = self.channels.ticket_profile();
         let input = &mut self.input;
         let last_result = &mut self.last_result;
@@ -773,6 +788,7 @@ impl ControlledViewer {
             if files.owns(route, bytes)
                 || clipboard.as_ref().is_some_and(|c| c.owns_inbound(route))
                 || clipboard_setup.owns(route, bytes)
+                || microphone.owns(route, bytes)
             {
                 return Ok(Disposition::Blocked);
             }
@@ -857,6 +873,7 @@ impl ControlledViewer {
             return Err(e);
         }
         receive?;
+        self.service_microphone()?;
         self.service_clipboard()?;
         self.send()?;
         // One bounded bulk turn follows input, clock and authority servicing.
@@ -891,6 +908,7 @@ impl ControlledViewer {
                 .files
                 .check_pending()
                 .map_err(Error::Files)?;
+            operation.viewer.service_microphone()?;
             operation.viewer.service_clipboard()?;
             operation.viewer.check_inner()?;
             // The source-age bound follows this path's measured round trip.
@@ -926,6 +944,9 @@ impl ControlledViewer {
             if let Some(deadline) = viewer.clipboard_setup.deadline_us() {
                 until = until.min(deadline);
             }
+            if let Some(deadline) = viewer.microphone.deadline_us() {
+                until = until.min(deadline);
+            }
             let current = now(cx)?;
             let remaining = match until.checked_sub(current) {
                 Some(remaining) => remaining,
@@ -943,7 +964,8 @@ impl ControlledViewer {
                 .session
                 .transport
                 .drive(cx, wait.min(Duration::from_micros(remaining)), || {
-                    viewer.files.permits_io()
+                    viewer.microphone.permits_io()
+                        && viewer.files.permits_io()
                         && viewer
                             .clipboard
                             .as_ref()
@@ -1036,7 +1058,8 @@ fn expired(viewer: &mut ControlledViewer, current: u64) -> Option<Error> {
         || passed(viewer.input.control_response_deadline().map(|at| at.0))
         || passed(viewer.session.responder.response_deadline().map(|at| at.0))
         || passed(viewer.files.deadline_us())
-        || passed(viewer.clipboard_setup.deadline_us()))
+        || passed(viewer.clipboard_setup.deadline_us())
+        || passed(viewer.microphone.deadline_us()))
     .then_some(Error::Expired)
 }
 /// Only this viewer's own view-gate refusal is relabelled. The transport checks

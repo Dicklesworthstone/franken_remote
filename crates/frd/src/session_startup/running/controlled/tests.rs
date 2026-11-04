@@ -548,7 +548,7 @@ fn pending_admission_refresh_keeps_control_tickets_and_input_results_progressing
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
-            microphone: &mut host.microphone,
+                    microphone: &mut host.microphone,
                     files: &mut host.files,
                     clipboard: &mut host.clipboard,
                     clipboard_setup: &mut host.clipboard_setup,
@@ -845,7 +845,7 @@ fn buffered_ordered_input_cannot_take_a_due_tickets_fair_turn() {
                 let mut other = block;
                 let mut services = InputServices {
                     input: &mut host.input,
-            microphone: &mut host.microphone,
+                    microphone: &mut host.microphone,
                     files: &mut host.files,
                     clipboard: &mut host.clipboard,
                     clipboard_setup: &mut host.clipboard_setup,

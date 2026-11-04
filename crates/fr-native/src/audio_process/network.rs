@@ -15,6 +15,10 @@
 //! the original connection before further I/O. A proven drained stop retires
 //! only this microphone lane. This module does not advertise a public offer.
 
+mod guard;
+#[cfg(feature = "linux-microphone-session")]
+mod session;
+
 use super::{
     Retirement,
     transmit::{self, ConfigurationEgress, Egress, Source, Transmitter},
@@ -22,7 +26,7 @@ use super::{
 use asupersync::cx::Cx;
 use fr_client::{
     audio::uplink::{self, Profile},
-    input::{ClientInstant, InputClient},
+    input::{ClientInstant, InputClient, presentation::PresentedInput},
 };
 use fr_core::audio::{
     AudioDirection, AudioGeneration, AudioStopReason, MicPermission, MicTalkMode,
@@ -141,6 +145,7 @@ fn now(cx: &Cx) -> Result<u64, Error> {
         .map(|driver| driver.now().as_nanos() / 1000)
         .ok_or(Error::Clock)
 }
+#[derive(Clone)]
 struct PendingEgress {
     permit: Egress,
     until: u64,
@@ -174,6 +179,7 @@ pub struct Uplink {
     inflight: [Option<PendingEgress>; INFLIGHT_PACKETS],
     retired: bool,
     reason: Option<Error>,
+    io: guard::Shared,
 }
 impl std::fmt::Debug for Uplink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -191,13 +197,77 @@ impl Uplink {
     #[allow(clippy::too_many_arguments)]
     pub fn attach(
         q: &mut QuicRecords,
-        mut lane: AudioUpChannel,
+        lane: AudioUpChannel,
         input: &mut InputClient,
         selection: &Selection,
         host_granted: bool,
         options: Options,
         cx: &Cx,
+        client_now: impl FnMut() -> ClientInstant,
+    ) -> Result<Self, AttachError> {
+        Self::attach_with(
+            q,
+            lane,
+            selection,
+            options,
+            cx,
+            client_now,
+            |lane, profile, at| {
+                input.attach_microphone(
+                    lane.parent(),
+                    lane.channel(),
+                    selection,
+                    host_granted,
+                    profile,
+                    at,
+                )
+            },
+        )
+    }
+    /// The same network/capture owner, attached through the original
+    /// decoder-backed input owner retained by a running `ControlledViewer`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attach_presented(
+        q: &mut QuicRecords,
+        lane: AudioUpChannel,
+        input: &mut PresentedInput,
+        selection: &Selection,
+        host_granted: bool,
+        options: Options,
+        cx: &Cx,
+        client_now: impl FnMut() -> ClientInstant,
+    ) -> Result<Self, AttachError> {
+        Self::attach_with(
+            q,
+            lane,
+            selection,
+            options,
+            cx,
+            client_now,
+            |lane, profile, at| {
+                input.attach_microphone(
+                    lane.parent(),
+                    lane.channel(),
+                    selection,
+                    host_granted,
+                    profile,
+                    at,
+                )
+            },
+        )
+    }
+    fn attach_with(
+        q: &mut QuicRecords,
+        mut lane: AudioUpChannel,
+        selection: &Selection,
+        options: Options,
+        cx: &Cx,
         mut client_now: impl FnMut() -> ClientInstant,
+        sender: impl FnOnce(
+            &AudioUpChannel,
+            Profile,
+            ClientInstant,
+        ) -> Result<uplink::Sender, uplink::Error>,
     ) -> Result<Self, AttachError> {
         if let Err(error) = lane.check(q) {
             return Err(AttachError {
@@ -214,16 +284,7 @@ impl Uplink {
                 return Err(Error::WrongScope);
             }
             let transport = now(cx)?;
-            let sender = input
-                .attach_microphone(
-                    lane.parent(),
-                    lane.channel(),
-                    selection,
-                    host_granted,
-                    options.profile,
-                    client_now(),
-                )
-                .map_err(Error::Consent)?;
+            let sender = sender(&lane, options.profile, client_now()).map_err(Error::Consent)?;
             let mut client = None;
             let transmitter = Transmitter::new(sender, &options.image, options.source, || {
                 let sampled = client_now();
@@ -251,6 +312,7 @@ impl Uplink {
                 });
             }
         };
+        let io = guard::Shared::new(cx.clone(), lane.retirement_request(), clock.transport);
         Ok(Self {
             connection: q.binding(),
             lane,
@@ -268,6 +330,7 @@ impl Uplink {
             inflight: std::array::from_fn(|_| None),
             retired: false,
             reason: None,
+            io,
         })
     }
     pub fn state(&self) -> State {
@@ -301,10 +364,10 @@ impl Uplink {
     /// Record a local OS permission result. Permission recovery is still muted
     /// and requires another explicit `begin_talk` action.
     pub fn set_permission(&mut self, permission: MicPermission) -> Result<(), Error> {
-        let muted = if permission != MicPermission::Granted {
-            self.mute()
-        } else {
+        let muted = if permission == MicPermission::Granted {
             Ok(())
+        } else {
+            self.mute()
         };
         self.permission = permission;
         self.transmitter.set_permission(permission);
@@ -355,6 +418,7 @@ impl Uplink {
                 .ok_or(Error::Clock)?;
             self.pending_stop = Some(PendingStop { bytes, until });
         }
+        self.publish_guard();
         Ok(())
     }
     /// Immediately end local admission. Call `service`/`retire` between I/O
@@ -364,6 +428,7 @@ impl Uplink {
         self.transmitter.stop();
         self.configuration_pending = false;
         self.pending_stop = None;
+        self.publish_guard();
     }
     fn bound(&self, q: &QuicRecords) -> Result<(), Error> {
         if q.is_bound_to(&self.connection) {
@@ -376,31 +441,26 @@ impl Uplink {
     /// gate on every native I/O poll. An immutable packet deadline is never
     /// extended by a newer capture permit, a queue retry or a later ACK.
     pub fn permits_io(&self) -> bool {
-        if self.retired {
-            return true;
+        self.io.permits()
+    }
+    /// A retained read-only gate for the original transport's every operation.
+    /// The snapshot contains only the same immutable guards already owned here,
+    /// never replacement authority or payload. Drain/retirement updates are
+    /// published between operations, with no lock held over a transport call.
+    pub fn operation_check(&self) -> std::sync::Arc<dyn Fn() -> bool + Send + Sync> {
+        self.io.operation_check()
+    }
+    fn snapshot(&self) -> guard::Snapshot {
+        guard::Snapshot {
+            inflight: self.inflight.clone(),
+            configuration: self.configuration_egress.clone(),
+            control_until: self.control_until,
+            stop_until: self.pending_stop.as_ref().map(|stop| stop.until),
+            retired: self.retired,
         }
-        let Ok(at) = now(&self.cx) else {
-            return false;
-        };
-        if at < self.clock.transport {
-            return false;
-        }
-        if !self.inflight.iter().flatten().all(|guard| guard.live(at)) {
-            return false;
-        }
-        if self.control_until.is_some_and(|until| at >= until)
-            || self
-                .configuration_egress
-                .as_ref()
-                .is_some_and(|guard| !guard.is_open())
-            || self
-                .pending_stop
-                .as_ref()
-                .is_some_and(|stop| at >= stop.until)
-        {
-            self.lane.request_retirement();
-        }
-        true
+    }
+    fn publish_guard(&self) {
+        self.io.publish(self.snapshot());
     }
     /// Explicit terminal retirement. If the native stack may still own an
     /// audio datagram/protected packet, conservatively close its original
@@ -419,20 +479,30 @@ impl Uplink {
             self.inflight.fill_with(|| None);
             self.control_until = None;
             self.configuration_egress = None;
+            self.publish_guard();
             return Err(Error::EgressExpired);
         }
+        // Drop packet guards only on the actual native drain witness above.
+        // Keep reliable guards and the non-retired snapshot across retirement:
+        // even an unwinding original security callback must not publish a
+        // successful optional reset that never happened.
         self.inflight.fill_with(|| None);
-        self.control_until = None;
-        self.retired = true;
+        self.publish_guard();
         if q.is_closed() {
+            self.retired = true;
+            self.control_until = None;
             self.configuration_egress = None;
+            self.publish_guard();
             return Ok(());
         }
         let retired = self.lane.retire(q, &self.cx).map_err(Error::Transport);
         if retired.is_err() {
             q.close();
         }
+        self.retired = true;
+        self.control_until = None;
         self.configuration_egress = None;
+        self.publish_guard();
         retired
     }
     fn fail(&mut self, q: &mut QuicRecords, reason: Error) -> Result<(), Error> {
@@ -444,7 +514,9 @@ impl Uplink {
         }
         Ok(())
     }
-    fn maintenance(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
+    /// Consume exact native drain witnesses before other session lanes run.
+    /// This never starts capture or refreshes an admitted packet's deadline.
+    pub fn maintain(&mut self, q: &mut QuicRecords) -> Result<(), Error> {
         self.bound(q)?;
         if self.retired {
             if !self.lane.is_retired(q).map_err(Error::Transport)? {
@@ -465,6 +537,7 @@ impl Uplink {
             self.control_until = None;
             self.configuration_egress = None;
         }
+        self.publish_guard();
         if let Err(error) = self.lane.check(q) {
             if self.lane.is_retired(q) == Ok(true) {
                 return self.fail(q, Error::Closed);
@@ -515,6 +588,7 @@ impl Uplink {
             guard.uplink.stop();
             guard.uplink.retired = true;
             guard.q.close();
+            guard.uplink.publish_guard();
         }
         guard.complete = true;
         result
@@ -524,7 +598,7 @@ impl Uplink {
         q: &mut QuicRecords,
         authorize: &mut impl FnMut() -> bool,
     ) -> Result<Progress, Error> {
-        self.maintenance(q)?;
+        self.maintain(q)?;
         if self.retired {
             return Ok(self.progress(0, false));
         }
@@ -540,12 +614,14 @@ impl Uplink {
             return Ok(self.progress(0, false));
         }
         let permit = self.transmitter.egress();
+        let snapshot = self.snapshot();
         let Self {
             transmitter,
             lane,
             cx,
             clock,
             inflight,
+            io,
             ..
         } = self;
         let mut failure = None;
@@ -590,6 +666,12 @@ impl Uplink {
                         .expect("bounded admission") = Some(PendingEgress {
                         permit: permit.clone(),
                         until,
+                    });
+                    // Publish after EACH admission, before the next packet or
+                    // any unrelated operation can observe the original socket.
+                    io.publish(guard::Snapshot {
+                        inflight: inflight.clone(),
+                        ..snapshot.clone()
                     });
                     Ok(true)
                 }
@@ -668,6 +750,7 @@ impl Uplink {
                 }
             }
         });
+        self.publish_guard();
         match result {
             Ok(true) => {
                 self.configuration_pending = false;
@@ -700,6 +783,7 @@ impl Uplink {
                         .map_or(stop.until, |old| old.min(stop.until)),
                 );
                 self.pending_stop = None;
+                self.publish_guard();
                 Ok(())
             }
             Err(quic::Error::Backpressure) => Ok(()),
@@ -752,9 +836,8 @@ impl Uplink {
         let bytes = &record[..length];
         match audio::record_kind(bytes) {
             Some(0x61) => {
-                let ack = match audio::decode_configured(bytes, self.lane.channel()) {
-                    Ok(ack) => ack,
-                    Err(_) => return self.fail(q, Error::InvalidRecord),
+                let Ok(ack) = audio::decode_configured(bytes, self.lane.channel()) else {
+                    return self.fail(q, Error::InvalidRecord);
                 };
                 if ack.direction != AudioDirection::Uplink {
                     return self.fail(q, Error::InvalidRecord);
@@ -769,9 +852,8 @@ impl Uplink {
                 }
             }
             Some(0x63) => {
-                let stop = match audio::decode_stop(bytes, self.lane.channel()) {
-                    Ok(stop) => stop,
-                    Err(_) => return self.fail(q, Error::InvalidRecord),
+                let Ok(stop) = audio::decode_stop(bytes, self.lane.channel()) else {
+                    return self.fail(q, Error::InvalidRecord);
                 };
                 if stop.direction != AudioDirection::Uplink {
                     return self.fail(q, Error::InvalidRecord);
@@ -852,6 +934,7 @@ impl Drop for Drive<'_> {
                 .reason
                 .get_or_insert(Error::Transport(quic::Error::Cancelled));
             self.q.close();
+            self.uplink.publish_guard();
         }
     }
 }
