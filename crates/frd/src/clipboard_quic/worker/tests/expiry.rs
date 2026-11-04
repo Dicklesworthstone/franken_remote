@@ -113,7 +113,9 @@ fn queued_and_explicitly_deferred_items_expire_without_replacing_the_original_wo
             assert!(inbox.expired.is_none());
             assert_eq!(
                 inbox.result,
-                Some(Received::Refused(SessionError::Clipboard(ClipboardError::Expired)))
+                Some(Received::Refused(SessionError::Clipboard(
+                    ClipboardError::Expired
+                )))
             );
         }
         {
@@ -137,12 +139,20 @@ fn queued_and_explicitly_deferred_items_expire_without_replacing_the_original_wo
         f.os.lock().unwrap().unsettled = false;
         assert_eq!(
             f.receive(1, begin()),
-            Some(Received::Refused(SessionError::Clipboard(ClipboardError::Replay)))
+            Some(Received::Refused(SessionError::Clipboard(
+                ClipboardError::Replay
+            )))
         );
         f.fresh_copy();
         let os = f.os.lock().unwrap();
         assert_eq!(
-            (os.opens, os.watches, os.publications, os.suspends, os.closes),
+            (
+                os.opens,
+                os.watches,
+                os.publications,
+                os.suspends,
+                os.closes
+            ),
             (1, 1, 1, 0, 0)
         );
         assert!(f.shared.gate.is_open());

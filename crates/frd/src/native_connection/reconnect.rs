@@ -444,7 +444,12 @@ impl Client {
                                 let _ = notify(application, Status::Stopped { attempt, failure });
                                 return Err(failure);
                             }
-                            notify(application, Status::Reopening { attempt: attempt + 1 })?;
+                            notify(
+                                application,
+                                Status::Reopening {
+                                    attempt: attempt + 1,
+                                },
+                            )?;
                             continue;
                         }
                     }

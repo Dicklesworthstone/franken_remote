@@ -231,7 +231,10 @@ fn real_resize_fences_old_target_then_coalesces_one_checked_native_size() {
         control.enable_resize(640, 480).unwrap();
         display.event(id, event);
         wait(|| matches!(control.status(), Status::Stopped(_)));
-        assert!(viewer.control().is_stopped(), "terminal status preceded input fence");
+        assert!(
+            viewer.control().is_stopped(),
+            "terminal status preceded input fence"
+        );
         assert_eq!(control.target(), Err(Error::NotReady));
         wait(|| window.finish().is_some());
         assert_eq!(window.finish(), Some(StopReason::GeometryChanged));
@@ -246,8 +249,12 @@ fn real_resize_fences_old_target_then_coalesces_one_checked_native_size() {
 fn synthetic_invalid_and_negative_lifecycle_events_never_supply_replacement_intent() {
     let display = Display::new();
     for event in [
-        "synthetic_resize", "resize_synthetic", "resize_odd",
-        "resize_unmap", "resize_destroy", "resize_close",
+        "synthetic_resize",
+        "resize_synthetic",
+        "resize_odd",
+        "resize_unmap",
+        "resize_destroy",
+        "resize_close",
     ] {
         let (_rt, viewer, mut window) = window(&display.name);
         let control = window.control();
@@ -300,11 +307,19 @@ fn published_display_choice_cancels_resize_without_confusing_offered_capability(
     let (_rt, viewer, mut window) = window(&display.name);
     let control = window.control();
     control.enable_resize(640, 480).unwrap();
-    control.set_display_switch_mode(DisplaySwitchMode::Controlled).unwrap();
-    assert!(control.resize_enabled(), "offered capability is not a choice");
+    control
+        .set_display_switch_mode(DisplaySwitchMode::Controlled)
+        .unwrap();
+    assert!(
+        control.resize_enabled(),
+        "offered capability is not a choice"
+    );
     let scope = control.display_switch_scope().unwrap();
     assert!(control.request_display_switch(scope, Instant::now()));
-    assert!(!control.resize_enabled(), "published choice did not cancel resize");
+    assert!(
+        !control.resize_enabled(),
+        "published choice did not cancel resize"
+    );
     assert!(!control.record_resize(322, 240));
     control.stop();
     wait(|| window.finish().is_some());

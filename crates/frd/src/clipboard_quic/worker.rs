@@ -244,11 +244,7 @@ impl<N: NativeClipboard> Worker<N> {
             if result == Received::Deferred {
                 // Only the synchronizer's explicit unsubmitted result returns
                 // the exact record to the safe queue, with its original bound.
-                self.shared
-                    .inbox
-                    .lock()
-                    .map_err(|_| Error::Poisoned)?
-                    .item = Some(record);
+                self.shared.inbox.lock().map_err(|_| Error::Poisoned)?.item = Some(record);
             } else {
                 self.finish_incoming(result)?;
             }
@@ -258,7 +254,12 @@ impl<N: NativeClipboard> Worker<N> {
     }
 
     fn finish_expired(&mut self, local: u64, host: HostInstant) -> Result<bool, Error> {
-        let expired = self.shared.inbox.lock().map_err(|_| Error::Poisoned)?.expired;
+        let expired = self
+            .shared
+            .inbox
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .expired;
         let Some(expired) = expired else {
             return Ok(false);
         };

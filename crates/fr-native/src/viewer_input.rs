@@ -155,7 +155,10 @@ impl Shared {
     fn stop(&self, reason: StopReason) {
         #[cfg(feature = "linux-viewer-window")]
         if self.state.first_stop().is_none()
-            && !matches!(reason, StopReason::Local | StopReason::Closed | StopReason::WindowResized)
+            && !matches!(
+                reason,
+                StopReason::Local | StopReason::Closed | StopReason::WindowResized
+            )
             && let Some(window) = self.display_switch.get()
         {
             window.cancel_display_switch();

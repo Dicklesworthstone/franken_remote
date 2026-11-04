@@ -900,7 +900,11 @@ struct Progress {
     display_changes: u8,
     display_change_closes: Vec<(u8, fr_native::desktop::reconnect::CleanupSummary)>,
     /// Confirmed local viewport changes, distinct from choosing another display.
-    window_resizes: Vec<(u8, (u32, u32), fr_native::desktop::reconnect::CleanupSummary)>,
+    window_resizes: Vec<(
+        u8,
+        (u32, u32),
+        fr_native::desktop::reconnect::CleanupSummary,
+    )>,
     presented: u64,
     approval_pending: bool,
     missing_display: bool,

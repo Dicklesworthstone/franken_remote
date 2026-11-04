@@ -311,7 +311,10 @@ fn local_resize_retires_original_consent_and_reports_its_own_viewport_history() 
     assert!(!progress.control.unwrap().initial_decision_available());
     assert!(!progress.control.unwrap().requested);
     progress.begin(2);
-    assert_eq!(progress.control.as_mut().unwrap().opened(), control::AttemptMode::ViewingOnly);
+    assert_eq!(
+        progress.control.as_mut().unwrap().opened(),
+        control::AttemptMode::ViewingOnly
+    );
     let report = history(&progress);
     let json: serde_json::Value =
         serde_json::from_str(&format!("{{\"fixture\":true{}}}", report.json)).unwrap();
@@ -322,10 +325,13 @@ fn local_resize_retires_original_consent_and_reports_its_own_viewport_history() 
     assert!(!report.text.contains("Display change"));
     assert!(report.text.contains("host cleanup remains unknown"));
     let mut ui = interface(progress);
-    let offer = ui.offer(2, &fr_client::native::control_offer_with_files()).unwrap();
+    let offer = ui
+        .offer(2, &fr_client::native::control_offer_with_files())
+        .unwrap();
     assert!(offer.capabilities.iter().all(|capability| !matches!(
         capability.name.as_str(),
-        fr_wire::attachment::FILES_CAPABILITY | fr_wire::files::CAPABILITY
+        fr_wire::attachment::FILES_CAPABILITY
+            | fr_wire::files::CAPABILITY
             | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
     )));
 }
@@ -350,9 +356,12 @@ fn resize_only_observer_history_survives_a_later_failed_dial() {
         false,
         &progress,
         true,
-    ).unwrap_err();
+    )
+    .unwrap_err();
     assert_eq!(failed.code, "native_session_failed");
-    let retained = failed.control_history.expect("resize history was discarded");
+    let retained = failed
+        .control_history
+        .expect("resize history was discarded");
     assert!(retained.json.contains("\"window_resizes\""));
     assert!(retained.json.contains("\"attempt\":1"));
     assert!(retained.text.contains("Window resize"));
@@ -379,10 +388,16 @@ fn resize_bounds_duplicate_intents_and_adverse_cleanup_cannot_spend_consent() {
     let mut failed = progress();
     failed.cleanup.as_mut().unwrap().failure =
         Some(fr_native::desktop::reconnect::CleanupFailure::Media);
-    assert_eq!(record_resize(&mut failed, 2, (640, 480)), Err(CallbackError));
+    assert_eq!(
+        record_resize(&mut failed, 2, (640, 480)),
+        Err(CallbackError)
+    );
     let mut duplicate = progress();
     record_resize(&mut duplicate, 2, (640, 480)).unwrap();
-    assert_eq!(record_resize(&mut duplicate, 2, (640, 480)), Err(CallbackError));
+    assert_eq!(
+        record_resize(&mut duplicate, 2, (640, 480)),
+        Err(CallbackError)
+    );
     assert_eq!(record(&mut duplicate, 2), Err(CallbackError));
     assert_eq!(duplicate.window_resizes.len(), 1);
 }

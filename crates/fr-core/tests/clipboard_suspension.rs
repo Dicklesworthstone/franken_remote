@@ -408,8 +408,12 @@ fn expired_unsubmitted_begin_consumes_the_original_floor_without_allocating_whil
         ..old
     };
     session.begin(fresh, at(3_000_002)).unwrap();
-    session.chunk(fresh.stamp, 0, 0, b"a", at(3_000_003)).unwrap();
-    session.chunk(fresh.stamp, 1, 1, b"b", at(3_000_004)).unwrap();
+    session
+        .chunk(fresh.stamp, 0, 0, b"a", at(3_000_003))
+        .unwrap();
+    session
+        .chunk(fresh.stamp, 1, 1, b"b", at(3_000_004))
+        .unwrap();
     let mut sink = Sink::default();
     let receipt = session
         .commit(fresh.stamp, 2, &mut sink, || at(3_000_005))
@@ -444,7 +448,10 @@ fn expired_continuation_cannot_clear_another_transfer_or_erase_an_existing_recei
     );
     assert_eq!(session.reserved_bytes(), reserved);
     state.paused.store(false, Ordering::Release);
-    assert_eq!(session.commit(old.stamp, 2, &mut sink, || at(6)), Ok(receipt));
+    assert_eq!(
+        session.commit(old.stamp, 2, &mut sink, || at(6)),
+        Ok(receipt)
+    );
     assert_eq!((sink.prepared, sink.published), (1, 1));
     session.expire_transfer(fresh.stamp, at(7)).unwrap();
     assert_eq!(session.reserved_bytes(), 0);

@@ -243,7 +243,8 @@ impl Shared {
             expired: None,
             result: None,
         };
-        self.inbound_bound.store(bound.as_micros(), Ordering::Release);
+        self.inbound_bound
+            .store(bound.as_micros(), Ordering::Release);
         self.inbound_until.store(until, Ordering::Release);
         drop(inbox);
         self.wake();

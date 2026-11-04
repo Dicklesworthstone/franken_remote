@@ -328,9 +328,9 @@ fn malformed_queued_ingress_is_still_terminal_when_its_original_deadline_expires
     f.clock.advance_to(Time::from_millis(3_000));
     assert_eq!(
         f.step(),
-        Err(Error::Session(fr_wire::clipboard::session::SessionError::Wire(
-            fr_wire::WireError::BadMagic
-        )))
+        Err(Error::Session(
+            fr_wire::clipboard::session::SessionError::Wire(fr_wire::WireError::BadMagic)
+        ))
     );
     assert!(!f.shared.gate.is_open());
     assert_eq!(f.os.lock().unwrap().publications, 0);

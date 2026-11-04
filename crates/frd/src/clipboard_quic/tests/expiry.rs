@@ -154,20 +154,19 @@ fn original_bridge_expires_only_a_complete_unsubmitted_handoff_and_keeps_input_l
                 .load(std::sync::atomic::Ordering::Acquire);
             // Exactly the worker's active-receive ownership transition. No
             // completion result means the bridge cannot assume a safe refusal.
-            let _active = executing.then(|| {
-                f.bridge.shared.inbox.lock().unwrap().item.take().unwrap()
-            });
+            let _active =
+                executing.then(|| f.bridge.shared.inbox.lock().unwrap().item.take().unwrap());
             let remaining = original.saturating_sub(clock(&f.cx));
-            asupersync::time::sleep(
-                f.cx.now(),
-                Duration::from_micros(remaining + 1_000),
-            )
-            .await;
+            asupersync::time::sleep(f.cx.now(), Duration::from_micros(remaining + 1_000)).await;
             assert!(clock(&f.cx) >= original);
             assert!(!f.bridge.lane.receive_expired(&f.link.h));
             assert_eq!(
                 f.bridge.maintain(&mut f.link.h),
-                Ok(if executing { State::Retired } else { State::Active })
+                Ok(if executing {
+                    State::Retired
+                } else {
+                    State::Active
+                })
             );
             assert_eq!(
                 f.bridge.reason(),

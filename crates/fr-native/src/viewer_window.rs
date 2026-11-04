@@ -7,10 +7,10 @@
 //! may choose a smaller initial target. A checked resize always retires that
 //! target; an opted-in supervisor may open fresh viewing only after cleanup.
 mod choice;
-mod resize;
 pub(crate) mod file_drop;
 pub(crate) mod file_send;
 mod focus;
+mod resize;
 use crate::viewer_input::display_switch;
 pub use crate::viewer_input::display_switch::Mode as DisplaySwitchMode;
 pub use file_send::{
@@ -167,11 +167,15 @@ impl Shared {
         }
     }
     fn stop(&self, reason: StopReason) {
-        let first = self.first_stop.compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
+        let first =
+            self.first_stop
+                .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
         let cause = first.unwrap_or_else(|first| first);
         let cause = if cause == 0 { reason as u8 } else { cause };
-        if !matches!(reason, StopReason::GeometryChanged | StopReason::SessionEnded | StopReason::OwnerDropped)
-        {
+        if !matches!(
+            reason,
+            StopReason::GeometryChanged | StopReason::SessionEnded | StopReason::OwnerDropped
+        ) {
             self.resize.cancel();
         }
         if !matches!(
@@ -924,9 +928,15 @@ fn record_resize(shared: &Shared, width: u32, height: u32, native: bool) -> bool
         || !shared.resize.begin(width, height, || {
             shared.state.load(Ordering::Acquire) == 1
                 && !shared.session.is_stopped()
-                && shared.first_stop.compare_exchange(
-                    0, StopReason::GeometryChanged as u8, Ordering::AcqRel, Ordering::Acquire,
-                ).is_ok()
+                && shared
+                    .first_stop
+                    .compare_exchange(
+                        0,
+                        StopReason::GeometryChanged as u8,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
         })
         || (native && !shared.resize.observe(width, height))
     {
@@ -941,7 +951,8 @@ fn native_resize(native: &Native<'_>) -> bool {
     let (mut width, mut height) = (0, 0);
     // SAFETY: sole native owner and writable scalars. These values came only
     // from a real ConfigureNotify on this exact owned drawable.
-    (unsafe { fr_viewer_window_resized(native.handle.as_ptr(), &raw mut width, &raw mut height) } == 1)
+    (unsafe { fr_viewer_window_resized(native.handle.as_ptr(), &raw mut width, &raw mut height) }
+        == 1)
         && record_resize(native.shared, width, height, true)
 }
 /// Input is already fenced. Coalesce at most 64 native events and 100 ms,
@@ -985,7 +996,10 @@ fn drain_resize_events(native: &Native<'_>) {
             0 | 1 | 6..=12 | 14..=17 => {}
             _ => {
                 if kind == 5 {
-                    native.shared.orderly_close.store(CLOSE_REQUESTED, Ordering::Release);
+                    native
+                        .shared
+                        .orderly_close
+                        .store(CLOSE_REQUESTED, Ordering::Release);
                 }
                 native.shared.resize.cancel();
                 return;
@@ -1142,7 +1156,8 @@ fn run_window(native: &Native<'_>, started: Instant) {
         let fresh = turn.duration_since(previous_turn) < choice::MAX_AGE;
         if !resize_offered && let Some((width, height)) = shared.resize.limits() {
             // SAFETY: only this native thread changes the original window's hints.
-            if unsafe { fr_viewer_window_resize_offer(native.handle.as_ptr(), width, height) } != 1 {
+            if unsafe { fr_viewer_window_resize_offer(native.handle.as_ptr(), width, height) } != 1
+            {
                 shared.stop(StopReason::NativeFailure);
                 return;
             }

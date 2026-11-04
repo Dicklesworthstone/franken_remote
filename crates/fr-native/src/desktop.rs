@@ -1039,7 +1039,8 @@ impl Desktop {
                                     layout,
                                     capture_system_shortcuts,
                                     file_controls.as_ref(),
-                                    (display_switching || window.resize_enabled()).then_some(&window),
+                                    (display_switching || window.resize_enabled())
+                                        .then_some(&window),
                                 )?);
                                 Ok(())
                             })(),

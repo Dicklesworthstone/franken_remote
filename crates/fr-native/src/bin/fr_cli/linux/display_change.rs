@@ -45,8 +45,14 @@ pub(super) fn record_resize(
     if !(2..=32).contains(&next)
         || progress.attempts.checked_add(1) != Some(next)
         || progress.display_change_closes.len() + progress.window_resizes.len() >= 31
-        || progress.display_change_closes.last().is_some_and(|(attempt, _)| *attempt >= progress.attempts)
-        || progress.window_resizes.last().is_some_and(|(attempt, _, _)| *attempt >= progress.attempts)
+        || progress
+            .display_change_closes
+            .last()
+            .is_some_and(|(attempt, _)| *attempt >= progress.attempts)
+        || progress
+            .window_resizes
+            .last()
+            .is_some_and(|(attempt, _, _)| *attempt >= progress.attempts)
         || progress.user_closed
         || progress.automation.is_some()
         || progress.automation_focus_stop.is_some()
@@ -56,12 +62,14 @@ pub(super) fn record_resize(
     }
     let summary = progress.cleanup.ok_or(CallbackError)?;
     if summary.failure.is_some()
-        || summary.input_stop.is_some_and(|reason| !matches!(
-            reason,
-            fr_native::viewer_input::StopReason::Local
-                | fr_native::viewer_input::StopReason::Closed
-                | fr_native::viewer_input::StopReason::WindowResized
-        ))
+        || summary.input_stop.is_some_and(|reason| {
+            !matches!(
+                reason,
+                fr_native::viewer_input::StopReason::Local
+                    | fr_native::viewer_input::StopReason::Closed
+                    | fr_native::viewer_input::StopReason::WindowResized
+            )
+        })
         || summary.retry_failure().is_some()
     {
         return Err(CallbackError);
@@ -69,7 +77,9 @@ pub(super) fn record_resize(
     if let Some(control) = &mut progress.control {
         control.retire_initial_decision();
     }
-    progress.window_resizes.push((progress.attempts, size, summary));
+    progress
+        .window_resizes
+        .push((progress.attempts, size, summary));
     Ok(())
 }
 
@@ -120,17 +130,22 @@ pub(super) fn history(progress: &Progress) -> crate::ControlHistory {
     if !progress.window_resizes.is_empty() {
         let mut resizes = String::new();
         for (attempt, (width, height), summary) in &progress.window_resizes {
-            let exchange = summary.disconnect.or_else(|| {
-                summary.control_disconnect.map(|outcome| outcome.exchange)
-            });
-            let lease = summary.control_disconnect.and_then(|outcome| outcome.revocation);
+            let exchange = summary
+                .disconnect
+                .or_else(|| summary.control_disconnect.map(|outcome| outcome.exchange));
+            let lease = summary
+                .control_disconnect
+                .and_then(|outcome| outcome.revocation);
             if !resizes.is_empty() {
                 resizes.push(',');
             }
             let _ = write!(
                 resizes,
                 "{{\"attempt\":{attempt},\"width\":{width},\"height\":{height},\"close_exchange\":{},\"lease_report\":{}}}",
-                exchange.map_or_else(|| "null".to_owned(), |outcome| crate::closure::Report::from(outcome).json()),
+                exchange.map_or_else(
+                    || "null".to_owned(),
+                    |outcome| crate::closure::Report::from(outcome).json()
+                ),
                 crate::terminal::lease_json(lease)
             );
             let _ = write!(

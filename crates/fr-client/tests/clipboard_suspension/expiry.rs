@@ -137,7 +137,12 @@ fn paused_controller_refuses_expired_unsubmitted_begin_then_accepts_a_fresh_copy
     let state = Rc::new(RefCell::new(Calls::default()));
     let mut native = lane.into_native(Native(state.clone()));
     native
-        .poll(&mut scratch(), &mut Gate::default(), || client(0), || Ok(91))
+        .poll(
+            &mut scratch(),
+            &mut Gate::default(),
+            || client(0),
+            || Ok(91),
+        )
         .unwrap();
     let old = record(1, begin());
     input.suspend(client(500_000));
@@ -188,7 +193,9 @@ fn paused_controller_refuses_expired_unsubmitted_begin_then_accepts_a_fresh_copy
     assert_eq!((state.suspended, state.closed), (0, 0));
     assert!(!native.is_closed());
     assert_eq!(
-        input.attach_clipboard(78, true, client(3_200_000)).unwrap_err(),
+        input
+            .attach_clipboard(78, true, client(3_200_000))
+            .unwrap_err(),
         Error::AlreadyAttached
     );
 }
@@ -217,7 +224,11 @@ fn expired_metadata_does_not_survive_original_controller_drop_or_clock_regressio
             client(500_002)
         };
         let error = native.expire_receive(expired, at).unwrap_err();
-        let expected = if regression { Error::Clock } else { Error::Stopped };
+        let expected = if regression {
+            Error::Clock
+        } else {
+            Error::Stopped
+        };
         assert!(matches!(error, NativeError::Authority(reason) if reason == expected));
         assert!(native.is_closed());
         assert_eq!(state.borrow().published, 0);

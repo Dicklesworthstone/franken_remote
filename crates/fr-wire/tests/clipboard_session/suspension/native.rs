@@ -572,7 +572,12 @@ fn expired_deferred_begin_uses_original_floor_and_watcher_without_native_callbac
         assert_eq!(state.changes, changes);
         assert_eq!(state.text, "local selection");
         assert_eq!(
-            (state.watches, state.reads, state.publications, state.suspends),
+            (
+                state.watches,
+                state.reads,
+                state.publications,
+                state.suspends
+            ),
             (1, 0, 0, 0)
         );
     }
@@ -597,7 +602,10 @@ fn expired_deferred_begin_uses_original_floor_and_watcher_without_native_callbac
     assert_eq!(published, 1);
     let state = state.borrow();
     assert_eq!(state.text, "new");
-    assert_eq!((state.watches, state.publications, state.suspends), (1, 1, 0));
+    assert_eq!(
+        (state.watches, state.publications, state.suspends),
+        (1, 1, 0)
+    );
     assert!(!native.is_closed());
     assert!(!input.monitor().is_revoked());
 }
@@ -614,14 +622,8 @@ fn expired_metadata_cannot_cross_a_channel_or_selected_limit_binding() {
             ..LimitOverrides::default()
         })
         .unwrap();
-        let mut target = ClipboardChannel::new(
-            &input,
-            context(Role::Host),
-            selected,
-            true,
-            at(0),
-        )
-        .unwrap();
+        let mut target =
+            ClipboardChannel::new(&input, context(Role::Host), selected, true, at(0)).unwrap();
         let transport = target.transport();
         let supplied = Context {
             channel: if foreign_channel { 78 } else { 77 },

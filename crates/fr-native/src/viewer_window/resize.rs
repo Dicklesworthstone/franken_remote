@@ -17,7 +17,10 @@ impl Intent {
         if X11Target::new(1, width, height).is_err() {
             return false;
         }
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.cancelled || state.limits.is_some() || state.pending.is_some() {
             return false;
         }
@@ -25,14 +28,20 @@ impl Intent {
         true
     }
     pub(super) fn limits(&self) -> Option<(u32, u32)> {
-        let state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         (!state.cancelled).then_some(state.limits).flatten()
     }
     /// Serialize first-cause reservation with the original tentative request.
     /// reserve must only inspect/reserve scalars, never fence or call native code.
     /// Input may start a fence, but can never replace the window's final size.
     pub(super) fn begin(&self, width: u32, height: u32, reserve: impl FnOnce() -> bool) -> bool {
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.cancelled || !valid(&state, width, height) {
             state.pending = None;
             state.cancelled = true;
@@ -52,8 +61,15 @@ impl Intent {
     /// Its event order is authoritative; another connection's delayed event
     /// cannot overwrite this metadata after the native owner has exited.
     pub(super) fn observe(&self, width: u32, height: u32) -> bool {
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.cancelled || state.sealed || state.pending.is_none() || !valid(&state, width, height) {
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.cancelled
+            || state.sealed
+            || state.pending.is_none()
+            || !valid(&state, width, height)
+        {
             state.pending = None;
             state.cancelled = true;
             return false;
@@ -63,13 +79,23 @@ impl Intent {
         true
     }
     pub(super) fn pending(&self) -> bool {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pending.is_some()
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .is_some()
     }
     pub(super) fn observed(&self) -> bool {
-        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).observed
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .observed
     }
     pub(super) fn seal(&self) {
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.sealed = true;
         if !state.observed {
             state.pending = None;
@@ -77,11 +103,19 @@ impl Intent {
         }
     }
     pub(super) fn requested(&self) -> Option<(u32, u32)> {
-        let state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        (state.sealed && state.observed && !state.cancelled).then_some(state.pending).flatten()
+        let state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (state.sealed && state.observed && !state.cancelled)
+            .then_some(state.pending)
+            .flatten()
     }
     pub(super) fn cancel(&self) {
-        let mut state = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut state = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.cancelled = true;
         state.pending = None;
     }
@@ -94,7 +128,10 @@ fn valid(state: &State, width: u32, height: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        Arc, Barrier,
+        atomic::{AtomicUsize, Ordering},
+    };
 
     #[test]
     fn input_cannot_replace_the_original_windows_observed_and_sealed_size() {

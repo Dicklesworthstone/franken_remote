@@ -22,7 +22,12 @@ fn retired() -> Cleanup {
 
 #[test]
 fn local_resize_requires_original_window_and_every_native_cleanup_receipt() {
-    for input in [None, Some(InputStop::Local), Some(InputStop::Closed), Some(InputStop::WindowResized)] {
+    for input in [
+        None,
+        Some(InputStop::Local),
+        Some(InputStop::Closed),
+        Some(InputStop::WindowResized),
+    ] {
         let mut summary = summary();
         summary.input_stop = input;
         assert!(resize_cleanup_allows_reopen(summary, Some(&retired())));
@@ -60,8 +65,12 @@ fn local_resize_requires_original_window_and_every_native_cleanup_receipt() {
 #[test]
 fn original_input_stops_host_reports_and_callback_failures_veto_resize() {
     for reason in [
-        InputStop::FocusLost, InputStop::WindowChanged, InputStop::NativeFailure,
-        InputStop::LocalEscape, InputStop::SyntheticInput, InputStop::Expired,
+        InputStop::FocusLost,
+        InputStop::WindowChanged,
+        InputStop::NativeFailure,
+        InputStop::LocalEscape,
+        InputStop::SyntheticInput,
+        InputStop::Expired,
     ] {
         let mut value = summary();
         value.input_stop = Some(reason);
@@ -90,19 +99,21 @@ fn original_input_stops_host_reports_and_callback_failures_veto_resize() {
     let mut value = summary();
     value.failure = Some(CleanupFailure::Media);
     assert!(!resize_cleanup_allows_reopen(value, Some(&retired())));
-    assert!(!resize_local_error(Some(Error::Observer(ObserverError::Application))));
-    assert!(!resize_local_error(Some(Error::Observer(ObserverError::Streaming(
-        frd::session_startup::StreamingViewerError::Application
-    )))));
+    assert!(!resize_local_error(Some(Error::Observer(
+        ObserverError::Application
+    ))));
+    assert!(!resize_local_error(Some(Error::Observer(
+        ObserverError::Streaming(frd::session_startup::StreamingViewerError::Application)
+    ))));
     assert!(!resize_local_error(Some(Error::LayoutMismatch)));
-    assert!(!resize_local_error(Some(Error::Window(crate::viewer_window::Error::NativeStopped(
-        WindowStop::Hidden
-    )))));
+    assert!(!resize_local_error(Some(Error::Window(
+        crate::viewer_window::Error::NativeStopped(WindowStop::Hidden)
+    ))));
     assert!(resize_local_error(None));
     assert!(resize_local_error(Some(Error::NotViewing)));
-    assert!(resize_local_error(Some(Error::Window(crate::viewer_window::Error::NativeStopped(
-        WindowStop::GeometryChanged
-    )))));
+    assert!(resize_local_error(Some(Error::Window(
+        crate::viewer_window::Error::NativeStopped(WindowStop::GeometryChanged)
+    ))));
 }
 
 #[test]
@@ -113,7 +124,10 @@ fn resizing_retains_only_fit_preference_and_creates_fresh_native_owners() {
     let fresh = original.configuration(2).unwrap();
     assert_eq!(fresh.worker_epoch, 72);
     assert_eq!(fresh.fit_window, Some((960, 540)));
-    assert!(!fresh.display_picker, "resize alone does not choose a different display");
+    assert!(
+        !fresh.display_picker,
+        "resize alone does not choose a different display"
+    );
     let desktop = Desktop::new(fresh);
     assert!(desktop.window().is_none());
     assert!(desktop.input().is_none());
@@ -130,12 +144,22 @@ fn opting_in_without_an_established_native_receipt_cannot_reopen() {
         ObserverPolicy::default(),
         Mode::Observe,
         SummaryUi::default(),
-    ).with_window_resizing();
-    for failure in [Failure::Cancelled, Failure::Observation(ObserverError::Application)] {
-        assert_eq!(Application::local_layout_change(&mut value, failure), Ok(None));
+    )
+    .with_window_resizing();
+    for failure in [
+        Failure::Cancelled,
+        Failure::Observation(ObserverError::Application),
+    ] {
+        assert_eq!(
+            Application::local_layout_change(&mut value, failure),
+            Ok(None)
+        );
     }
     value.prepare_attempt(1).unwrap();
     assert!(value.resize_window.is_none());
-    assert_eq!(Application::local_layout_change(&mut value, Failure::Cancelled), Ok(None));
+    assert_eq!(
+        Application::local_layout_change(&mut value, Failure::Cancelled),
+        Ok(None)
+    );
     assert!(value.desktop.is_some(), "unreaped original remains owned");
 }

@@ -12,17 +12,19 @@ fn only_precise_resize_interruptions_reach_the_local_receipt_hook() {
         Failure::Observation(ObserverError::Session(S::Transport(
             fr_transport::quic::Error::Cancelled,
         ))),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Session(S::Transport(
-            fr_transport::quic::Error::Cancelled,
-        )))),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::Session(
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Session(
             S::Transport(fr_transport::quic::Error::Cancelled),
-        )))),
+        ))),
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(
+            C::Session(S::Transport(fr_transport::quic::Error::Cancelled)),
+        ))),
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Closed)),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::Closed))),
-        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(C::Capture(
-            crate::session_startup::viewer_events::Error::Closed,
-        )))),
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(
+            C::Closed,
+        ))),
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(
+            C::Capture(crate::session_startup::viewer_events::Error::Closed),
+        ))),
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Media(
             crate::media::Error::Worker(crate::worker::Error::WorkerRefused(
                 fr_media::worker::Error::GeometryChanged,
@@ -30,7 +32,10 @@ fn only_precise_resize_interruptions_reach_the_local_receipt_hook() {
         ))),
     ] {
         assert!(resize_interrupted(failure), "{failure:?}");
-        assert!(!retryable(failure), "an interruption alone cannot retry: {failure:?}");
+        assert!(
+            !retryable(failure),
+            "an interruption alone cannot retry: {failure:?}"
+        );
     }
     for failure in [
         Failure::Notification,
@@ -65,7 +70,10 @@ fn a_host_geometry_report_is_not_a_local_resize_receipt() {
     let report = fr_wire::closure::Closed {
         reason: fr_wire::closure::ClosedReason::GeometryChanged,
         cleanup: fr_wire::closure::Cleanup::Complete,
-        effects: fr_wire::closure::OutstandingEffects::Known { pending: 0, uncertain: 0 },
+        effects: fr_wire::closure::OutstandingEffects::Known {
+            pending: 0,
+            uncertain: 0,
+        },
     };
     let failure = Failure::Observation(ObserverError::Session(
         crate::session_startup::Error::RemoteClosed(report),

@@ -636,7 +636,7 @@ fn resize_local_error(error: Option<Error>) -> bool {
         // resize fence arrived concurrently. Never turn it into a new attempt.
         Some(Error::Observer(
             ObserverError::Application
-                | ObserverError::Streaming(frd::session_startup::StreamingViewerError::Application),
+            | ObserverError::Streaming(frd::session_startup::StreamingViewerError::Application),
         )) => false,
         Some(Error::Observer(error)) => {
             frd::native_connection::reconnect::resize_interrupted(Failure::Observation(error))
@@ -651,7 +651,10 @@ fn resize_cleanup_allows_reopen(summary: CleanupSummary, cleanup: Option<&Cleanu
     use crate::{viewer_input::StopReason, viewer_window};
     summary.failure.is_none()
         && summary.input_stop.is_none_or(|reason| {
-            matches!(reason, StopReason::Local | StopReason::Closed | StopReason::WindowResized)
+            matches!(
+                reason,
+                StopReason::Local | StopReason::Closed | StopReason::WindowResized
+            )
         })
         && retained_failure(summary, true).is_none()
         && cleanup.is_some_and(|report| {
