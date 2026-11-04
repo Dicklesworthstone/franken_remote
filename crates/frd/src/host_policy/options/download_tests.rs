@@ -114,7 +114,7 @@ fn live_host_send_endpoint_requires_one_explicit_controlled_share() {
     ])
     .unwrap();
     assert_eq!(options.send_control.as_deref(), Some("desk-1"));
-    assert!(options.send.is_empty());
+    assert_eq!(options.send.len(), 0);
     assert!(options.clipboard && options.audio);
     assert_eq!(options.files, Some(PathBuf::from("/local/drop")));
     for args in [

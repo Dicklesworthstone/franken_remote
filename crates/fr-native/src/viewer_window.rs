@@ -258,7 +258,7 @@ impl WindowControl {
         self.0.resize.cancel();
     }
     /// Only native window/input event owners call this after a real server
-    /// ConfigureNotify. The first cause is reserved before cancellation wakes
+    /// `ConfigureNotify`. The first cause is reserved before cancellation wakes
     /// cleanup; the one target may coalesce within the bounded native drain.
     pub(crate) fn record_resize(&self, width: u32, height: u32) -> bool {
         record_resize(&self.0, width, height, false)
@@ -852,6 +852,7 @@ impl FileGesture {
             let buffer = self
                 .buffer
                 .get_or_insert_with(|| vec![0; file_drop::MAX_BYTES].into_boxed_slice());
+            #[allow(clippy::cast_possible_truncation)] // MAX_BYTES is a small constant.
             // SAFETY: fixed-size owned byte storage; C checks the supplied cap,
             // writes only the retained property and never retains this pointer.
             let length = unsafe {
@@ -1009,6 +1010,7 @@ fn drain_resize_events(native: &Native<'_>) {
     native.shared.resize.cancel();
 }
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct Gestures {
     control: bool,
     display: bool,
@@ -1163,17 +1165,17 @@ fn run_window(native: &Native<'_>, started: Instant) {
             }
             resize_offered = true;
         }
-        if gesture.offer(&native).is_err() {
+        if gesture.offer(native).is_err() {
             shared.stop(StopReason::NativeFailure);
             return;
         }
-        if display.offer(&native).is_err() {
+        if display.offer(native).is_err() {
             shared.stop(StopReason::NativeFailure);
             return;
         }
-        files.tick(&native, fresh);
+        files.tick(native, fresh);
         let Some(observed) = drain_events(
-            &native,
+            native,
             &mut gesture,
             &mut display,
             &mut files,
@@ -1185,7 +1187,7 @@ fn run_window(native: &Native<'_>, started: Instant) {
         };
         if gesture
             .finish(
-                &native,
+                native,
                 observed.control,
                 fresh && !observed.control_invalidated,
             )
@@ -1196,7 +1198,7 @@ fn run_window(native: &Native<'_>, started: Instant) {
         }
         if display
             .finish(
-                &native,
+                native,
                 observed.display,
                 fresh && !observed.display_invalidated,
             )
@@ -1205,8 +1207,8 @@ fn run_window(native: &Native<'_>, started: Instant) {
             shared.stop(StopReason::NativeFailure);
             return;
         }
-        files.finish(&native, fresh && turn.elapsed() < choice::MAX_AGE);
-        if let Err(reason) = focus.tick(&native) {
+        files.finish(native, fresh && turn.elapsed() < choice::MAX_AGE);
+        if let Err(reason) = focus.tick(native) {
             shared.stop(reason);
             return;
         }

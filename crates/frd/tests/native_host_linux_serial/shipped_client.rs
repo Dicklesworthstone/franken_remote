@@ -229,6 +229,7 @@ fn run_displays(fr: &Path, api: &Path, roots: &Path) -> std::process::Output {
 
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress"]
+#[allow(clippy::too_many_lines)]
 fn shipped_fr_displays_negotiates_with_frd_run() {
     let fr = shipped_client();
     let api = fixture::Api::new();

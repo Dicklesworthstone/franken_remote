@@ -840,6 +840,7 @@ impl Drop for Driver {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&mut S) -> bool>(
     cx: &Cx,
     mut session: InputSession,

@@ -32,6 +32,7 @@ use std::{
 
 /// Local package and graphical-session configuration. This cannot be supplied
 /// by a remote peer. Absolute paths are not a package-signature/trust check.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Configuration {
     image: PathBuf,
     display: String,
@@ -493,7 +494,7 @@ impl Desktop {
         // Keyboard shortcuts belong only to a concrete initial --send batch.
         // Deferred and later selections use their own panel controls.
         self.file_controls = initial_selection.then(|| controls.clone());
-        self.file_intake = intake.clone();
+        self.file_intake.clone_from(&intake);
         // The original observer accepted the selection once BEFORE optional UI.
         // No peer XID, alternative session, source read or permission is created.
         let panel = self
@@ -664,6 +665,7 @@ impl Desktop {
     ///
     /// A rejected second open leaves this desktop untouched and drops only the
     /// newly supplied Viewer. A failed/unpolled attempt is terminal, never retryable.
+    #[allow(clippy::too_many_lines)]
     pub fn open<'a>(
         &'a mut self,
         viewer: Viewer,
@@ -775,10 +777,8 @@ impl Desktop {
                     .map_err(|error| failure.get().unwrap_or(Error::Observer(error)))?;
                 *observer = Some(ready);
                 if configuration.initial_snapshot {
-                    *initial_snapshot = observer
-                        .as_mut()
-                        .ok_or(Error::NotViewing)?
-                        .snapshot_initial()
+                    let ready = observer.as_mut().ok_or(Error::NotViewing)?;
+                    *initial_snapshot = Box::pin(ready.snapshot_initial())
                         .await
                         .map_err(Error::Observer)?;
                 }

@@ -80,7 +80,7 @@ impl Drop for Process {
 }
 fn run(args: &[&str]) -> Output {
     let output = Process::spawn(args).finish();
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     output
 }
 fn refused(output: &Output, code: &str, exit: i32) {

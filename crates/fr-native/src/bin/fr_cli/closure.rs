@@ -183,49 +183,6 @@ const fn cleanup(stage: Cleanup) -> &'static str {
     }
 }
 
-/// Project only an already-validated FRD0 Closed report from this session.
-/// An unsolicited report proves neither a close-request acknowledgement nor
-/// successful completion of a local close exchange. Its stages remain exact.
-#[cfg(target_os = "linux")]
-pub(super) fn failure(value: Closed) -> Failure {
-    let mut error = Failure::new(
-        close_code_name(value.reason),
-        "The host ended this session. Check its reported reason, cleanup and outstanding effects before starting a new session; previously submitted actions are not rolled back.",
-        1,
-    );
-    error.closure = Some(Report {
-        request_acknowledged: false,
-        transport_completed: false,
-        host: Some(value),
-    });
-    error
-}
-/// The same reason carried only by the host's terminal close code: no Closed
-/// report arrived, so none is shown and its cleanup and effects are unknown.
-#[cfg(all(target_os = "linux", any(test, feature = "linux-desktop")))]
-pub(super) fn close_code_failure(reason: fr_wire::closure::ClosedReason) -> Failure {
-    Failure::new(
-        close_code_name(reason),
-        "The host ended this session and closed the connection with this reason, but no Closed report arrived, so its cleanup and outstanding effects are unknown. Previously submitted actions are not rolled back.",
-        1,
-    )
-}
-#[cfg(target_os = "linux")]
-const fn close_code_name(reason: fr_wire::closure::ClosedReason) -> &'static str {
-    use fr_wire::closure::ClosedReason;
-    match reason {
-        ClosedReason::ClientRequested => "host_session_closed",
-        ClosedReason::HostStopping => "host_stopping",
-        ClosedReason::AuthorityExpired => "host_authority_expired",
-        ClosedReason::PermissionLost => "host_permission_lost",
-        ClosedReason::ViewInvalidated => "host_view_invalidated",
-        ClosedReason::ProtocolError => "host_protocol_error",
-        ClosedReason::HostFailure => "host_failure",
-        ClosedReason::SessionReplaced => "host_session_replaced",
-        ClosedReason::GeometryChanged => "host_geometry_changed",
-    }
-}
-
 /// Local cleanup failure/cancellation must keep any already-collected host
 /// report. The failure code and exit status still win; no success is fabricated.
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]

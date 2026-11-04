@@ -480,11 +480,12 @@ mod tests {
                 cleanup: CleanupStage::Released,
                 effects: EffectStage::ReceiptsComplete,
             }),
-            crate::closure::failure(Closed {
+            crate::closure::host_closed(Closed {
                 reason: ClosedReason::HostStopping,
                 cleanup: Cleanup::Complete,
                 effects: OutstandingEffects::Unknown,
-            }),
+            })
+            .unwrap(),
         ];
         for mut failure in errors {
             let exit = failure.exit;

@@ -261,7 +261,7 @@ impl Control {
     pub fn hide(&self) {
         self.stop(StopReason::Hidden);
     }
-    /// The selection already belongs to the original SendIntake. This only
+    /// The selection already belongs to the original `SendIntake`. This only
     /// replaces a completed upload or empty-source setup UI, without starting work or retargeting
     /// native events queued against its old window. Hidden/failed panels stay
     /// terminal, and only one replacement may wait for native cleanup.
@@ -375,7 +375,7 @@ impl Panel {
         display: &str,
         parent: crate::viewer_input::Window,
         session: StreamingViewerControl,
-        source: frd::native_clipboard::Control,
+        source: &frd::native_clipboard::Control,
     ) -> Result<Self, Error> {
         let result = Self::start_transfer(
             display,
@@ -460,15 +460,14 @@ impl Panel {
         // Retain the native task even if its independent watchdog cannot start.
         let watchdog = if control.privacy.is_some() {
             let shared = control.clone();
-            match thread::Builder::new()
+            let watchdog = thread::Builder::new()
                 .name("fr-clipboard-ui-watch".into())
-                .spawn(move || clipboard::supervise(&shared))
-            {
-                Ok(task) => Some(task),
-                Err(_) => {
-                    control.stop(StopReason::NativeFailure);
-                    None
-                }
+                .spawn(move || clipboard::supervise(&shared));
+            if let Ok(task) = watchdog {
+                Some(task)
+            } else {
+                control.stop(StopReason::NativeFailure);
+                None
             }
         } else {
             None

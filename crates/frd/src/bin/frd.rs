@@ -482,7 +482,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
             Event::PeerFinished { outcome, .. } => println!("frd: peer finished: {outcome}"),
             Event::ShareEnded { outcome } => println!("frd: share ended: {outcome}"),
             Event::SourceForcedRetirement => {
-                println!("frd: source cleanup exceeded its deadline; forced retirement confirmed")
+                println!("frd: source cleanup exceeded its deadline; forced retirement confirmed");
             }
             Event::CleanupFailed { stage } => eprintln!("frd: cleanup failed: {stage}"),
             Event::Stopped => println!("frd: stopped"),

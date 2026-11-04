@@ -1,6 +1,6 @@
 //! Actual pending viewer dispatch on the original TLS control route. The host
 //! terminal and late-grant bytes below are explicit codec-valid fixtures, not
-//! evidence that a native input lease was created. The host GrantServices test
+//! evidence that a native input lease was created. The host `GrantServices` test
 //! separately exercises the real queued-grant reporting boundary.
 use super::*;
 use fr_core::limits::ProtocolLimits;

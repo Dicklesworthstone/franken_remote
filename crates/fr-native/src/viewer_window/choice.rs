@@ -114,7 +114,7 @@ mod tests {
     fn stale_or_not_ready_intent_never_waits_for_later_evidence() {
         let choice = Choice::default();
         assert!(choice.enable());
-        choice.publish(Instant::now() - MAX_AGE);
+        choice.publish(Instant::now().checked_sub(MAX_AGE).unwrap());
         assert!(!choice.take(true));
         choice.publish(Instant::now());
         assert!(!choice.take(false));
@@ -144,7 +144,7 @@ mod tests {
             let mut state = choice.0.lock().unwrap();
             assert!(matches!(*state, State::Chosen(at) if at == original));
             // The exact same retained slot after its original deadline.
-            *state = State::Chosen(Instant::now() - MAX_AGE);
+            *state = State::Chosen(Instant::now().checked_sub(MAX_AGE).unwrap());
         }
         assert!(!choice.take(true));
         assert!(!choice.take(true));

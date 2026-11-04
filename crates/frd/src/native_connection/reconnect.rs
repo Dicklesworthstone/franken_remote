@@ -186,8 +186,8 @@ pub trait Application {
     }
     /// Called only for an authenticated application's resize-compatible native
     /// interruption, after successful mandatory cleanup and terminal-report
-    /// checks. Return WindowResize only from this attempt's checked native
-    /// ConfigureNotify, after its first frame, with old input fenced and no
+    /// checks. Return `WindowResize` only from this attempt's checked native
+    /// `ConfigureNotify`, after its first frame, with old input fenced and no
     /// competing focus/hide/local-stop failure. Consume one bounded target.
     /// The default never reopens. Original failure history is unchanged; every
     /// new owner repeats admission and starts without previous input consent.
@@ -584,13 +584,16 @@ pub fn resize_interrupted(failure: Failure) -> bool {
                             | StreamingViewerError::Session(
                                 S::Cancelled | S::Transport(fr_transport::quic::Error::Cancelled)
                             )
-                            | StreamingViewerError::Control(C::Closed)
-                            | StreamingViewerError::Control(C::Capture(
-                                crate::session_startup::viewer_events::Error::Closed
-                            ))
-                            | StreamingViewerError::Control(C::Session(
-                                S::Cancelled | S::Transport(fr_transport::quic::Error::Cancelled)
-                            ))
+                            | StreamingViewerError::Control(
+                                C::Closed
+                                    | C::Capture(
+                                        crate::session_startup::viewer_events::Error::Closed
+                                    )
+                                    | C::Session(
+                                        S::Cancelled
+                                            | S::Transport(fr_transport::quic::Error::Cancelled)
+                                    )
+                            )
                             | StreamingViewerError::Transport(fr_transport::quic::Error::Cancelled)
                             | StreamingViewerError::Media(crate::media::Error::Worker(
                                 crate::worker::Error::Cancelled

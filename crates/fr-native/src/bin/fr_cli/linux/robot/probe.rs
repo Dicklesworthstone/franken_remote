@@ -79,15 +79,15 @@ impl Drop for ProbeScope {
     }
 }
 
-pub(in crate::linux) fn execute<'a>(
+pub(in crate::linux) fn execute(
     cx: Cx,
     api: LocalApi,
     roots: Vec<Certificate>,
-    peer: &'a DiscoveredPeer,
+    peer: &DiscoveredPeer,
     port: u16,
     ipv6: bool,
     identity: RobotInspectData,
-) -> impl Future<Output = Result<CapabilityInspectionData, Failure>> + 'a {
+) -> impl Future<Output = Result<CapabilityInspectionData, Failure>> + '_ {
     let scope = ProbeScope(cx);
     async move {
         let operation =

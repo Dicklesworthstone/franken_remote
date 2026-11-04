@@ -470,9 +470,9 @@ impl X11Clipboard {
             return Err(PlatformError::Unavailable.into());
         }
         let mut sequence = 0;
-        // SAFETY: live connection and writable scalar; timestamp comes from
-        // its correlated real server notification, never CurrentTime.
         if self.privacy_allowed().is_err()
+            // SAFETY: live connection and writable scalar; timestamp comes from
+            // its correlated real server notification, never CurrentTime.
             || unsafe { ffi::fr_clip_tick(handle, &raw mut sequence) } != 0
         {
             // SAFETY: this fresh child is uniquely owned and no longer used.

@@ -443,7 +443,7 @@ pub(super) struct Daemon {
     stop: Arc<StopHandle>,
     thread: Option<JoinHandle<Result<(), host_run::Error>>>,
     cli: Option<DaemonCli>,
-    _api: fixture::Api,
+    api: fixture::Api,
     tools: Tools,
 }
 impl Daemon {
@@ -528,7 +528,7 @@ impl Daemon {
             stop,
             thread: Some(thread),
             cli: None,
-            _api: api,
+            api,
             tools,
         };
         assert!(
@@ -743,7 +743,7 @@ exec \"$@\"
                 stdout,
                 stderr,
             }),
-            _api: api,
+            api,
             tools,
         };
         assert!(
@@ -803,6 +803,7 @@ struct Downloads<'a> {
 }
 
 #[derive(Clone, Copy, Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct InputSettings {
     unmap_wheel: bool,
     capture_system_shortcuts: bool,
@@ -1364,7 +1365,7 @@ fn fr_connect_control_uses_ipv6_while_host_also_listens_on_ipv4() {
         }),
         "IPv6 control did not reach the independent host X11 observer"
     );
-    let paths = s.daemon._api.requests.lock().unwrap().clone();
+    let paths = s.daemon.api.requests.lock().unwrap().clone();
     assert!(paths.iter().any(|path| {
         path.starts_with("/localapi/v0/whois?addr=%5Bfd7a%3A115c%3Aa1e0%3A%3A2%5D%3A")
     }));

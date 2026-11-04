@@ -96,6 +96,7 @@ async fn attached(state: &mut Fixture, c: &Cx, h: &Cx, n: &mut u128, t: &mut u12
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn both_directions_publish_and_keep_input_on_the_original_controller() {
     run(|c, h| async move {
         let cleanup = Cx::current().unwrap();
@@ -232,6 +233,7 @@ fn both_directions_publish_and_keep_input_on_the_original_controller() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn cancelling_either_partial_direction_preserves_the_other_and_input() {
     for cancel_download in [false, true] {
         run(move |c, h| async move {
@@ -294,14 +296,7 @@ fn cancelling_either_partial_direction_preserves_the_other_and_input() {
                                 ),
                             }) if id == progress.id && actual == progress
                         ));
-                        assert!(
-                            state
-                                .viewer
-                                .file_receive_status()
-                                .unwrap()
-                                .results
-                                .is_empty()
-                        );
+                        assert_eq!(state.viewer.file_receive_status().unwrap().results.len(), 0);
                         state.viewer.cancel_file_receive().unwrap();
                     } else {
                         assert!(state.viewer.file_result().is_none());

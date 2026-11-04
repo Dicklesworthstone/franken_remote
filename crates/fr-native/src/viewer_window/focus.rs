@@ -200,7 +200,7 @@ mod tests {
             Err(StopReason::FocusUnavailable)
         );
         assert_eq!(
-            gate.observe(true, at - Duration::from_millis(1), at),
+            gate.observe(true, at.checked_sub(Duration::from_millis(1)).unwrap(), at),
             Err(StopReason::FocusUnavailable)
         );
         gate.observe(true, at, at).unwrap();

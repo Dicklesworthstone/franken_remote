@@ -9,7 +9,7 @@ use std::{
     io::{BufRead, BufReader, Read},
     process::{Child, Command, Stdio},
 };
-#[allow(dead_code)]
+#[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../../../fr-transport/tests/support/mod.rs"]
 mod support;
 struct Display {

@@ -357,12 +357,12 @@ async fn peer(
     observations: Option<observation::Publisher>,
     automation: Option<input::Shared>,
 ) -> Result<Option<UnixStream>, Error> {
-    let mut identify = [0; 8];
+    let mut opening = [0; 8];
     stream
-        .read_exact(&mut identify)
+        .read_exact(&mut opening)
         .await
         .map_err(|_| Error::Protocol)?;
-    if identify != IDENTIFY {
+    if opening != IDENTIFY {
         return Err(Error::Protocol);
     }
     stream

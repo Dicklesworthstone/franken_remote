@@ -145,9 +145,8 @@ impl Owner {
             }
             // The hook runs on the existing clipboard worker, within that
             // worker's original setup deadline, before the native factory.
-            let panel = parent.and_then(|parent| {
-                Panel::start_clipboard(&display, parent, session, source.clone())
-            });
+            let panel = parent
+                .and_then(|parent| Panel::start_clipboard(&display, parent, session, &source));
             let control = panel.as_ref().map(Panel::control).map_err(|error| *error);
             {
                 let mut state = lock(&shared);
@@ -202,7 +201,9 @@ mod tests {
     #[test]
     fn opening_progress_cannot_extend_mapping_deadline_and_stale_ui_cannot_authorize_access() {
         let start = Instant::now();
-        let mapped = start + MAP_TIMEOUT - Duration::from_millis(1);
+        let mapped = (start + MAP_TIMEOUT)
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
         assert_eq!(
             progress_check(Status::Opening, mapped, start, mapped),
             Ok(())

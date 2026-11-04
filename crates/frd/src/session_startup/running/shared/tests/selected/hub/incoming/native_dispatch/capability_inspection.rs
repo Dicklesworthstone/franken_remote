@@ -180,7 +180,7 @@ fn repeated_inspections_leave_the_original_factory_for_a_later_approved_session(
             notice.lock().unwrap().take().unwrap().decide(true).unwrap();
             let mut viewer = Box::pin(Client::start(c, viewer)).await;
             viewer.ready().await;
-            assert!(!viewer.frames.is_empty());
+            assert_ne!(viewer.frames.len(), 0);
             assert_eq!(factories.load(Ordering::SeqCst), 1);
             assert_eq!(choices.load(Ordering::SeqCst), 1);
             assert!(!h.is_cancel_requested());

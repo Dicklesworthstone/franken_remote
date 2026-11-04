@@ -228,9 +228,9 @@ fn a_continuous_critical_backlog_cannot_starve_reliable_recovery() {
             if turn < 4 {
                 // Only one 900-byte bulk prefix per critical turn: recovery
                 // cannot spend the ordinary eight-prefix burst here.
-                assert!(recovery_received.is_empty());
+                assert_eq!(recovery_received.len(), 0);
             } else {
-                assert_eq!(recovery_received, [recovery.clone()]);
+                assert_eq!(recovery_received, std::slice::from_ref(&recovery));
             }
         }
         // No sender receive turn ran: native staging and application receipt

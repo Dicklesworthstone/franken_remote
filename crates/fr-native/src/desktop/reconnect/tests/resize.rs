@@ -1,8 +1,7 @@
-//! Policy fixtures only: native resize/retirement are exercised by viewer_window.
+//! Policy fixtures only: native resize/retirement are exercised by `viewer_window`.
 use super::*;
 use crate::viewer_input::StopReason as InputStop;
 use crate::viewer_window::StopReason as WindowStop;
-use std::os::unix::process::ExitStatusExt;
 
 fn summary() -> CleanupSummary {
     CleanupSummary {
@@ -14,7 +13,10 @@ fn summary() -> CleanupSummary {
 }
 fn retired() -> Cleanup {
     let mut cleanup = report();
-    cleanup.media = Ok(Some(std::process::ExitStatus::from_raw(0)));
+    cleanup.media = Ok(Some(asupersync::process::ExitStatus::from_parts(
+        Some(0),
+        None,
+    )));
     cleanup.input = CaptureCleanup::Complete;
     cleanup.window = WindowCleanup::Complete(WindowStop::GeometryChanged);
     cleanup

@@ -182,7 +182,7 @@ pub(super) fn run(request: &Request) -> Result<String, Failure> {
     };
     let result = result.and_then(|()| {
         if let Some(info) = info {
-            return closed(info, request.json, application.disconnect_outcome());
+            return closed(&info, request.json, application.disconnect_outcome());
         }
         report::render(
             request,
@@ -196,7 +196,7 @@ pub(super) fn run(request: &Request) -> Result<String, Failure> {
 }
 
 fn closed(
-    info: session_control::Info,
+    info: &session_control::Info,
     json: bool,
     close: Option<frd::session_startup::ViewerCloseOutcome>,
 ) -> Result<String, Failure> {

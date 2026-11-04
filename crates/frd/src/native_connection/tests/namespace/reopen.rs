@@ -334,7 +334,15 @@ async fn scenario(
                 .await
                 .unwrap(),
             };
-            host_attempt(&host_cx, &cleanup, endpoint, &opened, attempt, report(mode)).await;
+            Box::pin(host_attempt(
+                &host_cx,
+                &cleanup,
+                endpoint,
+                &opened,
+                attempt,
+                report(mode),
+            ))
+            .await;
             closed.store(attempt, Ordering::Release);
         }
     };

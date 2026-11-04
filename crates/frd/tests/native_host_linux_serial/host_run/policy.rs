@@ -100,6 +100,7 @@ fn malformed_live_policy_stops_active_capture_without_an_unsafe_restart() {
 fn overridden_disk_revision_still_retires_old_source_before_reopening() {
     update_active(Update::Overridden);
 }
+#[allow(clippy::too_many_lines)]
 fn update_active(update: Update) {
     let api = fixture::Api::new();
     let tools = Tools::new();

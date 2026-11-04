@@ -2,6 +2,7 @@
 //! constructor has no fixture mode and still requires installed `LocalAPI` proof.
 use super::*;
 use asupersync::types::Budget;
+#[allow(dead_code)] // Inspection is owned and tested by the fr-client crate itself.
 #[path = "../../../fr-client/src/startup.rs"]
 mod client_startup;
 pub(crate) use crate::test_support::transport_support as support;

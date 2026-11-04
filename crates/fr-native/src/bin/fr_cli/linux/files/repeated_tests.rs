@@ -143,7 +143,7 @@ fn aggregate_absence_cannot_override_any_batch_report() {
         }),
     });
     assert_eq!(complete.absence, None);
-    assert!(complete.sent.is_empty());
+    assert_eq!(complete.sent, [] as [(usize, u64, bool); 0]);
     assert_eq!(complete.requested, 4);
     assert_eq!(
         complete.refused,

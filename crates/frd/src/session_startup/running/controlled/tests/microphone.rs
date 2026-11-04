@@ -1,6 +1,6 @@
 //! Real UDP/TLS through the running controller, original counted input agent,
 //! and existing microphone coordinator. Only the native success case needs the
-//! real installed workers and a private PipeWire daemon; no fake audio backend.
+//! real installed workers and a private `PipeWire` daemon; no fake audio backend.
 use super::*;
 use crate::{microphone_process as native, microphone_quic as uplink};
 use fr_core::audio::{AudioChannels, AudioDirection, AudioGeneration, AudioStopReason};

@@ -315,11 +315,11 @@ impl ObservationControl {
             );
         }
     }
-    /// Record checked source failure BEFORE SelectionGuard fences authority.
+    /// Record checked source failure BEFORE `SelectionGuard` fences authority.
     /// Preserve an expired admission, a local stop or an earlier failure; none
     /// may be relabelled as permission to reconnect after a resize.
-    pub(super) fn capture_failure(&self, error: worker::Error) -> Error {
-        let error = Error::Worker(error);
+    pub(super) fn capture_failure(&self, error: impl Into<Error>) -> Error {
+        let error = error.into();
         if error.is_geometry_changed() {
             if let Err(authority) = self.note_geometry_changed() {
                 return authority;

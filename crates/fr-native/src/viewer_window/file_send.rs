@@ -210,7 +210,7 @@ impl Worker {
             // Preparation rechecks the original lane; a stale/closed selection
             // gets its own result instead of being silently replaced.
             if let Some(dropped) = self.inbox.take() {
-                self.prepare(dropped);
+                self.prepare(&dropped);
             }
             self.shared.record_retired(&self.inbox);
             // Eligibility comes from the original lane and panel, NOT from
@@ -219,7 +219,7 @@ impl Worker {
             thread::sleep(TURN);
         }
     }
-    fn prepare(&self, dropped: Dropped) {
+    fn prepare(&self, dropped: &Dropped) {
         let index = {
             let mut batches = self.shared.batches();
             if batches.len() >= MAX_BATCHES {
@@ -232,7 +232,7 @@ impl Worker {
             });
             index
         };
-        let outcome = self.select(&dropped, index);
+        let outcome = self.select(dropped, index);
         self.shared.batches()[index].outcome = outcome;
     }
     fn select(&self, dropped: &Dropped, index: usize) -> Outcome {

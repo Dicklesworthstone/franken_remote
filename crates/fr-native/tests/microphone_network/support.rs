@@ -1,6 +1,6 @@
 //! Local policy fixtures carried over actual certificate-authenticated UDP/TLS.
 //! Presentation is synthetic; the accepted grant, original input attachment,
-//! AudioUp attachment and all microphone records use the production owners.
+//! `AudioUp` attachment and all microphone records use the production owners.
 use super::{authority, network};
 use asupersync::cx::Cx;
 use fr_client::{
@@ -241,7 +241,7 @@ impl Link {
     }
     /// Accept the fixture's actual Granted record after transport delivery on
     /// this original critical control pair. No second owner is reconstructed
-    /// for AudioUp or capture renewal.
+    /// for `AudioUp` or capture renewal.
     pub async fn controller(&mut self, cx: &Cx) -> (InputClient, Instant) {
         let origin = Instant::now();
         let grant = authority::grant();

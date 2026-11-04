@@ -281,12 +281,12 @@ impl Shared {
         }
         checked
     }
-    fn bind_revoke(&self, socket: Arc<UnixStream>) -> Result<(), Error> {
+    fn bind_revoke(&self, socket: &Arc<UnixStream>) -> Result<(), Error> {
         if self.stopped.load(Ordering::Acquire) {
             let _ = socket.shutdown(Shutdown::Both);
             return Err(Error::Stopped);
         }
-        self.revoke.set(socket.clone()).map_err(|socket| {
+        self.revoke.set(Arc::clone(socket)).map_err(|socket| {
             let _ = socket.shutdown(Shutdown::Both);
             Error::Stopped
         })?;
@@ -754,7 +754,7 @@ fn spawn(
     let (codec_parent, device_codec) = UnixStream::pair().map_err(|_| Error::Spawn)?;
     command.set_nonblocking(true).map_err(|_| Error::Spawn)?;
     revoke.set_nonblocking(true).map_err(|_| Error::Spawn)?;
-    shared.bind_revoke(Arc::new(revoke))?;
+    shared.bind_revoke(&Arc::new(revoke))?;
     let codec_output = codec_parent.try_clone().map_err(|_| Error::Spawn)?;
     let mut codec = Command::new(&launch.codec);
     codec

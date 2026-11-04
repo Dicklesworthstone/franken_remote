@@ -151,6 +151,7 @@ fn host_revocation_wins_over_a_racing_transport_end_and_keeps_effect_stages() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_later_view_close_cannot_replace_the_original_control_exchange_or_input_results() {
     use fr_wire::closure::{Cleanup, Closed, ClosedReason, OutstandingEffects};
     let mut ui = requested();

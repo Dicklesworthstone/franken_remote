@@ -155,7 +155,10 @@ fn tampering_with_either_protection_fences_the_whole_idle_listener_set() {
             assert!(supervisor.is_cancel_requested());
             assert!(!broker.is_cancel_requested());
             assert!(identity.status(&broker).is_ok());
-            assert!(app.outcomes.is_empty());
+            assert_eq!(
+                app.outcomes,
+                [] as [std::result::Result<u128, frd::native_connection::host::Error>; 0]
+            );
             assert_eq!(api.whois.load(Ordering::Acquire), 0);
             for address in server.addresses() {
                 assert!(UdpSocket::bind(address).is_ok());

@@ -108,7 +108,7 @@ fn structural_entries_commit_regular_files_too_and_never_produce_chunks() {
             let entry = &manifest.entries[index];
             assert_eq!(entry.metadata.as_ref(), Some(&directory_metadata()));
             assert_eq!(entry.sha256_hex, EMPTY_SHA256);
-            assert!(entry.members.is_empty());
+            assert_eq!(entry.members.len(), 0);
         }
         assert!(manifest.entries[1].metadata.is_none());
         assert_eq!(manifest.entries[1].sha256_hex, EMPTY_SHA256);

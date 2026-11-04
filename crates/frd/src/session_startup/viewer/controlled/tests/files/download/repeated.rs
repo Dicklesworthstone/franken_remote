@@ -53,14 +53,7 @@ fn idle_host_lane_sends_later_batches_without_replaying_handles_or_extending_a_d
                 }
                 assert_eq!(state.host.file_send_stage(), Some(Stage::Idle));
                 assert!(state.host.file_batch_report().is_none());
-                assert!(
-                    state
-                        .viewer
-                        .file_receive_status()
-                        .unwrap()
-                        .results
-                        .is_empty()
-                );
+                assert_eq!(state.viewer.file_receive_status().unwrap().results.len(), 0);
                 assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
                 // Control remains usable while the download attachment has no source.
                 for pressed in [true, false] {
@@ -290,14 +283,7 @@ fn closing_the_host_command_surface_retires_queued_selection_without_a_source_or
                     lane.host(&mut state.host, view, &mut tickets);
                 }
                 assert_eq!(fs::read_dir(&dest.0).unwrap().count(), 0);
-                assert!(
-                    state
-                        .viewer
-                        .file_receive_status()
-                        .unwrap()
-                        .results
-                        .is_empty()
-                );
+                assert_eq!(state.viewer.file_receive_status().unwrap().results.len(), 0);
                 assert!(!state.viewer.is_closed() && !state.host.control().is_stopped());
                 retire(&mut state, &cleanup).await;
                 lane.close();

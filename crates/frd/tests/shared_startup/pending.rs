@@ -21,7 +21,7 @@ struct PendingGroup {
     peers: Vec<PendingPeer>,
 }
 async fn group(rt: &Runtime, count: usize) -> Box<PendingGroup> {
-    group_with_timeout(rt, count, Duration::from_secs(2)).await
+    Box::pin(group_with_timeout(rt, count, Duration::from_secs(2))).await
 }
 async fn group_with_timeout(
     rt: &Runtime,

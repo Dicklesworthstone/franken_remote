@@ -61,7 +61,7 @@ fn run(args: &[&str]) -> Output {
     }
     let output = process.0.take().unwrap().wait_with_output().unwrap();
     assert!(output.stdout.len() < 16 * 1024);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     output
 }
 fn refused(output: &Output, code: &str, exit: i32) {

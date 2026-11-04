@@ -270,7 +270,8 @@ mod tests {
         assert_eq!(paths(&vec![b'a'; MAX_BYTES + 1]), Err(Refusal::TooLarge));
         let eight = (0..MAX_PATHS)
             .map(|n| format!("file:///tmp/{n}\n"))
-            .collect::<String>();
+            .collect::<Vec<_>>()
+            .concat();
         assert_eq!(paths(eight.as_bytes()).unwrap().len(), MAX_PATHS);
         assert_eq!(
             paths(format!("{eight}file:///tmp/extra").as_bytes()),
@@ -290,7 +291,7 @@ mod tests {
         assert!(inbox.take().is_none());
         assert!(!inbox.ready());
         inbox.set_ready(true);
-        assert!(!inbox.publish(files(), Instant::now() - MAX_AGE));
+        assert!(!inbox.publish(files(), Instant::now().checked_sub(MAX_AGE).unwrap()));
         inbox.close();
         inbox.set_ready(true);
         assert!(!inbox.publish(files(), Instant::now()));
@@ -357,7 +358,7 @@ mod tests {
                 panic!("the accepted gesture must occupy the original slot");
             };
             assert!(!format!("{dropped:?}").contains("private-expiring-name"));
-            dropped.captured = Instant::now() - MAX_AGE;
+            dropped.captured = Instant::now().checked_sub(MAX_AGE).unwrap();
         }
         assert!(inbox.take().is_none());
         inbox.set_ready(true);
@@ -379,7 +380,7 @@ mod tests {
         let inbox = Inbox::default();
         let files = || vec![PathBuf::from("/tmp/explicit")];
         inbox.set_ready(true);
-        assert!(!inbox.publish(files(), Instant::now() - MAX_AGE));
+        assert!(!inbox.publish(files(), Instant::now().checked_sub(MAX_AGE).unwrap()));
         assert!(inbox.take_retired().is_none());
         assert!(!inbox.publish(Vec::new(), Instant::now()));
         assert!(!inbox.publish(

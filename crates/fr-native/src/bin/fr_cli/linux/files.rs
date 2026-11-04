@@ -106,13 +106,14 @@ impl Local {
         // spent. A pre-request startup retry still needs fresh descriptors;
         // later viewing/explicit-control attempts retain the original result.
         let configured = match &self.selection {
-            Some(selection) => match selection.request() {
-                Ok(request) => desktop.configure_file_send_with_intake(request),
-                Err(_) => {
+            Some(selection) => {
+                if let Ok(request) = selection.request() {
+                    desktop.configure_file_send_with_intake(request)
+                } else {
                     self.attempt = Some(Attempt::Absent("local_selection_unavailable"));
                     return;
                 }
-            },
+            }
             None => desktop.configure_file_drop(),
         };
         self.attempt = Some(match configured {
@@ -383,10 +384,13 @@ mod tests {
         assert!(select(&[], false).unwrap().is_none());
         let local = select(&[], true).unwrap().unwrap();
         assert!(local.selection.is_none());
-        assert!(local.sizes.is_empty());
+        assert_eq!(local.sizes, [] as [std::option::Option<u64>; 0]);
         assert_eq!(local.summary().requested, 0);
-        assert!(local.summary().sent.is_empty());
-        assert!(local.summary().refused.is_empty());
+        assert_eq!(local.summary().sent, [] as [(usize, u64, bool); 0]);
+        assert_eq!(
+            local.summary().refused,
+            [] as [(usize, std::option::Option<u64>, &str); 0]
+        );
         assert_eq!(local.summary().absence, Some("files_not_started"));
         let empty = summary(
             &[],

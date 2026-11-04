@@ -324,11 +324,12 @@ pub fn run(options: &Options) -> Result<String, Failure> {
 pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
     run_mode(options, true)
 }
+#[allow(clippy::too_many_lines)]
 fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
-    if let Command::SavedHosts(saved) = &options.command {
-        if let Some(text) = super::saved_hosts::local(saved, options.json)? {
-            return Ok(text);
-        }
+    if let Command::SavedHosts(saved) = &options.command
+        && let Some(text) = super::saved_hosts::local(saved, options.json)?
+    {
+        return Ok(text);
     }
     let mut shutdown = Shutdown::new()?;
     let runtime = RuntimeBuilder::current_thread()
@@ -1581,12 +1582,14 @@ fn control_history(progress: &Progress, control: &control::Counters) -> crate::C
     let changes = display_change::history(progress);
     history.json.push_str(&changes.json);
     history.text.push_str(&changes.text);
-    history.json.push_str(&format!(
-        ",\"initial_control_decision_retired_at\":{}",
-        control
+    history
+        .json
+        .push_str(",\"initial_control_decision_retired_at\":");
+    history.json.push_str(
+        &control
             .initial_decision_retired_at
-            .map_or_else(|| "null".to_owned(), |attempt| attempt.to_string())
-    ));
+            .map_or_else(|| "null".to_owned(), |attempt| attempt.to_string()),
+    );
     history
 }
 #[cfg(test)]
@@ -2013,6 +2016,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::too_many_lines)]
         fn transient_control_loss_reconnects_viewing_and_preserves_the_original_outcome() {
             let control = || Progress {
                 control: Some(control::Counters::default()),
@@ -2147,6 +2151,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::large_stack_arrays)]
         fn completions_report_the_last_attempts_recovery_counts_or_null() {
             let media = frd::session_startup::ViewerStatistics {
                 decoded: 41,
@@ -2175,6 +2180,7 @@ mod tests {
         }
 
         #[test]
+        #[allow(clippy::large_stack_arrays)]
         fn control_completion_reports_the_clipboard_by_type_and_count_only() {
             let with = |clipboard| Progress {
                 control: Some(control::Counters {

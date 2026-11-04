@@ -1,5 +1,6 @@
 //! Actual abstract sockets and the actual mailbox. Synthetic pixel fixtures
 //! qualify framing and owner identity only, never a decoder or live desktop.
+#![allow(clippy::large_futures)] // Test-thread awaits of QUIC fixtures; no production stack.
 use super::*;
 use crate::session_control::{Owner, hex};
 use asupersync::{runtime::RuntimeBuilder, types::Budget};

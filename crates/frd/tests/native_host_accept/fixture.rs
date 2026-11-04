@@ -115,6 +115,7 @@ impl Api {
     pub fn dual_stack() -> Self {
         Self::profile(true)
     }
+    #[allow(clippy::too_many_lines)]
     fn profile(dual_stack: bool) -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = pki().join(format!("host-api-{}", NEXT.fetch_add(1, Ordering::SeqCst)));

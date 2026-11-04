@@ -60,11 +60,11 @@ fn fixture(target: &str, replies: Vec<Reply>) -> thread::JoinHandle<()> {
             let mut identify = [0; 8];
             stream.read_exact(&mut identify).unwrap();
             assert_eq!(&identify, b"FRSC1ID\0");
-            let mut identity = b"FRSC1ME\0".to_vec();
-            identity.extend_from_slice(&INSTANCE);
-            identity.extend_from_slice(&u16::try_from(target.len()).unwrap().to_be_bytes());
-            identity.extend_from_slice(target.as_bytes());
-            stream.write_all(&identity).unwrap();
+            let mut answer = b"FRSC1ME\0".to_vec();
+            answer.extend_from_slice(&INSTANCE);
+            answer.extend_from_slice(&u16::try_from(target.len()).unwrap().to_be_bytes());
+            answer.extend_from_slice(target.as_bytes());
+            stream.write_all(&answer).unwrap();
             if matches!(reply, Reply::StalePin) {
                 assert_eq!(
                     stream.read(&mut [0]).unwrap(),
@@ -116,7 +116,7 @@ fn cli(args: &[&str]) -> Output {
     }
     let output = child.wait_with_output().unwrap();
     assert!(output.stdout.len() < 16 * 1024);
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
     output
 }
 fn query(target: &str, id: &str) -> Output {

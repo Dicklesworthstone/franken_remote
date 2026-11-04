@@ -84,6 +84,7 @@ fn assert_empty_branches(root: &Path) {
 
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; two Xvfb displays; real frd/fr CLIs, input agent and file lane"]
+#[allow(clippy::too_many_lines)]
 fn host_selections_download_atomically_while_control_and_clipboard_stay_live() {
     let source = Dir::new("download-source");
     let destination = Dir::new("download-destination");

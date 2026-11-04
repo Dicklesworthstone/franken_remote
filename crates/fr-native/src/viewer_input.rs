@@ -120,7 +120,7 @@ pub enum StopReason {
     EscapeUnavailable,
     LocalEscape,
     SystemShortcutsUnavailable,
-    /// A real ConfigureNotify changed this original target's dimensions.
+    /// A real `ConfigureNotify` changed this original target's dimensions.
     /// Separate from hide, unmap, obscuring and unverified window changes.
     WindowResized,
 }

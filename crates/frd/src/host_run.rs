@@ -617,7 +617,7 @@ async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
 async fn restart_wait(cx: &Cx, stop: &StopHandle, delay: Duration) {
     let mut waited = Duration::ZERO;
     while waited < delay && !stop.is_requested() {
-        let tick = Duration::from_millis(250).min(delay - waited);
+        let tick = Duration::from_millis(250).min(delay.saturating_sub(waited));
         asupersync::time::sleep(cx.now(), tick).await;
         waited += tick;
     }

@@ -5,7 +5,7 @@
 use super::*;
 
 /// This peer never selects ordinary key events on the root. Its key notices
-/// therefore prove real passive grabs, independently of FrankenRemote's active
+/// therefore prove real passive grabs, independently of `FrankenRemote`'s active
 /// keyboard owner. The same bindings must work after that owner has ended.
 const PROBE: &str = r#"
 # The CLI disables display switching before requesting control; the title must

@@ -132,6 +132,7 @@ impl X11Clipboard {
     /// native preparation. Once false it is terminal for this owner. The
     /// callback must be nonblocking and cannot call this clipboard recursively.
     /// Existing gates are retained when this is composed more than once.
+    #[must_use]
     pub fn with_privacy_gate(mut self, gate: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         let previous = self.privacy.take();
         self.privacy = Some(Box::new(move || {

@@ -132,6 +132,7 @@ pub enum CleanupFailure {
 /// TLS and identity checks, bounded backoff and an independent cleanup context.
 /// This adapter never dials, retries, approves, or takes control by itself.
 /// Keep it after failure to inspect or finish cleanup of the original Desktop.
+#[allow(clippy::struct_excessive_bools)]
 pub struct Session<U> {
     configuration: Configuration,
     policy: ObserverPolicy,
@@ -380,6 +381,7 @@ impl<U: Ui> Application for Session<U> {
         }
         self.ui.offer(attempt, original)
     }
+    #[allow(clippy::too_many_lines)]
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
         self.prepare_attempt(attempt)?;
         let stop = viewer.control();
@@ -631,7 +633,13 @@ impl<U: Ui> Application for Session<U> {
 fn resize_local_error(error: Option<Error>) -> bool {
     match error {
         // A fenced native owner can wake the supervisor before run returns.
-        None | Some(Error::NotViewing) => true,
+        None
+        | Some(
+            Error::NotViewing
+            | Error::Window(crate::viewer_window::Error::NativeStopped(
+                crate::viewer_window::StopReason::GeometryChanged,
+            )),
+        ) => true,
         // A callback refusal is a distinct local cause even when the native
         // resize fence arrived concurrently. Never turn it into a new attempt.
         Some(Error::Observer(
@@ -641,9 +649,6 @@ fn resize_local_error(error: Option<Error>) -> bool {
         Some(Error::Observer(error)) => {
             frd::native_connection::reconnect::resize_interrupted(Failure::Observation(error))
         }
-        Some(Error::Window(crate::viewer_window::Error::NativeStopped(
-            crate::viewer_window::StopReason::GeometryChanged,
-        ))) => true,
         _ => false,
     }
 }
@@ -672,9 +677,9 @@ fn resize_cleanup_allows_reopen(summary: CleanupSummary, cleanup: Option<&Cleanu
 fn requested_close_allows_reopen(summary: CleanupSummary) -> bool {
     use crate::viewer_input::StopReason;
     summary.failure.is_none()
-        && !summary
+        && summary
             .input_stop
-            .is_some_and(|reason| !matches!(reason, StopReason::Local | StopReason::Closed))
+            .is_none_or(|reason| matches!(reason, StopReason::Local | StopReason::Closed))
         && (summary.disconnect.is_some() || summary.control_disconnect.is_some())
         && closing_failure(summary).is_none()
 }

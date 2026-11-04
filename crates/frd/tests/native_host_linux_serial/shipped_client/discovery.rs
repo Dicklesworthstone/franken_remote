@@ -108,7 +108,7 @@ fn shipped_fr_hosts_probe_keeps_peer_failures_separate_and_never_opens_observati
     // also proves the absent trace above was a live launch sentinel, not a
     // broken fixture or a failed host quietly presented as a successful probe.
     let output = run_displays(&fr, &api.path, &host.roots);
-    assert!(output.status.success(), "{:?}", output);
+    assert!(output.status.success(), "{output:?}");
     let displays: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(displays["displays"].as_array().unwrap().len(), 1);
     assert!(

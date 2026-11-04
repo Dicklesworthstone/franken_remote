@@ -108,6 +108,7 @@ fn peer_session(error: &crate::session_startup::Error) -> bool {
         | E::ReferenceRecovery(_)
         | E::DecoderStartup(_)
         | E::Clipboard(_)
+        | E::Microphone(_)
         | E::ReceiverFeedback(_)
         | E::PresentedState(_)
         | E::Media(_)

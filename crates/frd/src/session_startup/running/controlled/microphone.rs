@@ -127,7 +127,7 @@ impl ControlledHost {
         self.microphone.pending.is_some()
     }
 
-    /// Join one completed AudioUp pair after the original input grant.
+    /// Join one completed `AudioUp` pair after the original input grant.
     /// Approval is separate local microphone consent; worker paths are local
     /// installation choices. Failure returns the original non-cloneable lane.
     /// A foreign or second pair is never dropped, retired or adopted on error.

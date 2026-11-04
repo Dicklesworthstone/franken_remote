@@ -18,7 +18,7 @@ fn host_choice_is_explicit_and_retains_all_connection_permissions_and_limits() {
         panic!("connection")
     };
     assert!(connection.choose_host && connection.control);
-    assert!(connection.target.node.is_empty());
+    assert_eq!(connection.target.node, "");
     assert_eq!(connection.target.port, 9443);
     assert_eq!(connection.display, DisplayChoice::Choose);
     assert_eq!(connection.x_display.as_deref(), Some(":91"));

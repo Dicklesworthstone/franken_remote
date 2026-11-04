@@ -341,6 +341,6 @@ fn offer_forwarding_cannot_bypass_old_native_ownership_or_attempt_bounds() {
             Err(CallbackError)
         );
     }
-    assert!(session.ui.seen.is_empty());
+    assert_eq!(session.ui.seen.len(), 0);
     assert!(session.desktop.is_some());
 }

@@ -41,7 +41,7 @@ impl Calls {
 struct Native(Rc<RefCell<Calls>>);
 struct Text;
 impl NativeText for Text {
-    fn text(&self) -> &str {
+    fn text(&self) -> &'static str {
         ""
     }
     fn origin(&self) -> Option<Stamp> {

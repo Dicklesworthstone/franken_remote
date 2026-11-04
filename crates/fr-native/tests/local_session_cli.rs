@@ -55,11 +55,11 @@ fn fixture(target: &str, exchanges: Vec<Exchange>) -> JoinHandle<()> {
             let mut identify = [0; 8];
             stream.read_exact(&mut identify).unwrap();
             assert_eq!(&identify, b"FRSC1ID\0");
-            let mut identity = b"FRSC1ME\0".to_vec();
-            identity.extend_from_slice(&INSTANCE);
-            identity.extend_from_slice(&u16::try_from(target.len()).unwrap().to_be_bytes());
-            identity.extend_from_slice(target.as_bytes());
-            stream.write_all(&identity).unwrap();
+            let mut reply = b"FRSC1ME\0".to_vec();
+            reply.extend_from_slice(&INSTANCE);
+            reply.extend_from_slice(&u16::try_from(target.len()).unwrap().to_be_bytes());
+            reply.extend_from_slice(target.as_bytes());
+            stream.write_all(&reply).unwrap();
             match exchange {
                 Exchange::Inspect => {
                     let mut byte = [0; 1];

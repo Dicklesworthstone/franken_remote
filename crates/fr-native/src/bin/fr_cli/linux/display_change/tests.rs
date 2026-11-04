@@ -129,7 +129,10 @@ fn failed_cleanup_real_close_duplicate_and_out_of_order_changes_do_not_retire_co
         let mut progress = progress();
         assert_eq!(record(&mut progress, next), Err(CallbackError));
         assert!(progress.control.unwrap().initial_decision_available());
-        assert!(progress.display_change_closes.is_empty());
+        assert_eq!(
+            progress.display_change_closes,
+            [] as [(u8, fr_native::desktop::reconnect::CleanupSummary); 0]
+        );
     }
     let mut closed = progress();
     closed.user_closed = true;
@@ -306,7 +309,10 @@ fn local_resize_retires_original_consent_and_reports_its_own_viewport_history() 
         Some(fr_native::viewer_input::StopReason::WindowResized);
     record_resize(&mut progress, 2, (960, 540)).unwrap();
     assert_eq!(progress.display_changes, 0);
-    assert!(progress.display_change_closes.is_empty());
+    assert_eq!(
+        progress.display_change_closes,
+        [] as [(u8, fr_native::desktop::reconnect::CleanupSummary); 0]
+    );
     assert_eq!(progress.window_resizes.len(), 1);
     assert!(!progress.control.unwrap().initial_decision_available());
     assert!(!progress.control.unwrap().requested);
@@ -373,7 +379,14 @@ fn resize_bounds_duplicate_intents_and_adverse_cleanup_cannot_spend_consent() {
         let mut value = progress();
         assert_eq!(record_resize(&mut value, 2, size), Err(CallbackError));
         assert!(value.control.unwrap().initial_decision_available());
-        assert!(value.window_resizes.is_empty());
+        assert_eq!(
+            value.window_resizes,
+            [] as [(
+                u8,
+                (u32, u32),
+                fr_native::desktop::reconnect::CleanupSummary
+            ); 0]
+        );
     }
     for reason in [
         fr_native::viewer_input::StopReason::FocusLost,

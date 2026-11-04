@@ -262,7 +262,7 @@ impl Epoch {
             || HostInstant::from_micros(timer.now().as_nanos() / 1000),
         )
         .map_err(Error::Native)?;
-        if let Err(error) = parameters.shared.install(process.control()) {
+        if let Err(error) = parameters.shared.install(&process.control()) {
             process.stop();
             self.retiring = Some(process.retirement());
             return Err(error);

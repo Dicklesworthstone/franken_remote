@@ -123,7 +123,7 @@ pub struct Target {
     pub port: u16,
     pub ipv6: bool,
 }
-#[allow(dead_code)]
+#[allow(dead_code, clippy::struct_excessive_bools)]
 pub struct Connection {
     pub target: Target,
     /// Select one current installed-daemon peer in a local native window.

@@ -381,4 +381,5 @@ fn abandoning_a_never_admitted_action_removes_its_clipboard_receipt_obligation()
     assert!(!lane.is_closed());
 }
 
+#[path = "clipboard_suspension/expiry.rs"]
 mod expiry;

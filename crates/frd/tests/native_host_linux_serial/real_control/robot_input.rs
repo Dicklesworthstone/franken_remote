@@ -1,7 +1,7 @@
 //! Explicit robot requests traverse the shipped foreground owner, its original
-//! UDP/TLS control lease and the real per-lease XTest executor. Independent Xlib
+//! UDP/TLS control lease and the real per-lease `XTest` executor. Independent Xlib
 //! clients observe effects on the host, never counters substituted for input.
-//! LocalAPI, CA and ingress are the existing namespace fixtures; this is not
+//! `LocalAPI`, CA and ingress are the existing namespace fixtures; this is not
 //! live-tailnet, physical-device or hardware-codec qualification.
 use super::*;
 use std::{ffi::OsStr, process::Output};

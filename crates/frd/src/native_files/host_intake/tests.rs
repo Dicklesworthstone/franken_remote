@@ -1,5 +1,5 @@
 //! Original-session bridge checks. Actual transfer/publication uses the real
-//! controller/ATP fixture in viewer::controlled::tests::files::download.
+//! controller/ATP fixture in `viewer::controlled::tests::files::download`.
 use super::*;
 use crate::native_files::{HostDownload, HostSelection, SendPhase};
 use asupersync::{

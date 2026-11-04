@@ -12,7 +12,7 @@ pub struct Observation {
 }
 impl Observation {
     /// Read the ORIGINAL initial receipt during a live desktop's ready callback.
-    /// Later frames arrive through Ui::frame; this accessor is not a current
+    /// Later frames arrive through `Ui::frame`; this accessor is not a current
     /// freshness probe and cannot create evidence before native startup succeeds.
     pub fn initial_from(desktop: &super::super::Desktop) -> Option<Self> {
         if desktop.state() != super::super::State::Viewing {

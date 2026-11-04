@@ -535,6 +535,7 @@ fn actual_hevc_streams_adaptive_idle_wakes_without_replacing_capture_or_decoder(
     continuous_viewer(true);
 }
 
+#[allow(clippy::too_many_lines)]
 fn continuous_viewer(adaptive: bool) {
     let image = worker_image();
     run(|c, h| async move {

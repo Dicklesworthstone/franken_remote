@@ -1,4 +1,4 @@
-//! Actual TLS, request decoding, native Driver and GrantServices queue boundary.
+//! Actual TLS, request decoding, native Driver and `GrantServices` queue boundary.
 //! The common-clock readiness, local consent and native sink are fixtures.
 use super::*;
 use crate::session_startup::{closure_reporting::Reporting, running::controlled::revocation};

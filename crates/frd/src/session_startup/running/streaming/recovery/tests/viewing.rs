@@ -242,10 +242,10 @@ fn pre_request_viewing_recovers_without_authority_then_grants_only_the_current_v
                                         crate::session_startup::confirm_visible(controlled.visible(frame.frame.as_raw()));
                                     }
                                     if actions_sent == 0 {
-                                        controlled.action(key(true)).unwrap();
+                                        let _ = controlled.action(key(true)).unwrap();
                                         actions_sent = 1;
                                     } else if actions_sent == 1 && receipts.get() >= 1 {
-                                        controlled.action(key(false)).unwrap();
+                                        let _ = controlled.action(key(false)).unwrap();
                                         actions_sent = 2;
                                     }
                                     if receipts.get() == 2 {

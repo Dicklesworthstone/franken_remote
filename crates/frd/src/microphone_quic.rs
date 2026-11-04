@@ -172,7 +172,7 @@ impl Shared {
             native.request_stop();
         }
     }
-    fn install(&self, native: native::Control) -> Result<(), Error> {
+    fn install(&self, native: &native::Control) -> Result<(), Error> {
         {
             let mut current = self.native.lock().unwrap_or_else(PoisonError::into_inner);
             if self.stopped.load(Ordering::Acquire) {

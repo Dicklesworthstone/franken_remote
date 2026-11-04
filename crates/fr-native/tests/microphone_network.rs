@@ -1,8 +1,9 @@
 #![cfg(all(target_os = "linux", feature = "linux-microphone-uplink"))]
+#![allow(clippy::large_futures)] // Test-thread awaits of QUIC fixtures; no production stack.
 //! Real certificate-authenticated UDP/TLS, original accepted controller and
 //! completed input/AudioUp attachments. Authority/presentation are explicitly
 //! local policy fixtures. Ignored native cases additionally use a real named
-//! PulseAudio recording source, encoder child and independent Opus decoder.
+//! `PulseAudio` recording source, encoder child and independent Opus decoder.
 //! This does not qualify a host virtual microphone, physical OS consent or UI.
 #[allow(dead_code)]
 #[path = "../../fr-client/tests/clipboard_controller/mod.rs"]
