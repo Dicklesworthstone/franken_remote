@@ -717,17 +717,7 @@ fn control_retry_stop(summary: fr_native::desktop::reconnect::CleanupSummary) ->
     if let Some(named) = summary.input_stop.and_then(input_stopped) {
         return Some(named);
     }
-    if let Some(report) = summary
-        .control_disconnect
-        .and_then(|outcome| outcome.revocation)
-    {
-        return Some(crate::terminal::failure(report));
-    }
-    summary
-        .disconnect
-        .or_else(|| summary.control_disconnect.map(|outcome| outcome.exchange))
-        .and_then(|outcome| outcome.report)
-        .map(crate::closure::failure)
+    summary.retry_failure().and_then(refusal::observation)
 }
 #[cfg(feature = "linux-desktop")]
 fn completed_result(

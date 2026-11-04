@@ -68,8 +68,8 @@ mod tests {
                 decoded += 1;
             }
         }
-        // ClosedReason 1-8 and LeaseRevoked Reason 1-9.
-        assert_eq!(decoded, 8 + 9);
+        // ClosedReason 1-9 and LeaseRevoked Reason 1-10.
+        assert_eq!(decoded, 9 + 10);
         assert_eq!(
             PeerClose::from_code(0x4652_0107),
             Some(PeerClose::Session(ClosedReason::HostFailure))
@@ -78,11 +78,19 @@ mod tests {
             PeerClose::from_code(0x4652_0201),
             Some(PeerClose::Lease(Reason::LocalRevoke))
         );
+        assert_eq!(
+            PeerClose::from_code(0x4652_0109),
+            Some(PeerClose::Session(ClosedReason::GeometryChanged))
+        );
+        assert_eq!(
+            PeerClose::from_code(0x4652_020a),
+            Some(PeerClose::Lease(Reason::GeometryChanged))
+        );
         for unassigned in [
             0x4652_0100,
-            0x4652_0109,
+            0x4652_010a,
             0x4652_0200,
-            0x4652_020a,
+            0x4652_020b,
             0,
             u64::MAX,
         ] {

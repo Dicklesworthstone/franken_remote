@@ -181,14 +181,16 @@ pub trait Application {
     /// original owner; this grants no authority and must not infer evidence
     /// from socket or native cleanup. The supervisor reads it for a failed
     /// attempt, an explicit Reopen or a completion-action refusal, AFTER
-    /// successful cleanup, and stops with this exact error even when a retryable
-    /// local failure won the service race. For a successful run's completion
+    /// successful cleanup. An adverse report stops with this exact error even
+    /// when a retryable local failure won the service race. A checked geometry
+    /// change without reported cleanup failure permits fresh viewing within the
+    /// existing retry budget; it cannot reclassify a nonretryable local failure.
+    /// For a successful run's completion
     /// decision, expected `ClientRequested` session/released-lease reports are the
     /// application's validated completion, not a terminal failure; it must still
     /// return adverse reports. An ordinary
     /// successful Finish remains successful even with a report. Reset the evidence
-    /// when a new `Connecting` attempt begins. Cleanup failure still dominates,
-    /// and returning `Some` can only prevent another attempt.
+    /// when a new `Connecting` attempt begins. Cleanup failure still dominates.
     fn terminal_failure(&self) -> Option<ObserverError> {
         None
     }
@@ -303,7 +305,7 @@ impl Client {
                     let viewing = runtime
                         .try_request_cx_with_budget(cx.budget())
                         .map_err(|_| Failure::MissingRuntime)?;
-                    let outcome = guarded(
+                    let mut outcome = guarded(
                         &cx,
                         &mut clock,
                         Owned {
@@ -362,11 +364,18 @@ impl Client {
                         return Err(error);
                     }
                     let terminal = failed_attempt_terminal(application, &outcome);
+                    // A checked host layout change may win a race with local
+                    // transport expiry. It still ends the original session.
+                    // Only an already-retryable outcome can use that report to
+                    // open fresh viewing; malformed input or uncertain native
+                    // failure must not be relabelled as a resize.
+                    let geometry_retry = terminal.is_some_and(geometry_changed)
+                        && outcome.as_ref().err().copied().is_some_and(retryable);
                     // A Cleaning callback failure must not erase a retained
                     // host report from an already failed attempt. Successful
                     // completion and failures without a report keep their
                     // existing notification semantics.
-                    if terminal.is_none() {
+                    if terminal.is_none() || geometry_retry {
                         notice?;
                     }
                     if let Err(error) = clock.live(&cx) {
@@ -380,10 +389,14 @@ impl Client {
                         return Err(error);
                     }
                     if let Some(failure) = terminal {
-                        // A notification failure cannot erase an authenticated
-                        // report or its known external-effect stages.
-                        let _ = notify(application, Status::Stopped { attempt, failure });
-                        return Err(failure);
+                        if geometry_retry {
+                            outcome = Err(failure);
+                        } else {
+                            // A notification failure cannot erase an authenticated
+                            // report or its known external-effect stages.
+                            let _ = notify(application, Status::Stopped { attempt, failure });
+                            return Err(failure);
+                        }
                     }
                     match outcome {
                         Ok(value) => {
@@ -487,7 +500,12 @@ fn failed_attempt_terminal<A: Application>(
     if outcome.is_ok() {
         return None;
     }
-    application.terminal_failure().map(Failure::Observation)
+    application
+        .terminal_failure()
+        .map(Failure::Observation)
+        .filter(|failure| {
+            !geometry_changed(*failure) || outcome.as_ref().err().copied().is_some_and(retryable)
+        })
 }
 
 /// Retry explicit transient transport/availability outcomes, exhausted media
@@ -512,10 +530,16 @@ fn failed_attempt_terminal<A: Application>(
 /// A fresh attempt is allowed only after the application has positively reaped
 /// the child and its other native owners. Initial decoder startup, decoder
 /// refusals and uncertain pipe failures stay terminal. An authenticated terminal
-/// report still vetoes a retry after cleanup, even if local expiry won the race.
+/// report still vetoes a retry after cleanup, even if local expiry won the race,
+/// except a checked geometry change with no reported cleanup failure. That
+/// exception opens a NEW observation through normal admission/display selection;
+/// it never restores the revoked input lease or replays queued actions.
 pub fn retryable(failure: Failure) -> bool {
     use crate::session_startup::ControlledViewerError;
 
+    if geometry_changed(failure) {
+        return true;
+    }
     if let Failure::Observation(ObserverError::Streaming(error)) = failure
         && let Some(error) = streaming_transport(error)
     {
@@ -552,6 +576,42 @@ pub fn retryable(failure: Failure) -> bool {
                 | fr_media::delivery::DeliveryError::RecoveryExpired
         ),
         _ => false,
+    }
+}
+
+/// Exact, authenticated host geometry-change evidence. A generic view loss,
+/// local decoder error or an untrusted worker-protocol value cannot use this
+/// exception. Remote cleanup remains honestly unknown without a full report;
+/// the caller must still positively finish every original local native owner.
+pub fn geometry_changed(failure: Failure) -> bool {
+    use crate::session_startup::{ControlledViewerError as C, Error as S};
+    use fr_wire::{closure, lease_revoked};
+
+    match failure {
+        Failure::Connection(ConnectionError::Session(S::RemoteClosed(report)))
+        | Failure::Observation(
+            ObserverError::Session(S::RemoteClosed(report))
+            | ObserverError::Streaming(
+                StreamingViewerError::Session(S::RemoteClosed(report))
+                | StreamingViewerError::Control(C::Session(S::RemoteClosed(report))),
+            ),
+        ) => {
+            report.reason == closure::ClosedReason::GeometryChanged
+                && report.cleanup != closure::Cleanup::Incomplete
+        }
+        Failure::Observation(ObserverError::Streaming(StreamingViewerError::Control(
+            C::LeaseRevoked(report),
+        ))) => {
+            report.reason == lease_revoked::Reason::GeometryChanged
+                && report.cleanup != lease_revoked::CleanupStage::Failed
+        }
+        _ => matches!(
+            peer_close(failure),
+            Some(
+                PeerClose::Session(closure::ClosedReason::GeometryChanged)
+                    | PeerClose::Lease(lease_revoked::Reason::GeometryChanged)
+            )
+        ),
     }
 }
 fn session_retryable(error: crate::session_startup::Error) -> bool {
@@ -594,7 +654,8 @@ pub use fr_transport::quic::PeerClose;
 /// The host's typed reason when it closed this connection with a recognized
 /// close code (the terminal close-packet fallback), through every wrapper that
 /// carries a session or streaming transport failure. For naming only: it is
-/// not a report, and it is not retryable (the host decided).
+/// not a report. Only the explicit geometry-change reason permits fresh
+/// observation after cleanup; every other host decision remains terminal.
 pub fn peer_close(failure: Failure) -> Option<PeerClose> {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
     use fr_transport::quic::Error as T;

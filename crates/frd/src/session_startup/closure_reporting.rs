@@ -62,12 +62,14 @@ impl Reporting {
 }
 /// 1 and 6 are recorded only by the original close-request parser (a FIN,
 /// cancelled task or generic `PeerClosed` is not a request); 7 only by the host
-/// when this viewer's source could not be prepared. Anything else is fallback.
+/// when this viewer's source could not be prepared; 9 only by checked native
+/// geometry failure on its original source. Anything else is fallback.
 fn recorded(value: u8, fallback: ClosedReason) -> ClosedReason {
     match value {
         1 => ClosedReason::ClientRequested,
         6 => ClosedReason::ProtocolError,
         7 => ClosedReason::HostFailure,
+        9 => ClosedReason::GeometryChanged,
         _ => fallback,
     }
 }
@@ -89,6 +91,9 @@ impl Configuration {
         // input lease exists yet, so a control-capable viewer needs this same
         // terminal report throughout startup and interactive viewing.
         let control = session.control.clone();
+        control
+            .retain_closure_reason(self.reason.clone())
+            .map_err(Error::Media)?;
         session
             .transport
             .arm_closed_report(
@@ -119,6 +124,7 @@ mod tests {
         assert_eq!(recorded(1, fallback), ClosedReason::ClientRequested);
         assert_eq!(recorded(6, fallback), ClosedReason::ProtocolError);
         assert_eq!(recorded(7, fallback), ClosedReason::HostFailure);
+        assert_eq!(recorded(9, fallback), ClosedReason::GeometryChanged);
         for unrecorded in [0, 2, 3, 4, 5, 8, 255] {
             assert_eq!(recorded(unrecorded, fallback), fallback);
         }

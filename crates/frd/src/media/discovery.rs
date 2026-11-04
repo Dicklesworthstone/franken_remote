@@ -46,7 +46,8 @@ impl DiscoveredSource {
                 &self.control.context(),
                 self.control.deadline(Duration::from_secs(2))?,
             )
-            .await?;
+            .await
+            .map_err(|error| self.control.capture_failure(error))?;
         self.control.check()?;
         guard.complete = true;
         Ok(())
@@ -155,7 +156,8 @@ impl DiscoveredSource {
             let control = self.control;
             discovery
                 .configure(&control.context(), choice, configuration, deadline)
-                .await?;
+                .await
+                .map_err(|error| control.capture_failure(error))?;
             control.check()?;
             let worker = discovery.into_worker()?;
             let source = Arc::new(());
@@ -303,7 +305,8 @@ impl CaptureSource {
                 crate::worker::Deadline::after(&control.context(), Duration::from_secs(2))?,
                 || control.live_deadline(),
             )
-            .await?;
+            .await
+            .map_err(|error| control.capture_failure(error))?;
         control.check()?;
         operation.completed = true;
         guard.finish();

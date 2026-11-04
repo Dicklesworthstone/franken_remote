@@ -183,7 +183,8 @@ impl CaptureSource {
                 deadline,
                 || control.live_deadline(),
             )
-            .await?;
+            .await
+            .map_err(|error| control.capture_failure(error))?;
         let (content, applied_bitrate) = loop {
             control.check()?;
             // Parsing/polling cannot restart the original recovery attempt.
@@ -221,7 +222,8 @@ impl CaptureSource {
                     deadline,
                     || control.live_deadline(),
                 )
-                .await?;
+                .await
+                .map_err(|error| control.capture_failure(error))?;
         };
         operation.completed = true;
         #[cfg(target_os = "linux")]

@@ -144,6 +144,9 @@ pub enum Error {
     Ingress(ingress::Error),
     Listener(Box<LinuxError>),
     Desktop(dispatch::Error),
+    /// Repeated checked layout changes exhausted the independent restart
+    /// budget; an unstable display cannot reconfigure workers indefinitely.
+    GeometryUnstable,
     NoTailnetAddress,
     /// The session monitor never produced fresh evidence; nothing was bound.
     SessionMonitor(session_monitor::Error),
@@ -189,7 +192,9 @@ impl Error {
                 LinuxError::Ingress(error) => error.refusal_code(),
                 _ => "listener_failed",
             },
+            Self::Desktop(error) if error.is_geometry_changed() => "display_geometry_changed",
             Self::Desktop(_) => "desktop_failed",
+            Self::GeometryUnstable => "display_geometry_unstable",
             Self::NoTailnetAddress => "no_tailnet_addresses",
             Self::SessionMonitor(_) => "session_monitor_unavailable",
             Self::SessionEnded(cause) => session_ended_code(*cause),
@@ -507,6 +512,40 @@ impl StopHandle {
 /// that stop the service. Peer outcomes neither count nor reset the run.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
+const MAX_GEOMETRY_RESTARTS: u8 = 5;
+const GEOMETRY_RESTART_WINDOW_NS: u64 = 30_000_000_000;
+
+/// Layout changes retire a healthy source rather than count as crashes. Keep
+/// a separate run-owned budget, untouched by peers, successful shares or the
+/// host-fault counter, so continuous changes cannot cause unbounded churn.
+#[derive(Default)]
+struct GeometryRestarts {
+    window: Option<u64>,
+    last: Option<u64>,
+    restarts: u8,
+}
+impl GeometryRestarts {
+    fn delay(&mut self, now: asupersync::types::Time) -> Result<Duration, Error> {
+        let now = now.as_nanos();
+        if self.last.is_some_and(|last| now < last) {
+            return Err(Error::Runtime);
+        }
+        if self
+            .window
+            .is_none_or(|start| now - start >= GEOMETRY_RESTART_WINDOW_NS)
+        {
+            self.window = Some(now);
+            self.restarts = 0;
+        }
+        self.last = Some(now);
+        if self.restarts >= MAX_GEOMETRY_RESTARTS {
+            return Err(Error::GeometryUnstable);
+        }
+        self.restarts += 1;
+        Ok(Duration::from_millis(250u64 << (self.restarts - 1).min(3)))
+    }
+}
+
 /// How one OS-share lifetime ended, for the failure policy.
 enum Ended {
     /// The source served a viewer, or the share was stopped locally.
@@ -515,6 +554,7 @@ enum Ended {
     /// the share was up: a normal peer outcome, not evidence about the host.
     Peer,
     PolicyChanged,
+    GeometryChanged(dispatch::Error),
     Failed(dispatch::Error),
     /// The selected session's evidence ended while this share was up.
     Session(session_monitor::Error),
@@ -572,9 +612,12 @@ fn capture_interval(fps: u16) -> Option<Duration> {
 /// 1s, 2s, 4s ... capped at 30s; wakes early when stop is requested.
 async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
     let delay = Duration::from_secs(1u64 << failures.min(5)).min(Duration::from_secs(30));
+    restart_wait(cx, stop, delay).await;
+}
+async fn restart_wait(cx: &Cx, stop: &StopHandle, delay: Duration) {
     let mut waited = Duration::ZERO;
     while waited < delay && !stop.is_requested() {
-        let tick = Duration::from_millis(250);
+        let tick = Duration::from_millis(250).min(delay - waited);
         asupersync::time::sleep(cx.now(), tick).await;
         waited += tick;
     }
@@ -737,6 +780,7 @@ fn serve_run(
             let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
             let serving = async {
                 let mut failures = 0u32;
+                let mut geometry = GeometryRestarts::default();
                 while !stop.is_requested() {
                     let share = Share {
                         options,
@@ -758,6 +802,13 @@ fn serve_run(
                         Ended::Served => failures = 0,
                         Ended::Peer | Ended::PolicyChanged => {}
                         Ended::Session(cause) => return Err(Error::SessionEnded(cause)),
+                        Ended::GeometryChanged(error) => {
+                            if options.once {
+                                return Err(Error::Desktop(error));
+                            }
+                            let delay = geometry.delay(broker.now())?;
+                            restart_wait(&broker, stop, delay).await;
+                        }
                         Ended::Failed(error) => {
                             if options.once {
                                 return Err(Error::Desktop(error));
@@ -1322,6 +1373,9 @@ impl Share<'_> {
         match end {
             End::Listener(Err(error)) => Err(Error::Listener(Box::new(error))),
             End::DrainExpired => Err(Error::Cleanup("session")),
+            End::Desktop(Err(error)) if error.is_geometry_changed() => {
+                Ok(Ended::GeometryChanged(error))
+            }
             End::Desktop(Err(error)) if error.is_peer_outcome() => Ok(Ended::Peer),
             End::Desktop(Err(error)) => Ok(Ended::Failed(error)),
             End::Desktop(Ok(_)) | End::Listener(Ok(_)) | End::Cancelled => Ok(Ended::Served),
@@ -1336,6 +1390,48 @@ mod cleanup_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_restarts_are_bounded_independently_of_peer_and_fault_outcomes() {
+        use asupersync::types::Time;
+        let mut geometry = GeometryRestarts::default();
+        let start = 100_000_000_000;
+        for (offset, delay_ms) in [(0, 250), (1, 500), (2, 1000), (3, 2000), (4, 2000)] {
+            assert_eq!(
+                geometry.delay(Time::from_nanos(start + offset)),
+                Ok(Duration::from_millis(delay_ms))
+            );
+        }
+        assert_eq!(
+            geometry.delay(Time::from_nanos(start + 29_999_999_999)),
+            Err(Error::GeometryUnstable)
+        );
+        // A genuinely later window restores only this layout budget.
+        assert_eq!(
+            geometry.delay(Time::from_nanos(start + 30_000_000_000)),
+            Ok(Duration::from_millis(250))
+        );
+        assert_eq!(Error::GeometryUnstable.code(), "display_geometry_unstable");
+    }
+
+    #[test]
+    fn geometry_backoff_cannot_reset_its_budget_by_regressing_or_wrapping_time() {
+        use asupersync::types::Time;
+        let mut geometry = GeometryRestarts::default();
+        assert!(geometry.delay(Time::from_nanos(u64::MAX - 10)).is_ok());
+        assert_eq!(geometry.delay(Time::ZERO), Err(Error::Runtime));
+        for tick in 1..5 {
+            assert!(
+                geometry
+                    .delay(Time::from_nanos(u64::MAX - 10 + tick))
+                    .is_ok()
+            );
+        }
+        assert_eq!(
+            geometry.delay(Time::from_nanos(u64::MAX)),
+            Err(Error::GeometryUnstable)
+        );
+    }
 
     #[test]
     fn session_end_codes_name_only_what_the_evidence_names() {

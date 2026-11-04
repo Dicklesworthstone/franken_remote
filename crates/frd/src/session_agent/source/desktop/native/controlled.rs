@@ -391,6 +391,17 @@ impl ControlledDesktop {
             if failed {
                 return Err(Error::LocalEvent);
             }
+            if !stopped
+                && (observation.end_reason()
+                    == Some(crate::input_watchdog::StopReason::GeometryChanged)
+                    || input.is_some_and(|shutdown| {
+                        shutdown.reason == crate::input_watchdog::StopReason::GeometryChanged
+                    }))
+            {
+                // Native cleanup above remains mandatory even when input,
+                // capture or cancellation observes the layout change first.
+                return Err(Error::GeometryChanged);
+            }
             match session {
                 Ok(()) => Ok(served(false)),
                 Err(_) if stopped => Ok(served(false)),

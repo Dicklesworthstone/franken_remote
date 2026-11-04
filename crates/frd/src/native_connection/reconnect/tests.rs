@@ -1,4 +1,6 @@
 //! Retry policy and public connector failure paths. No fabricated successful dial.
+#[path = "tests/geometry.rs"]
+mod geometry;
 use super::*;
 use crate::native_connection::tests::{offer, roots};
 use crate::session_startup::ObserverPolicy;

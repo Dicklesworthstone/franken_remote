@@ -73,6 +73,9 @@ impl Entry {
     fn close(&mut self, error: Error) {
         // Fence the exact subscriber BEFORE dropping its retained media. This
         // never revokes the OS source or another remote session's authority.
+        if matches!(error, Error::Media(error) if error.is_geometry_changed()) {
+            let _ = self.control.note_geometry_changed();
+        }
         self.control.revoke();
         // Fence audio with the viewer: nothing queued may follow departure.
         self.audio.close();
@@ -161,6 +164,18 @@ impl Members {
         }
     }
     fn close(&mut self, error: Error) {
+        // A selected source records native geometry failure before its guard
+        // cancels it. Preserve that evidence even when cancellation is observed
+        // first by a subscriber or a dropping capture future.
+        let error = if self.owner.end_reason()
+            == Some(crate::input_watchdog::StopReason::GeometryChanged)
+        {
+            Error::Media(MediaError::Worker(worker::Error::WorkerRefused(
+                fr_media::worker::Error::GeometryChanged,
+            )))
+        } else {
+            error
+        };
         for entry in self.entries.iter_mut().flatten() {
             entry.close(error);
         }

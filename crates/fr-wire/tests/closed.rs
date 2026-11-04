@@ -13,6 +13,9 @@ const UNKNOWN: &[u8] = b"FRD0\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00\x1c\x0
 // Same framing; ClientRequested, Complete cleanup, known 2 pending/3 uncertain.
 // Complete cleanup does not undo external effects or fabricate complete receipts.
 const KNOWN: &[u8] = b"FRD0\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00\x1c\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0d\x00\x01\x02\x01\x00\x00\x00\x02\x00\x00\x00\x03";
+// Checked geometry change, still-unconfirmed cleanup and UNKNOWN effects.
+// A reconnect is a new observation; this does not report released keys.
+const GEOMETRY: &[u8] = b"FRD0\x00\x00\x00\x1e\x00\x00\x00\x00\x00\x00\x00\x1c\x00\x00\x00\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0d\x00\x09\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00";
 fn binding() -> Binding {
     Binding {
         channel: 7,
@@ -49,6 +52,13 @@ fn encode(report: Closed, out: &mut [u8]) -> Result<usize, WireError> {
 fn independent_fixtures_survive_all_splits_and_refuse_every_truncation() {
     for (bytes, expected) in [
         (UNKNOWN, unknown()),
+        (
+            GEOMETRY,
+            Closed {
+                reason: Reason::GeometryChanged,
+                ..unknown()
+            },
+        ),
         (
             KNOWN,
             Closed {
@@ -93,6 +103,7 @@ fn reason_cleanup_and_effect_accounting_are_independent_and_lossless() {
         Reason::ProtocolError,
         Reason::HostFailure,
         Reason::SessionReplaced,
+        Reason::GeometryChanged,
     ] {
         assert_ne!(reason.code(), "");
         for cleanup in [Cleanup::Unconfirmed, Cleanup::Complete, Cleanup::Incomplete] {
@@ -189,7 +200,7 @@ fn wrong_owner_role_transport_or_preadmission_never_accepts_a_report() {
 fn malformed_unknown_summaries_reserved_values_and_trailing_bytes_refuse() {
     for (offset, value) in [
         (41, 0),
-        (41, 9),
+        (41, 10),
         (42, 0),
         (42, 4),
         (43, 2),

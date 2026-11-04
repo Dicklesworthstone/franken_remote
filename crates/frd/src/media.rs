@@ -69,6 +69,18 @@ impl fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+impl Error {
+    /// Only a checked native refusal identifies a layout change. A malformed
+    /// worker record or a lost child cannot authorize a geometry reconnect.
+    pub(crate) fn is_geometry_changed(self) -> bool {
+        matches!(
+            self,
+            Self::Worker(worker::Error::WorkerRefused(
+                fr_media::worker::Error::GeometryChanged
+            ))
+        )
+    }
+}
 impl From<worker::Error> for Error {
     fn from(e: worker::Error) -> Self {
         Self::Worker(e)
@@ -100,8 +112,11 @@ pub struct ObservationControl {
     renewal_attached: Arc<std::sync::atomic::AtomicBool>,
     control_grant_attached: Arc<std::sync::atomic::AtomicBool>,
     /// Why a serve ended, recorded before its fence (first wins). A label for
-    /// the controlled lease's terminal report only; no authority effect.
+    /// the original terminal report only; no authority effect.
     end_reason: Arc<std::sync::atomic::AtomicU8>,
+    /// The observation-only terminal report remains owned by the listener.
+    /// This signal carries its first cause without retaining its transport.
+    closure_reason: Arc<std::sync::OnceLock<Arc<std::sync::atomic::AtomicU8>>>,
     /// The input lease granted on this observation, so that a fence built
     /// before the grant still names a failure's cause on it.
     lease: Arc<Mutex<Option<crate::input_watchdog::Control>>>,
@@ -118,6 +133,7 @@ impl ObservationControl {
             renewal_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             control_grant_attached: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             end_reason: Arc::new(std::sync::atomic::AtomicU8::new(0)),
+            closure_reason: Arc::new(std::sync::OnceLock::new()),
             lease: Arc::new(Mutex::new(None)),
         })
     }
@@ -267,12 +283,58 @@ impl ObservationControl {
     }
     /// Record why a serve ended (first wins), before fencing it.
     pub(crate) fn note_end(&self, reason: crate::input_watchdog::StopReason) {
-        let _ = self.end_reason.compare_exchange(
+        let recorded = self.end_reason.compare_exchange(
             0,
             reason as u8,
             std::sync::atomic::Ordering::AcqRel,
             std::sync::atomic::Ordering::Acquire,
         );
+        if recorded.is_ok() && reason == crate::input_watchdog::StopReason::GeometryChanged {
+            self.record_geometry_closure();
+        }
+    }
+    pub(crate) fn retain_closure_reason(
+        &self,
+        reason: Arc<std::sync::atomic::AtomicU8>,
+    ) -> Result<(), Error> {
+        self.closure_reason
+            .set(reason)
+            .map_err(|_| Error::InvalidFrame)?;
+        if self.end_reason() == Some(crate::input_watchdog::StopReason::GeometryChanged) {
+            self.record_geometry_closure();
+        }
+        Ok(())
+    }
+    fn record_geometry_closure(&self) {
+        if let Some(reason) = self.closure_reason.get() {
+            let _ = reason.compare_exchange(
+                0,
+                fr_wire::closure::ClosedReason::GeometryChanged as u8,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            );
+        }
+    }
+    /// Record checked source failure BEFORE SelectionGuard fences authority.
+    /// Preserve an expired admission, a local stop or an earlier failure; none
+    /// may be relabelled as permission to reconnect after a resize.
+    pub(super) fn capture_failure(&self, error: worker::Error) -> Error {
+        let error = Error::Worker(error);
+        if error.is_geometry_changed()
+            && let Err(authority) = self.note_geometry_changed()
+        {
+            return authority;
+        }
+        error
+    }
+    pub(crate) fn note_geometry_changed(&self) -> Result<(), Error> {
+        self.check()?;
+        self.note_end(crate::input_watchdog::StopReason::GeometryChanged);
+        if let Some(reason) = self.end_reason() {
+            // The input owner is fenced before source teardown can await.
+            self.stop_lease(reason);
+        }
+        Ok(())
     }
     pub(crate) fn register_lease(&self, lease: crate::input_watchdog::Control) {
         if let Ok(mut slot) = self.lease.lock() {
@@ -791,3 +853,6 @@ impl Drop for MediaOperation<'_> {
 
 /// Bounded OS-share-session publication over independently owned transports.
 pub mod shared_publisher;
+
+#[cfg(all(test, target_os = "linux"))]
+mod geometry_tests;

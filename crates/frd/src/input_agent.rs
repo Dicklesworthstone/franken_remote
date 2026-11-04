@@ -851,7 +851,13 @@ fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&
     let mut sink = match factory() {
         Ok(s) => s,
         Err(error) => {
-            shared.control.stop(StopReason::NativeFailure);
+            shared
+                .control
+                .stop(if error == PlatformError::GeometryChanged {
+                    StopReason::GeometryChanged
+                } else {
+                    StopReason::NativeFailure
+                });
             if shared.lock().outstanding {
                 shared.reply(Reply::InitializationFailed(error));
             }
@@ -1050,7 +1056,23 @@ fn execute<S: InputSink>(
             }
         }
     });
+    if geometry_refusal(reply) {
+        // The validated native reply owns this cause, including a partial
+        // receipt. Fence before publishing it; retain the exact confirmed
+        // prefix and let the original cleanup owner release held input.
+        shared.control.stop(StopReason::GeometryChanged);
+    }
     shared.reply(reply);
+}
+
+fn geometry_refusal(reply: Reply) -> bool {
+    let refusal = match reply {
+        Reply::Input(Err(refusal)) | Reply::Reconciliation(Err(refusal)) => Some(refusal),
+        Reply::Input(Ok(Dispatch::Completed(receipt))) => receipt.refusal,
+        Reply::Reconciliation(Ok(report)) => report.refusal,
+        _ => None,
+    };
+    refusal == Some(Refusal::Platform(PlatformError::GeometryChanged))
 }
 
 fn ticket_reply(

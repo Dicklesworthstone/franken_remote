@@ -60,6 +60,9 @@ while True:
     if kind == 16:
         reply(h, 274, b"\x02")
         continue
+    if MODE == "capture-geometry" and last is not None and kind in (2, 7, 20):
+        reply(h, 263, struct.pack(">H", 9))
+        continue
     if kind == 20:
         assert configured and len(body) == 21
         frame, observed, flags, target_rate = struct.unpack(">QQBI", body)

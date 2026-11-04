@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-11-04 — fresh viewing after host display geometry changes
+
+- Preserve a checked native resize/topology failure through source teardown,
+  shared viewers and terminal session/input reports. Retire the old source and
+  recreate the host catalog after cleanup, with a separate bounded restart
+  policy (`fr-s7o1`).
+- Reconnect native viewing through fresh identity, admission, display selection
+  and native owners. Control and file choices remain spent; failed cleanup,
+  local stops and other adverse host reports still prevent retries.
+
 ## 2026-11-04 — private recovery retains the original feedback scope
 
 - Validate obsolete presentation, decoder metrics and repair records before

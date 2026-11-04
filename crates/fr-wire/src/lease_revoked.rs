@@ -26,6 +26,9 @@ pub enum Reason {
     HostFailure = 7,
     ClientRequested = 8,
     Suspended = 9,
+    /// Checked display geometry invalidated this lease. Fresh viewing cannot
+    /// renew it, replay input or authorize replacement coordinates.
+    GeometryChanged = 10,
 }
 impl Reason {
     /// The reason with this wire value, if any (zero and unassigned are None).
@@ -43,6 +46,7 @@ impl Reason {
             7 => Self::HostFailure,
             8 => Self::ClientRequested,
             9 => Self::Suspended,
+            10 => Self::GeometryChanged,
             _ => return Err(WireError::InvalidValue),
         })
     }
@@ -57,6 +61,7 @@ impl Reason {
             Self::HostFailure => "host_failure",
             Self::ClientRequested => "client_requested",
             Self::Suspended => "suspended",
+            Self::GeometryChanged => "geometry_changed",
         }
     }
 }

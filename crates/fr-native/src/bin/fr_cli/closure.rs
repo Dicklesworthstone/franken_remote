@@ -169,6 +169,10 @@ fn closed_code(reason: fr_wire::closure::ClosedReason) -> Option<(&'static str, 
             "host_session_replaced",
             "Another session replaced this one on the host. Nothing is replayed; start a new session only if this viewer should take over. Previously submitted actions are not rolled back.",
         ),
+        ClosedReason::GeometryChanged => (
+            "host_geometry_changed",
+            "The host display geometry changed and this viewing session ended. Automatic viewing retries have stopped; start a fresh session against the current display. Control needs a new explicit request. Previously submitted actions are not rolled back.",
+        ),
     })
 }
 const fn cleanup(stage: Cleanup) -> &'static str {
@@ -218,6 +222,7 @@ const fn close_code_name(reason: fr_wire::closure::ClosedReason) -> &'static str
         ClosedReason::ProtocolError => "host_protocol_error",
         ClosedReason::HostFailure => "host_failure",
         ClosedReason::SessionReplaced => "host_session_replaced",
+        ClosedReason::GeometryChanged => "host_geometry_changed",
     }
 }
 
@@ -267,6 +272,7 @@ mod tests {
             ClosedReason::ProtocolError,
             ClosedReason::HostFailure,
             ClosedReason::SessionReplaced,
+            ClosedReason::GeometryChanged,
         ] {
             for stage in [Cleanup::Unconfirmed, Cleanup::Complete, Cleanup::Incomplete] {
                 for effects in [

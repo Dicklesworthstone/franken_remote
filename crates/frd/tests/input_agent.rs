@@ -682,3 +682,6 @@ fn await_response_and_watchdog_together_on_the_real_runtime() {
 
 #[path = "input_agent/inhibition.rs"]
 mod inhibition;
+
+#[path = "input_agent/geometry.rs"]
+mod geometry;

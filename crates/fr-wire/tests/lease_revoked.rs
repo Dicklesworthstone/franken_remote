@@ -74,6 +74,34 @@ fn independent_fixture_in_both_directions() {
     assert_eq!(out.as_slice(), expected);
 }
 #[test]
+fn independent_geometry_change_fixture_retains_original_lease_and_effect_stages() {
+    let bytes: Vec<u8> = "46 52 44 30 00 00 00 14 00 00 00 00 00 00 00 24 00 00 00 07 00 00 00 00
+         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 01
+         00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 02
+         00 0a 01 00"
+        .split_whitespace()
+        .map(|s| u8::from_str_radix(s, 16).expect("hand-written hex"))
+        .collect();
+    let expected = Revoked {
+        reason: Reason::GeometryChanged,
+        ..message()
+    };
+    assert_eq!(decode(&bytes), Ok(expected));
+    assert_eq!(decode_before_grant(&bytes), Ok(expected));
+    let mut out = [0; REVOKED_BYTES];
+    assert_eq!(encode(expected, &mut out), Ok(REVOKED_BYTES));
+    assert_eq!(out.as_slice(), bytes);
+    for end in 0..bytes.len() {
+        assert!(decode(&bytes[..end]).is_err());
+        assert!(decode_before_grant(&bytes[..end]).is_err());
+    }
+    for offset in [19, 39, 55] {
+        let mut foreign = bytes.clone();
+        foreign[offset] ^= 1;
+        assert_eq!(decode(&foreign), Err(WireError::InvalidBinding));
+    }
+}
+#[test]
 fn every_truncation_and_short_output_refuse() {
     let bytes = fixture();
     for end in 0..bytes.len() {
@@ -156,7 +184,7 @@ fn stale_session_lease_and_channel_never_match() {
 }
 #[test]
 fn invalid_reason_cleanup_and_effects_refuse() {
-    for (offset, value) in [(57, 0), (57, 10), (58, 0), (58, 4), (59, 3)] {
+    for (offset, value) in [(57, 0), (57, 11), (58, 0), (58, 4), (59, 3)] {
         let mut bytes = fixture();
         bytes[offset] = value;
         assert_eq!(decode(&bytes), Err(WireError::InvalidValue));
@@ -175,6 +203,7 @@ fn every_defined_reason_and_stage_round_trips_without_losing_information() {
         Reason::HostFailure,
         Reason::ClientRequested,
         Reason::Suspended,
+        Reason::GeometryChanged,
     ] {
         for cleanup in [
             CleanupStage::Fenced,

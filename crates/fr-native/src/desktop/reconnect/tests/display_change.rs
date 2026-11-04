@@ -88,6 +88,7 @@ fn adverse_host_reports_and_real_local_failures_veto_display_reopening() {
         closure::ClosedReason::ProtocolError,
         closure::ClosedReason::HostFailure,
         closure::ClosedReason::SessionReplaced,
+        closure::ClosedReason::GeometryChanged,
     ] {
         let mut value = summary();
         value
@@ -146,6 +147,7 @@ fn expected_control_release_never_masks_an_adverse_original_lease_report() {
         lease_revoked::Reason::Suspended,
         lease_revoked::Reason::PermissionLost,
         lease_revoked::Reason::ViewInvalidated,
+        lease_revoked::Reason::GeometryChanged,
     ] {
         let mut value = summary();
         value.control_disconnect = Some(frd::session_startup::ControlCloseOutcome {

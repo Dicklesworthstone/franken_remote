@@ -35,6 +35,8 @@ pub enum StopReason {
     ClientDisconnected,
     ViewInvalidated,
     Suspended,
+    /// Checked native topology changed; the original input target is retired.
+    GeometryChanged,
 }
 impl StopReason {
     pub(crate) fn from_raw(value: u8) -> Option<Self> {
@@ -49,6 +51,7 @@ impl StopReason {
             8 => Self::ClientDisconnected,
             9 => Self::ViewInvalidated,
             10 => Self::Suspended,
+            11 => Self::GeometryChanged,
             _ => return None,
         })
     }

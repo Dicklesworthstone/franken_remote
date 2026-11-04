@@ -24,8 +24,17 @@ repeats the complete remote-session and input-lease IDs, never compact aliases.
 
 Reason values: 1 `local_revoke`, 2 `lease_expired`, 3 `observation_ended`,
 4 `view_invalidated`, 5 `session_ended`, 6 `permission_lost`, 7 `host_failure`,
-8 `client_requested`, 9 `suspended`. No free-form diagnostics are allowed.
+8 `client_requested`, 9 `suspended`, 10 `geometry_changed`. No free-form
+diagnostics are allowed.
 Unknown reason or stage values refuse; zero IDs are not wildcards.
+
+`geometry_changed` is a checked native change to the original display target.
+The old lease is terminal even if the client subsequently reconnects for fresh
+viewing. Input requires a new explicit request, current mapping and presentation
+evidence, and ordinary host approval. Reported failed cleanup or any separate
+authority/protocol refusal prevents that viewing retry. It never renews this
+lease, relabels old coordinates or replays input. Older peers refuse this new
+reason as an unknown value.
 
 Cleanup stages: 1 **Fenced**, with native release not certified; 2 **Released**,
 with held-input cleanup completed; 3 **Failed**, with input fenced but cleanup

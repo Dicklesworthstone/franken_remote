@@ -4,6 +4,8 @@ use std::path::Path;
 
 #[path = "tests/display_change.rs"]
 mod display_change;
+#[path = "tests/geometry.rs"]
+mod geometry;
 
 fn session(epoch: u128) -> Session<()> {
     Session::new(

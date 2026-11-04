@@ -33,8 +33,8 @@ The reason phrase is empty. Codes carry only the original owner's typed reason:
 
 | Family | Application error code | Valid reason values |
 |---|---|---|
-| Session Closed | `0x4652_0100 + reason` | ClosedReason 1 through 8, as in PROTOCOL_CLOSURE.md |
-| Lease revoked | `0x4652_0200 + reason` | LeaseRevoked Reason 1 through 9, as in PROTOCOL_LEASE_REVOKED.md |
+| Session Closed | `0x4652_0100 + reason` | ClosedReason 1 through 9, as in PROTOCOL_CLOSURE.md |
+| Lease revoked | `0x4652_0200 + reason` | LeaseRevoked Reason 1 through 10, as in PROTOCOL_LEASE_REVOKED.md |
 
 For example, host failure at session scope is `0x4652_0107`, host stopping is
 `0x4652_0102`, and local input revocation is `0x4652_0201`. Zero/reserved reasons
@@ -76,7 +76,10 @@ all QUIC transport error codes, which lie far below these values) stays
 0x1d; the value ranges cannot overlap the defined transport codes.
 
 `frd::native_connection::reconnect::peer_close` extracts the reason through
-every session and streaming transport wrapper. It is never retried. `fr`
+every session and streaming transport wrapper. Only the exact geometry-change
+codes (`0x4652_0109` and `0x4652_020a`) allow bounded fresh viewing after confirmed
+local cleanup; every other reason remains terminal. Missing remote cleanup and
+effect evidence stays unknown, including for geometry recovery. `fr`
 names it with the same codes as the corresponding report: a session reason
 like a `Closed` report (`host_stopped` on the CLI, `host_stopping` on the wire, `host_failure`, ..., the table in
 `fr_cli/closure.rs` from 60158e8), a lease reason like a `LeaseRevoked` report

@@ -350,20 +350,8 @@ impl Counters {
         Ok(())
     }
     pub(super) fn retry_stopped(&self) -> bool {
-        self.current_cleanup().is_some_and(|summary| {
-            summary.input_stop.is_some_and(|reason| {
-                !matches!(
-                    reason,
-                    fr_native::viewer_input::StopReason::Local
-                        | fr_native::viewer_input::StopReason::Closed
-                )
-            }) || summary
-                .disconnect
-                .is_some_and(|outcome| outcome.report.is_some())
-                || summary.control_disconnect.is_some_and(|outcome| {
-                    outcome.revocation.is_some() || outcome.exchange.report.is_some()
-                })
-        })
+        self.current_cleanup()
+            .is_some_and(CleanupSummary::prevents_viewing_retry)
     }
     /// Count host-reported results by stage only. Duplicates are not new work.
     pub(super) fn result(&mut self, event: &ResultEvent) {
@@ -848,7 +836,23 @@ mod tests {
             counters.cleanup.unwrap().input_stop,
             Some(StopReason::FocusLost)
         );
-        assert!(counters.retry_stopped());
+        assert!(
+            !counters.retry_stopped(),
+            "old attempt evidence is history, not a new veto"
+        );
+        assert_eq!(
+            counters.current_cleanup(),
+            None,
+            "viewing has no input owner"
+        );
+        assert_eq!(counters.mode, AttemptMode::ViewingOnly);
+        assert_eq!(counters.request_attempt, Some(2));
+        summary.input_stop = Some(StopReason::FocusLost);
+        counters.retain_cleanup(2, summary);
+        assert!(
+            !counters.retry_stopped(),
+            "a late old-owner callback cannot stop attempt 3"
+        );
     }
     #[test]
     fn cleanup_generated_stops_allow_viewing_but_native_stop_intent_is_terminal() {

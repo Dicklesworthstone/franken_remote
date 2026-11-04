@@ -1,5 +1,48 @@
 # Bounded fresh-session viewing recovery
 
+## Checked host display changes
+
+A checked native display resize or topology change retires the old capture
+source and fences its input before teardown. The source records
+`geometry_changed` before cancellation can hide the cause. Shared viewers receive
+the same source failure through their own terminal reports; a local revoke,
+expired authority or earlier failure keeps its original reason. Arbitrary
+worker/protocol errors and generic view loss are not inferred to be geometry
+changes.
+
+After native and ingress cleanup finishes, the persistent host creates a fresh
+source and display catalog. Geometry changes have an independent budget of five
+restarts in a fixed 30-second monotonic window, with 250-ms to 2-second delays.
+They neither consume nor reset the ordinary host-fault budget. Excessive churn
+ends with `display_geometry_unstable`; `--once` ends after its original share
+with `display_geometry_changed`.
+
+The native client recognizes only the typed `Closed`, `LeaseRevoked` or original
+authenticated QUIC-close reason. It must finish the previous window, input,
+decoder, picker, clipboard and file owners before backoff. Every retry spends
+the existing lifetime attempt budget and performs fresh destination/identity,
+TLS, admission, approval and catalog selection. Local display preferences may
+be applied to the new catalog; old owners and mappings cannot cross attempts.
+The worker epoch advances. The native picker, when configured, is created anew.
+
+Control remains ended. A new explicit local request and normal admission are
+required to control the replacement view. The CLI's spent `--control` request
+and file selections remain spent. Queued input and uncertain effects are not
+replayed; original receipts, cleanup stages and terminal reports remain
+inspectable. A resize report can explain a racing transient transport failure,
+but cannot replace an original protocol failure, native uncertainty, explicit
+local stop or reported failed cleanup. A separate adverse report wins over a
+geometry report. A report belonging to a previous attempt cannot authorize or
+veto the next attempt.
+
+Independent FRD0 byte fixtures cover session reason 9 and lease reason 10, and
+the transport table covers their assigned close codes. Supervisor tests exercise
+cleanup ordering, finite retries and local stop; native adapter tests cover
+conflicting reports, retained effects and fresh owner construction. These are
+protocol and ownership regressions, not live-tailnet or hardware qualification.
+
+## Exhausted reference-recovery namespace
+
 The native observation profile can recover a lost reference chain without
 restarting the current connection or decoder. The bounded QUIC namespace retains
 retired stream identities, however: after one complete three-role replacement,

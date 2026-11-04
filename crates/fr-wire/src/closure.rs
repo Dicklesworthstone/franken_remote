@@ -120,6 +120,9 @@ pub enum ClosedReason {
     ProtocolError = 6,
     HostFailure = 7,
     SessionReplaced = 8,
+    /// Checked display geometry ended this session. Returning to viewing needs
+    /// fresh admission, display selection and generations; input stays revoked.
+    GeometryChanged = 9,
 }
 impl ClosedReason {
     /// The reason with this wire value, if any (zero and unassigned are None).
@@ -136,6 +139,7 @@ impl ClosedReason {
             6 => Self::ProtocolError,
             7 => Self::HostFailure,
             8 => Self::SessionReplaced,
+            9 => Self::GeometryChanged,
             _ => return Err(WireError::InvalidValue),
         })
     }
@@ -149,6 +153,7 @@ impl ClosedReason {
             Self::ProtocolError => "protocol_error",
             Self::HostFailure => "host_failure",
             Self::SessionReplaced => "session_replaced",
+            Self::GeometryChanged => "geometry_changed",
         }
     }
 }

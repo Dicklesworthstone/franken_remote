@@ -97,7 +97,8 @@ The payload is exactly 28 bytes (52 including the FRD0 header):
 
 Final reasons: 1 client requested, 2 host stopping, 3 authority expired,
 4 permission lost, 5 view invalidated, 6 protocol error, 7 host failure,
-8 session replaced. These codes are independent of CloseRequest's reasons.
+8 session replaced, 9 geometry changed. These codes are independent of
+CloseRequest's reasons.
 Unknown effects MUST encode both counters as zero; this is distinct from known
 zero counts. Unknown flags, reasons, cleanup values and noncanonical unknown
 counts refuse. The ordinary header-extension and negotiated-size rules apply.
@@ -108,6 +109,15 @@ InputResult receipts must remain available and cannot be replaced by these
 counts. A closed socket, absent report or transport ACK never supplies missing
 counts, confirms physical key release, or completes another viewer's shared
 worker. Unconfirmed/incomplete reports retain that distinction at the client.
+
+`geometry_changed` names a checked native display-geometry failure on the
+original source, recorded before its authority fence. It ends the entire old
+session. After confirmed local cleanup, a client may spend its existing bounded
+retry budget on fresh identity/TLS admission and display selection. It cannot
+restore control, reuse coordinate mappings or replay actions. Reported incomplete
+cleanup, a separate permission/protocol failure or explicit local stop still
+prevents retry. Generic `view_invalidated` remains terminal. Older clients that
+do not recognize reason 9 refuse it under the existing unknown-value rule.
 
 Independent fixture: binding 7, session 13, host stopping, cleanup unconfirmed,
 effects unknown (not captured from the encoder):

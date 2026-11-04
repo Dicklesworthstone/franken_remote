@@ -54,6 +54,13 @@ impl From<super::super::Error> for Error {
     }
 }
 impl Error {
+    /// The running source/input owner observed checked native geometry loss.
+    /// Startup, malformed IPC and generic host faults are never inferred to
+    /// be resize events; cleanup and local-authority errors keep their causes.
+    #[must_use]
+    pub fn is_geometry_changed(&self) -> bool {
+        matches!(self, Self::Desktop(error) if **error == super::super::Error::GeometryChanged)
+    }
     /// True when this is one observer's own outcome rather than a host fault:
     /// the observer left, timed out, broke protocol or was refused. A running
     /// share records each viewer's end in `Report` and ends `Ok` when its last
@@ -80,7 +87,8 @@ impl Error {
                 | super::super::Error::Closed
                 | super::super::Error::Clock
                 | super::super::Error::NoInputPermission
-                | super::super::Error::InputCleanup => false,
+                | super::super::Error::InputCleanup
+                | super::super::Error::GeometryChanged => false,
             },
             Self::Closed | Self::Clock => false,
         }
@@ -820,6 +828,30 @@ mod tests {
 
     fn desktop(error: Desktop) -> Error {
         Error::Desktop(Box::new(error))
+    }
+
+    #[test]
+    fn only_the_original_running_geometry_cause_permits_a_layout_restart() {
+        let geometry = super::controlled_outcome(Err(Desktop::GeometryChanged)).unwrap_err();
+        assert!(geometry.is_geometry_changed());
+        assert!(!geometry.is_peer_outcome());
+        for error in [
+            desktop(Desktop::InputCleanup),
+            desktop(Desktop::NoInputPermission),
+            desktop(Desktop::Consent(Consent::NoCapturePermission)),
+            desktop(Desktop::Preparation(prepare::Error::Media(
+                media::Error::Worker(worker::Error::WorkerRefused(
+                    fr_media::worker::Error::GeometryChanged,
+                )),
+            ))),
+            desktop(Desktop::Capture(shared_publisher::Error::Media(
+                media::Error::Worker(worker::Error::Protocol(
+                    fr_media::worker::Error::GeometryChanged,
+                )),
+            ))),
+        ] {
+            assert!(!error.is_geometry_changed(), "{error:?}");
+        }
     }
 
     #[test]

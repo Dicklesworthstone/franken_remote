@@ -38,6 +38,9 @@ pub enum Error {
     /// A controlled lease ended without confirmed release of its held input;
     /// the Seat stays occupied and later control is refused until restart.
     InputCleanup,
+    /// Checked native topology changed. The original source is fenced and
+    /// must be reaped before a new independently approved observation starts.
+    GeometryChanged,
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -251,6 +254,21 @@ where
             completed: false,
         };
         let result = guard.running.turn(task);
+        let result = match result {
+            Poll::Ready(result)
+                if guard.running.source.end_reason()
+                    == Some(crate::input_watchdog::StopReason::GeometryChanged)
+                    && matches!(
+                        result,
+                        Ok(_) | Err(Error::Capture(_) | Error::Viewers(_) | Error::Closed)
+                    ) =>
+            {
+                // Source cancellation can win the polling race with its
+                // native error. Its already-recorded first cause survives.
+                Poll::Ready(Err(Error::GeometryChanged))
+            }
+            result => result,
+        };
         if result.is_ready() {
             // A caller may retain a completed future. Terminal result itself
             // fences/cancels owners; safety does not depend on caller Drop.

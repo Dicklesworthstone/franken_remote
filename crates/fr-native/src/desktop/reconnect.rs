@@ -50,6 +50,26 @@ pub struct CleanupSummary {
     pub input_stop: Option<crate::viewer_input::StopReason>,
     pub failure: Option<CleanupFailure>,
 }
+impl CleanupSummary {
+    /// Adverse original-owner evidence still vetoes an automatic viewing retry.
+    /// A checked host layout change alone permits fresh viewing after cleanup;
+    /// it is never permission to renew the old input lease or replay actions.
+    pub fn retry_failure(self) -> Option<ObserverError> {
+        retained_failure(self, true).filter(|error| {
+            !frd::native_connection::reconnect::geometry_changed(
+                frd::native_connection::reconnect::Failure::Observation(*error),
+            )
+        })
+    }
+    pub fn prevents_viewing_retry(self) -> bool {
+        use crate::viewer_input::StopReason;
+        self.failure.is_some()
+            || self
+                .input_stop
+                .is_some_and(|reason| !matches!(reason, StopReason::Local | StopReason::Closed))
+            || self.retry_failure().is_some()
+    }
+}
 
 /// Bounded synchronous callbacks on the session thread. No callback may block
 /// on native work. The observer's original mapping/visibility requirements apply
@@ -534,36 +554,15 @@ impl<U: Ui> Application for Session<U> {
         if self.current_attempt != self.last_attempt {
             return None;
         }
-        if !self.service_succeeded {
-            // A failed or abandoned run cannot reinterpret any authenticated
-            // terminal report as its own successful close, even when the host
-            // used an otherwise expected ClientRequested/SessionEnded reason.
-            if let Some(report) = self
-                .control_disconnect
-                .and_then(|outcome| outcome.revocation)
-            {
-                return Some(ObserverError::Streaming(
-                    frd::session_startup::StreamingViewerError::Control(
-                        frd::session_startup::ControlledViewerError::LeaseRevoked(report),
-                    ),
-                ));
-            }
-            if let Some(report) = self
-                .disconnect
-                .or_else(|| self.control_disconnect.map(|outcome| outcome.exchange))
-                .and_then(|outcome| outcome.report)
-            {
-                return Some(ObserverError::Session(
-                    frd::session_startup::Error::RemoteClosed(report),
-                ));
-            }
-        }
-        closing_failure(CleanupSummary {
-            disconnect: self.disconnect,
-            control_disconnect: self.control_disconnect,
-            input_stop: self.input_stop,
-            failure: self.cleanup_failure,
-        })
+        retained_failure(
+            CleanupSummary {
+                disconnect: self.disconnect,
+                control_disconnect: self.control_disconnect,
+                input_stop: self.input_stop,
+                failure: self.cleanup_failure,
+            },
+            !self.service_succeeded,
+        )
     }
 }
 
@@ -583,40 +582,46 @@ fn requested_close_allows_reopen(summary: CleanupSummary) -> bool {
 /// Preserve exact adverse reports/errors when the completion callback refuses.
 /// An expected own-close report cannot relabel a later protocol/auth failure.
 fn closing_failure(summary: CleanupSummary) -> Option<ObserverError> {
+    retained_failure(summary, false)
+}
+
+// A failed attempt cannot treat ClientRequested/SessionEnded as its own
+// successful closing exchange. Consider every retained report before allowing
+// a geometry retry: a separate permission, protocol or cleanup failure wins.
+fn retained_failure(summary: CleanupSummary, failed: bool) -> Option<ObserverError> {
     use fr_wire::{closure, lease_revoked};
     use frd::session_startup::{ControlledViewerError, StreamingViewerError};
-    if let Some(report) = summary
+    let lease = summary
         .control_disconnect
         .and_then(|outcome| outcome.revocation)
         .filter(|report| {
-            !matches!(
-                report.reason,
-                lease_revoked::Reason::ClientRequested | lease_revoked::Reason::SessionEnded
-            ) || report.cleanup == lease_revoked::CleanupStage::Failed
+            failed
+                || !matches!(
+                    report.reason,
+                    lease_revoked::Reason::ClientRequested | lease_revoked::Reason::SessionEnded
+                )
+                || report.cleanup == lease_revoked::CleanupStage::Failed
         })
-    {
-        return Some(ObserverError::Streaming(StreamingViewerError::Control(
-            ControlledViewerError::LeaseRevoked(report),
-        )));
-    }
+        .map(|report| {
+            ObserverError::Streaming(StreamingViewerError::Control(
+                ControlledViewerError::LeaseRevoked(report),
+            ))
+        });
     let exchanges = [
         summary.disconnect,
         summary.control_disconnect.map(|outcome| outcome.exchange),
     ];
-    for report in exchanges
+    let reports = exchanges
         .into_iter()
         .flatten()
         .filter_map(|outcome| outcome.report)
-    {
-        if report.reason != closure::ClosedReason::ClientRequested
-            || report.cleanup == closure::Cleanup::Incomplete
-        {
-            return Some(ObserverError::Session(
-                frd::session_startup::Error::RemoteClosed(report),
-            ));
-        }
-    }
-    exchanges.into_iter().flatten().find_map(|outcome| {
+        .filter(|report| {
+            failed
+                || report.reason != closure::ClosedReason::ClientRequested
+                || report.cleanup == closure::Cleanup::Incomplete
+        })
+        .map(|report| ObserverError::Session(frd::session_startup::Error::RemoteClosed(report)));
+    let transport = exchanges.into_iter().flatten().filter_map(|outcome| {
         outcome
             .transport
             .err()
@@ -629,7 +634,18 @@ fn closing_failure(summary: CleanupSummary) -> Option<ObserverError> {
                 )
             })
             .map(|error| ObserverError::Streaming(StreamingViewerError::Transport(error)))
-    })
+    });
+    let mut geometry = None;
+    for error in lease.into_iter().chain(reports).chain(transport) {
+        if frd::native_connection::reconnect::geometry_changed(
+            frd::native_connection::reconnect::Failure::Observation(error),
+        ) {
+            geometry.get_or_insert(error);
+        } else {
+            return Some(error);
+        }
+    }
+    geometry
 }
 impl<U> Session<U> {
     async fn finish_cleanup(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), CleanupFailure> {

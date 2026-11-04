@@ -64,7 +64,8 @@ impl CaptureSource {
                 deadline,
                 || control.live_deadline(),
             )
-            .await?;
+            .await
+            .map_err(|error| control.capture_failure(error))?;
         operation.completed = true;
         control.check()?;
         match reply.header.kind {

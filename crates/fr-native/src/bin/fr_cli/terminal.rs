@@ -43,6 +43,7 @@ const fn code(reason: Reason) -> &'static str {
         Reason::HostFailure => "host_control_failure",
         Reason::ClientRequested => "host_control_released",
         Reason::Suspended => "host_session_suspended",
+        Reason::GeometryChanged => "host_geometry_changed",
     }
 }
 
@@ -221,6 +222,11 @@ mod tests {
                 "client_requested",
             ),
             (Reason::Suspended, "host_session_suspended", "suspended"),
+            (
+                Reason::GeometryChanged,
+                "host_geometry_changed",
+                "geometry_changed",
+            ),
         ];
         for (reason, code, reason_name) in reasons {
             for (cleanup, cleanup_name) in [

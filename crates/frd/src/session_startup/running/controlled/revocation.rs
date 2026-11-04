@@ -14,6 +14,7 @@ fn wire_reason(reason: StopReason) -> Reason {
         StopReason::LocalRevoke => Reason::LocalRevoke,
         StopReason::ViewInvalidated => Reason::ViewInvalidated,
         StopReason::Suspended => Reason::Suspended,
+        StopReason::GeometryChanged => Reason::GeometryChanged,
         StopReason::ClockRegression
         | StopReason::ClockOverflow
         | StopReason::WatchdogDropped
@@ -230,5 +231,24 @@ impl ControlledHost {
         opened.pregrant_reporting = None;
         self.terminal_registered = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn geometry_has_a_specific_lease_reason_without_relabelling_other_failures() {
+        assert_eq!(
+            wire_reason(StopReason::GeometryChanged),
+            Reason::GeometryChanged
+        );
+        assert_eq!(wire_reason(StopReason::NativeFailure), Reason::HostFailure);
+        assert_eq!(
+            wire_reason(StopReason::AuthorityEnded),
+            Reason::SessionEnded
+        );
+        assert_eq!(wire_reason(StopReason::Suspended), Reason::Suspended);
     }
 }
