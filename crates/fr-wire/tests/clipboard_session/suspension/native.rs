@@ -535,3 +535,224 @@ fn unconsumed_receive_waits_but_prepared_commit_is_never_retried() {
     );
     assert_eq!(state.borrow().publications, 0);
 }
+
+#[test]
+fn expired_deferred_begin_uses_original_floor_and_watcher_without_native_callbacks() {
+    use fr_wire::clipboard::receive::ExpiredRecord;
+
+    let (shared, input) = shared_owner();
+    let (mut native, state) = native(&input);
+    let mut source = session(&input, Role::Controller);
+    let mut gate = Gate::default();
+    poll(&mut native, &mut gate, 0);
+    state.borrow_mut().text = "local selection".into();
+    source.offer(61, "old", None, at(0)).unwrap();
+    assert_eq!(pump(&mut source, &mut gate, 0), Pump::RecordAccepted);
+    let old_begin = gate.last.clone();
+    assert_eq!(
+        native.receive(&old_begin, || at(100_000)).unwrap(),
+        Received::Deferred
+    );
+    let changes = state.borrow().changes;
+    // The queue reports its own earlier immutable bound; core does not create
+    // a new deadline or invoke native work to consume this canonical refusal.
+    let expired = ExpiredRecord::decode(
+        &old_begin,
+        context(Role::Controller),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert_eq!(
+        native.expire_receive(expired, at(100_000)).unwrap(),
+        Received::Refused(SessionError::Clipboard(Error::Expired))
+    );
+    assert_eq!(native.retained_channel_bytes(), 0);
+    {
+        let state = state.borrow();
+        assert_eq!(state.changes, changes);
+        assert_eq!(state.text, "local selection");
+        assert_eq!(
+            (state.watches, state.reads, state.publications, state.suspends),
+            (1, 0, 0, 0)
+        );
+    }
+    resume(&shared, &input);
+    assert_eq!(
+        native.receive(&old_begin, || at(200_000)).unwrap(),
+        Received::Refused(SessionError::Clipboard(Error::Replay))
+    );
+    source.offer(62, "new", None, at(200_000)).unwrap();
+    let mut published = 0;
+    // Original sender releases its old Begin before the fresh item. No new
+    // receiver, grant, channel or native watcher is constructed.
+    for _ in 0..4 {
+        pump(&mut source, &mut gate, 200_000);
+        if let Received::Consumed(Some(receipt)) =
+            native.receive(&gate.last, || at(200_000)).unwrap()
+        {
+            assert_eq!(receipt.publication, Publication::SubmittedToOs);
+            published += 1;
+        }
+    }
+    assert_eq!(published, 1);
+    let state = state.borrow();
+    assert_eq!(state.text, "new");
+    assert_eq!((state.watches, state.publications, state.suspends), (1, 1, 0));
+    assert!(!native.is_closed());
+    assert!(!input.monitor().is_revoked());
+}
+
+#[test]
+fn expired_metadata_cannot_cross_a_channel_or_selected_limit_binding() {
+    use fr_core::limits::LimitOverrides;
+    use fr_wire::clipboard::{Message, encode, receive::ExpiredRecord};
+
+    for foreign_channel in [false, true] {
+        let input = owner(10_000_000);
+        let selected = ProtocolLimits::with_overrides(LimitOverrides {
+            max_clipboard_item_bytes: Some(32),
+            ..LimitOverrides::default()
+        })
+        .unwrap();
+        let mut target = ClipboardChannel::new(
+            &input,
+            context(Role::Host),
+            selected,
+            true,
+            at(0),
+        )
+        .unwrap();
+        let transport = target.transport();
+        let supplied = Context {
+            channel: if foreign_channel { 78 } else { 77 },
+            ..context(Role::Controller)
+        };
+        let mut bytes = [0; 128];
+        let length = encode(
+            Message {
+                stamp: Stamp {
+                    id: 71,
+                    source: fr_core::clipboard::Endpoint::Controller,
+                    sequence: 1,
+                },
+                body: Body::Begin {
+                    total_bytes: 3,
+                    chunks: 1,
+                },
+            },
+            supplied,
+            &ProtocolLimits::ABSOLUTE,
+            &mut bytes,
+        )
+        .unwrap();
+        let token_limits = if foreign_channel {
+            selected
+        } else {
+            ProtocolLimits::ABSOLUTE
+        };
+        let expired = ExpiredRecord::decode(&bytes[..length], supplied, &token_limits).unwrap();
+        assert_eq!(
+            target.expire_receive(expired, at(1)),
+            Err(SessionError::Wire(fr_wire::WireError::InvalidBinding))
+        );
+        assert!(target.is_closed());
+        assert!(!transport.is_open());
+        assert_eq!(target.retained_bytes(), 0);
+        assert!(!input.monitor().is_revoked());
+    }
+}
+
+#[test]
+fn expiry_only_receive_turn_retires_outbound_payload_and_preserves_cancel_before_replacement() {
+    use fr_wire::clipboard::{Message, encode, receive::ExpiredRecord};
+
+    let input = owner(10_000_000);
+    let (mut native, state) = native(&input);
+    let mut handoff = queue_original_copy(&mut native, &state, false);
+    let old = decode(
+        &handoff.gate.last,
+        context(Role::Host),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap()
+    .stamp;
+    let permit = handoff.permit.clone().unwrap();
+    let deadline = permit.deadline();
+    assert_eq!(native.retained_channel_bytes(), "original".len());
+    let counts = {
+        let state = state.borrow();
+        (
+            state.watches,
+            state.changes,
+            state.reads,
+            state.publications,
+            state.suspends,
+        )
+    };
+    let mut bytes = [0; 128];
+    let length = encode(
+        Message {
+            stamp: Stamp {
+                id: 81,
+                source: fr_core::clipboard::Endpoint::Controller,
+                sequence: 1,
+            },
+            body: Body::Begin {
+                total_bytes: 3,
+                chunks: 1,
+            },
+        },
+        context(Role::Controller),
+        &ProtocolLimits::ABSOLUTE,
+        &mut bytes,
+    )
+    .unwrap();
+    let expired = ExpiredRecord::decode(
+        &bytes[..length],
+        context(Role::Controller),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert_eq!(
+        native.expire_receive(expired, deadline).unwrap(),
+        Received::Refused(SessionError::Clipboard(Error::Expired))
+    );
+    assert_eq!(native.retained_channel_bytes(), 0);
+    assert_eq!(permit.deadline(), deadline);
+    assert_eq!(permit.check_operation(deadline), Err(Error::Expired.into()));
+    {
+        let state = state.borrow();
+        assert_eq!(
+            (
+                state.watches,
+                state.changes,
+                state.reads,
+                state.publications,
+                state.suspends,
+            ),
+            counts
+        );
+    }
+    state.borrow_mut().copy("fresh");
+    let resumed = deadline.as_micros() + 1;
+    poll(&mut native, &mut handoff.gate, resumed);
+    let cancelled = decode(
+        &handoff.gate.last,
+        context(Role::Host),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert_eq!(cancelled.stamp, old);
+    assert_eq!(cancelled.body, Body::Cancel(CancelReason::Expired));
+    poll(&mut native, &mut handoff.gate, resumed);
+    let fresh = decode(
+        &handoff.gate.last,
+        context(Role::Host),
+        &ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap();
+    assert_ne!(fresh.stamp, old);
+    assert!(matches!(fresh.body, Body::Begin { total_bytes: 5, .. }));
+    assert_eq!(state.borrow().publications, 0);
+    assert!(!native.is_closed());
+}

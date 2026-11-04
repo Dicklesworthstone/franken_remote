@@ -497,6 +497,26 @@ impl<N: NativeClipboard> Synchronizer<N> {
     ) -> Result<Received, SyncError<N::Error>> {
         self.receive_before(bytes, clock, HostInstant::from_micros(u64::MAX))
     }
+    /// Consume only the canonical rejection metadata of an expired unsubmitted
+    /// ingress record. A view pause must not require native changes, reads or
+    /// publication to release this record, or replace the existing watcher.
+    pub fn expire_receive(
+        &mut self,
+        expired: crate::clipboard::receive::ExpiredRecord,
+        now: HostInstant,
+    ) -> Result<Received, SyncError<N::Error>> {
+        let mut turn = Turn {
+            owner: self,
+            completed: false,
+        };
+        let result = match turn.owner.channel.expire_receive(expired, now) {
+            Ok(()) => Received::Refused(SessionError::Clipboard(Error::Expired)),
+            Err(error) if !turn.owner.channel.is_closed() => Received::Refused(error),
+            Err(error) => return Err(error.into()),
+        };
+        turn.completed = true;
+        Ok(result)
+    }
     /// The immutable ingress deadline includes time waiting for this worker.
     pub fn receive_before(
         &mut self,

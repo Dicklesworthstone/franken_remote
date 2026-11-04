@@ -83,6 +83,21 @@ impl<N: NativeClipboard> ControllerSynchronizer<N> {
             fr_core::time::HostInstant::from_micros(u64::MAX),
         )
     }
+    /// Release an expired unsubmitted record with this original controller's
+    /// maintenance projection, even while view readiness is paused.
+    pub fn expire_receive(
+        &mut self,
+        expired: fr_wire::clipboard::receive::ExpiredRecord,
+        now: ClientInstant,
+    ) -> Result<Received, NativeError<N::Error>> {
+        let failure = Cell::new(None);
+        let at = self.clock.checked(now, &failure);
+        self.native.expire_receive(expired, at).map_err(|error| {
+            failure
+                .get()
+                .map_or(NativeError::Synchronizer(error), NativeError::Authority)
+        })
+    }
     /// `bound` was captured with this original controller's qualified projection.
     pub fn receive_before(
         &mut self,

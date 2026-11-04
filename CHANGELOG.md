@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-04 — clipboard continues after an unpublished incoming item expires
+
+- Expire a complete queued or explicitly deferred clipboard record through the
+  original receiver, without replacing its watcher, channel or controller grant.
+  Canonical metadata retains the consumed sequence after the payload is cleared.
+- Keep both original handoff clocks and distinguish queued work from a native
+  operation already executing. Unknown effects, transport expiry, retained
+  outgoing payload and privacy/authority changes keep their terminal handling.
+- Add regressions for paused expiry, fresh later items, replay, malformed records
+  and handoff races. New test execution is pending recovery of the build environment.
+
 ## 2026-11-04 — explicit native microphone on the controlled viewer
 
 - The original viewer now owns a bounded AudioUp expectation, exact selected

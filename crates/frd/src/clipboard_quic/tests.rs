@@ -345,6 +345,7 @@ fn a_controller_clock_expiry_cannot_discard_a_live_wire_sender() {
             inbox: std::sync::Mutex::default(),
             outbox: std::sync::Mutex::default(),
             inbound_until: std::sync::atomic::AtomicU64::default(),
+            inbound_bound: std::sync::atomic::AtomicU64::default(),
             wake: std::sync::OnceLock::default(),
         };
         let timer = Clock::Controller(transport);

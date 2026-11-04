@@ -121,6 +121,7 @@ impl Outgoing {
 pub(super) struct Inbox {
     pub(super) busy: bool,
     pub(super) item: Option<Incoming>,
+    pub(super) expired: Option<fr_wire::clipboard::receive::ExpiredRecord>,
     pub(super) result: Option<Received>,
 }
 #[derive(Default)]
@@ -134,6 +135,9 @@ pub(super) struct Shared {
     pub(super) inbox: Mutex<Inbox>,
     pub(super) outbox: Mutex<Outbox>,
     pub(super) inbound_until: AtomicU64,
+    // Original projected host bound, retained even while the record is being
+    // processed or the inbox metadata lock is briefly contended.
+    pub(super) inbound_bound: AtomicU64,
     pub(super) wake: OnceLock<std::thread::Thread>,
 }
 impl Shared {
@@ -144,6 +148,7 @@ impl Shared {
         // one bounded record until it returns; its final authority is fenced now.
         if let Ok(mut i) = self.inbox.try_lock() {
             i.item = None;
+            i.expired = None;
         }
         if let Ok(mut o) = self.outbox.try_lock() {
             o.item = None;
@@ -153,6 +158,56 @@ impl Shared {
         if let Some(worker) = self.wake.get() {
             worker.unpark();
         }
+    }
+    /// Replace only a queued or explicitly deferred, complete record with its
+    /// canonical rejection metadata. Taking the record under this same lock
+    /// marks native execution; that state cannot acquire an expiry exemption.
+    /// No new deadline or native operation is created by this transition.
+    pub(super) fn expire_incoming(&self, local: u64, host: HostInstant) -> Result<(), Error> {
+        let until = self.inbound_until.load(Ordering::Acquire);
+        if until == 0 {
+            return Ok(());
+        }
+        let bound = self.inbound_bound.load(Ordering::Acquire);
+        let mut inbox = match self.inbox.try_lock() {
+            Ok(inbox) => inbox,
+            Err(TryLockError::WouldBlock) if local < until && host.as_micros() < bound => {
+                return Ok(());
+            }
+            Err(TryLockError::WouldBlock) => return Err(Error::HandoffExpired),
+            Err(TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+        };
+        // A worker may have consumed the record while this lock was acquired.
+        let until = self.inbound_until.load(Ordering::Acquire);
+        if until == 0 || inbox.expired.is_some() {
+            return Ok(());
+        }
+        let bound = self.inbound_bound.load(Ordering::Acquire);
+        let expired = local >= until || host.as_micros() >= bound;
+        if !expired {
+            return Ok(());
+        }
+        let record = inbox.item.as_ref().ok_or(Error::HandoffExpired)?;
+        let outgoing = self.gate.context();
+        let incoming = fr_wire::clipboard::Context {
+            sender: match outgoing.sender {
+                fr_wire::clipboard::Role::Host => fr_wire::clipboard::Role::Controller,
+                fr_wire::clipboard::Role::Controller => fr_wire::clipboard::Role::Host,
+                fr_wire::clipboard::Role::Observer => return Err(Error::WrongRole),
+            },
+            ..outgoing
+        };
+        let expired = fr_wire::clipboard::receive::ExpiredRecord::decode(
+            &record.bytes.0,
+            incoming,
+            &self.gate.limits(),
+        )
+        .map_err(|error| Error::Session(fr_wire::clipboard::session::SessionError::Wire(error)))?;
+        inbox.expired = Some(expired);
+        inbox.item = None;
+        drop(inbox);
+        self.wake();
+        Ok(())
     }
     pub(super) fn accept(
         &self,
@@ -185,8 +240,10 @@ impl Shared {
                 bytes: owned,
                 bound,
             }),
+            expired: None,
             result: None,
         };
+        self.inbound_bound.store(bound.as_micros(), Ordering::Release);
         self.inbound_until.store(until, Ordering::Release);
         drop(inbox);
         self.wake();

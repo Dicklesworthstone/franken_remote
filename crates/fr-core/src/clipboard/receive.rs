@@ -27,19 +27,7 @@ impl ClipboardSession {
             .monitor
             .item_deadline(now)
             .map_err(|reason| self.authority_error(reason))?;
-        begin.validate(&self.limits)?;
-        if begin.binding != self.binding {
-            return Err(Error::Binding);
-        }
-        if begin.stamp.source != self.local.opposite() {
-            return Err(Error::Source);
-        }
-        if begin.stamp.sequence <= self.received_floor {
-            return Err(Error::Replay);
-        }
-        if self.incoming.is_some() {
-            return Err(Error::Busy);
-        }
+        self.check_begin(begin)?;
         let deadline = now
             .checked_add(HostDuration::from_micros(3_000_000))
             .ok_or(Error::Clock)?
@@ -62,6 +50,49 @@ impl ClipboardSession {
             deadline,
             local_revision: self.local_revision,
         });
+        Ok(())
+    }
+    /// Consume a canonically decoded Begin whose original ingress handoff has
+    /// expired before submission. This release-only path retains the original
+    /// replay floor, creates no item buffer and grants no native permission.
+    pub fn expire_begin(&mut self, begin: Begin, now: HostInstant) -> Result<(), Error> {
+        self.check_expiration(now)?;
+        self.check_begin(begin)?;
+        self.received_floor = begin.stamp.sequence;
+        Ok(())
+    }
+    /// Expiring an unsubmitted continuation only releases its exact transfer.
+    /// It cannot clear a newer item or erase a real publication receipt.
+    pub fn expire_transfer(&mut self, stamp: Stamp, now: HostInstant) -> Result<(), Error> {
+        self.check_expiration(now)?;
+        if !stamp.valid() {
+            return Err(Error::Binding);
+        }
+        if stamp.source != self.local.opposite() {
+            return Err(Error::Source);
+        }
+        self.cancel(stamp)
+    }
+    fn check_expiration(&mut self, now: HostInstant) -> Result<(), Error> {
+        match self.maintain(now) {
+            Ok(()) | Err(Error::Expired | Error::Suspended) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+    fn check_begin(&self, begin: Begin) -> Result<(), Error> {
+        begin.validate(&self.limits)?;
+        if begin.binding != self.binding {
+            return Err(Error::Binding);
+        }
+        if begin.stamp.source != self.local.opposite() {
+            return Err(Error::Source);
+        }
+        if begin.stamp.sequence <= self.received_floor {
+            return Err(Error::Replay);
+        }
+        if self.incoming.is_some() {
+            return Err(Error::Busy);
+        }
         Ok(())
     }
     pub fn chunk(

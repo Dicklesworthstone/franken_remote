@@ -13,6 +13,61 @@ pub enum ReceiveError {
     Clipboard(Error),
 }
 
+/// Canonical metadata for one complete, expired, unsubmitted ingress record.
+/// Decode before dropping its payload; applying this record only releases the
+/// original receiver's item or consumes its Begin sequence. It cannot publish.
+#[derive(Debug, Clone, Copy)]
+pub struct ExpiredRecord {
+    context: Context,
+    limits: ProtocolLimits,
+    stamp: fr_core::clipboard::Stamp,
+    begin: Option<Begin>,
+}
+impl ExpiredRecord {
+    pub fn decode(
+        bytes: &[u8],
+        context: Context,
+        limits: &ProtocolLimits,
+    ) -> Result<Self, WireError> {
+        let message = decode(bytes, context, limits)?;
+        let begin = match message.body {
+            Body::Begin {
+                total_bytes,
+                chunks,
+            } => Some(Begin {
+                binding: context.scope,
+                stamp: message.stamp,
+                total_bytes,
+                chunks,
+            }),
+            _ => None,
+        };
+        Ok(Self {
+            context,
+            limits: *limits,
+            stamp: message.stamp,
+            begin,
+        })
+    }
+    pub(super) fn apply(
+        self,
+        session: &mut ClipboardSession,
+        context: Context,
+        limits: &ProtocolLimits,
+        now: HostInstant,
+    ) -> Result<(), ReceiveError> {
+        if self.context != context || self.limits != *limits || context.scope != session.binding() {
+            session.close();
+            return Err(ReceiveError::Wire(WireError::InvalidBinding));
+        }
+        match self.begin {
+            Some(begin) => session.expire_begin(begin, now),
+            None => session.expire_transfer(self.stamp, now),
+        }
+        .map_err(ReceiveError::Clipboard)
+    }
+}
+
 pub fn receive(
     session: &mut ClipboardSession,
     bytes: &[u8],

@@ -550,6 +550,34 @@ impl ChannelSession {
     ) -> Result<Option<Receipt>, SessionError> {
         self.receive_before(bytes, sink, clock, HostInstant::from_micros(u64::MAX))
     }
+    /// Refuse one complete record proven unsubmitted when its original ingress
+    /// handoff expired. The original receiver retains its replay floor; no
+    /// native callback, observation or replacement deadline is involved.
+    pub fn expire_receive(
+        &mut self,
+        expired: super::receive::ExpiredRecord,
+        now: HostInstant,
+    ) -> Result<(), SessionError> {
+        if self.is_closed() {
+            return Err(Error::Closed.into());
+        }
+        // Expiry-only worker turns must still release the opposite direction's
+        // private payload at its original deadline and retain its ordered Cancel.
+        // Preserve a consumed switch transition before a second core check could
+        // observe the switches enabled again.
+        if self.maintain(now)?.readiness == Readiness::Disabled {
+            return Err(Error::Disabled.into());
+        }
+        let result = expired.apply(&mut self.receiver, self.incoming, &self.limits, now);
+        if self.receiver.is_closed() {
+            self.close();
+        }
+        match result {
+            Ok(()) => Ok(()),
+            Err(ReceiveError::Clipboard(error)) => Err(self.clipboard_error(error)),
+            Err(ReceiveError::Wire(error)) => Err(error.into()),
+        }
+    }
     /// Shorten Begin to the deadline captured at ingress before a worker queue.
     pub fn receive_before(
         &mut self,

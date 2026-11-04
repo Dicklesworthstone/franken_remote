@@ -105,10 +105,20 @@ admitted transport records retain their original permits and deadlines.
 
 `ControllerTransport::sample_maintenance` advances the conservative clock without
 granting clipboard authority. Both the bridge and worker check retained operation
-and handoff deadlines before treating a readiness refusal as a pause. A queued
-item, three-second handoff, switch transition, cancellation or terminal authority
-failure can therefore still retire the lane during a view pause. No deadline is
-restarted on resume. Authenticated clock exchanges refresh only the conservative
+and handoff deadlines before treating a readiness refusal as a pause. A complete
+incoming record still queued, or explicitly deferred before native preparation,
+can expire without retiring the lane. Its original binding and canonical wire
+encoding are validated before its payload is cleared. One fixed metadata slot
+then lets the original receiver consume the refusal and the Begin sequence floor,
+even while the view remains paused. A later fresh item can use the same watcher,
+channel and grant once readiness returns; the expired item cannot be replayed.
+
+The mailbox distinguishes this release-only metadata from an executing native
+receive. Either the original local bound or the original projected host bound
+expires the handoff; an improved clock estimate cannot extend it. An executing
+operation with an uncertain external effect, an expired transport record,
+retained outgoing work, a switch transition, cancellation or terminal authority
+failure keeps its existing terminal handling. No deadline is restarted on resume. Authenticated clock exchanges refresh only the conservative
 clock model during ordinary suspension and negotiated reference recovery. They
 do not renew lease proof or supply a resume ticket, and cannot revive an expired
 clock or owner. Abandoning an input action that never entered transport removes

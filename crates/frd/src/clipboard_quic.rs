@@ -286,6 +286,7 @@ impl Bridge {
             inbox: std::sync::Mutex::default(),
             outbox: std::sync::Mutex::default(),
             inbound_until: std::sync::atomic::AtomicU64::default(),
+            inbound_bound: std::sync::atomic::AtomicU64::default(),
             wake: std::sync::OnceLock::default(),
         });
         let seed = WorkerSeed {
@@ -430,13 +431,7 @@ impl Bridge {
         {
             return Err(reason);
         }
-        let until = self
-            .shared
-            .inbound_until
-            .load(std::sync::atomic::Ordering::Acquire);
-        if until != 0 && local >= until {
-            return Err(Error::HandoffExpired);
-        }
+        self.shared.expire_incoming(local, host)?;
         self.clock.sample(&self.cx)?;
         Ok((local, host))
     }

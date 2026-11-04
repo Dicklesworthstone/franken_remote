@@ -387,3 +387,96 @@ fn a_clipboard_constructor_at_the_real_suspension_limit_is_refused_immediately()
     assert!(matches!(result, Err(Error::Authority(Refusal::Revoked))));
     assert!(host.input.monitor().is_revoked());
 }
+
+#[test]
+fn expired_unsubmitted_begin_consumes_the_original_floor_without_allocating_while_paused() {
+    let (state, mut session) = setup();
+    state.paused.store(true, Ordering::Release);
+    let old = begin();
+    session.expire_begin(old, at(3_000_000)).unwrap();
+    assert_eq!(session.reserved_bytes(), 0);
+    assert!(!session.is_closed());
+    state.paused.store(false, Ordering::Release);
+    assert_eq!(session.begin(old, at(3_000_001)), Err(Error::Replay));
+
+    let fresh = Begin {
+        stamp: Stamp {
+            id: 4,
+            sequence: 2,
+            ..old.stamp
+        },
+        ..old
+    };
+    session.begin(fresh, at(3_000_002)).unwrap();
+    session.chunk(fresh.stamp, 0, 0, b"a", at(3_000_003)).unwrap();
+    session.chunk(fresh.stamp, 1, 1, b"b", at(3_000_004)).unwrap();
+    let mut sink = Sink::default();
+    let receipt = session
+        .commit(fresh.stamp, 2, &mut sink, || at(3_000_005))
+        .unwrap();
+    assert_eq!(receipt.publication, Publication::SubmittedToOs);
+    assert_eq!((sink.prepared, sink.published), (1, 1));
+}
+
+#[test]
+fn expired_continuation_cannot_clear_another_transfer_or_erase_an_existing_receipt() {
+    let (state, mut session) = setup();
+    let old = begin();
+    session.begin(old, at(0)).unwrap();
+    session.chunk(old.stamp, 0, 0, b"a", at(1)).unwrap();
+    session.chunk(old.stamp, 1, 1, b"b", at(2)).unwrap();
+    let mut sink = Sink::default();
+    let receipt = session.commit(old.stamp, 2, &mut sink, || at(3)).unwrap();
+    let fresh = Begin {
+        stamp: Stamp {
+            id: 4,
+            sequence: 2,
+            ..old.stamp
+        },
+        ..old
+    };
+    session.begin(fresh, at(4)).unwrap();
+    let reserved = session.reserved_bytes();
+    state.paused.store(true, Ordering::Release);
+    assert_eq!(
+        session.expire_transfer(old.stamp, at(5)),
+        Err(Error::UnknownTransfer)
+    );
+    assert_eq!(session.reserved_bytes(), reserved);
+    state.paused.store(false, Ordering::Release);
+    assert_eq!(session.commit(old.stamp, 2, &mut sink, || at(6)), Ok(receipt));
+    assert_eq!((sink.prepared, sink.published), (1, 1));
+    session.expire_transfer(fresh.stamp, at(7)).unwrap();
+    assert_eq!(session.reserved_bytes(), 0);
+    assert_eq!(session.begin(fresh, at(8)), Err(Error::Replay));
+}
+
+#[test]
+fn expiry_consumption_does_not_ignore_scope_switches_revocation_or_clock_regression() {
+    let (state, mut session) = setup();
+    state.paused.store(true, Ordering::Release);
+    let mut foreign = begin();
+    foreign.binding.lease = InputLeaseId::from_raw(99);
+    assert_eq!(session.expire_begin(foreign, at(1)), Err(Error::Binding));
+    let switch = session.local_switch();
+    switch.set_enabled(false);
+    switch.set_enabled(true);
+    assert_eq!(session.expire_begin(begin(), at(2)), Err(Error::Disabled));
+    state.revoked.store(true, Ordering::Release);
+    assert_eq!(
+        session.expire_begin(begin(), at(3)),
+        Err(Error::Authority(Refusal::Revoked))
+    );
+    assert!(session.is_closed());
+    assert_eq!(session.reserved_bytes(), 0);
+
+    let (state, mut session) = setup();
+    state.paused.store(true, Ordering::Release);
+    session.expire_begin(begin(), at(10)).unwrap();
+    assert_eq!(
+        session.expire_transfer(begin().stamp, at(9)),
+        Err(Error::Clock)
+    );
+    assert!(session.is_closed());
+    assert!(state.revoked.load(Ordering::Acquire));
+}

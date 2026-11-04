@@ -128,3 +128,91 @@ fn earlier_blocked_record_expiry_fences_the_worker_and_reports_clipboard_only_ex
         f.stop();
     });
 }
+
+#[test]
+fn original_bridge_expires_only_a_complete_unsubmitted_handoff_and_keeps_input_live() {
+    for executing in [false, true] {
+        runtime().block_on(async {
+            let mut f = Fixture::new().await;
+            send(
+                &mut f,
+                Body::Begin {
+                    total_bytes: 3,
+                    chunks: 1,
+                },
+            )
+            .await;
+            let original = f
+                .bridge
+                .shared
+                .inbound_until
+                .load(std::sync::atomic::Ordering::Acquire);
+            let bound = f
+                .bridge
+                .shared
+                .inbound_bound
+                .load(std::sync::atomic::Ordering::Acquire);
+            // Exactly the worker's active-receive ownership transition. No
+            // completion result means the bridge cannot assume a safe refusal.
+            let _active = executing.then(|| {
+                f.bridge.shared.inbox.lock().unwrap().item.take().unwrap()
+            });
+            let remaining = original.saturating_sub(clock(&f.cx));
+            asupersync::time::sleep(
+                f.cx.now(),
+                Duration::from_micros(remaining + 1_000),
+            )
+            .await;
+            assert!(clock(&f.cx) >= original);
+            assert!(!f.bridge.lane.receive_expired(&f.link.h));
+            assert_eq!(
+                f.bridge.maintain(&mut f.link.h),
+                Ok(if executing { State::Retired } else { State::Active })
+            );
+            assert_eq!(
+                f.bridge.reason(),
+                executing.then_some(Error::HandoffExpired)
+            );
+            assert!(!f.link.h.is_closed());
+            assert!(
+                f.host
+                    .monitor()
+                    .deadline(HostInstant::from_micros(clock(&f.cx)))
+                    .is_ok()
+            );
+            if !executing {
+                assert!(f.bridge.permits_io());
+                f.bridge.lane.check(&f.link.h).unwrap();
+                let expired = {
+                    let inbox = f.bridge.shared.inbox.lock().unwrap();
+                    assert!(inbox.busy);
+                    assert!(inbox.item.is_none());
+                    assert!(inbox.result.is_none());
+                    inbox.expired.expect("canonical refusal metadata")
+                };
+                assert_eq!(
+                    f.bridge
+                        .shared
+                        .inbound_until
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    original
+                );
+                assert_eq!(
+                    f.bridge
+                        .shared
+                        .inbound_bound
+                        .load(std::sync::atomic::Ordering::Acquire),
+                    bound
+                );
+                // The original wire owner consumes the same rejection; no
+                // replacement grant, native publication or fresh deadline.
+                channel(&mut f.seed)
+                    .expire_receive(expired, HostInstant::from_micros(clock(&f.cx)))
+                    .unwrap();
+                assert_eq!(channel(&mut f.seed).retained_bytes(), 0);
+                assert!(f.bridge.shared.gate.is_open());
+            }
+            f.stop();
+        });
+    }
+}

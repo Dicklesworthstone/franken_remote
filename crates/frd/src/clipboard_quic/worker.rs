@@ -5,7 +5,7 @@ use super::{
     shared,
 };
 use fr_wire::clipboard::session::synchronize::SyncError;
-use shared::{Clock, Incoming, Shared, Sink, Turn};
+use shared::{Clock, Shared, Sink, Turn};
 use std::{
     sync::atomic::{AtomicBool, Ordering},
     thread::{self, JoinHandle},
@@ -77,7 +77,6 @@ impl WorkerSeed {
                     fr_core::clipboard::MAX_CHUNK_BYTES + fr_wire::clipboard::CHUNK_OVERHEAD
                 )
             ],
-            incoming: None,
         };
         if let Err(error) = ready(&worker.clock, &worker.cx) {
             worker.close();
@@ -158,20 +157,18 @@ enum Native<N: NativeClipboard> {
     Host(Synchronizer<N>),
     Controller(ControllerSynchronizer<N>),
 }
-/// Thread-confined state: one deferred incoming record, one scratch buffer and
-/// the existing bounded native synchronizer. No packet history or retry queue.
+/// Thread-confined native owner and one scratch buffer. Queued and explicitly
+/// deferred ingress stay in the shared slot; only execution removes its record.
 pub struct Worker<N: NativeClipboard> {
     owner: Native<N>,
     shared: Arc<Shared>,
     clock: Clock,
     cx: Cx,
     scratch: Vec<u8>,
-    incoming: Option<Incoming>,
 }
 impl<N: NativeClipboard> Worker<N> {
     pub fn close(&mut self) {
         self.shared.stop();
-        self.incoming = None;
         self.scratch.fill(0);
         match &mut self.owner {
             Native::Host(n) => n.close(),
@@ -187,19 +184,23 @@ impl<N: NativeClipboard> Worker<N> {
         let mut turn = Turn::new(&self.shared);
         let (local, host) = self.clock.sample_maintenance(&self.cx)?;
         self.check_handoffs(local, host)?;
+        if self.finish_expired(local, host)? {
+            turn.complete();
+            return Ok(());
+        }
         ready(&self.clock, &self.cx)?;
-        let cx = &self.cx;
+        let cx = self.cx.clone();
         let mut sink = Sink {
             shared: &self.shared,
             clock: &self.clock,
-            cx,
+            cx: &cx,
         };
         // Cx was checked above; no callback/lock may hold a native operation.
         // The synchronizer also runs maintenance while paused, expiring its
         // private buffers and cancelling expired reads without observing new
         // text, publishing or sending. Its submission checks own readiness.
-        let local = || ClientInstant(shared::now(cx).unwrap_or(u64::MAX));
-        let host = || HostInstant::from_micros(shared::now(cx).unwrap_or(u64::MAX));
+        let local = || ClientInstant(shared::now(&cx).unwrap_or(u64::MAX));
+        let host = || HostInstant::from_micros(shared::now(&cx).unwrap_or(u64::MAX));
         let polled = match &mut self.owner {
             Native::Host(n) => n
                 .poll(&mut self.scratch, &mut sink, host, &mut new_id)
@@ -212,20 +213,26 @@ impl<N: NativeClipboard> Worker<N> {
             turn.complete();
             return Ok(());
         }
-        if self.incoming.is_none() {
-            self.incoming = self
-                .shared
-                .inbox
-                .lock()
-                .map_err(|_| Error::Poisoned)?
-                .item
-                .take();
+        // Native polling can consume time. Recheck the same ingress bounds
+        // before transferring this slot into native receive ownership.
+        let (local_now, host_now) = self.clock.sample_maintenance(&self.cx)?;
+        self.check_handoffs(local_now, host_now)?;
+        if self.finish_expired(local_now, host_now)? {
+            turn.complete();
+            return Ok(());
         }
-        if let Some(record) = &self.incoming {
-            if !ready(&self.clock, cx)? {
-                turn.complete();
-                return Ok(());
-            }
+        if !ready(&self.clock, &self.cx)? {
+            turn.complete();
+            return Ok(());
+        }
+        let record = self
+            .shared
+            .inbox
+            .lock()
+            .map_err(|_| Error::Poisoned)?
+            .item
+            .take();
+        if let Some(record) = record {
             let result = match &mut self.owner {
                 Native::Host(n) => n
                     .receive_before(&record.bytes.0, host, record.bound)
@@ -233,50 +240,69 @@ impl<N: NativeClipboard> Worker<N> {
                 Native::Controller(n) => n
                     .receive_before(&record.bytes.0, local, record.bound)
                     .map_err(|error| controller_error(&error)),
-            };
-            let result = match result {
-                Ok(result) => result,
-                Err(error) if error.is_suspended() => {
-                    turn.complete();
-                    return Ok(());
-                }
-                Err(error) => return Err(error),
-            };
-            if result != Received::Deferred {
-                self.incoming = None;
+            }?;
+            if result == Received::Deferred {
+                // Only the synchronizer's explicit unsubmitted result returns
+                // the exact record to the safe queue, with its original bound.
                 self.shared
-                    .inbound_until
-                    .store(0, std::sync::atomic::Ordering::Release);
-                let mut inbox = self.shared.inbox.lock().map_err(|_| Error::Poisoned)?;
-                match result {
-                    Received::Consumed(None) => inbox.busy = false,
-                    _ => inbox.result = Some(result),
-                }
+                    .inbox
+                    .lock()
+                    .map_err(|_| Error::Poisoned)?
+                    .item = Some(record);
+            } else {
+                self.finish_incoming(result)?;
             }
         }
         turn.complete();
         Ok(())
     }
 
-    /// Pausing native calls never pauses original transfer time. The bridge
-    /// owns queued network records; the worker independently checks its one
-    /// deferred incoming record and the fixed slots it shares with that bridge.
+    fn finish_expired(&mut self, local: u64, host: HostInstant) -> Result<bool, Error> {
+        let expired = self.shared.inbox.lock().map_err(|_| Error::Poisoned)?.expired;
+        let Some(expired) = expired else {
+            return Ok(false);
+        };
+        // Keep the marker in its busy slot until this release-only owner turn
+        // completes. The bridge can distinguish it from executing native work.
+        let result = match &mut self.owner {
+            Native::Host(n) => n
+                .expire_receive(expired, host)
+                .map_err(|error| native_error(&error)),
+            Native::Controller(n) => n
+                .expire_receive(expired, ClientInstant(local))
+                .map_err(|error| controller_error(&error)),
+        }?;
+        if result
+            == Received::Refused(fr_wire::clipboard::session::SessionError::Clipboard(
+                fr_core::clipboard::Error::Disabled,
+            ))
+        {
+            return Err(Error::SwitchChanged);
+        }
+        self.finish_incoming(result)?;
+        Ok(true)
+    }
+    fn finish_incoming(&self, result: Received) -> Result<(), Error> {
+        let mut inbox = self.shared.inbox.lock().map_err(|_| Error::Poisoned)?;
+        inbox.item = None;
+        inbox.expired = None;
+        match result {
+            Received::Consumed(None) => inbox.busy = false,
+            _ => inbox.result = Some(result),
+        }
+        // Publish completion and clear its deadline under the same lock. A
+        // delayed collector must retain any actual native publication receipt.
+        self.shared.inbound_until.store(0, Ordering::Release);
+        Ok(())
+    }
+
+    /// Pausing native calls never pauses original transfer time. The bridge and
+    /// worker use the same exact slot and can release only unsubmitted records.
     fn check_handoffs(&self, local: u64, host: HostInstant) -> Result<(), Error> {
         if !self.shared.gate.is_open() {
             return Err(Error::Closed);
         }
-        let until = self
-            .shared
-            .inbound_until
-            .load(std::sync::atomic::Ordering::Acquire);
-        if (until != 0 && local >= until)
-            || self
-                .incoming
-                .as_ref()
-                .is_some_and(|item| host >= item.bound)
-        {
-            return Err(Error::HandoffExpired);
-        }
+        self.shared.expire_incoming(local, host)?;
         match self.shared.outbox.try_lock() {
             Ok(mut outbox) => {
                 if let Some(item) = &outbox.item

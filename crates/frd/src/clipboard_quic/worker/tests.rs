@@ -76,6 +76,8 @@ struct Os {
     changes: usize,
     reads: usize,
     publications: usize,
+    publication: Option<Publication>,
+    unsettled: bool,
     suspends: usize,
     closes: usize,
 }
@@ -98,8 +100,9 @@ impl ClipboardSink for Recording {
         Ok(())
     }
     fn publish(&mut self, _: &str, _: Stamp) -> Publication {
-        self.os.lock().unwrap().publications += 1;
-        Publication::SubmittedToOs
+        let mut os = self.os.lock().unwrap();
+        os.publications += 1;
+        os.publication.unwrap_or(Publication::SubmittedToOs)
     }
 }
 impl NativeClipboard for Recording {
@@ -120,7 +123,7 @@ impl NativeClipboard for Recording {
         self.seen = os.revision;
         Ok(NativeChanges {
             latest,
-            settled: true,
+            settled: !os.unsettled,
         })
     }
     fn revision(&self) -> u64 {
@@ -199,6 +202,7 @@ impl Fixture {
             inbox: Mutex::default(),
             outbox: Mutex::default(),
             inbound_until: std::sync::atomic::AtomicU64::default(),
+            inbound_bound: std::sync::atomic::AtomicU64::default(),
             wake: std::sync::OnceLock::default(),
         });
         let seed = WorkerSeed {
@@ -309,11 +313,11 @@ fn pause_keeps_subscription_and_sends_the_latest_local_copy_after_resume() {
 }
 
 #[test]
-fn queued_ingress_keeps_its_original_deadline_during_pause() {
+fn malformed_queued_ingress_is_still_terminal_when_its_original_deadline_expires() {
     let mut f = Fixture::new(false);
     f.permission.paused.store(true, Ordering::Release);
-    // The dispatcher owns framing; this deliberately unread body must never
-    // reach a parser/native owner before its fixed handoff lifetime expires.
+    // Expiry must still canonically validate the complete original record.
+    // Malformed input cannot gain an exemption by waiting during a view pause.
     assert_eq!(
         f.shared
             .accept(b"unconsumed record", 0, HostInstant::ORIGIN),
@@ -322,7 +326,12 @@ fn queued_ingress_keeps_its_original_deadline_during_pause() {
     f.step().unwrap();
     assert!(f.shared.gate.is_open());
     f.clock.advance_to(Time::from_millis(3_000));
-    assert_eq!(f.step(), Err(Error::HandoffExpired));
+    assert_eq!(
+        f.step(),
+        Err(Error::Session(fr_wire::clipboard::session::SessionError::Wire(
+            fr_wire::WireError::BadMagic
+        )))
+    );
     assert!(!f.shared.gate.is_open());
     assert_eq!(f.os.lock().unwrap().publications, 0);
     f.permission.paused.store(false, Ordering::Release);
@@ -596,3 +605,5 @@ fn expired_unsent_cancel_remains_terminal() {
     );
     assert!(!f.shared.gate.is_open());
 }
+
+mod expiry;
