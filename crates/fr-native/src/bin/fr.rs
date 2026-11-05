@@ -4,6 +4,8 @@
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
 #[path = "fr_cli/closure.rs"]
 mod closure;
+#[path = "fr_cli/file_commands.rs"]
+mod file_commands;
 #[cfg(target_os = "linux")]
 #[path = "fr_cli/linux.rs"]
 mod linux;
@@ -77,6 +79,7 @@ const HELP: &str = concat!(
     include_str!("fr_cli/help.txt"),
     include_str!("fr_cli/robot_observe/help.txt"),
     include_str!("fr_cli/robot_input/help.txt"),
+    include_str!("fr_cli/file_commands/help.txt"),
 );
 
 fn main() -> ExitCode {
@@ -103,6 +106,18 @@ fn main() -> ExitCode {
             );
         };
         args.push(arg);
+    }
+    if file_commands::requested(&args) {
+        return match file_commands::run(&args) {
+            Ok(reply) => {
+                if output::write(&reply.text).is_ok() {
+                    ExitCode::from(reply.exit)
+                } else {
+                    ExitCode::from(74)
+                }
+            }
+            Err(failure) => finish(Err(failure), json),
+        };
     }
     if robot_input::requested(&args) {
         return match robot_input::run(&args) {

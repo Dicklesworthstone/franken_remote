@@ -198,6 +198,9 @@ pub struct Desktop {
     file_controls: Option<frd::native_files::SendControl>,
     file_intake: Option<frd::native_files::SendIntake>,
     file_drops: Option<viewer_window::file_send::Manager>,
+    // Original local command endpoint and selector: retained through cleanup,
+    // never inherited by a viewing reconnect or a fresh control request.
+    file_commands: Option<frd::native_files::local::Owner>,
     // Optional local UI, never a file/source owner. Retain even a hidden panel
     // until its native thread is joined; reconnect cannot inherit this handle.
     file_progress: Option<Result<crate::file_progress::Panel, crate::file_progress::Error>>,
@@ -223,6 +226,7 @@ impl Desktop {
             file_controls: None,
             file_intake: None,
             file_drops: None,
+            file_commands: None,
             file_progress: None,
             receive_progress: None,
             first_file_panel_reserves_clipboard: false,
@@ -546,6 +550,28 @@ impl Desktop {
         let control = drops.control();
         self.file_drops = Some(drops);
         Ok(control)
+    }
+    /// Enable explicit same-user file commands on THIS configured upload.
+    /// The caller supplies the original foreground connection ID; the endpoint
+    /// also creates a fresh comparison instance. Readiness, pause, capacity and
+    /// admission remain with this desktop's original intake and control grant.
+    /// No path selection runs here, and only read-only results leave this owner.
+    pub fn enable_file_commands(
+        &mut self,
+        connection: &str,
+    ) -> Result<frd::native_files::local::Results, frd::native_files::local::Error> {
+        use frd::native_files::local::{Error, Owner};
+        if self.file_commands.is_some() {
+            return Err(Error::AlreadyRunning);
+        }
+        if self.state() != State::Viewing {
+            return Err(Error::Closed);
+        }
+        let intake = self.file_intake.clone().ok_or(Error::Unavailable)?;
+        let owner = Owner::bind_upload(connection, intake)?;
+        let results = owner.results();
+        self.file_commands = Some(owner);
+        Ok(results)
     }
     /// Receive the host's explicit selections into this locally pinned directory.
     /// This is consent for the original control lease, not another input grant.
@@ -1090,6 +1116,9 @@ impl Desktop {
         if let Some(observer) = &mut self.observer {
             observer.close();
         }
+        if let Some(commands) = &self.file_commands {
+            commands.stop();
+        }
         if let Some(drops) = &self.file_drops {
             drops.stop();
         }
@@ -1122,6 +1151,11 @@ impl Desktop {
                     .finish()
                     .map_or(WindowCleanup::Pending, WindowCleanup::Complete)
             });
+        if let Some(commands) = &self.file_commands
+            && !commands.is_complete()
+        {
+            return WindowCleanup::Pending;
+        }
         if let Some(drops) = &mut self.file_drops
             && !drops.finish()
         {

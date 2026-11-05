@@ -104,6 +104,15 @@ viewer. No source is opened or read until that explicit drop. Each batch keeps
 its own progress and cancellation controls; viewing-only reconnects do not
 repeat selections. See [native file sending](NATIVE_FILE_SEND.md#additional-selections-during-a-native-desktop-session).
 
+For later selections from another local command, explicitly add `--file-commands`
+to the original control connection. Use `fr robot session status NODE_ID --json`
+to obtain its connection ID, then `fr send NODE_ID --connection-id ID --status`
+to obtain the original file lease. Submit with `fr send NODE_ID --connection-id ID
+--lease HANDLE --send /absolute/path`; inspect or cancel its returned request
+with `--status --request N` or `--cancel N`. Commands reuse the original bounded
+upload intake and never reconnect, renew file consent or retry an uncertain send.
+See [live upload commands](NATIVE_FILE_SEND.md#local-commands-on-the-original-client-upload).
+
 For control, the viewer window must hold keyboard focus. A window manager gives it focus; without one, capture waits 30 s and then ends with `control_focus_lost`. The JSON completion names why a session ended. Typical causes: `host_not_answering` (the host is not running, is busy with another viewer, or UDP 8443 is blocked), `encoder_unavailable` (host startup), and `control_focus_lost`.
 
 The initial control request is made at most once per command. A transient link failure can

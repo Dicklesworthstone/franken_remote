@@ -160,7 +160,7 @@ pub struct Connection {
 #[cfg(any(feature = "linux-desktop", test))]
 impl Connection {
     pub fn uploads(&self) -> bool {
-        self.upload.file_drop || !self.upload.paths.is_empty()
+        self.upload.file_drop || self.upload.file_commands || !self.upload.paths.is_empty()
     }
 }
 #[allow(dead_code)]
@@ -171,6 +171,9 @@ pub struct UploadOptions {
     /// `--file-drop`: explicitly allow a first local Copy drop after control
     /// without requiring an initial --send. Reconnect never re-enables it.
     pub file_drop: bool,
+    /// `--file-commands`: explicitly enable later same-user selections on the
+    /// original upload owner. No connection retry or later control re-enables it.
+    pub file_commands: bool,
 }
 /// At most this many `--send` files per connection (frd's native bound).
 pub const MAX_SENDS: usize = 8;
@@ -766,6 +769,7 @@ fn parse_command(
     let (mut saved, mut hosts_file) = (false, None);
     let mut send = Vec::new();
     let mut file_drop = false;
+    let mut file_commands = false;
     let mut receive = None;
     let (mut receive_max_file_bytes, mut receive_max_session_bytes, mut receive_keep_both) =
         (None, None, None);
@@ -825,6 +829,7 @@ fn parse_command(
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             "--send" if connect => send.push(next_path(args, &mut index)?),
             "--file-drop" if connect => file_drop = true,
+            "--file-commands" if connect => file_commands = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
             "--receive-max-file-bytes" if connect => {
                 receive_max_file_bytes = Some(receive::bytes(next_arg(args, &mut index)?)?);
@@ -899,6 +904,13 @@ fn parse_command(
                 2,
             ));
         }
+        if file_commands && !control {
+            return Err(Failure::new(
+                "file_commands_require_control",
+                "Local file commands use the original upload control lease; pass --control with --file-commands. A viewing reconnect never re-enables them.",
+                2,
+            ));
+        }
         if receive.is_some() && !control {
             return Err(Failure::new(
                 "receive_requires_control",
@@ -957,6 +969,7 @@ fn parse_command(
                 upload: UploadOptions {
                     paths: send,
                     file_drop,
+                    file_commands,
                 },
                 receive,
             })
@@ -1335,6 +1348,49 @@ mod tests {
             ("hosts --file-drop".to_owned(), "invalid_arguments"),
         ] {
             assert_eq!(options(&arguments).err().unwrap().code, code, "{arguments}");
+        }
+    }
+    #[test]
+    fn file_commands_require_explicit_control_and_select_no_source() {
+        let base = "connect n-host --experimental-native --worker /opt/fr/worker --display only";
+        let Command::Connect(plain) = options(&format!("{base} --control")).unwrap().command else {
+            unreachable!()
+        };
+        assert!(!plain.upload.file_commands && !plain.uploads());
+        for extra in [
+            "",
+            "--file-drop",
+            "--send /private/initial",
+            "--receive /private/download",
+        ] {
+            let Command::Connect(connection) =
+                options(&format!("{base} --control --file-commands {extra}"))
+                    .unwrap()
+                    .command
+            else {
+                unreachable!()
+            };
+            assert!(connection.upload.file_commands && connection.uploads());
+            if extra.is_empty() {
+                assert!(connection.upload.paths.is_empty() && !connection.upload.file_drop);
+            }
+        }
+        for (arguments, code) in [
+            (
+                format!("{base} --view-only --file-commands"),
+                "file_commands_require_control",
+            ),
+            (
+                format!("{base} --control --file-commands --file-commands"),
+                "invalid_arguments",
+            ),
+            ("hosts --file-commands".into(), "invalid_arguments"),
+            (
+                "displays n-host --experimental-native --file-commands".into(),
+                "invalid_arguments",
+            ),
+        ] {
+            assert_eq!(options(&arguments).err().unwrap().code, code);
         }
     }
     #[test]

@@ -1,8 +1,8 @@
 //! One socket supervisor, one selection worker and one fixed cleanup reaper.
 //! No per-peer threads and no blocking join on the caller/authority thread.
 use super::{
-    Arc, Error, HANDSHAKE, Handler, Info, MAX_PEERS, Status, TICK, check_peer, check_target,
-    check_time, name, wire,
+    Arc, Error, HANDSHAKE, Handler, Info, MAX_PEERS, Scope, Status, TICK, check_peer, check_time,
+    name, wire,
 };
 use std::{
     io::{self, Read, Write},
@@ -80,15 +80,24 @@ pub(in super::super) struct Owner {
 }
 impl Owner {
     pub(in super::super) fn bind(target: &str, handler: Arc<dyn Handler>) -> Result<Self, Error> {
-        check_target(target)?;
+        Self::bind_scoped(Scope::Host, target, handler)
+    }
+    pub(in super::super) fn bind_upload(
+        connection: &str,
+        handler: Arc<dyn Handler>,
+    ) -> Result<Self, Error> {
+        Self::bind_scoped(Scope::Upload, connection, handler)
+    }
+    fn bind_scoped(scope: Scope, target: &str, handler: Arc<dyn Handler>) -> Result<Self, Error> {
+        scope.check_target(target)?;
         let uid = rustix::process::geteuid().as_raw();
-        let address =
-            SocketAddr::from_abstract_name(name(uid, target)).map_err(|_| Error::InvalidTarget)?;
+        let address = SocketAddr::from_abstract_name(name(scope, uid, target))
+            .map_err(|_| Error::InvalidTarget)?;
         let listener = match UnixListener::bind_addr(&address) {
             Ok(listener) => listener,
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                 // Public abstract-name occupancy is not proof of a trusted owner.
-                let existing = super::connect(uid, target)?;
+                let existing = super::connect(scope, uid, target)?;
                 check_peer(&existing, uid)?;
                 return Err(Error::AlreadyRunning);
             }

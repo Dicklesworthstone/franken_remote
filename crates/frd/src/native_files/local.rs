@@ -1,4 +1,4 @@
-//! Explicit local host sends on one original, already selected control session.
+//! Explicit local sends on one original, already selected control session.
 //! The socket is opt-in. Same-effective-user callers can select local paths;
 //! remote peers can neither reach this endpoint nor choose host paths. A new
 //! process or control session gets a new comparison instance and intake.
@@ -8,7 +8,10 @@
 //! until this owner ends. Cancelling an old command cannot affect its successor.
 #![forbid(unsafe_code)]
 
-use super::{HostSendIntake, SelectReason, Selection, SendControl, SendPhase};
+use super::{
+    HostSendIntake, SelectReason, Selection, SendControl, SendIntake, SendPhase, SendRequest,
+    SendStatus,
+};
 use fr_files::sender::{self, Outcome};
 use std::{
     path::PathBuf,
@@ -23,45 +26,122 @@ mod ipc;
 pub use ipc::{
     Cancellation, Cleanup, Error, Info, MAX_HISTORY, MAX_PATH_BYTES, MAX_PATHS,
     MAX_TOTAL_PATH_BYTES, Phase, SelectionFailure, Stage, Status, Submission, cancel, inspect,
-    send, status, validate_target,
+    send, status, upload, validate_target,
 };
 
 /// Owns only this local endpoint and its fixed workers. Drop/stop immediately
 /// fences the original intake without joining a potentially stuck filesystem
 /// call. `is_complete` remains false until BOTH original threads have exited.
-pub struct Owner(ipc::Owner);
+pub struct Owner {
+    ipc: ipc::Owner,
+    results: Results,
+}
 impl Owner {
     pub fn bind(target: &str, intake: HostSendIntake) -> Result<Self, Error> {
-        let handler = Arc::new(Selections {
-            intake,
-            records: Mutex::new(Vec::with_capacity(MAX_HISTORY)),
-        });
-        ipc::Owner::bind(target, handler).map(Self)
+        let handler = Arc::new(Selections::new(Intake::Host(intake)));
+        let results = handler.results.clone();
+        ipc::Owner::bind(target, handler).map(|ipc| Self { ipc, results })
+    }
+    /// Explicitly enable local commands on THIS original client upload intake.
+    /// The connection ID and separately generated instance are both comparison
+    /// fences; neither grants remote authority or reopens a retired intake.
+    pub fn bind_upload(connection: &str, intake: SendIntake) -> Result<Self, Error> {
+        let handler = Arc::new(Selections::new(Intake::Upload(intake)));
+        let results = handler.results.clone();
+        ipc::Owner::bind_upload(connection, handler).map(|ipc| Self { ipc, results })
     }
     pub fn info(&self) -> Result<Info, Error> {
-        self.0.info()
+        self.ipc.info()
+    }
+    /// Read-only, content-free outcomes survive owner cleanup. This handle has
+    /// no intake, socket, selection, cancellation or rebind capability.
+    pub fn results(&self) -> Results {
+        self.results.clone()
     }
     pub fn stop(&self) {
-        self.0.stop();
+        self.ipc.stop();
     }
     pub fn is_complete(&self) -> bool {
-        self.0.is_complete()
+        self.ipc.is_complete()
     }
 }
 
 struct Record {
     control: SendControl,
     selected: u16,
+    sizes: Vec<Option<u64>>,
 }
-struct Selections {
-    intake: HostSendIntake,
-    records: Mutex<Vec<Record>>,
+/// Each batch keeps its own original outcomes without retaining local paths.
+pub struct BatchStatus {
+    /// The exact immutable request number originally returned at admission.
+    pub sequence: u64,
+    pub sizes: Vec<Option<u64>>,
+    pub status: SendStatus,
 }
-impl Selections {
+#[derive(Clone)]
+pub struct Results(Arc<Mutex<Vec<Record>>>);
+impl Results {
+    pub fn batches(&self) -> Vec<BatchStatus> {
+        self.records()
+            .iter()
+            .enumerate()
+            .map(|(index, record)| BatchStatus {
+                sequence: u64::try_from(index + 1).expect("bounded original history"),
+                sizes: record.sizes.clone(),
+                status: record.control.status(),
+            })
+            .collect()
+    }
     fn records(&self) -> MutexGuard<'_, Vec<Record>> {
-        self.records
+        self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+enum Intake {
+    Host(HostSendIntake),
+    Upload(SendIntake),
+}
+impl Intake {
+    fn ready(&self) -> bool {
+        match self {
+            Self::Host(intake) => intake.ready(),
+            Self::Upload(intake) => intake.ready(),
+        }
+    }
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Host(intake) => intake.is_closed(),
+            Self::Upload(intake) => intake.is_closed(),
+        }
+    }
+    fn submit(&self, request: SendRequest) -> Result<SendControl, sender::Error> {
+        match self {
+            Self::Host(intake) => intake.submit(request),
+            Self::Upload(intake) => intake.submit(request),
+        }
+    }
+    fn close(&self) {
+        match self {
+            Self::Host(intake) => intake.close(),
+            Self::Upload(intake) => intake.close(),
+        }
+    }
+}
+struct Selections {
+    intake: Intake,
+    results: Results,
+}
+impl Selections {
+    fn new(intake: Intake) -> Self {
+        Self {
+            intake,
+            results: Results(Arc::new(Mutex::new(Vec::with_capacity(MAX_HISTORY)))),
+        }
+    }
+    fn records(&self) -> MutexGuard<'_, Vec<Record>> {
+        self.results.records()
     }
     fn snapshot(&self, records: &[Record], sequence: Option<u64>) -> Result<Status, Error> {
         let sequence =
@@ -161,8 +241,11 @@ impl ipc::Handler for Selections {
         check()?;
         // Only this fixed local selection worker touches paths. No authority,
         // history or socket mutex is held across filesystem work.
-        let request = Selection::select(paths)
-            .and_then(|selection| selection.request())
+        let (request, sizes) = Selection::select(paths)
+            .and_then(|selection| {
+                let sizes = selection.sizes().collect();
+                selection.request().map(|request| (request, sizes))
+            })
             .map_err(|refusal| Error::Selection {
                 index: u8::try_from(refusal.index).unwrap_or(u8::MAX),
                 reason: match refusal.reason {
@@ -187,6 +270,7 @@ impl ipc::Handler for Selections {
         if Instant::now() >= until {
             return Err(Error::Timeout);
         }
+        let selected = u16::try_from(paths.len()).map_err(|_| Error::InvalidPaths)?;
         let control = self.intake.submit(request).map_err(|error| match error {
             sender::Error::Busy => Error::Busy,
             sender::Error::Closed => Error::Closed,
@@ -195,7 +279,8 @@ impl ipc::Handler for Selections {
         })?;
         records.push(Record {
             control,
-            selected: u16::try_from(paths.len()).map_err(|_| Error::InvalidPaths)?,
+            selected,
+            sizes,
         });
         self.snapshot(&records, None)
     }
@@ -209,6 +294,12 @@ impl ipc::Handler for Selections {
     }
     fn close(&self) {
         self.intake.close();
+        // SendIntake.close fences a queued request. A batch already taken by
+        // the original sender still needs its exact retained cancellation;
+        // terminal records are harmless and cannot cancel a later selection.
+        for record in self.records().iter() {
+            record.control.cancel();
+        }
     }
 }
 

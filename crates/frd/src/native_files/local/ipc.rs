@@ -18,6 +18,28 @@ mod server;
 mod wire;
 pub(super) use server::Owner;
 
+#[derive(Clone, Copy)]
+enum Scope {
+    Host,
+    Upload,
+}
+impl Scope {
+    fn check_target(self, target: &str) -> Result<(), Error> {
+        check_target(target)?;
+        if matches!(self, Self::Upload) {
+            // A client endpoint belongs to one exact foreground connection,
+            // never a convenient host label or a replacement connection.
+            wire::parse_instance(target).map_err(|_| Error::InvalidTarget)?;
+        }
+        Ok(())
+    }
+}
+
+/// Commands for an explicitly enabled original client upload. The target is
+/// its foreground connection ID. Its separate instance must also match; this
+/// namespace can never address a host's independently opted-in send endpoint.
+pub mod upload;
+
 pub const MAX_PATHS: usize = 8;
 pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_TOTAL_PATH_BYTES: usize = MAX_PATHS * MAX_PATH_BYTES;
@@ -167,18 +189,31 @@ pub(super) trait Handler: Send + Sync + 'static {
 /// Inspect the current owner once. Callers retain this instance for every
 /// subsequent command; finding a replacement never retries an old command.
 pub fn inspect(target: &str) -> Result<Info, Error> {
-    let (_, info, _, _) = identify(target)?;
+    let (_, info, _, _) = identify(Scope::Host, target)?;
     Ok(info)
 }
 pub fn status(target: &str, instance: &str, sequence: Option<u64>) -> Result<Info, Error> {
     if sequence == Some(0) {
         return Err(Error::InvalidRequest);
     }
-    command(target, instance, wire::Command::Status(sequence), &[]).map(|reply| reply.0)
+    command(
+        Scope::Host,
+        target,
+        instance,
+        wire::Command::Status(sequence),
+        &[],
+    )
+    .map(|reply| reply.0)
 }
 pub fn send(target: &str, instance: &str, paths: &[PathBuf]) -> Result<Submission, Error> {
     let payload = wire::paths(paths)?;
-    let (info, _) = command(target, instance, wire::Command::Send(paths.len()), &payload)?;
+    let (info, _) = command(
+        Scope::Host,
+        target,
+        instance,
+        wire::Command::Send(paths.len()),
+        &payload,
+    )?;
     Ok(Submission {
         sequence: info.status.sequence,
         info,
@@ -188,18 +223,25 @@ pub fn cancel(target: &str, instance: &str, sequence: u64) -> Result<Cancellatio
     if sequence == 0 {
         return Err(Error::InvalidRequest);
     }
-    let (info, requested) = command(target, instance, wire::Command::Cancel(sequence), &[])?;
+    let (info, requested) = command(
+        Scope::Host,
+        target,
+        instance,
+        wire::Command::Cancel(sequence),
+        &[],
+    )?;
     Ok(Cancellation { info, requested })
 }
 
 fn command(
+    scope: Scope,
     target: &str,
     expected: &str,
     command: wire::Command,
     payload: &[u8],
 ) -> Result<(Info, bool), Error> {
     let expected = wire::parse_instance(expected)?;
-    let (mut stream, mut info, instance, until) = identify(target)?;
+    let (mut stream, mut info, instance, until) = identify(scope, target)?;
     if instance != expected {
         return Err(Error::WrongInstance);
     }
@@ -233,13 +275,13 @@ fn command(
     Ok((info, cancelled))
 }
 
-fn identify(target: &str) -> Result<(UnixStream, Info, [u8; 16], Instant), Error> {
-    check_target(target)?;
+fn identify(scope: Scope, target: &str) -> Result<(UnixStream, Info, [u8; 16], Instant), Error> {
+    scope.check_target(target)?;
     let until = Instant::now()
         .checked_add(HANDSHAKE)
         .ok_or(Error::Unavailable)?;
     let uid = rustix::process::geteuid().as_raw();
-    let mut stream = connect(uid, target)?;
+    let mut stream = connect(scope, uid, target)?;
     check_peer(&stream, uid)?;
     write(&mut stream, &wire::IDENTIFY, until)?;
     let mut bytes = [0; wire::IDENTITY_BYTES];
@@ -261,7 +303,7 @@ fn identify(target: &str) -> Result<(UnixStream, Info, [u8; 16], Instant), Error
         until,
     ))
 }
-fn connect(uid: u32, target: &str) -> Result<UnixStream, Error> {
+fn connect(scope: Scope, uid: u32, target: &str) -> Result<UnixStream, Error> {
     use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
     let socket = rustix::net::socket_with(
         AddressFamily::UNIX,
@@ -270,8 +312,8 @@ fn connect(uid: u32, target: &str) -> Result<UnixStream, Error> {
         None,
     )
     .map_err(|_| Error::Unavailable)?;
-    let address =
-        SocketAddrUnix::new_abstract_name(&name(uid, target)).map_err(|_| Error::InvalidTarget)?;
+    let address = SocketAddrUnix::new_abstract_name(&name(scope, uid, target))
+        .map_err(|_| Error::InvalidTarget)?;
     rustix::net::connect(&socket, &address).map_err(|error| match error {
         rustix::io::Errno::CONNREFUSED | rustix::io::Errno::NOENT => Error::NoSession,
         rustix::io::Errno::AGAIN | rustix::io::Errno::INPROGRESS => Error::Busy,
@@ -299,8 +341,12 @@ fn check_target(target: &str) -> Result<(), Error> {
     }
     Ok(())
 }
-fn name(uid: u32, target: &str) -> Vec<u8> {
-    format!("frankenremote.send.v1.{uid}.{target}").into_bytes()
+fn name(scope: Scope, uid: u32, target: &str) -> Vec<u8> {
+    let direction = match scope {
+        Scope::Host => "send",
+        Scope::Upload => "upload",
+    };
+    format!("frankenremote.{direction}.v1.{uid}.{target}").into_bytes()
 }
 /// Validate the same local endpoint label accepted by bind and every caller.
 pub fn validate_target(target: &str) -> Result<(), Error> {

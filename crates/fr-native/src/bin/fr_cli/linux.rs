@@ -480,7 +480,11 @@ fn connect(
         )
     })?;
     // Classify every --send path by type before any network I/O.
-    let sends = files::select(&connection.upload.paths, connection.upload.file_drop)?;
+    let sends = files::select(
+        &connection.upload.paths,
+        connection.upload.file_drop,
+        connection.upload.file_commands,
+    )?;
     let downloads = files::download::select(connection.receive.as_ref())?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
@@ -551,6 +555,9 @@ fn connect(
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
+    if let Some(files) = state.borrow_mut().files.as_mut() {
+        files.command_connection(&owner.info().instance);
+    }
     if automation {
         state.borrow_mut().automation =
             Some(owner.enable_input(&local).map_err(robot::local_failure)?);
@@ -917,7 +924,7 @@ struct Progress {
     control: Option<control::Counters>,
     /// Some only for `--audio`: content-free playback outcome.
     audio: Option<Rc<RefCell<audio::Report>>>,
-    /// Some only with `--send`: the explicit selection and its outcome.
+    /// Explicit original uploads: initial send, later drops or local commands.
     files: Option<files::Local>,
     /// Some only with `--receive`: the pinned local directory and actual receipts.
     downloads: Option<files::download::Local>,
@@ -997,27 +1004,23 @@ struct Interface {
 impl Ui for Interface {
     fn offer(&mut self, _: u8, original: &Offer) -> Result<Offer, CallbackError> {
         let mut offer = original.clone();
-        if self
-            .progress
-            .borrow()
+        let progress = self.progress.borrow();
+        let initial = progress
             .control
             .as_ref()
-            .is_some_and(|control| !control.initial_decision_available())
-        {
-            // The original source selections and receive consent were spent.
-            // Keep a control-capable session for a NEW local input decision,
-            // without advertising file lanes that have no fresh local owner.
-            offer.capabilities.retain(|capability| {
-                !matches!(
-                    capability.name.as_str(),
-                    fr_wire::attachment::FILES_CAPABILITY
-                        | fr_wire::files::CAPABILITY
-                        | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
-                        | fr_wire::files::DOWNLOAD_CAPABILITY
-                        | fr_wire::files::DUPLEX_CAPABILITY
-                )
-            });
-        }
+            .is_some_and(control::Counters::initial_decision_available);
+        // A new local input decision never restores file consent. Command-only
+        // upload also retires at its first setup, even before control was asked;
+        // retain an independently selected download on that startup retry.
+        files::retain_offer(
+            &mut offer,
+            initial
+                && progress
+                    .files
+                    .as_ref()
+                    .is_some_and(files::Local::can_configure_upload),
+            initial && progress.downloads.is_some(),
+        );
         Ok(offer)
     }
     fn choose(&mut self, _: u8, catalog: &Catalog) -> Result<Option<u128>, CallbackError> {
@@ -2388,6 +2391,7 @@ mod tests {
             upload: crate::options::UploadOptions {
                 paths: Vec::new(),
                 file_drop: false,
+                file_commands: false,
             },
             receive: None,
         };

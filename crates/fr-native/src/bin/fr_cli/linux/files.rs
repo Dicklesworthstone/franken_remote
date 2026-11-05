@@ -1,4 +1,4 @@
-//! `fr connect --control --send PATH...|--file-drop`: the local upload owner.
+//! `fr connect --control --send PATH...|--file-drop|--file-commands`: local uploads.
 //!
 //! Every path is classified by type BEFORE any network I/O: symbolic links
 //! and special files refuse (typed, by 1-based position, never by name).
@@ -18,7 +18,7 @@ use fr_native::{
 };
 use fr_wire::files::Reason;
 use frd::native_files::{
-    Absence, Publication, SelectReason, Selection, SendControl, SendPhase, SendStatus,
+    Absence, Publication, SelectReason, Selection, SendControl, SendPhase, SendStatus, local,
 };
 use frd::session_startup::{FileSendError, FileSendOutcome};
 use std::{fmt::Write as _, path::PathBuf};
@@ -34,12 +34,36 @@ pub(super) fn offer(clipboard: bool, send: bool) -> fr_wire::negotiation::Offer 
         (clipboard, false) => super::control::offer(clipboard),
     }
 }
+/// Omit only file directions that no longer have an explicit local owner.
+/// A pre-control retry may retain download consent while command-only upload
+/// consent is already spent. Shared file framing survives for that download.
+pub(super) fn retain_offer(offer: &mut fr_wire::negotiation::Offer, upload: bool, download: bool) {
+    offer
+        .capabilities
+        .retain(|capability| match capability.name.as_str() {
+            fr_wire::attachment::FILES_CAPABILITY | fr_wire::files::CAPABILITY => {
+                upload || download
+            }
+            fr_wire::files::CHANNEL_SCOPE_CAPABILITY => upload,
+            fr_wire::files::DOWNLOAD_CAPABILITY => download,
+            fr_wire::files::DUPLEX_CAPABILITY => upload && download,
+            _ => true,
+        });
+}
 
 /// The explicit selection and the current attempt's content-free handle.
 pub(super) struct Local {
     selection: Option<Selection>,
     sizes: Vec<Option<u64>>,
     attempt: Option<Attempt>,
+    file_drop: bool,
+    commands: Option<Commands>,
+}
+struct Commands {
+    connection: Option<String>,
+    // Spent on the first configuration, even if it failed before a control
+    // request. Never reset this when the foreground connection retries viewing.
+    outcome: Option<Result<local::Results, local::Error>>,
 }
 enum Attempt {
     Configured {
@@ -51,12 +75,22 @@ enum Attempt {
 
 /// Deferred drops have no selected path or descriptor before connection.
 /// `None` without either opt-in. Refusals name the argument position only.
-pub(super) fn select(paths: &[PathBuf], file_drop: bool) -> Result<Option<Local>, Failure> {
+pub(super) fn select(
+    paths: &[PathBuf],
+    file_drop: bool,
+    file_commands: bool,
+) -> Result<Option<Local>, Failure> {
+    let commands = file_commands.then(|| Commands {
+        connection: None,
+        outcome: None,
+    });
     if paths.is_empty() {
-        return Ok(file_drop.then(|| Local {
+        return Ok((file_drop || file_commands).then(|| Local {
             selection: None,
             sizes: Vec::new(),
             attempt: None,
+            file_drop,
+            commands,
         }));
     }
     let selection = Selection::select(paths).map_err(|refusal| {
@@ -95,13 +129,59 @@ pub(super) fn select(paths: &[PathBuf], file_drop: bool) -> Result<Option<Local>
         selection: Some(selection),
         sizes,
         attempt: None,
+        file_drop: true,
+        commands,
     }))
 }
 
 impl Local {
+    pub(super) fn can_configure_upload(&self) -> bool {
+        self.selection.is_some()
+            || self.file_drop
+            || self
+                .commands
+                .as_ref()
+                .is_some_and(|commands| commands.outcome.is_none())
+    }
+    pub(super) fn command_connection(&mut self, connection: &str) {
+        if let Some(commands) = &mut self.commands
+            && commands.connection.is_none()
+            && commands.outcome.is_none()
+        {
+            commands.connection = Some(connection.to_owned());
+        }
+    }
+    fn configure_commands(&mut self, desktop: &mut Desktop) -> bool {
+        let Some(commands) = &mut self.commands else {
+            return false;
+        };
+        if commands.outcome.is_some() {
+            return false;
+        }
+        let outcome = commands
+            .connection
+            .as_deref()
+            .ok_or(local::Error::InvalidInstance)
+            .and_then(|connection| desktop.enable_file_commands(connection));
+        let enabled = outcome.is_ok();
+        commands.outcome = Some(outcome);
+        enabled
+    }
+    fn refuse_commands(&mut self) {
+        if let Some(commands) = &mut self.commands
+            && commands.outcome.is_none()
+        {
+            commands.outcome = Some(Err(local::Error::Unavailable));
+        }
+    }
     /// At each opened attempt, before service. Absence is typed, never fatal:
     /// control proceeds without files.
     pub(super) fn configure(&mut self, desktop: &mut Desktop) {
+        if !self.can_configure_upload() {
+            // The command-only choice was already consumed. Keep its original
+            // results; a later Desktop gets no replacement intake or endpoint.
+            return;
+        }
         // ready invokes this only before the original control decision is
         // spent. A pre-request startup retry still needs fresh descriptors;
         // later viewing/explicit-control attempts retain the original result.
@@ -111,31 +191,38 @@ impl Local {
                     desktop.configure_file_send_with_intake(request)
                 } else {
                     self.attempt = Some(Attempt::Absent("local_selection_unavailable"));
+                    self.refuse_commands();
                     return;
                 }
             }
             None => desktop.configure_file_drop(),
         };
         self.attempt = Some(match configured {
-            Ok((control, _intake)) => match desktop.enable_file_drops() {
-                Ok(drops) => Attempt::Configured {
-                    control,
-                    drops: Some(drops),
-                },
-                Err(_) if self.selection.is_none() => {
-                    // An explicitly requested drop-only surface must report
-                    // absence, not silently leave a permanently empty lane.
-                    // Settle the agreed attachment, then stop it independently.
+            Ok((control, _intake)) => {
+                let commands = self.configure_commands(desktop);
+                let drops = self
+                    .file_drop
+                    .then(|| desktop.enable_file_drops().ok())
+                    .flatten();
+                if self.selection.is_none() && drops.is_none() && !commands {
+                    // No selected source or reachable explicit intake remains.
                     control.cancel();
-                    Attempt::Absent("file_drop_unavailable")
+                    Attempt::Absent(if self.file_drop {
+                        "file_drop_unavailable"
+                    } else {
+                        "file_commands_unavailable"
+                    })
+                } else {
+                    Attempt::Configured { control, drops }
                 }
-                Err(_) => Attempt::Configured {
-                    control,
-                    drops: None,
-                },
-            },
-            Err(DesktopError::Files(absence)) => Attempt::Absent(absence_code(absence)),
-            Err(_) => Attempt::Absent("files_unavailable"),
+            }
+            Err(error) => {
+                self.refuse_commands();
+                Attempt::Absent(match error {
+                    DesktopError::Files(absence) => absence_code(absence),
+                    _ => "files_unavailable",
+                })
+            }
         });
     }
     pub(super) fn summary(&self) -> Summary {
@@ -151,6 +238,18 @@ impl Local {
             for batch in drops.batches() {
                 out.append_dropped(&batch);
             }
+        }
+        if let Some(commands) = &self.commands {
+            out.commands = Some(match &commands.outcome {
+                None => Err(local::Error::Unavailable),
+                Some(Err(error)) => Err(*error),
+                Some(Ok(results)) => {
+                    for batch in results.batches() {
+                        out.append_command(&batch);
+                    }
+                    Ok(())
+                }
+            });
         }
         if out.requested != 0 && out.absence == Some("no_files_selected") {
             out.absence = None;
@@ -219,6 +318,11 @@ pub(super) struct Summary {
     pub(super) refused: Vec<(usize, Option<u64>, &'static str)>,
     /// Why no batch produced a report; `None` once any batch has one.
     pub(super) absence: Option<&'static str>,
+    /// Original local-command setup only, never present authority/readiness.
+    commands: Option<Result<(), local::Error>>,
+    /// Exact original request -> range in the combined per-file outcomes.
+    /// Drop/command batches can interleave; an aggregate index is not an ID.
+    command_requests: Vec<(u64, usize, usize)>,
 }
 fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> Summary {
     let mut out = Summary {
@@ -284,8 +388,17 @@ fn reported(sizes: &[Option<u64>], mut outcomes: impl Iterator<Item = FileSendOu
     out
 }
 impl Summary {
+    fn append_command(&mut self, batch: &local::BatchStatus) {
+        let first = self.requested;
+        self.append_later(&batch.sizes, Ok(&batch.status));
+        self.command_requests
+            .push((batch.sequence, first, batch.sizes.len()));
+    }
     fn append_dropped(&mut self, batch: &DroppedBatchStatus) {
-        let mut next = summary(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
+        self.append_later(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
+    }
+    fn append_later(&mut self, sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) {
+        let mut next = summary(sizes, status);
         if let Some(reason) = next.absence {
             // An admitted successor awaits its original controller turn; it
             // does not request a new control grant. Preserve other typed local
@@ -349,10 +462,55 @@ impl Summary {
             self.absence
                 .map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""))
         );
+        if let Some(commands) = self.commands {
+            let absence = commands.err().map_or_else(
+                || "null".to_owned(),
+                |error| format!("\"{}\"", crate::file_commands::local_failure(error).code),
+            );
+            let _ = write!(
+                out,
+                ",\"files_commands\":{{\"originally_enabled\":{},\"absence\":{absence},\"requests\":[",
+                commands.is_ok()
+            );
+            for (index, (request, first, selected)) in self.command_requests.iter().enumerate() {
+                let comma = if index == 0 { "" } else { "," };
+                let _ = write!(
+                    out,
+                    "{comma}{{\"request\":{request},\"first_index\":{first},\"selected\":{selected}}}"
+                );
+            }
+            out.push_str("]}");
+        }
         out
     }
     /// One sentence for the text completion.
     pub(super) fn text(&self) -> String {
+        let mut text = self.transfer_text();
+        if let Some(commands) = self.commands {
+            match commands {
+                Ok(()) => {
+                    text.push_str(" Local file commands belonged to the original upload only.");
+                }
+                Err(error) => {
+                    let _ = write!(
+                        text,
+                        " Local file commands unavailable: {}.",
+                        crate::file_commands::local_failure(error).code
+                    );
+                }
+            }
+        }
+        for (request, first, selected) in &self.command_requests {
+            let _ = write!(
+                text,
+                " File request {request}: #{} through #{} in the combined outcomes.",
+                first + 1,
+                first + selected
+            );
+        }
+        text
+    }
+    fn transfer_text(&self) -> String {
         if let Some(absence) = self.absence {
             if absence == "not_requested" {
                 return String::new();
@@ -385,8 +543,8 @@ mod tests {
     use frd::native_files::SendStatus;
     #[test]
     fn deferred_upload_has_no_initial_selection_or_fabricated_file_result() {
-        assert!(select(&[], false).unwrap().is_none());
-        let local = select(&[], true).unwrap().unwrap();
+        assert!(select(&[], false, false).unwrap().is_none());
+        let local = select(&[], true, false).unwrap().unwrap();
         assert!(local.selection.is_none());
         assert_eq!(local.sizes, [] as [std::option::Option<u64>; 0]);
         assert_eq!(local.summary().requested, 0);
@@ -517,6 +675,8 @@ mod tests {
             sent: vec![(0, 5, true)],
             refused: vec![(1, Some(3), "host_conflict")],
             absence: None,
+            commands: None,
+            command_requests: Vec::new(),
         }
         .text();
         assert_eq!(
@@ -532,19 +692,21 @@ mod tests {
         std::fs::write(&chosen, b"x").unwrap();
         let alias = dir.join("private-alias");
         std::os::unix::fs::symlink(&dir, &alias).unwrap();
-        let failure = select(&[chosen.clone(), alias.clone()], false)
+        let failure = select(&[chosen.clone(), alias.clone()], false, false)
             .err()
             .unwrap();
         assert_eq!(failure.code, "send_symlink");
         assert!(failure.next.starts_with("--send #2 is a symbolic link"));
         assert!(!failure.next.contains("chosen") && !failure.next.contains("fr-cli-send"));
-        assert!(select(&[], false).unwrap().is_none());
-        let local = select(std::slice::from_ref(&chosen), false)
+        assert!(select(&[], false, false).unwrap().is_none());
+        let local = select(std::slice::from_ref(&chosen), false, false)
             .unwrap()
             .unwrap();
         assert_eq!(local.sizes, [Some(1)]);
         assert_eq!(local.summary().absence, Some("files_not_started"));
-        let tree = select(std::slice::from_ref(&dir), false).unwrap().unwrap();
+        let tree = select(std::slice::from_ref(&dir), false, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(tree.sizes, [None]);
         let json = format!("{{{}}}", tree.summary().json().trim_start_matches(','));
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();

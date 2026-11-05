@@ -12,10 +12,7 @@ fn paths() -> Vec<PathBuf> {
     ))]
 }
 fn handler(intake: HostSendIntake) -> Selections {
-    Selections {
-        intake,
-        records: Mutex::new(Vec::with_capacity(MAX_HISTORY)),
-    }
+    Selections::new(Intake::Host(intake))
 }
 fn until() -> Instant {
     Instant::now().checked_add(Duration::from_secs(2)).unwrap()
@@ -157,4 +154,80 @@ fn expired_command_and_terminal_original_owner_never_enqueue_selected_descriptor
     let status = handler.status(None).unwrap();
     assert_eq!(status.sequence, 0);
     assert!(status.closed && !status.ready);
+}
+
+#[test]
+fn upload_commands_use_original_readiness_and_cancel_their_taken_batch_on_close() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let intake = SendIntake::new(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        sender::Policy::default(),
+    );
+    let handler = Selections::new(Intake::Upload(intake.clone()));
+    let stopped = AtomicBool::new(false);
+    assert_eq!(
+        handler.select(&["/missing-not-selected".into()], until(), &stopped),
+        Err(Error::Busy)
+    );
+    intake.set_ready(true);
+    let admitted = handler.select(&paths(), until(), &stopped).unwrap();
+    let pending = intake.take().unwrap();
+    assert_eq!(admitted.sequence, 1);
+    assert_eq!(pending.request.selection.len(), 1);
+    assert_eq!(admitted.published, 0);
+    let results = handler.results.clone();
+    handler.close();
+    assert!(intake.is_closed());
+    assert!(pending.control.snapshot().cancel_requested);
+    assert_eq!(pending.control.snapshot().cleanup, None);
+    intake.set_ready(true);
+    assert_eq!(
+        handler.select(&paths(), until(), &stopped),
+        Err(Error::Closed)
+    );
+    assert!(intake.take().is_none());
+    drop(handler);
+    let batches = results.batches();
+    assert_eq!(batches.len(), 1);
+    assert_eq!(batches[0].sequence, admitted.sequence);
+    assert_eq!(batches[0].sizes.len(), 1);
+    assert!(batches[0].sizes[0].is_some());
+    assert!(
+        batches[0].status.report.is_none(),
+        "cleanup and cancellation do not create publication evidence"
+    );
+}
+
+#[test]
+fn old_upload_request_cancellation_cannot_target_a_new_command_or_drop() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let intake = SendIntake::new(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        sender::Policy::default(),
+    );
+    let handler = Selections::new(Intake::Upload(intake.clone()));
+    intake.set_ready(true);
+    handler
+        .select(&paths(), until(), &AtomicBool::new(false))
+        .unwrap();
+    let first = intake.take().unwrap();
+    first
+        .control
+        .update(|status| status.phase = SendPhase::Finished);
+    intake.set_ready(true);
+    // Another explicit surface shares the slot, not this command's history.
+    let dropped = intake
+        .submit(Selection::select(&paths()).unwrap().request().unwrap())
+        .unwrap();
+    let _drop = intake.take().unwrap();
+    assert!(!handler.cancel(1).unwrap().1);
+    assert_eq!(handler.cancel(2), Err(Error::UnknownRequest));
+    assert!(!dropped.snapshot().cancel_requested);
+    handler.close();
+    assert!(
+        !dropped.snapshot().cancel_requested,
+        "stopping this command worker does not cancel an unrelated taken batch"
+    );
+    assert_eq!(handler.status(Some(1)).unwrap().phase, Phase::Finished);
+    assert_eq!(handler.results.batches()[0].sequence, 1);
 }

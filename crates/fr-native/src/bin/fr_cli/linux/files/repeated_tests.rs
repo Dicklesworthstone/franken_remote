@@ -7,6 +7,119 @@ fn json(summary: &Summary) -> serde_json::Value {
 }
 
 #[test]
+fn spent_command_only_consent_cannot_reopen_on_a_precontrol_retry() {
+    let mut local = select(&[], false, true).unwrap().unwrap();
+    assert!(local.can_configure_upload());
+    local.command_connection(&"a".repeat(32));
+    let configuration = || {
+        fr_native::desktop::Configuration::new(
+            std::path::Path::new("/usr/bin/false"),
+            ":0",
+            None,
+            12,
+        )
+        .unwrap()
+    };
+    let mut first = Desktop::new(configuration());
+    // Setup refusal is still a spent command consent; no live viewer or lease
+    // is fabricated by this pre-control lifecycle fixture.
+    local.configure(&mut first);
+    assert!(!local.can_configure_upload());
+    local.command_connection(&"b".repeat(32));
+    assert_eq!(
+        local.commands.as_ref().unwrap().connection.as_deref(),
+        Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+    );
+    let mut next = Desktop::new(configuration());
+    local.configure(&mut next);
+    assert!(!local.can_configure_upload());
+    assert_eq!(local.summary().requested, 0);
+    let mut retry = fr_client::native::control_offer_with_files();
+    retain_offer(&mut retry, local.can_configure_upload(), false);
+    assert_eq!(retry, fr_client::native::control_offer());
+}
+
+#[test]
+fn spent_command_upload_keeps_independent_download_and_drop_choices() {
+    let mut command_only = select(&[], false, true).unwrap().unwrap();
+    command_only.refuse_commands();
+    let mut retry = fr_client::native::control_offer_with_duplex(true, true);
+    retain_offer(&mut retry, command_only.can_configure_upload(), true);
+    assert!(
+        retry
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == fr_wire::files::DOWNLOAD_CAPABILITY)
+    );
+    assert!(
+        retry
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == fr_wire::attachment::FILES_CAPABILITY)
+    );
+    assert!(
+        retry
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == fr_wire::files::CAPABILITY)
+    );
+    assert!(!retry.capabilities.iter().any(|cap| matches!(
+        cap.name.as_str(),
+        fr_wire::files::CHANNEL_SCOPE_CAPABILITY | fr_wire::files::DUPLEX_CAPABILITY
+    )));
+    let mut drop = select(&[], true, true).unwrap().unwrap();
+    drop.refuse_commands();
+    assert!(drop.can_configure_upload());
+    let original = fr_client::native::control_offer_with_duplex(false, false);
+    let mut both = original.clone();
+    retain_offer(&mut both, drop.can_configure_upload(), true);
+    assert_eq!(both, original);
+    retain_offer(&mut both, false, false);
+    assert_eq!(both, fr_client::native::control_offer());
+}
+
+#[test]
+fn final_command_requests_map_to_their_exact_combined_outcomes() {
+    let mut complete = reported(
+        &[Some(5)],
+        [FileSendOutcome::PublicationUnknown].into_iter(),
+    );
+    complete.append_dropped(&DroppedBatchStatus {
+        sizes: vec![Some(7)],
+        status: Err("file_selection_stopped"),
+    });
+    complete.commands = Some(Ok(()));
+    for (sequence, sizes) in [(1, vec![Some(11), None]), (2, vec![Some(13)])] {
+        complete.append_command(&local::BatchStatus {
+            sequence,
+            sizes,
+            status: SendStatus {
+                phase: SendPhase::WaitingForControl,
+                absence: None,
+                report: None,
+            },
+        });
+    }
+    let output = json(&complete);
+    assert_eq!(
+        output["files_commands"]["requests"],
+        serde_json::json!([
+            { "request": 1, "first_index": 2, "selected": 2 },
+            { "request": 2, "first_index": 4, "selected": 1 },
+        ])
+    );
+    assert_eq!(output["files_refused"][0]["reason"], "publication_unknown");
+    assert_eq!(
+        output["files_refused"][1]["reason"],
+        "file_selection_stopped"
+    );
+    assert_eq!(output["files_refused"][2]["reason"], "files_queued");
+    assert_eq!(output["files_refused"][4]["bytes"], 13);
+    assert!(complete.text().contains("File request 1: #3 through #4"));
+    assert!(complete.text().contains("File request 2: #5 through #5"));
+}
+
+#[test]
 fn later_refused_preparing_and_queued_selections_preserve_initial_publication() {
     let mut complete = reported(
         &[Some(19), Some(0)],

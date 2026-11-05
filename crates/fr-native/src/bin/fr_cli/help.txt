@@ -17,7 +17,7 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--socket PATH] [--port 8443] [--ipv6]
     [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
     [--capture-system-shortcuts] [--send /absolute/file-or-directory]...
-    [--file-drop] [--receive /absolute/private-directory]
+    [--file-drop] [--file-commands] [--receive /absolute/private-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]

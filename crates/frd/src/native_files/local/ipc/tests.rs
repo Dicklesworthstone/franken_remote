@@ -26,6 +26,13 @@ fn target() -> String {
         LABEL.fetch_add(1, Ordering::Relaxed)
     )
 }
+fn connection() -> String {
+    format!(
+        "{:016x}{:016x}",
+        std::process::id(),
+        LABEL.fetch_add(1, Ordering::Relaxed)
+    )
+}
 #[derive(Default)]
 struct Records {
     paths: Vec<Vec<PathBuf>>,
@@ -139,7 +146,7 @@ fn stop(owner: &Owner) {
 }
 fn raw(owner: &Owner) -> (UnixStream, [u8; 16], Instant) {
     let info = owner.info().unwrap();
-    let (stream, _, instance, until) = identify(&info.target).unwrap();
+    let (stream, _, instance, until) = identify(Scope::Host, &info.target).unwrap();
     (stream, instance, until)
 }
 
@@ -153,6 +160,119 @@ fn inspect_is_content_free_and_does_not_select_or_cancel() {
     assert_eq!(handler.records.lock().unwrap().paths.len(), 0);
     assert!(!handler.closed.load(Ordering::Acquire));
     stop(&owner);
+}
+
+#[test]
+fn upload_and_host_namespaces_cannot_address_each_others_selections() {
+    let connection = connection();
+    let host_handler = Arc::new(Probe::default());
+    let upload_handler = Arc::new(Probe::default());
+    let host = Owner::bind(&connection, host_handler.clone()).unwrap();
+    let upload = Owner::bind_upload(&connection, upload_handler.clone()).unwrap();
+    let host_info = inspect(&connection).unwrap();
+    let upload_info = upload::inspect(&connection).unwrap();
+    assert_eq!(host_info, host.info().unwrap());
+    assert_eq!(upload_info, upload.info().unwrap());
+    assert_ne!(host_info.instance, upload_info.instance);
+    assert_eq!(
+        send(&connection, &upload_info.instance, &["/wrong-host".into()]),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        upload::send(&connection, &host_info.instance, &["/wrong-upload".into()]),
+        Err(Error::WrongInstance)
+    );
+    let accepted = upload::send(
+        &connection,
+        &upload_info.instance,
+        &["/explicit-upload".into()],
+    )
+    .unwrap();
+    assert_eq!(accepted.sequence, 1);
+    assert_eq!(
+        host_handler.records.lock().unwrap().paths,
+        Vec::<Vec<PathBuf>>::new()
+    );
+    assert_eq!(
+        upload_handler.records.lock().unwrap().paths,
+        [vec![PathBuf::from("/explicit-upload")]]
+    );
+    assert_eq!(
+        upload::status(&connection, &upload_info.instance, Some(1))
+            .unwrap()
+            .status
+            .sequence,
+        1
+    );
+    assert!(
+        upload::cancel(&connection, &upload_info.instance, 1)
+            .unwrap()
+            .requested
+    );
+    assert_eq!(inspect(&connection).unwrap().status.sequence, 0);
+    stop(&upload);
+    stop(&host);
+}
+
+#[test]
+fn reused_connection_name_never_accepts_an_original_upload_lease() {
+    let connection = connection();
+    let first = Owner::bind_upload(&connection, Arc::new(Probe::default())).unwrap();
+    let original = first.info().unwrap();
+    let request = upload::send(&connection, &original.instance, &["/first".into()])
+        .unwrap()
+        .sequence;
+    stop(&first);
+    let handler = Arc::new(Probe::default());
+    let replacement = Owner::bind_upload(&connection, handler.clone()).unwrap();
+    assert_ne!(replacement.info().unwrap().instance, original.instance);
+    assert_eq!(
+        upload::send(&connection, &original.instance, &["/stale".into()]),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        upload::status(&connection, &original.instance, Some(request)),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        upload::cancel(&connection, &original.instance, request),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        handler.records.lock().unwrap().paths,
+        Vec::<Vec<PathBuf>>::new()
+    );
+    stop(&replacement);
+}
+
+#[test]
+fn upload_targets_are_exact_foreground_connection_handles_before_any_io() {
+    for invalid in [
+        "host",
+        "../host",
+        "",
+        "0123456789abcdef0123456789abcdeg",
+        "0123456789abcdef0123456789abcdef0",
+    ] {
+        assert_eq!(upload::inspect(invalid), Err(Error::InvalidTarget));
+        assert!(matches!(
+            Owner::bind_upload(invalid, Arc::new(Probe::default())),
+            Err(Error::InvalidTarget)
+        ));
+    }
+    let connection = connection();
+    assert_eq!(
+        upload::send(&connection, &"a".repeat(32), &[]),
+        Err(Error::InvalidPaths)
+    );
+    assert_eq!(
+        upload::status(&connection, &"a".repeat(32), Some(0)),
+        Err(Error::InvalidRequest)
+    );
+    assert_eq!(
+        upload::cancel(&connection, &"a".repeat(32), 0),
+        Err(Error::InvalidRequest)
+    );
 }
 
 #[test]
@@ -407,7 +527,7 @@ fn a_stalled_selection_does_not_refresh_its_original_command_deadline() {
 fn a_lost_or_malformed_post_command_reply_is_never_a_safe_retry() {
     let target = target();
     let uid = rustix::process::geteuid().as_raw();
-    let address = SocketAddr::from_abstract_name(name(uid, &target)).unwrap();
+    let address = SocketAddr::from_abstract_name(name(Scope::Host, uid, &target)).unwrap();
     let listener = UnixListener::bind_addr(&address).unwrap();
     let instance = [17; 16];
     let client_target = target.clone();

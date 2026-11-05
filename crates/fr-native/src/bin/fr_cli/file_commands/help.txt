@@ -1,0 +1,31 @@
+
+Later client file selections (Linux):
+fr connect NODE_ID --control --file-commands [native connect options]
+fr send NODE_ID --connection-id ID --status [--json]
+fr send NODE_ID --connection-id ID --lease HANDLE --send /absolute/path... [--json]
+fr send NODE_ID --connection-id ID --lease HANDLE --status [--request N] [--json]
+fr send NODE_ID --connection-id ID --lease HANDLE --cancel N [--json]
+
+Start with explicit --file-commands, alone or with initial --send / --file-drop.
+Host approval, control and frd --files DIR are still required. Find connection_id
+with fr robot session status NODE_ID; fr send --status then reports its separate
+file lease. Both handles compare original local owners; neither is a bearer ticket.
+--send repeats for up to 8 absolute regular files or portable directories. Paths
+are selected on the original fixed worker; symlinks, special files and parent
+traversal refuse. After the separately bounded foreground lookup, the file-owner
+request has one two-second budget, including selection; neither phase retries.
+Finish the previous transfer before another selection; an earlier paused batch
+still holds the intake and original cumulative limits remain in force. Inspect
+command batches with --status --request N and cancel them with --cancel N; the
+original panel/hotkeys keep their original selection, and no CLI pause is added.
+Up to 64 exact request results remain until owner cleanup.
+Admission/queued bytes do not prove host publication; inspect the request's actual
+receipt, uncertainty and cleanup. --cancel N only requests that original batch's
+cancellation and cannot erase earlier effects or cancel a successor's handle.
+After an unknown reply inspect the SAME file lease; never automatically resend.
+No new connection is opened. Same-user kernel credentials and the exact node,
+connection and file lease are checked before sending. File command consent is
+spent at the first upload setup, even if control has not yet been granted.
+It never restarts after a startup/viewing retry, display change or fresh F8 control.
+Original selector cleanup must finish before reconnect. Completion retains every
+admitted command's actual result without paths, names or file contents.

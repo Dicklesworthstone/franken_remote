@@ -1,7 +1,7 @@
 # Native file sending
 
 The shipped native workflow supports explicit uploads and downloads. Uploads use
-`fr connect --control --send PATH` or `--file-drop` with `frd run --files DIR`; downloads use
+`fr connect --control --send PATH`, `--file-drop` or `--file-commands` with `frd run --files DIR`; downloads use
 `frd run --once --send PATH` with `fr connect --control --receive DIR`.
 See [NATIVE_FILE_DOWNLOAD.md](NATIVE_FILE_DOWNLOAD.md) for the download workflow.
 The sections below describe the original upload API and its later integrations.
@@ -365,3 +365,61 @@ submission. Native panel and CLI regressions cover replacement lifecycle and
 combined result reporting. Those runtime-dependent Rust targets and an actual
 file-manager/X11 drop have not yet been executed in this change's workspace;
 the parser and C checks do not qualify the complete desktop workflow.
+
+## Local commands on the original client upload
+
+The Linux client can accept later explicit selections without an X11 file-manager
+drop. Enable this separately on the original connection; it is off by default:
+
+```sh
+fr connect NODE_ID --control --file-commands --experimental-native --display only
+fr robot session status NODE_ID --json
+fr send NODE_ID --connection-id ID --status --json
+fr send NODE_ID --connection-id ID --lease HANDLE --send /absolute/file --send /absolute/tree --json
+fr send NODE_ID --connection-id ID --lease HANDLE --status --request N --json
+fr send NODE_ID --connection-id ID --lease HANDLE --cancel N --json
+```
+
+The host still needs its explicit `--files DIR`, approval and control grant.
+`--file-commands` may start with no source or accompany `--send` / `--file-drop`.
+The foreground status supplies `connection_id`; file status supplies a separate
+random `lease`. Both are public comparison handles. Every command verifies the
+same effective kernel user and the exact node/foreground connection, then the
+upload endpoint's original lease. A lost reply never discovers another owner
+or automatically repeats a send. Host-send endpoints use a different namespace.
+
+One existing selector worker validates up to eight absolute paths per command;
+the caller cannot change the long-lived viewer's working directory, bypass
+symlink/special-file refusal or renew the original transfer deadlines. After
+the separately bounded foreground lookup, the file request has one two-second
+deadline including selection. Readiness and the single pending slot belong to
+the original `SendIntake`: an unfinished or paused transfer, cancelled intake,
+expired authority or spent cumulative quota still refuses the next selection.
+
+Each admitted command has its own retained request number, receipts and exact
+cancellation handle. Use `fr send --status --request N` and `--cancel N` for these
+batches; the original upload panel and shortcuts keep their original selection.
+At most 64 command results remain until owner cleanup. Local admission and queued
+bytes do not prove publication; the report separates published/refused items,
+unknown publication, unknown durability and source cleanup. Cancellation cannot
+erase effects or cancel a successor by naming an older request. Final connection
+output includes admitted command outcomes without paths, names or contents.
+`files_commands.requests` maps each original `request` to its zero-based
+`first_index` and `selected` count in the `index` fields of `files_sent` /
+`files_refused`, so mixed
+initial, dropped and command selections retain exact attribution after cleanup.
+
+Consent is spent at the first upload setup, even if control has not yet been
+requested. A startup or viewing retry, display change or fresh F8 control does
+not reopen this endpoint. A retry can preserve independent download consent
+without advertising a spent command-only upload. The original Desktop fences
+its session before stopping commands and retains the socket/selector owner
+until both original workers have joined; a stuck selection prevents cleanup
+from falsely authorizing another attempt.
+
+The exact production IPC/parser/report sources compile together independently
+of the transport runtime. Portable parsing, framing/credential and result
+regressions run locally; abstract-socket integration tests are blocked here by
+`bind` returning `EPERM`. Real `SendIntake` cancellation/result-retention and
+native retry/consent regressions are included as runtime-dependent targets.
+These checks do not establish live-tailnet or native desktop qualification.
