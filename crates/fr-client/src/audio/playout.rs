@@ -242,7 +242,9 @@ impl<D: PolledDecoder> AudioPlayout<D> {
     /// `arrived` is the ORIGINAL local receipt instant on the same clock as
     /// `clock.now`, not the worker's dequeue time or a host timestamp. Queueing
     /// consumes the existing age budget; it never grants another full lifetime.
-    /// An already obsolete packet is dropped without starting a device schedule.
+    /// An expired packet, or an initial packet without enough original lifetime
+    /// for the full startup reorder interval, is dropped without starting a
+    /// device schedule.
     /// Current device/clock checks still run, including expiry of earlier work.
     pub fn receive_at(
         &mut self,
@@ -267,6 +269,15 @@ impl<D: PolledDecoder> AudioPlayout<D> {
             }
         };
         if clock.now.0 >= until {
+            return Ok(false);
+        }
+        // The first packet must outlive the full startup reorder interval.
+        // Before any schedule or codec history exists, an aged handoff must not
+        // arm playback that expires before its first slot. A newer packet can
+        // establish startup; an existing timeline keeps its strict expiry rules.
+        if self.next_output.is_none()
+            && until - clock.now.0 <= u64::from(self.config.jitter_target_ms()) * 1000
+        {
             return Ok(false);
         }
         match self.jitter.try_push_packet(packet) {

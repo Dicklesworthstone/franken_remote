@@ -158,6 +158,121 @@ fn one_packet_starts_at_the_original_device_deadline_without_counting_missing_pa
 }
 
 #[test]
+fn delayed_startup_handoff_keeps_playable_packets_without_inventing_prior_history() {
+    let (mut owner, counts) = owner(20, 20);
+    // One bounded worker stall: the original inbox arrivals remain 20 ms apart.
+    // Packet 0 expires at 100 ms, before startup's first possible slot at 110 ms.
+    for sequence in 0..5 {
+        assert_eq!(
+            owner
+                .receive_at(packet(20, sequence), clock(sequence * 20).now, clock(90))
+                .unwrap(),
+            sequence != 0
+        );
+    }
+    assert_eq!(owner.queued_packets(), 4);
+    for ms in [90, 99, 100, 109] {
+        assert_eq!(render(&mut owner, ms), Ok(PlayoutResult::Waiting));
+        assert_eq!(counts.decoded.get(), 0);
+    }
+    for sequence in 1..5 {
+        let first = submitted(render(&mut owner, 90 + sequence * 20));
+        assert_eq!(first.sequence, sequence);
+        assert_eq!(first.generation, config(20, 20).generation());
+        assert_eq!(first.source_samples, 900_000 + sequence * 960);
+        assert_eq!(first.valid_until, clock(sequence * 20 + 100).now);
+        assert!(!first.concealed);
+    }
+    assert_eq!(counts.decoded.get(), 4);
+    assert_eq!(counts.concealed.get(), 0);
+    assert_eq!(counts.dropped.get(), 0);
+    assert_eq!(owner.queued_packets(), 0);
+    assert_eq!(owner.error(), None);
+}
+
+#[test]
+fn startup_handoff_must_outlive_the_full_reorder_interval() {
+    for target in [10, 20, 40, 60, 80, 90] {
+        for remaining in [target - 1, target, target + 1] {
+            let (mut owner, counts) = owner(10, target);
+            let at = u64::from(100 - remaining);
+            assert_eq!(
+                owner.receive_at(packet(10, 0), clock(0).now, clock(at)),
+                Ok(remaining > target)
+            );
+            if remaining <= target {
+                assert_eq!(owner.queued_packets(), 0);
+                assert_eq!(render(&mut owner, at + 200), Ok(PlayoutResult::Waiting));
+                assert_eq!(counts.decoded.get(), 0);
+            } else {
+                let due = at + u64::from(target);
+                assert_eq!(render(&mut owner, due - 1), Ok(PlayoutResult::Waiting));
+                assert_eq!(counts.decoded.get(), 0, "keep the full reorder interval");
+                let first = submitted(render(&mut owner, due));
+                assert_eq!(first.sequence, 0);
+                assert_eq!(first.valid_until, clock(100).now);
+                assert_eq!(counts.decoded.get(), 1);
+            }
+            assert_eq!(owner.error(), None);
+            assert_eq!(counts.concealed.get(), 0);
+            assert_eq!(counts.dropped.get(), 0);
+        }
+    }
+}
+
+#[test]
+fn an_existing_startup_schedule_does_not_require_another_full_reorder_interval() {
+    let (mut owner, counts) = owner(20, 60);
+    owner.receive(packet(20, 0), clock(0)).unwrap();
+    // Less than 60 ms remains, but the original first slot is already at 60 ms.
+    assert!(
+        owner
+            .receive_at(packet(20, 1), clock(0).now, clock(50))
+            .unwrap()
+    );
+    assert_eq!(render(&mut owner, 59), Ok(PlayoutResult::Waiting));
+    assert_eq!(counts.decoded.get(), 0);
+    for (sequence, at) in [(0, 60), (1, 80)] {
+        let first = submitted(render(&mut owner, at));
+        assert_eq!(first.sequence, sequence);
+        assert_eq!(first.valid_until, clock(100).now);
+    }
+    assert_eq!(counts.decoded.get(), 2);
+    assert_eq!(counts.concealed.get(), 0);
+    assert_eq!(counts.dropped.get(), 0);
+}
+
+#[test]
+fn an_established_timeline_cannot_skip_expiring_handoff_or_restart_with_fresh_input() {
+    let (mut owner, counts) = owner(10, 80);
+    owner.receive(packet(10, 0), clock(0)).unwrap();
+    assert_eq!(submitted(render(&mut owner, 80)).sequence, 0);
+    for sequence in 1..3 {
+        let due = 80 + sequence * 10;
+        assert!(
+            owner
+                .receive_at(packet(10, sequence), clock(0).now, clock(due - 1))
+                .unwrap(),
+            "the established codec timeline does not skip aged handoffs"
+        );
+        assert_eq!(render(&mut owner, due - 1), Ok(PlayoutResult::Waiting));
+        assert_eq!(counts.decoded.get(), sequence + 1);
+        if sequence == 1 {
+            assert_eq!(submitted(render(&mut owner, due)).sequence, sequence);
+        } else {
+            assert_eq!(render(&mut owner, due), Err(PlayoutError::Expired));
+        }
+    }
+    assert_eq!(
+        owner.receive(packet(10, 3), clock(100)),
+        Err(PlayoutError::Expired)
+    );
+    assert_eq!(counts.concealed.get(), 0);
+    assert_eq!(counts.dropped.get(), 1);
+    assert_eq!(owner.queued_packets(), 0);
+}
+
+#[test]
 fn lost_initial_packets_use_the_existing_finite_plc_timeline_then_resume_real_audio() {
     for duration in [10, 20] {
         let target = 3 * duration;

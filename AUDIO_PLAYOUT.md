@@ -66,6 +66,28 @@ patterns across 10/20 ms mono/stereo match a separately driven native decoder's
 history, with exactly the injected losses concealed. Device clocks and loss are
 injected; this is not a live-network, speaker or complete-workspace result.
 
+### Startup after a delayed worker handoff
+
+Before the first output schedule exists, `receive_at` drops a packet whose
+original remaining lifetime cannot outlast the full startup reorder interval.
+For example, a packet received at 0 ms and dequeued at 90 ms cannot start a
+20 ms reorder interval with its unchanged 100 ms expiry. A newer queued packet
+can establish startup instead. The discarded packet adds neither codec history
+nor concealment, and the replacement keeps its own original arrival deadline.
+
+This admission check does not restart an existing schedule or extend an admitted
+packet's lifetime. Once startup is scheduled, subsequent packets retain the
+existing reorder and terminal-expiry rules; after decode starts, the established
+codec timeline remains intact. The full initial reorder interval still elapses
+before the first decode or output.
+
+The original implementation fails the delayed-batch and exact-lifetime-boundary
+regressions in `audio_startup_loss`; the corrected suite passes all 12 tests,
+including four new cases for delayed startup, expiry equality, an already
+scheduled first slot and an established codec timeline (bead `fr-5xt3`). All 70
+tests across the seven affected client audio suites pass with explicit codec and
+clock fixtures. This does not add physical-device or live-network qualification.
+
 ## Decode ahead without early playback
 
 After the first output, a queued packet on the exact next sequence/sample
