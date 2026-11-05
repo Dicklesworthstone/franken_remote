@@ -84,9 +84,12 @@ static int switch_surface(struct fr_viewer_window *h, int control_offered) {
     if (h->control_key || (h->switch_mode == 1 && h->switch_keys[6]))
         mask |= XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_PROPERTY_CHANGE;
     if (h->files) mask |= XCB_EVENT_MASK_PROPERTY_CHANGE;
-    return checked(h, xcb_change_window_attributes_checked(h->c, h->window,
-        XCB_CW_EVENT_MASK, &mask)) &&
-        property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) &&
+    if (!checked(h, xcb_change_window_attributes_checked(h->c, h->window,
+        XCB_CW_EVENT_MASK, &mask))) return 0;
+    /* A confirmed keyboard grab names itself from the input connection, at a
+     * moment unordered with this window thread. Writing here would hide it. */
+    if (h->switch_grab_title) return 1;
+    return property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) &&
         property(h, h->net_name, h->utf8, 8, (uint32_t)strlen(title), title);
 }
 static int switch_barrier(struct fr_viewer_window *h, uint8_t kind) {
@@ -105,12 +108,14 @@ void fr_viewer_window_display_switch_reset(struct fr_viewer_window *h) {
     if (h->switch_barrier_kind == 2) h->switch_barrier_kind = 0;
 }
 /* 0 disabled; 1 viewing (this connection observes keys); 2 controlling (the
- * original native input-capture owner consumes the physical chord instead). */
-int fr_viewer_window_display_switch_offer(struct fr_viewer_window *h, int mode) {
+ * original native input-capture owner consumes the physical chord instead).
+ * grab_title: while controlling, the capture owner's grab writes the title. */
+int fr_viewer_window_display_switch_offer(struct fr_viewer_window *h, int mode, int grab_title) {
     if (!h || mode < 0 || mode > 2 || xcb_connection_has_error(h->c)) return -1;
     fr_viewer_window_display_switch_reset(h);
     h->switch_sequence = h->switch_ready = h->switch_barrier_kind = 0;
     h->switch_mode = (uint8_t)mode;
+    h->switch_grab_title = mode == 2 && grab_title;
     memset(h->switch_keys, 0, sizeof(h->switch_keys));
     if (mode) {
         if (!switch_map(h)) return xcb_connection_has_error(h->c) ? -1 :

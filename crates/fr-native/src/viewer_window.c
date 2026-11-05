@@ -25,7 +25,7 @@ struct fr_viewer_window {
     uint16_t control_locks;
     xcb_atom_t control_clock;
     uint32_t control_sequence, control_baseline, control_press_at, control_release_at, control_age;
-    uint8_t switch_mode, switch_keys[7], switch_held[7], switch_xkb;
+    uint8_t switch_mode, switch_grab_title, switch_keys[7], switch_held[7], switch_xkb;
     uint8_t switch_pressed, switch_released, switch_blocked, switch_ready, switch_barrier_kind;
     xcb_atom_t switch_clock;
     uint32_t switch_sequence, switch_baseline, switch_press_at, switch_release_at, switch_age;

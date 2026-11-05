@@ -27,7 +27,7 @@ use std::{
     ptr::NonNull,
     sync::{
         Arc, Mutex, OnceLock,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     task::{Context, Poll, Waker},
     thread::{self, JoinHandle},
@@ -72,7 +72,11 @@ unsafe extern "C" {
     fn fr_viewer_window_drop_complete(handle: *mut c_void, accepted: c_int);
     fn fr_viewer_window_control_age(handle: *mut c_void) -> u32;
     fn fr_viewer_window_control_reset(handle: *mut c_void);
-    fn fr_viewer_window_display_switch_offer(handle: *mut c_void, mode: c_int) -> c_int;
+    fn fr_viewer_window_display_switch_offer(
+        handle: *mut c_void,
+        mode: c_int,
+        grab_title: c_int,
+    ) -> c_int;
     fn fr_viewer_window_display_switch_released(handle: *mut c_void) -> c_int;
     fn fr_viewer_window_display_switch_age(handle: *mut c_void) -> u32;
     fn fr_viewer_window_display_switch_reset(handle: *mut c_void);
@@ -144,6 +148,7 @@ struct Shared {
     orderly_close: AtomicU8,
     control_choice: choice::Choice,
     display_switch: display_switch::Intent,
+    grab_title: AtomicBool,
     resize: resize::Intent,
     automation_focus: focus::Gate,
     automation_focus_stop: AtomicU8,
@@ -332,6 +337,11 @@ impl WindowControl {
     /// display-change chord. Requesting control and automation keep it Disabled.
     /// Changing mode invalidates in-flight gestures; an accepted choice is
     /// one-use and cannot be erased by a subsequent request to disable it.
+    /// This desktop's control takes the keyboard, whose confirmed grab names
+    /// itself in the title. Controlled mode then leaves that title alone.
+    pub(crate) fn leave_controlled_title_to_grab(&self) {
+        self.0.grab_title.store(true, Ordering::Release);
+    }
     pub fn set_display_switch_mode(&self, mode: DisplaySwitchMode) -> Result<(), Error> {
         if self.status() != Status::Mapped || !self.0.display_switch.set_mode(mode) {
             return Err(Error::NotReady);
@@ -473,6 +483,7 @@ impl ViewerWindow {
             orderly_close: AtomicU8::new(CLOSE_DISARMED),
             control_choice: choice::Choice::default(),
             display_switch: display_switch::Intent::default(),
+            grab_title: AtomicBool::new(false),
             resize: resize::Intent::default(),
             automation_focus: focus::Gate::default(),
             automation_focus_stop: AtomicU8::new(0),
@@ -719,9 +730,11 @@ impl DisplayGesture {
             return Ok(());
         }
         let mode = scope.map_or(DisplaySwitchMode::Disabled, |scope| scope.mode);
+        let grab_title = c_int::from(native.shared.grab_title.load(Ordering::Acquire));
         // SAFETY: the original window thread exclusively owns this connection.
-        if unsafe { fr_viewer_window_display_switch_offer(native.handle.as_ptr(), mode as c_int) }
-            < 0
+        if unsafe {
+            fr_viewer_window_display_switch_offer(native.handle.as_ptr(), mode as c_int, grab_title)
+        } < 0
         {
             return Err(());
         }
@@ -768,7 +781,7 @@ impl DisplayGesture {
         // Disable the old subscription before publishing one-shot intent. A
         // mode change during any native query makes the exact scope refuse.
         // SAFETY: original window owner; independent F8/file subscriptions remain.
-        if unsafe { fr_viewer_window_display_switch_offer(native.handle.as_ptr(), 0) } != 1 {
+        if unsafe { fr_viewer_window_display_switch_offer(native.handle.as_ptr(), 0, 0) } != 1 {
             return Err(());
         }
         self.scope = None;

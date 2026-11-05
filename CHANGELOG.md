@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-04 — captured system shortcuts keep their window title
+
+- With `fr connect --control --capture-system-shortcuts` and display
+  switching, the viewer's window thread could rewrite the controlled title
+  after the confirmed keyboard grab had named itself. The window then hid
+  "Remote system shortcuts" while they were captured. The two writers use
+  unordered X connections; the window thread now leaves the title to a
+  confirmed grab.
+- The namespace test expects the capture title with the F7 hint. With the old
+  write planted back it fails 2/2 on the title (ts1). The test now repeats the
+  chord when a view lapse refused it: input on a stale view is refused by
+  design and never replayed. Its key assertions are unchanged.
+
 ## 2026-11-04 — audio that outran its window is reported as late
 
 - The completion counted a jitter window or concealment overrun, a missed

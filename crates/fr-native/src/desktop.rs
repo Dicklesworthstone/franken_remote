@@ -272,8 +272,11 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        self.window()
-            .ok_or(Error::NotViewing)?
+        let window = self.window().ok_or(Error::NotViewing)?;
+        if self.configuration.capture_system_shortcuts {
+            window.leave_controlled_title_to_grab();
+        }
+        window
             .set_display_switch_mode(viewer_window::DisplaySwitchMode::Viewing)
             .map_err(Error::Window)?;
         self.display_switching = true;

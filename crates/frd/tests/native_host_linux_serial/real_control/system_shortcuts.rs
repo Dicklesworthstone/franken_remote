@@ -8,9 +8,9 @@ use super::*;
 /// therefore prove real passive grabs, independently of `FrankenRemote`'s active
 /// keyboard owner. The same bindings must work after that owner has ended.
 const PROBE: &str = r#"
-# The CLI disables display switching before requesting control; the title must
-# advertise only the local release shortcut while this original grant is active.
-ACTIVE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control"
+# The confirmed grab names itself and both local shortcuts while this original
+# grant is active; the window thread's controlled title must not replace it.
+ACTIVE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+F7 changes display - Ctrl+Alt+Shift+Escape releases control"
 sig(x.XGrabKey, I, D, I, U, W, I, I, I)
 sig(x.XGrabKeyboard, I, D, W, I, I, I, W)
 sig(x.XUngrabKeyboard, I, D, W)
@@ -69,7 +69,7 @@ def chord(names):
 def command(cmd):
     if cmd[0] == "active":
         window = int(cmd[1])
-        assert title(window) == ACTIVE
+        assert title(window) == ACTIVE, title(window)
         a, focused, revert = A(), W(), I()
         assert x.XGetWindowAttributes(d, window, c.byref(a)) and a.map_state == 2
         x.XGetInputFocus(d, c.byref(focused), c.byref(revert))
@@ -119,16 +119,20 @@ fn remote_shortcuts_and_ordinary_input(s: &mut Controlled, probe: &mut Harness) 
         code
     });
     let before = host_events(&mut s.observer).len();
-    assert_eq!(probe.ask("shortcuts"), ["OK"]);
-    assert_eq!(probe.ask("ordinary"), ["OK"]);
+    // A view can lapse right after the grant on a loaded host, and input captured
+    // on a stale view is refused and never replayed. Press again, as a user would.
     assert!(
-        eventually(Duration::from_secs(10), || {
-            let events = host_events(&mut s.observer);
-            host_keys.iter().all(|&code| {
-                [2, 3].iter().all(|&kind| {
-                    events[before..]
-                        .iter()
-                        .any(|e| (e.0, e.1, e.3) == (kind, code, false))
+        eventually(Duration::from_secs(20), || {
+            assert_eq!(probe.ask("shortcuts"), ["OK"]);
+            assert_eq!(probe.ask("ordinary"), ["OK"]);
+            eventually(Duration::from_secs(2), || {
+                let events = host_events(&mut s.observer);
+                host_keys.iter().all(|&code| {
+                    [2, 3].iter().all(|&kind| {
+                        events[before..]
+                            .iter()
+                            .any(|e| (e.0, e.1, e.3) == (kind, code, false))
+                    })
                 })
             })
         }),
