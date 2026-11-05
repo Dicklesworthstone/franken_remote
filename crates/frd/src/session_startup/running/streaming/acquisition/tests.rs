@@ -177,7 +177,6 @@ async fn fixture_with_presentation(
         ReceivePipeline::new(config, MediaBudget::new(config.limits.protocol()).unwrap()).unwrap();
     let mut presenter =
         Presenter::stream_fixture(c, viewer.io().unwrap().0, &vm, &mut receiver).await;
-    let mut n = 1000;
     let initial = loop {
         sender
             .transmit(h, host.io().unwrap().0, Lane::Original)
@@ -185,10 +184,7 @@ async fn fixture_with_presentation(
         let (host_turn, viewer_turn) = Box::pin(support::both(
             host.drive(
                 Duration::from_millis(1),
-                || {
-                    n += 1;
-                    Ok(n)
-                },
+                || Ok(crate::session_startup::tests::unique_nonce()),
                 block,
             ),
             viewer.drive(Duration::from_millis(1), block),
@@ -314,7 +310,6 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
     let receipts = Cell::new(0);
     let active = Cell::new(false);
     let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let mut n = 6000;
     let mut ticket = 1000;
     let mut sampled = 0;
     let start = now(&h).unwrap();
@@ -394,10 +389,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                             }
                             Ok(Some(target()))
                         },
-                        || {
-                            n += 1;
-                            Ok(n)
-                        },
+                        || Ok(crate::session_startup::tests::unique_nonce()),
                         || {
                             ticket += 1;
                             Some(InputTicketId::from_raw(ticket))

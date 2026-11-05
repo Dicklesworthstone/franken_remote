@@ -68,7 +68,8 @@ async fn drain_host(c: &Cx, h: &Cx, host: &mut QuicRecords, viewer: &mut QuicRec
 }
 fn nonce(value: &mut u128) -> Result<u128, ()> {
     *value = value.checked_add(1).ok_or(())?;
-    Ok(*value)
+    // The counter only bounds draws; the value never repeats across phases.
+    Ok(crate::session_startup::tests::unique_nonce())
 }
 async fn poll_driver(driver: &mut Driver) {
     std::future::poll_fn(|task| {

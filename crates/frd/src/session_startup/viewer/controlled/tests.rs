@@ -60,7 +60,8 @@ fn key(down: bool) -> Action<'static> {
 }
 fn nonce(counter: &mut u128) -> Result<u128, ()> {
     *counter = counter.checked_add(1).ok_or(())?;
-    Ok(*counter)
+    // The counter only bounds draws; the value never repeats across phases.
+    Ok(crate::session_startup::tests::unique_nonce())
 }
 #[derive(Default)]
 struct Effects {

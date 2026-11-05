@@ -18,6 +18,17 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+/// A host refuses a fresh challenge nonce equal to the last one it issued
+/// (`NonceUnavailable`). Fixtures drive one session through several phases,
+/// and phases that each counted up from the same base drew the same nonce
+/// again whenever the renewal cadence fell due in both, which happens under
+/// load. Every draw from this one process-wide sequence is distinct, and the
+/// sequence starts above every hand-written test nonce.
+pub(in crate::session_startup) fn unique_nonce() -> u128 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    (1 << 40) + u128::from(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 fn config(approval: bool) -> Configuration {
     Configuration {
         offer: Offer {

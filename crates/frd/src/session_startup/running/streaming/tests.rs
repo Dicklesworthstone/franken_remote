@@ -61,7 +61,8 @@ pub(super) fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
 }
 pub(super) fn nonce(n: &mut u128) -> Result<u128, ()> {
     *n = n.checked_add(1).ok_or(())?;
-    Ok(*n)
+    // The counter only bounds draws; the value never repeats across phases.
+    Ok(crate::session_startup::tests::unique_nonce())
 }
 pub(super) fn capabilities() -> Vec<Capability> {
     [
