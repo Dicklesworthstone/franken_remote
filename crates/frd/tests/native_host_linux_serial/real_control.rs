@@ -199,18 +199,25 @@ TITLE = b"FrankenRemote"
 CAPTURE_TITLE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+Escape releases control"
 VIEW_ONLY_TITLE = b"FrankenRemote - View only - F8 requests control"
 VIEW_ONLY_UNAVAILABLE = b"FrankenRemote - View only - F8 unavailable"
+# The native viewer offers display switching once its keys are mapped.
+VIEW_SWITCH_TITLE = b"FrankenRemote - Ctrl+Alt+Shift+F7 changes display"
+VIEW_ONLY_SWITCH_TITLE = b"FrankenRemote - View only - F8 requests control - Ctrl+Alt+Shift+F7 changes display"
+CONTROL_SWITCH_TITLE = b"FrankenRemote - Ctrl+Alt+Shift+F7 changes display - Ctrl+Alt+Shift+Escape releases control"
+CAPTURE_SWITCH_TITLE = b"FrankenRemote - Remote system shortcuts - Ctrl+Alt+Shift+F7 changes display - Ctrl+Alt+Shift+Escape releases control"
+VIEWER_TITLES = (TITLE, VIEW_ONLY_TITLE, VIEW_ONLY_UNAVAILABLE, VIEW_SWITCH_TITLE,
+                 VIEW_ONLY_SWITCH_TITLE, CONTROL_SWITCH_TITLE)
 x.XSelectInput(d, root, 1 << 19)
 x.XSync(d, 0)
 state = {"window": 0}
 def event(e):
-    if e.type == 19 and title(e.map.window) in (TITLE, VIEW_ONLY_TITLE, VIEW_ONLY_UNAVAILABLE):
+    if e.type == 19 and title(e.map.window) in VIEWER_TITLES:
         x.XSetInputFocus(d, e.map.window, 2, 0)
         x.XSync(d, 0)
         state["window"] = e.map.window
         say("FOCUSED", e.map.window)
 def command(cmd):
     if cmd[0] == "window":
-        found = [f for name in (TITLE, CAPTURE_TITLE, VIEW_ONLY_TITLE, VIEW_ONLY_UNAVAILABLE) for f in mapped(name)
+        found = [f for name in VIEWER_TITLES + (CAPTURE_TITLE, CAPTURE_SWITCH_TITLE) for f in mapped(name)
                  if f[0] == state["window"]]
         say("WIN", *(found[0] if found else ("none",)))
         return
