@@ -2,6 +2,7 @@
 //! recorded virtual source. Input establishment and the tone are fixtures; no
 //! application-output or child-exit claim is inferred from admission counters.
 #[path = "../../../frd/src/microphone_process.rs"]
+#[allow(dead_code)] // This subset drives the supervisor; Control's other callers are in frd.
 mod microphone_process;
 
 use super::{
