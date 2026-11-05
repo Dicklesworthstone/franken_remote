@@ -76,12 +76,24 @@ can return pixels and the pictured frame's original input handles. It does not
 make a later input request atomic with the observation or refresh that evidence.
 
 Clicks, drags and key taps contain two reliable actions. Modifier shortcuts
-contain at most ten. Each next action is admitted only after the original host
+contain at most ten. Line scrolls contain one to eight: each action has at most
+32 total wheel steps, matching the X11 executor's existing submission bound.
+Horizontal lines precede vertical lines, with the original signs, exact total
+distance and target point preserved. Previously the CLI accepted up to 120
+lines per axis but sent them as one action, which the native executor refused
+when their combined distance exceeded 32.
+
+Each next action is admitted only after the original host
 reports successful submission of the preceding action and the original
 observation, generations, focus and authority remain valid. There is one pending
 request and at most eight retained fixed-size reports. No persistent held keys,
 arbitrary batches, committed text,
 relative pointer, pixel scrolling or pointer replay are exposed.
+
+Splitting a scroll does not extend its lifetime. On a slow path the original
+observation or ticket may expire after a prefix; the result retains its exact
+confirmed OS operations and any unknown effect. That request remains consumed,
+including after a late receipt, and the remainder is never automatically sent.
 
 ### Drag with the original observation
 

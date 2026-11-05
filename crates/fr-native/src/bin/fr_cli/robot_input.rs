@@ -48,7 +48,17 @@ impl Operation {
     #[cfg(any(target_os = "linux", test))]
     pub fn count(self) -> u8 {
         match self {
-            Self::Scroll { .. } => 1,
+            Self::Scroll { dx, dy, .. } => {
+                // The public request spans up to 120 lines per axis, but one
+                // native wheel action admits at most 32 total steps. A request
+                // is at most eight original, receipt-gated actions. Invalid
+                // raw IPC values remain non-panicking until valid() refuses.
+                let lines = u64::from(dx.unsigned_abs()) + u64::from(dy.unsigned_abs());
+                u8::try_from(
+                    lines.div_ceil(u64::from(fr_core::input_submission::scroll::MAX_STEPS)),
+                )
+                .unwrap_or(u8::MAX)
+            }
             Self::Click { .. } | Self::KeyTap { .. } | Self::Drag { .. } => 2,
             Self::KeyChord { modifiers, .. } => {
                 // A byte has at most eight set bits, including invalid requests.
@@ -76,6 +86,32 @@ impl Operation {
                     && fr_core::input::PhysicalKey::new(usage).is_some()
             }
         }
+    }
+    /// One bounded part of the original scroll. Preserve horizontal-then-
+    /// vertical order, signs and exact distance without allocating or retaining
+    /// an input queue. Later parts still need their original owner's gates.
+    #[cfg(any(feature = "linux-desktop", test))]
+    pub fn scroll_lines(self, index: u8) -> Option<(i32, i32)> {
+        let Self::Scroll { dx, dy, .. } = self else {
+            return None;
+        };
+        if !self.valid() {
+            return None;
+        }
+        let maximum = fr_core::input_submission::scroll::MAX_STEPS;
+        let offset = u32::from(index) * maximum;
+        let x = dx.unsigned_abs().saturating_sub(offset).min(maximum);
+        let y = dy
+            .unsigned_abs()
+            .saturating_sub(offset.saturating_sub(dx.unsigned_abs()))
+            .min(maximum - x);
+        if x == 0 && y == 0 {
+            return None;
+        }
+        Some((
+            i32::try_from(x).ok()? * dx.signum(),
+            i32::try_from(y).ok()? * dy.signum(),
+        ))
     }
     /// Both endpoints of the single bounded drag, in signed desktop pixels.
     #[cfg(any(feature = "linux-desktop", test))]

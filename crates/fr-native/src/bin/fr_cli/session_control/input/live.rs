@@ -9,12 +9,15 @@ use std::time::Instant;
 impl Operation {
     fn action(self, index: u8) -> Option<Action<'static>> {
         match self {
-            Self::Scroll { x, y, dx, dy } if index == 0 => Some(Action::Scroll {
-                position: DesktopPoint { x, y },
-                x: dx * fr_core::input_submission::scroll::LINE,
-                y: dy * fr_core::input_submission::scroll::LINE,
-                unit: ScrollUnit::Lines,
-            }),
+            Self::Scroll { x, y, .. } => {
+                let (dx, dy) = self.scroll_lines(index)?;
+                Some(Action::Scroll {
+                    position: DesktopPoint { x, y },
+                    x: dx * fr_core::input_submission::scroll::LINE,
+                    y: dy * fr_core::input_submission::scroll::LINE,
+                    unit: ScrollUnit::Lines,
+                })
+            }
             Self::Click { button, x, y } if index < 2 => Some(Action::Button {
                 button: match button {
                     1 => PointerButton::Primary,
@@ -186,6 +189,90 @@ impl Shared {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn robot_scroll_preserves_every_line_within_the_native_submission_bound() {
+        use fr_core::input_submission::scroll::{LINE, LineScroll, MAX_STEPS, WheelDirection};
+
+        for (dx, dy) in [
+            (0, 1),
+            (32, 0),
+            (33, 0),
+            (20, -20),
+            (0, -120),
+            (120, 120),
+            (-120, 120),
+            (120, -120),
+            (-120, -120),
+        ] {
+            let operation = Operation::Scroll {
+                x: -700,
+                y: 500,
+                dx,
+                dy,
+            };
+            assert!(operation.valid());
+            assert!(operation.count() <= fr_client::robot::input::native::MAX_ACTIONS);
+            let mut distance = (0, 0);
+            let mut directions = Vec::new();
+            for index in 0..operation.count() {
+                let Some(Action::Scroll {
+                    position,
+                    x,
+                    y,
+                    unit,
+                }) = operation.action(index)
+                else {
+                    panic!("every declared scroll action must exist");
+                };
+                assert!(position == DesktopPoint { x: -700, y: 500 });
+                assert_eq!(unit, ScrollUnit::Lines);
+                // This is the actual X11 executor's pre-submission gate. The
+                // original single 120-line action failed here before moving.
+                let native = LineScroll::new(x, y).expect("bounded native wheel action");
+                assert!(native.native_operations() <= 1 + 2 * MAX_STEPS);
+                assert!(native.native_operations() > 1);
+                distance.0 += x / LINE;
+                distance.1 += y / LINE;
+                directions.extend(native.steps());
+            }
+            assert_eq!(distance, (dx, dy));
+            let expected: Vec<_> = std::iter::repeat_n(
+                if dx < 0 {
+                    WheelDirection::Left
+                } else {
+                    WheelDirection::Right
+                },
+                dx.unsigned_abs() as usize,
+            )
+            .chain(std::iter::repeat_n(
+                if dy < 0 {
+                    WheelDirection::Up
+                } else {
+                    WheelDirection::Down
+                },
+                dy.unsigned_abs() as usize,
+            ))
+            .collect();
+            assert_eq!(
+                directions, expected,
+                "horizontal motion precedes vertical motion"
+            );
+            assert!(operation.action(operation.count()).is_none());
+            assert!(operation.action(u8::MAX).is_none());
+        }
+    }
+
+    #[test]
+    fn invalid_scrolls_cannot_expand_into_valid_partial_input() {
+        for (dx, dy) in [(0, 0), (121, 0), (0, -121), (i32::MIN, i32::MAX)] {
+            let operation = Operation::Scroll { x: 0, y: 0, dx, dy };
+            assert!(!operation.valid());
+            for index in 0..=u8::MAX {
+                assert!(operation.action(index).is_none());
+            }
+        }
+    }
 
     fn key_step(operation: Operation, index: u8) -> (u16, KeyTransition) {
         let Some(Action::Key { key, transition }) = operation.action(index) else {

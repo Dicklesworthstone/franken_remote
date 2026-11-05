@@ -674,6 +674,120 @@ fn a_complete_chord_keeps_the_same_owner_and_retains_all_key_receipts() {
 }
 
 #[test]
+fn a_large_scroll_waits_for_each_receipt_and_preserves_the_original_result() {
+    let shared = fresh();
+    let request = Request {
+        operation: Operation::Scroll {
+            x: -100,
+            y: 20,
+            dx: -120,
+            dy: 120,
+        },
+        ..request(&snapshot(&shared), 1)
+    };
+    assert_eq!(request.operation.count(), 8);
+    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    for sequence in 0..8 {
+        encoded(&shared, 1, sequence);
+        assert!(!ready(&shared, 1), "never pipeline another wheel action");
+        // A repeated command is the same pending request, not eight more actions.
+        assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+        shared.result(ResultEvent::Completed(InputResult {
+            submitted_operations: if sequence == 7 { 33 } else { 65 },
+            ..receipt(sequence)
+        }));
+    }
+    let complete = retained(&shared, request);
+    assert_eq!(complete.disposition, InputDisposition::Committed);
+    assert_eq!(complete.actions_submitted, 8);
+    assert_eq!(complete.submitted_operations, 488); // eight positions, 240 wheel pairs
+    assert_eq!(complete.unacknowledged_actions, 0);
+    assert_eq!(validate_report(complete, request), Ok(()));
+    assert_eq!(
+        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        complete
+    );
+    assert!(snapshot(&shared).ready);
+}
+
+#[test]
+fn interrupted_large_scrolls_keep_the_prefix_and_never_replay_the_remainder() {
+    for missing_receipt in [false, true] {
+        let shared = fresh();
+        let request = Request {
+            operation: Operation::Scroll {
+                x: -100,
+                y: 20,
+                dx: 120,
+                dy: 120,
+            },
+            ..request(&snapshot(&shared), 1)
+        };
+        let mut waiting = Box::pin(shared.submit(request));
+        assert!(poll(waiting.as_mut()).is_pending());
+        for sequence in 0..3 {
+            encoded(&shared, 1, sequence);
+            shared.result(ResultEvent::Completed(InputResult {
+                submitted_operations: 65,
+                ..receipt(sequence)
+            }));
+        }
+        encoded(&shared, 1, 3);
+        if !missing_receipt {
+            shared.result(ResultEvent::Completed(InputResult {
+                stage: Stage::Admitted,
+                outcome: InputOutcome::ExpiredBeforeSubmission,
+                submitted_operations: 0,
+                reason: Some(fr_wire::input_result::Reason::TicketExpired),
+                ..receipt(3)
+            }));
+        }
+        drop(waiting);
+        let result = retained(&shared, request);
+        assert_eq!(result.actions_total, 8);
+        assert_eq!(result.actions_encoded, 4);
+        assert_eq!(result.actions_submitted, 3);
+        assert_eq!(result.submitted_operations, 195);
+        assert_eq!(result.unacknowledged_actions, u8::from(missing_receipt));
+        assert_eq!(
+            result.disposition,
+            if missing_receipt {
+                InputDisposition::UnknownEffect
+            } else {
+                InputDisposition::Partial
+            }
+        );
+        assert!(!snapshot(&shared).ready);
+        assert_eq!(
+            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            result
+        );
+        assert_eq!(
+            shared.0.lock().unwrap().submit(Request {
+                request_id: 2,
+                ..request
+            }),
+            Err(Refusal::Stopped)
+        );
+        if missing_receipt {
+            shared.result(ResultEvent::Completed(InputResult {
+                submitted_operations: 65,
+                ..receipt(3)
+            }));
+            let late = retained(&shared, request);
+            assert_eq!(late.actions_submitted, 4);
+            assert_eq!(late.submitted_operations, 260);
+            assert_eq!(late.unacknowledged_actions, 0);
+            assert_eq!(late.disposition, InputDisposition::Partial);
+            assert!(
+                !snapshot(&shared).ready,
+                "a late receipt never resumes the scroll"
+            );
+        }
+    }
+}
+
+#[test]
 fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases() {
     for prefix in [1_u8, 4, 5, 6, 9] {
         for missing_receipt in [false, true] {

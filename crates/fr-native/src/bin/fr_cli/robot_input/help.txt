@@ -29,6 +29,9 @@ the original observation and deadline remain in force through the release.
 This is a bounded single move, with no recorded path or persistent held button.
 --key taps a physical USB page-7 usage (decimal), not Unicode or a keyboard-layout
 guess. Scroll deltas are integer lines on each axis, at most 120 in magnitude.
+Large scrolls use up to eight reliable actions of at most 32 total lines each,
+horizontal before vertical. Each waits for the preceding host receipt under the
+same original observation and deadline; an interrupted prefix is never replayed.
 --chord holds one to four distinct USB modifiers (224..231) through one
 non-modifier key tap; for example, 224,225,19 is physical left Ctrl+Shift+P.
 Modifiers press in ascending usage order, then the key; releases run in reverse.

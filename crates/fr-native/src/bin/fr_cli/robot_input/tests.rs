@@ -184,7 +184,7 @@ fn bounded_primitives_keep_signed_host_coordinates_and_physical_key_positions() 
                 dx: -120,
                 dy: 120,
             },
-            1,
+            8,
         ),
         (
             "--click",
