@@ -104,10 +104,21 @@ fn approval_installation_refuses_profiles_without_the_original_desktop_lifetime(
         "--approval",
         "local",
     ];
+    // A logind session with --headless is refused by the host parser itself
+    // (a private Xvfb has no session lifetime to watch), before approval.
+    let args = base
+        .iter()
+        .copied()
+        .chain(["--", "--logind-session", "c2", "--headless"])
+        .collect::<Vec<_>>();
+    assert!(
+        matches!(parse(&args), Err(ServiceError::InvalidOptions)),
+        "{args:?}"
+    );
     for tail in [
         vec![],
         vec!["--", "--display", ":0"],
-        vec!["--", "--logind-session", "c2", "--headless"],
+        vec!["--", "--headless"],
         vec![
             "--",
             "--logind-session",
@@ -128,6 +139,8 @@ fn approval_installation_refuses_profiles_without_the_original_desktop_lifetime(
             "{args:?}"
         );
     }
+    // A valid system profile (system units must be headless, and headless
+    // cannot also name a logind session) is refused for its kind.
     let system = parse(&[
         "--system",
         "--dry-run",
@@ -136,8 +149,6 @@ fn approval_installation_refuses_profiles_without_the_original_desktop_lifetime(
         "local",
         "--",
         "--headless",
-        "--logind-session",
-        "c2",
     ]);
     assert!(matches!(
         system,
