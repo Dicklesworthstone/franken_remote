@@ -197,7 +197,11 @@ fn refusal_reason(outcome: FileSendOutcome) -> Option<&'static str> {
         },
         FileSendOutcome::PublicationUnknown => "publication_unknown",
         FileSendOutcome::InterruptedBeforePublication(error) => match error {
-            FileSendError::Expired => "interrupted_expired",
+            FileSendError::Expired
+            | FileSendError::Transport(
+                fr_transport::quic::Error::Expired
+                | fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
+            ) => "interrupted_expired",
             FileSendError::Cancelled | FileSendError::Closed => "interrupted_cancelled",
             FileSendError::SourceChanged | FileSendError::Source => "source_changed",
             _ => "interrupted",
@@ -484,6 +488,18 @@ mod tests {
             (FileSendOutcome::PublicationUnknown, "publication_unknown"),
             (
                 FileSendOutcome::InterruptedBeforePublication(FileSendError::Expired),
+                "interrupted_expired",
+            ),
+            (
+                FileSendOutcome::InterruptedBeforePublication(FileSendError::Transport(
+                    fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
+                )),
+                "interrupted_expired",
+            ),
+            (
+                FileSendOutcome::InterruptedBeforePublication(FileSendError::Transport(
+                    fr_transport::quic::Error::Expired,
+                )),
                 "interrupted_expired",
             ),
         ] {

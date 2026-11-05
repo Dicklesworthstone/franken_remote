@@ -8,6 +8,10 @@ use asupersync::bytes::Bytes;
 // acknowledgment, authority token, or retry semantics are introduced.
 const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
 const FILES_RETIRED: u64 = 0x4652_4649;
+// An expired receive is a terminal file-transfer outcome, including for its
+// peer sender. It carries no retry or authority semantics and is recognized
+// only after the original Files/FilesDownload exchange has reached ACTIVE.
+const FILES_RECEIVE_EXPIRED: u64 = 0x4652_4645;
 const MEDIA_RETIRED: u64 = 0x4652_4d44;
 const AUDIO_RETIRED: u64 = 0x4652_4144;
 const MICROPHONE_RETIRED: u64 = 0x4652_4155;
@@ -121,19 +125,24 @@ impl QuicRecords {
                 continue;
             }
             if r.state.load(Ordering::Acquire) == ACTIVE {
-                // A complete clipboard record can wait behind its one-slot OS
-                // handoff. Its ORIGINAL framing deadline may be earlier than
-                // that handoff's deadline. Retire the optional pair at that
-                // existing bound before the generic framing check closes the
-                // connection. Never forgive an incomplete/malformed frame, an
-                // unfinished attachment, or a critical stream's expiry.
-                let receive_expired = r.role == MediaRole::Clipboard
-                    && self.inbound.iter().any(|s| {
-                        s.route.stream == r.inbound
-                            && !s.fin
-                            && s.blocked
-                            && s.framing.next_deadline().is_some_and(|until| now >= until)
-                    });
+                // Files share congestion capacity with higher-priority input
+                // and media. A stalled prefix or unconsumed complete record
+                // expires the transfer, not its controlling desktop. Retire
+                // the ACTIVE original pair before generic framing checks;
+                // never extend the first-byte deadline or reuse its binding.
+                // Clipboard keeps its narrower complete-blocked exception.
+                // Malformed records, unfinished exchanges and critical streams
+                // still take their ordinary connection-fencing paths.
+                let receive_expired = self.inbound.iter().any(|s| {
+                    s.route.stream == r.inbound
+                        && !s.fin
+                        && match r.role {
+                            MediaRole::Files | MediaRole::FilesDownload => true,
+                            MediaRole::Clipboard => s.blocked,
+                            _ => false,
+                        }
+                        && s.framing.next_deadline().is_some_and(|until| now >= until)
+                });
                 let streams = self
                     .native
                     .as_ref()
@@ -143,6 +152,11 @@ impl QuicRecords {
                     .streams();
                 let outgoing = streams.stream(r.outbound).map_err(|_| Error::Native)?;
                 let incoming = streams.stream(r.inbound).map_err(|_| Error::Native)?;
+                let receive_expired = receive_expired
+                    || (r.role.is_files()
+                        && (outgoing.stop_sending_error_code == Some(FILES_RECEIVE_EXPIRED)
+                            || incoming.recv_reset.map(|(code, _)| code)
+                                == Some(FILES_RECEIVE_EXPIRED)));
                 if receive_expired
                     || r.retire.load(Ordering::Acquire)
                     || outgoing.stop_sending_error_code.is_some()
@@ -150,8 +164,8 @@ impl QuicRecords {
                     || incoming.recv_reset.is_some()
                     || incoming.final_size.is_some()
                 {
-                    self.retire_optional_at(cx, index)?;
                     self.attachments[index].receive_expired = receive_expired;
+                    self.retire_optional_at(cx, index)?;
                 }
             }
             if self.attachments[index].retired() {
@@ -170,7 +184,11 @@ impl QuicRecords {
     /// original Files exchange reached its direction-specific staged final boundary.
     fn retire_reservation_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
-        let code = retirement_code(r.role).ok_or(Error::WrongRoute)?;
+        let code = if r.role.is_files() && r.receive_expired {
+            FILES_RECEIVE_EXPIRED
+        } else {
+            retirement_code(r.role).ok_or(Error::WrongRoute)?
+        };
         let (outbound, inbound, binding) = (r.outbound, r.inbound, r.binding);
         // The native DATAGRAM queue mixes routes and exposes no selective erase.
         // Check before removing this binding, on all three retirement paths:

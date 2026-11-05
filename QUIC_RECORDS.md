@@ -89,6 +89,41 @@ DATAGRAMs, lifetime denial and cancellation. These new runtime tests have not
 been executed in this resource-constrained session; source review of the pinned
 native implementation and formatting are separate evidence from a live pass.
 
+### File receive deadlines
+
+An established `Files` or `FilesDownload` attachment now retires independently
+when its original first-byte receive deadline expires. This covers a stalled
+header or body as well as a complete record waiting for its consumer. The
+connection owner resets both directions of that exact file pair, frees its
+framing and queued-send storage, and keeps the consumed ticket, binding and
+stream identities as tombstones. Late bytes cannot reopen the transfer or be
+interpreted as a new record. The other file direction, input, control and media
+remain on their original connection.
+
+`FilesChannel::check` reports the retained framing-expiry cause to its original
+file owner. The receiver fences its disk worker and collects actual cleanup;
+the sender preserves publication receipts or uncertainty without replay. CLI
+completion distinguishes `receive_expired` and `interrupted_expired` from a
+generic cancelled transfer. A previously published file remains published if a
+later record expires.
+
+The native reset code `FILES_RECEIVE_EXPIRED` (`0x4652_4645`) carries this
+terminal reason to the peer. It is recognized only on the exact original
+`ACTIVE` Files pair; an unfinished attachment cannot use it to avoid the
+connection fence. It grants no authority, retry or stream-reuse permission.
+
+This exception requires a completed file attachment. Malformed records,
+incomplete ticket exchanges, critical-stream expiry and authority loss keep
+their connection-fencing behavior. Clipboard retains its narrower exception
+for a complete blocked record. Outbound delivery deadlines and native-I/O
+cancellation rules are unchanged; this is not a general promise that any slow
+transfer or loaded desktop will survive.
+
+Regression coverage lives in the real UDP/TLS attachment cases under
+`crates/fr-transport/tests/media_attachment/files/expiry.rs` and the actual
+disk-worker cases in `crates/fr-files/tests/native_quic/receive_cleanup.rs`.
+These fixtures are separate from loaded two-machine and hardware qualification.
+
 ## Bounded resources
 
 Default bounds are 64 KiB per native stream receive window, 512 KiB native

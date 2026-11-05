@@ -120,7 +120,13 @@ mod tests {
             Some(FILES_RETIRED),
             Some(FILES_RETIRED)
         ));
-        for wrong in [0, FILES_RETIRED - 1, FILES_RETIRED + 1, (1 << 62) - 1] {
+        for wrong in [
+            0,
+            FILES_RETIRED - 1,
+            FILES_RETIRED + 1,
+            super::super::FILES_RECEIVE_EXPIRED,
+            (1 << 62) - 1,
+        ] {
             assert!(!files_retirement_requested(Some(wrong), None));
             assert!(!files_retirement_requested(None, Some(wrong)));
             assert!(!files_retirement_requested(

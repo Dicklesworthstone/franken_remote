@@ -119,7 +119,13 @@ impl FilesChannel {
         if !q.is_bound_to(&self.connection) {
             return Err(Error::WrongRoute);
         }
-        if q.is_closed() || !self.attachment.is_complete() {
+        if q.is_closed() {
+            return Err(Error::Closed);
+        }
+        if self.receive_expired(q) {
+            return Err(Error::Stream(fr_wire::stream::StreamError::Expired));
+        }
+        if !self.attachment.is_complete() {
             return Err(Error::Closed);
         }
         if self.attachment.completed_on(q)? != self.routes
@@ -131,6 +137,14 @@ impl FilesChannel {
             return Err(Error::Closed);
         }
         Ok(())
+    }
+    /// This original completed pair expired at its fixed first-byte receive
+    /// deadline, locally or as reported by the peer's file-expiry reset code.
+    /// Both stalled prefixes and unconsumed records are terminal to this
+    /// transfer; no expired bytes are dispatched or retried.
+    /// Closed or foreign connections cannot supply this isolation evidence.
+    pub fn receive_expired(&self, q: &QuicRecords) -> bool {
+        self.attachment.receive_expired(q)
     }
     /// Request retirement of this original completed pair without borrowing its
     /// connection. The next checked operation retires it before new application

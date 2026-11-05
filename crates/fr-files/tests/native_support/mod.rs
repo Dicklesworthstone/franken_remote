@@ -57,11 +57,17 @@ pub struct Link {
 }
 impl Link {
     pub async fn new(cx: &Cx) -> Self {
+        Self::with_policy(
+            cx,
+            Policy {
+                critical_send_records: 1,
+                ..Policy::default()
+            },
+        )
+        .await
+    }
+    async fn with_policy(cx: &Cx, policy: Policy) -> Self {
         let (c, h) = support::native_pair(cx, "localhost", ALPN).await;
-        let policy = Policy {
-            critical_send_records: 1,
-            ..Policy::default()
-        };
         let (mut c, cr) = QuicRecords::bootstrap(c.unwrap(), cx, policy).unwrap();
         let (mut h, hr) = QuicRecords::bootstrap(h.unwrap(), cx, policy).unwrap();
         let cr = c.bind_control(cx, cr, 7, 4096, || true).unwrap();
@@ -233,7 +239,18 @@ pub struct Running {
 }
 impl Running {
     pub async fn new(cx: &Cx) -> Self {
-        let mut link = Link::new(cx).await;
+        Self::with_record_lifetime(cx, Policy::default().record_lifetime_micros).await
+    }
+    pub async fn with_record_lifetime(cx: &Cx, record_lifetime_micros: u64) -> Self {
+        let mut link = Link::with_policy(
+            cx,
+            Policy {
+                critical_send_records: 1,
+                record_lifetime_micros,
+                ..Policy::default()
+            },
+        )
+        .await;
         link.selection.role = Role::RequestControl;
         for (name, version) in [
             (attachment::INPUT_CAPABILITY, 1),

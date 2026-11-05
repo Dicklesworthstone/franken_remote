@@ -6,6 +6,8 @@ use fr_wire::{
     files::{self as wire, Body, Message as FileMessage},
 };
 
+#[path = "files/expiry.rs"]
+mod expiry;
 #[path = "files/peer_retirement.rs"]
 mod peer_retirement;
 
