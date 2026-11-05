@@ -121,10 +121,12 @@ fn batch_round_trips_consecutive_packets_and_empty_pulls() {
     let empty = encode_batch(&[], CaptureCounters::default(), &c).unwrap();
     let batch = decode_batch(&empty, &c).unwrap();
     assert_eq!(batch.packets.len(), 0);
-    // A source gap is legal; overlap or reordering is not.
-    let gap = encode_batch(&[unit(7, 0, 5), unit(8, 5000, 5)], counters, &c).unwrap();
+    // A source gap spends sequence numbers; overlap, reordering and a timestamp
+    // jump on consecutive sequence numbers are not on the receiver's grid.
+    let gap = encode_batch(&[unit(7, 0, 5), unit(12, 4800, 5)], counters, &c).unwrap();
     assert_eq!(decode_batch(&gap, &c).unwrap().packets.len(), 2);
     for bad in [
+        [unit(7, 0, 5), unit(8, 5000, 5)],
         [unit(7, 0, 5), unit(9, 960, 5)],
         [unit(7, 960, 5), unit(8, 959, 5)],
         [unit(8, 0, 5), unit(7, 960, 5)],

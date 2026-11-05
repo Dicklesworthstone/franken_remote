@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-04 — shared system audio survives a capture gap
+
+- A hole in the host's PulseAudio monitor capture now spends the sequence
+  numbers of the whole frames it lost, on the generation's fixed timeline. The
+  viewer conceals them as ordinary loss. Before, the next packet arrived with a
+  jumped timestamp, the jitter buffer refused it (`Timeline`), and the output
+  generation was reported as `audio_output_failed`.
+- The host's batch check now enforces the same sequence-to-sample spacing as
+  the viewer, instead of passing a gapped timeline on for the viewer to refuse.
+- A real Opus test feeds a three-frame gap through the real jitter buffer and
+  expects packets 0-1, concealment for 2-4, then packets 5-6. With the previous
+  encoder planted back it fails with `Timeline` (ts1). Gaps longer than the
+  100 ms concealment ceiling still end that output generation.
+
 ## 2026-11-04 — sharper software video on text and fast motion
 
 - Allow 60 seconds of active encoding between natural IDRs instead of two. Forced

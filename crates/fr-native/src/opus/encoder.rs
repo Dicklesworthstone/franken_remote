@@ -72,6 +72,7 @@ pub struct Encoder {
     complexity: i32,
     next_sequence: u64,
     last_end: Option<u64>,
+    next_timestamp: Option<u64>,
     pending: Option<AudioAccessUnit>,
 }
 impl Default for Encoder {
@@ -100,6 +101,7 @@ impl Encoder {
             complexity: 5,
             next_sequence: 0,
             last_end: None,
+            next_timestamp: None,
             pending: None,
         }
     }
@@ -147,6 +149,7 @@ impl Encoder {
         self.state = None;
         self.config = None;
         self.last_end = None;
+        self.next_timestamp = None;
     }
 }
 impl AudioEncoder for Encoder {
@@ -175,6 +178,7 @@ impl AudioEncoder for Encoder {
         self.generation = Some(config.generation());
         self.next_sequence = 0;
         self.last_end = None;
+        self.next_timestamp = None;
         Ok(())
     }
 
@@ -203,10 +207,24 @@ impl AudioEncoder for Encoder {
             .timestamp_samples()
             .checked_add(u64::from(samples))
             .ok_or(AudioMediaError::BufferOverflow)?;
-        let next = self
+        // A receiver holds one fixed sequence-to-sample spacing for a generation.
+        // A capture gap therefore spends the sequence numbers of the whole frames
+        // it lost: they read as missing packets, which the receiver conceals. A
+        // sub-frame remainder stays out of the timeline, already counted as a gap.
+        let lost = self
+            .last_end
+            .map_or(0, |end| pcm.timestamp_samples().saturating_sub(end))
+            / u64::from(samples);
+        let sequence = self
             .next_sequence
+            .checked_add(lost)
+            .ok_or(AudioMediaError::BufferOverflow)?;
+        let next = sequence
             .checked_add(1)
             .ok_or(AudioMediaError::BufferOverflow)?;
+        let timestamp = self
+            .next_timestamp
+            .map_or(pcm.timestamp_samples(), |at| at + lost * u64::from(samples));
         let state = self.state.as_mut().ok_or(AudioMediaError::NotConfigured)?;
         let capacity =
             i32::try_from(self.limits.packet_bytes).map_err(|_| AudioMediaError::BufferOverflow)?;
@@ -233,14 +251,15 @@ impl AudioEncoder for Encoder {
         self.pending = Some(AudioAccessUnit::new(
             config.direction(),
             config.generation(),
-            self.next_sequence,
-            pcm.timestamp_samples(),
+            sequence,
+            timestamp,
             samples,
             pcm.samples().iter().all(|&sample| sample == 0),
             &payload[..length],
         )?);
         self.next_sequence = next;
         self.last_end = Some(end);
+        self.next_timestamp = Some(timestamp + u64::from(samples));
         Ok(())
     }
 

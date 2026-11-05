@@ -220,8 +220,10 @@ impl AudioJitterBuffer {
             return Ok(false);
         }
         // Every accepted packet lies on one fixed negotiated sequence/sample
-        // timeline. Capture gaps or duration changes require a new configuration;
-        // they are not permission to fabricate an inferred packet history.
+        // timeline. The host encoder spends the sequence numbers of whole frames
+        // a capture gap lost, so a gap arrives here as ordinary loss on it. A
+        // packet off this timeline, or a duration change, needs a new
+        // configuration; it is not permission to fabricate an inferred history.
         if let Some(anchor) = self
             .next
             .or_else(|| self.slots[0].map(|p| (p.sequence(), p.timestamp_samples())))

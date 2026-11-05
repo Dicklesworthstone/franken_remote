@@ -297,8 +297,13 @@ pub fn decode_batch(body: &[u8], capture: &Capture) -> Result<Batch, Error> {
         if duration != capture.frame_samples()
             || timestamp.checked_add(frame).is_none()
             || last.is_some_and(|(s, t)| {
-                s.checked_add(1) != Some(sequence)
-                    || t.checked_add(frame).is_none_or(|e| timestamp < e)
+                // One fixed spacing, including across a capture gap's lost frames.
+                sequence
+                    .checked_sub(s)
+                    .filter(|&packets| packets != 0)
+                    .and_then(|packets| packets.checked_mul(frame))
+                    .and_then(|samples| t.checked_add(samples))
+                    != Some(timestamp)
             })
         {
             return Err(Error::Malformed);

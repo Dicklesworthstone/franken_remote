@@ -122,7 +122,7 @@ fn backpressure_and_bad_pcm_do_not_advance_native_history_or_sequences() {
 }
 
 #[test]
-fn timeline_overflow_refuses_before_codec_and_explicit_source_gaps_are_preserved() {
+fn timeline_overflow_refuses_before_codec_and_source_gaps_spend_sequence_numbers() {
     let cfg = config(AudioChannels::Mono, AudioDirection::Uplink, 10);
     let mut encoder = Encoder::new();
     encoder.configure(cfg).unwrap();
@@ -130,10 +130,16 @@ fn timeline_overflow_refuses_before_codec_and_explicit_source_gaps_are_preserved
         encoder.submit_pcm(&tone(cfg, u64::MAX - 479)),
         Err(AudioMediaError::BufferOverflow)
     );
-    for (sequence, timestamp) in [1000_u64, 50_000, u64::MAX - 480].into_iter().enumerate() {
-        encoder.submit_pcm(&tone(cfg, timestamp)).unwrap();
+    // 48,520 samples after the first frame's end: 101 whole frames and 40 samples.
+    let far = (u64::MAX - 480 - 50_480) / 480;
+    for (source, sequence, timestamp) in [
+        (1000_u64, 0, 1000),
+        (50_000, 102, 49_960),
+        (u64::MAX - 480, 103 + far, 50_440 + far * 480),
+    ] {
+        encoder.submit_pcm(&tone(cfg, source)).unwrap();
         let packet = encoder.poll_packet().unwrap().unwrap();
-        assert_eq!(packet.sequence(), u64::try_from(sequence).unwrap());
+        assert_eq!(packet.sequence(), sequence);
         assert_eq!(packet.timestamp_samples(), timestamp);
     }
     assert_eq!(
@@ -240,4 +246,43 @@ fn repeated_configuration_release_and_quality_extremes_remain_bounded() {
             }
         }
     }
+}
+
+/// The host and viewer must agree: a gap is loss the viewer conceals, never a
+/// `Timeline` refusal that ends the generation and spends a lane restart.
+#[test]
+fn a_capture_gap_reaches_the_real_jitter_buffer_as_concealable_loss() {
+    use fr_client::audio::{AudioJitterBuffer, jitter::JitterDrainResult};
+    let cfg = config(AudioChannels::Mono, AudioDirection::Downlink, 10);
+    let mut encoder = Encoder::new();
+    encoder.configure(cfg).unwrap();
+    let mut jitter = AudioJitterBuffer::with_config(cfg).unwrap();
+    // Three lost frames and a 37-sample remainder between the second and third.
+    for source in [960, 1440, 1920 + 3 * 480 + 37, 1920 + 4 * 480 + 37] {
+        encoder.submit_pcm(&tone(cfg, source)).unwrap();
+        let packet = encoder.poll_packet().unwrap().unwrap();
+        assert_eq!(jitter.try_push_packet(packet), Ok(true));
+    }
+    let mut played = Vec::new();
+    for _ in 0..7 {
+        played.push(match jitter.drain_for_playout().unwrap() {
+            JitterDrainResult::Packet(packet) => (true, packet.sequence()),
+            JitterDrainResult::Plc {
+                missing_sequence, ..
+            } => (false, missing_sequence),
+            JitterDrainResult::Underrun => panic!("underrun inside the retained span"),
+        });
+    }
+    assert_eq!(
+        played,
+        [
+            (true, 0),
+            (true, 1),
+            (false, 2),
+            (false, 3),
+            (false, 4),
+            (true, 5),
+            (true, 6)
+        ]
+    );
 }
