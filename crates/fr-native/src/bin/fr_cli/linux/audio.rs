@@ -190,8 +190,20 @@ mod output {
     }
     impl From<PlayoutError> for Failure {
         fn from(error: PlayoutError) -> Self {
+            use fr_client::audio::{jitter::JitterError, playout::PlayoutError as Playback};
+            use fr_native::opus::playout::Error as ReceiveError;
             match error {
-                PlayoutError::Device(DeviceError::Expired) => Self::Expired,
+                // Each enforces the freshness contract: this sound, or the
+                // timeline it continues, outran its window and is never played.
+                // A gap or stall longer than the concealment ceiling ends here.
+                PlayoutError::Device(DeviceError::Expired)
+                | PlayoutError::Receiver(ReceiveError::Playout(
+                    Playback::Expired
+                    | Playback::MissedDeviceSlot
+                    | Playback::Jitter(
+                        JitterError::WindowExceeded | JitterError::ConcealmentExhausted,
+                    ),
+                )) => Self::Expired,
                 _ => Self::Native,
             }
         }

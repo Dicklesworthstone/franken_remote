@@ -67,7 +67,10 @@ the previous generation's submitted-frame count to claim playback.
 An older host without the extension continues control with typed audio absence.
 
 The completion distinguishes output freshness expiry (`audio_output_late`) from
-an actual native/worker failure. Each retired output generation is counted once
+an actual native/worker failure. Freshness expiry covers PCM past its deadline
+at the device or receiver, a missed device slot, and a timeline that outran the
+100 ms concealment ceiling (a longer capture gap or playout stall). A packet off
+the generation's timeline is a failure. Each retired output generation is counted once
 in `audio_output_expired_generations` or `audio_output_failed_generations`.
 Only acknowledged, fresh PCM submission by a replacement output clears the
 current `audio_absence` and advances `audio_output_recovered_generations`.

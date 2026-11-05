@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-04 — audio that outran its window is reported as late
+
+- The completion counted a jitter window or concealment overrun, a missed
+  device slot and receiver-side PCM expiry as `audio_output_failed`. Each is a
+  freshness refusal: stale sound is not played and a replacement generation
+  resumes. They now count as `audio_output_late`, like device-side expiry. A
+  packet off the generation's timeline still counts as a failure.
+- Seen on ts1: under full-suite load a capture gap longer than the 100 ms
+  ceiling failed `every_lane_with_audio_recovers_from_repeated_capture_stalls`
+  with `Jitter(WindowExceeded)` although playback recovered.
+
 ## 2026-11-04 — shared system audio survives a capture gap
 
 - A hole in the host's PulseAudio monitor capture now spends the sequence

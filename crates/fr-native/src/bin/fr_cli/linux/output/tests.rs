@@ -15,6 +15,8 @@ const BINDING: u32 = 61;
 
 #[test]
 fn the_native_refusal_keeps_freshness_expiry_distinct_from_device_failure() {
+    use fr_client::audio::{jitter::JitterError, playout::PlayoutError as Playback};
+    use fr_native::opus::playout::Error as ReceiveError;
     let report = Rc::new(RefCell::new(Report::default()));
     let mut output = Output::new(
         PathBuf::from("/unused"),
@@ -32,10 +34,26 @@ fn the_native_refusal_keeps_freshness_expiry_distinct_from_device_failure() {
     );
     output.reset();
     assert_eq!(output.failure, None);
+    // Stale sound, or a timeline that outran the concealment ceiling (a long
+    // capture gap or playout stall), is never played: late, not a broken output.
+    for error in [
+        Playback::Expired,
+        Playback::MissedDeviceSlot,
+        Playback::Jitter(JitterError::WindowExceeded),
+        Playback::Jitter(JitterError::ConcealmentExhausted),
+    ] {
+        output.refuse(PlayoutError::Receiver(ReceiveError::Playout(error)));
+        assert_eq!(output.failure, Some(Failure::Expired), "{error:?}");
+        output.reset();
+    }
     for error in [
         PlayoutError::Device(DeviceError::Denied),
         PlayoutError::Device(DeviceError::Clock),
         PlayoutError::Closed,
+        // A packet off the generation's fixed timeline is a broken stream.
+        PlayoutError::Receiver(ReceiveError::Playout(Playback::Jitter(
+            JitterError::Timeline,
+        ))),
     ] {
         output.refuse(error);
         assert_eq!(output.failure, Some(Failure::Native));
