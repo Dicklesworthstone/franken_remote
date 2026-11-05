@@ -69,12 +69,15 @@ impl Server {
     }
 }
 fn stop(generation: u64) -> Vec<u8> {
+    stop_with_reason(generation, AudioStopReason::UserMute)
+}
+fn stop_with_reason(generation: u64, reason: AudioStopReason) -> Vec<u8> {
     let mut bytes = vec![0; audio::AUDIO_STOP_RECORD_BYTES];
     audio::encode_stop(
         &AudioStop {
             direction: AudioDirection::Uplink,
             generation: AudioGeneration::from_raw(generation),
-            reason: AudioStopReason::UserMute,
+            reason,
         },
         10,
         &mut bytes,
@@ -371,33 +374,47 @@ fn real_datagram_receipts_expire_and_explicit_retalk_waits_for_both_original_chi
         f.send(&configuration(7, AudioDirection::Uplink));
         running(&mut f, &mut host, 7).await;
         original_receipt_expiry(&mut f, &mut host).await;
-        let old = host.retirement().unwrap();
-        f.send(&stop(7));
-        let until = clock(&f.cx) + 500_000;
-        while host.epoch.process.is_some() {
-            assert!(clock(&f.cx) < until);
-            f.drive(&host).await;
-            host.service(&mut f.link.h, || true).unwrap();
+        for (generation, reason) in [
+            (7, AudioStopReason::UserMute),
+            (8, AudioStopReason::DeviceChanged),
+        ] {
+            let old = host.retirement().unwrap();
+            f.send(&stop_with_reason(generation, reason));
+            let until = clock(&f.cx) + 500_000;
+            while host.epoch.process.is_some() {
+                assert!(clock(&f.cx) < until);
+                f.drive(&host).await;
+                host.service(&mut f.link.h, || true).unwrap();
+                assert!(
+                    !host.control().is_stopped(),
+                    "{reason:?} must stop its epoch without revoking consent: {:?}",
+                    host.reason()
+                );
+            }
+            reaped(&f.cx, &old).await;
+            assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Idle);
+            assert_eq!(host.reason(), None);
+            assert!(!f.link.h.is_closed());
+            assert!(!f.input.control().is_stopped());
+            while !f.peer.control_send_drained(&f.link.c).unwrap() {
+                f.drive(&host).await;
+            }
+            f.send(&configuration(generation, AudioDirection::Uplink));
+            let until = clock(&f.cx) + 100_000;
+            while clock(&f.cx) < until {
+                f.drive(&host).await;
+                host.service(&mut f.link.h, || true).unwrap();
+            }
+            assert!(
+                host.epoch.process.is_none(),
+                "old generation cannot recreate an epoch"
+            );
+            assert_eq!(host.statistics().configurations_started, generation - 6);
+            f.send(&configuration(generation + 1, AudioDirection::Uplink));
+            running(&mut f, &mut host, generation + 1).await;
+            assert_eq!(host.statistics().configurations_started, generation - 5);
+            assert!(old.is_complete());
         }
-        reaped(&f.cx, &old).await;
-        while !f.peer.control_send_drained(&f.link.c).unwrap() {
-            f.drive(&host).await;
-        }
-        f.send(&configuration(7, AudioDirection::Uplink));
-        let until = clock(&f.cx) + 100_000;
-        while clock(&f.cx) < until {
-            f.drive(&host).await;
-            host.service(&mut f.link.h, || true).unwrap();
-        }
-        assert!(
-            host.epoch.process.is_none(),
-            "old generation cannot recreate an epoch"
-        );
-        assert_eq!(host.statistics().configurations_started, 1);
-        f.send(&configuration(8, AudioDirection::Uplink));
-        running(&mut f, &mut host, 8).await;
-        assert_eq!(host.statistics().configurations_started, 2);
-        assert!(old.is_complete());
         let next = host.retirement().unwrap();
         host.control().stop();
         reaped(&f.cx, &next).await;

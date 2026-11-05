@@ -60,12 +60,33 @@ physical microphone, desktop application or live-tailnet qualification.
 
 The new controlled-session regression cases cover refusal before allocation,
 fixed-deadline cancellation, original-owner fencing, optional worker failure
-and native readiness/stop through the canonical drive loop. At this checkpoint,
-whole-workspace formatting on the pinned toolchain and manifest checks pass.
-The new tests remain unexecuted locally after environment failures and
-insufficient build memory; hosted verification remains queued. The earlier
-native results below qualify the existing component owners and do not
-substitute for executing this new session composition.
+and native readiness/stop through the canonical drive loop. Hosted run
+`41987352165` exercised this composition and exposed a refusal fixture that
+reused already-cancelled contexts and a valid mute that retired the attachment.
+Each refusal case now creates its own original runtime/context pair.
+
+### Mute and explicit new talk generations
+
+The receive gate checks the current, fixed-size published epoch state on every
+dispatch round, including rounds after a control record changes that state.
+`UserMute` and `DeviceChanged` stop the old native epoch; they do not revoke the
+original microphone attachment's consent. Previously, the gate retained a
+pre-dispatch native handle and mistook its intentional stop for permanent
+authority loss on the next round.
+
+The gate shares the transport's existing nonblocking snapshot check. It retains
+the original setup and ACK deadlines, original controller and local-stop fence,
+and count/byte bounds. A new explicit configuration still waits for both old
+children's actual exit receipts and the original ACK drain. Its generation must
+advance; old configurations and packets cannot restart audio. Local consent
+revocation remains terminal and never becomes a talk toggle.
+
+The native retalk regression covers both resumable stop reasons, original
+connection/input survival, actual child reaping, stale-generation rejection and
+exactly one next generation. Pinned formatting, whitespace and docs checks pass;
+execution of this follow-up remains pending hosted validation because local
+Asupersync compilation exceeds the available memory. The earlier component
+results below do not substitute for this session composition's native result.
 
 ## Acknowledgement and ownership
 

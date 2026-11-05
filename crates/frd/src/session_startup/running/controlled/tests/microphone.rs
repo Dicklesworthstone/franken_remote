@@ -158,8 +158,10 @@ fn send(peer: &AudioUpChannel, viewer: &mut View, c: &Cx, bytes: &[u8]) {
 
 #[test]
 fn microphone_consent_and_selection_refuse_before_reserving_or_starting_work() {
-    run(|c, h| async move {
-        for selected in [false, true] {
+    // Session close cancels its original contexts. Each refusal must establish
+    // its own owner region instead of reusing the previous closed connection's.
+    for selected in [false, true] {
+        run(|c, h| async move {
             let Fixture {
                 mut host,
                 viewer: _viewer,
@@ -191,8 +193,8 @@ fn microphone_consent_and_selection_refuse_before_reserving_or_starting_work() {
             host.close();
             assert!(driver.await.handoff_safe());
             assert!(!seat.is_occupied());
-        }
-    });
+        });
+    }
 }
 
 #[test]

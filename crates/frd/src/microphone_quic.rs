@@ -515,9 +515,6 @@ impl Host {
         mut authorize: impl FnMut() -> bool,
     ) -> Result<State, Error> {
         let packet_ready = self.epoch.packet_ready();
-        let native = self.epoch.process.as_ref().map(native::Process::control);
-        let inflight = self.epoch.inflight;
-        let setup = self.epoch.precommit_deadline();
         let parameters = Parameters {
             cx: &self.cx,
             controller: &self.controller,
@@ -535,14 +532,11 @@ impl Host {
             q,
             &self.cx,
             || {
-                permits_io(
+                permits_published_io(
                     &self.cx,
                     &self.controller,
                     &self.shared,
                     &self.lane.retirement_request(),
-                    native.as_ref(),
-                    inflight,
-                    setup,
                 ) && authorize()
             },
             |route| matches!(route, Route::Stream(_)) || packet_ready,
@@ -550,6 +544,8 @@ impl Host {
                 let result = self.epoch.receive(bytes, receipt, &parameters);
                 // Subsequent dispatch checks see this exact configuration cap,
                 // including a replacement still waiting for old child exits.
+                // A valid mute removes the stopped old native handle before
+                // those checks, without revoking this attachment's consent.
                 self.shared.publish(
                     self.epoch.inflight,
                     self.epoch.precommit_deadline(),
@@ -701,25 +697,36 @@ fn retain_io(
     let retirement = lane.retirement_request();
     q.retain_operation_check(
         cx,
-        Arc::new(move || {
-            // Only the exclusive Host/Q owner publishes this snapshot, between
-            // Q calls. Neither local controls nor native threads write it.
-            let Ok(state) = shared.snapshot() else {
-                shared.fence_io(None);
-                return false;
-            };
-            state.retired
-                || permits_io(
-                    &clock,
-                    &controller,
-                    &shared,
-                    &retirement,
-                    state.native.as_ref(),
-                    state.inflight,
-                    state.setup,
-                )
-        }),
+        Arc::new(move || permits_published_io(&clock, &controller, &shared, &retirement)),
     )
+}
+
+/// Dispatch can consume a mute or a replacement configuration between checked
+/// receive rounds. Read its current fixed-size custody each time; retaining the
+/// old native handle would turn its intentional stop into attachment revocation.
+fn permits_published_io(
+    cx: &Cx,
+    controller: &HostController,
+    shared: &Shared,
+    retirement: &RetirementRequest,
+) -> bool {
+    // Only the exclusive Host/Q owner publishes, between Q operations or from
+    // its synchronous receive handler. Native threads and controls cannot write
+    // this snapshot. Contention never waits or grants work without custody.
+    let Ok(state) = shared.snapshot() else {
+        shared.fence_io(None);
+        return false;
+    };
+    state.retired
+        || permits_io(
+            cx,
+            controller,
+            shared,
+            retirement,
+            state.native.as_ref(),
+            state.inflight,
+            state.setup,
+        )
 }
 
 fn permits_io(
