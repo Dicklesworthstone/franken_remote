@@ -444,3 +444,26 @@ its full binding changes. Source-work/send-credit history, capture interval and
 adjustment cooldown survive. A measured nonpressured sibling vetoes accumulated
 shared receiver pressure even if its sender is blocked; that veto cannot combine
 its decoder with another viewer's ready sender to manufacture headroom.
+
+## Deferred bitrate probes after conditions change
+
+A pending bitrate increase remains contingent on its original headroom evidence.
+Known sender, capture, source or receiver pressure, verified idle, a sample gap,
+or more than the existing 100 ms without positive headroom cancels that optimistic
+intent. An unsent increase no longer prevents sustained send pressure from
+proposing a reduction. A short unknown interval retains only the original grace;
+it does not refresh the evidence or justify a new probe.
+
+If the native worker already retained or started the increase, the controller
+uses its existing explicit current-rate cancellation. A late reply that actually
+changed the encoder is recorded before restoring the prior rate; neither a new
+sample nor a duplicate completion erases that effect. Only a real codec change
+starts the existing two-second dwell. Conservative pending reductions survive
+loss of headroom, and capture credits and native deadlines are unchanged.
+
+The actual `fr-media` bitrate regression reproduced the old failure: after
+100 ms of send blockage, the pending target was still a 4.25 Mbit/s increase
+instead of a 2 Mbit/s reduction. The corrected canonical suite passes 27 tests,
+including deferred/in-flight cancellation, idle, stale evidence, late effects
+and preserved cooldowns (bead `fr-10bq`). These are deterministic production-policy
+tests, not a new hardware or impaired-tailnet performance measurement.

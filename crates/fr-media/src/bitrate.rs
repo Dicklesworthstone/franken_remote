@@ -29,7 +29,7 @@ pub enum Error {
 pub enum Reason {
     SendPressure,
     Headroom,
-    /// Cancel a retained native target after the evidence scope changed.
+    /// Cancel a retained native target after its supporting evidence was invalidated.
     EvidenceReset,
 }
 
@@ -79,12 +79,12 @@ impl Headroom {
     fn clear(&mut self) {
         *self = Self::default();
     }
+    fn expired(&self, now: u64) -> bool {
+        self.last_positive
+            .is_some_and(|last| now - last > EVIDENCE_GAP_US)
+    }
     fn observe(&mut self, now: u64, positive: bool, negative: bool) -> u64 {
-        if negative
-            || self
-                .last_positive
-                .is_some_and(|last| now - last > EVIDENCE_GAP_US)
-        {
+        if negative || self.expired(now) {
             self.clear();
         }
         if positive {
@@ -169,7 +169,20 @@ impl Controller {
             .last_sample
             .is_some_and(|last| now - last > EVIDENCE_GAP_US);
         self.last_sample = Some(now);
-        if gap || report.reason == crate::pacing::Reason::EvidenceGap {
+        let evidence_gap = gap || report.reason == crate::pacing::Reason::EvidenceGap;
+        let negative = headroom_negative(report);
+        if self
+            .pending
+            .is_some_and(|change| change.reason == Reason::Headroom)
+            && (evidence_gap || negative || self.headroom.expired(now))
+        {
+            // A deferred optimistic target cannot block a necessary reduction
+            // or revive on first motion after its headroom disappeared. Preserve
+            // any in-flight effect, and explicitly cancel a native-held target
+            // using the existing restoration path and unchanged change dwell.
+            self.reset_evidence()?;
+        }
+        if evidence_gap {
             self.clear_measurements();
         }
         let blocked = report.mode == Mode::Active && report.sample.send == Availability::Blocked;
@@ -182,7 +195,7 @@ impl Controller {
         let headroom = self.headroom.observe(
             now,
             report.mode == Mode::Active && report.headroom_us > 0,
-            headroom_negative(report),
+            negative,
         );
         if self.pending.is_some() || self.changed_at.is_some_and(|at| now - at < CHANGE_DWELL_US) {
             return Ok(());

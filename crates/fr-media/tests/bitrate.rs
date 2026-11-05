@@ -52,6 +52,16 @@ fn reduced() -> (Controller, Pacer) {
     (c, p)
 }
 
+fn proposed_probe() -> (Controller, Pacer) {
+    let (mut c, mut p) = reduced();
+    for now in (150_000..=4_200_000).step_by(50_000) {
+        observe(&mut c, &mut p, now, A::Ready);
+    }
+    assert_eq!(c.pending().unwrap().reason(), Reason::Headroom);
+    assert_eq!(c.pending().unwrap().bitrate(), 4_250_000);
+    (c, p)
+}
+
 #[test]
 fn sustained_sender_pressure_reduces_bytes_even_at_maximum_capture_interval() {
     let mut p = Pacer::new(Policy {
@@ -270,6 +280,178 @@ fn first_upward_probe_needs_four_seconds_of_actual_positive_edges() {
     observe(&mut c, &mut p, 4_200_000, A::Ready);
     assert_eq!(c.pending().unwrap().bitrate(), 4_250_000);
     assert_eq!(c.applied_bitrate(), 4_000_000);
+}
+
+#[test]
+fn sustained_send_pressure_replaces_an_unsent_upward_probe_with_a_cut() {
+    let (mut c, mut p) = proposed_probe();
+    for now in [4_250_000, 4_300_000, 4_350_000] {
+        observe(&mut c, &mut p, now, A::Blocked);
+    }
+    let cut = c.pending().unwrap();
+    assert_eq!(cut.reason(), Reason::SendPressure);
+    assert_eq!(cut.bitrate(), 2_000_000);
+    assert_eq!(c.applied_bitrate(), 4_000_000);
+    assert_eq!(c.begin_capture().unwrap().bitrate(), 2_000_000);
+}
+
+#[test]
+fn known_overload_and_sampling_gaps_cancel_unsent_upward_probes() {
+    for cause in 0..5 {
+        let (mut c, mut p) = proposed_probe();
+        let mut s = sample(4_250_000, A::Ready);
+        let mut receiver = ReceiverEvidence::Unobserved;
+        match cause {
+            0 => s.source_work_us = Some(40_000),
+            1 => s.capture_credit = A::Blocked,
+            2 => {
+                receiver = ReceiverEvidence::Measured(Load {
+                    retained_bytes: 2_048,
+                    retained_pictures: 2,
+                    decoding: false,
+                    work_us: Some(5_000),
+                });
+            }
+            3 => {
+                receiver = ReceiverEvidence::Measured(Load {
+                    retained_bytes: 1_024,
+                    retained_pictures: 1,
+                    decoding: true,
+                    work_us: Some(40_000),
+                });
+            }
+            _ => s = sample(4_300_001, A::Ready),
+        }
+        c.observe(&p.update_with_receiver(s, receiver).unwrap())
+            .unwrap();
+        assert_eq!(c.pending(), None, "counterevidence {cause}");
+        assert_eq!(c.applied_bitrate(), 4_000_000);
+        assert_eq!(c.begin_capture().unwrap().bitrate(), 4_000_000);
+    }
+}
+
+#[test]
+fn verified_idle_cannot_apply_an_old_upward_probe_on_first_changed_capture() {
+    let (mut c, mut p) = proposed_probe();
+    for now in (4_250_000..=5_250_000).step_by(50_000) {
+        let mut s = sample(now, A::Ready);
+        s.observation.as_mut().unwrap().changed = false;
+        c.observe(&p.update(s).unwrap()).unwrap();
+    }
+    assert_eq!(p.report().unwrap().mode, Mode::Idle);
+    assert_eq!(c.pending(), None);
+    let wake = observe(&mut c, &mut p, 5_300_000, A::Ready);
+    assert_eq!(wake.reason, fr_media::pacing::Reason::ChangedAfterIdle);
+    assert_eq!(c.begin_capture().unwrap().bitrate(), 4_000_000);
+}
+
+#[test]
+fn unknown_evidence_preserves_only_the_original_bounded_probe_grace() {
+    for missing in 0..4 {
+        let (mut c, mut p) = proposed_probe();
+        let proposal = c.pending();
+        for now in [4_250_000, 4_300_000, 4_300_001] {
+            let mut s = sample(now, A::Ready);
+            let mut receiver = ReceiverEvidence::Unobserved;
+            match missing {
+                0 => s.send = A::Unknown,
+                1 => s.capture_credit = A::Unknown,
+                2 => s.source_work_us = None,
+                _ => receiver = ReceiverEvidence::Unknown,
+            }
+            let report = p.update_with_receiver(s, receiver).unwrap();
+            assert_ne!(report.reason, fr_media::pacing::Reason::EvidenceGap);
+            c.observe(&report).unwrap();
+            assert_eq!(
+                c.pending(),
+                if now <= 4_300_000 { proposal } else { None },
+                "unknown source {missing} at {now}"
+            );
+        }
+        assert_eq!(c.begin_capture().unwrap().bitrate(), 4_000_000);
+    }
+}
+
+#[test]
+fn deferred_upward_target_is_explicitly_cancelled_without_charging_change_dwell() {
+    let (mut c, mut p) = proposed_probe();
+    let old = c.begin_capture().unwrap();
+    c.complete_capture(old, 4_000_000, false, 4_200_001)
+        .unwrap();
+    observe(&mut c, &mut p, 4_250_000, A::Blocked);
+    let cancellation = c.pending().unwrap();
+    assert_eq!(cancellation.reason(), Reason::EvidenceReset);
+    assert_eq!(cancellation.bitrate(), 4_000_000);
+    for now in [4_300_000, 4_350_000] {
+        observe(&mut c, &mut p, now, A::Blocked);
+        assert_eq!(c.pending(), Some(cancellation));
+    }
+    let explicit = c.begin_capture().unwrap();
+    assert_eq!(explicit.bitrate(), 4_000_000);
+    c.complete_capture(explicit, 4_000_000, false, 4_350_000)
+        .unwrap();
+    assert_eq!(c.pending(), None);
+    // The cancellation changed no actual rate. It must not impose another
+    // two-second wait on the already measured need to reduce offered load.
+    observe(&mut c, &mut p, 4_400_000, A::Blocked);
+    assert_eq!(c.pending().unwrap().reason(), Reason::SendPressure);
+    assert_eq!(c.begin_capture().unwrap().bitrate(), 2_000_000);
+}
+
+#[test]
+fn late_upward_effect_and_new_headroom_cannot_erase_original_restoration() {
+    let (mut c, mut p) = proposed_probe();
+    let old = c.begin_capture().unwrap();
+    observe(&mut c, &mut p, 4_250_000, A::Blocked);
+    let restoration = c.pending().unwrap();
+    assert_eq!(restoration.reason(), Reason::EvidenceReset);
+    assert_eq!(restoration.bitrate(), 4_000_000);
+    // Re-earned headroom cannot replace an explicit cancellation while the
+    // original native request still owns an unknown external effect.
+    for now in (4_300_000..=8_500_000).step_by(50_000) {
+        observe(&mut c, &mut p, now, A::Ready);
+        assert_eq!(c.pending(), Some(restoration));
+    }
+    c.complete_capture(old, 4_250_000, true, 8_500_000).unwrap();
+    assert_eq!(c.applied_bitrate(), 4_250_000);
+    assert_eq!(c.pending(), Some(restoration));
+    let next = c.begin_capture().unwrap();
+    assert_eq!(next.bitrate(), 4_000_000);
+    assert_eq!(
+        c.complete_capture(old, 4_250_000, true, 8_550_000),
+        Err(Error::UnexpectedCapture)
+    );
+    c.complete_capture(next, 4_250_000, false, 8_550_000)
+        .unwrap();
+    assert_eq!(c.pending(), Some(restoration));
+    let next = c.begin_capture().unwrap();
+    c.complete_capture(next, 4_000_000, true, 10_500_000)
+        .unwrap();
+    assert_eq!(c.applied_bitrate(), 4_000_000);
+    assert_eq!(c.pending(), None);
+    for now in (10_550_000..12_500_000).step_by(50_000) {
+        observe(&mut c, &mut p, now, A::Blocked);
+        assert_eq!(c.pending(), None, "actual restoration charged its dwell");
+    }
+    observe(&mut c, &mut p, 12_500_000, A::Blocked);
+    assert_eq!(c.pending().unwrap().bitrate(), 2_000_000);
+}
+
+#[test]
+fn lost_headroom_never_cancels_a_pending_conservative_reduction() {
+    let (mut c, mut p) = proposed_cut(8_000_000);
+    let cut = c.pending();
+    observe(&mut c, &mut p, 150_000, A::Ready);
+    observe(&mut c, &mut p, 200_000, A::Unknown);
+    observe(&mut c, &mut p, 400_001, A::Ready);
+    for now in (450_001..=1_450_001).step_by(50_000) {
+        let mut s = sample(now, A::Ready);
+        s.observation.as_mut().unwrap().changed = false;
+        c.observe(&p.update(s).unwrap()).unwrap();
+        assert_eq!(c.pending(), cut);
+    }
+    assert_eq!(p.report().unwrap().mode, Mode::Idle);
+    assert_eq!(c.begin_capture().unwrap().bitrate(), 4_000_000);
 }
 
 #[test]
