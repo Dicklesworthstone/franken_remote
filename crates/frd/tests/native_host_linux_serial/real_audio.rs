@@ -520,7 +520,9 @@ fn share_lanes(
     private_root_home();
     let worker = sibling("fr-media-worker");
     let host = Xvfb::start("640x480x24");
-    let viewer = Xvfb::start("800x600x24");
+    // Room for the clipboard controls beside the unscaled 640x480 picture, so a
+    // window coordinate is the same host coordinate (as in `real_control`).
+    let viewer = Xvfb::start("1600x900x24");
     set_root(&host.display, COLOUR);
     // The viewer draws the forwarded host cursor; keep it off the sampled centre.
     warp_pointer(&host.display, 16, 16);

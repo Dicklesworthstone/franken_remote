@@ -283,7 +283,9 @@ fn idle_attempts_rebind_without_reinstalling_or_extending_their_deadlines() {
                 supervisor,
                 handle,
                 serial::Policy {
-                    cooldown: Duration::from_millis(600),
+                    // Renewal sleeps 500 ms and then runs its tools, so the run
+                    // must outlast three renewals on a loaded host as well.
+                    cooldown: Duration::from_millis(1_200),
                     ..serial::Policy::default()
                 },
                 &mut app,
