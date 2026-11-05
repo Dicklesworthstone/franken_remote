@@ -5,6 +5,8 @@ use fr_core::{
     input_submission::Capability,
 };
 
+mod lifecycle;
+
 fn caps() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)

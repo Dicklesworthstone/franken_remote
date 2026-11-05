@@ -30,7 +30,7 @@
 //! source/ring/lane beside the managed service. Input is always polled first;
 //! no audio IPC wait or native call runs on the input executor. The host-run
 //! owner retains the original audio-child receipt and reaps it at share end.
-use super::super::{Error, LocalAction, Report, Wake};
+use super::super::{Error, LocalAction, LocalFailure, Report, Wake};
 use super::{SessionAgent, Setup, Startup, local_stage};
 use crate::{
     clipboard_process, clipboard_quic,
@@ -39,8 +39,8 @@ use crate::{
     input_quic::grant::Error as GrantError,
     input_watchdog::StopReason,
     session_startup::{
-        HostSession, ManagedControlReport, ManagedHostControlState, NativePublisher,
-        PublisherPolicy,
+        HostSession, ManagedControlReport, ManagedControlService, ManagedHostControlState,
+        NativePublisher, PublisherPolicy,
         shared_viewers::{Entropy, Statistics},
     },
     worker::Deadline,
@@ -298,10 +298,12 @@ impl ControlledDesktop {
         agent: &'a mut SessionAgent,
         cx: Cx,
         entropy: Entropy,
-        mut local: L,
+        local: L,
     ) -> impl Future<Output = Result<Report, Error>> + Send + 'a
     where
-        L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send + 'a,
+        L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, LocalFailure>
+            + Send
+            + 'a,
     {
         let permitted = Arc::new(AtomicBool::new(input_permitted(agent)));
         let mut decider = Decider {
@@ -348,68 +350,95 @@ impl ControlledDesktop {
         };
         async move {
             let (_files, _download, clipboard, observation, service) = prepared?;
-            let mut service = pin!(service);
-            let mut timer = Wake {
-                driver: cx.timer_driver().ok_or(Error::Clock)?,
-                handle: None,
-            };
-            let (mut stopped, mut failed) = (false, false);
-            let report = poll_fn(|task| {
-                if !stopped {
-                    let action = local(agent, task);
-                    permitted.store(input_permitted(agent), Ordering::Release);
-                    if action != Ok(LocalAction::Continue) {
-                        // Local priority: revoke first; the service then drains
-                        // its input owner and returns its original evidence.
-                        // A named local cause (a lock, a suspend) is the lease's
-                        // terminal reason; the revoke alone reads as its end.
-                        stopped = true;
-                        failed = action.is_err();
-                        if let Some(reason) = agent.local_stop_reason() {
-                            observation.stop_lease(reason);
-                        }
-                        observation.revoke();
-                    }
-                }
-                if let Poll::Ready(report) = service.as_mut().poll(task) {
-                    return Poll::Ready(report);
-                }
-                // Free the bounded receipt slots (at most two, content-free);
-                // a full slot would otherwise defer the next incoming item.
-                if let Some(clipboard) = &clipboard {
-                    while clipboard.take_received().is_some() {}
-                }
-                let next = timer.driver.now().as_nanos().saturating_add(10_000_000);
-                timer.arm(Time::from_nanos(next), task);
-                Poll::Pending
-            })
-            .await;
-            let ManagedControlReport { session, input, .. } = report;
-            if input.is_some_and(|shutdown| !shutdown.handoff_safe()) {
-                return Err(Error::InputCleanup);
-            }
-            if failed {
-                return Err(Error::LocalEvent);
-            }
-            if !stopped
-                && (observation.end_reason()
-                    == Some(crate::input_watchdog::StopReason::GeometryChanged)
-                    || input.is_some_and(|shutdown| {
-                        shutdown.reason == crate::input_watchdog::StopReason::GeometryChanged
-                    }))
-            {
-                // Native cleanup above remains mandatory even when input,
-                // capture or cancellation observes the layout change first.
-                return Err(Error::GeometryChanged);
-            }
-            match session {
-                Ok(()) => Ok(served(false)),
-                Err(_) if stopped => Ok(served(false)),
-                Err(error) => Err(Error::Publication(error)),
-            }
+            drive_control(
+                agent,
+                &cx,
+                local,
+                permitted,
+                observation,
+                clipboard,
+                service,
+            )
+            .await
         }
     }
 }
+
+/// Local priority applies while the original session is live. Once the managed
+/// service has fenced it, keep its SAME I/O and cleanup futures running. Its
+/// terminal result can still be pending; cancellation caused by that teardown
+/// is not a second local failure and must not overwrite the original outcome.
+async fn drive_control<L, S>(
+    agent: &mut SessionAgent,
+    cx: &Cx,
+    mut local: L,
+    permitted: Arc<AtomicBool>,
+    observation: crate::media::ObservationControl,
+    clipboard: Option<crate::native_clipboard::Control>,
+    service: S,
+) -> Result<Report, Error>
+where
+    L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, LocalFailure>,
+    S: ManagedControlService,
+{
+    let mut service = pin!(service);
+    let mut timer = Wake {
+        driver: cx.timer_driver().ok_or(Error::Clock)?,
+        handle: None,
+    };
+    let (mut stopped, mut failure) = (false, None);
+    let report = poll_fn(|task| {
+        if !stopped && !service.as_ref().get_ref().shutdown_started() {
+            let action = local(agent, task);
+            permitted.store(input_permitted(agent), Ordering::Release);
+            if action != Ok(LocalAction::Continue) {
+                // Fence before another poll can submit input. Keep the original
+                // managed owner for its independent drain/cleanup evidence.
+                stopped = true;
+                failure = action.err();
+                if let Some(reason) = agent.local_stop_reason() {
+                    observation.stop_lease(reason);
+                }
+                observation.revoke();
+            }
+        }
+        if let Poll::Ready(report) = service.as_mut().poll(task) {
+            return Poll::Ready(report);
+        }
+        // Free the bounded receipt slots (at most two, content-free).
+        if let Some(clipboard) = &clipboard {
+            while clipboard.take_received().is_some() {}
+        }
+        let next = timer.driver.now().as_nanos().saturating_add(10_000_000);
+        timer.arm(Time::from_nanos(next), task);
+        Poll::Pending
+    })
+    .await;
+    let ManagedControlReport { session, input, .. } = report;
+    if input.is_some_and(|shutdown| !shutdown.handoff_safe()) {
+        return Err(Error::InputCleanup);
+    }
+    if let Some(cause) = failure {
+        // A local fault observed before session termination remains a host
+        // fault. Keep the session result too; do not guess their causal order.
+        return Err(Error::LocalFailure {
+            cause,
+            session: session.err(),
+        });
+    }
+    if !stopped
+        && (observation.end_reason() == Some(StopReason::GeometryChanged)
+            || input.is_some_and(|shutdown| shutdown.reason == StopReason::GeometryChanged))
+    {
+        return Err(Error::GeometryChanged);
+    }
+    match session {
+        Ok(()) => Ok(served(false)),
+        Err(_) if stopped => Ok(served(false)),
+        Err(error) => Err(Error::Publication(error)),
+    }
+}
+
 /// One admitted viewer; `failed` records a viewer-side ending.
 pub(super) fn served(failed: bool) -> Report {
     Report {

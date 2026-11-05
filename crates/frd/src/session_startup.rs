@@ -42,8 +42,8 @@ mod opening;
 mod running;
 pub use running::controlled::files::{Cleanup as FileReceiveCleanup, Error as FileReceiveError};
 pub use running::publisher::{
-    Error as PublisherError, ManagedControlReport, ManagedHostControlState, ManagedPendingControl,
-    NativePublisher, Policy as PublisherPolicy,
+    Error as PublisherError, ManagedControlReport, ManagedControlService, ManagedHostControlState,
+    ManagedPendingControl, NativePublisher, Policy as PublisherPolicy,
 };
 pub use running::{
     ControlledHost, HostSession, LocalControl as HostControlState,

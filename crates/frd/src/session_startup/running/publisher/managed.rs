@@ -132,6 +132,21 @@ pub struct ManagedControlReport {
     pub revocation: Option<Result<(), fr_transport::quic::Error>>,
 }
 
+/// The original managed service, including its independent native/terminal
+/// drain. Shutdown starts only after authority is fenced. The terminal session
+/// result may arrive later, when original pending I/O returns its cancellation.
+/// Neither witness proves cleanup completed: callers must keep polling this
+/// same future for `ManagedControlReport`.
+pub trait ManagedControlService: Future<Output = ManagedControlReport> {
+    /// Monotonic witness of this service's actual authority fence. Ordinary
+    /// session work cannot resume, even if its I/O result is still pending.
+    fn shutdown_started(&self) -> bool;
+
+    /// The original result, never a result guessed from cancellation or native
+    /// cleanup. `None` can also mean shutdown has begun but I/O has not returned.
+    fn terminal_session(&self) -> Option<Result<(), Error>>;
+}
+
 #[derive(Default)]
 struct Native {
     driver: Option<Driver>,
@@ -177,7 +192,7 @@ impl NativePublisher {
         local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
-    ) -> impl Future<Output = ManagedControlReport> + 'a {
+    ) -> impl ManagedControlService + 'a {
         self.managed_control(Ok(None), seat, local, nonce, ticket, None)
     }
 
@@ -193,7 +208,7 @@ impl NativePublisher {
         local: impl FnMut(ManagedHostControlState<'_>) -> Result<Option<Target>, GrantError> + 'a,
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
-    ) -> impl Future<Output = ManagedControlReport> + 'a {
+    ) -> impl ManagedControlService + 'a {
         self.serve_managed_control_with_audio(cleanup, seat, local, nonce, ticket, None)
     }
 
@@ -213,7 +228,7 @@ impl NativePublisher {
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
         audio: Option<crate::media::shared_publisher::AudioProfile>,
-    ) -> impl Future<Output = ManagedControlReport> + 'a {
+    ) -> impl ManagedControlService + 'a {
         let reporting = self
             .host
             .enable_revocation_reporting(cleanup)
@@ -231,7 +246,7 @@ impl NativePublisher {
         nonce: impl FnMut() -> Result<u128, ()> + 'a,
         ticket: impl FnMut() -> Option<InputTicketId> + 'a,
         audio: Option<crate::media::shared_publisher::AudioProfile>,
-    ) -> impl Future<Output = ManagedControlReport> + 'a {
+    ) -> impl ManagedControlService + 'a {
         let native = Arc::new(Mutex::new(Native::default()));
         let slot = native.clone();
         let control = self.control();
@@ -265,6 +280,7 @@ impl NativePublisher {
                 inner.await
             })),
             native,
+            shutdown_started: false,
             session: None,
             done: None,
             reporting,
@@ -281,6 +297,7 @@ struct Service<F> {
     control: ObservationControl,
     inner: Option<Pin<Box<F>>>,
     native: Arc<Mutex<Native>>,
+    shutdown_started: bool,
     session: Option<Result<(), Error>>,
     done: Option<ManagedControlReport>,
     reporting: Option<fr_transport::quic::RevocationReport>,
@@ -288,8 +305,12 @@ struct Service<F> {
     revocation: Option<Result<(), fr_transport::quic::Error>>,
 }
 impl<F> Service<F> {
-    fn end(&mut self, result: Result<(), Error>) {
+    fn begin_shutdown(&mut self) {
         self.control.revoke();
+        self.shutdown_started = true;
+    }
+    fn end(&mut self, result: Result<(), Error>) {
+        self.begin_shutdown();
         self.session = Some(result);
         // Abandoning a still-pending QUIC turn is terminal, and occurs only
         // AFTER revocation. We never cancel a healthy turn for native progress.
@@ -314,7 +335,7 @@ impl<F> Service<F> {
                 // Keep polling the original service so pending I/O RETURNS its
                 // cancellation instead of losing the socket through abandonment.
                 // The input owner is already fenced; ordinary media cannot resume.
-                self.control.revoke();
+                self.begin_shutdown();
             } else {
                 self.end(Err(Error::Session(crate::session_startup::Error::Closed)));
             }
@@ -361,10 +382,18 @@ impl<F: Future<Output = Result<(), Error>>> Future for Service<F> {
         Poll::Pending
     }
 }
+impl<F: Future<Output = Result<(), Error>>> ManagedControlService for Service<F> {
+    fn shutdown_started(&self) -> bool {
+        self.shutdown_started
+    }
+    fn terminal_session(&self) -> Option<Result<(), Error>> {
+        self.session
+    }
+}
 impl<F> Drop for Service<F> {
     fn drop(&mut self) {
         if self.done.is_none() {
-            self.control.revoke();
+            self.begin_shutdown();
             let mut native = lock(&self.native);
             if let Some(driver) = &native.driver {
                 driver.control().stop(StopReason::Cancelled);
@@ -373,3 +402,6 @@ impl<F> Drop for Service<F> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

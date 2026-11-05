@@ -19,7 +19,9 @@ use fr_wire::{
     attachment::{MediaRole, Ticket},
     display::Display,
 };
-pub use managed::{ManagedControlReport, ManagedHostControlState, ManagedPendingControl};
+pub use managed::{
+    ManagedControlReport, ManagedControlService, ManagedHostControlState, ManagedPendingControl,
+};
 use std::{
     future::{Future, poll_fn},
     pin::{Pin, pin},

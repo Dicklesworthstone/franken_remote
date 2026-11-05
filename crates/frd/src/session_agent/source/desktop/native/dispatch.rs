@@ -26,6 +26,8 @@ use std::{
     task::{Context, Poll},
     time::Duration,
 };
+mod local;
+use local::Events as LocalEvents;
 
 /// Safety-net re-check while the desktop waits for its first peer: nothing is
 /// shared yet. Stops and session-lifetime changes wake it directly; a policy
@@ -84,6 +86,7 @@ impl Error {
                 | super::super::Error::SourceSetup
                 | super::super::Error::Capture(_)
                 | super::super::Error::LocalEvent
+                | super::super::Error::LocalFailure { .. }
                 | super::super::Error::Closed
                 | super::super::Error::Clock
                 | super::super::Error::NoInputPermission
@@ -453,20 +456,7 @@ impl Driver {
         let shared = self.shared.clone();
         let lifetime = self.cx.clone();
         let state = self.shared.clone();
-        let mut events = local;
-        let mut local = move |agent: &mut SessionAgent, task: &mut Context<'_>| {
-            let check = || -> Result<(), ()> {
-                lifetime.checkpoint().map_err(|_| ())?;
-                if matches!(*state.route.lock().map_err(|_| ())?, Route::Closed) {
-                    return Err(());
-                }
-                Ok(())
-            };
-            check()?;
-            let result = events(agent, task)?;
-            check()?;
-            Ok(result)
-        };
+        let mut local = LocalEvents::new(lifetime, state, local);
         let owner = Owner { driver: self };
         Guard {
             shared,
@@ -488,10 +478,12 @@ impl Driver {
                         let mut receive = pin!(initial.recv(&this.cx));
                         let mut previous = timer.driver.now();
                         poll_fn(|task| {
-                            this.cx.checkpoint().map_err(|_| Error::Closed)?;
-                            if local(&mut this.agent, task)
-                                .map_err(|()| Error::from(super::super::Error::LocalEvent))?
-                                == LocalAction::Stop
+                            if local.turn(&mut this.agent, task).map_err(|cause| {
+                                Error::from(super::super::Error::LocalFailure {
+                                    cause,
+                                    session: None,
+                                })
+                            })? == LocalAction::Stop
                                 || this.agent.is_revoked()
                             {
                                 return Poll::Ready(Err(Error::Closed));
@@ -547,7 +539,7 @@ impl Driver {
                             this.policy,
                             this.entropy.clone(),
                             notify,
-                            &mut local,
+                            &mut |agent, task| local.turn(agent, task).map_err(|_| ()),
                             this.interval,
                         )
                         .map_err(Error::from)?
@@ -595,7 +587,7 @@ impl Driver {
                             // an abandoned receiver without stopping the source.
                             let _ = reply.send(&this.cx, FirstService::Inspection(result));
                         }
-                        Err(error) => return Err(Error::from(error)),
+                        Err(error) => return Err(Error::from(local.annotate(error))),
                     }
                 };
                 this.desktop = Some(opened);
@@ -616,7 +608,7 @@ impl Driver {
                                 &mut this.agent,
                                 this.cx.clone(),
                                 this.entropy.clone(),
-                                local,
+                                |agent, task| local.turn(agent, task),
                             )
                             .await;
                         drop(ended);
@@ -644,7 +636,12 @@ impl Driver {
                 // Install the original continuous-service guard BEFORE publishing
                 // warm routing; it fences reentrant joins on any later failure.
                 let running = desktop
-                    .serve(&mut this.agent, this.interval, this.entropy.clone(), local)
+                    .serve(
+                        &mut this.agent,
+                        this.interval,
+                        this.entropy.clone(),
+                        |agent, task| local.turn(agent, task).map_err(|_| ()),
+                    )
                     .map_err(Error::from)?;
                 {
                     let mut route = this.shared.route.lock().map_err(|_| Error::Closed)?;
@@ -659,7 +656,9 @@ impl Driver {
                 if reply.send(&this.cx, FirstService::Shared(service)).is_err() {
                     return Err(Error::Closed);
                 }
-                running.await.map_err(Error::from)
+                running
+                    .await
+                    .map_err(|error| Error::from(local.annotate(error)))
             }),
         }
     }
@@ -912,6 +911,12 @@ mod tests {
             Desktop::InputCleanup,
             Desktop::NoInputPermission,
             Desktop::LocalEvent,
+            Desktop::LocalFailure {
+                cause: super::super::super::LocalFailure::CallbackFailed,
+                session: Some(Publication::Session(Session::Transport(
+                    quic::Error::Expired,
+                ))),
+            },
             Desktop::Publication(Publication::Shared(shared_publisher::Error::Closed)),
         ] {
             let error = super::controlled_outcome(Err(fault)).unwrap_err();

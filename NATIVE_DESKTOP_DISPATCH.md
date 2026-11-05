@@ -52,6 +52,52 @@ child. The factory must retain `Launch::retain_cleanup`'s Retirement outside
 startup for failed/abandoned preparation, as required by the original opener.
 No cleanup call retries external effects or creates another native worker.
 
+## Controlled shutdown and local failures
+
+The controlled share separates the session's terminal result from the original
+input owner's cleanup and terminal-report drain (plan §7.3). Its managed service
+exposes `ManagedControlService::shutdown_started()`, a monotonic witness set
+after the service revokes authority. `terminal_session()` separately retains the
+actual session result once it arrives. Native input may end first, leaving
+original network I/O pending while cancellation is returned; the shutdown
+witness is already set, but the session result remains `None`. Neither witness
+is a cleanup receipt. The caller must keep polling that same service until it
+returns `ManagedControlReport`; it does not replace the service, renew a deadline,
+or reacquire control.
+
+The native driver checks local events before each active-session turn. Once the
+managed service has begun shutdown, the driver stops those local checks and
+continues the original I/O and cleanup drain. This prevents cancellation caused by
+teardown from replacing an earlier transport or session failure with an unnamed
+`LocalEvent`. An explicit local stop during an active session still fences input
+before the next service poll and preserves the original lease stop reason.
+
+Native local failures carry one fixed, content-free cause:
+
+| Cause | Observed condition |
+|---|---|
+| `SourceLifetimeCancelled` | The original independent source context failed its cancellation checkpoint. |
+| `DispatcherClosed` | The original dispatch route was closed. |
+| `DispatcherPoisoned` | The dispatch-state mutex was poisoned. |
+| `CallbackFailed` | The embedding's local event or monitor callback returned an error. |
+
+The original source and route are checked before and after a successful local
+callback; the first failure prevents later callback execution. If a local
+failure occurs while the session is still active, `LocalFailure { cause, session }`
+retains both that cause and any subsequent managed-session error. It remains
+a host fault without inferring which concurrent failure caused the other.
+Uncertain native cleanup still takes precedence as `InputCleanup`.
+
+The added regressions cover cancellation, route closure, mutex poison, failed
+callbacks, simultaneous local/session errors, native-stop fencing before pending
+I/O returns, ordinary local stops and cleanup precedence. They exercise the
+production local gate and controlled loop with a scripted managed service, and
+the production managed service with an explicit pending drain fixture. They
+require no native SDK or live network. Source-level
+verification is separate from `fr-jlgm`'s loaded namespace acceptance and any
+live-tailnet qualification: these fixtures cannot establish that the reported
+capture-stall and files-plus-clipboard load failures are eliminated.
+
 This is the cold/warm authenticated-Host dispatcher, not multi-client UDP
 multiplexing (`frd run` composes it in `crates/frd/src/host_run.rs`). It does not qualify an installed
 Tailscale, logind/locker, kernel-ingress or hardware-media path. The focused

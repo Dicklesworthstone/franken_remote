@@ -31,6 +31,13 @@ pub enum Error {
     Viewers(shared_viewers::Error),
     Capture(shared_publisher::Error),
     LocalEvent,
+    /// A checked native-local failure, with the original managed session's
+    /// failure retained if shutdown also produced one. Neither cause is inferred
+    /// from the other; uncertain input cleanup still takes precedence.
+    LocalFailure {
+        cause: LocalFailure,
+        session: Option<crate::session_startup::PublisherError>,
+    },
     Closed,
     Clock,
     /// The controlled share needs input-injection permission (and no lock).
@@ -48,6 +55,15 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+
+/// Content-free reasons the native OS-share owner stopped at its local gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalFailure {
+    SourceLifetimeCancelled,
+    DispatcherClosed,
+    DispatcherPoisoned,
+    CallbackFailed,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalAction {
