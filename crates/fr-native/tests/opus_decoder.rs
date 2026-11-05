@@ -527,13 +527,34 @@ fn source_gaps_are_preserved_without_manufactured_plc_or_input_borrow_retention(
     let mut decoder = Decoder::new();
     decoder.configure(cfg).unwrap();
     let mut oracle = Oracle::new(cfg.channels());
-    for at in [0, 480, 10_000_000] {
+    // The encoder carries a capture gap as the lost whole frames' sequence
+    // numbers on the generation's grid, which the viewer's jitter buffer conceals
+    // up to its ceiling (opus_encoder.rs runs that path). The decoder's own
+    // contract is checked with source coordinates: a consecutive sequence whose
+    // timestamp jumps decodes without concealment and keeps the jump.
+    let lost = (10_000_000 - 960) / 480;
+    for (sequence, at, grid) in [
+        (0, 0, (0, 0)),
+        (1, 480, (1, 480)),
+        (2, 10_000_000, (2 + lost, 960 + lost * 480)),
+    ] {
         let mut input = tone(cfg, at);
         encoder.submit_pcm(&input).unwrap();
         input.samples_mut().fill(0); // Submission did not retain the PCM borrow.
         let expected;
         {
-            let packet = encoder.poll_packet().unwrap().unwrap();
+            let emitted = encoder.poll_packet().unwrap().unwrap();
+            assert_eq!((emitted.sequence(), emitted.timestamp_samples()), grid);
+            let packet = AudioAccessUnit::new(
+                emitted.direction(),
+                emitted.generation(),
+                sequence,
+                at,
+                emitted.duration_samples(),
+                emitted.is_silence(),
+                emitted.payload(),
+            )
+            .unwrap();
             expected = oracle.decode(packet.payload(), 480);
             decoder.submit_packet(&packet).unwrap();
         } // Nor does decoding retain the packet's borrowed allocation.
