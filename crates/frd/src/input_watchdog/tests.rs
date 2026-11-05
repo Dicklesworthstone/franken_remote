@@ -109,8 +109,8 @@ fn typed_stop_is_visible_before_a_contended_executor_fence_can_run() {
         // still blocked. Previously it saw no cause and selected AuthorityEnded.
         let observer_wakes = wakes.clone();
         let observer = thread::spawn(move || {
-            let waker = Waker::from(observer_wakes);
-            Pin::new(&mut watchdog).poll(&mut Context::from_waker(&waker))
+            let signal = Waker::from(observer_wakes);
+            Pin::new(&mut watchdog).poll(&mut Context::from_waker(&signal))
         });
         let registered = wait_for(|| control.0.waker.lock().unwrap().is_some());
         let contended_cause = control.reason();
