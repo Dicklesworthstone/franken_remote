@@ -5,7 +5,8 @@
 //! original local receipt of every record. This worker-only owner neither grants
 //! those permissions nor advertises/attaches a network channel. A real `PipeWire`
 //! consumer must request sound before packets enter the bounded jitter queue.
-//! One exact-next real packet may decode ahead under its original receipt expiry.
+//! Bounded real PCM first prepares a complete native quantum. Afterwards one
+//! exact-next real packet may decode ahead under its original receipt expiry.
 //! After the first submission its output position is fixed; a later graph turn,
 //! duplicate record or worker dequeue cannot move that position or renew expiry.
 use super::{Demand, Error as DeviceError, Microphone, State, Statistics};
@@ -39,6 +40,9 @@ use std::{
 
 pub use crate::opus::playout::ReceiveResult;
 
+mod startup;
+use startup::{Frame as StartupFrame, Pcm as SensitivePcm, Startup};
+
 const SETUP: Duration = Duration::from_secs(2);
 const MAX_AGE: Duration = Duration::from_millis(MAX_JITTER_CEILING_MS as u64);
 
@@ -67,11 +71,25 @@ impl std::fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+impl From<startup::Error> for Error {
+    fn from(error: startup::Error) -> Self {
+        match error {
+            startup::Error::Configuration => Self::Configuration,
+            startup::Error::Metadata => Self::Metadata,
+            startup::Error::Capacity => Self::Media(AudioMediaError::BufferOverflow),
+            startup::Error::Expired => Self::Expired,
+            startup::Error::Timeline => Self::Clock,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderResult {
     Waiting,
     /// Accepted by the bounded native queue, not proof an application heard it.
+    /// The first turn may admit a complete quantum's batch of real frames;
+    /// `source_samples` is its first source timestamp and `output_samples` is
+    /// the aggregate admitted span. Subsequent turns admit one frame each.
     Submitted {
         source_samples: u64,
         output_samples: u32,
@@ -161,6 +179,7 @@ pub struct Uplink<D: UplinkDecoder = ProcessDecoder> {
     arrivals: [Option<Arrival>; JITTER_BUFFER_CAPACITY],
     drift: Drift,
     pending: Option<Pending>,
+    startup: Startup,
     next_output: Option<u64>,
     reorder_until: Option<Instant>,
     last_packet_expiry: Option<Instant>,
@@ -248,6 +267,7 @@ impl<D: UplinkDecoder> Uplink<D> {
         )
         .map_err(Error::Media)?;
         let jitter = AudioJitterBuffer::with_config(config).map_err(Error::Jitter)?;
+        let startup = Startup::new(config)?;
         permission(&mut permitted)?;
         let mut decoder = make_decoder(limits).map_err(Error::Media)?;
         decoder.configure(config).map_err(Error::Media)?;
@@ -266,6 +286,7 @@ impl<D: UplinkDecoder> Uplink<D> {
             arrivals: [None; JITTER_BUFFER_CAPACITY],
             drift: Drift::default(),
             pending: None,
+            startup,
             next_output: None,
             reorder_until: None,
             last_packet_expiry: None,
@@ -496,9 +517,10 @@ impl<D: UplinkDecoder> Uplink<D> {
     }
 
     /// One bounded worker turn: poll native demand and at most one codec result
-    /// or admission. One exact-next real packet may predecode while an earlier
-    /// native frame still spans graph quanta; no PLC is generated ahead. Output
-    /// retains its fixed position, and a missed interval cannot be rebased.
+    /// or admission, except the initial batch of at most three real PCM frames.
+    /// One exact-next real packet may predecode while an earlier native frame
+    /// still spans graph quanta; no PLC is generated ahead. Output retains its
+    /// fixed position, and a missed interval cannot be rebased.
     pub fn service(&mut self, mut permitted: impl FnMut() -> bool) -> Result<RenderResult, Error> {
         self.check()?;
         self.operation(|this| {
@@ -515,6 +537,9 @@ impl<D: UplinkDecoder> Uplink<D> {
             let Some(demand) = demand else {
                 return Ok(RenderResult::Waiting);
             };
+            if this.next_output.is_none() {
+                return this.service_startup(demand, &mut permitted);
+            }
             let start = this.next_output.unwrap_or(demand.output_start());
             if start < demand.output_start() {
                 return Err(Error::MissedDemand);
@@ -531,9 +556,9 @@ impl<D: UplinkDecoder> Uplink<D> {
                 let Some(pcm) = this.decoder()?.poll_pcm().map_err(Error::Media)? else {
                     return Ok(RenderResult::Waiting);
                 };
-                let pcm = SensitivePcm(pcm);
+                let mut pcm = SensitivePcm(pcm);
                 let pending = this.pending.take().ok_or(Error::Metadata)?;
-                return this.submit(pcm, &pending, demand, start, &mut permitted);
+                return this.submit(&mut pcm, &pending, demand, start, &mut permitted);
             }
             if this
                 .reorder_until
@@ -550,6 +575,90 @@ impl<D: UplinkDecoder> Uplink<D> {
             }
             this.decode(demand)
         })
+    }
+
+    fn service_startup(
+        &mut self,
+        demand: Demand,
+        permitted: &mut impl FnMut() -> bool,
+    ) -> Result<RenderResult, Error> {
+        if !self.startup.needs_frame(demand.frames())? {
+            if self.pending.is_some() {
+                return Err(Error::Metadata);
+            }
+            let Some(batch) =
+                self.startup
+                    .take(demand.frames(), demand.available_blocks(), Instant::now())?
+            else {
+                return Ok(RenderResult::Waiting);
+            };
+            // No native poll or decoder work can run between these bounded
+            // submissions. The owner-thread callback sees a complete first
+            // quantum; any error returns through operation(), fencing and
+            // clearing the partial batch before another callback can run.
+            let submitted =
+                batch.admit::<Error>(demand.output_start(), Instant::now, |frame, start| {
+                    let pending = Pending {
+                        demand: None,
+                        span: frame.span,
+                        source: frame.pcm.0.timestamp_samples(),
+                        expires: frame.expires,
+                        concealed: false,
+                    };
+                    self.submit(&mut frame.pcm, &pending, demand, start, permitted)
+                        .map(|_| ())
+                })?;
+            return Ok(RenderResult::Submitted {
+                source_samples: submitted.source_samples,
+                output_samples: submitted.output_samples,
+                concealed: false,
+            });
+        }
+        if let Some(pending) = self.pending.as_ref() {
+            if pending.demand.is_some() || pending.concealed {
+                return Err(Error::Metadata);
+            }
+            let Some(pcm) = self.decoder()?.poll_pcm().map_err(Error::Media)? else {
+                return Ok(RenderResult::Waiting);
+            };
+            let pcm = SensitivePcm(pcm);
+            let pending = self.pending.take().ok_or(Error::Metadata)?;
+            self.validate_pcm(&pcm.0, &pending)?;
+            self.startup.push(
+                StartupFrame {
+                    pcm,
+                    span: pending.span,
+                    expires: pending.expires,
+                },
+                demand.frames(),
+                Instant::now(),
+            )?;
+            // Select an absolute output start only on the next service turn,
+            // after polling a fresh demand with a complete batch already ready.
+            return Ok(RenderResult::Waiting);
+        }
+        if self
+            .reorder_until
+            .is_none_or(|until| Instant::now() < until)
+            || demand.available_blocks() == 0
+        {
+            return Ok(RenderResult::Waiting);
+        }
+        let packet = if self.startup.is_empty() {
+            match self.jitter.drain_for_playout().map_err(Error::Jitter)? {
+                JitterDrainResult::Packet(packet) => Some(packet),
+                JitterDrainResult::Underrun => None,
+                JitterDrainResult::Plc { .. } => return Err(Error::Metadata),
+            }
+        } else {
+            // An absent exact-next packet leaves a bounded gap until its
+            // original receipt expires. Startup must never invent early PLC.
+            self.jitter.predecode_packet()
+        };
+        if let Some(packet) = packet {
+            self.decode_packet(&packet)?;
+        }
+        Ok(RenderResult::Waiting)
     }
 
     fn decode(&mut self, demand: Demand) -> Result<RenderResult, Error> {
@@ -616,27 +725,33 @@ impl<D: UplinkDecoder> Uplink<D> {
         Ok(())
     }
 
-    fn submit(
-        &mut self,
-        mut pcm: SensitivePcm,
-        pending: &Pending,
-        demand: Demand,
-        start: u64,
-        permitted: &mut impl FnMut() -> bool,
-    ) -> Result<RenderResult, Error> {
+    fn validate_pcm(&self, pcm: &AudioPcmFrame, pending: &Pending) -> Result<(), Error> {
         let nominal = self.config.expected_samples_per_frame();
-        if pcm.0.generation() != self.config.generation()
-            || pcm.0.channels() != self.config.channels()
-            || pcm.0.sample_rate() != self.config.sample_rate()
-            || pcm.0.samples_per_channel()
+        if pcm.generation() != self.config.generation()
+            || pcm.channels() != self.config.channels()
+            || pcm.sample_rate() != self.config.sample_rate()
+            || pcm.samples_per_channel()
                 != usize::try_from(nominal).map_err(|_| Error::Configuration)?
-            || pcm.0.timestamp_samples() != pending.source
+            || pcm.timestamp_samples() != pending.source
         {
             return Err(Error::Metadata);
         }
         if Instant::now() >= pending.expires {
             return Err(Error::Expired);
         }
+        Ok(())
+    }
+
+    fn submit(
+        &mut self,
+        pcm: &mut SensitivePcm,
+        pending: &Pending,
+        demand: Demand,
+        start: u64,
+        permitted: &mut impl FnMut() -> bool,
+    ) -> Result<RenderResult, Error> {
+        self.validate_pcm(&pcm.0, pending)?;
+        let nominal = self.config.expected_samples_per_frame();
         let output_samples = pending.span.samples();
         let end = start
             .checked_add(u64::from(output_samples))
@@ -692,8 +807,9 @@ impl<D: UplinkDecoder> Uplink<D> {
             Ok(())
         }
     }
-    fn retained_live(&self) -> Result<(), Error> {
+    fn retained_live(&mut self) -> Result<(), Error> {
         let now = Instant::now();
+        self.startup.check_live(now)?;
         if self.arrivals.iter().flatten().any(|a| now >= a.expires)
             || self.pending.as_ref().is_some_and(|p| now >= p.expires)
         {
@@ -718,6 +834,7 @@ impl<D: UplinkDecoder> Uplink<D> {
         self.control.native.stop();
         self.jitter.stop();
         self.pending = None;
+        self.startup.clear();
         self.arrivals.fill(None);
         self.control.decoder.stop();
         self.decoder = None;
@@ -758,13 +875,6 @@ impl<D: UplinkDecoder> Drop for Guard<'_, D> {
         }
     }
 }
-struct SensitivePcm(AudioPcmFrame);
-impl Drop for SensitivePcm {
-    fn drop(&mut self) {
-        self.0.samples_mut().fill(0);
-    }
-}
-
 fn permission(permitted: &mut impl FnMut() -> bool) -> Result<(), Error> {
     if catch_unwind(AssertUnwindSafe(permitted)).unwrap_or(false) {
         Ok(())

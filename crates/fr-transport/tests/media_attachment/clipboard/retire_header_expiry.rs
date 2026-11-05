@@ -81,13 +81,27 @@ fn a_stalled_header_retires_the_original_clipboard_pair_without_renewing_its_dea
         quiet(&mut l, &cx).await;
         let capacity = l.c.usage().framed_capacity;
         let bytes = small_chunk(&h);
-        for _ in 0..2 {
-            h.send(&mut l.h, &cx, &bytes, clock(&cx) + 4_000_000, || true)
-                .unwrap();
+        h.send(&mut l.h, &cx, &bytes, clock(&cx) + 4_000_000, || true)
+            .unwrap();
+        // The 186-byte Attached record used this same stream. Draining its
+        // send custody does not prove the host has received MAX_STREAM_DATA
+        // from the peer's application read. A host drive stages prefixes BEFORE
+        // receiving that credit, so one turn can leave even this first record
+        // incomplete. Drive both native peers until this exact record is really
+        // acknowledged, without dispatching any clipboard application bytes.
+        let until = clock(&cx) + 1_000_000;
+        while !h.send_drained(&l.h).unwrap() {
+            assert!(
+                clock(&cx) < until,
+                "first clipboard record never drained through renewed stream credit"
+            );
+            l.drive(&cx).await;
         }
-        // The actual peer stream has 512 bytes of credit: one complete
-        // 500-byte record followed by just 12 of the next 24-byte header.
-        // Read no application bytes until both native prefixes are delivered.
+        // Those 500 bytes are now native-owned at the receiver, still unread.
+        // Its fixed 512-byte window leaves exactly 12 bytes for the next
+        // 24-byte header; acknowledging the first record grants no read credit.
+        h.send(&mut l.h, &cx, &bytes, clock(&cx) + 4_000_000, || true)
+            .unwrap();
         l.h.drive(&cx, Duration::ZERO, || true).await.unwrap();
         for _ in 0..3 {
             l.c.drive(&cx, Duration::from_millis(1), || true)

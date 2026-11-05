@@ -262,13 +262,14 @@ interval. Repeated reads do not extend the token's original deadline.
 
 The source schedules two graph quanta ahead: one for the non-real-time worker
 and isolated decoder, and one for the asynchronous native handoff. A service
-turn admits or collects at most one decode. One exact-next real packet can
-decode ahead while previously submitted PCM spans several graph quanta. Its
-reply stays in the existing single process mailbox; there is no second PCM
-FIFO. Concealment is never generated ahead of native demand.
+turn admits or collects at most one decode. After the initial quantum is
+prepared, one exact-next real packet can decode ahead while previously submitted
+PCM spans several graph quanta. Its reply stays in the existing single process
+mailbox. Concealment is never generated ahead of native demand.
 
-The first output anchor is chosen only after real PCM is ready, under the
-original first-arrival reorder wait and packet expiry. Every subsequent output
+The first output anchor is chosen only after enough real PCM is ready for a
+complete native quantum, under the original first-arrival reorder wait and
+packet expiry. Every subsequent output
 position is fixed by the preceding accepted span. Ready PCM acquires a native
 token only when that token contains the fixed position. If a callback has
 already passed it, the epoch retires; a later token cannot move it forward.
@@ -292,6 +293,54 @@ as evidence of consumed audio. The existing ±1,000 ppm correction can produce
 479/481 or 959/961 output samples; the source timeline still advances by the
 nominal 480 or 960 samples. Fractional correction credit is committed once,
 only after native queue admission succeeds.
+
+### Preparing the first complete native quantum
+
+A 10-ms Opus frame contains 480 samples per channel, so it cannot fill the
+supported 512-sample native quantum by itself. Previously, admitting that first
+frame immediately armed the native source's continuous-output requirement. A
+callback could then run before the next asynchronous decode completed, retire
+the source for a 32-sample underrun, and publish no audible PCM even though the
+original packet deadlines and controller authority were still live.
+
+Startup now prepares the smallest consecutive group of real decoded frames
+that covers the actual demanded quantum. It retains at most three frames,
+1,920 samples per channel and 7,680 live interleaved PCM bytes. The first decode
+still waits for the original reorder deadline; later preparation uses only the
+jitter buffer's exact-next real packet. A missing packet cannot manufacture
+startup concealment. Each prepared frame retains its original receipt expiry,
+source timestamp, generation, channel layout and planned sample span.
+
+Only a complete group can acquire an absolute output start, from a fresh demand
+on the following service turn. The worker submits that group through the
+existing native admission checks without polling the native loop between
+frames. The original earliest expiry is checked before and after every
+admission, and each local PCM value is erased immediately after its native copy.
+Any failure fences and clears a partially admitted group before another native
+callback can run. Taking this initial group permanently seals the preparation
+owner; later graph turns cannot reopen it, move the output anchor or replay
+sound. All subsequent underrun, missed-demand, graph continuity and original
+authority checks remain in force.
+
+The initial `RenderResult::Submitted` reports the group's first source timestamp
+and total admitted output samples. Later results describe individual frames as
+before. These are native-queue admissions, not evidence that an application
+heard the sound. The device-free production-policy tests cover 256-, 512- and
+1,024-sample quanta, 10/20-ms mono/stereo frames, immutable expiry, bounded
+capacity, gaps, generation changes and failed partial admission. They do not
+replace the actual PipeWire consumer and supervised-worker qualification tests.
+
+Local validation on 2026-11-05 used the exact pinned nightly and an external
+manifest referencing the original production files and matching repository
+lockfile versions. All eight startup-policy tests and six existing device-free
+microphone policy/authority tests passed. The original `fr-native` library with
+`linux-microphone-playout` and both real worker binaries built; strict library
+Clippy and all-target Clippy for that focused harness passed. This avoids the
+daemon's unchanged Asupersync dev-dependency graph, whose compilation exceeds
+the executor's 8 GiB memory allowance. Actual PipeWire execution remains
+blocked locally because the environment refuses creation of Unix sockets with
+`EPERM`. The source-level startup interleaving above is independently identified;
+it has not been proven to be the cause of an earlier native CI child exit.
 
 ## Original deadlines and bounded retention
 
@@ -328,9 +377,17 @@ replace the original expiry; startup eviction removes the corresponding
 metadata. The startup reorder deadline is anchored to the first timely admitted
 record's original receipt, rather than construction, acknowledgement or polling.
 
-There is at most one outstanding process decode, four private PCM blocks in
-the native source and one local PCM value being checked/submitted. PCM in the
-receiving owner is erased on every completion or refusal. Concealment uses the
+There is at most one outstanding process decode and four private PCM blocks in
+the native source. Before the first submission, a fixed reservation holds at
+most three local prepared frames; together with a pending startup decode, the
+owner never prepares more than the smallest group covering the first quantum.
+`AudioPcmFrame` has fixed backing for 11,520 interleaved samples, independently of
+its active duration. The startup allocation therefore reserves three full
+`AudioPcmFrame` values plus their metadata; the 7,680-byte live-audio limit is
+not a claim about total allocated storage. Reservation occurs during owner
+construction and never grows in the service loop. It is released after the
+initial admission, after which there is one local PCM value being checked or
+submitted. PCM is erased on every completion or refusal. Concealment uses the
 existing decoder history and shared jitter limits, preserves the nominal
 source timeline, and cannot extend the original last-real-packet budget.
 
