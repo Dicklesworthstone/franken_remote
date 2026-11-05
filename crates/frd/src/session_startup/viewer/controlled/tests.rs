@@ -1499,4 +1499,6 @@ mod files;
 
 mod maintenance;
 
+mod clock;
+
 mod microphone;

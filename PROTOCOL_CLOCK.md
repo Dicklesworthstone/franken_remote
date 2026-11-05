@@ -68,6 +68,16 @@ clock progress. `receive` may return an unrelated record as blocked for another
 handler; all callbacks must be bounded and nonblocking. The connection is driven
 by one owner at a time. This path adds no thread, task, runtime or listener.
 
+After promotion to a controlled viewer, the original clock endpoint belongs to
+that input owner. Its combined session dispatcher continues to route clock
+records through the same endpoint: a preliminary clock-only receive can stop at
+an earlier authority record on the ordered control stream. A reply behind that
+record must still reach its clock owner when the authority dispatcher advances,
+rather than being exposed to the application's unrelated-record handler. Invalid
+routes, bindings, sequences and expired exchanges retain their terminal clock
+errors; dispatch never creates a replacement estimator, rebases the outstanding
+exchange's deadline, or renews input authority.
+
 Every operation checks its original connection identity and live session
 context. Pending expiry, malformed or replayed replies, FIN/RESET, cancellation,
 failed/abandoned I/O and owner drop terminate sampling. Host termination revokes

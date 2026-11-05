@@ -782,9 +782,21 @@ impl ControlledViewer {
         let microphone = &self.microphone;
         let ticket_profile = self.channels.ticket_profile();
         let input = &mut self.input;
+        let clock = &mut self.clock;
         let last_result = &mut self.last_result;
         let mut failure = None;
         let receive = self.session.step(&mut |route, bytes| {
+            // The first clock-only pass may stop at another record on this
+            // ordered stream. Keep the SAME clock owner in the combined pass:
+            // the session transferred it here when this grant was installed.
+            match clock.dispatch_record(route, bytes) {
+                Ok(Some(disposition)) => return Ok(disposition),
+                Ok(None) => {}
+                Err(error) => {
+                    failure = Some(Error::Clock(error));
+                    return Err(());
+                }
+            }
             if files.owns(route, bytes)
                 || clipboard.as_ref().is_some_and(|c| c.owns_inbound(route))
                 || clipboard_setup.owns(route, bytes)
