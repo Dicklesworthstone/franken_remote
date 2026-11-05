@@ -7,6 +7,9 @@ use asupersync::bytes::Bytes;
 // Application cancellation of the optional clipboard pair. No new FRD0 kind,
 // acknowledgment, authority token, or retry semantics are introduced.
 const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
+// Only the original ACTIVE Clipboard pair can report this framing expiry.
+// It is terminal metadata, not a new item lifetime or permission to retry.
+const CLIPBOARD_RECEIVE_EXPIRED: u64 = 0x4652_4345;
 const FILES_RETIRED: u64 = 0x4652_4649;
 // An expired receive is a terminal file-transfer outcome, including for its
 // peer sender. It carries no retry or authority semantics and is recognized
@@ -125,22 +128,20 @@ impl QuicRecords {
                 continue;
             }
             if r.state.load(Ordering::Acquire) == ACTIVE {
-                // Files share congestion capacity with higher-priority input
-                // and media. A stalled prefix or unconsumed complete record
-                // expires the transfer, not its controlling desktop. Retire
-                // the ACTIVE original pair before generic framing checks;
+                // Clipboard and files share congestion capacity with higher-
+                // priority input and media. A stalled prefix or unconsumed
+                // complete record expires its optional pair, not its desktop.
+                // Retire the ACTIVE original pair before generic framing checks;
                 // never extend the first-byte deadline or reuse its binding.
-                // Clipboard keeps its narrower complete-blocked exception.
                 // Malformed records, unfinished exchanges and critical streams
                 // still take their ordinary connection-fencing paths.
                 let receive_expired = self.inbound.iter().any(|s| {
                     s.route.stream == r.inbound
                         && !s.fin
-                        && match r.role {
-                            MediaRole::Files | MediaRole::FilesDownload => true,
-                            MediaRole::Clipboard => s.blocked,
-                            _ => false,
-                        }
+                        && matches!(
+                            r.role,
+                            MediaRole::Files | MediaRole::FilesDownload | MediaRole::Clipboard
+                        )
                         && s.framing.next_deadline().is_some_and(|until| now >= until)
                 });
                 let streams = self
@@ -156,7 +157,11 @@ impl QuicRecords {
                     || (r.role.is_files()
                         && (outgoing.stop_sending_error_code == Some(FILES_RECEIVE_EXPIRED)
                             || incoming.recv_reset.map(|(code, _)| code)
-                                == Some(FILES_RECEIVE_EXPIRED)));
+                                == Some(FILES_RECEIVE_EXPIRED)))
+                    || (r.role == MediaRole::Clipboard
+                        && (outgoing.stop_sending_error_code == Some(CLIPBOARD_RECEIVE_EXPIRED)
+                            || incoming.recv_reset.map(|(code, _)| code)
+                                == Some(CLIPBOARD_RECEIVE_EXPIRED)));
                 if receive_expired
                     || r.retire.load(Ordering::Acquire)
                     || outgoing.stop_sending_error_code.is_some()
@@ -184,7 +189,9 @@ impl QuicRecords {
     /// original Files exchange reached its direction-specific staged final boundary.
     fn retire_reservation_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
-        let code = if r.role.is_files() && r.receive_expired {
+        let code = if r.role == MediaRole::Clipboard && r.receive_expired {
+            CLIPBOARD_RECEIVE_EXPIRED
+        } else if r.role.is_files() && r.receive_expired {
             FILES_RECEIVE_EXPIRED
         } else {
             retirement_code(r.role).ok_or(Error::WrongRoute)?
@@ -257,7 +264,6 @@ impl QuicRecords {
                 receiver.framing.close();
                 receiver.remainder = Bytes::new();
                 receiver.fin = true;
-                receiver.blocked = false;
             }
         }
         // Keep numeric route entries as tombstones too: native stream counts

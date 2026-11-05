@@ -41,39 +41,46 @@ GUI integration, or live-tailnet qualification. See
 [PROTOCOL_CLIPBOARD.md](PROTOCOL_CLIPBOARD.md) for the transfer and authority
 contracts used by the native worker.
 
-## A complete record blocked behind a stalled worker
+## Stalled clipboard receive records
 
-The native worker handoff has a three-second bound, while the transport's
-default record lifetime is two seconds from its first byte. A stalled worker
-can retain `Begin` in its one-slot inbox while the next complete `Chunk` waits
-in transport. The earlier transport expiry must retire the optional clipboard
-pair before a generic framing check closes the controlling session.
+The transport's default record lifetime is two seconds from its first byte.
+A stalled header or body, or a complete record waiting for its consumer,
+retires the original **active clipboard attachment** before a generic framing
+check closes the controlling session. The native worker handoff keeps its
+separate three-second bound: a worker holding `Begin` can cause the next
+complete `Chunk` to reach the earlier transport deadline.
 
-The transport records backpressure only after a complete, validated record
-reaches its application callback and returns `Blocked`. At that record's
-original framing deadline, the next checked operation retires an **active
-clipboard attachment** while it owns the native connection. It resets the
-exact pair and preserves receive-credit accounting and one-use tombstones.
-Retries do not renew the deadline. Consumption or framing replacement clears
-the marker, so a later incomplete record cannot inherit this exception.
-Partial or malformed records, critical streams, incomplete attachments and
-native-I/O cancellation keep their existing terminal handling.
+The next checked operation resets the exact pair while it owns the native
+connection, frees its partial/complete framing and queued-send storage, and
+preserves receive-credit accounting and one-use tombstones. Repeated partial
+reads or blocked callbacks do not renew the first-byte deadline. No expired
+bytes are dispatched or retried, and the same grant cannot reopen the lane.
+Malformed records, critical streams, incomplete attachments, authority loss,
+outbound delivery expiry and native-I/O cancellation retain their existing
+connection-fencing handling.
 
-The retired reservation retains a content-free expiry cause. The original
-bridge reports `HandoffExpired` and fences its worker, including expiry races
-during its own send or dispatch. A foreign or closed connection cannot supply
-this evidence. Neither the transport deadline nor the worker handoff was
-extended, and delayed clipboard bytes cannot be dispatched after retirement.
+The content-free reset code `CLIPBOARD_RECEIVE_EXPIRED` (`0x4652_4345`) carries
+the terminal reason to the peer's original `ACTIVE` Clipboard pair. It grants
+no retry, authority or stream-reuse permission. An ordinary clipboard stop
+keeps its separate cancellation code and is not labeled receive expiry.
+`ClipboardChannel::check` reports `StreamError::Expired` from the retained
+original reservation; a foreign or closed connection cannot supply this proof.
 
-The change follows the failing native session regression in Rust verification
-run `41220574048`, job `124594070123`. Four new regression tests cover the
-earlier record deadline, non-renewal, continued bidirectional control/input,
-consumed-to-partial transitions, critical expiry and the bridge's typed cause.
-Two independent source reviews and pinned formatting checks passed. Local
-compilation stopped in the pinned Asupersync dependency when the shared 8 GiB
-memory limit killed its compiler; the new runtime tests and the original
-native session regression remain pending CI. Source coverage is not recorded
-as executed native qualification.
+The bridge reports `ReceiveExpired` and fences its original worker, including
+expiry during its send or dispatch preflight. Actual worker/operation handoff
+expiry remains `HandoffExpired`. Cleanup retains any preceding native receipt;
+it cannot change a completed publication into a refusal or replay it. The CLI
+reports `clipboard_receive_expired` while the controlling session continues.
+The native application collects the original lane's terminal cause before
+worker cleanup, so a resulting closed/stopped worker cannot hide receive expiry.
+The actual worker cleanup outcome and any earlier specific failure stay retained.
+
+Regression sources cover both directions over real UDP/TLS, a 512-byte native
+stream window that leaves only 12 bytes of a new header, partial bodies,
+blocked callbacks, fixed deadlines, peer causes, freed buffers, preserved
+control/input and malformed-record fencing. Bridge tests use an explicitly
+recording native fixture to check worker fencing, cleanup and retained actual
+fixture receipts. These are separate from real OS and live-tailnet qualification.
 
 ## Authorization across a worker handoff
 

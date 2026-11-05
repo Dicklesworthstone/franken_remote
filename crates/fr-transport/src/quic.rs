@@ -384,10 +384,6 @@ struct Inbound {
     framing: RecordStream,
     remainder: Bytes,
     fin: bool,
-    /// Set only after a complete validated record reaches its application
-    /// callback and is refused for backpressure. Partial frames cannot use an
-    /// optional lane's receive-expiry retirement path.
-    blocked: bool,
 }
 /// A synchronous handler either consumes the borrowed record or applies
 /// backpressure. It must validate its message codec and current session state.
@@ -527,7 +523,6 @@ impl QuicRecords {
                     },
                     remainder: Bytes::new(),
                     fin: false,
-                    blocked: false,
                 });
             }
         }
@@ -1422,13 +1417,11 @@ impl QuicRecords {
         }
         if let Some(bytes) = s.framing.frame(current)? {
             validate_record(bytes, s.route.maximum, s.route.binding, s.route.messages)?;
-            match handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)? {
-                Disposition::Consumed => {
-                    s.framing.consume(current)?;
-                    s.blocked = false;
-                    count += 1;
-                }
-                Disposition::Blocked => s.blocked = true,
+            if handler(Route::Stream(s.route), bytes).map_err(|()| Error::Handler)?
+                == Disposition::Consumed
+            {
+                s.framing.consume(current)?;
+                count += 1;
             }
         }
         if s.remainder.is_empty()

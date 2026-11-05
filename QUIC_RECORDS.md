@@ -114,8 +114,9 @@ connection fence. It grants no authority, retry or stream-reuse permission.
 
 This exception requires a completed file attachment. Malformed records,
 incomplete ticket exchanges, critical-stream expiry and authority loss keep
-their connection-fencing behavior. Clipboard retains its narrower exception
-for a complete blocked record. Outbound delivery deadlines and native-I/O
+their connection-fencing behavior. Completed Clipboard attachments also retire
+on their original partial/complete receive deadline; see
+[NATIVE_CLIPBOARD_TRANSPORT.md](NATIVE_CLIPBOARD_TRANSPORT.md). Outbound delivery deadlines and native-I/O
 cancellation rules are unchanged; this is not a general promise that any slow
 transfer or loaded desktop will survive.
 

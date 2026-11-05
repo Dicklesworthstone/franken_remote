@@ -557,7 +557,9 @@ fn superseded_unsent_commit_remains_terminal() {
     }
     f.permission.paused.store(true, Ordering::Release);
     f.copy("new selection");
-    f.step().unwrap();
+    // Native polling consumes the new revision and invalidates the Commit's
+    // existing permit. The same turn's post-poll handoff check must fence it;
+    // do not leave the stale Commit available until another worker turn.
     assert_eq!(
         f.step(),
         Err(Error::Session(
@@ -568,8 +570,14 @@ fn superseded_unsent_commit_remains_terminal() {
     );
     assert!(!f.shared.gate.is_open());
     assert!(f.shared.outbox.lock().unwrap().item.is_none());
+    {
+        let os = f.os.lock().unwrap();
+        assert_eq!((os.reads, os.publications), (1, 0));
+    }
     f.permission.paused.store(false, Ordering::Release);
     assert_eq!(f.step(), Err(Error::Closed));
+    let os = f.os.lock().unwrap();
+    assert_eq!((os.reads, os.publications), (1, 0));
 }
 
 #[test]

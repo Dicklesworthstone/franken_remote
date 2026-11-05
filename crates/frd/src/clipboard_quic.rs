@@ -43,6 +43,9 @@ pub enum Error {
     Native,
     Panicked,
     HandoffExpired,
+    /// The original clipboard pair reached its fixed framing deadline.
+    /// No completed native publication or replacement attachment is implied.
+    ReceiveExpired,
     NativeSetup(PlatformError),
     Session(SessionError),
     Controller(fr_client::clipboard::Error),
@@ -396,7 +399,7 @@ impl Bridge {
     }
     fn retirement_reason(&self, q: &QuicRecords) -> Error {
         if self.lane.receive_expired(q) {
-            Error::HandoffExpired
+            Error::ReceiveExpired
         } else {
             Error::Closed
         }
@@ -544,10 +547,12 @@ impl Bridge {
                     self.release_handoff()?;
                 }
                 Err(quic::Error::Backpressure) => {}
-                Err(quic::Error::WrongRoute | quic::Error::Closed)
-                    if self.lane.receive_expired(q) =>
-                {
-                    let state = self.on_refusal(q, Error::HandoffExpired)?;
+                Err(
+                    quic::Error::WrongRoute
+                    | quic::Error::Closed
+                    | quic::Error::Stream(fr_wire::stream::StreamError::Expired),
+                ) if self.lane.receive_expired(q) => {
+                    let state = self.on_refusal(q, Error::ReceiveExpired)?;
                     turn.complete();
                     return Ok(state);
                 }
@@ -600,10 +605,12 @@ impl Bridge {
                 });
         if matches!(
             dispatched,
-            Err(quic::Error::WrongRoute | quic::Error::Closed)
+            Err(quic::Error::WrongRoute
+                | quic::Error::Closed
+                | quic::Error::Stream(fr_wire::stream::StreamError::Expired))
         ) && self.lane.receive_expired(q)
         {
-            return Ok(Some(Error::HandoffExpired));
+            return Ok(Some(Error::ReceiveExpired));
         }
         dispatched.map_err(Error::Transport)?;
         Ok(refused)

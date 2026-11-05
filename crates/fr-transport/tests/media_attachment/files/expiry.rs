@@ -310,9 +310,17 @@ fn retained_file_send_expiry_still_fences_the_connection() {
         let _h = FilesChannel::new(&l.h, hp, InputLeaseId::from_raw(123), 456).unwrap();
         let c = FilesChannel::new(&l.c, cp, InputLeaseId::from_raw(123), 456).unwrap();
         quiet(&mut l, &cx).await;
-        c.send(&mut l.c, &cx, &chunk(&c), clock(&cx) + 100_000, || true)
+        let bytes = chunk(&c);
+        c.send(&mut l.c, &cx, &bytes, clock(&cx) + 100_000, || true)
             .unwrap();
-        asupersync::time::sleep(cx.now(), Duration::from_millis(120)).await;
+        assert_eq!(l.c.usage().retained_send_records, 1);
+        assert_eq!(l.c.usage().retained_send_upper_bound, bytes.len());
+        // The short send-by limits admission. Once accepted, this exact record
+        // retains the path's fixed delivery allowance (250 ms to 2 seconds).
+        // Keep both peers idle and pass its public upper bound from AFTER
+        // admission; 120 ms was necessarily before even the minimum deadline.
+        // No peer receive/reset can turn this send expiry into lane retirement.
+        asupersync::time::sleep(cx.now(), Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US)).await;
         assert_eq!(l.c.tick(&cx, || true), Err(Error::Expired));
         assert!(l.c.is_closed());
         assert!(!c.receive_expired(&l.c));

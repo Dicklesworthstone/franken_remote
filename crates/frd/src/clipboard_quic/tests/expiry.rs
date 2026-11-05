@@ -113,7 +113,7 @@ fn earlier_blocked_record_expiry_fences_the_worker_and_reports_clipboard_only_ex
             "the earlier record bound must win"
         );
         assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Retired));
-        assert_eq!(f.bridge.reason(), Some(Error::HandoffExpired));
+        assert_eq!(f.bridge.reason(), Some(Error::ReceiveExpired));
         assert!(!f.bridge.shared.gate.is_open());
         assert!(f.bridge.shared.inbox.lock().unwrap().item.is_none());
         assert!(!f.link.h.is_closed());
@@ -124,7 +124,7 @@ fn earlier_blocked_record_expiry_fences_the_worker_and_reports_clipboard_only_ex
                 .is_ok()
         );
         assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Retired));
-        assert_eq!(f.bridge.reason(), Some(Error::HandoffExpired));
+        assert_eq!(f.bridge.reason(), Some(Error::ReceiveExpired));
         f.stop();
     });
 }

@@ -12,6 +12,7 @@ use transport_support::{clock, runtime};
 
 mod batching;
 mod expiry;
+mod expiry_native;
 
 struct Fixture {
     cx: Cx,

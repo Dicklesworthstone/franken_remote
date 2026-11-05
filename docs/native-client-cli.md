@@ -402,10 +402,12 @@ clipboard worker started; it is not proof that either native owner opened),
 `clipboard_absence`: `null` when active, otherwise a typed code such as
 `host_clipboard_unavailable` (the host did not enable it),
 `host_clipboard_refused`, `local_clipboard_unavailable`, `clipboard_not_started`
-(for example, control never granted) or `not_requested`. `clipboard_ended`
+(for example, control never granted), `clipboard_receive_expired` (a completed
+lane expired before native worker readiness was observed) or `not_requested`. `clipboard_ended`
 is `null` unless an ACTIVE clipboard retired while the session ran on. Then it
-names why: `clipboard_item_expired` (retained transport or uncertain native work
-outlived its deadline, for example a large copy on a slow path),
+names why: `clipboard_receive_expired` (a partial or complete record reached
+its original framing deadline, locally or at the peer), `clipboard_item_expired`
+(retained outgoing or uncertain native work outlived its original deadline),
 `clipboard_disabled`, `clipboard_authority_ended` or `clipboard_ended`. Control
 continues, and the clipboard is not re-attached under that grant. Clipboard text
 never appears in output, errors or logs.
@@ -414,8 +416,9 @@ An incoming item that expires while its complete record is still queued or
 explicitly deferred before native preparation is refused individually. The
 expired bytes are cleared, its sequence cannot be reused, and a fresh later copy
 can cross on the original lane after the view becomes ready again. This case
-leaves `clipboard_ended` unset. Partial transport records, uncertain OS effects,
-privacy-switch changes and lost authority still retain their terminal behavior.
+leaves `clipboard_ended` unset. Partial transport receive expiry retires the
+completed clipboard lane without restarting its lifetime. Uncertain OS effects,
+privacy-switch changes and lost authority retain their existing terminal behavior.
 
 Evidence is the namespace e2e with real X11 selections on two Xvfb displays
 (`crates/frd/tests/native_host_linux_serial/real_clipboard.rs`), described

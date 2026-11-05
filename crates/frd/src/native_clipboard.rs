@@ -335,6 +335,15 @@ impl Application {
         endpoint: &mut E,
         begin: impl FnOnce(&mut E, Duration, bool) -> Result<(), Error>,
     ) -> Result<(), Error> {
+        // The bridge records its original cause before fencing its worker.
+        // Collect that cause before cleanup can report the resulting generic
+        // closed/stopped error. Keep actual worker completion and any receipt.
+        if endpoint.retired() {
+            self.retired(endpoint.reason());
+            self.collect_cleanup();
+            self.collect_received(endpoint)?;
+            return Ok(());
+        }
         self.collect_cleanup();
         self.collect_received(endpoint)?;
         let (stopped, enabled) = {
@@ -469,3 +478,6 @@ macro_rules! endpoint {
 }
 endpoint!(ControlledHost);
 endpoint!(ControlledViewer);
+
+#[cfg(test)]
+mod tests;

@@ -129,6 +129,11 @@ impl ClipboardChannel {
     /// Check the original object identity before touching its routes. A foreign
     /// connection with equal numeric IDs must not be closed or dispatched here.
     pub fn check(&self, q: &QuicRecords) -> Result<(), Error> {
+        // The tombstone proves both original connection identity and the exact
+        // retired reservation. A foreign or closed object cannot supply it.
+        if self.receive_expired(q) {
+            return Err(Error::Stream(fr_wire::stream::StreamError::Expired));
+        }
         if self.attachment.completed_on(q)? != self.routes
             || !q.has_route(Route::Stream(self.routes.outbound))
             || !q.has_route(Route::Stream(self.routes.inbound))
@@ -139,9 +144,10 @@ impl ClipboardChannel {
         }
         Ok(())
     }
-    /// This original connection retired the pair because a complete record
-    /// remained blocked until its original framing deadline. This is terminal
-    /// metadata, never permission to dispatch or reopen the expired record.
+    /// This original connection retired the pair because a partial or complete
+    /// record reached its original first-byte framing deadline, locally or at
+    /// its peer. This is terminal metadata, never permission to dispatch or
+    /// reopen the expired record.
     /// Foreign or closed connections cannot supply that isolation evidence.
     pub fn receive_expired(&self, q: &QuicRecords) -> bool {
         self.attachment.receive_expired(q)

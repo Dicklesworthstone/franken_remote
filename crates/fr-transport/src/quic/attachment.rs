@@ -67,7 +67,7 @@ pub(super) struct Reservation {
     pub(super) inbound: StreamId,
     outbound: StreamId,
     retired_receive_accounted: u64,
-    /// Original complete-record expiry retired this optional clipboard pair.
+    /// Original framing expiry retired this completed clipboard or file pair.
     /// Retain the cause beside the one-use reservation after buffers are gone.
     receive_expired: bool,
     role: MediaRole,
@@ -621,7 +621,6 @@ impl QuicRecords {
             framing,
             remainder: Bytes::new(),
             fin: false,
-            blocked: false,
         });
         self.attachments.push(Reservation {
             state: state.clone(),
@@ -1302,7 +1301,6 @@ impl MediaChannel {
             }
             q.inbound[slot].route = inbound;
             q.inbound[slot].framing = framing;
-            q.inbound[slot].blocked = false;
             q.senders[sender].route = outbound;
             if let Some(route) = datagram {
                 q.attachments[reservation].datagram_maximum =

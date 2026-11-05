@@ -123,6 +123,14 @@ fn retire_queued_clipboard_preserves_control_and_input_in_both_directions() {
         }
         assert!(h.check(&l.h).is_err());
         assert!(c.check(&l.c).is_err());
+        assert!(
+            !h.receive_expired(&l.h),
+            "ordinary retirement has no expiry cause"
+        );
+        assert!(
+            !c.receive_expired(&l.c),
+            "ordinary peer retirement has no expiry cause"
+        );
         quiet(&mut l, &cx).await;
         assert_eq!(l.c.usage().retained_send_records, 0);
         h.retire(&mut l.h, &cx).unwrap();

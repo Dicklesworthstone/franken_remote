@@ -112,6 +112,7 @@ fn ended(reason: Option<frd::clipboard_quic::Error>) -> &'static str {
     use fr_wire::clipboard::session::SessionError;
     use frd::clipboard_quic::Error;
     match reason {
+        Some(Error::ReceiveExpired) => "clipboard_receive_expired",
         Some(Error::HandoffExpired | Error::Session(SessionError::Clipboard(Item::Expired))) => {
             "clipboard_item_expired"
         }
@@ -128,6 +129,7 @@ fn ended(reason: Option<frd::clipboard_quic::Error>) -> &'static str {
 fn absence(reason: Option<frd::clipboard_quic::Error>) -> &'static str {
     use frd::clipboard_quic::Error;
     match reason {
+        Some(Error::ReceiveExpired) => "clipboard_receive_expired",
         Some(Error::NotNegotiated) => "host_clipboard_unavailable",
         Some(Error::ConsentRequired) => "host_clipboard_refused",
         Some(Error::NativeSetup(_)) => "local_clipboard_unavailable",
@@ -739,6 +741,7 @@ mod tests {
         use fr_wire::clipboard::session::SessionError;
         use frd::clipboard_quic::Error;
         for (reason, code) in [
+            (Error::ReceiveExpired, "clipboard_receive_expired"),
             (Error::HandoffExpired, "clipboard_item_expired"),
             (
                 Error::Session(SessionError::Clipboard(Item::Expired)),
@@ -764,6 +767,10 @@ mod tests {
     #[test]
     fn clipboard_absence_is_typed_and_never_reported_once_active() {
         use frd::clipboard_quic::Error;
+        assert_eq!(
+            absence(Some(Error::ReceiveExpired)),
+            "clipboard_receive_expired"
+        );
         assert_eq!(
             absence(Some(Error::NotNegotiated)),
             "host_clipboard_unavailable"
