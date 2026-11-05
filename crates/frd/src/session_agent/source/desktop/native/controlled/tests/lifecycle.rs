@@ -210,27 +210,36 @@ fn independent_local_failure_fences_first_and_retains_both_observed_causes() {
 
 #[test]
 fn requested_local_stop_keeps_its_reason_and_finishes_the_original_drain() {
-    let (_runtime, cx, observation, mut agent) = fixture();
-    let retained = observation.clone();
-    agent.note_local_stop(StopReason::Suspended);
-    let (service, ready) = service(&observation, Err(session_failure()), true);
-    let mut drive = pin!(drive_control(
-        &mut agent,
-        &cx,
-        |_, _| Ok(LocalAction::Stop),
-        Arc::new(AtomicBool::new(true)),
-        observation,
-        None,
-        service,
-    ));
-    let mut task = Context::from_waker(Waker::noop());
-    assert!(drive.as_mut().poll(&mut task).is_pending());
-    assert_eq!(retained.end_reason(), Some(StopReason::Suspended));
-    ready.store(true, Ordering::Release);
-    assert_eq!(
-        drive.as_mut().poll(&mut task),
-        Poll::Ready(Ok(served(false)))
-    );
+    for previous in [None, Some(StopReason::LocalRevoke)] {
+        let (_runtime, cx, observation, mut agent) = fixture();
+        let retained = observation.clone();
+        if let Some(reason) = previous {
+            observation.note_end(reason);
+        }
+        agent.note_local_stop(StopReason::Suspended);
+        let (service, ready) = service(&observation, Err(session_failure()), true);
+        let mut drive = pin!(drive_control(
+            &mut agent,
+            &cx,
+            |_, _| Ok(LocalAction::Stop),
+            Arc::new(AtomicBool::new(true)),
+            observation,
+            None,
+            service,
+        ));
+        let mut task = Context::from_waker(Waker::noop());
+        assert!(drive.as_mut().poll(&mut task).is_pending());
+        assert_eq!(
+            retained.end_reason(),
+            Some(previous.unwrap_or(StopReason::Suspended))
+        );
+        assert!(cx.is_cancel_requested());
+        ready.store(true, Ordering::Release);
+        assert_eq!(
+            drive.as_mut().poll(&mut task),
+            Poll::Ready(Ok(served(false)))
+        );
+    }
 }
 
 #[test]

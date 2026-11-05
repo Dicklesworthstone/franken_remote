@@ -23,6 +23,35 @@ unchanged `3f4f39b` input-owner source (also unchanged in `38c5bea`): it submits
 with the final-submission check. A separate real-XKB regression verifies that
 cancelled preparation does not press the key or strand its repeat setting.
 
+## Preserve the cause across concurrent shutdown
+
+`Control::stop` publishes the first typed cause before publishing the input
+monitor's revocation flag. An observer that acquires that flag therefore sees
+the original cause even while the stopping thread waits for the executor-fence
+mutex. Revocation still precedes every mutex, executor callback, task wake and
+cleanup operation. Later stops execute the fence again without replacing the
+first cause. A direct monitor revocation without a named stop still becomes
+`AuthorityEnded`.
+
+This ordering preserves `GeometryChanged` for fresh viewing recovery and keeps
+`Suspended` and `LocalRevoke` specific in terminal reports. Previously, the
+independent watchdog could observe revocation before its cause was published
+and race to replace it with `AuthorityEnded`. Cause metadata can now become
+visible just before revocation; it grants no authority and is not evidence
+that revocation, native release or cleanup has completed.
+
+The regression in `crates/frd/src/input_watchdog/tests.rs` holds the real
+executor-fence mutex while the original stop and independent watchdog run. It
+checks cause publication, revocation before the lock, fence-before-wake order,
+repeated stops and the direct-monitor fallback. Its wall-clock bound is only a
+deadlock fuse; no guessed scheduling delay selects the race.
+
+The native managed-share loop also records a named local stop on its original
+observation owner before stopping any granted input lease and revoking the
+share. This retains the cause during cleanup even before a lease exists, while
+preserving an earlier observation cause. The local-stop/drain regression checks
+both cases; a stopped lease alone does not populate the observation's reason.
+
 ## Return the original action's result
 
 `Agent::try_input_result` and `Agent::input_response` project the existing

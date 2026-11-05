@@ -397,6 +397,10 @@ where
                 stopped = true;
                 failure = action.err();
                 if let Some(reason) = agent.local_stop_reason() {
+                    // Keep the share's cause even when no input lease was
+                    // granted. Its later teardown must not label the local
+                    // stop as a generic cancellation or transport failure.
+                    observation.note_end(reason);
                     observation.stop_lease(reason);
                 }
                 observation.revoke();

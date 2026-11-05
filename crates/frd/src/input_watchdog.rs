@@ -76,6 +76,15 @@ struct Signal {
 pub struct Control(Arc<Signal>);
 impl Control {
     pub fn stop(&self, reason: StopReason) {
+        // Publish the first cause before the monitor's release-store fence.
+        // An observer that acquires that fence must never mistake this stop
+        // for an unlabelled authority expiry while the executor lock is busy.
+        // The cause is metadata only; no mutex, wake or native work precedes
+        // revocation, including when another caller already named the stop.
+        let _ =
+            self.0
+                .reason
+                .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
         self.0.monitor.revoke();
         // Then fence an out-of-process executor, still before any wake, lock
         // wait on native work, or cleanup. The fence itself never blocks.
@@ -88,10 +97,6 @@ impl Control {
         {
             fence();
         }
-        let _ =
-            self.0
-                .reason
-                .compare_exchange(0, reason as u8, Ordering::AcqRel, Ordering::Acquire);
         let waker = self
             .0
             .waker
@@ -135,6 +140,8 @@ impl Control {
         }
         true
     }
+    /// First requested cause, published before the authority fence. This is
+    /// terminal metadata, not proof that the fence or cleanup has completed.
     pub fn reason(&self) -> Option<StopReason> {
         StopReason::from_raw(self.0.reason.load(Ordering::Acquire))
     }
@@ -295,3 +302,6 @@ impl Drop for Watchdog {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
