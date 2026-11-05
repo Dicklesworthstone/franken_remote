@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-04 — taking control survives a late picture report
+
+- While the host started its native input owner for a new control grant, one
+  late presentation report (the view aging past its 250 ms source-age bound)
+  made the grant check refuse the lease's first ticket. The host then ended the
+  whole session. A stale view now suspends this lease, as it already does a
+  running one (plan 11.3): the grant stands, no input passes on the first
+  ticket, and input resumes on a new ticket issued after fresh evidence.
+  Revocation, a replaced owner and lease or observation expiry still end it.
+- Seen on ts1 under load: in 8 timing runs of a controlled namespace e2e, 3
+  sessions ended right after the grant, all this way. The first presentation
+  report can leave about 43 ms of view margin. Two frd tests cover it: a view lapse during the owner's start, where
+  press and release must reach the OS on the later ticket, and a revocation
+  during the start, which must stay terminal.
+
 ## 2026-11-04 — long sessions keep audio through separate output failures
 
 - The viewer and the host each allowed 8 audio output restarts per session.

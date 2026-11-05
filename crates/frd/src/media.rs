@@ -223,6 +223,19 @@ impl ObservationControl {
             host_now(&self.cx).map_err(|_| fr_core::input_submission::Refusal::Revoked)?,
         )
     }
+    /// The same transition as a report's lapse, without waiting out a real
+    /// source-age bound, and what these credentials can then submit.
+    #[cfg(test)]
+    pub(crate) fn lapse_view_for_test(
+        &self,
+        lease: fr_core::ids::InputLeaseId,
+        ticket: fr_core::ids::InputTicketId,
+    ) -> Result<(), AuthorityError> {
+        let now = host_now(&self.cx).unwrap();
+        let mut authority = self.authority.lock().unwrap();
+        authority.mark_view_stale();
+        authority.authorize_submission(lease, ticket, now)
+    }
     pub(crate) fn check_control(&self) -> Result<HostInstant, Error> {
         self.check()?;
         if let Some(admission) = &self.admission {

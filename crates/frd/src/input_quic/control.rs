@@ -106,7 +106,8 @@ impl QuicInput {
         {
             return Err(Error::PeerClosed);
         }
-        observation.check_control().map_err(Error::Media)?;
+        // Renewal starts on a lease a stale view may already have suspended.
+        observation.check_lease().map_err(Error::Media)?;
         let (mut lease, cx, admission) = self
             .agent
             .take_control_lease(&observation)

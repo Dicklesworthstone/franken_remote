@@ -311,12 +311,14 @@ impl GrantBroker {
             if now >= native.until {
                 return Err(Error::Expired);
             }
+            // The picture on screen can age out while the native owner starts.
+            // That suspends this lease and invalidates its first ticket, as under
+            // a running lease (plan 11.3): no input passes until a new ticket
+            // follows fresh evidence, and the grant itself still stands. Revocation,
+            // a replaced owner and lease or observation expiry remain terminal.
             native
                 .monitor
-                .authorize_ticket(
-                    native.record.ticket,
-                    fr_core::time::HostInstant::from_micros(now),
-                )
+                .status(fr_core::time::HostInstant::from_micros(now))
                 .map_err(Error::Authority)?;
         }
         Ok(now)
@@ -628,13 +630,9 @@ impl GrantBroker {
             native.until,
             || {
                 self.admission.permitted()
-                    && self.observation.check_control().is_ok()
+                    && self.observation.check_lease().is_ok()
                     && host_now(&self.cx).is_ok_and(|now| {
-                        now.as_micros() < native.until
-                            && native
-                                .monitor
-                                .authorize_ticket(native.record.ticket, now)
-                                .is_ok()
+                        now.as_micros() < native.until && native.monitor.status(now).is_ok()
                     })
             },
         );

@@ -21,6 +21,7 @@ use crate::{
 use asupersync::cx::Cx;
 use fr_client::input::{Action, Policy as InputPolicy};
 use fr_core::{
+    authority::AuthorityError,
     ids::*,
     input::*,
     input_submission::{Capabilities, Capability, Operation as NativeOperation, Submission},
@@ -261,12 +262,20 @@ enum Case {
     /// The capture worker exits about 1 s in, after the grant, with
     /// observation and control live.
     HostFailureAfterGrant,
+    /// The picture ages out while the native owner starts: the grant survives
+    /// with its first ticket dead, and input waits for a new one.
+    PresentedLapseDuringStart,
+    /// Local revocation while the native owner starts stays terminal.
+    RevokeDuringStart,
 }
 impl Case {
     fn proof(self) -> bool {
         matches!(
             self,
-            Self::Presented | Self::PresentedNoConsent | Self::PresentedNoVisibility
+            Self::Presented
+                | Self::PresentedNoConsent
+                | Self::PresentedNoVisibility
+                | Self::PresentedLapseDuringStart
         )
     }
     fn no_consent(self) -> bool {
@@ -333,6 +342,7 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                         let effects = effects.clone();
                                         let calls = factory_calls.clone();
                                         let fail = matches!(case, Case::NativeFailure);
+                                        let owner = stop.clone();
                                         let driver = pending.approve(
                                             target(),
                                             || {
@@ -346,6 +356,23 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                                     1,
                                                     std::sync::atomic::Ordering::SeqCst,
                                                 );
+                                                if matches!(case, Case::PresentedLapseDuringStart) {
+                                                    assert_eq!(
+                                                        owner.lapse_view_for_test(
+                                                            InputLeaseId::from_raw(19),
+                                                            InputTicketId::from_raw(23),
+                                                        ),
+                                                        Err(AuthorityError::ViewUnready),
+                                                        "the first ticket must not admit input"
+                                                    );
+                                                    // Service turns and later reports run
+                                                    // against the suspended lease meanwhile.
+                                                    std::thread::sleep(Duration::from_millis(100));
+                                                }
+                                                if matches!(case, Case::RevokeDuringStart) {
+                                                    owner.revoke();
+                                                    std::thread::sleep(Duration::from_millis(100));
+                                                }
                                                 if fail {
                                                     Err(PlatformError::Unavailable)
                                                 } else {
@@ -415,7 +442,17 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                                             controlled.visible(frame.frame.as_raw()),
                                         );
                                     }
-                                    if sent == 0 {
+                                    if sent == 0 && matches!(case, Case::PresentedLapseDuringStart)
+                                    {
+                                        // Past the first ticket's own expiry, an accepted
+                                        // action can only carry a ticket issued after the
+                                        // lapse, on fresh evidence.
+                                        if now(&c).unwrap() >= at + 1_100_000
+                                            && controlled.action(key(true)).is_ok()
+                                        {
+                                            sent = 1;
+                                        }
+                                    } else if sent == 0 {
                                         let _ = controlled.action(key(true)).unwrap();
                                         sent = 1;
                                     } else if sent == 1
@@ -474,7 +511,17 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
     ))
     .await;
     assert!(host_result.is_err() && view_result.is_err());
-    if matches!(case, Case::Accept | Case::Presented) {
+    if matches!(case, Case::PresentedLapseDuringStart) {
+        assert_eq!(
+            effects.lock().unwrap().len(),
+            2,
+            "press and release must reach the OS on the later ticket"
+        );
+    }
+    if matches!(
+        case,
+        Case::Accept | Case::Presented | Case::PresentedLapseDuringStart
+    ) {
         assert!(
             granted && active.get(),
             "host={host_result:?} viewer={view_result:?}"
@@ -514,7 +561,10 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
             assert_eq!(factory_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
     }
-    if matches!(case, Case::Presented | Case::PresentedNoConsent) {
+    if matches!(
+        case,
+        Case::Presented | Case::PresentedNoConsent | Case::PresentedLapseDuringStart
+    ) {
         assert!(
             host.presentation_reports() > 1,
             "host={host_result:?} viewer={view_result:?}"
@@ -613,6 +663,14 @@ where
 #[test]
 fn actual_presentation_reports_replace_manual_readiness_through_grant_and_idle_renewal() {
     run3(|c, h, cleanup| exercise(c, h, cleanup, Case::Presented, 0, 3_100_000));
+}
+#[test]
+fn a_view_lapse_while_native_input_starts_keeps_the_grant_and_needs_a_new_ticket() {
+    run3(|c, h, cleanup| exercise(c, h, cleanup, Case::PresentedLapseDuringStart, 0, 0));
+}
+#[test]
+fn a_revocation_while_native_input_starts_never_publishes_the_grant() {
+    run3(|c, h, cleanup| exercise(c, h, cleanup, Case::RevokeDuringStart, 0, 0));
 }
 #[test]
 fn presented_source_does_not_supply_local_consent() {
