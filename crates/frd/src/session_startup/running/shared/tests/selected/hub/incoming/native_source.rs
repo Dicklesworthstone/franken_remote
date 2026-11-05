@@ -391,10 +391,26 @@ fn selector_panic_fences_native_and_peer_even_when_failed_future_is_retained() {
                 let _ = viewer.drive(Duration::from_millis(1)).await;
             }
         });
+        // Only the selector's own panic ends this wait. A run that finishes, or
+        // never reaches the selector (setup lost to load), fails instead of
+        // being re-polled after completion or spinning with the client forever.
+        let start = std::time::Instant::now();
         poll_fn(|task| {
-            if catch_unwind(AssertUnwindSafe(|| run.as_mut().poll(task))).is_err() {
-                return Poll::Ready(());
+            match catch_unwind(AssertUnwindSafe(|| run.as_mut().poll(task))) {
+                Ok(result) => assert!(result.is_pending(), "run ended: {result:?}"),
+                Err(payload) => {
+                    let message = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+                    assert_eq!(message, Some("selector fixture"));
+                    return Poll::Ready(());
+                }
             }
+            assert!(
+                start.elapsed() < Duration::from_secs(60),
+                "the run never reached the selector"
+            );
             assert!(client.as_mut().poll(task).is_pending());
             Poll::Pending
         })
