@@ -231,8 +231,10 @@ impl ObservationControl {
         lease: fr_core::ids::InputLeaseId,
         ticket: fr_core::ids::InputTicketId,
     ) -> Result<(), AuthorityError> {
-        let now = host_now(&self.cx).unwrap();
         let mut authority = self.authority.lock().unwrap();
+        // Read the clock under the lock, as check_control does: a reading taken
+        // before it can precede a time the session already recorded there.
+        let now = host_now(&self.cx).unwrap();
         authority.mark_view_stale();
         authority.authorize_submission(lease, ticket, now)
     }
