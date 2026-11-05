@@ -223,7 +223,7 @@ async fn survives(role: MediaRole, partial: bool) {
 fn partial_file_receive_expiry_preserves_control_input_and_the_other_file_direction() {
     runtime().block_on(async {
         for role in [MediaRole::Files, MediaRole::FilesDownload] {
-            survives(role, true).await;
+            Box::pin(survives(role, true)).await;
         }
     });
 }
@@ -232,7 +232,7 @@ fn partial_file_receive_expiry_preserves_control_input_and_the_other_file_direct
 fn blocked_file_receive_expiry_preserves_control_input_and_the_other_file_direction() {
     runtime().block_on(async {
         for role in [MediaRole::Files, MediaRole::FilesDownload] {
-            survives(role, false).await;
+            Box::pin(survives(role, false)).await;
         }
     });
 }

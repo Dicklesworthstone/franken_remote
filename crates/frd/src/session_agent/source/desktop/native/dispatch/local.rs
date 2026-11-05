@@ -7,15 +7,15 @@ use std::{sync::Arc, task::Context};
 pub(super) struct Events<L> {
     lifetime: Cx,
     shared: Arc<Shared>,
-    events: L,
+    callback: L,
     failure: Option<LocalFailure>,
 }
 impl<L> Events<L> {
-    pub(super) fn new(lifetime: Cx, shared: Arc<Shared>, events: L) -> Self {
+    pub(super) fn new(lifetime: Cx, shared: Arc<Shared>, callback: L) -> Self {
         Self {
             lifetime,
             shared,
-            events,
+            callback,
             failure: None,
         }
     }
@@ -38,7 +38,7 @@ impl<L> Events<L> {
     }
 
     /// Older startup/shared owners expose a unit-error callback. Replace only
-    /// their exact LocalEvent marker, never a native cleanup or other failure.
+    /// their exact `LocalEvent` marker, never a native cleanup or other failure.
     pub(super) fn annotate(&self, error: Error) -> Error {
         match (error, self.failure) {
             (Error::LocalEvent, Some(cause)) => Error::LocalFailure {
@@ -62,7 +62,7 @@ where
             return Err(cause);
         }
         let result = self.check().and_then(|()| {
-            let action = (self.events)(agent, task).map_err(|()| LocalFailure::CallbackFailed)?;
+            let action = (self.callback)(agent, task).map_err(|()| LocalFailure::CallbackFailed)?;
             self.check()?;
             Ok(action)
         });

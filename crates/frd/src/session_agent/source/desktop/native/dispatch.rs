@@ -539,7 +539,9 @@ impl Driver {
                             this.policy,
                             this.entropy.clone(),
                             notify,
-                            &mut |agent, task| local.turn(agent, task).map_err(|_| ()),
+                            &mut |agent: &mut SessionAgent, task: &mut Context<'_>| {
+                                local.turn(agent, task).map_err(|_| ())
+                            },
                             this.interval,
                         )
                         .map_err(Error::from)?

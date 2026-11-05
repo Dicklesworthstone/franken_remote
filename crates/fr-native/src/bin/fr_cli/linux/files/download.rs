@@ -397,12 +397,7 @@ mod tests {
         let report = json(&summary);
         assert_eq!(report["files_receive_ended"], "receive_expired");
         assert_eq!(report["files_received"][0]["bytes"], 19);
-        assert!(
-            report["files_receive_refused"]
-                .as_array()
-                .unwrap()
-                .is_empty()
-        );
+        assert_eq!(report["files_receive_refused"], serde_json::json!([]));
         assert!(summary.text().contains("receive_expired"));
     }
 
