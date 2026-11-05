@@ -250,6 +250,36 @@ fn a_viewer_output_reset_gets_bounded_fresh_epochs() {
 }
 
 #[test]
+fn a_generation_that_played_for_a_while_earns_the_restart_budget_back() {
+    let mut ring = AudioRing::new();
+    ring.start(stream(1)).unwrap();
+    let mut lane = AudioLane::new();
+    let mut epoch = 1;
+    let mut sequence = 0;
+    active(&ring, &mut lane, 1, epoch, 0);
+    for reset in 0..3 * MAX_LANE_RESTARTS {
+        // Every eighth generation plays long enough to prove the output works.
+        let played = if reset % MAX_LANE_RESTARTS == 0 {
+            HEALTHY_EPOCH_PACKETS
+        } else {
+            1
+        };
+        for _ in 0..played {
+            ring.push(unit(1, sequence, 10), 0).unwrap();
+            assert_eq!(lane.next(&ring, 0), packet(sequence, epoch));
+            lane.packet_sent(sequence).unwrap();
+            sequence += 1;
+        }
+        lane.viewer_stopped(stop(epoch, AudioStopReason::DeviceChanged))
+            .unwrap();
+        assert!(!lane.is_stopped(), "reset {reset} ended a working lane");
+        epoch += 1;
+        active(&ring, &mut lane, 1, epoch, 0);
+    }
+    assert_eq!(lane.counters().restarts, 3 * MAX_LANE_RESTARTS);
+}
+
+#[test]
 fn unacknowledged_configuration_expires_and_failed_sources_are_a_typed_stop() {
     let mut ring = AudioRing::new();
     ring.start(stream(1)).unwrap();

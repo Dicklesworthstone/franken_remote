@@ -334,8 +334,41 @@ pub struct LaneCounters {
 }
 
 /// Fresh generations one viewer may request after its local output reset
-/// (`AudioStop` with `DeviceChanged`). Beyond this the lane ends, typed.
+/// (`AudioStop` with `DeviceChanged`) without a healthy generation between them.
+/// Beyond this the lane ends, typed.
 pub const MAX_LANE_RESTARTS: u64 = 8;
+/// Packets that prove an output works: 30 s at the nominal 10 ms packet.
+pub const HEALTHY_EPOCH_PACKETS: u64 = 3_000;
+
+/// Bounds an output that keeps failing, not a long session. Without this, eight
+/// unrelated network stalls hours apart would end its audio until reconnection.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestartBudget {
+    unproven: u64,
+    epoch_start: u64,
+}
+impl RestartBudget {
+    pub const fn new() -> Self {
+        Self {
+            unproven: 0,
+            epoch_start: 0,
+        }
+    }
+    /// The current generation just reset, with `packets` handled this session.
+    /// False once `MAX_LANE_RESTARTS` resets ran without a healthy generation.
+    pub const fn spend(&mut self, packets: u64) -> bool {
+        if packets.saturating_sub(self.epoch_start) >= HEALTHY_EPOCH_PACKETS {
+            self.unproven = 0;
+        }
+        self.epoch_start = packets;
+        if self.unproven < MAX_LANE_RESTARTS {
+            self.unproven += 1;
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// One viewer's cursor into the shared ring. The wire generation is this
 /// lane's OWN epoch: strictly increasing per viewer, never reused, and
@@ -347,6 +380,7 @@ pub struct AudioLane {
     state: LaneState,
     last_epoch: Option<AudioGeneration>,
     counters: LaneCounters,
+    budget: RestartBudget,
 }
 impl Default for AudioLane {
     fn default() -> Self {
@@ -369,6 +403,7 @@ impl AudioLane {
                 stops: 0,
                 restarts: 0,
             },
+            budget: RestartBudget::new(),
         }
     }
     pub const fn counters(&self) -> LaneCounters {
@@ -662,7 +697,7 @@ impl AudioLane {
             return Err(Error::StaleGeneration);
         }
         self.state = if stop.reason == AudioStopReason::DeviceChanged
-            && self.counters.restarts < MAX_LANE_RESTARTS
+            && self.budget.spend(self.counters.sent)
         {
             self.counters.restarts += 1;
             LaneState::Waiting

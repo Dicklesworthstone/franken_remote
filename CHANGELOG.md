@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-11-04 — long sessions keep audio through separate output failures
+
+- The viewer and the host each allowed 8 audio output restarts per session.
+  After 8 unrelated output stalls, even hours apart, audio stayed off until
+  reconnection. The bound now applies to restarts without a healthy generation
+  between them: 3,000 packets (30 s) of playback since the last restart earn
+  the budget back. An output that keeps failing still ends after 8, typed.
+- The two sides count independently (the host packets sent, the viewer packets
+  received). Under loss the viewer can end first. The host then offers one more
+  generation, which goes unacknowledged, and stops at its acknowledgement
+  deadline.
+
 ## 2026-11-04 — captured system shortcuts keep their window title
 
 - With `fr connect --control --capture-system-shortcuts` and display

@@ -106,10 +106,6 @@ pub struct AudioStatistics {
     pub restarts: u64,
 }
 
-/// Local output resets per session before audio ends (typed `Local`). Equal
-/// to the host lane's own bound.
-pub const MAX_RESTARTS: u64 = fr_media::audio_delivery::MAX_LANE_RESTARTS;
-
 pub(crate) struct ViewerAudio {
     lanes: AudioLanes,
     output: Option<Box<dyn AudioOutput>>,
@@ -118,6 +114,9 @@ pub(crate) struct ViewerAudio {
     /// A local stop to send to the host before anything else.
     stop: Option<(AudioGeneration, AudioStopReason)>,
     statistics: AudioStatistics,
+    /// Local output resets without a healthy generation before audio ends
+    /// (typed `Local`): the host lane's own bound, `MAX_LANE_RESTARTS`.
+    budget: fr_media::audio_delivery::RestartBudget,
     pending_reply: Option<reply::Pending>,
 }
 impl std::fmt::Debug for ViewerAudio {
@@ -141,6 +140,7 @@ impl ViewerAudio {
             last: None,
             stop: None,
             statistics: AudioStatistics::default(),
+            budget: fr_media::audio_delivery::RestartBudget::new(),
             pending_reply: None,
         }))
     }
@@ -182,7 +182,7 @@ impl ViewerAudio {
     fn fail_locally(&mut self, generation: AudioGeneration) {
         self.pending_reply = None;
         self.stop = Some((generation, AudioStopReason::DeviceChanged));
-        if self.statistics.restarts < MAX_RESTARTS {
+        if self.budget.spend(self.statistics.packets) {
             self.statistics.restarts += 1;
             self.state = State::Idle;
             if let Some(output) = &mut self.output {

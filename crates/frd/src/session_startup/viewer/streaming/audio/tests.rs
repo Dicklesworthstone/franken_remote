@@ -5,6 +5,7 @@
 use super::*;
 use asupersync::net::quic_native::StreamId;
 use fr_core::audio::{AudioChannels, AudioStopReason};
+use fr_media::audio_delivery::MAX_LANE_RESTARTS as MAX_RESTARTS;
 use fr_transport::quic::{DatagramRoute, Disposition, Messages, Priority, StreamRoute};
 use std::{cell::RefCell, rc::Rc};
 
@@ -85,6 +86,7 @@ fn owner() -> (ViewerAudio, Rc<RefCell<Calls>>) {
         last: None,
         stop: None,
         statistics: AudioStatistics::default(),
+        budget: fr_media::audio_delivery::RestartBudget::new(),
         pending_reply: None,
     };
     audio.configure(Box::new(Recording(calls.clone()))).unwrap();
@@ -268,6 +270,25 @@ fn local_failures_reset_with_a_bounded_budget_and_ask_for_a_fresh_epoch() {
 }
 
 #[test]
+fn a_long_session_keeps_audio_through_more_than_the_restart_bound_of_separate_failures() {
+    let (mut audio, calls) = owner();
+    calls.borrow_mut().fail_receive = true;
+    let failures = 3 * MAX_RESTARTS;
+    for generation in 1..=failures {
+        audio.receive(control(), &configuration(generation), &mut live());
+        audio.state = State::Active(offer(generation));
+        // Generations that played between stalls prove this output works.
+        if generation % MAX_RESTARTS == 0 {
+            audio.statistics.packets += fr_media::audio_delivery::HEALTHY_EPOCH_PACKETS;
+        }
+        audio.receive(datagram(), &packet(generation, 0, 40), &mut live());
+        audio.stop = None;
+    }
+    assert_eq!(audio.statistics().restarts, failures);
+    assert_eq!(calls.borrow().ended, [] as [AudioEnd; 0]);
+}
+
+#[test]
 fn a_viewer_without_an_output_refuses_the_configuration_by_type() {
     let mut audio = ViewerAudio {
         lanes: lanes(),
@@ -276,6 +297,7 @@ fn a_viewer_without_an_output_refuses_the_configuration_by_type() {
         last: None,
         stop: None,
         statistics: AudioStatistics::default(),
+        budget: fr_media::audio_delivery::RestartBudget::new(),
         pending_reply: None,
     };
     audio.receive(control(), &configuration(1), &mut live());
