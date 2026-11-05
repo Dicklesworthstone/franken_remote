@@ -16,7 +16,7 @@ struct Effects {
 struct Recording(Arc<Mutex<Effects>>);
 struct EmptyText;
 impl NativeText for EmptyText {
-    fn text(&self) -> &str {
+    fn text(&self) -> &'static str {
         ""
     }
     fn origin(&self) -> Option<Stamp> {
