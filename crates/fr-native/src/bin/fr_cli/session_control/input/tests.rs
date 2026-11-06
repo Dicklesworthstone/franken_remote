@@ -1404,7 +1404,10 @@ fn modified_gestures_require_the_entire_original_capability_grant() {
             }
             shared.locked().live.as_mut().unwrap().capabilities = capabilities;
             let request = modified_request(&shared, drag);
-            assert_eq!(shared.locked().submit(request), Err(Refusal::InputUnavailable));
+            assert_eq!(
+                shared.locked().submit(request),
+                Err(Refusal::InputUnavailable)
+            );
             let refused = retained(&shared, request);
             assert_eq!(refused.actions_encoded, 0);
             assert_eq!(refused.submitted_operations, 0);
@@ -1436,7 +1439,10 @@ fn modified_gestures_keep_ten_action_receipts_and_twelve_native_operations() {
         assert_eq!(shared.locked().submit(request), Ok(None));
         for sequence in 0..10 {
             encoded(&shared, 1, sequence);
-            assert!(!ready(&shared, 1), "each modifier/button needs its own receipt");
+            assert!(
+                !ready(&shared, 1),
+                "each modifier/button needs its own receipt"
+            );
             assert_eq!(shared.locked().submit(request), Ok(None));
             assert_eq!(
                 shared.locked().submit(Request {
@@ -1521,9 +1527,15 @@ fn interrupted_modified_gestures_keep_the_exact_prefix_and_retire_the_owner() {
                     shared.result(ResultEvent::Completed(modified_receipt(u64::from(prefix))));
                     let late = retained(&shared, request);
                     assert_eq!(late.actions_submitted, prefix + 1);
-                    assert_eq!(late.submitted_operations, OPERATIONS[usize::from(prefix + 1)]);
+                    assert_eq!(
+                        late.submitted_operations,
+                        OPERATIONS[usize::from(prefix + 1)]
+                    );
                     assert_eq!(late.unacknowledged_actions, 0);
-                    assert!(!snapshot(&shared).ready, "late evidence cannot resume input");
+                    assert!(
+                        !snapshot(&shared).ready,
+                        "late evidence cannot resume input"
+                    );
                     assert!(shared.locked().pending.is_none());
                 }
             }
@@ -1557,7 +1569,10 @@ fn modified_gesture_expiry_fences_held_modifiers_and_buttons_without_replaying()
             assert_eq!(expired.disposition, InputDisposition::Partial);
             assert_eq!(expired.actions_encoded, prefix);
             assert_eq!(expired.actions_submitted, prefix);
-            assert_eq!(expired.submitted_operations, if prefix == 1 { 1 } else { 6 });
+            assert_eq!(
+                expired.submitted_operations,
+                if prefix == 1 { 1 } else { 6 }
+            );
             assert_eq!(expired.unacknowledged_actions, 0);
             assert_eq!(
                 report(&shared.locked().submit(request).unwrap().unwrap()),

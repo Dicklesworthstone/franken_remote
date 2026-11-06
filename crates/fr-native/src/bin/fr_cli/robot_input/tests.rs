@@ -814,12 +814,18 @@ fn modified_pointer_commands_preserve_canonical_modifiers_and_signed_coordinates
         let reordered = command(&action(flag, reordered)).unwrap().request.unwrap();
         assert!(request == reordered && request.operation == expected);
         assert!(request.valid());
-        assert_eq!(request.operation.count(), fr_client::robot::input::native::MAX_ACTIONS);
+        assert_eq!(
+            request.operation.count(),
+            fr_client::robot::input::native::MAX_ACTIONS
+        );
         let body = serde_json::to_vec(&request).unwrap();
         assert!(body.len() <= 512);
         assert_eq!(body, serde_json::to_vec(&reordered).unwrap());
         assert!(serde_json::from_slice::<Request>(&body).unwrap() == request);
-        assert_eq!(serde_json::to_value(request).unwrap()["operation"]["kind"], tag);
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["operation"]["kind"],
+            tag
+        );
         assert!(request.operation.pointer(0).is_none());
 
         for modifiers in 0_u8..=255 {
@@ -828,7 +834,10 @@ fn modified_pointer_commands_preserve_canonical_modifiers_and_signed_coordinates
             let decoded: Request = serde_json::from_value(body).unwrap();
             assert_eq!(decoded.valid(), (1..=4).contains(&modifiers.count_ones()));
             if decoded.valid() {
-                assert_eq!(u32::from(decoded.operation.count()), 2 * modifiers.count_ones() + 2);
+                assert_eq!(
+                    u32::from(decoded.operation.count()),
+                    2 * modifiers.count_ones() + 2
+                );
                 assert!(decoded.operation.count() <= fr_client::robot::input::native::MAX_ACTIONS);
             }
         }

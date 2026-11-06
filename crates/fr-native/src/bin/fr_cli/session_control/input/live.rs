@@ -531,7 +531,10 @@ mod tests {
                     let mut held = BTreeSet::new();
                     for index in 0..operation.count() {
                         assert!(operation.pointer(index).is_none());
-                        match operation.action(index).expect("every bounded action exists") {
+                        match operation
+                            .action(index)
+                            .expect("every bounded action exists")
+                        {
                             Action::Key { key, transition } => {
                                 if index < count {
                                     assert_eq!(key.usage(), usages[usize::from(index)]);
