@@ -83,6 +83,7 @@ impl Operation {
     }
 }
 impl Shared {
+    #[allow(clippy::too_many_lines)]
     pub fn turn(&self, viewer: &mut ControlledViewer, focused: bool) {
         let mut state = self.locked();
         if state.stop.is_none() {

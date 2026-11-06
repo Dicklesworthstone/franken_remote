@@ -80,7 +80,7 @@ pub(super) fn select(
     file_drop: bool,
     file_commands: bool,
 ) -> Result<Option<Local>, Failure> {
-    let commands = file_commands.then(|| Commands {
+    let commands = file_commands.then_some(Commands {
         connection: None,
         outcome: None,
     });

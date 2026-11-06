@@ -88,7 +88,7 @@ async fn begin_refresh(state: &mut Fixture, c: &Cx, h: &Cx) {
         {
             ClockEvent::ProbeQueued | ClockEvent::AwaitingReply => return,
             ClockEvent::Idle | ClockEvent::Backpressure => {}
-            other => panic!("viewer clock event: {other:?}"),
+            other @ ClockEvent::ReplyQueued => panic!("viewer clock event: {other:?}"),
         }
         // Keep real authority, tickets, view progress and the independently
         // polled Driver alive until the original one-second refresh is due.
@@ -225,7 +225,7 @@ fn an_ordered_authority_challenge_does_not_hide_the_original_clock_refresh() {
                 assert!(!state.host.control().is_stopped());
                 assert_eq!(state.host.observation_renewed_until(), observation_until);
                 assert_eq!(state.host.control_renewed_until(), control_until);
-                assert!(state.effects.lock().unwrap().operations.is_empty());
+                assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
                 state.viewer.close();
                 state.host.close();
             },
@@ -282,7 +282,7 @@ fn refuse_reply(change: fn(&mut [u8]), expected: ClockError) {
                 assert!(state.viewer.is_closed());
                 assert!(state.viewer.control().is_stopped());
                 assert!(!state.viewer.pending_send());
-                assert!(state.effects.lock().unwrap().operations.is_empty());
+                assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
                 state.host.close();
             },
             driver,

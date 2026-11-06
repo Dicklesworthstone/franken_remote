@@ -980,7 +980,7 @@ mod tests {
             .output()
             .unwrap();
         assert!(output.status.success());
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, [] as [u8; 0]);
         let actual: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
         assert_eq!(
             actual,

@@ -203,5 +203,5 @@ fn topic_help_preserves_output_failure_exit_status() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(74));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, [] as [u8; 0]);
 }
