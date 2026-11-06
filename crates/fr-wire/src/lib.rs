@@ -25,6 +25,7 @@ pub mod lease_revoked;
 mod media;
 pub mod negotiation;
 pub mod presented;
+pub mod quality_decision;
 pub mod receiver_metrics;
 mod record;
 pub mod recovery_request;

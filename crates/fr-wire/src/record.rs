@@ -149,6 +149,7 @@ pub enum Kind {
     FileCancel = 0x0074,
     PresentedState = 0x0080,
     StageMetrics = 0x0082,
+    QualityDecision = 0x0083,
     ClockProbe = 0x0084,
     ClockReply = 0x0085,
 }
@@ -222,6 +223,7 @@ impl Kind {
             0x0074 => Ok(Self::FileCancel),
             0x0080 => Ok(Self::PresentedState),
             0x0082 => Ok(Self::StageMetrics),
+            0x0083 => Ok(Self::QualityDecision),
             0x0084 => Ok(Self::ClockProbe),
             0x0085 => Ok(Self::ClockReply),
             _ => Err(WireError::UnsupportedKind),
@@ -284,6 +286,7 @@ impl Kind {
             | Self::FileCancel
             | Self::PresentedState
             | Self::StageMetrics
+            | Self::QualityDecision
             | Self::ClockProbe
             | Self::ClockReply => None,
         }

@@ -544,9 +544,75 @@ logs or error strings.
 | 0x0080 | PresentedState | V→H / control | C | Current binding/frame, source-observation identity, decode/presentation stage, clock/uncertainty, visible/stale/unknown state; A; only valid current evidence may establish R |
 | 0x0081 | ReceiverPressure | Receiver→sender / control | C | Direction/binding, credit epoch, cumulative freed bytes/frames and queue pressure; admitted channel; §5 credit rules, no authority renewal |
 | 0x0082 | StageMetrics | Either / control | C | Bounded sanitized stage/count/byte/duration samples with clock/scope; admitted session; no raw library strings or content |
-| 0x0083 | QualityDecision | H→V / control | C | Current binding, selected operating point and bounded reason; A; inside admitted capabilities, explicit reconfiguration for codec/geometry change |
+| 0x0083 | QualityDecision | H→V / control | C | Optional `quality-decisions` v1; current full decoder binding, nonzero sequence, actual source cadence, pacing mode/reason and distinct applied/pending encoder bitrates; A; informational only, never implicit codec/geometry reconfiguration |
 | 0x0084 | ClockProbe | V→H / control | C | Host-boot, OS-session and remote-session IDs, nonzero sequence (80 bytes); only with `clock-correlation` v1; not an authority renewal or source observation ([PROTOCOL_CLOCK.md](PROTOCOL_CLOCK.md)) |
 | 0x0085 | ClockReply | H→V / control | C | The probe's fields plus an 8-byte host-monotonic microsecond sample (88 bytes); answers only the outstanding probe sequence |
+
+#### QualityDecision v1
+
+The optional `quality-decisions` capability at version 1 authorizes only these
+host-to-viewer reports on the original reliable control channel. Both peers MUST
+select it; an absent or incompatible optional version preserves the existing
+session behavior. Native offers omit this diagnostic capability before dropping
+any existing feature to fit the unchanged 24-capability bound. The host reports
+its original running source's decisions; the codec alone is not evidence of an
+adaptive source, observation authority, presentation, bandwidth, or input readiness.
+
+The fixed record is 150 bytes, including the 24-byte header and the complete
+96-byte decoder binding in its existing order: host boot, OS session, remote
+session and display IDs (`u128` each), then geometry, codec configuration,
+recovery and viewport generations (`u64` each). The header carries the compact
+binding ID. Every binding member MUST match the original current view.
+The remaining fields are, in order:
+
+| Field | Encoding | Constraint |
+|---|---|---|
+| Report version | `u16` | Exactly 1 |
+| Sequence | `u64` | Nonzero, increasing within the original reporting owner; no wrap or duplicate acceptance |
+| Capture interval | `u64` microseconds | 1,000–1,000,000 inclusive; actual selected source admission cadence, not measured delivered FPS |
+| Mode | `u8` | 0 active, 1 verified idle |
+| Pacing reason | `u8` | Enumerated below; no free-form text |
+| Applied bitrate known | `u8` | 0 or 1 |
+| Applied bitrate | `u32` bits/s | Zero when unknown; otherwise 10,000–200,000,000 inclusive |
+| Pending bitrate known | `u8` | 0 or 1; cannot be 1 unless applied bitrate is known |
+| Pending bitrate | `u32` bits/s | Zero when absent; otherwise 10,000–200,000,000 inclusive |
+
+Pacing reason values are: 0 hold, 1 source work, 2 send admission, 3 capture
+credit, 4 receiver backlog, 5 decoder work, 6 headroom probe, 7 verified idle,
+8 changed after idle, 9 evidence gap. They describe the existing source pacing
+controller's decision, not an inferred cause of network congestion. Unknown
+enum/flag values and nonzero absent-value slots refuse. Unknown optional
+record extensions retain §2's checked skip rule and the complete C byte budget;
+they cannot change the fixed fields or their meaning.
+
+Applied bitrate is the encoder setting acknowledged by the original source
+owner, never measured output throughput. A pending target is not applied until
+that owner's existing worker acknowledgement succeeds. When bitrate evidence
+is unavailable, both fields remain absent; missing evidence is never reported
+as a zero-cost or zero-bitrate measurement. A report cannot request another
+codec, alter geometry, extend a deadline, renew authority or establish fresh
+source/presentation evidence. Such changes retain their existing protocols.
+
+The independent pending-target fixture below uses compact binding `01020304`,
+host/OS/session/display IDs consisting of 16 repeated bytes `11/22/33/44`,
+generations 1/2/3/4, sequence `0102030405060708`, active cadence 40,000 μs,
+send-admission reason, applied 8,000,000 bits/s and pending 6,000,000 bits/s:
+
+```text
+46 52 44 30 00 00 00 83 00 00 00 00 00 00 00 7e 01 02 03 04 00 00 00 00
+11 11 11 11 11 11 11 11 11 11 11 11 11 11 11 11
+22 22 22 22 22 22 22 22 22 22 22 22 22 22 22 22
+33 33 33 33 33 33 33 33 33 33 33 33 33 33 33 33
+44 44 44 44 44 44 44 44 44 44 44 44 44 44 44 44
+00 00 00 00 00 00 00 01 00 00 00 00 00 00 00 02
+00 00 00 00 00 00 00 03 00 00 00 00 00 00 00 04
+00 01 01 02 03 04 05 06 07 08
+00 00 00 00 00 00 9c 40 00 02 01 00 7a 12 00 01 00 5b 8d 80
+```
+
+`crates/fr-wire/tests/quality_decision.rs` independently transcribes this
+fixture and an idle report with both bitrates absent. Neither fixture is dumped
+from the encoder or treated as native/hardware qualification.
 
 ## 7. Media completeness, recovery, and freshness
 
