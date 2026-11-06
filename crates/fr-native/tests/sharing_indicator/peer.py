@@ -77,7 +77,11 @@ try:
         assert x.XTranslateCoordinates(d, w, root, 0, 0, c.byref(px), c.byref(py), c.byref(child))
     if op in ("click-at", "press-at", "release-at"):
         dx, dy = int(sys.argv[4]), int(sys.argv[5])
-        assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + dx, py.value + dy, 0)
+        # An XTEST motion switches the master pointer's source slave. The panel's
+        # XI_DeviceChanged handling then rightly drops a held device press, so a
+        # device release stays where its press left the pointer.
+        if not (device_input and op == "release-at"):
+            assert xt.XTestFakeMotionEvent(d, x.XDefaultScreen(d), px.value + dx, py.value + dy, 0)
         if op != "release-at":
             assert button(1, 1)
         if op != "press-at":
