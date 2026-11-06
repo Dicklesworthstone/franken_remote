@@ -171,7 +171,7 @@ impl ControlProfile {
         self.clipboard
     }
     /// Independent local microphone enable. Every session gets its own
-    /// revocation-only privacy surface before any AudioUp offer or native output.
+    /// revocation-only privacy surface before any `AudioUp` offer or native output.
     #[must_use]
     pub fn with_microphone(mut self, config: crate::native_microphone::Configuration) -> Self {
         self.microphone = Some(config);

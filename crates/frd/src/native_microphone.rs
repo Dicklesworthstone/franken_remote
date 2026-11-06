@@ -53,7 +53,7 @@ impl Local {
             native.request_stop();
         }
     }
-    fn bind(&self, native: uplink::Control) {
+    fn bind(&self, native: &uplink::Control) {
         *self
             .native
             .lock()
@@ -152,7 +152,7 @@ impl Application {
         if !self.bound
             && let Some(native) = host.microphone_control()
         {
-            self.local.bind(native);
+            self.local.bind(&native);
             self.bound = true;
         }
         if let Some(retiring) = host.microphone_retirement() {

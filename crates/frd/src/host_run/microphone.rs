@@ -1,5 +1,5 @@
 //! Local microphone endpoint and privacy-surface configuration. The daemon
-//! supervises installed children; it never links a codec or opens PipeWire.
+//! supervises installed children; it never links a codec or opens `PipeWire`.
 use super::{Error, Options};
 use crate::{input_process::ProcessLaunch, microphone_process::Launch, native_microphone};
 use std::path::PathBuf;

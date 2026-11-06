@@ -68,7 +68,7 @@ pub struct RunOptions {
     pub audio_sink: Option<String>,
     /// Separate local enable for the controller's microphone virtual source.
     pub microphone: bool,
-    /// Exact PipeWire socket; absent resolves below the local runtime directory.
+    /// Exact `PipeWire` socket; absent resolves below the local runtime directory.
     pub microphone_server: Option<PathBuf>,
     /// `--files DIR`: the controller's drop directory (needs `input_agent`;
     /// the caller validates it by type before any I/O).
