@@ -18,6 +18,9 @@ use std::{
 const INSTANCE: [u8; 16] = [0xa3; 16];
 
 enum Exchange {
+    /// `fr robot session status`: one optional quality request, answered with
+    /// no current decision. Nothing else, and never a STOP, may follow it.
+    Status,
     Inspect,
     Close,
     LoseReply,
@@ -61,6 +64,22 @@ fn fixture(target: &str, exchanges: Vec<Exchange>) -> JoinHandle<()> {
             reply.extend_from_slice(target.as_bytes());
             stream.write_all(&reply).unwrap();
             match exchange {
+                Exchange::Status => {
+                    let mut request = [0; 24];
+                    stream.read_exact(&mut request).unwrap();
+                    assert_eq!(&request[..8], b"FRSC1QY\0");
+                    assert_eq!(request[8..], INSTANCE);
+                    let mut reply = b"FRSC1QV\0".to_vec();
+                    reply.extend_from_slice(&INSTANCE);
+                    reply.extend_from_slice(&0_u16.to_be_bytes());
+                    stream.write_all(&reply).unwrap();
+                    let mut byte = [0; 1];
+                    assert_eq!(
+                        stream.read(&mut byte).unwrap(),
+                        0,
+                        "no STOP may follow inspection"
+                    );
+                }
                 Exchange::Inspect => {
                     let mut byte = [0; 1];
                     assert_eq!(
@@ -140,7 +159,7 @@ fn json(output: &Output) -> serde_json::Value {
 #[test]
 fn separate_commands_inspect_and_close_the_same_pinned_invocation() {
     let target = target();
-    let owner = fixture(&target, vec![Exchange::Inspect, Exchange::Close]);
+    let owner = fixture(&target, vec![Exchange::Status, Exchange::Close]);
     let status = cli(&["robot", "session", "status", &target, "--json"]);
     assert!(status.status.success());
     let value = json(&status);
@@ -154,6 +173,10 @@ fn separate_commands_inspect_and_close_the_same_pinned_invocation() {
     );
     assert_eq!(
         data.get("remote_control_granted"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(
+        data.get("current_host_quality_decision"),
         Some(&serde_json::Value::Null)
     );
     let id = data["connection_id"].as_str().unwrap();
