@@ -520,8 +520,11 @@ impl InputSink for EmptySink {
 #[test]
 fn blocked_initialization_expires_without_grant_and_keeps_seat_until_native_destruction() {
     run(|cx, _second| async move {
+        // The 60 ms ticket must expire first. A slow runner can spend 200 ms
+        // before the check (setup, worker start), which then expires the
+        // authorization instead and reports ObservationExpired.
         let policy = AuthorityPolicy {
-            authorization_lifetime: HostDuration::from_millis_checked(200).unwrap(),
+            authorization_lifetime: HostDuration::from_millis_checked(2_000).unwrap(),
             ticket_lifetime: HostDuration::from_millis_checked(60).unwrap(),
         };
         let mut s = Setup::new(cx, Seat::default(), policy, true).await;
