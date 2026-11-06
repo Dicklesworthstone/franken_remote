@@ -389,11 +389,15 @@ fn selector_panic_fences_native_and_peer_even_when_failed_future_is_retained() {
         let mut client = Box::pin(async {
             loop {
                 let _ = viewer.drive(Duration::from_millis(1)).await;
+                // An ended viewer's drive is ready at once. Without this yield
+                // the loop never leaves one poll, so neither the run nor the
+                // bound below is reached again.
+                asupersync::runtime::yield_now().await;
             }
         });
-        // Only the selector's own panic ends this wait. A run that finishes, or
-        // never reaches the selector (setup lost to load), fails instead of
-        // being re-polled after completion or spinning with the client forever.
+        // Only the selector's own panic ends this wait. A run that finishes or
+        // never reaches the selector (its startup budget can expire first under
+        // load) fails instead of being polled forever.
         let start = std::time::Instant::now();
         poll_fn(|task| {
             match catch_unwind(AssertUnwindSafe(|| run.as_mut().poll(task))) {
