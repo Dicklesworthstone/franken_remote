@@ -8,3 +8,10 @@ RUST_TEST_THREADS = { value = "4", force = false }
 # already export. Without it, plain `cargo test` (and the narrow workflows)
 # overflow the default 2 MiB stack in frd's fanout test.
 RUST_MIN_STACK = { value = "16777216", force = false }
+
+[unstable]
+# Fetch git dependencies (Asupersync, pinned by rev) at depth 1. A full fetch
+# downloads ~900 MB of history and spends 18-24 minutes indexing it on a CI
+# runner, most of a 25-minute nightly verification timeout before anything
+# compiles. A shallow fetch takes under a minute. The pinned nightly accepts it.
+git = { shallow_deps = true }
