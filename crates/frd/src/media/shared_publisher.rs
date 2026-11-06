@@ -752,12 +752,21 @@ impl Subscriber {
     ) -> Result<Option<fr_transport::quic::Disposition>, Error> {
         let shared = self.members.upgrade().ok_or(Error::Closed)?;
         let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
-        let Members { entries, audio, .. } = &mut *members;
+        let Members {
+            entries,
+            audio,
+            owner,
+            ..
+        } = &mut *members;
         let entry = entries[self.slot].as_mut().ok_or(Error::Closed)?;
         if let Some(error) = entry.failure {
             return Err(error);
         }
-        Ok(entry.audio_record(audio, route, bytes))
+        entry.control.check().map_err(Error::Media)?;
+        // Configuration expiry uses the same source clock as its send. A
+        // receive callback can precede the next publisher service turn.
+        let now = owner.check().map_err(Error::Media)?.as_micros();
+        Ok(entry.audio_record(audio, route, bytes, now))
     }
     /// Consume only this subscriber's actual repair route. Other control records
     /// remain with the original session, including renewal and recovery policy.

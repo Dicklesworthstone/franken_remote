@@ -108,9 +108,9 @@ impl AudioFeed {
         if state.closed {
             return Ok(None);
         }
-        state.owner.check().map_err(Error::Media)?;
+        let now = state.owner.check().map_err(Error::Media)?.as_micros();
         let State { ring, audio, .. } = &mut *state;
-        Ok(audio.receive(ring, route, bytes))
+        Ok(audio.receive(ring, route, bytes, now))
     }
     /// Fence the optional lane without revoking input. The containing publisher
     /// separately revokes its original session FIRST on session termination.

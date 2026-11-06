@@ -18,6 +18,21 @@ The audio channel is joined to the same selected display/view proof and authenti
 
 Audio capture is demand-driven and uses the existing AudioSource, bounded AudioRing and per-subscription AudioLane. Native capture runs in the supervised audio child, independently polled alongside session service. No packet is sent until that viewer's exact configuration acknowledgement is admitted. Pre-acknowledgement sound is not replayed. Acknowledgements must match the original binding, direction, current epoch and actual negotiated format.
 
+The host checks the configuration acknowledgement deadline when the reply is
+received, using the original source owner's monotonic clock. A matching reply
+at or after expiry moves only that viewer's audio lane to the existing
+`SessionEnded` stop; it cannot activate playback merely because the next send
+turn has not serviced the timeout yet. A stale epoch cannot expire a newer
+configuration.
+
+Each pending host configuration or stop record has one two-second admission
+lifetime, beginning when its bytes are first prepared. Backpressure retains
+those exact bytes and that original deadline. Expiry before transport admission
+closes only the optional audio lane. Once transport has accepted the record,
+its retained-output deadline and failure rules still apply to the connection.
+This admission lifetime is separate from the acknowledgement wait, which starts
+only after configuration admission, and from each packet's capture deadline.
+
 ## Authority, scheduling and teardown
 
 Original observation approval and expiry gate audio, including any observation before the local control request. Input still requires its separate explicit grant, presented-view checks, valid tickets and native submission checks. Audio never supplies evidence of screen freshness and cannot renew or resume input authority.

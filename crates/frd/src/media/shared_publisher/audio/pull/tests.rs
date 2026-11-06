@@ -33,6 +33,7 @@ fn setup() -> (Admission, AudioRing, AudioLane) {
             actual_frame_duration_ms: 20,
         },
         &ring,
+        0,
     )
     .unwrap();
     (Admission::new(stream), ring, lane)

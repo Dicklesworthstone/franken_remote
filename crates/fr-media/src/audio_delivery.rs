@@ -21,6 +21,8 @@ use fr_core::audio::{
 use fr_wire::audio::{AudioConfiguration, AudioConfigured, AudioStop};
 use std::collections::VecDeque;
 
+pub mod control;
+
 /// Ring bound in packets: 160 ms of 20 ms frames.
 pub const RING_PACKETS: usize = 8;
 /// Ring bound in Opus payload bytes, independent of the count bound.
@@ -630,14 +632,21 @@ impl AudioLane {
         Ok(())
     }
     /// The viewer's `AudioConfigured`. Only the exact outstanding epoch with
-    /// the exact advertised shape activates the lane, and only packets
-    /// captured AFTER this point are sent. A stale epoch is refused and
-    /// changes nothing; an explicit viewer refusal ends the lane.
-    pub fn configured(&mut self, ack: AudioConfigured, ring: &AudioRing) -> Result<(), Error> {
+    /// the exact advertised shape, received before its original deadline,
+    /// activates the lane, and only packets captured AFTER this point are
+    /// sent. The caller supplies the original source owner's current clock:
+    /// receive dispatch may run before the next sender turn. A stale epoch
+    /// is refused and changes nothing; an explicit viewer refusal ends the lane.
+    pub fn configured(
+        &mut self,
+        ack: AudioConfigured,
+        ring: &AudioRing,
+        now_us: u64,
+    ) -> Result<(), Error> {
         let LaneState::Configuring {
             stream,
             epoch,
-            until_us: Some(_),
+            until_us: Some(until),
         } = self.state
         else {
             self.counters.stale_refused += 1;
@@ -650,6 +659,14 @@ impl AudioLane {
         if ack.generation != epoch || ack.direction != AudioDirection::Downlink {
             self.counters.stale_refused += 1;
             return Err(Error::StaleGeneration);
+        }
+        if now_us >= until {
+            self.state = LaneState::Stopping {
+                epoch,
+                reason: AudioStopReason::SessionEnded,
+                then: Then::Stop,
+            };
+            return Err(Error::WrongState);
         }
         if !ack.accepted {
             self.state = LaneState::Stopped;

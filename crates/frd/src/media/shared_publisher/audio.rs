@@ -20,7 +20,7 @@ use crate::{
 use asupersync::{cx::Cx, time::sleep_until, types::Time};
 use fr_core::audio::{AudioChannels, AudioGeneration, AudioStopReason};
 use fr_media::{
-    audio_delivery::{AudioLane, AudioRing, LaneAction, SourceStream},
+    audio_delivery::{AudioLane, AudioRing, LaneAction, SourceStream, control::ControlOffer},
     worker::{
         Kind, Role,
         audio::{Capture, Monitor, decode_batch},
@@ -43,8 +43,6 @@ const PULL_US: u64 = 10_000;
 const START_TIMEOUT: Duration = Duration::from_secs(3);
 const PULL_TIMEOUT: Duration = Duration::from_millis(500);
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
-/// Reliable-record retention for configuration and stop records.
-const CONTROL_SEND_US: u64 = 2_000_000;
 /// Records per viewer service turn: bounded, no catch-up burst.
 const RECORDS_PER_TURN: usize = 4;
 const FRAME_MS: u16 = 20;
@@ -132,11 +130,32 @@ impl AudioProfile {
 pub(super) struct EntryAudio {
     lane: AudioLane,
     lanes: Option<AudioLanes>,
+    /// Exactly one UNADMITTED reliable record, with its first preparation
+    /// deadline. Native transport owns a record after acceptance; this slot
+    /// never retracts or disguises expiry of already retained output.
+    control_offer: Option<ControlOffer>,
 }
 impl EntryAudio {
     /// Departure/teardown fence: no further configuration, packet or stop.
     pub(super) fn close(&mut self) {
         self.lane.close();
+        self.control_offer = None;
+    }
+    fn prepare_control(&mut self, action: LaneAction, binding: u32, now: u64) -> Result<(), ()> {
+        if self
+            .control_offer
+            .as_ref()
+            .is_none_or(|offer| !offer.matches(action, binding))
+        {
+            // The actual lane state may supersede an unadmitted configuration
+            // with a stop or a newer epoch. No bytes of the old offer escaped.
+            self.control_offer = Some(ControlOffer::prepare(action, binding, now).map_err(|_| ())?);
+        }
+        self.control_offer
+            .as_mut()
+            .ok_or(())?
+            .authorize(action, binding, now)
+            .map_err(|_| ())
     }
     /// The same bounded lane service for shared and exclusive publications.
     /// Native work never runs under this synchronous transport callback.
@@ -166,16 +185,40 @@ impl EntryAudio {
         for _ in 0..RECORDS_PER_TURN {
             let now = owner.check().map_err(Error::Media)?.as_micros();
             let action = self.lane.next(ring, now);
-            let (route, record, deadline) = match audio_record(action, ring, lanes, now) {
-                Ok(Some(send)) => send,
-                Ok(None) => return Ok(()),
-                Err(_) => {
+            let control_record = matches!(action, LaneAction::Configure(_) | LaneAction::Stop(_));
+            let sent = if control_record {
+                if self.prepare_control(action, lanes.binding, now).is_err() {
+                    // Only an unadmitted optional record expired. Fence its
+                    // audio lane; retain the independent video/input owners.
                     self.close();
                     return Ok(());
                 }
+                let offer = self
+                    .control_offer
+                    .as_ref()
+                    .expect("prepared control record");
+                transport.send(
+                    cx,
+                    Route::Stream(lanes.control),
+                    offer.bytes(),
+                    offer.deadline_micros(),
+                    &mut authorize,
+                )
+            } else {
+                self.control_offer = None;
+                let (route, record, deadline) = match audio_packet(action, ring, lanes, now) {
+                    Ok(Some(send)) => send,
+                    Ok(None) => return Ok(()),
+                    Err(_) => {
+                        self.close();
+                        return Ok(());
+                    }
+                };
+                transport.send(cx, route, &record, deadline, &mut authorize)
             };
-            match transport.send(cx, route, &record, deadline, &mut authorize) {
+            match sent {
                 Ok(()) => {
+                    self.control_offer = None;
                     report.accepted += 1;
                     let result = match action {
                         LaneAction::Configure(_) => self.lane.configuration_sent(now),
@@ -202,6 +245,10 @@ impl EntryAudio {
                 {
                     return Ok(());
                 }
+                Err(quic::Error::Expired) if control_record && !transport.is_closed() => {
+                    self.close();
+                    return Ok(());
+                }
                 Err(error) => {
                     return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
                 }
@@ -210,7 +257,13 @@ impl EntryAudio {
         Ok(())
     }
     /// Only the original reliable reply route may change this lane's state.
-    fn receive(&mut self, ring: &AudioRing, route: Route, bytes: &[u8]) -> Option<Disposition> {
+    fn receive(
+        &mut self,
+        ring: &AudioRing,
+        route: Route,
+        bytes: &[u8],
+        now: u64,
+    ) -> Option<Disposition> {
         let lanes = self.lanes?;
         if route != Route::Stream(lanes.replies) {
             return None;
@@ -218,7 +271,7 @@ impl EntryAudio {
         match wire::record_kind(bytes) {
             Some(0x0061) => match wire::decode_configured(bytes, lanes.binding) {
                 Ok(ack) => {
-                    let _ = self.lane.configured(ack, ring);
+                    let _ = self.lane.configured(ack, ring, now);
                 }
                 Err(_) => self.close(),
             },
@@ -297,39 +350,23 @@ impl Entry {
         ring: &AudioRing,
         route: Route,
         bytes: &[u8],
+        now: u64,
     ) -> Option<Disposition> {
-        self.audio.receive(ring, route, bytes)
+        self.audio.receive(ring, route, bytes, now)
     }
 }
 
-/// The exact record, route and send deadline for one lane action.
-fn audio_record(
+/// A packet keeps its capture-anchored deadline. Reliable control records use
+/// the retained `ControlOffer` above; retries never manufacture a new lifetime.
+fn audio_packet(
     action: LaneAction,
     ring: &AudioRing,
     lanes: AudioLanes,
     now: u64,
 ) -> Result<Option<(Route, Vec<u8>, u64)>, Error> {
-    let control = |record: Vec<u8>| {
-        Some((
-            Route::Stream(lanes.control),
-            record,
-            now.saturating_add(CONTROL_SEND_US),
-        ))
-    };
     Ok(match action {
         LaneAction::Nothing => None,
-        LaneAction::Configure(configuration) => {
-            let mut record = vec![0; wire::AUDIO_CONFIGURATION_RECORD_BYTES];
-            wire::encode_configuration(&configuration, lanes.binding, &mut record)
-                .map_err(|_| Error::InvalidBudget)?;
-            control(record)
-        }
-        LaneAction::Stop(stop) => {
-            let mut record = vec![0; wire::AUDIO_STOP_RECORD_BYTES];
-            wire::encode_stop(&stop, lanes.binding, &mut record)
-                .map_err(|_| Error::InvalidBudget)?;
-            control(record)
-        }
+        LaneAction::Configure(_) | LaneAction::Stop(_) => return Err(Error::InvalidBudget),
         LaneAction::Packet {
             sequence,
             generation,

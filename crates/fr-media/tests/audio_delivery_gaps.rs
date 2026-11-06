@@ -54,6 +54,7 @@ fn active(ring: &AudioRing) -> AudioLane {
             actual_frame_duration_ms: offer.frame_duration_ms,
         },
         ring,
+        0,
     )
     .unwrap();
     lane

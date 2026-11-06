@@ -56,7 +56,7 @@ fn configuration(source: u64, epoch: u64) -> LaneAction {
 fn active(ring: &AudioRing, lane: &mut AudioLane, source: u64, epoch: u64, now: u64) {
     assert_eq!(lane.next(ring, now), configuration(source, epoch));
     lane.configuration_sent(now).unwrap();
-    lane.configured(ack(epoch), ring).unwrap();
+    lane.configured(ack(epoch), ring, now).unwrap();
 }
 
 #[test]
@@ -80,7 +80,7 @@ fn no_packet_leaves_before_the_matching_acknowledgement() {
         ring.push(unit(1, s, 100), 20).unwrap();
         assert_eq!(lane.next(&ring, 20), LaneAction::Nothing);
     }
-    lane.configured(ack(1), &ring).unwrap();
+    lane.configured(ack(1), &ring, 20).unwrap();
     // Everything captured before the acknowledgement is skipped, not replayed.
     assert_eq!(lane.next(&ring, 30), LaneAction::Nothing);
     assert_eq!(lane.counters().skipped_before_ack, 6);
@@ -90,7 +90,7 @@ fn no_packet_leaves_before_the_matching_acknowledgement() {
     assert_eq!(lane.next(&ring, 30), LaneAction::Nothing);
     assert_eq!(lane.counters().sent, 1);
     // A duplicate acknowledgement never re-arms or rewinds the lane.
-    assert_eq!(lane.configured(ack(1), &ring), Err(Error::WrongState));
+    assert_eq!(lane.configured(ack(1), &ring, 30), Err(Error::WrongState));
 }
 
 #[test]
@@ -196,11 +196,14 @@ fn stale_generations_are_refused_at_the_ring_and_the_lane() {
     assert_eq!(lane.next(&ring, 0), configuration(3, 1));
     lane.configuration_sent(0).unwrap();
     // An acknowledgement naming another epoch changes nothing.
-    assert_eq!(lane.configured(ack(2), &ring), Err(Error::StaleGeneration));
+    assert_eq!(
+        lane.configured(ack(2), &ring, 0),
+        Err(Error::StaleGeneration)
+    );
     assert_eq!(lane.counters().stale_refused, 1);
     ring.push(unit(3, 0, 10), 0).unwrap();
     assert_eq!(lane.next(&ring, 0), LaneAction::Nothing);
-    lane.configured(ack(1), &ring).unwrap();
+    lane.configured(ack(1), &ring, 0).unwrap();
     // A restarted source: the old epoch is stopped first, then a NEW epoch is
     // configured, and the lane waits for its new acknowledgement.
     ring.end(AudioStopReason::DeviceChanged);
@@ -215,13 +218,16 @@ fn stale_generations_are_refused_at_the_ring_and_the_lane() {
     assert_eq!(lane.next(&ring, 0), configuration(4, 2));
     lane.configuration_sent(0).unwrap();
     // The old epoch's acknowledgement or stop can never address the new one.
-    assert_eq!(lane.configured(ack(1), &ring), Err(Error::StaleGeneration));
+    assert_eq!(
+        lane.configured(ack(1), &ring, 0),
+        Err(Error::StaleGeneration)
+    );
     assert_eq!(
         lane.viewer_stopped(stop(1, AudioStopReason::UserMute)),
         Err(Error::StaleGeneration)
     );
     assert_eq!(lane.next(&ring, 0), LaneAction::Nothing);
-    lane.configured(ack(2), &ring).unwrap();
+    lane.configured(ack(2), &ring, 0).unwrap();
     ring.push(unit(4, 1, 10), 0).unwrap();
     assert_eq!(lane.next(&ring, 0), packet(1, 2));
 }
@@ -280,6 +286,97 @@ fn a_generation_that_played_for_a_while_earns_the_restart_budget_back() {
 }
 
 #[test]
+fn an_acknowledgement_before_the_next_send_turn_cannot_bypass_expiry() {
+    for extra_us in [0, 1] {
+        let mut ring = AudioRing::new();
+        ring.start(stream(1)).unwrap();
+        let mut lane = AudioLane::new();
+        assert_eq!(lane.next(&ring, 100), configuration(1, 1));
+        lane.configuration_sent(100).unwrap();
+        let now = 100 + CONFIGURE_TIMEOUT_US + extra_us;
+
+        // Receive dispatch may run before the sender gets another turn. The
+        // original deadline must still win without an intervening next().
+        assert_eq!(lane.configured(ack(1), &ring, now), Err(Error::WrongState));
+        assert_eq!(
+            lane.next(&ring, now),
+            LaneAction::Stop(stop(1, AudioStopReason::SessionEnded))
+        );
+        assert!(!lane.is_active());
+        assert!(!lane.wants_audio());
+        assert_eq!(lane.counters().sent, 0);
+        lane.stop_sent().unwrap();
+        assert!(lane.is_stopped());
+        assert_eq!(lane.configured(ack(1), &ring, now), Err(Error::WrongState));
+        assert!(lane.is_stopped());
+    }
+}
+
+#[test]
+fn an_acknowledgement_just_before_expiry_admits_only_future_audio() {
+    let mut ring = AudioRing::new();
+    ring.start(stream(1)).unwrap();
+    let mut lane = AudioLane::new();
+    assert_eq!(lane.next(&ring, 100), configuration(1, 1));
+    lane.configuration_sent(100).unwrap();
+    let now = 100 + CONFIGURE_TIMEOUT_US - 1;
+    ring.push(unit(1, 0, 10), now).unwrap();
+
+    lane.configured(ack(1), &ring, now).unwrap();
+    assert!(lane.is_active());
+    assert_eq!(lane.counters().skipped_before_ack, 1);
+    assert_eq!(lane.next(&ring, now), LaneAction::Nothing);
+    ring.push(unit(1, 1, 10), now + 1).unwrap();
+    assert_eq!(lane.next(&ring, now + 1), packet(1, 1));
+}
+
+#[test]
+fn an_old_acknowledgement_does_not_expire_a_newer_configuration() {
+    let mut ring = AudioRing::new();
+    ring.start(stream(1)).unwrap();
+    let mut lane = AudioLane::new();
+    assert_eq!(lane.next(&ring, 100), configuration(1, 1));
+    lane.configuration_sent(100).unwrap();
+    lane.viewer_stopped(stop(1, AudioStopReason::DeviceChanged))
+        .unwrap();
+    let now = 100 + CONFIGURE_TIMEOUT_US;
+    assert_eq!(lane.next(&ring, now), configuration(1, 2));
+    lane.configuration_sent(now).unwrap();
+
+    assert_eq!(
+        lane.configured(ack(1), &ring, now + 1),
+        Err(Error::StaleGeneration)
+    );
+    assert_eq!(lane.next(&ring, now + 1), LaneAction::Nothing);
+    assert!(lane.wants_audio());
+    lane.configured(ack(2), &ring, now + 2).unwrap();
+    assert!(lane.is_active());
+}
+
+#[test]
+fn expired_acknowledgement_stops_only_its_lane_not_the_shared_source() {
+    let mut ring = AudioRing::new();
+    ring.start(stream(1)).unwrap();
+    let mut late = AudioLane::new();
+    let mut healthy = AudioLane::new();
+    assert_eq!(late.next(&ring, 100), configuration(1, 1));
+    late.configuration_sent(100).unwrap();
+    active(&ring, &mut healthy, 1, 1, 100);
+    let now = 100 + CONFIGURE_TIMEOUT_US;
+
+    assert_eq!(late.configured(ack(1), &ring, now), Err(Error::WrongState));
+    ring.push(unit(1, 0, 10), now).unwrap();
+    assert_eq!(
+        late.next(&ring, now),
+        LaneAction::Stop(stop(1, AudioStopReason::SessionEnded))
+    );
+    assert_eq!(healthy.next(&ring, now), packet(0, 1));
+    assert_eq!(ring.state(), SourceState::Live(stream(1)));
+    assert_eq!(ring.len(), 1);
+    assert!(healthy.is_active());
+}
+
+#[test]
 fn unacknowledged_configuration_expires_and_failed_sources_are_a_typed_stop() {
     let mut ring = AudioRing::new();
     ring.start(stream(1)).unwrap();
@@ -296,7 +393,10 @@ fn unacknowledged_configuration_expires_and_failed_sources_are_a_typed_stop() {
     );
     lane.stop_sent().unwrap();
     // A late acknowledgement cannot resurrect it.
-    assert!(lane.configured(ack(1), &ring).is_err());
+    assert!(
+        lane.configured(ack(1), &ring, 100 + CONFIGURE_TIMEOUT_US)
+            .is_err()
+    );
     assert_eq!(lane.next(&ring, u64::MAX), LaneAction::Nothing);
     // A source that never became live (missing monitor) is a typed stop for
     // every waiting viewer, and its generation is consumed.
@@ -321,6 +421,7 @@ fn unacknowledged_configuration_expires_and_failed_sources_are_a_typed_stop() {
                 ..ack(1)
             },
             &ring,
+            0,
         )
         .unwrap();
     assert!(refused.is_stopped());
