@@ -53,16 +53,30 @@ confinement. Failed or unused preparations release their native context and join
 the pool; the original single-thread constructor remains available to callers
 that already entered confinement.
 
+BGRA conversion remains scalar and writes directly into the exact Rust-owned
+output buffer. Widths not divisible by sixteen select the general converter
+with `SWS_ACCURATE_RND`. FFmpeg 6.1's fast converter wrapper rounds to eight
+pixels, but its SSSE3 implementation writes sixteen-pixel groups; at width 1368
+this overruns the last tightly packed row. See the upstream
+[wrapper](https://github.com/FFmpeg/FFmpeg/blob/n6.1/libswscale/x86/yuv2rgb_template.c)
+and [kernel](https://github.com/FFmpeg/FFmpeg/blob/n6.1/libswscale/x86/yuv_2_rgb.asm).
+The encoder also calls `sws_frame_end` unconditionally after `sws_scale_frame`,
+including partial setup failure, before releasing its borrowed BGRA source.
+FFmpeg's [frame API](https://github.com/FFmpeg/FFmpeg/blob/n6.1/libswscale/swscale.c)
+can retain that source before a later setup operation fails.
+
 `scripts/test_native_decoder.sh` compiles the actual production bridge and
 unchanged filter. Its confined child probes file opens, socket creation and
 process creation on every slice-thread index, requiring `EPERM`; file and socket
 controls must first succeed without the filter. It also checks metadata-only
 configuration, malformed configuration, allocation limits, reference-only
-decoding, exact pixels and the original constructor inside confinement. The
-timing rows measure native CPU decode plus BGRA conversion, not X11
-presentation, transport or visible latency. The script requires a C compiler,
-`pkg-config`, the FFmpeg/X11/XCB development libraries and an FFmpeg build with
-the software x265 encoder; it does not require an X server.
+decoding, exact pixels, tight-buffer guards and the original constructor inside
+confinement. The geometry cases include 1366- and 1368-wide crops, uneven heights
+and widths divisible by sixteen but not thirty-two. Timing rows measure native
+CPU decode plus BGRA conversion, not X11 presentation, transport or visible
+latency. The script requires a C compiler, `pkg-config`, the FFmpeg/X11/XCB
+development libraries and an FFmpeg build with the software x265 encoder; it
+does not require an X server.
 
 ### Presenter escape attempts
 

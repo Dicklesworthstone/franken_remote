@@ -86,9 +86,13 @@ static uint64_t decode(FrDecoder *d,Unit u,uint8_t *out,size_t size) {
     assert(fr_decoder_receive(d,out,size,&pts)==FR_OK && pts==u.id);
     return monotonic_ns()-began;
 }
-static void output_canaries(const uint8_t *pixels,size_t size,uint8_t sentinel) {
+static void output_canaries(const uint8_t *pixels,size_t size,uint8_t sentinel,const char *name) {
     const uint8_t *before=pixels-PIXEL_CANARY;
     for (size_t i=0;i<PIXEL_CANARY;i++) {
+        if (before[i]!=sentinel || pixels[size+i]!=sentinel) {
+            fprintf(stderr,"guard_mismatch buffer=%s size=%zu offset=%zu expected=%u prefix=%u suffix=%u\n",
+                    name,size,i,sentinel,before[i],pixels[size+i]);
+        }
         assert(before[i]==sentinel);
         assert(pixels[size+i]==sentinel);
     }
@@ -162,7 +166,7 @@ static void confined(Unit *units,int count,const uint8_t *configuration,size_t l
                 assert(fr_decoder_receive_reference(d,&pts)==FR_OK && pts==units[i].id);
             } else {
                 (void)decode(d,units[i],out,size);
-                output_canaries(out,size,0x69);
+                output_canaries(out,size,0x69,"confined_prepared");
             }
         }
         assert(memcmp(out,expected,size)==0);
@@ -172,7 +176,7 @@ static void confined(Unit *units,int count,const uint8_t *configuration,size_t l
         assert(d->ctx->thread_count==1);
         for (int i=0;i<count;i++) (void)decode(d,units[i],out,size);
         assert(memcmp(out,expected,size)==0);
-        output_canaries(out,size,0x69);
+        output_canaries(out,size,0x69,"confined_legacy");
         fr_decoder_free(d); free(allocation);
         printf("sandbox_decode=passed all_four_threads_confined=true legacy_single_thread=passed\n");
         fflush(stdout); _exit(0);
@@ -264,7 +268,8 @@ static void roundtrip(int w,int h,int count,int noise) {
         // Alternate order for paired measurements against the same packets.
         if (i%2) { b=decode(parallel,units[i],four,size); a=decode(baseline,units[i],one,size); }
         else { a=decode(baseline,units[i],one,size); b=decode(parallel,units[i],four,size); }
-        output_canaries(one,size,0x5a); output_canaries(four,size,0xa5);
+        output_canaries(one,size,0x5a,"single_decode");
+        output_canaries(four,size,0xa5,"four_slice_decode");
         assert(memcmp(one,four,size)==0);
         if (i>=5) { single[i-5]=a; slices[i-5]=b; }
     }
@@ -287,6 +292,10 @@ int main(int argc,char **argv) {
     if (argc==1) {
         roundtrip(192,128,20,0);
         roundtrip(1366,768,20,0);
+        roundtrip(194,130,20,0);
+        roundtrip(192,130,20,0);
+        roundtrip(1368,768,20,0);
+        roundtrip(208,130,20,0);
     } else if (argc==2 && (!strcmp(argv[1],"desktop") || !strcmp(argv[1],"noise"))) {
         roundtrip(1920,1080,MAX_UNITS,!strcmp(argv[1],"noise"));
     } else {

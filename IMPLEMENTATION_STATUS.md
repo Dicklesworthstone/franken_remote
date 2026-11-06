@@ -144,9 +144,10 @@ cropped 1366x768 rows passed the same checks. Reproduce the native harness with
 
 **Cropped-frame correctness.** Those tests exposed an existing FFmpeg 6.1 fast
 conversion path that left six visible columns unwritten at width 1366 with a
-tightly packed BGRA destination. Widths not divisible by eight now select the
-supported general converter with `SWS_ACCURATE_RND`, without another frame
-buffer or copy; aligned widths keep the fast path. Different poisoned output
+tightly packed BGRA destination. That revision selected the supported general
+converter with `SWS_ACCURATE_RND` for widths not divisible by eight, without
+another frame buffer or copy. The November 6 correction below tightens this
+rule to widths not divisible by sixteen. Different poisoned output
 buffers, opaque-alpha checks and leading/trailing canaries verify the whole
 visible image. Restoring only the old conversion flag makes the cropped
 regression fail on the previously unwritten alpha bytes.
@@ -165,6 +166,52 @@ a tailnet session. The isolated manifest excludes unrelated unavailable runtime
 dependencies; this is not full-workspace qualification. The five-minute
 loaded-client acceptance and current QUIC idle-traffic defect (`fr-r6qp`) remain
 outstanding.
+
+**Native buffer safety, 2026-11-06 (UTC).** The original
+`95d010e` production bridge overwrote the trailing guard of an exact 1368x768
+BGRA buffer in the real FFmpeg 6.1.1 harness. Its fast-converter wrapper rounds
+width to eight pixels, while the SSSE3 kernel writes sixteen-pixel groups.
+Selecting accurate general conversion for every width not divisible by sixteen
+fixes this overrun and preserves the existing 1366-wide tail correction. It
+adds no output buffer or pixel copy. The encoder also unconditionally ends its
+swscale frame operation before returning the borrowed BGRA source; a partial
+frame-start failure can otherwise leave a retained reference to caller memory.
+See [the native boundary details](WORKER_SANDBOX.md#hevc-slice-threads).
+
+The final production patch passed `scripts/test_native_decoder.sh` against the
+real bridge, FFmpeg 6.1.1 and software x265: all eight geometry/content cases,
+including 1368x768, exact pixel comparisons, opaque alpha and leading/trailing
+buffer guards. Configuration and allocation-limit refusal cases also passed.
+Inside the unchanged sandbox, the child completed metadata-only configuration,
+reference-only decoding and the legacy constructor, with `EPERM` on all four
+slice-thread indices. This is native CPU and confinement evidence, not a
+tailnet session or visible-latency acceptance.
+
+The actual `fr-media-worker` binary also built and passed strict scoped Clippy
+(`-D warnings`) with the pinned toolchain, `--locked --offline`,
+`--no-default-features --features linux-media`. Pinned workspace formatting,
+docs and whitespace checks passed. Full-workspace tests were not completed in
+this session: earlier builds of unchanged Asupersync exceeded the shared 8 GiB
+memory limit, and UBS is unavailable. No dependency or lockfile was changed.
+
+**Parallel conversion experiment rejected.** A separate swscale thread pool
+increased moving-desktop conversion cost. Reusing the existing HEVC workers
+instead passed pixel, bounds and confinement checks, but did not establish an
+improvement in complete decode-plus-conversion time. In the final experiment,
+both paths used four HEVC threads and the same 65 encoded 1920x1080 pictures per
+fixture; 60 measurements after five warmups alternated the paired order.
+
+| Fixture | Scalar total p50 / p95 | Shared-worker total p50 / p95 | Conversion-only p50, scalar to shared |
+|---|---:|---:|---:|
+| Moving desktop | 8.126 / 11.942 ms | 8.166 / 13.174 ms | 0.873 to 0.529 ms |
+| High-noise frames | 7.804 / 11.821 ms | 7.952 / 13.383 ms | 0.829 to 0.479 ms |
+
+These are local native elapsed times on a loaded shared host, before
+confinement. Timing drift also appeared in identical-scalar controls; the cause
+of the total-time difference is unproven. Production retains scalar conversion,
+with the verified buffer-safety corrections. No additional converter pool,
+shared-worker conversion scheduler, latency improvement or completed
+five-minute two-machine acceptance is claimed by this change.
 
 **Explicit robot commands (2026-10-30):** the foreground input owner accepts
 bounded modifier chords (`--chord MODIFIER,...,KEY`), with one to four USB

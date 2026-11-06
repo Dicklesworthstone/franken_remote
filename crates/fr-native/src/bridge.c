@@ -170,6 +170,9 @@ int fr_encoder_send(FrEncoder *e,const uint8_t *bgra,size_t len,int64_t pts,int 
     if (!src->buf[0]) return FR_MEMORY;
     src->data[0]=(uint8_t *)bgra; src->linesize[0]=e->ctx->width*4;
     int scaled=sws_scale_frame(e->scale,e->input,src);
+    /* A failed frame_start may already retain this caller's source. End even
+       partial setup before the borrowed BGRA lifetime returns to Rust. */
+    sws_frame_end(e->scale);
     av_frame_unref(src);
     if (scaled<0) return FR_CODEC;
     e->input->pts=pts; e->input->pict_type=idr?AV_PICTURE_TYPE_I:AV_PICTURE_TYPE_NONE;
@@ -347,11 +350,12 @@ int fr_decoder_receive(FrDecoder *d,uint8_t *out,size_t len,int64_t *pts) {
     if (!d || !out || !pts || !bgra_buffer(d->w,d->h,len)) return FR_INVALID;
     int code=fr_decoder_output(d); if (code!=FR_OK) return code;
     AVFrame *f=d->frame;
-    /* FFmpeg 6.1's fast unscaled x86 converter rounds down to eight-pixel
-       blocks when the tightly packed destination has no rounded-up padding.
-       Select its general converter for these widths so EVERY visible pixel
-       is written, without adding a second BGRA buffer or another copy. */
-    int flags=SWS_FAST_BILINEAR|((d->w&7)?SWS_ACCURATE_RND:0);
+    /* FFmpeg 6.1's fast x86 converter can leave a partial eight-pixel tail
+       unwritten, or write a sixteen-pixel SIMD group past an eight-aligned
+       tight row (1368 pixels). Use the general converter unless the complete
+       sixteen-pixel group fits: every visible pixel is written safely in this
+       serial whole-frame call, without padding or a second BGRA copy. */
+    int flags=SWS_FAST_BILINEAR|((d->w&15)?SWS_ACCURATE_RND:0);
     d->scale=sws_getCachedContext(d->scale,d->w,d->h,(enum AVPixelFormat)f->format,d->w,d->h,AV_PIX_FMT_BGRA,flags,NULL,NULL,NULL);
     if (!d->scale || sws_setColorspaceDetails(d->scale,sws_getCoefficients(SWS_CS_ITU709),0,sws_getCoefficients(SWS_CS_ITU709),1,0,1<<16,1<<16)<0) return FR_CODEC;
     uint8_t *dst[4]={out,NULL,NULL,NULL}; int stride[4]={d->w*4,0,0,0};
