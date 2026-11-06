@@ -256,7 +256,7 @@ impl Dispatch<'_> {
         }
         // These are consumed by the original role-specific exchange, never an
         // embedding application's callback. Parent renewal/clock dispatch runs
-        // before this callback in ViewerSession::drive.
+        // before this callback, in ViewerSession::step or ControlledViewer::step.
         if route == self.inbound
             && bytes.get(6..8).is_some_and(|kind| {
                 (0x0018..=0x001c).contains(&u16::from_be_bytes([kind[0], kind[1]]))
