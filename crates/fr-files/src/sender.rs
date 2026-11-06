@@ -436,8 +436,11 @@ impl<'a> Sender<'a> {
         });
         Ok(id)
     }
-    /// Result collection never waits for cleanup. A completed kernel call is not
-    /// cancelled retroactively. Published outcomes remain readable after errors.
+    /// Collection never blocks on cleanup and releases this slot only after the
+    /// original source has joined successfully. Failed cleanup keeps both the
+    /// receipt and failure inspectable through `result`/`try_finish_cleanup`;
+    /// it cannot reopen the sender or become a fabricated successful cleanup.
+    /// A completed publication is never cancelled retroactively.
     pub fn take_result(&mut self) -> Option<Receipt> {
         if self.batch.is_some() {
             return None;
@@ -449,6 +452,9 @@ impl<'a> Sender<'a> {
         }
         if t.cleanup.is_none() {
             t.cleanup = t.source.reap();
+        }
+        if t.cleanup != Some(Ok(())) {
+            return None;
         }
         self.transfer = None;
         Some(result)

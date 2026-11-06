@@ -1,5 +1,7 @@
 //! Locally selected descriptors, disk-only hashing/reads, one outstanding result.
 #[cfg(test)]
+mod cleanup_tests;
+#[cfg(test)]
 mod tests;
 mod tree;
 use super::{Error, Policy};

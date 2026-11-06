@@ -7,6 +7,10 @@
 //! All filesystem operations belong on an owned disk worker, not a reactor or
 //! an authority task. Network attachment and permission remain with the session.
 
+// Share the real UDP/TLS integration fixture with private worker-fault tests.
+#[cfg(test)]
+extern crate self as fr_files;
+
 #[cfg(target_os = "linux")]
 pub mod receive;
 
