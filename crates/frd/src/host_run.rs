@@ -20,7 +20,7 @@ pub mod approval;
 pub mod audio;
 pub mod encoder;
 pub mod microphone;
-pub use encoder::Encoder;
+pub use encoder::{Encoder, Selection as EncoderSelection};
 pub mod policy;
 pub mod video;
 pub use audio::AudioOptions;
@@ -167,9 +167,9 @@ pub enum Error {
     /// sharing needs no input agent.
     ControlCapabilityMissing(Capability),
     /// `--encoder nvenc|vaapi`: the startup probe could not open the selected
-    /// encoder at this display's size, or its first IDR was not admitted
-    /// (the worker's typed reason, or `timed_out`). Nothing was bound, and no
-    /// other backend is substituted.
+    /// encoder at this display's size, or its first IDR was not admitted.
+    /// Details retain bounded probe reasons. Nothing was bound and software
+    /// is never substituted for a hardware request.
     EncoderUnavailable(String),
 }
 impl fmt::Display for Error {
@@ -244,6 +244,11 @@ pub enum Event {
     /// Fetching this node's Tailscale HTTPS certificate; a first issuance can
     /// take a minute (it is published in Certificate Transparency logs).
     ObtainingCertificate,
+    /// An explicit automatic request resolved through a real startup probe.
+    /// Every share retains this concrete backend; it is not qualification.
+    EncoderSelected {
+        encoder: Encoder,
+    },
     Listening {
         address: SocketAddr,
     },
@@ -368,29 +373,70 @@ fn probe_control(options: &Options) -> Result<Option<Capabilities>, Error> {
         .map(Some)
         .map_err(Error::ControlCapabilityMissing)
 }
-/// A hardware encoder is proved once at startup, before anything is bound: an
-/// unusable GPU encoder used to surface only when the first viewer's share
-/// failed (the viewer saw a renewal timeout). The explicit software profile is
-/// not probed, and a failure never substitutes another backend.
-fn probe_encoder(options: &Options, encoder: Encoder) -> Result<(), Error> {
-    if !encoder.is_hardware() {
-        return Ok(());
-    }
-    let launch = Launch::new(
-        &options.worker,
-        &options.display,
-        options.xauthority.as_deref(),
-        WorkerRole::Capture,
-        random_nonzero_u128()?,
-    )
-    .map_err(|_| Error::Configuration)?;
-    match launch
-        .probe_encoder(encoder.as_str(), std::time::Duration::from_secs(15))
-        .map_err(|_| Error::Configuration)?
-    {
-        EncoderProbe::Admitted { .. } => Ok(()),
-        EncoderProbe::Refused(reason) => Err(Error::EncoderUnavailable(reason)),
-        EncoderProbe::TimedOut => Err(Error::EncoderUnavailable("timed_out".into())),
+/// Resolve the local request before binding anything. Each hardware candidate
+/// must capture and produce an admitted IDR through the canonical worker probe.
+/// Exact requests never substitute; explicit auto tries NVENC then VAAPI only
+/// after a completed refusal. Timeouts, launch errors and uncertain cleanup stop.
+fn select_encoder(
+    options: &Options,
+    selection: EncoderSelection,
+    stop: &StopHandle,
+) -> Result<Option<Encoder>, Error> {
+    use encoder::selection::{Attempt, Failure, resolve, valid_dimensions};
+    let limits = ProtocolLimits::ABSOLUTE;
+    let selected = resolve(
+        selection,
+        || stop.is_requested(),
+        |encoder| {
+            let launch = Launch::new(
+                &options.worker,
+                &options.display,
+                options.xauthority.as_deref(),
+                WorkerRole::Capture,
+                random_nonzero_u128()?,
+            )
+            .map_err(|_| Error::Configuration)?;
+            match launch
+                .probe_encoder(encoder.as_str(), Duration::from_secs(15))
+                .map_err(|_| Error::Configuration)?
+            {
+                EncoderProbe::Admitted { width, height }
+                    if valid_dimensions(
+                        width,
+                        height,
+                        limits.max_dimension_pixels(),
+                        limits.max_coded_pixels(),
+                    ) =>
+                {
+                    Ok(Attempt::Ready)
+                }
+                EncoderProbe::Admitted { .. } => Err(Error::EncoderUnavailable(format!(
+                    "{}=malformed_probe_reply",
+                    encoder.as_str()
+                ))),
+                EncoderProbe::Refused(reason) => Ok(Attempt::Refused(reason)),
+                EncoderProbe::TimedOut => Err(Error::EncoderUnavailable(format!(
+                    "{}_timed_out",
+                    encoder.as_str()
+                ))),
+            }
+        },
+    );
+    match selected {
+        Ok(encoder) => Ok(Some(encoder)),
+        Err(Failure::Stopped) => Ok(None),
+        Err(Failure::Probe(error)) => Err(error),
+        Err(Failure::InvalidReply { encoder, reason }) => Err(Error::EncoderUnavailable(format!(
+            "{}={reason}",
+            encoder.as_str()
+        ))),
+        Err(Failure::Unavailable(attempts)) => Err(Error::EncoderUnavailable(
+            attempts
+                .into_iter()
+                .map(|(encoder, reason)| format!("{}={reason}", encoder.as_str()))
+                .collect::<Vec<_>>()
+                .join(";"),
+        )),
     }
 }
 /// The static host policy for this X11 slice: operations a controller may
@@ -664,7 +710,14 @@ async fn restart_wait(cx: &Cx, stop: &StopHandle, delay: Duration) {
 
 /// Run until stopped. Returns after the last share is torn down.
 pub fn run(options: &Options, report: &Reporter, stop: &Arc<StopHandle>) -> Result<(), Error> {
-    run_inner(options, report, stop, None, Encoder::SoftwareExplicit, None)
+    run_inner(
+        options,
+        report,
+        stop,
+        None,
+        Encoder::SoftwareExplicit.into(),
+        None,
+    )
 }
 
 /// Serve with live saved policy on the original listener and independent source.
@@ -683,16 +736,16 @@ pub fn run_with_policy(
 /// Explicit local encoder selection for observation AND controlled shares.
 /// The existing worker must still configure the chosen codec, produce admitted
 /// HEVC and complete decoder startup. No hardware-availability claim is made by
-/// selecting a name, and failure never substitutes software or another device
-/// backend. This selection is retained across policy revisions and share retries.
+/// selecting a name. Explicit auto probes hardware before serving; exact requests
+/// never substitute. The concrete winner is retained across revisions and retries.
 pub fn run_with_policy_and_encoder(
     options: &Options,
     report: &Reporter,
     stop: &Arc<StopHandle>,
     policy: policy::Configuration,
-    encoder: Encoder,
+    encoder: impl Into<EncoderSelection>,
 ) -> Result<(), Error> {
-    run_inner(options, report, stop, Some(policy), encoder, None)
+    run_inner(options, report, stop, Some(policy), encoder.into(), None)
 }
 
 /// Local desktop consent backed by the installed UI child and an explicitly
@@ -703,10 +756,17 @@ pub fn run_with_desktop_approval(
     report: &Reporter,
     stop: &Arc<StopHandle>,
     policy: policy::Configuration,
-    encoder: Encoder,
+    encoder: impl Into<EncoderSelection>,
     approval: &approval::Configuration,
 ) -> Result<(), Error> {
-    run_inner(options, report, stop, Some(policy), encoder, Some(approval))
+    run_inner(
+        options,
+        report,
+        stop,
+        Some(policy),
+        encoder.into(),
+        Some(approval),
+    )
 }
 
 fn run_inner(
@@ -714,10 +774,14 @@ fn run_inner(
     report: &Reporter,
     stop: &Arc<StopHandle>,
     policy: Option<policy::Configuration>,
-    encoder: Encoder,
+    selection: EncoderSelection,
     approval: Option<&approval::Configuration>,
 ) -> Result<(), Error> {
     check(options)?;
+    if stop.is_requested() {
+        report(Event::Stopped);
+        return Ok(());
+    }
     if let Some(approval) = approval {
         approval.validate(options)?;
     }
@@ -739,7 +803,17 @@ fn run_inner(
         )
         .map_err(|_| Error::MicrophoneCapabilities)?;
     }
-    probe_encoder(options, encoder)?;
+    let Some(encoder) = select_encoder(options, selection, stop)? else {
+        report(Event::Stopped);
+        return Ok(());
+    };
+    if stop.is_requested() {
+        report(Event::Stopped);
+        return Ok(());
+    }
+    if selection == EncoderSelection::AutomaticHardware {
+        report(Event::EncoderSelected { encoder });
+    }
     // Started before anything is bound; kept for the whole run.
     let monitor = match &options.session_monitor {
         Some(configuration) => {

@@ -1,5 +1,44 @@
 # Implementation status
 
+## Native readiness, hardware selection and transfer pacing (2026-11-06)
+
+Three public operations now reach their existing native owners:
+
+- `fr doctor --probe-native --worker PATH --encoder software|nvenc|vaapi --x-display :N`
+  performs one actual capture/HEVC IDR probe before runtime or tailnet access.
+  Optional `--input-agent PATH` discovers the executor's operations without
+  injecting input. Reports distinguish combined probe failures from unknown
+  capture outcomes and leave decode, presentation and other untested lanes
+  unqualified. Ordinary `fr doctor` retains its tailnet checks.
+- `frd run --encoder auto` explicitly probes NVENC then VAAPI, at most once each,
+  and retains the first admitted concrete backend for every share and restart.
+  Software is never an automatic candidate. Timeouts, malformed replies,
+  invalid geometry, launch/reap errors and local Stop prevent further probing
+  or startup as appropriate. Installation preserves the explicit selection;
+  the service probes on its own actual desktop before binding.
+- `frd send --target NAME --instance ORIGINAL --pause N` and `--resume N` control
+  the original host download sender through existing authenticated local V2 IPC.
+  They preserve its original deadline and authority, distinguish intent from
+  observed pacing, and never replay or reopen a transfer. V1 send/status/cancel
+  clients remain accepted by current owners; current clients do not downgrade.
+
+Verification is scoped: 15 host-file CLI/report/IPC component tests, seven
+native-doctor parser/help tests and 11 production encoder-selection tests pass,
+with strict component Clippy. Formatting and diff checks pass. Full `frd`/native
+CLI Cargo verification remains blocked locally by the unchanged pinned
+Asupersync compile exceeding this runner's memory; real socket/desktop tests
+cannot run because AF_UNIX creation returns EPERM. Report/probe and source-owner
+integration regressions are added for a capable runner. Hardware, sustained
+performance and public end-to-end qualification remain pending. Beads `fr-tlef`,
+`fr-jn0o` and `fr-kqow` retain those exact follow-ups.
+
+The GitHub indicator runner exposed two microphone compilation defects at
+`716add6`; direct-main correction `3490f07` adds immutable launch-configuration
+cloning and completes the independent microphone flag in an approval fixture.
+The isolated native microphone-process library/audio-worker check and strict
+Clippy pass. Whole-graph CI for the correction and the new operations remains
+pending; earlier core-only CI results do not qualify these later commits.
+
 ## Public Linux microphone slice (2026-11-06; qualification pending)
 
 The native microphone libraries now have public application owners. On the

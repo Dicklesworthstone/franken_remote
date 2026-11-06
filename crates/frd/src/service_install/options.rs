@@ -72,7 +72,7 @@ impl InstallOptions {
             if !self.software_explicit && !encoder_selected {
                 return Err(ServiceError::HostProfileUnavailable {
                     code: "hardware_hevc_unavailable",
-                    detail: "frd run needs an explicit encoder: pass --software-explicit or pass -- --encoder nvenc|vaapi|software; no automatic selection or fallback",
+                    detail: "frd run needs an explicit encoder: pass --software-explicit or pass -- --encoder auto|nvenc|vaapi|software; auto probes hardware only",
                 });
             }
             if self.approval_mode == "local" {

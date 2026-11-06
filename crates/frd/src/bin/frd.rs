@@ -141,10 +141,12 @@ OPTIONS:
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
-    --encoder NAME  Select 'nvenc', 'vaapi' or 'software' explicitly. Hardware
-                    paths are experimental, retain CPU-staged X11 capture and
-                    never silently fall back. Actual native startup and HEVC
-                    validation must succeed; selection is not qualification.
+    --encoder NAME  Select 'auto', 'nvenc', 'vaapi' or 'software' explicitly.
+                    Auto probes NVENC then VAAPI at startup (15s per candidate),
+                    never software. Timeout or launch/cleanup failure stops.
+                    The selected backend stays fixed across shares and retries.
+                    Hardware retains CPU-staged X11 capture; a successful
+                    startup IDR is not hardware qualification.
                     See docs/hardware-encoder-selection.md
     --fps FPS       Maximum capture/codec frame rate, integer 1..240 (default 30).
                     Native backpressure skips opportunities; this is not measured
@@ -403,7 +405,7 @@ struct Profile {
     adaptive_capture: bool,
     session_lifetime: bool,
     observation_indicator: bool,
-    encoder: frd::host_run::Encoder,
+    encoder: frd::host_run::EncoderSelection,
     video: frd::host_run::video::Profile,
 }
 
@@ -414,6 +416,11 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
     if json {
         let value = match event {
             Event::ObtainingCertificate => serde_json::json!({"event": "obtaining_certificate"}),
+            Event::EncoderSelected { encoder } => serde_json::json!({
+                "event": "encoder_selected", "encoder_selection": profile.encoder.as_str(),
+                "encoder": encoder.as_str(), "startup_idr_probe": "passed",
+                "hardware_qualification": "not_tested"
+            }),
             Event::Listening { address } => serde_json::json!({
                 "event": "listening",
                 "address": address.to_string(),
@@ -447,6 +454,10 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
         println!("{value}");
     } else {
         match event {
+            Event::EncoderSelected { encoder } => println!(
+                "frd: automatic hardware selection chose {} after an admitted startup IDR; this backend remains fixed for this run",
+                encoder.as_str()
+            ),
             Event::ObtainingCertificate => println!(
                 "frd: fetching this host's Tailscale HTTPS certificate (a first issuance can take a minute)"
             ),
@@ -458,7 +469,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 };
                 println!("frd: sharing this desktop ({mode}) on {address}; Ctrl-C to stop");
                 println!(
-                    "frd: encoder selection: {}; availability is checked at capture startup; no automatic fallback",
+                    "frd: encoder request: {}; native startup checks remain required for every share; no software fallback",
                     profile.encoder.as_str()
                 );
                 println!(
@@ -600,9 +611,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             return run_refusal(
                 json,
                 "hardware_hevc_unavailable",
-                "no automatic encoder selection: pass --encoder nvenc or --encoder vaapi for \
-                 an explicit experimental hardware attempt, or --software-explicit / --encoder \
-                 software for the CPU developer profile; no automatic fallback is performed",
+                "choose an encoder explicitly: --encoder auto probes NVENC then VAAPI; \
+                 --encoder nvenc or --encoder vaapi attempts only that hardware backend; \
+                 --software-explicit / --encoder software selects the CPU developer profile; \
+                 software is never an automatic fallback",
                 2,
             );
         }

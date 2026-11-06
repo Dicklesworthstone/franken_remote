@@ -1,4 +1,4 @@
-//! Exact CLI selection, without filesystem, codec, network or input work.
+//! Explicit CLI selection, without filesystem, codec, network or input work.
 use super::*;
 
 fn parse(args: &[&str]) -> Result<RunOptions, Error> {
@@ -13,12 +13,13 @@ fn encoder_selection_is_explicit_and_keeps_the_software_alias() {
             .unwrap()
             .selected_encoder()
             .unwrap(),
-        Some(Encoder::SoftwareExplicit)
+        Some(Encoder::SoftwareExplicit.into())
     );
     for (name, expected) in [
-        ("software", Encoder::SoftwareExplicit),
-        ("nvenc", Encoder::Nvenc),
-        ("vaapi", Encoder::Vaapi),
+        ("software", Encoder::SoftwareExplicit.into()),
+        ("nvenc", Encoder::Nvenc.into()),
+        ("vaapi", Encoder::Vaapi.into()),
+        ("auto", EncoderSelection::AutomaticHardware),
     ] {
         let options = parse(&["--encoder", name]).unwrap();
         assert_eq!(options.selected_encoder().unwrap(), Some(expected));
@@ -28,12 +29,14 @@ fn encoder_selection_is_explicit_and_keeps_the_software_alias() {
 
 #[test]
 fn encoder_selection_rejects_ambiguity_in_both_argument_orders() {
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         for args in [
             vec!["--encoder", encoder, "--software-explicit"],
             vec!["--software-explicit", "--encoder", encoder],
             vec!["--encoder", encoder, "--encoder", encoder],
             vec!["--encoder", encoder, "--encoder", "software"],
+            vec!["--encoder", encoder, "--encoder", "auto"],
+            vec!["--encoder", "auto", "--encoder", encoder],
         ] {
             assert!(
                 matches!(parse(&args), Err(Error::InvalidArgument)),
@@ -44,12 +47,12 @@ fn encoder_selection_rejects_ambiguity_in_both_argument_orders() {
 }
 
 #[test]
-fn encoder_selection_does_not_accept_automatic_or_arbitrary_codec_names() {
+fn encoder_selection_does_not_accept_unknown_or_arbitrary_codec_names() {
     for args in [
         vec!["--encoder"],
         vec!["--encoder", "--once"],
         vec!["--encoder", ""],
-        vec!["--encoder", "auto"],
+        vec!["--encoder", "hardware"],
         vec!["--encoder", "h264"],
         vec!["--encoder", "hevc_nvenc"],
         vec!["--encoder", "libx265"],
@@ -67,7 +70,7 @@ fn encoder_selection_does_not_accept_automatic_or_arbitrary_codec_names() {
 
 #[test]
 fn hardware_selection_never_enables_control_audio_or_disables_approval() {
-    for encoder in ["nvenc", "vaapi"] {
+    for encoder in ["nvenc", "vaapi", "auto"] {
         let options = parse(&["--encoder", encoder]).unwrap();
         assert!(options.input_agent.is_none());
         assert!(!options.audio && !options.clipboard);
@@ -76,7 +79,10 @@ fn hardware_selection_never_enables_control_audio_or_disables_approval() {
         assert_eq!(options.sharing, None);
         let local = parse(&["--encoder", encoder, "--approval", "local"]).unwrap();
         assert_eq!(local.approval, Some(Approval::Local));
-        assert_eq!(local.selected_encoder().unwrap(), Encoder::parse(encoder));
+        assert_eq!(
+            local.selected_encoder().unwrap(),
+            EncoderSelection::parse(encoder)
+        );
     }
 }
 
@@ -95,7 +101,10 @@ fn encoder_choice_is_orthogonal_to_other_explicit_features() {
         "c2",
     ])
     .unwrap();
-    assert_eq!(controlled.selected_encoder().unwrap(), Some(Encoder::Nvenc));
+    assert_eq!(
+        controlled.selected_encoder().unwrap(),
+        Some(Encoder::Nvenc.into())
+    );
     assert!(controlled.clipboard && controlled.audio);
     assert_eq!(controlled.input_agent, Some(PathBuf::from("/input")));
     assert_eq!(controlled.files, Some(PathBuf::from("/drop")));
@@ -108,7 +117,10 @@ fn encoder_choice_is_orthogonal_to_other_explicit_features() {
         "--audio",
     ])
     .unwrap();
-    assert_eq!(observed.selected_encoder().unwrap(), Some(Encoder::Vaapi));
+    assert_eq!(
+        observed.selected_encoder().unwrap(),
+        Some(Encoder::Vaapi.into())
+    );
     assert_eq!(
         observed.observation_indicator,
         Some(PathBuf::from("/indicator"))
@@ -118,7 +130,12 @@ fn encoder_choice_is_orthogonal_to_other_explicit_features() {
 
 #[test]
 fn programmatic_conflicts_fail_before_loading_saved_policy() {
-    for encoder in [Encoder::SoftwareExplicit, Encoder::Nvenc, Encoder::Vaapi] {
+    for encoder in [
+        Encoder::SoftwareExplicit.into(),
+        Encoder::Nvenc.into(),
+        Encoder::Vaapi.into(),
+        EncoderSelection::AutomaticHardware,
+    ] {
         let options = RunOptions {
             software_explicit: true,
             encoder: Some(encoder),

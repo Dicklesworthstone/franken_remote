@@ -1,7 +1,7 @@
 //! Strict local command parsing and startup resolution. No filesystem mutation.
 use super::{Approval, Change, Error, Policy, Sharing, Store, default_path};
 use crate::{
-    host_run::{Encoder, video},
+    host_run::{Encoder, EncoderSelection, video},
     native_files::ConflictPolicy,
 };
 mod files;
@@ -41,9 +41,9 @@ pub struct RunOptions {
     /// Legacy explicit CPU HEVC developer profile (ADR 0004). Equivalent to
     /// `--encoder software`, but supplying both selectors is refused.
     pub software_explicit: bool,
-    /// Exact local backend selection, never a codec name received from a peer.
+    /// Local exact backend or explicit hardware-auto selection, never peer input.
     /// Hardware remains experimental until qualified on the actual host.
-    pub encoder: Option<Encoder>,
+    pub encoder: Option<EncoderSelection>,
     /// Local maximum capture/codec frame rate; absent retains 30 fps.
     pub fps: Option<u16>,
     /// Local encoder target bits/s; absent retains 8,000,000. Not a hard
@@ -177,7 +177,7 @@ impl RunOptions {
                 "--trust-roots" => set(&mut options.trust_roots, PathBuf::from(value))?,
                 "--encoder" => set(
                     &mut options.encoder,
-                    Encoder::parse(value).ok_or(Error::InvalidArgument)?,
+                    EncoderSelection::parse(value).ok_or(Error::InvalidArgument)?,
                 )?,
                 "--fps" => set(
                     &mut options.fps,
@@ -253,11 +253,11 @@ impl RunOptions {
     }
     /// Resolve only explicit operator input; absence never selects hardware or
     /// software implicitly. Recheck contradictory programmatically built options.
-    pub fn selected_encoder(&self) -> Result<Option<Encoder>, Error> {
+    pub fn selected_encoder(&self) -> Result<Option<EncoderSelection>, Error> {
         match (self.encoder, self.software_explicit) {
             (Some(_), true) => Err(Error::InvalidArgument),
             (Some(encoder), false) => Ok(Some(encoder)),
-            (None, true) => Ok(Some(Encoder::SoftwareExplicit)),
+            (None, true) => Ok(Some(Encoder::SoftwareExplicit.into())),
             (None, false) => Ok(None),
         }
     }

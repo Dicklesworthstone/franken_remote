@@ -79,16 +79,16 @@ pub fn run_with_policy(
     )
 }
 
-/// Preserve the exact local encoder selection through the indicator gate.
-/// Requiring the UI neither resets hardware to software nor grants permission
-/// to try another backend on native failure. Other host policy is unchanged.
+/// Preserve the local encoder request through the indicator gate. Explicit
+/// automatic hardware selection still requires real startup probes. The UI
+/// never permits software fallback or changes the selected backend later.
 pub fn run_with_policy_and_encoder(
     options: &Options,
     report: &Reporter,
     stop: &Arc<StopHandle>,
     policy: policy::Configuration,
     image: &Path,
-    encoder: Encoder,
+    encoder: impl Into<host_run::EncoderSelection>,
 ) -> Result<(), Error> {
     if stop.is_requested() {
         return Ok(());

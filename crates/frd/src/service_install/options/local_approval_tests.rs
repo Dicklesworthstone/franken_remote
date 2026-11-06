@@ -28,7 +28,7 @@ fn emitted(options: &InstallOptions) -> RunOptions {
 
 #[test]
 fn monitored_local_approval_survives_installation_and_host_argument_parsing() {
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         for clipboard in [None, Some(false), Some(true)] {
             let mut args = vec![
                 "--user",

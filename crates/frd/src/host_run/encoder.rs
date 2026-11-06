@@ -1,35 +1,13 @@
 //! Explicit local encoder selection for the existing supervised HEVC worker.
-//! Selecting a backend is NOT a successful probe, a qualification result or a
-//! reason to bypass native startup/bitstream checks. No automatic substitution
-//! exists: a failed hardware attempt stays failed, including on share restart.
+//! Exact backend requests never substitute another encoder. Explicit automatic
+//! hardware selection uses real startup probes and retains the winner across
+//! shares. Neither mode bypasses native startup/bitstream checks.
 use fr_media::worker::Backend;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Encoder {
-    SoftwareExplicit,
-    Nvenc,
-    Vaapi,
-}
+pub(crate) mod selection;
+pub use selection::{Encoder, Selection};
+
 impl Encoder {
-    /// Exact local CLI names, not peer input or an arbitrary `FFmpeg` codec name.
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "software" => Some(Self::SoftwareExplicit),
-            "nvenc" => Some(Self::Nvenc),
-            "vaapi" => Some(Self::Vaapi),
-            _ => None,
-        }
-    }
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::SoftwareExplicit => "software",
-            Self::Nvenc => "nvenc",
-            Self::Vaapi => "vaapi",
-        }
-    }
-    pub const fn is_hardware(self) -> bool {
-        !matches!(self, Self::SoftwareExplicit)
-    }
     /// The SAME value configures independent observation and controlled capture.
     pub(crate) const fn backend(self) -> Backend {
         match self {

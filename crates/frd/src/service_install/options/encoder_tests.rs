@@ -3,7 +3,7 @@
 use super::*;
 use crate::{
     host_policy::{Approval, Sharing, options::RunOptions},
-    host_run::Encoder,
+    host_run::{Encoder, EncoderSelection},
     service_install::render_systemd_unit,
 };
 
@@ -31,9 +31,10 @@ fn emitted(options: &InstallOptions) -> RunOptions {
 #[test]
 fn encoder_selection_survives_the_rendered_systemd_command_without_fallback() {
     for (name, encoder) in [
-        ("nvenc", Encoder::Nvenc),
-        ("vaapi", Encoder::Vaapi),
-        ("software", Encoder::SoftwareExplicit),
+        ("nvenc", Encoder::Nvenc.into()),
+        ("vaapi", Encoder::Vaapi.into()),
+        ("software", Encoder::SoftwareExplicit.into()),
+        ("auto", EncoderSelection::AutomaticHardware),
     ] {
         let options = parse(&[
             "--user",
@@ -68,7 +69,7 @@ fn encoder_selection_survives_the_rendered_systemd_command_without_fallback() {
 
 #[test]
 fn legacy_software_and_explicit_backend_cannot_both_enter_a_unit() {
-    for name in ["software", "nvenc", "vaapi"] {
+    for name in ["software", "nvenc", "vaapi", "auto"] {
         let conflicting = parse(&[
             "--user",
             "--software-explicit",
@@ -91,7 +92,7 @@ fn legacy_software_and_explicit_backend_cannot_both_enter_a_unit() {
     let legacy = parse(&["--user", "--software-explicit", "--dry-run"]).unwrap();
     assert_eq!(
         emitted(&legacy).selected_encoder().unwrap(),
-        Some(Encoder::SoftwareExplicit)
+        Some(Encoder::SoftwareExplicit.into())
     );
 }
 
@@ -99,9 +100,12 @@ fn legacy_software_and_explicit_backend_cannot_both_enter_a_unit() {
 fn malformed_or_duplicate_encoder_flags_are_refused_before_installation() {
     for tail in [
         vec!["--encoder"],
-        vec!["--encoder", "auto"],
+        vec!["--encoder", "hardware"],
         vec!["--encoder", "libx265"],
         vec!["--encoder", "nvenc", "--encoder", "vaapi"],
+        vec!["--encoder", "auto", "--encoder", "auto"],
+        vec!["--encoder", "auto", "--encoder", "nvenc"],
+        vec!["--encoder", "nvenc", "--encoder", "auto"],
         vec!["--encoder", "software", "--software-explicit"],
         vec!["--encoder", "nvenc", "--once"],
         vec!["--encoder", "nvenc", "--approval", "none"],
@@ -144,59 +148,66 @@ fn encoder_selection_preserves_authority_policy_and_other_explicit_features() {
     .unwrap();
     assert!(options.approval_mode.is_empty() && options.sharing_scope.is_empty());
     let run = emitted(&options);
-    assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Vaapi));
+    assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Vaapi.into()));
     assert!(run.approval.is_none() && run.sharing.is_none());
     assert_eq!(run.input_agent, Some(PathBuf::from("/input")));
     assert!(run.clipboard && run.audio);
     assert_eq!(run.files, Some(PathBuf::from("/drop")));
     assert_eq!(run.logind_session.as_deref(), Some("c2"));
-    assert!(matches!(
-        parse(&[
-            "--user",
-            "--dry-run",
-            "--approval",
-            "local",
-            "--",
-            "--encoder",
-            "nvenc"
-        ]),
-        Err(ServiceError::HostProfileUnavailable {
-            code: "local_approval_unavailable",
-            ..
-        })
-    ));
+    for encoder in ["nvenc", "vaapi", "auto"] {
+        assert!(matches!(
+            parse(&[
+                "--user",
+                "--dry-run",
+                "--approval",
+                "local",
+                "--",
+                "--encoder",
+                encoder
+            ]),
+            Err(ServiceError::HostProfileUnavailable {
+                code: "local_approval_unavailable",
+                ..
+            })
+        ));
+    }
 }
 
 #[test]
 fn hardware_selection_cannot_bypass_system_service_or_platform_restrictions() {
-    assert!(matches!(
-        parse(&["--system", "--dry-run", "--", "--encoder", "nvenc"]),
-        Err(ServiceError::HostProfileUnavailable {
-            code: "system_service_requires_headless",
-            ..
-        })
-    ));
-    let options = parse(&[
-        "--system",
-        "--dry-run",
-        "--",
-        "--encoder",
-        "nvenc",
-        "--headless",
-    ])
-    .unwrap();
-    let run = emitted(&options);
-    assert!(run.headless);
-    assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Nvenc));
-    for kind in [ServiceKind::LaunchdAgent, ServiceKind::WindowsService] {
-        let options = InstallOptions {
-            kind,
-            ..options.clone()
-        };
+    for encoder in ["nvenc", "vaapi", "auto"] {
         assert!(matches!(
-            options.validate(),
-            Err(ServiceError::UnsupportedPlatform { .. })
+            parse(&["--system", "--dry-run", "--", "--encoder", encoder]),
+            Err(ServiceError::HostProfileUnavailable {
+                code: "system_service_requires_headless",
+                ..
+            })
         ));
+        let options = parse(&[
+            "--system",
+            "--dry-run",
+            "--",
+            "--encoder",
+            encoder,
+            "--headless",
+        ])
+        .unwrap();
+        let run = emitted(&options);
+        assert!(run.headless);
+        assert_eq!(
+            run.selected_encoder().unwrap(),
+            EncoderSelection::parse(encoder)
+        );
+        for kind in [ServiceKind::LaunchdAgent, ServiceKind::WindowsService] {
+            let options = InstallOptions {
+                kind,
+                ..options.clone()
+            };
+            assert!(matches!(
+                options.validate(),
+                Err(ServiceError::UnsupportedPlatform { .. })
+            ));
+        }
     }
 }
 
@@ -213,7 +224,7 @@ fn a_hardware_view_only_service_retains_the_validated_observation_indicator() {
     ])
     .unwrap();
     let run = emitted(&options);
-    assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Vaapi));
+    assert_eq!(run.selected_encoder().unwrap(), Some(Encoder::Vaapi.into()));
     assert_eq!(
         run.observation_indicator,
         Some(PathBuf::from("/usr/libexec/fr-observation-indicator"))

@@ -84,10 +84,13 @@ fn video_duplicate_and_valueless_flags_refuse_in_either_order() {
 
 #[test]
 fn video_options_do_not_select_a_codec_or_enable_authority_and_optional_lanes() {
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         let options =
             parse(&["--encoder", encoder, "--fps", "60", "--bitrate", "12000000"]).unwrap();
-        assert_eq!(options.selected_encoder().unwrap(), Encoder::parse(encoder));
+        assert_eq!(
+            options.selected_encoder().unwrap(),
+            EncoderSelection::parse(encoder)
+        );
         assert_eq!(
             options.video_profile().unwrap(),
             video::Profile::new(60, 12_000_000).unwrap()
@@ -131,7 +134,7 @@ fn video_programmatic_invalid_options_refuse_before_policy_resolution() {
 
 #[test]
 fn video_rate_targets_survive_systemd_render_and_the_actual_host_parser() {
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         let options = InstallOptions {
             kind: ServiceKind::SystemdUser,
             exec_path: PathBuf::from("/usr/bin/frd"),
@@ -158,7 +161,10 @@ fn video_rate_targets_survive_systemd_render_and_the_actual_host_parser() {
             parsed.video_profile().unwrap(),
             video::Profile::new(60, 12_000_000).unwrap()
         );
-        assert_eq!(parsed.selected_encoder().unwrap(), Encoder::parse(encoder));
+        assert_eq!(
+            parsed.selected_encoder().unwrap(),
+            EncoderSelection::parse(encoder)
+        );
         assert_eq!(parsed.approval, Some(Approval::None));
         assert!(!command.contains("--software-explicit"));
         assert_eq!(command.matches("--fps").count(), 1);
@@ -217,7 +223,7 @@ fn adaptive_capture_is_an_explicit_boolean_and_does_not_change_the_codec_target(
     );
     assert_eq!(
         options.selected_encoder().unwrap(),
-        Some(Encoder::SoftwareExplicit)
+        Some(Encoder::SoftwareExplicit.into())
     );
     assert!(options.approval.is_none() && options.sharing.is_none());
     assert!(!options.audio && options.files.is_none());

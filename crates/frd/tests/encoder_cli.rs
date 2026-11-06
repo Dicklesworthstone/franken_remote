@@ -123,6 +123,7 @@ fn the_real_cli_reaches_native_preflight_for_every_explicit_encoder() {
         &["--encoder", "nvenc"][..],
         &["--encoder", "vaapi"][..],
         &["--encoder", "software"][..],
+        &["--encoder", "auto"][..],
         &["--software-explicit"][..],
     ] {
         // Restoring the old software-only guard would fail the hardware cases
@@ -140,12 +141,17 @@ fn missing_ambiguous_or_invalid_encoder_selection_never_starts_the_host() {
         absent["detail"]
             .as_str()
             .unwrap()
-            .contains("no automatic encoder selection")
+            .contains("choose an encoder explicitly")
     );
     for args in [
-        &["--encoder", "auto"][..],
+        &["--encoder", "hardware"][..],
         &["--encoder", "nvenc", "--software-explicit"][..],
         &["--encoder", "vaapi", "--encoder", "software"][..],
+        &["--encoder", "auto", "--software-explicit"][..],
+        &["--software-explicit", "--encoder", "auto"][..],
+        &["--encoder", "auto", "--encoder", "auto"][..],
+        &["--encoder", "auto", "--encoder", "nvenc"][..],
+        &["--encoder", "nvenc", "--encoder", "auto"][..],
     ] {
         let value = fixture.run(args);
         assert_eq!(value["code"], "invalid_host_policy");
@@ -157,7 +163,7 @@ fn missing_ambiguous_or_invalid_encoder_selection_never_starts_the_host() {
 fn hardware_selection_cannot_bypass_saved_or_explicit_local_approval() {
     let saved = Fixture::new(Approval::Local, true);
     let explicit = Fixture::new(Approval::None, true);
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         assert_eq!(
             saved.run(&["--encoder", encoder])["code"],
             "local_approval_unavailable"
@@ -178,7 +184,7 @@ fn hardware_selection_cannot_bypass_saved_or_explicit_local_approval() {
 #[test]
 fn encoder_selection_does_not_replace_the_installed_tailnet_requirement() {
     let missing = Fixture::new(Approval::None, false);
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         assert_eq!(
             missing.run(&["--encoder", encoder])["code"],
             "tailscale_unavailable"
@@ -189,7 +195,7 @@ fn encoder_selection_does_not_replace_the_installed_tailnet_requirement() {
 #[test]
 fn real_cli_accepts_video_rate_targets_for_all_encoders_without_starting_native_work() {
     let fixture = Fixture::new(Approval::None, true);
-    for encoder in ["software", "nvenc", "vaapi"] {
+    for encoder in ["software", "nvenc", "vaapi", "auto"] {
         for (fps, bitrate) in [("1", "10000"), ("60", "12000000"), ("240", "200000000")] {
             assert_eq!(
                 fixture.run(&["--encoder", encoder, "--fps", fps, "--bitrate", bitrate])["code"],
@@ -226,7 +232,9 @@ fn real_cli_refuses_invalid_or_ambiguous_video_rates_before_native_or_network_wo
 fn video_rates_cannot_bypass_local_approval_or_the_installed_tailnet_requirement() {
     let local = Fixture::new(Approval::Local, true);
     let missing = Fixture::new(Approval::None, false);
-    let args = ["--encoder", "nvenc", "--fps", "60", "--bitrate", "12000000"];
-    assert_eq!(local.run(&args)["code"], "local_approval_unavailable");
-    assert_eq!(missing.run(&args)["code"], "tailscale_unavailable");
+    for encoder in ["nvenc", "vaapi", "auto"] {
+        let args = ["--encoder", encoder, "--fps", "60", "--bitrate", "12000000"];
+        assert_eq!(local.run(&args)["code"], "local_approval_unavailable");
+        assert_eq!(missing.run(&args)["code"], "tailscale_unavailable");
+    }
 }
