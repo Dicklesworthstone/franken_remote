@@ -311,6 +311,12 @@ they do not negotiate another file lane or renew authority. Each submitted
 selection has a fresh status/cancellation handle and an absolute submission-time
 deadline. Earlier receipts remain available after later failures.
 
+If a stale view suspends source admission after a selection was accepted, its
+Cancel request and original submission deadline still run on ordinary owner
+turns. Either retires the queued selection and releases its descriptors without
+starting a disk source or closing the desktop. An expired selection reports
+`Expired`; becoming ready later never replays it.
+
 For `--file-drop` without an initial source, `NativeObserver::configure_file_drop`
 and `Desktop::configure_file_drop` use the same owner, attachment and fixed
 sender policy. The initial panel has only Cancel, with no transfer percentage

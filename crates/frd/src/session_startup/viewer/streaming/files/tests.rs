@@ -17,6 +17,9 @@ struct Peer {
     cancels: usize,
     polls: usize,
     cancel_on_ready: Option<SendControl>,
+    admission_blocked: bool,
+    readiness_checks: usize,
+    terminal_before_report: Option<SendControl>,
 }
 impl Default for Peer {
     fn default() -> Self {
@@ -32,6 +35,9 @@ impl Default for Peer {
             cancels: 0,
             polls: 0,
             cancel_on_ready: None,
+            admission_blocked: false,
+            readiness_checks: 0,
+            terminal_before_report: None,
         }
     }
 }
@@ -64,10 +70,11 @@ impl Endpoint for Peer {
         Ok(())
     }
     fn can_start(&mut self) -> bool {
+        self.readiness_checks += 1;
         if let Some(control) = self.cancel_on_ready.take() {
             assert!(control.cancel(), "the setup owner has not handed off yet");
         }
-        !self.closed && self.stage == Some(Stage::Idle)
+        !self.closed && !self.admission_blocked && self.stage == Some(Stage::Idle)
     }
     fn cancel(&mut self) -> Result<(), Error> {
         assert!(
@@ -83,6 +90,13 @@ impl Endpoint for Peer {
         self.cleanup
     }
     fn report(&self) -> Option<Report> {
+        if let Some(control) = &self.terminal_before_report {
+            assert_eq!(
+                control.status().phase,
+                SendPhase::Ended,
+                "a queued terminal request cannot wait behind another source's report"
+            );
+        }
         None
     }
     fn progress(&self) -> Option<Progress> {
@@ -419,4 +433,116 @@ fn cancelling_between_readiness_check_and_selection_handoff_cannot_start_a_sourc
     deferred.viewer(&mut peer);
     assert_eq!(peer.starts, 0);
     assert_eq!(peer.cancels, 1);
+}
+
+fn queued_request_ends_while_source_admission_is_blocked(reason: Error, direct_source: bool) {
+    use asupersync::{
+        runtime::RuntimeBuilder,
+        time::{TimerDriverHandle, VirtualClock},
+        types::{Budget, Time},
+    };
+    use std::sync::Arc;
+    let clock = Arc::new(VirtualClock::new());
+    let runtime = RuntimeBuilder::current_thread()
+        .with_timer_driver(TimerDriverHandle::with_virtual_clock(clock.clone()))
+        .build()
+        .unwrap();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let setup = SendControl::new();
+    let intake = SendIntake::new(cx, Policy::default());
+    let mut deferred = Lane::deferred(Policy::default(), setup.clone());
+    deferred.set_intake(intake.clone());
+    let mut peer = Peer::default();
+    established(&mut deferred, &mut peer);
+    deferred.viewer(&mut peer);
+    assert!(intake.ready());
+    let (mut selected, _) = lane();
+    let pending = intake.submit(selected.request.take().unwrap()).unwrap();
+
+    // The view became stale after local selection admission. The session and
+    // completed file lane remain live, but no new disk source can be started.
+    peer.admission_blocked = true;
+    clock.advance_to(Time::from_millis(12_000));
+    deferred.viewer(&mut peer);
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.cancels, 0);
+    assert_eq!(pending.status().phase, SendPhase::WaitingForControl);
+    assert!(pending.status().absence.is_none());
+    assert!(!intake.is_closed());
+    let checks = peer.readiness_checks;
+
+    if direct_source {
+        // Public StreamingViewer UI callbacks can start a separate single-file
+        // source between intake submission and its next turn. It has no batch
+        // report, and cancellation of the queued selection must not touch it.
+        peer.stage = Some(Stage::Streaming);
+        peer.progress = Some(Progress {
+            id: 77,
+            queued_bytes: 7,
+            total_bytes: Some(100),
+        });
+    }
+
+    if reason == Error::Cancelled {
+        assert!(pending.cancel());
+    } else {
+        assert_eq!(reason, Error::Expired);
+        clock.advance_to(Time::from_millis(13_000)); // Exact original submission deadline.
+    }
+    // The pending request must be retired before asking for a potentially
+    // incomplete direct-batch report, which can otherwise make the owner return.
+    peer.terminal_before_report = Some(pending.clone());
+    deferred.viewer(&mut peer);
+    assert_eq!(peer.readiness_checks, checks);
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.cancels, 0);
+    assert!(!peer.closed);
+    assert!(intake.is_closed());
+    assert!(intake.take().is_none());
+    assert!(deferred.request.is_none());
+    assert_eq!(pending.status().phase, SendPhase::Ended);
+    assert_eq!(pending.status().absence, Some(Absence::Refused(reason)));
+    assert_eq!(pending.snapshot().cleanup, Some(Ok(())));
+    assert!(pending.status().report.is_none());
+    assert!(pending.snapshot().current.is_none());
+    assert!(pending.snapshot().stage.is_none());
+    assert_eq!(setup.status().phase, SendPhase::Ended);
+    assert!(!setup.cancel());
+    assert!(!pending.cancel() && !pending.pause() && !pending.resume());
+
+    // A later fresh view cannot revive or replay the cancelled/expired request.
+    peer.admission_blocked = false;
+    for _ in 0..3 {
+        deferred.viewer(&mut peer);
+    }
+    assert_eq!(peer.starts, 0);
+    assert_eq!(peer.cancels, 0);
+    if direct_source {
+        assert_eq!(peer.stage, Some(Stage::Streaming));
+        assert_eq!(peer.progress.unwrap().id, 77);
+    } else {
+        assert_eq!(peer.stage, Some(Stage::Idle));
+    }
+    assert_eq!(pending.status().absence, Some(Absence::Refused(reason)));
+    assert!(pending.snapshot().current.is_none());
+}
+
+#[test]
+fn queued_cancel_retires_without_waiting_for_a_fresh_view() {
+    queued_request_ends_while_source_admission_is_blocked(Error::Cancelled, false);
+}
+
+#[test]
+fn queued_deadline_expires_without_waiting_for_a_fresh_view() {
+    queued_request_ends_while_source_admission_is_blocked(Error::Expired, false);
+}
+
+#[test]
+fn queued_cancel_neither_stops_a_direct_source_nor_inherits_its_progress() {
+    queued_request_ends_while_source_admission_is_blocked(Error::Cancelled, true);
+}
+
+#[test]
+fn queued_expiry_neither_stops_a_direct_source_nor_inherits_its_progress() {
+    queued_request_ends_while_source_admission_is_blocked(Error::Expired, true);
 }

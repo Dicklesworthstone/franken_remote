@@ -269,7 +269,8 @@ impl Sending {
             return;
         };
         intake.set_ready(false);
-        if viewer.closed()
+        if intake.is_closed()
+            || viewer.closed()
             || viewer.stage() == Some(Stage::Closed)
             || self.cancelled
             || self.control.cancel_requested()
@@ -279,6 +280,13 @@ impl Sending {
             return;
         }
         if !self.expecting || viewer.negotiating() || self.request.is_some() {
+            return;
+        }
+        // Cancellation and the submission-time deadline belong to the queued
+        // selection, not to a fresh-view/source-admission check or another
+        // source's outstanding report. No sender has ever owned this request.
+        if let Some((pending, error)) = intake.take_terminal() {
+            self.retire_pending(pending.request, pending.control, error);
             return;
         }
         if let Some(report) = viewer.report() {
@@ -320,6 +328,21 @@ impl Sending {
             self.cancelled = false;
         } else {
             intake.set_ready(true);
+        }
+    }
+    fn retire_pending(&mut self, request: SendRequest, control: SendControl, error: Error) {
+        // A public UI callback may have started a direct file operation since
+        // the intake accepted this request. Retire only these queued descriptors
+        // and their exact handle: never cancel that source or inherit its report.
+        drop(request);
+        control.end(Absence::Refused(error));
+        control.cleaned(Some(Ok(())));
+        self.close_intake();
+        if self.deferred {
+            self.deferred = false;
+            // The empty setup handle can no longer accept a first selection.
+            // Never replace an earlier selection's status/receipt handle here.
+            self.control.end(Absence::Refused(error));
         }
     }
     /// Called on ordinary turns AND after final parent cleanup. Keep the real

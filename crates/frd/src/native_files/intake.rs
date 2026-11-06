@@ -129,6 +129,29 @@ impl SendIntake {
     pub(crate) fn take(&self) -> Option<Pending> {
         self.lock().pending.take()
     }
+    /// Retire a queued selection's local cancellation/deadline without waiting
+    /// for source admission. A stale view may hold `take` back indefinitely, but
+    /// cannot extend this request's original lifetime or retain cancelled files.
+    /// The returned request has never entered a sender or started a disk worker.
+    pub(crate) fn take_terminal(&self) -> Option<(Pending, Error)> {
+        let mut state = self.lock();
+        let pending = state.pending.as_ref()?;
+        let until = pending.until_us;
+        let reason = if pending.control.cancel_requested() {
+            Some(Error::Cancelled)
+        } else {
+            match self.now() {
+                Err(error) => Some(error),
+                Ok(now) if now < state.last => Some(Error::Clock),
+                Ok(now) => {
+                    state.last = now;
+                    (now >= until).then_some(Error::Expired)
+                }
+            }
+        }?;
+        state.ready = false;
+        state.pending.take().map(|pending| (pending, reason))
+    }
     pub(crate) fn close(&self) {
         let pending = {
             let mut state = self.lock();
