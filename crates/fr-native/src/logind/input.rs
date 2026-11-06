@@ -96,6 +96,14 @@ impl<S: InputSink> InputSink for Gate<S> {
     fn cancel_prepared(&mut self) {
         self.inner.cancel_prepared();
     }
+    // Lifecycle evidence cannot hide the native owner's independent negative
+    // authority. The canonical input loop polls these even without new input.
+    fn locally_revoked(&mut self) -> bool {
+        self.inner.locally_revoked()
+    }
+    fn native_failed(&mut self) -> bool {
+        self.inner.native_failed()
+    }
     fn repeat_requires_pair(&self) -> bool {
         self.inner.repeat_requires_pair()
     }

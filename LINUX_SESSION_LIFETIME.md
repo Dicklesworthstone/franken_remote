@@ -115,6 +115,11 @@ packet arrives. No second runtime, watchdog queue or input sink is introduced.
 Its Shutdown result comes from the original native cleanup owner. Unpolled Drop
 still requests canonical abandonment; it does not assert synchronous native reap.
 
+The input gate also forwards the wrapped native owner's local-revoke and failure
+signals. The original native loop can therefore stop an idle lease and release
+held input even while logind still reports Active. The first native stop cause is
+retained; clearing a backend diagnostic cannot reactivate the retired owner.
+
 Additional tests use a private real Xvfb server and an independent Xlib connection
 to observe held Shift/button state, not only a submission receipt. Synthetic
 logind lock or lost replies cause actual release without another input packet;

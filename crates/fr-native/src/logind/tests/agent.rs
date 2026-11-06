@@ -494,3 +494,157 @@ fn abandoned_local_event_adapter_fences_its_source_not_the_broker() {
     // dropping this read-only association is not proof of completed cleanup.
     finish(&mut watch);
 }
+
+mod native_stop {
+    use super::*;
+    use asupersync::time::{TimerDriverHandle, VirtualClock};
+    use fr_core::{
+        input::{InputEvent, InputRequest},
+        input_sequence::InputOutcome,
+        input_submission::{Dispatch, InputMonitor},
+        limits::ProtocolLimits,
+    };
+    use fr_wire::input::{InputDelivery, InputDirection, MAX_INPUT_RECORD_BYTES, encode_input};
+    use frd::{
+        input_agent::{Error as AgentError, Phase, Reply, Route, Seat},
+        input_watchdog::StopReason as NativeReason,
+    };
+
+    // Native events and OS effects are explicit fixtures. The original
+    // authority, guarded sink, idle native loop and cleanup are production code.
+    struct Native {
+        signals: Arc<AtomicU8>,
+        effects: Arc<Mutex<Vec<Operation>>>,
+        monitor: InputMonitor,
+    }
+    impl InputSink for Native {
+        fn prepare(&mut self, _: Operation) -> Result<(), PlatformError> {
+            Ok(())
+        }
+        fn submit(&mut self, operation: Operation) -> Submission {
+            assert_eq!(operation.is_release(), self.monitor.is_revoked());
+            self.effects.lock().unwrap().push(operation);
+            Submission::Submitted
+        }
+        fn locally_revoked(&mut self) -> bool {
+            self.signals.load(Ordering::Acquire) & 1 != 0
+        }
+        fn native_failed(&mut self) -> bool {
+            self.signals.load(Ordering::Acquire) & 2 != 0
+        }
+    }
+
+    fn idle_stop(signals: u8, expected: NativeReason) {
+        let _serial = SERIAL.lock().unwrap();
+        let peer = Peer::new(Data::default());
+        let mut watch = start(&peer);
+        active(&watch);
+        // Keep host authority live independent of test-thread scheduling. A
+        // masked native stop must not pass because the lease eventually expires.
+        let clock = Arc::new(VirtualClock::new());
+        let rt = RuntimeBuilder::new()
+            .worker_threads(1)
+            .with_timer_driver(TimerDriverHandle::with_virtual_clock(clock))
+            .build()
+            .unwrap();
+        let cx = rt.request_cx_with_budget(Budget::INFINITE);
+        let owner = input_support::session(&cx);
+        let monitor = owner.monitor();
+        let events = Arc::new(AtomicU8::new(0));
+        let effects = Arc::new(Mutex::new(Vec::new()));
+        let native = Native {
+            signals: events.clone(),
+            effects: effects.clone(),
+            monitor: monitor.clone(),
+        };
+        let gate = Gate::new(native, watch.control(), monitor.clone());
+        let seat = Seat::default();
+        let (mut agent, driver) = seat
+            .start(
+                cx,
+                owner,
+                Route::new(7, ProtocolLimits::ABSOLUTE),
+                move || Ok(gate),
+                |_| true,
+            )
+            .unwrap();
+        let key = PhysicalKey::new(0xe1).unwrap();
+        let mut bytes = [0; MAX_INPUT_RECORD_BYTES];
+        let length = encode_input(
+            InputRequest {
+                credentials: input_support::credentials(),
+                sequence: 0,
+                event: InputEvent::Key {
+                    key,
+                    transition: KeyTransition::Press,
+                },
+            },
+            &mut bytes,
+            &ProtocolLimits::ABSOLUTE,
+            7,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        agent
+            .submit(&bytes[..length], InputDelivery::Reliable)
+            .unwrap();
+        let mut response = None;
+        wait(|| {
+            response = agent.try_reply().unwrap();
+            response.is_some()
+        });
+        let Some(Reply::Input(Ok(Dispatch::Completed(receipt)))) = response else {
+            panic!("original input owner did not return a receipt");
+        };
+        assert_eq!(receipt.outcome, InputOutcome::SubmittedToOs);
+        assert_eq!(receipt.submitted_operations, 1);
+        assert!(!monitor.is_revoked());
+        assert!(!agent.control().is_stopped());
+
+        // No new remote action, stop request, clock advance or logind event.
+        events.store(signals, Ordering::Release);
+        wait(|| agent.status().phase == Phase::Finished);
+        let shutdown = rt.block_on(driver);
+        assert_eq!(shutdown.reason, expected);
+        assert!(shutdown.handoff_safe());
+        assert!(monitor.is_revoked());
+        assert!(!seat.is_occupied());
+        assert_eq!(watch.control().status(), Status::Active);
+        let expected_effects = [
+            Operation::Key {
+                key,
+                transition: KeyTransition::Press,
+            },
+            Operation::Key {
+                key,
+                transition: KeyTransition::Release,
+            },
+        ];
+        assert_eq!(effects.lock().unwrap().as_slice(), expected_effects);
+        // Clearing native diagnostics cannot reactivate the retired owner or
+        // execute a replay of its previously submitted action.
+        events.store(0, Ordering::Release);
+        assert_eq!(
+            agent.submit(&bytes[..length], InputDelivery::Reliable),
+            Err(AgentError::Stopped)
+        );
+        assert_eq!(effects.lock().unwrap().as_slice(), expected_effects);
+        finish(&mut watch);
+    }
+
+    #[test]
+    fn local_revoke_through_logind_gate_stops_idle_owner_and_releases_held_key() {
+        idle_stop(1, NativeReason::LocalRevoke);
+    }
+
+    #[test]
+    fn native_failure_through_logind_gate_stops_idle_owner_and_releases_held_key() {
+        idle_stop(2, NativeReason::NativeFailure);
+    }
+
+    #[test]
+    fn local_revoke_keeps_priority_when_the_guarded_backend_also_fails() {
+        idle_stop(3, NativeReason::LocalRevoke);
+    }
+}
