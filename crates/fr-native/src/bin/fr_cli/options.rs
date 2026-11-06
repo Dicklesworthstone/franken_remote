@@ -1,6 +1,9 @@
 use super::Failure;
 use std::{collections::BTreeSet, path::PathBuf};
 
+#[path = "options/doctor.rs"]
+mod doctor;
+pub use doctor::{DoctorOptions, NativeDoctorOptions};
 #[path = "options/receive.rs"]
 mod receive;
 pub use receive::ReceiveOptions;
@@ -115,10 +118,6 @@ pub enum SavedHostAction {
 }
 pub struct SavedSelection {
     pub file: Option<PathBuf>,
-}
-pub struct DoctorOptions {
-    pub port: u16,
-    pub roots: Option<PathBuf>,
 }
 pub struct Target {
     pub saved: Option<SavedSelection>,
@@ -725,7 +724,7 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
             parse_saved_hosts(args)
         }
         "hosts" => hosts::parse(args),
-        "doctor" => parse_command(args, 1, None, false, true, false),
+        "doctor" => doctor::parse(args),
         "connect" | "displays" => {
             let node = args.get(1).ok_or_else(usage)?;
             let choose_host = args[0] == "connect" && node == "--choose-host";
@@ -737,7 +736,6 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
                 2,
                 (!choose_host).then(|| node.clone()),
                 args[0] == "displays",
-                false,
                 choose_host,
             )
         }
@@ -764,7 +762,6 @@ fn parse_command(
     mut index: usize,
     node: Option<String>,
     inspect: bool,
-    doctor: bool,
     choose_host: bool,
 ) -> Result<Options, Failure> {
     let remote = node.is_some() || choose_host;
@@ -856,9 +853,9 @@ fn parse_command(
             }
             "--fit" if connect => fit_window = Some(fitted_size(next_arg(args, &mut index)?)?),
             "--worker" if connect => worker = Some(next_path(args, &mut index)?),
-            "--trust-roots" if remote || doctor => roots = Some(next_path(args, &mut index)?),
+            "--trust-roots" if remote => roots = Some(next_path(args, &mut index)?),
             "--x-display" if connect => x_display = Some(next_arg(args, &mut index)?.to_string()),
-            "--port" if remote || doctor => port = next_port(args, &mut index)?,
+            "--port" if remote => port = next_port(args, &mut index)?,
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             "--send" if connect => send.push(next_path(args, &mut index)?),
             "--file-drop" if connect => file_drop = true,
@@ -1030,11 +1027,6 @@ fn parse_command(
                 receive,
             })
         }
-    } else if doctor {
-        if port == 0 {
-            return Err(usage());
-        }
-        Command::Doctor(DoctorOptions { port, roots })
     } else {
         Command::Hosts
     };

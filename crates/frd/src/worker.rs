@@ -229,7 +229,9 @@ impl Launch {
                 // As for every worker: end the whole group, then reap.
                 crate::input_process::kill_group(&child);
                 let _ = child.kill();
-                let _ = child.wait();
+                child
+                    .wait()
+                    .map_err(|error| Error::SpawnFailed(error.into()))?;
                 return outcome;
             }
         };

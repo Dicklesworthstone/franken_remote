@@ -11,6 +11,8 @@ mod display_change;
 mod displays;
 #[path = "linux/doctor.rs"]
 mod doctor;
+#[path = "linux/doctor_native.rs"]
+mod doctor_native;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/files.rs"]
 mod files;
@@ -326,6 +328,16 @@ async fn await_shutdown<T>(
 }
 pub fn run(options: &Options) -> Result<String, Failure> {
     run_mode(options, false)
+}
+/// Local diagnostic children finish before any runtime or tailnet lookup.
+pub fn probe_native(options: &Options) -> Option<Result<(String, u8), Failure>> {
+    let Command::Doctor(doctor) = &options.command else {
+        return None;
+    };
+    doctor
+        .native
+        .as_ref()
+        .map(|native| doctor_native::run(native, options.json))
 }
 pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
     run_mode(options, true)

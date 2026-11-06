@@ -9,6 +9,9 @@ fr hosts --probe --experimental-native [--probe-limit 1..64]
     [--json] [--socket PATH]
 fr status [--json] [--socket PATH]
 fr doctor [--port 8443] [--socket PATH] [--trust-roots /absolute/ca-roots.pem] [--json]
+fr doctor --probe-native --worker /absolute/fr-media-worker
+    --encoder software|nvenc|vaapi --x-display :N [--xauthority /absolute/cookie]
+    [--input-agent /absolute/fr-input-agent] [--json]
 fr inspect NODE_ID [--by-name] [--probe --experimental-native] [--port 8443]
     [--trust-roots /absolute/ca-roots.pem] [--ipv6] [--socket PATH] [--json]
 fr disconnect NODE_ID [--socket PATH] [--json]
@@ -50,6 +53,14 @@ Help reads no local service or desktop and accepts no target or operational opti
 
 Discovery and connection:
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
+Doctor --probe-native separately captures one local root-display picture and tries
+the explicitly selected HEVC encoder; --input-agent adds capability discovery with
+no injected input. It runs before any runtime/tailnet access, kills and reaps its
+bounded probe children, and reports scoped results plus actionable failures.
+No backend fallback, decoder/presenter proof or sustained-performance claim.
+Use an explicit local X display and installed worker; worker/cookie paths and
+captured content are never printed. Exit 1 means a requested probe failed or was
+blocked; other capabilities stay not_tested. Tailnet options cannot be combined.
 Discovery/inspect uses installed Tailscale metadata. --by-name requires an exact
 canonical tailnet FQDN, never arbitrary DNS/a URL. --probe reads authenticated frd
 capabilities, opening no approval, observation or input; it grants no access.

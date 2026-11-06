@@ -516,7 +516,9 @@ pub fn probe(launch: &ProcessLaunch) -> Result<Capabilities, PlatformError> {
     })();
     // Nothing to release: end the one-shot child whatever it replied.
     kill_group(&child);
-    let _ = child.wait();
+    // Readiness is usable only after collecting the original probe child.
+    // A reply cannot turn uncertain cleanup into permission to start serving.
+    child.wait().map_err(|_| PlatformError::Unavailable)?;
     result
 }
 /// Launch the locally selected image with a cleared environment, the private

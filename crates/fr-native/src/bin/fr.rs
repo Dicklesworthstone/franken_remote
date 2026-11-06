@@ -163,6 +163,19 @@ fn main() -> ExitCode {
         };
     }
     #[cfg(target_os = "linux")]
+    if let Some(result) = linux::probe_native(&parsed) {
+        return match result {
+            Ok((text, exit)) => {
+                if output::write(&text).is_ok() {
+                    ExitCode::from(exit)
+                } else {
+                    ExitCode::from(74)
+                }
+            }
+            Err(failure) => finish(Err(failure), parsed.json),
+        };
+    }
+    #[cfg(target_os = "linux")]
     let result = linux::run(&parsed);
     #[cfg(not(target_os = "linux"))]
     let result = Err(Failure::new(

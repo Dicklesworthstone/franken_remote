@@ -258,8 +258,8 @@ pub struct DoctorRestrictionReport {
 }
 
 impl DoctorReport {
-    /// `fr doctor` probes identity, ports and (on request) the certificate
-    /// only; every OS permission row stays `not_tested` until a probe fills it.
+    /// Ordinary `fr doctor` checks tailnet state. Explicit local probe mode
+    /// replaces only the permission rows established by an actual probe.
     pub fn unmeasured_permissions() -> Vec<DoctorPermissionReport> {
         [
             "screen_capture",
@@ -278,7 +278,8 @@ impl DoctorReport {
         .collect()
     }
 
-    /// No media, input, clipboard, audio or transfer probe runs in `fr doctor`.
+    /// Start every capability unmeasured. Explicit local probe mode replaces
+    /// only the rows for its selected capture/encoder and optional input agent.
     pub fn unmeasured_capabilities() -> Vec<DoctorCapabilityReport> {
         [
             "video_encode",

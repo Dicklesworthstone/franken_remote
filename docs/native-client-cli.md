@@ -50,6 +50,46 @@ omitted candidates stay explicit. This opens no observation, media or input.
 The advertisement does not qualify the current desktop or codec; see
 [bounded capability discovery](../NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery).
 
+## Check local capture, encoding and input readiness
+
+Ordinary `fr doctor` checks the installed Tailscale identity, service port and,
+when requested, certificate lifecycle. The explicit local probe mode works
+without Tailscale or an async runtime:
+
+```sh
+./target/debug/fr doctor --probe-native \
+  --worker /absolute/fr-media-worker --encoder nvenc --x-display :0 \
+  --xauthority /absolute/Xauthority --input-agent /absolute/fr-input-agent --json
+```
+
+Choose exactly `nvenc`, `vaapi`, or `software`; the selected backend is tried
+once and never replaced by another. The worker captures one real X11 root-display
+picture, encodes it, and applies the normal HEVC IDR admission checks. Its existing
+supervisor allows at most fifteen seconds, then ends and reaps the worker group.
+This proves one capture and admitted IDR for that display/backend; it does not
+measure decoding, presentation, sustained performance, a selected monitor, or a
+remote session. A combined capture/encode refusal cannot identify an individual
+capture failure, so that separate row remains `not_tested`.
+
+The optional input-agent probe uses its existing five-second startup bound and
+discovers the operations the real executor advertises on the selected display.
+It checks the core keys, repeat, absolute-pointer and button operations required
+by native control, and lists any additional discovered operations. It injects
+no input and makes no claim that an application received an event. All probes
+finish before network or runtime initialization; no connection or input lease
+is created. The selected binaries remain part of the trusted local installation.
+
+The report includes a `local_native_probe` scope, explicit display and encoder,
+typed capability rows and actionable refusal codes. It omits executable and
+Xauthority paths, captured pixels and codec payloads. Decode, clipboard, audio,
+files and unrequested input remain `not_tested`. Exit status is zero when all
+requested probes pass, one when a requested probe fails or is blocked, and two
+for invalid arguments. Run ordinary `fr doctor` separately for tailnet and
+certificate checks; `--port`, `--socket` and `--trust-roots` are rejected in local
+probe mode. `--worker`, `--encoder` and `--x-display` are required, while
+`--xauthority` and `--input-agent` are optional; neither display selection nor
+desktop capture is inferred from the environment.
+
 ## Choose a machine in the native window
 
 ```sh
