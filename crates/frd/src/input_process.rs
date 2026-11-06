@@ -54,6 +54,7 @@ pub struct InvalidLaunch;
 /// Locally selected package image and graphical-session context. Never build
 /// this from a peer path, argv or environment. The environment is cleared; the
 /// child gets only DISPLAY, optional XAUTHORITY and `--parent-pid`.
+#[derive(Clone)]
 pub struct ProcessLaunch {
     pub(crate) image: PathBuf,
     pub(crate) display: String,
