@@ -195,6 +195,104 @@ fn start(sender: &mut Sender, elapsed: u64) -> CapturePermit {
 }
 
 #[test]
+fn local_panel_is_muted_until_an_explicit_talk_and_false_does_not_end_idle_control() {
+    let (_input, mut sender) = attached();
+    let requested = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let panel = requested.clone();
+    sender.set_local_talk_check(Arc::new(move || {
+        let token = panel.load(Ordering::Acquire);
+        (token != 0).then_some(token)
+    }));
+    sender.set_permission(MicPermission::Granted);
+    assert_eq!(sender.pending_configuration(now(1)), Ok(None));
+    assert_eq!(sender.status(), Status::Muted);
+    assert_eq!(
+        sender.begin_talk(MicTalkMode::OpenMic { active: true }, now(2)),
+        Err(Error::Permission)
+    );
+    assert_eq!(sender.pending_configuration(now(3)), Ok(None));
+    requested.store(1, Ordering::Release);
+    assert_eq!(sender.pending_configuration(now(4)), Ok(None));
+    assert_eq!(
+        sender.status(),
+        Status::Muted,
+        "permission alone cannot talk"
+    );
+    let _explicit = sender
+        .begin_talk(MicTalkMode::OpenMic { active: true }, now(5))
+        .unwrap();
+    assert!(sender.pending_configuration(now(6)).unwrap().is_some());
+}
+
+#[test]
+fn local_mute_fences_queued_configuration_without_waiting_for_the_session_task() {
+    let (_input, mut sender) = attached();
+    let requested = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let panel = requested.clone();
+    sender.set_local_talk_check(Arc::new(move || {
+        let token = panel.load(Ordering::Acquire);
+        (token != 0).then_some(token)
+    }));
+    sender.set_permission(MicPermission::Granted);
+    let original = sender
+        .begin_talk(MicTalkMode::OpenMic { active: true }, now(0))
+        .unwrap();
+    let retained = sender.configuration_permit().unwrap();
+    sender.configuration_sent(now(1)).unwrap();
+    requested.store(0, Ordering::Release);
+    // The native owner never samples the entire intervening mute interval.
+    requested.store(2, Ordering::Release);
+    assert!(
+        !retained.valid(now(3)),
+        "a new UI action cannot revive old bytes"
+    );
+    sender.mute();
+    let replacement = sender
+        .begin_talk(MicTalkMode::OpenMic { active: true }, now(4))
+        .unwrap();
+    assert!(replacement.generation > original.generation);
+    assert!(sender.configuration_permit().unwrap().valid(now(5)));
+    assert!(!retained.valid(now(5)));
+}
+
+#[test]
+fn native_monitor_independently_fences_speech_on_ui_loss_and_never_revives_it() {
+    let (_input, mut sender) = attached();
+    let live = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let panel = live.clone();
+    sender.set_local_talk_check(Arc::new(move || {
+        let token = panel.load(Ordering::Acquire);
+        (token != 0).then_some(token)
+    }));
+    let permit = start(&mut sender, 0);
+    let monitor = permit.monitor();
+    assert!(monitor.valid(now(1)));
+    live.store(0, Ordering::Release);
+    // No Sender operation runs between UI failure and the native monitor check.
+    assert!(!monitor.valid(now(2)));
+    assert!(!permit.valid(now(2)));
+    live.store(2, Ordering::Release);
+    assert!(!monitor.valid(now(3)));
+    sender.mute();
+    let fresh = start(&mut sender, 4);
+    assert!(fresh.valid(now(5)));
+    assert!(!permit.valid(now(5)));
+}
+
+#[test]
+fn a_panicking_local_permission_check_cannot_start_recording() {
+    let (_input, mut sender) = attached();
+    sender.set_local_talk_check(Arc::new(|| panic!("local permission unavailable")));
+    sender.set_permission(MicPermission::Granted);
+    assert_eq!(
+        sender.begin_talk(MicTalkMode::OpenMic { active: true }, now(0)),
+        Err(Error::Permission)
+    );
+    assert_eq!(sender.status(), Status::Muted);
+    assert!(sender.configuration_permit().is_none());
+}
+
+#[test]
 fn configuration_queue_permit_observes_original_owner_without_capture_ack() {
     let (input, mut sender) = attached();
     assert!(sender.configuration_permit().is_none());

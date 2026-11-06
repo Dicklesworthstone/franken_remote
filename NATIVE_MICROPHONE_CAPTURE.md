@@ -117,6 +117,29 @@ source failure and owner destruction close every retained clone. A new talk
 cannot launch a replacement until the previous child is positively reaped, so
 the original cleanup receipt is never overwritten while work is still alive.
 
+## Independent local talk tokens
+
+An application can install `Sender::set_local_talk_check` before using the
+original microphone sender. Its bounded, nonblocking check returns a nonzero
+local gesture token while that exact Talk choice remains active, and `None`
+when muted or unavailable. Every fresh native Talk gesture must receive a new
+token. `begin_talk` snapshots it into the configuration, capture, native-monitor
+and egress proofs for that one audio generation.
+
+Muting, changing the token or losing the check permanently fences the old
+proofs. Even a complete mute-then-talk interval between two supervisor polls
+cannot revive old speech. A panicking check refuses recording. The check alone
+never starts capture; OS permission, a new explicit talk operation, original
+controller authority and the exact host acknowledgement remain necessary.
+An idle muted attachment remains available for a later explicit talk.
+
+`fr_wire::audio_up::with_microphone` builds the optional bilateral offer only
+on a valid native input/media profile. At the existing capability ceiling it
+may remove only the optional quality-decision diagnostic; it refuses rather
+than removing authority/media/file capabilities or widening resource limits.
+Public applications must still provide their own local consent surfaces and
+native workers before calling it.
+
 ## Continuous talk across original-controller renewals
 
 `Sender::refresh_capture` may issue a successor `CapturePermit` only within the

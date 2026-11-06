@@ -29,6 +29,7 @@ use fr_wire::{
     audio::{self, AudioConfiguration, AudioStop},
     negotiation::{ControlBinding, Selection},
 };
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -41,6 +42,10 @@ const RENEW_MARGIN_US: u64 = 1_000_000;
 const RENEW_INTERVAL_US: u64 = 250_000;
 const RENEW_ADVANCE_US: u64 = 100_000;
 const MAX_RECORD_BYTES: usize = audio::AUDIO_PACKET_OVERHEAD + MAX_OPUS_PAYLOAD_BYTES;
+
+/// Current explicit local talk token, sampled without blocking. None is muted;
+/// every new local gesture uses a nonzero token that this UI owner never reuses.
+pub type LocalTalkCheck = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -116,14 +121,32 @@ struct Epoch {
     live: AtomicBool,
     until: Mutex<ClientInstant>,
     configuration: AudioConfiguration,
+    local_talk: Option<(LocalTalkCheck, u64)>,
 }
 impl Epoch {
     fn stop(&self) {
         self.live.store(false, Ordering::Release);
     }
     fn is_live(&self) -> bool {
+        if !self.live.load(Ordering::Acquire) {
+            return false;
+        }
+        if self
+            .local_talk
+            .as_ref()
+            .is_some_and(|(check, original)| local_talk_epoch(check) != Some(*original))
+        {
+            self.stop();
+            return false;
+        }
         self.live.load(Ordering::Acquire)
     }
+}
+fn local_talk_epoch(check: &LocalTalkCheck) -> Option<u64> {
+    catch_unwind(AssertUnwindSafe(|| check()))
+        .ok()
+        .flatten()
+        .filter(|epoch| *epoch != 0)
 }
 
 /// Unique sender for one separately approved authenticated `AudioUp` attachment.
@@ -138,6 +161,7 @@ pub struct Sender {
     clock: ProjectedClock,
     last_now: ClientInstant,
     permission: MicPermission,
+    local_talk: Option<LocalTalkCheck>,
     status: Status,
     generation: AudioGeneration,
     epoch: Option<Arc<Epoch>>,
@@ -201,6 +225,7 @@ impl InputClient {
             clock,
             last_now: now,
             permission: MicPermission::NotRequested,
+            local_talk: None,
             status: Status::Muted,
             generation: AudioGeneration::INITIAL,
             epoch: None,
@@ -229,6 +254,18 @@ impl Sender {
     }
     pub const fn permission(&self) -> MicPermission {
         self.permission
+    }
+    /// Bind a local UI's nonblocking talk token/liveness check to every NEW epoch.
+    /// The native supervisor, configuration and packet permits all recheck it
+    /// independently of the session loop. The UI returns None while muted and
+    /// a NEW nonzero token for every consumed explicit talk action, never reused.
+    /// Each epoch freezes that token, so even an entirely unsampled mute/retalk
+    /// interval cannot revive old capture or queued speech. A missing, changed
+    /// or panicking check permanently fences the original epoch.
+    /// Replacing the check mutes first and cannot transfer earlier talk consent.
+    pub fn set_local_talk_check(&mut self, check: LocalTalkCheck) {
+        self.retire_epoch();
+        self.local_talk = Some(check);
     }
     pub fn status(&self) -> Status {
         if self.status != Status::Stopped
@@ -354,6 +391,15 @@ impl Sender {
         if self.permission != MicPermission::Granted {
             return Err(Error::Permission);
         }
+        let local_talk = self
+            .local_talk
+            .as_ref()
+            .map(|check| {
+                local_talk_epoch(check)
+                    .map(|epoch| (check.clone(), epoch))
+                    .ok_or(Error::Permission)
+            })
+            .transpose()?;
         if !mode.is_active() {
             return Err(Error::NotTalking);
         }
@@ -382,6 +428,7 @@ impl Sender {
             live: AtomicBool::new(true),
             until: Mutex::new(until),
             configuration,
+            local_talk,
         }));
         self.configuration_until = Some(until);
         self.status = Status::Configuring;

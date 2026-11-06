@@ -7,10 +7,59 @@
 //! This codec does not advertise an endpoint or qualify a device. Public native
 //! offers must omit it until their complete capture, transport, approval,
 //! indicator and endpoint paths are installed.
-use crate::negotiation::{Role, Selection};
+use crate::negotiation::{Capability, Error, MAX_CAPABILITIES, Offer, Role, Selection};
 
 pub const CAPABILITY: &str = "native-audio-up";
 pub const VERSION: u16 = 1;
+
+/// Add the separately enabled microphone profile to a validated native offer.
+/// Call only after the application's capture/endpoint and local consent UI are
+/// configured. An optional diagnostic may yield its slot; no authority, media
+/// or file capability is displaced when the fixed capability bound is full.
+pub fn with_microphone(mut offer: Offer) -> Result<Offer, Error> {
+    offer.validate()?;
+    if ![
+        (crate::attachment::CAPABILITY, crate::attachment::VERSION),
+        (
+            crate::attachment::INPUT_CAPABILITY,
+            crate::attachment::INPUT_VERSION,
+        ),
+    ]
+    .iter()
+    .all(|(name, version)| {
+        offer
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == *name && cap.version == *version)
+    }) {
+        return Err(Error::Selection);
+    }
+    if let Some(cap) = offer.capabilities.iter().find(|cap| cap.name == CAPABILITY) {
+        return if cap.version == VERSION {
+            Ok(offer)
+        } else {
+            Err(Error::Version)
+        };
+    }
+    if offer.capabilities.len() == MAX_CAPABILITIES {
+        offer.capabilities.retain(|cap| {
+            cap.name != crate::quality_decision::CAPABILITY
+                || cap.version != crate::quality_decision::VERSION
+                || cap.required
+        });
+    }
+    if offer.capabilities.len() >= MAX_CAPABILITIES {
+        return Err(Error::Limits);
+    }
+    offer.capabilities.push(Capability {
+        name: CAPABILITY.into(),
+        version: VERSION,
+        required: false,
+    });
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer.validate()?;
+    Ok(offer)
+}
 
 /// Exact positive selection of the independent microphone profile. Uplink
 /// needs the original control connection's media and input attachments. It is
@@ -64,6 +113,97 @@ mod tests {
             limits: ProtocolLimits::ABSOLUTE,
             capabilities,
         }
+    }
+
+    fn offer(role: Role) -> Offer {
+        Offer {
+            versions: vec![0],
+            profile: 1,
+            profile_version: 0,
+            role,
+            limits: ProtocolLimits::ABSOLUTE,
+            capabilities: selection()
+                .capabilities
+                .into_iter()
+                .filter(|cap| cap.name != CAPABILITY)
+                .collect(),
+        }
+    }
+    fn fill(offer: &mut Offer) {
+        while offer.capabilities.len() < MAX_CAPABILITIES {
+            offer.capabilities.push(Capability {
+                name: format!("test-feature-{:02}", offer.capabilities.len()),
+                version: 1,
+                required: false,
+            });
+        }
+        offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    #[test]
+    fn public_microphone_offer_is_optional_bilateral_and_idempotent() {
+        let client = with_microphone(offer(Role::RequestControl)).unwrap();
+        let legacy = offer(Role::Observe);
+        let selected = client.intersect(&legacy).unwrap();
+        assert!(
+            selected
+                .capabilities
+                .iter()
+                .all(|cap| cap.name != CAPABILITY)
+        );
+        let host = with_microphone(legacy).unwrap();
+        let selected = client.intersect(&host).unwrap();
+        let mic = selected
+            .capabilities
+            .iter()
+            .find(|cap| cap.name == CAPABILITY)
+            .unwrap();
+        assert_eq!(mic.version, VERSION);
+        assert!(!mic.required);
+        assert_eq!(with_microphone(client.clone()), Ok(client));
+    }
+    #[test]
+    fn microphone_can_replace_only_an_optional_diagnostic_at_capacity() {
+        let mut base = offer(Role::Observe);
+        base.capabilities.push(Capability {
+            name: crate::quality_decision::CAPABILITY.into(),
+            version: crate::quality_decision::VERSION,
+            required: false,
+        });
+        fill(&mut base);
+        let selected = with_microphone(base.clone()).unwrap();
+        assert_eq!(selected.capabilities.len(), MAX_CAPABILITIES);
+        for capability in base
+            .capabilities
+            .iter()
+            .filter(|cap| cap.name != crate::quality_decision::CAPABILITY)
+        {
+            assert!(selected.capabilities.contains(capability));
+        }
+        base.capabilities
+            .iter_mut()
+            .find(|cap| cap.name == crate::quality_decision::CAPABILITY)
+            .unwrap()
+            .required = true;
+        assert_eq!(with_microphone(base), Err(Error::Limits));
+        let mut full = offer(Role::RequestControl);
+        fill(&mut full);
+        assert_eq!(with_microphone(full), Err(Error::Limits));
+    }
+    #[test]
+    fn public_microphone_refuses_an_observer_without_input_or_an_unknown_version() {
+        let mut observation = offer(Role::Observe);
+        observation
+            .capabilities
+            .retain(|cap| cap.name != attachment::INPUT_CAPABILITY);
+        assert_eq!(with_microphone(observation), Err(Error::Selection));
+        let mut unknown = with_microphone(offer(Role::RequestControl)).unwrap();
+        unknown
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == CAPABILITY)
+            .unwrap()
+            .version += 1;
+        assert_eq!(with_microphone(unknown), Err(Error::Version));
     }
 
     #[test]
