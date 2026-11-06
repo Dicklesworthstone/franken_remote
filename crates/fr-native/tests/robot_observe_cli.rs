@@ -212,7 +212,7 @@ fn legacy_observe_and_unqualified_native_requests_do_not_open_a_new_session() {
 
 #[test]
 fn help_explains_new_connection_lifetime_and_unknown_observation_fields() {
-    let output = run(&["--help"]);
+    let output = run(&["robot", "observe", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--native-once"));
