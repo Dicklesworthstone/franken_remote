@@ -11,6 +11,9 @@ mod host_choice_tests;
 mod hosts;
 #[path = "options/local_session.rs"]
 mod local_session;
+#[cfg(test)]
+#[path = "options/microphone_tests.rs"]
+mod microphone_tests;
 
 pub struct Options {
     pub command: Command,
@@ -150,6 +153,9 @@ pub struct Connection {
     /// `--audio`: explicitly ask for host playback audio in either role.
     /// `None` offers no audio capability at all.
     pub audio: Option<AudioRequest>,
+    /// Explicit microphone selection for this original control attempt.
+    /// Connection and host approval never start recording; a local Talk action does.
+    pub microphone: Option<MicrophoneRequest>,
     /// Explicit local upload choices, retained only for the original control.
     pub upload: UploadOptions,
     /// `--receive DIR`: the explicit local destination for host-selected files.
@@ -189,6 +195,12 @@ pub struct AudioRequest {
     pub volume: u8,
     /// Initial local mute, independent of gain.
     pub muted: bool,
+}
+/// Explicit local input device. No default-source alias or remote selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MicrophoneRequest {
+    pub server: Option<PathBuf>,
+    pub source: String,
 }
 /// Explicit policies only. `Only` refuses ambiguity; it is never "first" or an
 /// invented primary display. Both policies are reevaluated on each live catalog.
@@ -763,6 +775,7 @@ fn parse_command(
     let (mut control, mut clipboard, mut capture_system_shortcuts) = (false, None, false);
     let (mut audio, mut audio_server, mut audio_sink) = (false, None, None);
     let (mut audio_volume, mut audio_muted) = (None, false);
+    let (mut microphone, mut microphone_server, mut microphone_source) = (false, None, None);
     let (mut display, mut worker, mut roots, mut x_display) = (None, None, None, None);
     let (mut port, mut attempts) = (8443_u16, 5_u8);
     let mut fit_window = None;
@@ -805,6 +818,26 @@ fn parse_command(
                 audio_volume = Some(volume);
             }
             "--audio-muted" if connect => audio_muted = true,
+            "--microphone" if connect => microphone = true,
+            "--microphone-server" if connect => {
+                microphone_server = Some(next_path(args, &mut index)?);
+            }
+            "--microphone-source" if connect => {
+                let source = next_arg(args, &mut index)?;
+                if source.is_empty()
+                    || source.len() > 255
+                    || !source
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || b"_-.".contains(&byte))
+                {
+                    return Err(Failure::new(
+                        "microphone_source_invalid",
+                        "Select one explicit PulseAudio source name (1..255 ASCII letters, digits, '_', '-' or '.'); default-source aliases are unavailable.",
+                        2,
+                    ));
+                }
+                microphone_source = Some(source.to_string());
+            }
             "--experimental-native" if remote => experimental = true,
             "--ipv6" if remote => ipv6 = true,
             "--display" if connect => {
@@ -890,6 +923,28 @@ fn parse_command(
         {
             return Err(usage());
         }
+        if microphone && !control {
+            return Err(Failure::new(
+                "microphone_requires_control",
+                "Microphone forwarding follows your original control lease; --microphone requires --control and never enables a viewing session.",
+                2,
+            ));
+        }
+        if !microphone && (microphone_server.is_some() || microphone_source.is_some()) {
+            return Err(usage());
+        }
+        let microphone = if microphone {
+            Some(MicrophoneRequest {
+                server: microphone_server,
+                source: microphone_source.ok_or_else(|| Failure::new(
+                    "microphone_source_required",
+                    "--microphone requires --microphone-source NAME. It starts muted; use the local microphone panel to talk.",
+                    2,
+                ))?,
+            })
+        } else {
+            None
+        };
         if !send.is_empty() && !control {
             return Err(Failure::new(
                 "send_requires_control",
@@ -966,6 +1021,7 @@ fn parse_command(
                     volume: audio_volume.unwrap_or(100),
                     muted: audio_muted,
                 }),
+                microphone,
                 upload: UploadOptions {
                     paths: send,
                     file_drop,

@@ -271,12 +271,59 @@ fn native_monitor_independently_fences_speech_on_ui_loss_and_never_revives_it() 
     // No Sender operation runs between UI failure and the native monitor check.
     assert!(!monitor.valid(now(2)));
     assert!(!permit.valid(now(2)));
+    assert!(sender.local_talk_withdrawn());
     live.store(2, Ordering::Release);
     assert!(!monitor.valid(now(3)));
     sender.mute();
+    assert!(!sender.local_talk_withdrawn());
     let fresh = start(&mut sender, 4);
     assert!(fresh.valid(now(5)));
     assert!(!permit.valid(now(5)));
+}
+
+#[test]
+fn authority_retirement_cannot_be_relabelled_as_a_later_local_mute() {
+    let (input, mut sender) = attached();
+    let token = Arc::new(std::sync::atomic::AtomicU64::new(1));
+    let local = token.clone();
+    sender.set_local_talk_check(Arc::new(move || Some(local.load(Ordering::Acquire))));
+    let permit = start(&mut sender, 0);
+    drop(input);
+    assert!(!permit.valid(now(1)));
+    assert!(!sender.local_talk_withdrawn());
+    token.store(2, Ordering::Release);
+    assert!(!permit.valid(now(2)));
+    let _ = sender.status();
+    assert!(
+        !sender.local_talk_withdrawn(),
+        "the original authority fence wins"
+    );
+}
+
+#[test]
+fn idle_attachment_is_not_a_withdrawal_and_each_mute_retains_its_original_cause() {
+    let (_input, mut sender) = attached();
+    let token = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let local = token.clone();
+    sender.set_local_talk_check(Arc::new(move || {
+        let token = local.load(Ordering::Acquire);
+        (token != 0).then_some(token)
+    }));
+    assert_eq!(sender.status(), Status::Muted);
+    assert!(!sender.local_talk_withdrawn());
+    token.store(1, Ordering::Release);
+    let permit = start(&mut sender, 0);
+    token.store(0, Ordering::Release);
+    assert_eq!(sender.status(), Status::Muted);
+    assert!(sender.local_talk_withdrawn());
+    assert!(!permit.valid(now(1)));
+    sender.mute();
+    assert!(!sender.local_talk_withdrawn());
+    token.store(2, Ordering::Release);
+    let fresh = start(&mut sender, 2);
+    assert!(fresh.valid(now(3)));
+    assert!(!sender.local_talk_withdrawn());
+    assert!(!permit.valid(now(3)));
 }
 
 #[test]

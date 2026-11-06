@@ -113,6 +113,10 @@ pub(super) fn observation(error: ObserverError) -> Option<Failure> {
         ObserverError::Streaming(StreamingViewerError::Control(
             ControlledViewerError::LeaseRevoked(report),
         )) => Some(crate::terminal::failure(report)),
+        #[cfg(feature = "linux-desktop")]
+        ObserverError::Streaming(StreamingViewerError::Control(
+            ControlledViewerError::Microphone(error),
+        )) => Some(super::microphone::failure(error)),
         _ => None,
     }
 }

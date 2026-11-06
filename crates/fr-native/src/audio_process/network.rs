@@ -18,6 +18,8 @@
 mod guard;
 #[cfg(feature = "linux-microphone-session")]
 mod session;
+#[cfg(feature = "linux-microphone-session")]
+pub use session::CaptureRetirement;
 
 use super::{
     Retirement,
@@ -180,6 +182,8 @@ pub struct Uplink {
     retired: bool,
     reason: Option<Error>,
     io: guard::Shared,
+    #[cfg(feature = "linux-microphone-session")]
+    observer: Option<CaptureRetirement>,
 }
 impl std::fmt::Debug for Uplink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -331,6 +335,8 @@ impl Uplink {
             retired: false,
             reason: None,
             io,
+            #[cfg(feature = "linux-microphone-session")]
+            observer: None,
         })
     }
     pub fn state(&self) -> State {
@@ -360,6 +366,20 @@ impl Uplink {
     /// does not claim the foreign child has already exited.
     pub fn retirement(&self) -> Option<Retirement> {
         self.transmitter.retirement()
+    }
+    /// Bind the original visible local UI before any permission/talk action.
+    /// Every new talk uses the UI's fresh token; a token change invalidates all
+    /// earlier native/queued proofs even if the mute interval was not sampled.
+    pub fn bind_local_talk_check(&mut self, check: uplink::LocalTalkCheck) -> Result<(), Error> {
+        if self.retired
+            || self.permission != MicPermission::NotRequested
+            || self.generation.is_some()
+            || self.state() != State::Muted
+        {
+            return Err(Error::Busy);
+        }
+        self.transmitter.set_local_talk_check(check);
+        Ok(())
     }
     /// Record a local OS permission result. Permission recovery is still muted
     /// and requires another explicit `begin_talk` action.
@@ -548,6 +568,14 @@ impl Uplink {
             Ok(at) => at,
             Err(reason) => return self.fail(q, reason),
         };
+        // The real UI/native monitor can withdraw talk before the session's
+        // next application callback. After consuming original drain witnesses,
+        // use the same bounded UserMute/AudioStop path as an explicit callback.
+        // All still-retained configuration/datagram proofs below stay intact:
+        // withdrawing local talk cannot reauthorize bytes already in custody.
+        if self.transmitter.local_talk_withdrawn() {
+            self.mute()?;
+        }
         if !self.inflight.iter().flatten().all(|guard| guard.live(at)) {
             return self.fail(q, Error::EgressExpired);
         }
@@ -918,6 +946,10 @@ impl Uplink {
 impl Drop for Uplink {
     fn drop(&mut self) {
         self.transmitter.stop();
+        #[cfg(feature = "linux-microphone-session")]
+        if let Some(observer) = &self.observer {
+            observer.record(self, true);
+        }
     }
 }
 struct Drive<'a> {

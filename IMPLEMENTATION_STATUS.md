@@ -1,5 +1,34 @@
 # Implementation status
 
+## Public Linux microphone slice (2026-11-06; qualification pending)
+
+The native microphone libraries now have public application owners. On the
+host, `frd run --microphone` independently enables the original controller's
+AudioUp attachment, requires a responsive local Stop microphone window, and
+retains the real PipeWire/Opus/UI cleanup receipts. On the client,
+`fr connect --control --microphone --microphone-source NAME` (feature
+`linux-microphone`) starts muted, binds a visible Talk/Mute panel to the original
+viewer, and records only after a new attributed local Talk gesture and the
+exact host acknowledgement. Playback audio enable is independent.
+
+Each Talk has a distinct immutable local token, so a fast mute–retalk interval
+cannot revive old capture even if a session poll misses the muted state. Local
+withdrawal has its own terminal epoch cause; after real drain evidence it uses
+the normal UserMute/AudioStop path, without relabeling native or authority
+failures. The original selected source and microphone choice do not cross
+viewing reconnects or a later F8 request. No default device is changed.
+
+The sender/offer/IPC component tests, strict component Clippy, native UI
+production build, C warnings-as-errors compilation and native integration-test
+compilation pass. The full graph is blocked locally by memory exhaustion in
+the unchanged pinned Asupersync dependency; AF_UNIX socket creation is denied
+by this runner, preventing an Xvfb execution result. The indicator CI lane now
+requires the actual native panel tests. These results do not qualify a physical
+microphone, a user's desktop audio server, application audibility, a public
+end-to-end session or live-tailnet microphone latency. Bead `fr-d8rs` retains
+that application acceptance follow-up. See [client setup](NATIVE_MICROPHONE_CAPTURE.md)
+and [host setup](NATIVE_MICROPHONE_UPLINK.md).
+
 ## Live state (2026-10-12)
 
 **First live two-machine sessions.** Release build of this tree, no patches:

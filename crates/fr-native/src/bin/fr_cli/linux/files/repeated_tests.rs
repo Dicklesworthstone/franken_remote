@@ -6,6 +6,19 @@ fn json(summary: &Summary) -> serde_json::Value {
     serde_json::from_str(&format!("{{\"schema_version\":1{}}}", summary.json())).unwrap()
 }
 
+fn control_with_original_bulk_framing() -> fr_wire::negotiation::Offer {
+    let mut offer = fr_client::native::control_offer();
+    // Retiring file consent preserves the original optional framing boundary;
+    // a new bare control constructor has no reason to request bulk records.
+    offer.capabilities.push(fr_wire::negotiation::Capability {
+        name: fr_wire::attachment::BULK_RECORD_CAPABILITY.into(),
+        version: fr_wire::attachment::BULK_RECORD_VERSION,
+        required: false,
+    });
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer
+}
+
 #[test]
 fn spent_command_only_consent_cannot_reopen_on_a_precontrol_retry() {
     let mut local = select(&[], false, true).unwrap().unwrap();
@@ -36,7 +49,7 @@ fn spent_command_only_consent_cannot_reopen_on_a_precontrol_retry() {
     assert_eq!(local.summary().requested, 0);
     let mut retry = fr_client::native::control_offer_with_files();
     retain_offer(&mut retry, local.can_configure_upload(), false);
-    assert_eq!(retry, fr_client::native::control_offer());
+    assert_eq!(retry, control_with_original_bulk_framing());
 }
 
 #[test]
@@ -75,7 +88,7 @@ fn spent_command_upload_keeps_independent_download_and_drop_choices() {
     retain_offer(&mut both, drop.can_configure_upload(), true);
     assert_eq!(both, original);
     retain_offer(&mut both, false, false);
-    assert_eq!(both, fr_client::native::control_offer());
+    assert_eq!(both, control_with_original_bulk_framing());
 }
 
 #[test]

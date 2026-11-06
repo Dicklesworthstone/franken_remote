@@ -4,7 +4,69 @@ The opt-in `linux-microphone-capture` feature provides
 `fr_native::pulse::microphone::MicrophoneSource`: an actual locally selected
 PulseAudio RECORD stream feeding the existing real libopus encoder. It is the
 client capture boundary for plan §15.4 and bead `fr-p2-audio-microphone-lz6`.
-It does not enable a network microphone capability or change `fr connect`.
+That low-level feature does not advertise microphone forwarding. The separate
+`linux-microphone` feature now connects it to the public controlled client,
+with an explicit source and a local Talk/Mute panel. The host's independent
+enable and Stop microphone surface are described in
+[NATIVE_MICROPHONE_UPLINK.md](NATIVE_MICROPHONE_UPLINK.md).
+
+## Public client command
+
+Build the native client with `linux-desktop,linux-microphone` in addition to
+the desktop features required by the chosen media/input profile, and install
+the matching `fr-audio-worker` beside `fr`. The host needs its own explicit
+`frd run --microphone` enable and matching receiver workers. For example, on
+an otherwise configured Linux X11 control client:
+
+```sh
+fr connect NODE --control --experimental-native --display only \
+  --microphone --microphone-source alsa_input.usb-device.analog-mono \
+  --microphone-server /absolute/path/pulse/native
+```
+
+Replace the example source with the exact local PulseAudio source name.
+`--microphone-source` is required; default-source aliases and network server
+addresses are refused. The optional server flag selects an existing absolute
+Unix socket; otherwise the local selection is `PULSE_SERVER`, then
+`$XDG_RUNTIME_DIR/pulse/native`. Neither source nor socket comes from the host.
+The client uses mono 48-kHz Opus in 10-ms frames at 64 kbit/s, with a 512-byte
+packet ceiling and a 20-ms jitter target. These are configured bounds, not
+measured end-to-end latency.
+
+Connecting starts muted. A recent, attributed local primary-button gesture
+on **Talk** creates one new talk generation; core X11 events, XTest and
+SendEvent cannot activate it. The actual PulseAudio RECORD operation still
+has to authorize the selected source. Capture begins only after the host's
+exact configuration acknowledgement. The panel is placed outside the original
+viewer without changing its size or taking keyboard focus; unavailable visible
+space refuses microphone setup.
+
+**Mute** immediately withdraws that gesture's capture and egress proofs,
+independently of the session callback. After original queued output drains and
+the old capture child is actually reaped, a new explicit Talk can start a newer
+generation. Turn Off, hiding or closing the panel, loss of its native worker,
+the original controller ending, and reconnect all stop the original choice.
+A viewing retry or later F8 control request does not inherit microphone enable.
+If protected audio has uncertain transport custody, the existing conservative
+connection-close policy still applies.
+
+Completion separately reports microphone selection, whether a native Talking
+state was observed (`microphone_capture_observed`), its last state and a typed
+content-free reason. A false observation is not proof that RECORD never began:
+native setup may precede its readiness reply or an application callback.
+Cleanup success needs
+the original capture child's actual retirement and the UI thread's actual join;
+it never treats a stop request as an exit receipt. Host application audibility
+is explicitly unproven.
+
+The new public slice has source/regression coverage and component build/lint
+results. Native X11 integration tests are mandatory in the indicator workflow.
+This development runner cannot create AF_UNIX sockets (`EPERM`), so those new
+runtime cases and a complete public two-machine microphone session remain
+unqualified here. The full host/client dependency build also exceeds this
+runner's memory in the unchanged pinned Asupersync dependency. Earlier native
+component measurements below do not establish public CLI or physical-device
+qualification.
 
 ## Selection, consent and lifecycle
 
@@ -295,9 +357,9 @@ and presentation policy fixtures. They do not establish uninterrupted talk over
 an authenticated network, physical-device qualification, or user-visible consent.
 
 The controlled host and viewer now retain the microphone protocol and native
-owners through their library APIs. Public native command offers remain disabled
-pending visible client/host approval and talk/stop controls. Physical microphone
-consent, hardware device changes and end-to-end latency remain qualification
-work. The host composition is described in
+owners through their library APIs. The public commands now supply separate
+host enable/stop and client explicit-source/talk/mute controls as described
+above. Physical microphone consent, hardware device changes and end-to-end
+latency remain qualification work. The host composition is described in
 [NATIVE_MICROPHONE_UPLINK.md](NATIVE_MICROPHONE_UPLINK.md), its output boundary in
 [VIRTUAL_MIC.md](VIRTUAL_MIC.md), and the codec contract in [NATIVE_OPUS.md](NATIVE_OPUS.md).

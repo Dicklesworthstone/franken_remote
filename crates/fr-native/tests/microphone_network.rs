@@ -255,6 +255,81 @@ fn late_positive_ack_after_mute_never_revives_cancelled_talk() {
 }
 
 #[test]
+fn local_ui_mute_before_session_callback_preserves_a_drained_attachment_for_new_talk() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
+    run_test!(cx, {
+        let mut link = Link::new(&cx).await;
+        let (host, client) = link.microphone(&cx).await;
+        let (mut input, origin) = link.controller(&cx).await;
+        let mut uplink = link.uplink(
+            &cx,
+            client,
+            &mut input,
+            origin,
+            Path::new("/nonexistent/private-pulse"),
+        );
+        let token = Arc::new(AtomicU64::new(1));
+        let local = token.clone();
+        uplink
+            .bind_local_talk_check(Arc::new(move || {
+                let token = local.load(Ordering::Acquire);
+                (token != 0).then_some(token)
+            }))
+            .unwrap();
+        uplink.set_permission(MicPermission::Granted).unwrap();
+        let original = uplink
+            .begin_talk(MicTalkMode::OpenMic { active: true })
+            .unwrap();
+        let bytes = link.next_record(&cx, &mut uplink, &host).await;
+        assert_eq!(
+            audio::decode_configuration(&bytes, CHANNEL).unwrap(),
+            original
+        );
+        let until = network::clock(&cx) + 500_000;
+        while link.client.usage().retained_send_records != 0 {
+            assert!(network::clock(&cx) < until);
+            link.drive_uplink(&cx, &mut uplink).await;
+        }
+        token.store(0, Ordering::Release);
+        // The canonical owner maintains microphone BEFORE the next application
+        // callback; no explicit uplink.mute() has run on this session thread.
+        uplink.maintain(&mut link.client).unwrap();
+        assert_eq!(uplink.state(), State::Muted);
+        let bytes = link.next_record(&cx, &mut uplink, &host).await;
+        let stop = audio::decode_stop(&bytes, CHANNEL).unwrap();
+        assert_eq!(stop.generation, original.generation);
+        assert_eq!(stop.reason, fr_core::audio::AudioStopReason::UserMute);
+        assert!(
+            uplink.retirement().is_none(),
+            "no host ACK means no capture child"
+        );
+        let until = network::clock(&cx) + 500_000;
+        while link.client.usage().retained_send_records != 0 {
+            assert!(network::clock(&cx) < until);
+            link.drive_uplink(&cx, &mut uplink).await;
+        }
+        uplink.maintain(&mut link.client).unwrap();
+        assert_eq!(
+            uplink.state(),
+            State::Muted,
+            "draining is never a talk action"
+        );
+        token.store(2, Ordering::Release);
+        let next = uplink
+            .begin_talk(MicTalkMode::OpenMic { active: true })
+            .unwrap();
+        assert!(next.generation > original.generation);
+        let bytes = link.next_record(&cx, &mut uplink, &host).await;
+        assert_eq!(audio::decode_configuration(&bytes, CHANNEL).unwrap(), next);
+        uplink.retire(&mut link.client).unwrap();
+        link.assert_original_control_usable(&cx).await;
+    });
+}
+
+#[test]
 fn original_owner_talk_and_os_withdrawal_fence_config_after_admission_before_io() {
     for withdrawal in 0..3 {
         run_test!(cx, {

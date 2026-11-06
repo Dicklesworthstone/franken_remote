@@ -53,6 +53,8 @@ linux-microphone-process = ["linux-microphone-capture"]
 linux-microphone-uplink = ["linux-microphone-process", "dep:fr-transport", "dep:asupersync"]
 # Original ControlledViewer scheduling and visible local consent API.
 linux-microphone-session = ["linux-microphone-uplink", "dep:frd"]
+# Public controlled-client talk/mute UI, separate from the library-only boundary.
+linux-microphone = ["linux-microphone-session", "linux-session-ui"]
 # Explicit native virtual source; no CLI/GUI, capture, runtime or default enable.
 linux-pipewire-mic = []
 # Bound uplink Opus, isolated decoding and actual virtual-source graph demand.

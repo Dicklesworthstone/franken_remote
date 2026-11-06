@@ -21,7 +21,7 @@ use fr_wire::audio::{AudioConfiguration, AudioStop};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, Instant},
 };
 
@@ -265,6 +265,39 @@ impl Transmitter {
             self.offer = None;
             self.state = State::Disabled;
         }
+    }
+    /// Install the original local UI fence before capture is enabled. Each
+    /// immutable talk proof retains this check, including the native process's
+    /// independently serviced monitor. Replacing it always discards old talk.
+    pub fn set_local_talk_check(&mut self, check: uplink::LocalTalkCheck) {
+        self.stop_capture();
+        self.sender.set_local_talk_check(check);
+        self.offer = None;
+        self.state = State::Disabled;
+    }
+    /// A local panel may fence the native monitor before the session task gets
+    /// its next UI callback. Preserve that explicit cause for the existing mute
+    /// protocol. Never reinterpret an already failed native process as a mute.
+    pub fn local_talk_withdrawn(&self) -> bool {
+        if self.state == State::Stopped {
+            return false;
+        }
+        if self.capture.as_ref().is_some_and(|capture| {
+            capture.shared.stopped.load(Ordering::Acquire) && !self.sender.local_talk_withdrawn()
+        }) {
+            return false;
+        }
+        // No native callback is run here. This samples only the local bounded
+        // UI predicate; an original capture monitor can have sampled it first.
+        let _ = self.sender.status();
+        self.sender.local_talk_withdrawn()
+            && self.capture.as_ref().is_none_or(|capture| {
+                !capture.shared.stopped.load(Ordering::Acquire)
+                    || matches!(
+                        capture.shared.error(),
+                        super::Error::Denied | super::Error::Stopped
+                    )
+            })
     }
     /// Only an explicit new local talk action calls this method. A reconnect,
     /// restored OS permission, decoder readiness or timer never calls it.

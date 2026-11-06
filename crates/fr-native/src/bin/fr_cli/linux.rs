@@ -23,6 +23,9 @@ mod hosts_probe;
 #[path = "linux/lapse.rs"]
 mod lapse;
 #[cfg(feature = "linux-desktop")]
+#[path = "linux/microphone.rs"]
+mod microphone;
+#[cfg(feature = "linux-desktop")]
 #[path = "linux/quality.rs"]
 mod quality;
 #[path = "linux/refusal.rs"]
@@ -491,6 +494,8 @@ fn connect(
     let downloads = files::download::select(connection.receive.as_ref())?;
     let configuration = desktop_configuration(cx, connection)?;
     let audio_output = audio::resolve(connection.audio.as_ref())?;
+    let microphone = microphone::resolve(connection.microphone.as_ref(), || x_display(connection))?
+        .map(|local| Rc::new(RefCell::new(local)));
     let state = Rc::new(RefCell::new(Progress {
         control: connection.control.then(|| control::Counters {
             clipboard: connection
@@ -501,6 +506,7 @@ fn connect(
         audio: audio_output
             .as_ref()
             .map(|(_, request)| Rc::new(RefCell::new(audio::Report::for_request(request)))),
+        microphone,
         files: sends,
         downloads,
         ..Progress::default()
@@ -586,6 +592,15 @@ fn connect(
         } else {
             files::offer(connection.clipboard, connection.uploads())
         };
+        let offer = if connection.microphone.is_some() {
+            fr_wire::audio_up::with_microphone(offer).map_err(|_| Failure::new(
+                "microphone_capability_limit",
+                "This microphone combination exceeds the fixed native capability limit; reduce the explicitly selected optional file/audio features before connecting.",
+                2,
+            ))?
+        } else {
+            offer
+        };
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
@@ -609,7 +624,13 @@ fn connect(
         runtime.block_on(shutdown.run_connection(cx, stopped, operation, &local, &mut owner))
     };
     state.borrow_mut().media = application.statistics();
-    let cleanup = if native_cleanup_confirmed(&application, &result) {
+    let microphone = state.borrow().microphone.clone();
+    let microphone_cleanup = match microphone {
+        Some(microphone) => runtime.block_on(microphone::cleanup(&microphone, &local)),
+        None => true,
+    };
+    state.borrow_mut().microphone_cleanup = microphone_cleanup;
+    let cleanup = if native_cleanup_confirmed(&application, &result) && microphone_cleanup {
         session_control::Completion::Confirmed
     } else {
         session_control::Completion::Unconfirmed
@@ -749,6 +770,19 @@ fn completed_result(
             "native_cleanup_incomplete",
             "Native cleanup was not confirmed; inspect remaining workers before another connection.",
         ));
+    }
+    if progress.microphone.is_some() && !progress.microphone_cleanup {
+        return Err(failure(
+            "microphone_cleanup_incomplete",
+            "The original microphone or its local control window has not confirmed cleanup; inspect the remaining local worker before another microphone session.",
+        ));
+    }
+    if let Some(named) = progress
+        .microphone
+        .as_ref()
+        .and_then(|local| local.borrow().failure())
+    {
+        return Err(named);
     }
     if stopped {
         return Err(Failure::new(
@@ -930,6 +964,9 @@ struct Progress {
     control: Option<control::Counters>,
     /// Some only for `--audio`: content-free playback outcome.
     audio: Option<Rc<RefCell<audio::Report>>>,
+    /// Original explicit microphone choice; no replacement attempt inherits it.
+    microphone: Option<Rc<RefCell<microphone::Local>>>,
+    microphone_cleanup: bool,
     /// Explicit original uploads: initial send, later drops or local commands.
     files: Option<files::Local>,
     /// Some only with `--receive`: the pinned local directory and actual receipts.
@@ -1028,6 +1065,16 @@ impl Ui for Interface {
                     .is_some_and(files::Local::can_configure_upload),
             initial && progress.downloads.is_some(),
         );
+        if !initial
+            || !progress
+                .microphone
+                .as_ref()
+                .is_some_and(|local| local.borrow().may_offer())
+        {
+            offer
+                .capabilities
+                .retain(|capability| capability.name != fr_wire::audio_up::CAPABILITY);
+        }
         Ok(offer)
     }
     fn choose(&mut self, _: u8, catalog: &Catalog) -> Result<Option<u128>, CallbackError> {
@@ -1069,10 +1116,14 @@ impl Ui for Interface {
                 )
                 .map_err(|()| CallbackError)?;
         }
+        let microphone = p.microphone.clone();
         if let Some(counters) = p.control.as_mut() {
             let mode = counters.opened();
             let mut attempt = control::Attempt::new(desktop, mode).ok_or(CallbackError)?;
             if mode == control::AttemptMode::Control {
+                if let Some(microphone) = &microphone {
+                    microphone.borrow_mut().ready(desktop.window());
+                }
                 if let (Some(local), Some(clipboard)) =
                     (&self.clipboard, counters.clipboard.as_mut())
                 {
@@ -1095,7 +1146,7 @@ impl Ui for Interface {
     fn interactive(
         &mut self,
         _: u8,
-        state: InteractiveViewerState<'_>,
+        mut state: InteractiveViewerState<'_>,
         frame: Option<Presentation>,
     ) -> Result<Option<Layout>, CallbackError> {
         let mut progress = self.progress.borrow_mut();
@@ -1103,6 +1154,11 @@ impl Ui for Interface {
             progress.presented = progress.presented.saturating_add(1);
         }
         let automation = progress.automation.clone();
+        if let InteractiveViewerState::Controlled(viewer) = &mut state
+            && let Some(microphone) = &progress.microphone
+        {
+            microphone.borrow_mut().turn(viewer)?;
+        }
         if let (Some(automation), Some(frame)) = (&automation, frame) {
             automation
                 .presented(frame.frame.as_raw(), snapshot_evidence(frame.stage))
@@ -1158,6 +1214,9 @@ impl Ui for Interface {
                 self.attempt = None;
             }
             Status::Cleaning { attempt, failure } => {
+                if let Some(microphone) = &progress.microphone {
+                    microphone.borrow_mut().stop();
+                }
                 let focus_stop = progress
                     .window
                     .as_ref()
@@ -1439,9 +1498,13 @@ fn control_completion(
         downloads.text()
     };
     let audio = audio_completion(progress, json);
+    let microphone = progress
+        .microphone
+        .as_ref()
+        .map_or_else(String::new, |local| local.borrow().summary(json));
     if json {
         format!(
-            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{}{}{downloads}{audio},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
+            "{{\"schema_version\":1,\"timestamp_unix_ms\":{},\"outcome\":\"stopped\",\"role\":\"control\",\"attempts\":{},\"opened\":{},\"subsequent_decoder_completions\":{},\"last_attempt_media\":{}{}{downloads}{audio}{microphone},\"cleanup_confirmed\":true,\"transport_qualified\":false,\"physical_visibility_proven\":false,\"close_exchange\":{},\"lease_report\":{}}}\n",
             output::timestamp(),
             progress.attempts,
             progress.opened,
@@ -1464,7 +1527,7 @@ fn control_completion(
             )
         });
         format!(
-            "Control session stopped; {} attempt(s), {} opened session(s).{} Local cleanup confirmed.{close}{lease}{downloads}{audio}{quality} Native transport/hardware remain unqualified.\n",
+            "Control session stopped; {} attempt(s), {} opened session(s).{} Local cleanup confirmed.{close}{lease}{downloads}{audio}{microphone}{quality} Native transport/hardware remain unqualified.\n",
             progress.attempts, progress.opened, history.text,
         )
     }
@@ -2404,6 +2467,7 @@ mod tests {
             capture_system_shortcuts: false,
             clipboard: false,
             audio: None,
+            microphone: None,
             upload: crate::options::UploadOptions {
                 paths: Vec::new(),
                 file_drop: false,

@@ -24,7 +24,9 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
-     [--audio-volume 0..100] [--audio-muted]] [--json]
+     [--audio-volume 0..100] [--audio-muted]]
+    [--microphone --microphone-source NAME
+     [--microphone-server /absolute/pulse/native]] [--json]
 fr connect --choose-host --view-only|--control --experimental-native
     --display HANDLE|only|choose [connect options except --by-name/--saved]
 fr robot session open NODE_ID --foreground --role view|control
@@ -127,6 +129,24 @@ and the default sink or --audio-sink. --audio-volume: local 0..100 (default 100)
 --audio-muted starts muted. Remote audio offers Quieter/Louder/Mute / unmute.
 Settings survive recovery/reconnect/panel close. Changes affect new submissions;
 queued sound drains briefly. Host, microphone and system volume stay unchanged.
+
+Microphone:
+--microphone requires --control and an explicit --microphone-source NAME.
+Client build: linux-desktop,linux-microphone with fr-audio-worker beside fr.
+The host must independently enable and approve its native microphone endpoint.
+The local Microphone panel starts muted: click Talk to authorize this selected
+source, then wait for the host configuration and actual PulseAudio RECORD access.
+Mute stops this talk generation. Turn off, hiding or closing the panel ends this
+microphone choice. Both ends require visible controls; no recording starts from
+connecting, receiving playback, restoring permission or viewing reconnects/F8.
+After a mute, wait for the old capture child to exit before another explicit Talk.
+The panel needs visible space outside the viewer; --fit can leave room.
+Server: --microphone-server, else PULSE_SERVER, else XDG_RUNTIME_DIR/pulse/native.
+Only a local Unix socket and named source are accepted, with no default-source
+alias, source creation, implicit device change or downloaded worker.
+Reports distinguish native capture from host application audibility; physical
+microphone/live-tailnet qualification remains separate. Missing host selection
+is typed absence. Unsafe pending output may end the original connection.
 
 Local foreground sessions:
 disconnect TARGET / robot session close TARGET stop the kernel-authenticated

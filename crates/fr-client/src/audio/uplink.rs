@@ -32,7 +32,7 @@ use fr_wire::{
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 
 pub const MAX_CAPTURE_CUSTODY_US: u64 = 100_000;
@@ -118,17 +118,21 @@ pub enum Status {
     Stopped,
 }
 struct Epoch {
-    live: AtomicBool,
+    // 0 live, 1 terminal/authority retirement, 2 original local talk withdrawn.
+    // The first fence wins; a later UI action cannot relabel authority failure.
+    live: AtomicU8,
     until: Mutex<ClientInstant>,
     configuration: AudioConfiguration,
     local_talk: Option<(LocalTalkCheck, u64)>,
 }
 impl Epoch {
     fn stop(&self) {
-        self.live.store(false, Ordering::Release);
+        let _ = self
+            .live
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire);
     }
     fn is_live(&self) -> bool {
-        if !self.live.load(Ordering::Acquire) {
+        if self.live.load(Ordering::Acquire) != 0 {
             return false;
         }
         if self
@@ -136,10 +140,12 @@ impl Epoch {
             .as_ref()
             .is_some_and(|(check, original)| local_talk_epoch(check) != Some(*original))
         {
-            self.stop();
+            let _ = self
+                .live
+                .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire);
             return false;
         }
-        self.live.load(Ordering::Acquire)
+        self.live.load(Ordering::Acquire) == 0
     }
 }
 fn local_talk_epoch(check: &LocalTalkCheck) -> Option<u64> {
@@ -266,6 +272,14 @@ impl Sender {
     pub fn set_local_talk_check(&mut self, check: LocalTalkCheck) {
         self.retire_epoch();
         self.local_talk = Some(check);
+    }
+    /// Whether a native/queued proof already observed withdrawal of this exact
+    /// local talk token. Reading it cannot turn a generic native or authority
+    /// failure into `UserMute`; ordinary status/permit checks publish the cause.
+    pub fn local_talk_withdrawn(&self) -> bool {
+        self.epoch
+            .as_ref()
+            .is_some_and(|epoch| epoch.live.load(Ordering::Acquire) == 2)
     }
     pub fn status(&self) -> Status {
         if self.status != Status::Stopped
@@ -425,7 +439,7 @@ impl Sender {
         audio::encode_configuration(&configuration, self.channel, &mut self.configuration_bytes)
             .map_err(Error::Wire)?;
         self.epoch = Some(Arc::new(Epoch {
-            live: AtomicBool::new(true),
+            live: AtomicU8::new(0),
             until: Mutex::new(until),
             configuration,
             local_talk,

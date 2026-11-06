@@ -397,6 +397,31 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                 fr_client::native::control_offer_with_duplex(clipboard, audio),
             ] {
                 let mut ui = interface();
+                {
+                    let mut progress = ui.progress.borrow_mut();
+                    if original.capabilities.iter().any(|capability| {
+                        capability.name == fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+                    }) {
+                        progress.files = files::select(&[], true, false).unwrap();
+                    }
+                    if original
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability.name == fr_wire::files::DOWNLOAD_CAPABILITY)
+                    {
+                        // Pin an existing directory through the real local
+                        // selection boundary; this fixture never starts a
+                        // receive worker or writes into that directory.
+                        progress.downloads =
+                            files::download::select(Some(&crate::options::ReceiveOptions {
+                                directory: std::env::current_dir().unwrap().canonicalize().unwrap(),
+                                max_file_bytes: Some(1),
+                                max_session_bytes: Some(1),
+                                keep_both: false,
+                            }))
+                            .unwrap();
+                    }
+                }
                 ui.status(Status::Connecting { attempt: 1 }).unwrap();
                 assert_eq!(ui.offer(1, &original).unwrap(), original);
                 // A pre-request retry has not spent the file selection.
@@ -443,6 +468,14 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                         assert!(!file);
                     }
                 }
+                // Freed file slots cannot manufacture a fresh diagnostic or
+                // framing capability absent from the original full profile.
+                assert!(
+                    narrowed
+                        .capabilities
+                        .iter()
+                        .all(|capability| original.capabilities.contains(capability))
+                );
                 assert_eq!(ui.offer(4, &original).unwrap(), narrowed);
             }
         }
