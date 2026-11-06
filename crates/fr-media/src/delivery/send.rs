@@ -280,6 +280,9 @@ pub struct SendCache {
     repair_spent: usize,
     closed: bool,
     needs_recovery: bool,
+    // First local failure discovery starts the time budget, before an owner
+    // admits a wait or peer request. Rate admission remains independently timed.
+    first_failure_deadline: Option<u64>,
     recovery_request: Option<PendingRecovery>,
     // Fixed metadata belongs to the subscription, not a replaceable generation.
     // Neither clear(), payload eviction nor codec reconfiguration refills it.
@@ -322,6 +325,7 @@ impl SendCache {
             repair_spent: 0,
             closed: false,
             needs_recovery: false,
+            first_failure_deadline: None,
             recovery_request: None,
             recoveries: [None; RECOVERY_SLOTS],
             recovery_charged_epoch: None,
@@ -453,7 +457,7 @@ impl SendCache {
             // these bytes alone would leave later pictures depending on a frame
             // this subscriber never received. Use the same fence as tick's
             // unsent-original expiry, including the existing recovery allowance.
-            self.fail_reference();
+            self.fail_reference(now)?;
             return Err(SendError::OriginalExpired);
         }
         let index = self
@@ -733,7 +737,7 @@ impl SendCache {
             .flatten()
             .any(|p| now >= p.send_by && !p.original_complete())
         {
-            self.fail_reference();
+            self.fail_reference(now)?;
             return Err(SendError::OriginalExpired);
         }
         // Expired source metadata is replaceable, not a broken codec reference.
@@ -761,7 +765,7 @@ impl SendCache {
             return None;
         }
         if self.needs_recovery {
-            return self.recovery_request.as_ref().map(|p| p.until);
+            return self.recovery_deadline();
         }
         self.pictures
             .iter()
@@ -850,11 +854,20 @@ impl SendCache {
     /// descriptor for a Failed notification. Repair dispatch may discover this
     /// loss before the streaming turn begins; a caller-local snapshot is too late.
     /// The existing fixed metadata slot owns this evidence, not another queue.
-    fn fail_reference(&mut self) {
+    fn fail_reference(&mut self, now: u64) -> Result<(), SendError> {
+        let until = match deadline(now, self.policy.recovery_horizon_micros) {
+            Ok(until) => until,
+            Err(error) => {
+                self.close();
+                return Err(error.into());
+            }
+        };
         let progress = self.last_progress;
         self.clear();
         self.last_progress = progress;
         self.needs_recovery = true;
+        self.first_failure_deadline = Some(until);
+        Ok(())
     }
     pub fn close(&mut self) {
         self.clear();
@@ -867,6 +880,7 @@ impl SendCache {
         })
     }
     fn clear(&mut self) {
+        self.first_failure_deadline = None;
         self.recovery_request = None;
         self.last_progress = None;
         self.observation = None;

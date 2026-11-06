@@ -46,6 +46,17 @@ the original deadline or issuing another demand. Expiry closes this sender;
 replacement at the deadline cannot resurrect it. A valid replacement requires a
 new generation and newer channel bindings under the existing rules.
 
+A locally detected sender failure starts its recovery budget immediately, even
+before the host services the failed subscription or receives a peer request.
+`next_deadline` exposes that first deadline while the failed sender has no
+pending request. Delayed wait admission, peer requests, repeated polling and
+direct replacement inherit the same deadline; none can create a fresh budget.
+Failure discovery uses the sender's checked local clock, and deadline overflow
+closes the sender. The separate recovery-rate allowance is still charged when
+recovery is admitted, so delayed service cannot backdate or replenish rate
+credit. This makes sender timing independent of service order without changing
+the existing reference horizon, recovery horizon or input-readiness rules.
+
 Keep one `IdrCoalescer` for the shared encoder lifetime, not per viewer or
 recovery generation. Its sole slot consumes authentic sender demands and keeps
 the earliest live cohort deadline. A valid newly arriving demand retires an

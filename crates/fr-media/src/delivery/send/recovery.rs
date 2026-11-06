@@ -70,13 +70,9 @@ impl SendCache {
         if self.recovery_request.is_some() {
             return Ok(());
         }
-        let until = match deadline(now, self.policy.recovery_horizon_micros) {
-            Ok(until) => until,
-            Err(error) => {
-                self.close();
-                return Err(error.into());
-            }
-        };
+        let until = self
+            .first_failure_deadline
+            .ok_or(DeliveryError::WrongState)?;
         self.admit_recovery(now)?;
         self.recovery_request = Some(PendingRecovery {
             request: None,
@@ -110,7 +106,7 @@ impl SendCache {
             return Err(DeliveryError::WrongState.into());
         }
         if !self.needs_recovery {
-            self.fail_reference();
+            self.fail_reference(now)?;
         }
         self.await_recovery_request(now)
     }
@@ -159,8 +155,8 @@ impl SendCache {
                 return Ok(RecoveryDisposition::Coalesced);
             }
         }
-        let until = match self.recovery_request.as_ref() {
-            Some(pending) => pending.until,
+        let until = match self.recovery_deadline() {
+            Some(until) => until,
             None => match deadline(now, self.policy.recovery_horizon_micros) {
                 Ok(until) => until,
                 Err(error) => {
@@ -191,12 +187,14 @@ impl SendCache {
             until,
         }))
     }
+    pub(super) fn recovery_deadline(&self) -> Option<u64> {
+        self.first_failure_deadline
+            .into_iter()
+            .chain(self.recovery_request.as_ref().map(|pending| pending.until))
+            .min()
+    }
     pub(super) fn check_recovery_deadline(&mut self, now: u64) -> Result<(), SendError> {
-        if self
-            .recovery_request
-            .as_ref()
-            .is_some_and(|p| now >= p.until)
-        {
+        if self.recovery_deadline().is_some_and(|until| now >= until) {
             self.close();
             return Err(DeliveryError::RecoveryExpired.into());
         }
@@ -389,26 +387,27 @@ mod tests {
         ));
     }
 
-    fn last_offer(cache: &mut SendCache) -> PacketOffer {
-        cache
-            .push(
-                fr_wire::Progress {
-                    descriptor: fr_wire::FrameDescriptor {
-                        frame: 1,
-                        reference: None,
-                        total_bytes: 16,
-                        stride: cache.limits.fragment_stride(),
-                        capture_micros: 0,
-                    },
-                    observed_micros: 0,
-                    observation: fr_wire::SourceObservation::Captured,
-                    pipeline: fr_wire::PipelineState::Running,
+    fn push_bootstrap(cache: &mut SendCache, now: u64) -> Result<(), SendError> {
+        cache.push(
+            fr_wire::Progress {
+                descriptor: fr_wire::FrameDescriptor {
+                    frame: 1,
+                    reference: None,
+                    total_bytes: 16,
+                    stride: cache.limits.fragment_stride(),
+                    capture_micros: 0,
                 },
-                vec![1; 16],
-                super::super::DeliveryMode::Recovery,
-                0,
-            )
-            .unwrap();
+                observed_micros: 0,
+                observation: fr_wire::SourceObservation::Captured,
+                pipeline: fr_wire::PipelineState::Running,
+            },
+            vec![1; 16],
+            super::super::DeliveryMode::Recovery,
+            now,
+        )
+    }
+    fn last_offer(cache: &mut SendCache) -> PacketOffer {
+        push_bootstrap(cache, 0).unwrap();
         let mut bytes = vec![0; cache.limits.record_bytes()];
         let announcement = cache.next_packet(0, &mut bytes).unwrap().unwrap();
         assert_eq!(announcement.channel(), Channel::MediaConfig);
@@ -416,6 +415,139 @@ mod tests {
         assert_eq!(last.channel(), Channel::Recovery);
         assert!(!cache.originals_pending());
         last
+    }
+    fn discover_unsent_failure(cache: &mut SendCache) -> u64 {
+        push_bootstrap(cache, 0).unwrap();
+        // The budget begins at actual failure discovery, not retrospectively
+        // at the picture's capture or send-by time.
+        let observed = cache.policy.recovery_horizon_micros + 17;
+        assert_eq!(cache.tick(observed), Err(SendError::OriginalExpired));
+        observed
+    }
+    #[test]
+    fn first_sender_failure_has_a_deadline_before_recovery_owner_service() {
+        let mut cache = cache();
+        let observed = discover_unsent_failure(&mut cache);
+        let until = observed + cache.policy.recovery_horizon_micros;
+        assert_eq!(cache.next_deadline(), Some(until));
+        assert!(cache.recovery_request.is_none());
+        assert!(cache.recoveries.iter().all(Option::is_none));
+        assert_eq!(cache.cached_bytes(), 0);
+        assert_eq!(cache.cached_pictures(), 0);
+        for now in [observed + 1, until - 1] {
+            assert_eq!(cache.tick(now), Err(SendError::NeedsRecovery));
+            assert_eq!(cache.next_deadline(), Some(until));
+        }
+        assert_eq!(
+            cache.tick(until),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+        assert_eq!(cache.next_deadline(), None);
+        assert_eq!(cache.tick(until + 1), Err(SendError::Closed));
+    }
+    #[test]
+    fn delayed_sender_admission_inherits_failure_time_without_backdating_rate_credit() {
+        for peer_request_first in [false, true] {
+            let mut cache = cache();
+            let observed = discover_unsent_failure(&mut cache);
+            let until = observed + cache.policy.recovery_horizon_micros;
+            let admitted = observed + 100;
+            let demand = if peer_request_first {
+                accepted(&mut cache, admitted)
+            } else {
+                cache.await_recovery_request(admitted).unwrap();
+                assert_eq!(cache.next_deadline(), Some(until));
+                accepted(&mut cache, admitted + 1)
+            };
+            assert_eq!(demand.deadline_micros(), until);
+            assert_eq!(cache.next_deadline(), Some(until));
+            let charges: Vec<_> = cache.recoveries.iter().flatten().copied().collect();
+            assert_eq!(charges, vec![admitted]);
+            cache.await_recovery_request(admitted + 2).unwrap();
+            assert!(matches!(
+                request(&mut cache, admitted + 3),
+                Ok(RecoveryDisposition::Coalesced)
+            ));
+            assert_eq!(cache.next_deadline(), Some(until));
+            replace(&mut cache, until - 1);
+            assert!(!cache.needs_recovery());
+            assert_eq!(cache.next_deadline(), None);
+            assert!(demand.check(&cache, until - 1).is_err());
+            assert_eq!(
+                cache
+                    .recoveries
+                    .iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>(),
+                charges
+            );
+        }
+    }
+    #[test]
+    fn delayed_sender_owners_cannot_restart_an_expired_unserviced_failure() {
+        for operation in 0..3 {
+            let mut cache = cache();
+            let observed = discover_unsent_failure(&mut cache);
+            let until = observed + cache.policy.recovery_horizon_micros;
+            let result = match operation {
+                0 => cache.await_recovery_request(until),
+                1 => request(&mut cache, until).map(|_| ()),
+                _ => cache.replace(
+                    MediaEpoch {
+                        recovery: cache.epoch.recovery.next().unwrap(),
+                        ..cache.epoch
+                    },
+                    MediaBindings::new(11, 12, 13, 14).unwrap(),
+                    until,
+                ),
+            };
+            assert_eq!(
+                result,
+                Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+            );
+            assert!(cache.recoveries.iter().all(Option::is_none));
+            assert_eq!(cache.next_deadline(), None);
+            assert_eq!(cache.tick(until + 1), Err(SendError::Closed));
+        }
+    }
+    #[test]
+    fn late_enqueue_anchors_recovery_without_an_admitted_picture() {
+        let mut cache = cache();
+        let observed = cache.policy.recovery_horizon_micros + 17;
+        assert_eq!(
+            push_bootstrap(&mut cache, observed),
+            Err(SendError::OriginalExpired)
+        );
+        let until = observed + cache.policy.recovery_horizon_micros;
+        assert_eq!(cache.next_deadline(), Some(until));
+        assert!(cache.recovery_progress().is_none());
+        assert_eq!(cache.cached_bytes(), 0);
+        assert_eq!(cache.cached_pictures(), 0);
+        assert_eq!(
+            cache.tick(until),
+            Err(SendError::Delivery(DeliveryError::RecoveryExpired))
+        );
+    }
+    #[test]
+    fn overflowing_sender_failure_is_terminal_at_discovery() {
+        for during_enqueue in [false, true] {
+            let mut cache = cache();
+            let result = if during_enqueue {
+                push_bootstrap(&mut cache, u64::MAX)
+            } else {
+                push_bootstrap(&mut cache, 0).unwrap();
+                cache.tick(u64::MAX)
+            };
+            assert_eq!(
+                result,
+                Err(SendError::Delivery(DeliveryError::ClockOverflow))
+            );
+            assert_eq!(cache.next_deadline(), None);
+            assert_eq!(cache.cached_bytes(), 0);
+            assert!(cache.recoveries.iter().all(Option::is_none));
+            assert_eq!(cache.tick(u64::MAX), Err(SendError::Closed));
+        }
     }
     #[test]
     fn expired_final_offer_fences_even_after_payload_eviction() {
@@ -515,12 +647,12 @@ mod tests {
             Err(SendError::Delivery(DeliveryError::WrongState))
         );
         for now in [1, 3] {
-            // Model the existing tick/push unsent-original failure transition.
-            cache.needs_recovery = true;
+            // Run the same failure transition as tick/push, before admission.
+            cache.fail_reference(now).unwrap();
             cache.await_recovery_request(now).unwrap();
             replace(&mut cache, now + 1);
         }
-        cache.needs_recovery = true;
+        cache.fail_reference(5).unwrap();
         assert_eq!(
             cache.await_recovery_request(5),
             Err(SendError::RecoveryLimitExceeded)
@@ -530,9 +662,9 @@ mod tests {
     #[test]
     fn overflowing_local_wait_is_terminal() {
         let mut cache = cache();
-        cache.needs_recovery = true;
+        let offer = last_offer(&mut cache);
         assert_eq!(
-            cache.await_recovery_request(u64::MAX),
+            cache.abandon_expired_offer(&offer, u64::MAX),
             Err(SendError::Delivery(DeliveryError::ClockOverflow))
         );
         assert_eq!(cache.tick(u64::MAX), Err(SendError::Closed));
