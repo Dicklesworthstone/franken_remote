@@ -327,6 +327,11 @@ impl Desktop {
     pub fn statistics(&self) -> Option<ViewerStatistics> {
         self.observer.as_ref().map(NativeObserver::statistics)
     }
+    pub fn quality_handle(&self) -> Option<frd::session_startup::ViewerQualityHandle> {
+        self.observer
+            .as_ref()
+            .and_then(NativeObserver::quality_handle)
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.observer.as_ref().and_then(NativeObserver::worker_id)
     }

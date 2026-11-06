@@ -65,6 +65,47 @@ The `--fps` setting remains the maximum capture rate. The adaptive maximum is
 below 5 then keeps that slower interval fixed. The host never speeds up a low-fps
 operator choice to fit the adaptive range.
 
+## Viewing the host's operating decisions
+
+With `--adaptive-capture`, the host optionally offers `quality-decisions` v1.
+Current native viewers select it when their existing capability budget has room;
+full profiles omit this diagnostic before sacrificing an older feature. A peer
+without the capability receives no new records and keeps its existing behavior.
+
+The original private or shared capture owner reports its selected capture
+interval, active/idle mode, and the reason for its most recent adjustment. An
+enabled software bitrate controller separately reports the encoder's confirmed
+applied bitrate and any pending target. The target stays pending until the
+original native worker confirms the actual transition. Unknown bitrate remains
+null. These are scheduling and encoder settings, not measured frame delivery,
+link capacity, presentation latency or source-freshness evidence.
+
+For an existing foreground robot session, inspect the current report with:
+
+```sh
+fr robot session status NODE_ID --json
+```
+
+`data.current_host_quality_decision` is either null or an object containing
+`sequence`, `capture_interval_us`, `mode`, `reason`, `applied_bitrate_bps`, and
+`pending_bitrate_bps`. It is null before a report, when reporting is unselected,
+while the receiver is recovering, and after its original owner closes. A new
+report must match the recovered view before it becomes current. Completed
+observation output retains `last_attempt_media.host_quality_decisions_received`
+and `last_attempt_media.last_host_quality_decision` as explicitly historical
+diagnostics.
+
+Reports use the original reliable control lane, full decoder-view binding and
+session-owned increasing sequence. The host attempts at most four changed-state
+reports per second, retains no unsent diagnostic queue, and re-samples the
+current source after backpressure. The existing transport accounting reserves
+both renewal slots and 512 critical bytes before admitting this metadata.
+Recovery changes the view binding without resetting sequence or rate limits.
+Reporting never grants input, changes decoder configuration, renews consent,
+refreshes a source observation, or extends an existing deadline.
+
+## Existing adaptive capture integration evidence
+
 A dispatch regression follows the actual controlling owner through native
 UDP/TLS/QUIC and supervised capture, presentation and input IPC. It checks a
 genuine unchanged source reaches verified idle, the original input receipt and

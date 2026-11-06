@@ -22,6 +22,9 @@ mod hosts_probe;
 #[cfg(any(test, feature = "linux-desktop"))]
 #[path = "linux/lapse.rs"]
 mod lapse;
+#[cfg(feature = "linux-desktop")]
+#[path = "linux/quality.rs"]
+mod quality;
 #[path = "linux/refusal.rs"]
 mod refusal;
 #[path = "linux/robot.rs"]
@@ -555,6 +558,7 @@ fn connect(
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
+    state.borrow_mut().quality = owner.quality_publisher();
     if let Some(files) = state.borrow_mut().files.as_mut() {
         files.command_connection(&owner.info().instance);
     }
@@ -898,6 +902,8 @@ fn offer() -> Offer {
 #[cfg(feature = "linux-desktop")]
 #[derive(Default)]
 struct Progress {
+    /// Read-only current host settings on this invocation's existing socket.
+    quality: session_control::quality::Publisher,
     /// Only the explicit foreground automation mode exposes this bounded owner.
     automation: Option<session_control::input::Shared>,
     /// Original native focus cause, independent of cleanup-generated status.
@@ -936,6 +942,7 @@ struct Progress {
 #[cfg(feature = "linux-desktop")]
 impl Progress {
     fn begin(&mut self, attempt: u8) {
+        self.quality.set(None);
         self.attempts = attempt;
         self.user_closed = false;
         self.missing_display = false;
@@ -1044,6 +1051,7 @@ impl Ui for Interface {
         p.opened = p.opened.saturating_add(1);
         p.approval_pending = false;
         p.window = desktop.window();
+        p.quality.set(desktop.quality_handle());
         if let Some(automation) = &p.automation {
             p.window
                 .as_ref()
@@ -1280,6 +1288,7 @@ fn completion_with_lease(
             changes.json,
         )
     } else {
+        let quality = quality::text(progress.media.as_ref());
         let closure = closure.map_or_else(
             || {
                 "No completed close exchange; host cleanup and outstanding effects are unknown."
@@ -1288,7 +1297,7 @@ fn completion_with_lease(
             crate::closure::Report::text,
         );
         format!(
-            "View-only session stopped; {} attempt(s), {} opened session(s), local cleanup confirmed. {closure}{}{audio} Native transport/hardware remain unqualified.\n",
+            "View-only session stopped; {} attempt(s), {} opened session(s), local cleanup confirmed. {closure}{}{audio}{quality} Native transport/hardware remain unqualified.\n",
             progress.attempts, progress.opened, changes.text,
         )
     }
@@ -1309,13 +1318,14 @@ fn media_json(media: Option<&frd::session_startup::ViewerStatistics>) -> String 
                     .map_or_else(|| "null".to_owned(), |us| (us / 1000).to_string())
             };
             format!(
-                "{{\"decoded\":{},\"repair_requests\":{},\"recovered_streams\":{},\"presented_age_reports\":{},\"presented_age_p50_ms_at_most\":{},\"presented_age_p95_ms_at_most\":{}}}",
+                "{{\"decoded\":{},\"repair_requests\":{},\"recovered_streams\":{},\"presented_age_reports\":{},\"presented_age_p50_ms_at_most\":{},\"presented_age_p95_ms_at_most\":{}{}}}",
                 m.decoded,
                 m.repair_requests,
                 m.recovered_streams,
                 m.presented_age.reports(),
                 age(500),
-                age(950)
+                age(950),
+                quality::json(m),
             )
         },
     )
@@ -1442,6 +1452,7 @@ fn control_completion(
             crate::terminal::lease_json(lease),
         )
     } else {
+        let quality = quality::text(progress.media.as_ref());
         let close = closure.map_or_else(
             || " No completed final close exchange; host cleanup and outstanding effects are unknown.".to_owned(),
             |report| format!(" Final connection close: {}", report.text()),
@@ -1453,7 +1464,7 @@ fn control_completion(
             )
         });
         format!(
-            "Control session stopped; {} attempt(s), {} opened session(s).{} Local cleanup confirmed.{close}{lease}{downloads}{audio} Native transport/hardware remain unqualified.\n",
+            "Control session stopped; {} attempt(s), {} opened session(s).{} Local cleanup confirmed.{close}{lease}{downloads}{audio}{quality} Native transport/hardware remain unqualified.\n",
             progress.attempts, progress.opened, history.text,
         )
     }
@@ -1604,10 +1615,15 @@ mod tests {
         assert!(offer.validate().is_ok());
         assert_eq!(offer.role, fr_wire::negotiation::Role::Observe);
         assert_eq!(offer, fr_client::native::observation_offer());
-        assert_eq!(offer.capabilities.len(), 8);
+        assert_eq!(offer.capabilities.len(), 9);
         assert!(offer.capabilities.iter().any(|c| {
             c.name == fr_wire::attachment::credit::CAPABILITY
                 && c.version == fr_wire::attachment::credit::VERSION
+                && !c.required
+        }));
+        assert!(offer.capabilities.iter().any(|c| {
+            c.name == fr_wire::quality_decision::CAPABILITY
+                && c.version == fr_wire::quality_decision::VERSION
                 && !c.required
         }));
         assert!(offer.capabilities.iter().all(|c| !c.name.contains("input")
@@ -2162,7 +2178,7 @@ mod tests {
                 recovered_streams: 1,
                 ..Default::default()
             };
-            let expected = "\"last_attempt_media\":{\"decoded\":41,\"repair_requests\":3,\"recovered_streams\":1,\"presented_age_reports\":0,\"presented_age_p50_ms_at_most\":null,\"presented_age_p95_ms_at_most\":null}";
+            let expected = "\"last_attempt_media\":{\"decoded\":41,\"repair_requests\":3,\"recovered_streams\":1,\"presented_age_reports\":0,\"presented_age_p50_ms_at_most\":null,\"presented_age_p95_ms_at_most\":null,\"host_quality_decisions_received\":0,\"last_host_quality_decision\":null}";
             for progress in [
                 Progress {
                     media: Some(media),

@@ -199,12 +199,21 @@ struct LocalSessionData {
     local_owner_present: bool,
     remote_session_state: Option<&'static str>,
     remote_control_granted: Option<bool>,
+    current_host_quality_decision: Option<session_control::quality::Report>,
 }
 
-fn render_local_status(info: session_control::Info, json: bool) -> Result<String, Failure> {
+fn render_local_status(
+    status: session_control::quality::Status,
+    json: bool,
+) -> Result<String, Failure> {
+    let session_control::quality::Status { info, quality } = status;
     let human = (!json).then(|| {
+        let quality = quality.as_ref().map_or_else(
+            || "Host quality for the current media view: unknown.\n".to_owned(),
+            session_control::quality::Report::text,
+        );
         format!(
-            "Identified the existing local foreground connection.\nTarget: {}\nConnection ID: {}\nRemote session and control state: not observed.\n",
+            "Identified the existing local foreground connection.\nTarget: {}\nConnection ID: {}\nRemote session and control state: not observed.\n{quality}",
             info.target, info.instance,
         )
     });
@@ -215,6 +224,7 @@ fn render_local_status(info: session_control::Info, json: bool) -> Result<String
         local_owner_present: true,
         remote_session_state: None,
         remote_control_granted: None,
+        current_host_quality_decision: quality,
     };
     let envelope = RobotEnvelope::success(now_unix_ms(), AcknowledgementStage::Observed, data);
     if json {
@@ -258,7 +268,7 @@ pub(super) fn run_robot(
 ) -> Result<String, Failure> {
     if let RobotCommand::SessionStatus { node } = command {
         let info = runtime
-            .block_on(shutdown.run(cx, stopped, session_control::probe(cx, node)))
+            .block_on(shutdown.run(cx, stopped, session_control::quality::read(cx, node)))
             .map_err(local_failure)?;
         return render_local_status(info, json);
     }
@@ -384,9 +394,12 @@ mod tests {
         let instance = "0123456789abcdef0123456789abcdef";
         for json in [true, false] {
             let text = render_local_status(
-                session_control::Info {
-                    target: "n-host".into(),
-                    instance: instance.into(),
+                session_control::quality::Status {
+                    info: session_control::Info {
+                        target: "n-host".into(),
+                        instance: instance.into(),
+                    },
+                    quality: None,
                 },
                 json,
             )
@@ -407,12 +420,52 @@ mod tests {
                     data.get("remote_control_granted"),
                     Some(&serde_json::Value::Null)
                 );
+                assert_eq!(
+                    data.get("current_host_quality_decision"),
+                    Some(&serde_json::Value::Null)
+                );
                 assert!(data.get("lease").is_none());
                 assert!(data.get("local_cleanup_confirmed").is_none());
             } else {
                 assert!(text.contains("not observed"));
             }
         }
+    }
+
+    #[test]
+    fn local_quality_status_keeps_host_settings_separate_from_remote_authority() {
+        use fr_wire::quality_decision::{Decision, Mode, Reason};
+        let status = session_control::quality::Status {
+            info: session_control::Info {
+                target: "n-host".into(),
+                instance: "0123456789abcdef0123456789abcdef".into(),
+            },
+            quality: Some(
+                Decision {
+                    sequence: 3,
+                    capture_interval_us: 50_000,
+                    mode: Mode::Active,
+                    reason: Reason::SourceWork,
+                    applied_bitrate_bps: Some(2_000_000),
+                    pending_bitrate_bps: Some(1_500_000),
+                }
+                .into(),
+            ),
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&render_local_status(status.clone(), true).unwrap()).unwrap();
+        let data = &json["data"];
+        assert!(data["remote_session_state"].is_null());
+        assert!(data["remote_control_granted"].is_null());
+        let quality = &data["current_host_quality_decision"];
+        assert_eq!(quality["applied_bitrate_bps"], 2_000_000);
+        assert_eq!(quality["pending_bitrate_bps"], 1_500_000);
+        assert_eq!(quality["capture_interval_us"], 50_000);
+        assert!(quality.get("fps").is_none());
+        let human = render_local_status(status, false).unwrap();
+        assert!(human.contains("current media view"));
+        assert!(human.contains("pending 1500000 bps (not yet applied)"));
+        assert!(human.contains("Remote session and control state: not observed"));
     }
 
     #[test]

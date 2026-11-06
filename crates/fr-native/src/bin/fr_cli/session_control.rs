@@ -7,6 +7,8 @@
 pub(super) mod input;
 #[path = "session_control/observation.rs"]
 pub(super) mod observation;
+#[path = "session_control/quality.rs"]
+pub(super) mod quality;
 #[path = "session_control/screenshot.rs"]
 pub(super) mod screenshot;
 #[cfg(any(feature = "linux-desktop", test))]
@@ -95,6 +97,7 @@ pub(super) struct Owner {
     completed: bool,
     observations: Option<observation::Publisher>,
     automation: Option<input::Shared>,
+    quality: quality::Publisher,
 }
 #[cfg(any(feature = "linux-desktop", test))]
 impl Owner {
@@ -130,11 +133,15 @@ impl Owner {
             completed: false,
             observations: None,
             automation: None,
+            quality: quality::Publisher::default(),
         })
     }
     pub fn with_observations(mut self, publisher: observation::Publisher) -> Self {
         self.observations = Some(publisher);
         self
+    }
+    pub fn quality_publisher(&self) -> quality::Publisher {
+        self.quality.clone()
     }
     /// Explicit opt-in only. This opaque LOCAL handle is a comparison fence;
     /// the original controlled viewer retains every host lease and bearer ticket.
@@ -179,11 +186,19 @@ impl Owner {
                         let instance = self.instance;
                         let observations = self.observations.clone();
                         let automation = self.automation.clone();
+                        let quality = self.quality.clone();
                         self.peers.push(Box::pin(async move {
                             bounded(
                                 &clock,
                                 deadline,
-                                peer(stream, identity, instance, observations, automation),
+                                peer(
+                                    stream,
+                                    identity,
+                                    instance,
+                                    observations,
+                                    automation,
+                                    quality,
+                                ),
                             )
                             .await
                         }));
@@ -205,6 +220,7 @@ impl Owner {
                                 automation.retire();
                             }
                             self.requester = Some(stream);
+                            self.quality.set(None);
                             self.peers.clear();
                             if let Some(publisher) = &self.observations {
                                 publisher.retire(fr_client::robot::live::Phase::Cleaning);
@@ -231,6 +247,7 @@ impl Owner {
             automation.retire();
         }
         self.completed = true;
+        self.quality.set(None);
         self.peers.clear();
         if let Some(publisher) = &self.observations {
             publisher.retire(fr_client::robot::live::Phase::Stopped);
@@ -356,6 +373,7 @@ async fn peer(
     instance: [u8; 16],
     observations: Option<observation::Publisher>,
     automation: Option<input::Shared>,
+    quality: quality::Publisher,
 ) -> Result<Option<UnixStream>, Error> {
     let mut opening = [0; 8];
     stream
@@ -379,6 +397,10 @@ async fn peer(
     }
     if request[..8] == STOP {
         return Ok(Some(stream));
+    }
+    if request[..8] == quality::REQUEST {
+        quality::respond(&mut stream, instance, &quality).await?;
+        return Ok(None);
     }
     if request[..8] == input::STATUS || request[..8] == input::SUBMIT {
         input::respond(
