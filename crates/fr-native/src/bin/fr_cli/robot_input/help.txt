@@ -5,7 +5,7 @@ fr robot session open NODE_ID --foreground --role control --accept-input
 fr robot input NODE_ID --connection-id ID --status [--json]
 fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     --observation-id INTEGER --max-observation-age-ms 1..1000
-    (--click BUTTON,X,Y | --drag BUTTON,X1,Y1,X2,Y2 | --key USB_USAGE
+    (--move X,Y | --click BUTTON,X,Y | --drag BUTTON,X1,Y1,X2,Y2 | --key USB_USAGE
      | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
 
 Find the public connection ID with fr robot session status NODE_ID --json.
@@ -21,7 +21,11 @@ them with a subsequent --status read. Expired readiness clears those handles.
 
 Use increasing nonzero request IDs. Each action pins the ORIGINAL observation;
 a new status read cannot refresh an accepted command. Coordinates are signed
-host desktop pixels. Buttons are 1 primary, 2 secondary, 3 middle, 4 back, 5 forward.
+host desktop pixels. --move sends one absolute pointer state without a click,
+key or wheel event. Its point must be inside the original granted display. It
+waits for the original host's pointer receipt; a lost datagram or missing receipt
+is an unknown effect, never an automatic retry or a refreshed observation.
+Buttons are 1 primary, 2 secondary, 3 middle, 4 back, 5 forward.
 --drag presses at X1,Y1, moves once with the button held, then releases at X2,Y2.
 Both distinct endpoints must be inside the original granted display before any
 press is sent. Each of its two reliable actions waits for its original receipt;

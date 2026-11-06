@@ -156,15 +156,23 @@ impl Shared {
             state.finish_if_retained();
             return;
         }
-        let Some(action) = pending.request.operation.action(pending.encoded) else {
+        let binding = viewer.input_result_binding();
+        let encoded = if let Some(position) = pending.request.operation.pointer(pending.encoded) {
+            viewer.pointer(position)
+        } else if let Some(action) = pending.request.operation.action(pending.encoded) {
+            viewer.action(action)
+        } else {
             viewer.close();
             state.retire();
             return;
         };
-        let binding = viewer.input_result_binding();
-        match viewer.action(action) {
+        match encoded {
             Ok(encoded) => {
-                if state.ledger.encoded(id, binding, encoded.sequence).is_err() {
+                if state
+                    .ledger
+                    .encoded_in(id, binding, encoded.space, encoded.sequence)
+                    .is_err()
+                {
                     // Sending became possible before ledger recording. Fence
                     // immediately; the ledger preserves that uncertainty.
                     viewer.close();
@@ -189,6 +197,29 @@ impl Shared {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn move_encodes_one_pointer_without_synthesizing_a_reliable_action() {
+        let operation = Operation::Move { x: -700, y: 500 };
+        assert!(operation.valid());
+        assert_eq!(operation.count(), 1);
+        assert_eq!(operation.pointer(0), Some(DesktopPoint { x: -700, y: 500 }));
+        for index in 0..=u8::MAX {
+            assert!(operation.action(index).is_none());
+            if index != 0 {
+                assert!(operation.pointer(index).is_none());
+            }
+        }
+        assert!(
+            Operation::Click {
+                button: 1,
+                x: -700,
+                y: 500
+            }
+            .pointer(0)
+            .is_none()
+        );
+    }
 
     #[test]
     fn robot_scroll_preserves_every_line_within_the_native_submission_bound() {
@@ -225,7 +256,7 @@ mod tests {
                 else {
                     panic!("every declared scroll action must exist");
                 };
-                assert!(position == DesktopPoint { x: -700, y: 500 });
+                assert_eq!(position, DesktopPoint { x: -700, y: 500 });
                 assert_eq!(unit, ScrollUnit::Lines);
                 // This is the actual X11 executor's pre-submission gate. The
                 // original single 120-line action failed here before moving.

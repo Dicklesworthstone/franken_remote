@@ -242,6 +242,7 @@ pub enum Error {
 #[derive(Clone, Copy)]
 struct Action {
     binding: ResultBinding,
+    space: SequenceSpace,
     sequence: u64,
     receipt: Option<InputResult>,
 }
@@ -319,7 +320,9 @@ impl Request {
     }
     fn accepts(&mut self, receipt: InputResult) -> Result<bool, Error> {
         let Some(action) = self.actions.iter_mut().flatten().find(|action| {
-            action.sequence == receipt.sequence && action.binding == receipt.binding
+            action.space == receipt.space
+                && action.sequence == receipt.sequence
+                && action.binding == receipt.binding
         }) else {
             return Ok(false);
         };
@@ -342,7 +345,8 @@ pub struct Ledger {
     scope: Scope,
     consumed: u64,
     previous_time: Option<u64>,
-    last_encoding: Option<(ResultBinding, u64)>,
+    binding: Option<ResultBinding>,
+    last_encoding: [Option<u64>; 2],
     pending: Option<Request>,
     retained: [Option<Request>; RETAINED_REPORTS],
     cursor: usize,
@@ -357,7 +361,8 @@ impl Ledger {
             scope,
             consumed: 0,
             previous_time: None,
-            last_encoding: None,
+            binding: None,
+            last_encoding: [None; 2],
             pending: None,
             retained: [None; RETAINED_REPORTS],
             cursor: 0,
@@ -466,10 +471,24 @@ impl Ledger {
     /// consumes an unresolved slot, retains uncertainty and closes this owner.
     /// Each next action waits for its preceding successful receipt.
     pub fn encoded(&mut self, id: u64, binding: ResultBinding, sequence: u64) -> Result<(), Error> {
+        self.encoded_in(id, binding, SequenceSpace::Action, sequence)
+    }
+    /// Record the encoder's exact sequence space. Replaceable pointer states
+    /// use their own monotonic sequence, but still require the original host's
+    /// reliable receipt before a robot request can claim OS submission. Neither
+    /// a missing datagram nor switching spaces permits replay or rebinding.
+    pub fn encoded_in(
+        &mut self,
+        id: u64,
+        binding: ResultBinding,
+        space: SequenceSpace,
+        sequence: u64,
+    ) -> Result<(), Error> {
         if self.closed {
             return Err(Error::Closed);
         }
-        let previous_encoding = self.last_encoding;
+        let original_binding = self.binding;
+        let previous_encoding = self.last_encoding[space as usize];
         let request = self.pending_id_mut(id)?;
         let error = if request.awaiting() {
             Some(Error::ActionPending)
@@ -477,8 +496,8 @@ impl Ledger {
             || binding.channel == 0
             || binding.session.as_raw() == 0
             || binding.lease.as_raw() == 0
-            || previous_encoding
-                .is_some_and(|(original, previous)| original != binding || previous >= sequence)
+            || original_binding.is_some_and(|original| original != binding)
+            || previous_encoding.is_some_and(|previous| previous >= sequence)
         {
             Some(Error::InvalidSequence)
         } else {
@@ -490,6 +509,7 @@ impl Ledger {
             if error.is_none() {
                 request.actions[slot] = Some(Action {
                     binding,
+                    space,
                     sequence,
                     receipt: None,
                 });
@@ -499,11 +519,13 @@ impl Ledger {
             self.retire_with(End::Stopped);
             return Err(error);
         }
-        self.last_encoding = Some((binding, sequence));
+        self.binding = Some(binding);
+        self.last_encoding[space as usize] = Some(sequence);
         Ok(())
     }
     /// Only matching reliable receipts from the original bound input owner
-    /// advance this request. Native pointer/unrelated receipts are ignored.
+    /// advance this request. Binding, sequence AND sequence space must match;
+    /// a native pointer receipt cannot acknowledge a same-numbered action.
     /// Late receipts can improve retained uncertainty but never resume work.
     pub fn result(&mut self, event: ResultEvent) -> Result<Option<Report>, Error> {
         let receipt = match event {
@@ -512,6 +534,7 @@ impl Ledger {
             {
                 receipt
             }
+            ResultEvent::Pointer(receipt) if receipt.space == SequenceSpace::Pointer => receipt,
             _ => return Ok(None),
         };
         let result = self.accept_result(receipt);

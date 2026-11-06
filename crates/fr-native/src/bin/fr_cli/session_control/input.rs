@@ -377,6 +377,13 @@ impl State {
             if current.view != original.view || current.bounds != original.bounds {
                 return Err(Refusal::ViewChanged);
             }
+            if request
+                .operation
+                .pointer(0)
+                .is_some_and(|position| !original.bounds.contains(position))
+            {
+                return Err(Refusal::OutOfBounds);
+            }
             if let Some((from, to)) = request.operation.drag_points()
                 && (!original.bounds.contains(from) || !original.bounds.contains(to))
             {

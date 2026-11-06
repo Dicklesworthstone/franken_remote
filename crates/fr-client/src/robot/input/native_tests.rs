@@ -975,3 +975,290 @@ fn a_missing_chord_receipt_never_replays_even_when_a_late_result_resolves_it() {
         );
     }
 }
+
+fn pointer_submitted(sequence: u64) -> InputResult {
+    InputResult {
+        space: SequenceSpace::Pointer,
+        submitted_operations: 1,
+        ..submitted(sequence)
+    }
+}
+
+#[test]
+fn pointer_requires_its_exact_original_binding_space_and_sequence() {
+    let mut ledger = Ledger::new(scope()).unwrap();
+    start(&mut ledger, 1, 0, 1);
+    ledger
+        .encoded_in(1, binding(), SequenceSpace::Pointer, 0)
+        .unwrap();
+    assert!(!ledger.ready(1, 1).unwrap());
+    for foreign in [
+        ResultBinding {
+            channel: 18,
+            ..binding()
+        },
+        ResultBinding {
+            session: RemoteSessionId::from_raw(24),
+            ..binding()
+        },
+        ResultBinding {
+            lease: InputLeaseId::from_raw(32),
+            ..binding()
+        },
+    ] {
+        assert_eq!(
+            ledger.result(ResultEvent::Pointer(InputResult {
+                binding: foreign,
+                ..pointer_submitted(0)
+            })),
+            Ok(None)
+        );
+    }
+    for event in [
+        ResultEvent::Completed(submitted(0)),
+        ResultEvent::Duplicate(submitted(0)),
+        ResultEvent::Pointer(pointer_submitted(1)),
+        ResultEvent::Completed(pointer_submitted(0)),
+        ResultEvent::Pointer(submitted(0)),
+    ] {
+        assert_eq!(ledger.result(event), Ok(None));
+        assert!(!ledger.ready(1, 2).unwrap());
+    }
+    let result = ledger
+        .result(ResultEvent::Pointer(pointer_submitted(0)))
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.disposition, InputDisposition::Committed);
+    assert_eq!(result.actions_encoded, 1);
+    assert_eq!(result.actions_submitted, 1);
+    assert_eq!(result.acknowledged_actions, 1);
+    assert_eq!(result.submitted_operations, 1);
+    assert_eq!(result.stage, Some(AcknowledgementStage::SubmittedToOs));
+    assert_eq!(
+        ledger.result(ResultEvent::Pointer(pointer_submitted(0))),
+        Ok(None)
+    );
+    assert_eq!(report(&ledger, 1), result);
+    assert!(!ledger.is_closed());
+}
+
+#[test]
+fn pointer_and_action_sequences_advance_independently_without_receipt_collisions() {
+    let mut ledger = Ledger::new(scope()).unwrap();
+    for (id, space, sequence) in [
+        (1, SequenceSpace::Action, 100),
+        (2, SequenceSpace::Pointer, 0),
+        (3, SequenceSpace::Action, 101),
+        (4, SequenceSpace::Pointer, 100),
+    ] {
+        start(&mut ledger, id, id, 1);
+        ledger.encoded_in(id, binding(), space, sequence).unwrap();
+        let (actual, other) = if space == SequenceSpace::Pointer {
+            (
+                ResultEvent::Pointer(pointer_submitted(sequence)),
+                ResultEvent::Completed(submitted(sequence)),
+            )
+        } else {
+            (
+                ResultEvent::Completed(submitted(sequence)),
+                ResultEvent::Pointer(pointer_submitted(sequence)),
+            )
+        };
+        assert_eq!(ledger.result(other), Ok(None));
+        assert!(!ledger.ready(id, id).unwrap());
+        let result = ledger.result(actual).unwrap().unwrap();
+        assert_eq!(result.request_id, id);
+        assert_eq!(result.disposition, InputDisposition::Committed);
+    }
+    assert_eq!(report(&ledger, 1).submitted_operations, 2);
+    assert_eq!(report(&ledger, 4).submitted_operations, 1);
+}
+
+#[test]
+fn switching_sequence_spaces_cannot_reset_a_consumed_sequence_or_replace_binding() {
+    for changed_binding in [false, true] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 1);
+        ledger
+            .encoded_in(1, binding(), SequenceSpace::Pointer, 9)
+            .unwrap();
+        ledger
+            .result(ResultEvent::Pointer(pointer_submitted(9)))
+            .unwrap()
+            .unwrap();
+        start(&mut ledger, 2, 1, 1);
+        ledger.encoded(2, binding(), 3).unwrap();
+        ledger
+            .result(ResultEvent::Completed(submitted(3)))
+            .unwrap()
+            .unwrap();
+        start(&mut ledger, 3, 2, 1);
+        let (binding, sequence) = if changed_binding {
+            (
+                ResultBinding {
+                    channel: 18,
+                    ..binding()
+                },
+                10,
+            )
+        } else {
+            (binding(), 9)
+        };
+        assert_eq!(
+            ledger.encoded_in(3, binding, SequenceSpace::Pointer, sequence),
+            Err(Error::InvalidSequence)
+        );
+        assert_eq!(
+            report(&ledger, 3).disposition,
+            InputDisposition::UnknownEffect
+        );
+        assert_eq!(report(&ledger, 3).unacknowledged_actions, 1);
+        assert!(ledger.is_closed());
+    }
+}
+
+#[test]
+fn lost_pointer_is_unknown_and_late_receipt_cannot_reopen_or_replay_it() {
+    for cancelled in [false, true] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 1);
+        ledger
+            .encoded_in(1, binding(), SequenceSpace::Pointer, 0)
+            .unwrap();
+        let lost = if cancelled {
+            ledger.retire().unwrap()
+        } else {
+            assert_eq!(ledger.expire(99), Ok(None));
+            ledger.expire(100).unwrap().unwrap()
+        };
+        assert_eq!(lost.disposition, InputDisposition::UnknownEffect);
+        assert_eq!(lost.unacknowledged_actions, 1);
+        assert_eq!(lost.submitted_operations, 0);
+        assert_eq!(
+            ledger.begin(scope(), key(1), 100, 200, 1),
+            Ok(Admission::Retained(lost))
+        );
+        let late = ledger
+            .result(ResultEvent::Pointer(pointer_submitted(0)))
+            .unwrap()
+            .unwrap();
+        assert_eq!(late.end, lost.end);
+        assert_eq!(late.disposition, InputDisposition::Committed);
+        assert_eq!(late.submitted_operations, 1);
+        assert_eq!(late.unacknowledged_actions, 0);
+        assert!(ledger.is_closed());
+        assert_eq!(
+            ledger.begin(scope(), key(2), 101, 200, 1),
+            Err(Error::Closed)
+        );
+        assert_eq!(
+            ledger.encoded_in(1, binding(), SequenceSpace::Pointer, 1),
+            Err(Error::Closed)
+        );
+    }
+}
+
+#[test]
+fn pointer_receipt_uses_the_canonical_one_operation_grammar() {
+    for invalid in [
+        InputResult {
+            submitted_operations: 2,
+            ..pointer_submitted(0)
+        },
+        InputResult {
+            submitted_operations: 0,
+            ..pointer_submitted(0)
+        },
+        InputResult {
+            stage: Stage::Admitted,
+            ..pointer_submitted(0)
+        },
+    ] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 1);
+        ledger
+            .encoded_in(1, binding(), SequenceSpace::Pointer, 0)
+            .unwrap();
+        assert_eq!(
+            ledger.result(ResultEvent::Pointer(invalid)),
+            Err(Error::InvalidReceipt)
+        );
+        assert_eq!(
+            report(&ledger, 1).disposition,
+            InputDisposition::UnknownEffect
+        );
+        assert!(ledger.is_closed());
+    }
+}
+
+#[test]
+fn pointer_expiry_and_host_unknown_effect_are_not_reported_as_submission() {
+    for (outcome, reason, disposition) in [
+        (
+            InputOutcome::ExpiredBeforeSubmission,
+            Reason::TicketExpired,
+            InputDisposition::Refused,
+        ),
+        (
+            InputOutcome::EffectUnknown,
+            Reason::UnknownEffect,
+            InputDisposition::UnknownEffect,
+        ),
+    ] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 1);
+        ledger
+            .encoded_in(1, binding(), SequenceSpace::Pointer, 0)
+            .unwrap();
+        let receipt = InputResult {
+            stage: Stage::Admitted,
+            outcome,
+            submitted_operations: 0,
+            unknown_next_operation: outcome == InputOutcome::EffectUnknown,
+            reason: Some(reason),
+            ..pointer_submitted(0)
+        };
+        let result = ledger
+            .result(ResultEvent::Pointer(receipt))
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.disposition, disposition);
+        assert_eq!(result.actions_submitted, 0);
+        assert_eq!(result.acknowledged_actions, 1);
+        assert_eq!(result.unacknowledged_actions, 0);
+        assert_eq!(result.host_reason, Some(reason as u16));
+        assert!(ledger.is_closed());
+    }
+}
+
+#[test]
+fn first_use_of_the_other_sequence_space_cannot_change_the_original_binding() {
+    for first in [SequenceSpace::Pointer, SequenceSpace::Action] {
+        let mut ledger = Ledger::new(scope()).unwrap();
+        start(&mut ledger, 1, 0, 1);
+        ledger.encoded_in(1, binding(), first, 7).unwrap();
+        let (event, second) = if first == SequenceSpace::Pointer {
+            (
+                ResultEvent::Pointer(pointer_submitted(7)),
+                SequenceSpace::Action,
+            )
+        } else {
+            (ResultEvent::Completed(submitted(7)), SequenceSpace::Pointer)
+        };
+        ledger.result(event).unwrap().unwrap();
+        start(&mut ledger, 2, 1, 1);
+        let foreign = ResultBinding {
+            lease: InputLeaseId::from_raw(32),
+            ..binding()
+        };
+        assert_eq!(
+            ledger.encoded_in(2, foreign, second, 0),
+            Err(Error::InvalidSequence)
+        );
+        assert_eq!(
+            report(&ledger, 2).disposition,
+            InputDisposition::UnknownEffect
+        );
+        assert!(ledger.is_closed());
+    }
+}

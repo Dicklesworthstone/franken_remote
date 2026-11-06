@@ -1124,3 +1124,178 @@ fn cancelled_or_expired_drags_preserve_effects_and_never_resume_the_release() {
         }
     }
 }
+
+fn move_request(shared: &Shared, x: i32, y: i32) -> Request {
+    Request {
+        operation: Operation::Move { x, y },
+        ..request(&snapshot(shared), 1)
+    }
+}
+
+fn encoded_pointer(shared: &Shared, id: u64, sequence: u64) {
+    assert!(ready(shared, id));
+    let mut state = shared.0.lock().unwrap();
+    state
+        .ledger
+        .encoded_in(id, binding(), SequenceSpace::Pointer, sequence)
+        .unwrap();
+    state.pending.as_mut().unwrap().encoded += 1;
+}
+
+fn pointer_receipt(sequence: u64) -> InputResult {
+    InputResult {
+        space: SequenceSpace::Pointer,
+        submitted_operations: 1,
+        ..receipt(sequence)
+    }
+}
+
+#[test]
+fn move_outside_the_original_display_consumes_the_request_before_encoding() {
+    for (x, y) in [
+        (-801, 0),
+        (800, 0),
+        (0, -201),
+        (0, 600),
+        (i32::MIN, i32::MAX),
+    ] {
+        let shared = fresh();
+        let request = move_request(&shared, x, y);
+        assert_eq!(
+            shared.0.lock().unwrap().submit(request),
+            Err(Refusal::OutOfBounds)
+        );
+        let refused = retained(&shared, request);
+        assert_eq!(refused.actions_total, 1);
+        assert_eq!(refused.actions_encoded, 0);
+        assert_eq!(refused.disposition, InputDisposition::Refused);
+        assert!(shared.0.lock().unwrap().pending.is_none());
+        assert_eq!(snapshot(&shared).next_request_id, Some(2));
+        assert_eq!(
+            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            refused
+        );
+        assert_eq!(
+            shared.0.lock().unwrap().submit(Request {
+                operation: Operation::Move { x: 0, y: 0 },
+                ..request
+            }),
+            Err(Refusal::RequestChanged)
+        );
+    }
+}
+
+#[test]
+fn move_pins_its_coordinates_observation_and_original_pointer_receipt() {
+    for (x, y) in [(-800, -200), (799, 599)] {
+        let shared = fresh();
+        let request = move_request(&shared, x, y);
+        assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+        encoded_pointer(&shared, 1, 0);
+        for operation in [
+            Operation::Move { x: x + 1, y },
+            Operation::Move { x, y: y + 1 },
+            Operation::Click { button: 1, x, y },
+        ] {
+            assert_eq!(
+                shared.0.lock().unwrap().submit(Request {
+                    operation,
+                    ..request
+                }),
+                Err(Refusal::RequestChanged)
+            );
+        }
+        shared
+            .0
+            .lock()
+            .unwrap()
+            .live
+            .as_mut()
+            .unwrap()
+            .sample
+            .stamp
+            .frame = 8;
+        let newer = snapshot(&shared);
+        assert_ne!(newer.observation_id, Some(request.observation_id));
+        {
+            let state = shared.0.lock().unwrap();
+            let pending = state.pending.as_ref().unwrap();
+            assert_eq!(pending.original.sample.stamp.frame, 7);
+            assert_eq!(pending.request.observation_id, request.observation_id);
+            assert_eq!(pending.encoded, 1);
+        }
+        shared.result(ResultEvent::Completed(receipt(0)));
+        assert!(!ready(&shared, 1));
+        shared.result(ResultEvent::Pointer(pointer_receipt(0)));
+        let complete = retained(&shared, request);
+        assert_eq!(complete.disposition, InputDisposition::Committed);
+        assert_eq!(complete.actions_total, 1);
+        assert_eq!(complete.actions_submitted, 1);
+        assert_eq!(complete.submitted_operations, 1);
+        assert_eq!(
+            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            complete
+        );
+        assert!(shared.0.lock().unwrap().pending.is_none());
+    }
+}
+
+#[test]
+fn move_keeps_original_observation_focus_and_display_preconditions() {
+    for refusal in [
+        Refusal::ObservationExpired,
+        Refusal::InputUnavailable,
+        Refusal::ViewChanged,
+    ] {
+        let shared = fresh();
+        let request = move_request(&shared, 0, 0);
+        {
+            let mut state = shared.0.lock().unwrap();
+            match refusal {
+                Refusal::ObservationExpired => {
+                    state.pinned.as_mut().unwrap().1.at =
+                        Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
+                    state.live = Some(candidate(0));
+                }
+                Refusal::InputUnavailable => state.live = None,
+                Refusal::ViewChanged => {
+                    state.live.as_mut().unwrap().bounds = fr_core::input::InputBounds::new(
+                        fr_core::input::DesktopPoint { x: -800, y: -200 },
+                        1599,
+                        800,
+                    )
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(state.submit(request), Err(refusal));
+        }
+        assert_eq!(retained(&shared, request).actions_encoded, 0);
+    }
+}
+
+#[test]
+fn cancelled_move_keeps_unknown_effect_and_a_late_receipt_cannot_restart_owner() {
+    let shared = fresh();
+    let request = move_request(&shared, 0, 0);
+    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    encoded_pointer(&shared, 1, 0);
+    shared.0.lock().unwrap().retire();
+    let cancelled = retained(&shared, request);
+    assert_eq!(cancelled.disposition, InputDisposition::UnknownEffect);
+    assert_eq!(cancelled.unacknowledged_actions, 1);
+    assert!(!snapshot(&shared).ready);
+    shared.result(ResultEvent::Pointer(pointer_receipt(0)));
+    let late = retained(&shared, request);
+    assert_eq!(late.end, cancelled.end);
+    assert_eq!(late.disposition, InputDisposition::Committed);
+    assert_eq!(late.submitted_operations, 1);
+    assert!(!snapshot(&shared).ready);
+    assert_eq!(
+        shared.0.lock().unwrap().submit(Request {
+            request_id: 2,
+            ..request
+        }),
+        Err(Refusal::Stopped)
+    );
+}

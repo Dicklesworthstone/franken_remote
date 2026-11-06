@@ -16,6 +16,11 @@ pub(crate) struct Output {
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
+    /// One absolute pointer state; no buttons, keys or scroll are submitted.
+    Move {
+        x: i32,
+        y: i32,
+    },
     Scroll {
         x: i32,
         y: i32,
@@ -48,6 +53,7 @@ impl Operation {
     #[cfg(any(target_os = "linux", test))]
     pub fn count(self) -> u8 {
         match self {
+            Self::Move { .. } => 1,
             Self::Scroll { dx, dy, .. } => {
                 // The public request spans up to 120 lines per axis, but one
                 // native wheel action admits at most 32 total steps. A request
@@ -68,6 +74,7 @@ impl Operation {
     }
     pub fn valid(self) -> bool {
         match self {
+            Self::Move { .. } => true,
             Self::Scroll { dx, dy, .. } => {
                 (-120..=120).contains(&dx) && (-120..=120).contains(&dy) && (dx != 0 || dy != 0)
             }
@@ -113,6 +120,14 @@ impl Operation {
             i32::try_from(y).ok()? * dy.signum(),
         ))
     }
+    /// Only the first and sole pointer state of an absolute move is encodable.
+    #[cfg(any(feature = "linux-desktop", test))]
+    pub fn pointer(self, index: u8) -> Option<fr_core::input::DesktopPoint> {
+        match self {
+            Self::Move { x, y } if index == 0 => Some(fr_core::input::DesktopPoint { x, y }),
+            _ => None,
+        }
+    }
     /// Both endpoints of the single bounded drag, in signed desktop pixels.
     #[cfg(any(feature = "linux-desktop", test))]
     pub fn drag_points(
@@ -142,6 +157,7 @@ impl Operation {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| usage())?;
         Ok(match (flag, values.as_slice()) {
+            ("--move", &[x, y]) => Self::Move { x, y },
             ("--scroll", &[x, y, dx, dy]) => Self::Scroll { x, y, dx, dy },
             ("--click", &[button, x, y]) => Self::Click {
                 button: u8::try_from(button).map_err(|_| usage())?,
@@ -473,7 +489,7 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--request-id" => request_id = Some(value.parse().map_err(|_| usage())?),
             "--observation-id" => observation_id = Some(value.parse().map_err(|_| usage())?),
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
-            "--scroll" | "--click" | "--key" | "--chord" | "--drag" => {
+            "--move" | "--scroll" | "--click" | "--key" | "--chord" | "--drag" => {
                 if operation.is_some() {
                     return Err(usage());
                 }

@@ -721,3 +721,61 @@ fn invalid_or_same_point_drags_cannot_become_a_click_or_an_open_held_button() {
         assert!(serde_json::from_value::<Request>(body).is_err());
     }
 }
+
+#[test]
+fn move_preserves_one_signed_absolute_point_without_other_input() {
+    for (value, x, y) in [
+        ("-800,599", -800, 599),
+        ("-2147483648,2147483647", i32::MIN, i32::MAX),
+    ] {
+        let request = command(&action("--move", value)).unwrap().request.unwrap();
+        assert!(request.operation == Operation::Move { x, y });
+        assert!(request.valid());
+        assert_eq!(request.operation.count(), 1);
+        assert_eq!(
+            request.operation.pointer(0),
+            Some(fr_core::input::DesktopPoint { x, y })
+        );
+        assert!(request.operation.drag_points().is_none());
+        let wire = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            wire["operation"],
+            serde_json::json!({"kind": "move", "x": x, "y": y})
+        );
+        assert!(serde_json::from_value::<Request>(wire.clone()).unwrap() == request);
+        for field in ["button", "pressed", "dx", "dy", "repeat", "duration_ms"] {
+            let mut extended = wire.clone();
+            extended["operation"][field] = 1.into();
+            assert!(serde_json::from_value::<Request>(extended).is_err());
+        }
+    }
+}
+
+#[test]
+fn malformed_or_mixed_move_requests_refuse_before_local_io() {
+    for value in [
+        "0",
+        "0,",
+        ",0",
+        "0,0,0",
+        "0.5,0",
+        "-2147483649,0",
+        "0,2147483648",
+        "private-coordinate,0",
+    ] {
+        let failure = refused(&action("--move", value));
+        assert!(!format!("{failure:?}").contains("private-coordinate"));
+    }
+    for suffix in [
+        "--move 1,2",
+        "--click 1,1,2",
+        "--drag 1,1,2,3,4",
+        "--key 4",
+        "--scroll 1,2,0,1",
+        "--status",
+    ] {
+        let mut args = action("--move", "0,0");
+        args.extend(words(suffix));
+        refused(&args);
+    }
+}

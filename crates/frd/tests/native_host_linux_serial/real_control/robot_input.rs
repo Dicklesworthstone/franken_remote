@@ -204,6 +204,53 @@ fn effects(observer: &mut Harness, before: usize, expected: &[(u32, u32, Point, 
     );
 }
 
+fn exercise_hover(session: &mut Controlled, connection: &str) {
+    let first = ready(session, connection);
+    let id = first["next_request_id"].as_u64().unwrap();
+    let before = host_events(&mut session.observer).len();
+    let hover = action(connection, &first, "--move", "250,260");
+    let (output, original) = invoke(&hover);
+    assert!(output.status.success(), "{original}");
+    submitted(&original, id, 1, 1);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            host_pointer(&mut session.observer) == ((250, 260), 0)
+        }),
+        "the host did not observe the submitted hover position"
+    );
+    assert_eq!(host_events(&mut session.observer).len(), before);
+
+    let second = ready(session, connection);
+    assert_eq!(second["lease"], first["lease"]);
+    assert_eq!(second["next_request_id"], id + 1);
+    let (output, moved) = invoke(action(connection, &second, "--move", "300,270"));
+    assert!(output.status.success(), "{moved}");
+    submitted(&moved, id + 1, 1, 1);
+    assert!(
+        eventually(Duration::from_secs(10), || {
+            host_pointer(&mut session.observer) == ((300, 270), 0)
+        }),
+        "the host did not observe the submitted hover position"
+    );
+
+    // A retained old move must not drag the pointer back, even after the
+    // original observation pin has been replaced by a newer request.
+    let (output, duplicate) = invoke(&hover);
+    assert!(output.status.success(), "{duplicate}");
+    assert_eq!(duplicate["data"], original["data"]);
+    let mut changed = hover;
+    *changed.last_mut().unwrap() = "400,300".into();
+    let (output, refused) = invoke(&changed);
+    assert!(!output.status.success(), "{refused}");
+    assert_eq!(
+        refused["error"]["code"], "robot_request_changed",
+        "{refused}"
+    );
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(host_pointer(&mut session.observer), ((300, 270), 0));
+    assert_eq!(host_events(&mut session.observer).len(), before);
+}
+
 fn exercise_actions(session: &mut Controlled, connection: &str) -> Vec<String> {
     // Human input remains local even while this explicit automation owner has
     // a real lease. A hidden second action sequencer would break these checks.
@@ -293,6 +340,7 @@ fn foreground_robot_actions_have_host_receipts_and_do_not_replay_after_focus_los
     assert!(output.status.success(), "{identified}");
     let connection = identified["data"]["connection_id"].as_str().unwrap();
     assert_eq!(connection.len(), 32);
+    exercise_hover(&mut session, connection);
     let original_request = exercise_actions(&mut session, connection);
     let before = host_events(&mut session.observer).len();
     let mut focus = Harness::start(BLUR, &session.viewer.display, "READY");

@@ -1,9 +1,10 @@
 # Bounded input on the original foreground owner
 
 The Linux native desktop CLI can explicitly accept bounded robot input on its
-original authenticated control session. It supports a click, a bounded drag,
-a physical key tap, a modifier shortcut, or integer line scrolling. The owner retains the host lease, input ticket,
-original viewport and reliable transport; local commands receive comparison
+original authenticated control session. It supports an absolute pointer move,
+a click, a bounded drag, a physical key tap, a modifier shortcut, or integer
+line scrolling. The owner retains the host lease, input ticket,
+original viewport and transport; local commands receive comparison
 handles and content-free results.
 
 This is an experimental native slice of plan §18, with the authority and
@@ -59,6 +60,7 @@ forms are:
 
 | Option | Meaning |
 | --- | --- |
+| `--move X,Y` | Move the absolute pointer once without pressing a button, key or wheel. The signed host-desktop point must be inside the original granted display. |
 | `--click BUTTON,X,Y` | Press and release at the same host-desktop point. Buttons: 1 primary, 2 secondary, 3 middle, 4 back, 5 forward. |
 | `--drag BUTTON,X1,Y1,X2,Y2` | Press at the source, move once while held, then release at the destination. Both distinct endpoints must be inside the original granted display. Uses the same button numbers as click. |
 | `--key USB_USAGE` | Press and release one validated USB keyboard page-7 physical usage, in decimal; for example `4`. This is not Unicode or a keyboard-layout translation. |
@@ -94,6 +96,37 @@ Splitting a scroll does not extend its lifetime. On a slow path the original
 observation or ticket may expire after a prefix; the result retains its exact
 confirmed OS operations and any unknown effect. That request remains consumed,
 including after a late receipt, and the remainder is never automatically sent.
+
+### Pointer positioning and hover
+
+Use `--move` to position the pointer for a hover target or a later separately
+observed action. For example:
+
+```bash
+fr robot input NODE_ID --connection-id CONNECTION_ID \
+  --lease LOCAL_LEASE --request-id NEXT_REQUEST_ID --observation-id OBSERVATION_ID \
+  --max-observation-age-ms 250 --move 640,360 --json
+```
+
+The move encodes one existing replaceable `PointerState` datagram. It uses the
+same original observation, focus, display bounds, authority and expiry checks
+as other robot input. An outside point is refused before encoding, with
+`robot_input_out_of_bounds`; coordinates are never clamped. No button, key,
+wheel event, interpolated path or delayed second move is synthesized.
+
+A successful report requires the original host's reliable pointer receipt and
+reports one submitted OS operation. Pointer and reliable-action sequences are
+separate: a same-numbered click/key receipt cannot acknowledge the move, and
+switching between them cannot replace the original host binding or reset a
+consumed sequence. A lost datagram, obsolete pointer state or missing receipt
+can leave the effect unknown. At the original deadline the owner is fenced;
+there is no retransmission, refreshed observation or automatic new request. A
+late original receipt may improve the retained report without reopening input.
+
+OS submission does not prove that a tooltip appeared or that an application
+accepted a hover. Read a new observation to inspect the result before deciding
+on another action. Repeating an old request ID only returns retained evidence;
+it cannot move the pointer back to its previous target.
 
 ### Drag with the original observation
 
@@ -175,15 +208,17 @@ fr robot session close NODE_ID --connection-id CONNECTION_ID --json
 
 ## Verification boundary
 
-The combined CLI validation scope passes 102 actual-source tests, covering saved
-hosts and command parsing, input action mapping, the local owner and request
-ledger, and control-screenshot observation pins. It passes strict Clippy. The
-tests use the real client/core/wire types and exercise endpoint bounds,
-immutable request fingerprints, original receipts, partial effects, cancellation
-and deadline retirement. The scoped harness omits socket I/O and the native
+The pointer extension passes all 502 `fr-client` package tests, including 29
+native request-ledger tests, plus 98 actual-source CLI tests covering options,
+command parsing, input mapping and the local owner state. Both scopes pass
+strict Clippy. The tests use the real client/core/wire types and exercise signed
+endpoint bounds, immutable request fingerprints, original receipts, separate
+sequence spaces, partial effects, cancellation and deadline retirement. The
+scoped CLI harness omits socket I/O, control-screenshot helpers and the native
 `ControlledViewer` dispatcher; its unused control-handle boundary is
 uninhabited. These results establish the tested parser/state behavior, not a
-complete native network run.
+complete native network run. The preceding 102-test CLI validation also covered
+control-screenshot observation pins.
 
 Two actual X11 tests pass under private Xvfb: the existing
 `real_pointer_drag_barriers_duplicates_and_expiry_cleanup` and
@@ -194,6 +229,14 @@ destination/button-up. Exact duplicate records return their retained receipts
 without additional OS submissions. Strict Clippy also passes for this native
 test scope. These checks verify native input ordering and cleanup; they do not
 establish application-level drag/drop success.
+
+The pointer-only move extension (fr-a5k9) adds exact sequence-space receipt
+tracking and tests for signed bounds, original observation pins, contradictory
+receipt tags, independent sequence counters, unknown effects on loss, and late
+receipts after retirement. Its namespace regression sends two moves through
+the shipped foreground CLI, checks the host pointer independently, verifies no
+button/key/wheel events, and verifies that replaying the first request cannot
+move the pointer back. That extended namespace row has not run in this session.
 
 The complete foreground CLI-to-host regression is wired into the existing
 namespace verification lane. Full native Cargo validation and real two-machine
