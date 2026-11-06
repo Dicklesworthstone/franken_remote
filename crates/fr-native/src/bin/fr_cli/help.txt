@@ -1,5 +1,8 @@
 FrankenRemote development client
 
+fr help [TOPIC...]
+fr COMMAND --help
+
 fr hosts [--json] [--socket /absolute/tailscaled.sock]
 fr hosts --probe --experimental-native [--probe-limit 1..64]
     [--port 8443] [--trust-roots /absolute/ca-roots.pem] [--ipv6]
@@ -29,6 +32,19 @@ fr robot session open NODE_ID --foreground --role view|control
 fr robot session status NODE_ID [--json]
 fr robot session close NODE_ID [--connection-id ID] [--lease LEASE]
     [--socket PATH] [--json]
+fr robot observe NODE_ID [observation options] [--json]
+fr robot input NODE_ID --connection-id ID [input options] [--json]
+fr send NODE_ID --connection-id ID [file command options] [--json]
+
+Detailed help:
+  fr help connect         Connection, discovery, privacy and saved-host options below.
+  fr help robot           Robot command overview and explicit owner modes.
+  fr help robot session   Foreground lifetime, local identity and conditional close.
+  fr help robot observe   One-shot observations, retained views and screenshots.
+  fr help robot input     Original-observation actions and staged effect receipts.
+  fr help send            Later file selections, status, pause, resume and cancellation.
+Use a command path alone with --help, for example fr robot input --help.
+Help reads no local service or desktop and accepts no target or operational options.
 
 Discovery and connection:
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.

@@ -1,0 +1,24 @@
+FrankenRemote robot commands
+
+fr robot session open NODE_ID --foreground --role view|control
+    --experimental-native --display HANDLE|only|choose [native connect options]
+fr robot session status NODE_ID [--json]
+fr robot session close NODE_ID [--connection-id ID] [--lease LEASE] [--json]
+fr robot observe NODE_ID --native-once --experimental-native --display HANDLE|only
+    [--screenshot /path/new-screen.png] [--json]
+fr robot observe NODE_ID --connection-id ID [--screenshot /path/new-screen.png] [--json]
+fr robot input NODE_ID --connection-id ID --status [--json]
+fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
+    --observation-id INTEGER --max-observation-age-ms 1..1000 [one input action] [--json]
+
+Detailed help (also available as fr robot COMMAND --help):
+  fr help robot session   Foreground lifetime, local identity and conditional close.
+  fr help robot observe   One-shot capture, retained observations and screenshots.
+  fr help robot input     Explicit control consent, action syntax and effect receipts.
+
+Session open stays in the foreground and requires a local native desktop.
+View-only publication requires --publish-observations; robot control requires
+--accept-input. These are explicit owner modes, not grants from a printed handle.
+Local connection IDs compare original owners; they are not remote input leases.
+Input requires the original lease, observation and deadline. Submitted input is
+not proof of an application's result, and uncertain effects are never retried.

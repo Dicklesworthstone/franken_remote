@@ -6,6 +6,8 @@
 mod closure;
 #[path = "fr_cli/file_commands.rs"]
 mod file_commands;
+#[path = "fr_cli/help.rs"]
+mod help;
 #[cfg(target_os = "linux")]
 #[path = "fr_cli/linux.rs"]
 mod linux;
@@ -75,13 +77,6 @@ impl Failure {
         self
     }
 }
-const HELP: &str = concat!(
-    include_str!("fr_cli/help.txt"),
-    include_str!("fr_cli/robot_observe/help.txt"),
-    include_str!("fr_cli/robot_input/help.txt"),
-    include_str!("fr_cli/file_commands/help.txt"),
-);
-
 fn main() -> ExitCode {
     let mut args = Vec::new();
     let mut json = false;
@@ -106,6 +101,28 @@ fn main() -> ExitCode {
             );
         };
         args.push(arg);
+    }
+    // Help is local and platform-independent, but never bypasses the original
+    // argument limits above or turns a malformed command into a successful one.
+    match help::page(&args) {
+        Ok(Some(text)) => {
+            return if output::write(text).is_ok() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(74)
+            };
+        }
+        Err(_) => {
+            return finish(
+                Err(Failure::new(
+                    "invalid_arguments",
+                    "Use fr help TOPIC or fr COMMAND --help; run fr --help to list topics.",
+                    2,
+                )),
+                json,
+            );
+        }
+        Ok(None) => {}
     }
     if file_commands::requested(&args) {
         return match file_commands::run(&args) {
@@ -139,7 +156,7 @@ fn main() -> ExitCode {
         Err(e) => return finish(Err(e), json),
     };
     if matches!(parsed.command, options::Command::Help) {
-        return if output::write(HELP).is_ok() {
+        return if output::write(help::OVERVIEW).is_ok() {
             ExitCode::SUCCESS
         } else {
             ExitCode::from(74)
