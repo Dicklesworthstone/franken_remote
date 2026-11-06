@@ -640,7 +640,10 @@ mod tests {
             let mut directions = Vec::new();
             for index in 0..operation.count() {
                 assert!(operation.pointer(index).is_none());
-                match operation.action(index).expect("every bounded action exists") {
+                match operation
+                    .action(index)
+                    .expect("every bounded action exists")
+                {
                     Action::Key { key, transition } => {
                         if index < count {
                             assert_eq!(key.usage(), usages[usize::from(index)]);
@@ -653,7 +656,12 @@ mod tests {
                             assert!(held.remove(&key.usage()));
                         }
                     }
-                    Action::Scroll { position, x, y, unit } => {
+                    Action::Scroll {
+                        position,
+                        x,
+                        y,
+                        unit,
+                    } => {
                         assert_eq!(held.iter().copied().collect::<Vec<_>>(), usages);
                         assert_eq!(position, DesktopPoint { x: -700, y: 500 });
                         assert_eq!(unit, ScrollUnit::Lines);
@@ -670,15 +678,26 @@ mod tests {
             assert_eq!(held, BTreeSet::new());
             assert_eq!(distance, (dx, dy));
             let expected: Vec<_> = std::iter::repeat_n(
-                if dx < 0 { WheelDirection::Left } else { WheelDirection::Right },
+                if dx < 0 {
+                    WheelDirection::Left
+                } else {
+                    WheelDirection::Right
+                },
                 usize::try_from(dx.unsigned_abs()).unwrap(),
             )
             .chain(std::iter::repeat_n(
-                if dy < 0 { WheelDirection::Up } else { WheelDirection::Down },
+                if dy < 0 {
+                    WheelDirection::Up
+                } else {
+                    WheelDirection::Down
+                },
                 usize::try_from(dy.unsigned_abs()).unwrap(),
             ))
             .collect();
-            assert_eq!(directions, expected, "horizontal steps still precede vertical steps");
+            assert_eq!(
+                directions, expected,
+                "horizontal steps still precede vertical steps"
+            );
             for index in operation.count()..=u8::MAX {
                 assert!(operation.action(index).is_none());
             }

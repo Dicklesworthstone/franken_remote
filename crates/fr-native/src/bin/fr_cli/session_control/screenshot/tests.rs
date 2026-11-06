@@ -143,7 +143,10 @@ fn original_input_age_includes_delivery_and_writing_and_expiry_clears_handles() 
         Some(999)
     );
     assert_eq!(value.control.as_ref().unwrap().observation_id, original_id);
-    assert_eq!(value.control.as_ref().unwrap().input_support, original_support);
+    assert_eq!(
+        value.control.as_ref().unwrap().input_support,
+        original_support
+    );
     value.elapse(1).unwrap();
     let expired = value.control.as_ref().unwrap();
     assert!(!expired.ready);

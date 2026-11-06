@@ -1634,7 +1634,10 @@ fn modified_scroll_requires_keys_position_and_wheel_before_any_modifier() {
             assert_eq!(shared.locked().submit(request), Ok(None));
             assert_eq!(shared.locked().pending.as_ref().unwrap().encoded, 0);
         } else {
-            assert_eq!(shared.locked().submit(request), Err(Refusal::InputUnavailable));
+            assert_eq!(
+                shared.locked().submit(request),
+                Err(Refusal::InputUnavailable)
+            );
             let refused = retained(&shared, request);
             assert_eq!(refused.actions_encoded, 0);
             assert_eq!(refused.submitted_operations, 0);
@@ -1652,7 +1655,13 @@ fn modified_scroll_requires_keys_position_and_wheel_before_any_modifier() {
 
 #[test]
 fn modified_scroll_refuses_outside_the_original_display_before_pressing_keys() {
-    for (x, y) in [(-801, 0), (800, 0), (0, -201), (0, 600), (i32::MIN, i32::MAX)] {
+    for (x, y) in [
+        (-801, 0),
+        (800, 0),
+        (0, -201),
+        (0, 600),
+        (i32::MIN, i32::MAX),
+    ] {
         let shared = fresh();
         let request = Request {
             operation: Operation::ModifiedScroll {
@@ -1694,7 +1703,10 @@ fn over_budget_modified_scroll_never_enters_the_original_receipt_ledger() {
         ..original
     };
     assert_eq!(invalid.operation.count(), 16);
-    assert_eq!(shared.locked().submit(invalid), Err(Refusal::InvalidRequest));
+    assert_eq!(
+        shared.locked().submit(invalid),
+        Err(Refusal::InvalidRequest)
+    );
     assert!(shared.locked().pending.is_none());
     assert_eq!(shared.locked().ledger.consumed_through(), 0);
     assert_eq!(shared.locked().submit(original), Ok(None));
@@ -1722,7 +1734,10 @@ fn modified_scroll_retains_ten_receipts_and_all_490_native_operations() {
     }
     for sequence in 0..10 {
         encoded(&shared, 1, sequence);
-        assert!(!ready(&shared, 1), "each key or wheel action needs its own receipt");
+        assert!(
+            !ready(&shared, 1),
+            "each key or wheel action needs its own receipt"
+        );
         assert_eq!(shared.locked().submit(request), Ok(None));
         shared.result(ResultEvent::Completed(modified_scroll_receipt(sequence)));
     }
@@ -1773,8 +1788,14 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
             assert_eq!(interrupted.actions_total, 10);
             assert_eq!(interrupted.actions_encoded, prefix + 1);
             assert_eq!(interrupted.actions_submitted, prefix);
-            assert_eq!(interrupted.submitted_operations, OPERATIONS[usize::from(prefix)]);
-            assert_eq!(interrupted.unacknowledged_actions, u8::from(missing_receipt));
+            assert_eq!(
+                interrupted.submitted_operations,
+                OPERATIONS[usize::from(prefix)]
+            );
+            assert_eq!(
+                interrupted.unacknowledged_actions,
+                u8::from(missing_receipt)
+            );
             assert_eq!(
                 interrupted.disposition,
                 if missing_receipt {
@@ -1790,20 +1811,34 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
                 interrupted
             );
             assert_eq!(
-                shared.locked().submit(Request { request_id: 2, ..request }),
+                shared.locked().submit(Request {
+                    request_id: 2,
+                    ..request
+                }),
                 Err(Refusal::Stopped)
             );
             if missing_receipt {
-                shared.result(ResultEvent::Completed(modified_scroll_receipt(u64::from(prefix))));
+                shared.result(ResultEvent::Completed(modified_scroll_receipt(u64::from(
+                    prefix,
+                ))));
                 let late = retained(&shared, request);
                 assert_eq!(late.end, interrupted.end);
                 assert_eq!(late.actions_submitted, prefix + 1);
-                assert_eq!(late.submitted_operations, OPERATIONS[usize::from(prefix + 1)]);
+                assert_eq!(
+                    late.submitted_operations,
+                    OPERATIONS[usize::from(prefix + 1)]
+                );
                 assert_eq!(late.unacknowledged_actions, 0);
-                assert!(!snapshot(&shared).ready, "late evidence cannot resume the wheel sequence");
+                assert!(
+                    !snapshot(&shared).ready,
+                    "late evidence cannot resume the wheel sequence"
+                );
                 assert!(shared.locked().pending.is_none());
                 assert_eq!(
-                    shared.locked().submit(Request { request_id: 2, ..request }),
+                    shared.locked().submit(Request {
+                        request_id: 2,
+                        ..request
+                    }),
                     Err(Refusal::Stopped)
                 );
             }
@@ -1843,7 +1878,10 @@ fn modified_scroll_expiry_fences_held_keys_and_keeps_confirmed_wheel_effects() {
             expired
         );
         assert_eq!(
-            shared.locked().submit(Request { request_id: 2, ..request }),
+            shared.locked().submit(Request {
+                request_id: 2,
+                ..request
+            }),
             Err(Refusal::Stopped)
         );
     }
@@ -1870,7 +1908,12 @@ fn status_discloses_only_the_original_grants_signed_bounds_and_capabilities() {
                 .with(Capability::Buttons)
                 .with(Capability::Absolute)
                 .with(Capability::Keys),
-            vec!["physical_keys", "absolute_pointer", "buttons", "line_scroll"],
+            vec![
+                "physical_keys",
+                "absolute_pointer",
+                "buttons",
+                "line_scroll",
+            ],
         ),
         (
             Capabilities::default()

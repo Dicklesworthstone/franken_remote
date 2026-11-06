@@ -146,7 +146,10 @@ pub(super) fn validate_snapshot(snapshot: &crate::robot_input::Snapshot) -> Resu
         .all(|v| v.is_none());
     if snapshot.next_request_id == Some(0)
         || snapshot.physical_visibility_proven
-        || snapshot.input_support.as_ref().is_some_and(|support| !support.valid())
+        || snapshot
+            .input_support
+            .as_ref()
+            .is_some_and(|support| !support.valid())
         || !(if snapshot.ready { complete } else { empty })
     {
         return Err(Error::Protocol);
