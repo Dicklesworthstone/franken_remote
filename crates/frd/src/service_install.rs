@@ -3,18 +3,22 @@
 //! Service lifecycle and installer for the `FrankenRemote` host daemon (`frd`).
 //!
 //! Implements bead `fr-p2-service-install-aw3` and plan §20.3:
-//! - Idempotent registration across platforms:
+//! - Service specifications across platforms:
 //!   - Linux: `systemd` user units (recommended for graphical sessions) or system units
 //!   - macOS: `launchd` `LaunchAgent` (GUI session) or `LaunchDaemon`
 //!   - Windows: Windows Service
+//! - Idempotent Linux publication and removal through verified directory handles
 //! - Setup preflight: verifies executable, checks port conflicts, and validates directory permissions
-//! - Safe uninstall: removes `FrankenRemote` unit files and runtime state without touching Tailscale or tailnet policy
+//! - Safe uninstall: removes `FrankenRemote` unit files without touching Tailscale or tailnet policy
 //! - Dry-run mode for previewing generated unit/plist specifications without filesystem mutation
 
 use std::fmt::{self, Write as _};
 
 mod options;
+#[cfg(target_os = "linux")]
+mod publication;
 mod quoting;
+#[cfg(unix)]
 use std::fs;
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -80,6 +84,8 @@ pub enum ServiceError {
     UnsupportedPlatform { detail: String },
     /// Invalid or ambiguous local service configuration.
     InvalidOptions,
+    /// A service path is linked, shared-writable, or not owned by its installer.
+    UnsafeUnitPath,
     /// The installed `frd run` would refuse this profile at every start (and
     /// the service manager would restart it forever), so installation refuses.
     HostProfileUnavailable {
@@ -96,6 +102,10 @@ impl fmt::Display for ServiceError {
             Self::InvalidOptions => {
                 write!(f, "invalid service options; no service change was applied")
             }
+            Self::UnsafeUnitPath => write!(
+                f,
+                "unsafe service path: use an installer-owned directory without writable untrusted ancestors, symlinks, or a linked/nonregular existing unit"
+            ),
             Self::HostProfileUnavailable { code, detail } => write!(f, "{code}: {detail}"),
             Self::PortConflict { port } => {
                 write!(
@@ -182,6 +192,10 @@ pub struct InstallReport {
     pub unit_path: PathBuf,
     /// Whether this was a dry run.
     pub dry_run: bool,
+    /// `None` for a preview. After publication, false means the complete unit
+    /// is visible but syncing its directory failed; do not retry as if no
+    /// change occurred. A true result includes file and directory durability.
+    pub durable: Option<bool>,
     /// Rendered service specification content.
     pub unit_content: String,
     /// Setup instructions or next steps for the operator.
@@ -212,27 +226,44 @@ pub struct IngressHelperArtifacts {
     pub copy_from: Option<PathBuf>,
 }
 
-/// Whether `path` and every ancestor are root-owned and not group/other-writable.
+/// Return the actual protected executable, not the possibly mutable alias used
+/// to find it. The root service must execute the same path we verified.
 #[cfg(unix)]
-fn root_only(path: &std::path::Path) -> bool {
+fn root_executable(path: &std::path::Path) -> Option<PathBuf> {
     use std::os::unix::fs::MetadataExt;
-    path.is_absolute()
-        && path.canonicalize().is_ok_and(|path| {
-            path.ancestors().all(|part| {
-                fs::symlink_metadata(part).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0)
+    if !path.is_absolute() {
+        return None;
+    }
+    let canonical = path.canonicalize().ok()?;
+    // The unit renderer accepts UTF-8: a lossy path would name a different
+    // executable even when the original alias was a valid CLI argument.
+    canonical.to_str()?;
+    let executable = fs::symlink_metadata(&canonical).ok()?;
+    if !executable.is_file() || executable.mode() & 0o100 == 0 {
+        return None;
+    }
+    canonical
+        .ancestors()
+        .all(|part| {
+            fs::symlink_metadata(part).is_ok_and(|m| {
+                m.uid() == 0
+                    && m.mode() & 0o022 == 0
+                    && !m.file_type().is_symlink()
+                    && (part == canonical.as_path() || m.is_dir())
             })
         })
+        .then_some(canonical)
 }
 #[cfg(not(unix))]
-fn root_only(_: &std::path::Path) -> bool {
-    false
+fn root_executable(_: &std::path::Path) -> Option<PathBuf> {
+    None
 }
 
 /// Render the helper's system unit and configuration for local account `uid`.
 #[must_use]
 pub fn render_ingress_helper(options: &InstallOptions, uid: u32) -> IngressHelperArtifacts {
-    let (exec_path, copy_from) = if root_only(&options.exec_path) {
-        (options.exec_path.clone(), None)
+    let (exec_path, copy_from) = if let Some(canonical) = root_executable(&options.exec_path) {
+        (canonical, None)
     } else {
         (
             PathBuf::from(INGRESS_HELPER_EXEC),
@@ -285,10 +316,13 @@ fn ingress_helper_steps(helper: &IngressHelperArtifacts) -> Vec<String> {
             .to_owned(),
     ];
     if let Some(source) = &helper.copy_from {
+        steps.push(
+            "The root helper must use a protected executable, not a user-writable binary.".into(),
+        );
         steps.push(format!(
-            "[root] sudo install -o root -g root -m 0755 {} {} (a root service must not run a user-writable binary)",
-            source.display(),
-            helper.exec_path.display()
+            "[root] sudo install -o root -g root -m 0755 -- {} {}",
+            quoting::shell(&source.to_string_lossy()),
+            quoting::shell(&helper.exec_path.to_string_lossy())
         ));
     }
     steps.push(format!(
@@ -331,6 +365,9 @@ pub struct UninstallReport {
     pub existed: bool,
     /// Whether this was a dry run.
     pub dry_run: bool,
+    /// `None` when no removal was performed. False preserves a completed
+    /// removal whose crash durability could not be confirmed.
+    pub durable: Option<bool>,
     /// Removing the unit file does not stop a running service: what to run.
     pub next_steps: Vec<String>,
 }
@@ -573,6 +610,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
     };
 
     let mut next_steps = Vec::new();
+    let mut durable = None;
 
     if options.dry_run {
         next_steps.push(format!(
@@ -580,24 +618,13 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
             unit_path.display()
         ));
     } else {
-        if let Some(parent) = unit_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| ServiceError::PermissionDenied {
-                detail: format!(
-                    "Failed to create service directory '{}': {e}",
-                    parent.display()
-                ),
-            })?;
+        durable = Some(publish_unit(&unit_path, unit_content.as_bytes())?);
+        if durable == Some(false) {
+            next_steps.push(
+                "The complete service definition was published, but directory synchronization failed. Its persistence across a crash is unconfirmed; inspect the installed definition before starting the service."
+                    .into(),
+            );
         }
-
-        // Atomic write via temporary file
-        let tmp_path = unit_path.with_extension("tmp");
-        fs::write(&tmp_path, &unit_content).map_err(|e| ServiceError::PermissionDenied {
-            detail: format!("Failed to write unit file: {e}"),
-        })?;
-
-        fs::rename(&tmp_path, &unit_path).map_err(|e| ServiceError::PermissionDenied {
-            detail: format!("Failed to activate unit file: {e}"),
-        })?;
 
         match options.kind {
             ServiceKind::SystemdUser => {
@@ -660,24 +687,35 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
         kind: options.kind,
         unit_path,
         dry_run: options.dry_run,
+        durable,
         unit_content,
         next_steps,
         ingress_helper,
     })
 }
 
+/// Only Linux has a supported persistent host install. Other platforms retain
+/// their preview renderers, but cannot write a weaker path than the shipped CLI.
+fn publish_unit(path: &std::path::Path, bytes: &[u8]) -> Result<bool, ServiceError> {
+    #[cfg(target_os = "linux")]
+    {
+        publication::write(path, bytes)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, bytes);
+        Err(ServiceError::UnsupportedPlatform {
+            detail: "persistent service installation is implemented only on Linux; use a dry run to preview other service formats".into(),
+        })
+    }
+}
+
 /// Safely and idempotently uninstall the `frd` service.
 pub fn uninstall(options: &InstallOptions) -> Result<UninstallReport, ServiceError> {
     let unit_path = resolve_unit_path(options);
-    let existed = unit_path.exists();
+    let (existed, durable) = remove_unit(&unit_path, options.dry_run)?;
 
-    if !options.dry_run && existed {
-        fs::remove_file(&unit_path).map_err(|e| ServiceError::PermissionDenied {
-            detail: format!("Failed to remove unit file '{}': {e}", unit_path.display()),
-        })?;
-    }
-
-    let next_steps = match options.kind {
+    let mut next_steps = match options.kind {
         ServiceKind::SystemdUser => vec![
             "[user] Removing the unit file does not stop a running service: run 'systemctl --user disable --now frd' and then 'systemctl --user daemon-reload'.".into(),
         ],
@@ -688,13 +726,39 @@ pub fn uninstall(options: &InstallOptions) -> Result<UninstallReport, ServiceErr
             "Removing the service definition does not stop a running frd: unload or stop it with the platform service manager.".into(),
         ],
     };
+    if durable == Some(false) {
+        next_steps.push(
+            "The service definition was removed, but directory synchronization failed. Its removal across a crash is unconfirmed; inspect the definition before restarting the service manager."
+                .into(),
+        );
+    }
     Ok(UninstallReport {
         kind: options.kind,
         unit_path,
         existed,
         dry_run: options.dry_run,
+        durable,
         next_steps,
     })
+}
+
+fn remove_unit(
+    path: &std::path::Path,
+    preview: bool,
+) -> Result<(bool, Option<bool>), ServiceError> {
+    #[cfg(target_os = "linux")]
+    {
+        publication::remove(path, preview)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if preview {
+            return Ok((path.exists(), None));
+        }
+        Err(ServiceError::UnsupportedPlatform {
+            detail: "persistent service removal is implemented only on Linux; use a dry run to preview other service formats".into(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -749,6 +813,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn install_and_uninstall_idempotency_in_isolated_directory() {
         let temp_dir = std::env::temp_dir().join(format!("frd_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
@@ -770,10 +835,12 @@ mod tests {
         // 1. First install succeeds
         let report = install(&options).expect("first install should succeed");
         assert!(report.unit_path.exists());
+        assert_eq!(report.durable, Some(true));
 
         // 2. Second install is idempotent
         let report2 = install(&options).expect("second install should succeed idempotently");
         assert!(report2.unit_path.exists());
+        assert_eq!(report2.durable, Some(true));
 
         // 3. Uninstall unlinks the file
         let un_report = uninstall(&options).expect("uninstall should succeed");
@@ -824,11 +891,12 @@ mod tests {
             };
             let direct = render_ingress_helper(&root, 1000);
             assert_eq!(direct.copy_from, None);
-            assert!(
-                direct
-                    .unit_content
-                    .contains("ExecStart=:/usr/bin/env ingress-helper")
-            );
+            let canonical = PathBuf::from("/usr/bin/env").canonicalize().unwrap();
+            assert_eq!(direct.exec_path, canonical);
+            assert!(direct.unit_content.contains(&format!(
+                "ExecStart=:{} ingress-helper",
+                quoting::systemd(canonical.to_str().unwrap())
+            )));
         }
         #[cfg(target_os = "linux")]
         {
@@ -887,5 +955,47 @@ mod tests {
             result,
             Err(ServiceError::ExecutableNotFound { .. })
         ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn helper_copy_instructions_preserve_paths_as_literal_shell_arguments() {
+        let source =
+            PathBuf::from("/home/example/frd with 'quote'; $(printf expanded); `printf expanded`");
+        let options = InstallOptions {
+            exec_path: source.clone(),
+            ..InstallOptions::default()
+        };
+        let helper = render_ingress_helper(&options, 1000);
+        assert_eq!(helper.copy_from, Some(source.clone()));
+        let steps = ingress_helper_steps(&helper);
+        let args = steps
+            .iter()
+            .find_map(|step| step.strip_prefix("[root] sudo install "))
+            .unwrap();
+        // Parse only the quoted arguments using a harmless fixed printf. The
+        // generated sudo/install command is never executed by this regression.
+        let output = std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("set -- {args}; printf '%s\\000' \"$@\"")])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        let actual: Vec<_> = output.stdout.split(|byte| *byte == 0).collect();
+        assert_eq!(
+            actual,
+            [
+                b"-o".as_slice(),
+                b"root",
+                b"-g",
+                b"root",
+                b"-m",
+                b"0755",
+                b"--",
+                source.as_os_str().as_encoded_bytes(),
+                helper.exec_path.as_os_str().as_encoded_bytes(),
+                b"",
+            ]
+        );
     }
 }

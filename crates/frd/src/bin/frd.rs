@@ -296,6 +296,7 @@ fn execute_uninstall(args: &[String], json: bool) -> ExitCode {
                         "outcome": "success", "kind": report.kind.as_str(),
                         "unit_path": report.unit_path, "existed": report.existed,
                         "dry_run": report.dry_run, "next_steps": report.next_steps,
+                        "durable": report.durable,
                     })
                 );
             } else {
@@ -309,7 +310,9 @@ fn execute_uninstall(args: &[String], json: bool) -> ExitCode {
                     report.kind.as_str()
                 );
                 println!("  Target path: {}", report.unit_path.display());
-                if report.existed {
+                if report.dry_run && report.existed {
+                    println!("  Service configuration would be removed.");
+                } else if report.existed {
                     println!("  Service configuration removed.");
                 } else {
                     println!("  Service was not previously installed (idempotent no-op).");

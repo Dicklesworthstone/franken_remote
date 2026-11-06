@@ -55,6 +55,7 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
                         "schema_version": "fr.service.v1", "outcome": "success",
                         "kind": report.kind.as_str(), "unit_path": report.unit_path,
                         "dry_run": report.dry_run, "started": false,
+                        "durable": report.durable,
                         "unit_content": report.dry_run.then_some(&report.unit_content),
                         "next_steps": report.next_steps,
                         "ingress_helper": helper,

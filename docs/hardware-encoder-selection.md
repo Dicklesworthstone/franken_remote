@@ -67,6 +67,30 @@ This preview renders configuration; it does not start a service, probe a GPU
 change saved admission policy or qualify the selected encoder. The service
 account still needs the existing local desktop, device and ingress permissions.
 
+On Linux, installation writes a private, exclusively created staging file and
+publishes the complete service definition atomically. It never reuses an old
+`frd.tmp`; symlinks, multiply linked units, nonregular files and untrusted writable
+service directories are refused. Every directory component is opened without
+following links, and publication/removal uses the original directory handle.
+Concurrent installers have separate stages; the last complete publication wins.
+Uninstall uses the same path checks, leaves missing directories absent and does
+not stop an already running service.
+
+Install and uninstall JSON include `durable`: `null` for a preview or when no
+removal occurred, `true` after synchronizing the changed directory, and `false`
+if publication/removal completed but directory synchronization failed. That last
+result retains the completed filesystem change and reports the uncertainty in
+`next_steps`; it does not claim that nothing happened. The selected local user
+and root remain trusted. These checks do not qualify a service manager, GPU or
+live remote session, and persistent installation remains Linux-only.
+
+The generated root ingress-helper unit uses the canonical executable whose
+file and ancestor ownership were checked, so retargeting the installer's original
+symlink cannot redirect the root service. A protected directory or nonexecutable
+file does not qualify as that executable. When a protected copy is needed, the
+reported administrator command quotes each path as one literal shell argument;
+installation still does not execute that command or start the helper.
+
 ## What a hardware selection proves
 
 `frd run --encoder nvenc|vaapi` probes the selection once at startup, before any

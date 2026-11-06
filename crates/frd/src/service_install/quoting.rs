@@ -1,6 +1,12 @@
 //! Service-manager encodings are not shell quoting. Never interpolate paths
 //! directly into `ExecStart` or XML. `ExecStart` uses ':' to disable $ expansion.
 
+/// One literal POSIX-shell argument, for the administrator's copy command.
+/// This is deliberately separate from the service manager's own encodings.
+pub(super) fn shell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 pub(super) fn systemd(value: &str) -> String {
     if !value.is_empty()
         && value
