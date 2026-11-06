@@ -246,6 +246,7 @@ fn native_backpressure_retries_preserve_the_next_repair_turn() {
         assert!(!host.io().unwrap().0.is_closed());
         drop(services);
         host.close();
+        stream.close();
         stream
             .reap(&c, Deadline::after(&c, Duration::from_secs(1)).unwrap())
             .await
