@@ -659,6 +659,152 @@ fn worker_permission_is_send_sync_and_concurrent_clock_overtaking_is_conservativ
     assert!(!permit.valid(now(21)));
 }
 #[test]
+fn overtaken_capture_timestamp_cannot_admit_expired_speech() {
+    let (_input, mut sender) = attached();
+    let permit = start(&mut sender, 0);
+    let mut receipt = sender.begin_capture(&permit, now(1), now(100_001)).unwrap();
+    // The original worker has already serviced a later clock sample while
+    // the application callback retained an earlier, otherwise ordered sample.
+    assert!(permit.valid(now(100_001)));
+    assert_eq!(
+        sender.submit(&mut receipt, &packet(&permit, 0, 0), now(100_000)),
+        Err(Error::Expired)
+    );
+    assert!(!sender.has_pending_record());
+    assert!(!permit.valid(now(100_001)));
+}
+
+#[test]
+fn overtaken_send_timestamp_never_exposes_expired_speech_to_transport() {
+    let (_input, mut sender) = attached();
+    let permit = start(&mut sender, 0);
+    let mut receipt = sender.begin_capture(&permit, now(1), now(100_001)).unwrap();
+    sender
+        .submit(&mut receipt, &packet(&permit, 0, 0), now(2))
+        .unwrap();
+    assert!(permit.valid(now(100_001)));
+    let mut called = false;
+    let result = sender.try_send(now(100_000), |_, _| {
+        called = true;
+        Ok(true)
+    });
+    assert!(
+        !called,
+        "known-expired speech reached the transport callback"
+    );
+    assert_eq!(result, Err(Error::Expired));
+    assert!(!sender.has_pending_record());
+    assert!(!permit.valid(now(100_001)));
+}
+
+#[test]
+fn overtaken_capture_request_cannot_open_expired_custody() {
+    let (_input, mut sender) = attached();
+    let permit = start(&mut sender, 0);
+    assert!(permit.valid(now(100_001)));
+    assert_eq!(
+        sender
+            .begin_capture(&permit, now(100_000), now(100_001))
+            .unwrap_err(),
+        Error::Expired
+    );
+    // No native pull or captured work existed; rejecting this old request
+    // does not turn it into a new lifetime or consume the live talk epoch.
+    assert!(permit.valid(now(100_001)));
+}
+
+#[test]
+fn overtaken_configuration_timestamp_cannot_restart_expired_talk_work() {
+    for started in [false, true] {
+        let (mut input, mut sender) = attached();
+        sender.set_permission(MicPermission::Granted);
+        let configuration = started.then(|| {
+            let cfg = sender
+                .begin_talk(MicTalkMode::OpenMic { active: true }, now(0))
+                .unwrap();
+            sender.configuration_sent(now(0)).unwrap();
+            cfg
+        });
+        ready(&mut input, 1_000_000);
+        ready(&mut input, 2_000_000);
+        if let Some(cfg) = configuration {
+            assert_eq!(
+                sender.configured(&ack(cfg), now(1_999_999)).unwrap_err(),
+                Error::Expired
+            );
+        } else {
+            assert_eq!(
+                sender.begin_talk(MicTalkMode::OpenMic { active: true }, now(0)),
+                Err(Error::Expired)
+            );
+        }
+        assert_eq!(sender.status(), Status::Muted);
+        assert_eq!(sender.configuration_deadline(), None);
+    }
+}
+
+#[test]
+fn overtaken_send_callback_expires_only_retained_capture_work() {
+    for admitted in [false, true] {
+        let (_input, mut sender) = attached();
+        let permit = start(&mut sender, 0);
+        let mut receipt = sender.begin_capture(&permit, now(1), now(100_001)).unwrap();
+        sender
+            .submit(&mut receipt, &packet(&permit, 0, 0), now(2))
+            .unwrap();
+        let mut called = false;
+        let result = sender.try_send(now(3), |_, until| {
+            assert_eq!(until, now(100_001));
+            called = true;
+            assert!(permit.valid(until));
+            Ok(admitted)
+        });
+        assert!(called);
+        assert_eq!(
+            result,
+            if admitted {
+                Ok(true)
+            } else {
+                Err(Error::Expired)
+            }
+        );
+        assert!(!sender.has_pending_record());
+        assert!(sender.pending_bytes.iter().all(|byte| *byte == 0));
+        assert_eq!(permit.valid(now(100_001)), admitted);
+        if admitted {
+            // The original handoff remains accepted, but no further packet
+            // may borrow that capture receipt after its immutable deadline.
+            assert_eq!(
+                sender.submit(&mut receipt, &packet(&permit, 1, 480), now(100_001)),
+                Err(Error::Expired)
+            );
+        }
+    }
+}
+
+#[test]
+fn overtaken_live_samples_keep_original_custody_and_owner_clock_order() {
+    let (_input, mut sender) = attached();
+    let permit = start(&mut sender, 0);
+    let mut receipt = sender.begin_capture(&permit, now(1), now(100_001)).unwrap();
+    assert!(permit.valid(now(100_000)));
+    sender
+        .submit(&mut receipt, &packet(&permit, 0, 0), now(2))
+        .unwrap();
+    assert!(
+        sender
+            .try_send(now(3), |_, until| {
+                assert_eq!(until, now(100_001));
+                Ok(true)
+            })
+            .unwrap()
+    );
+    let next = sender.begin_capture(&permit, now(4), now(100_004)).unwrap();
+    assert_eq!(next.acquired(), now(4));
+    assert_eq!(next.expires(), now(100_004));
+}
+
+#[test]
 fn callback_failure_or_caught_panic_fences_worker_and_erases_retained_speech() {
     for panic in [false, true] {
         let (_input, mut sender) = attached();

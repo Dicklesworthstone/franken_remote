@@ -311,7 +311,7 @@ impl Sender {
         self.stop();
         Err(error)
     }
-    fn check(&mut self, now: ClientInstant) -> Result<(), Error> {
+    fn check(&mut self, now: ClientInstant) -> Result<ClientInstant, Error> {
         if self.status == Status::Stopped {
             return Err(Error::Stopped);
         }
@@ -319,21 +319,29 @@ impl Sender {
             return self.fail(Error::Clock);
         }
         self.last_now = now;
-        if let Err(error) = self.clock.sample_concurrent(now) {
-            self.retire_epoch();
-            return Err(Error::Authority(error));
-        }
+        // Workers can service a later timestamp before this ordered owner
+        // acquires the projection. Preserve the raw owner clock above, but
+        // use the shared effective time for every original custody deadline.
+        let effective = match self.clock.sample_concurrent(now) {
+            Ok((_, effective)) => effective,
+            Err(error) => {
+                self.retire_epoch();
+                return Err(Error::Authority(error));
+            }
+        };
         if self.epoch.as_ref().is_some_and(|epoch| !epoch.is_live()) {
             self.retire_epoch();
             return Err(Error::Retired);
         }
-        if self.configuration_until.is_some_and(|until| now >= until)
+        if self
+            .configuration_until
+            .is_some_and(|until| effective >= until)
             && matches!(self.status, Status::Configuring | Status::AwaitingHost)
         {
             self.retire_epoch();
             return Err(Error::Expired);
         }
-        Ok(())
+        Ok(effective)
     }
     /// A local user action, never a network callback. No PCM is admitted while
     /// configuration is queued/backpressured or awaiting its exact host reply.
@@ -342,7 +350,7 @@ impl Sender {
         mode: MicTalkMode,
         now: ClientInstant,
     ) -> Result<AudioConfiguration, Error> {
-        self.check(now)?;
+        let effective = self.check(now)?;
         if self.permission != MicPermission::Granted {
             return Err(Error::Permission);
         }
@@ -365,6 +373,9 @@ impl Sender {
                 .ok_or(Error::Clock)?
                 .min(cap.0),
         );
+        if effective >= until {
+            return Err(Error::Expired);
+        }
         audio::encode_configuration(&configuration, self.channel, &mut self.configuration_bytes)
             .map_err(Error::Wire)?;
         self.epoch = Some(Arc::new(Epoch {
@@ -515,7 +526,7 @@ impl Sender {
         now: ClientInstant,
         expires: ClientInstant,
     ) -> Result<CaptureReceipt, Error> {
-        self.check(now)?;
+        let effective = self.check(now)?;
         permit.check(now)?;
         if self.status != Status::Capturing {
             return Err(Error::NotTalking);
@@ -527,7 +538,10 @@ impl Sender {
         if !permit.belongs_to(epoch) {
             return self.fail(Error::WrongScope);
         }
-        if expires <= now || expires > permit.until || expires.0 - now.0 > MAX_CAPTURE_CUSTODY_US {
+        if expires <= effective
+            || expires > permit.until
+            || expires.0 - now.0 > MAX_CAPTURE_CUSTODY_US
+        {
             return Err(Error::Expired);
         }
         Ok(CaptureReceipt {
@@ -545,7 +559,7 @@ impl Sender {
         packet: &AudioAccessUnit,
         now: ClientInstant,
     ) -> Result<(), Error> {
-        self.check(now)?;
+        let effective = self.check(now)?;
         if self.status != Status::Capturing {
             return Err(Error::NotTalking);
         }
@@ -556,7 +570,7 @@ impl Sender {
         if !receipt.belongs_to(epoch) {
             return self.fail(Error::WrongScope);
         }
-        if now < receipt.acquired || now >= receipt.expires {
+        if now < receipt.acquired || effective >= receipt.expires {
             self.retire_epoch();
             return Err(Error::Expired);
         }
@@ -613,11 +627,11 @@ impl Sender {
         now: ClientInstant,
         send: impl FnOnce(&[u8], ClientInstant) -> Result<bool, ()>,
     ) -> Result<bool, Error> {
-        self.check(now)?;
+        let effective = self.check(now)?;
         let Some(until) = self.pending_until else {
             return Ok(false);
         };
-        if now >= until {
+        if effective >= until {
             self.retire_epoch();
             return Err(Error::Expired);
         }
@@ -633,7 +647,14 @@ impl Sender {
             call.sender.pending_len = 0;
             call.sender.pending_until = None;
         }
-        call.sender.check(now)?;
+        let effective = call.sender.check(now)?;
+        if !accepted && effective >= until {
+            // Backpressure leaves this owner with the original speech. Once
+            // admitted, the transport owns those bytes and their unchanged
+            // deadline; a delayed callback return cannot undo that handoff.
+            call.sender.retire_epoch();
+            return Err(Error::Expired);
+        }
         call.complete = true;
         Ok(accepted)
     }
