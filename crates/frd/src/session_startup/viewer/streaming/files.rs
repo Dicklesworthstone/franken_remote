@@ -286,7 +286,7 @@ impl Sending {
         // selection, not to a fresh-view/source-admission check or another
         // source's outstanding report. No sender has ever owned this request.
         if let Some((pending, error)) = intake.take_terminal() {
-            self.retire_pending(pending.request, pending.control, error);
+            self.retire_pending(pending.request, &pending.control, error);
             return;
         }
         if let Some(report) = viewer.report() {
@@ -330,7 +330,7 @@ impl Sending {
             intake.set_ready(true);
         }
     }
-    fn retire_pending(&mut self, request: SendRequest, control: SendControl, error: Error) {
+    fn retire_pending(&mut self, request: SendRequest, control: &SendControl, error: Error) {
         // A public UI callback may have started a direct file operation since
         // the intake accepted this request. Retire only these queued descriptors
         // and their exact handle: never cancel that source or inherit its report.
