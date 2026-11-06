@@ -18,10 +18,12 @@ use std::{
 const INSTANCE: [u8; 16] = [0xa3; 16];
 
 enum Exchange {
-    /// `fr robot session status`: one optional quality request, answered with
-    /// no current decision. Nothing else, and never a STOP, may follow it.
+    /// `fr robot session status` sends the protocol's optional quality request
+    /// (76c8430b); this owner requires it and answers that no decision is
+    /// current. Nothing else, and never a STOP, may follow.
     Status,
-    Inspect,
+    /// Identification only: a stale pin refuses before sending any request.
+    IdentifyOnly,
     Close,
     LoseReply,
 }
@@ -77,15 +79,15 @@ fn fixture(target: &str, exchanges: Vec<Exchange>) -> JoinHandle<()> {
                     assert_eq!(
                         stream.read(&mut byte).unwrap(),
                         0,
-                        "no STOP may follow inspection"
+                        "no STOP may follow status inspection"
                     );
                 }
-                Exchange::Inspect => {
+                Exchange::IdentifyOnly => {
                     let mut byte = [0; 1];
                     assert_eq!(
                         stream.read(&mut byte).unwrap(),
                         0,
-                        "no STOP may follow inspection or a stale pin"
+                        "nothing may follow a stale pin's identification"
                     );
                 }
                 Exchange::Close | Exchange::LoseReply => {
@@ -242,7 +244,7 @@ fn disconnect_by_saved_alias_closes_the_saved_hosts_stable_id() {
 #[test]
 fn stale_cli_pin_refuses_without_sending_stop_or_claiming_unknown_effects() {
     let target = target();
-    let owner = fixture(&target, vec![Exchange::Inspect]);
+    let owner = fixture(&target, vec![Exchange::IdentifyOnly]);
     let output = cli(&[
         "robot",
         "session",
