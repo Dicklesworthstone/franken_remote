@@ -178,6 +178,7 @@ pub(super) fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
 struct Candidate {
     view: InputView,
     bounds: fr_core::input::InputBounds,
+    capabilities: fr_core::input_submission::Capabilities,
     sample: fr_wire::presented::Sample,
     at: Instant,
 }
@@ -374,20 +375,17 @@ impl State {
                 return Err(Refusal::ObservationExpired);
             }
             let current = self.live.ok_or(Refusal::InputUnavailable)?;
-            if current.view != original.view || current.bounds != original.bounds {
+            if current.view != original.view
+                || current.bounds != original.bounds
+                || current.capabilities != original.capabilities
+            {
                 return Err(Refusal::ViewChanged);
             }
-            if request
-                .operation
-                .pointer(0)
-                .is_some_and(|position| !original.bounds.contains(position))
-            {
+            if !request.operation.within_bounds(original.bounds) {
                 return Err(Refusal::OutOfBounds);
             }
-            if let Some((from, to)) = request.operation.drag_points()
-                && (!original.bounds.contains(from) || !original.bounds.contains(to))
-            {
-                return Err(Refusal::OutOfBounds);
+            if !request.operation.supported(original.capabilities) {
+                return Err(Refusal::InputUnavailable);
             }
             Ok(original)
         })();

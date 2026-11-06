@@ -2,8 +2,8 @@
 
 The Linux native desktop CLI can explicitly accept bounded robot input on its
 original authenticated control session. It supports an absolute pointer move,
-a click, a bounded drag, a physical key tap, a modifier shortcut, or integer
-line scrolling. The owner retains the host lease, input ticket,
+a click, a bounded drag, modifier-held clicks and drags, a physical key tap,
+a modifier shortcut, or integer line scrolling. The owner retains the host lease, input ticket,
 original viewport and transport; local commands receive comparison
 handles and content-free results.
 
@@ -62,7 +62,9 @@ forms are:
 | --- | --- |
 | `--move X,Y` | Move the absolute pointer once without pressing a button, key or wheel. The signed host-desktop point must be inside the original granted display. |
 | `--click BUTTON,X,Y` | Press and release at the same host-desktop point. Buttons: 1 primary, 2 secondary, 3 middle, 4 back, 5 forward. |
+| `--modified-click MODIFIER,...,BUTTON,X,Y` | Hold one to four distinct USB modifiers (224–231) through a click, then release them in reverse order. For example, `224,1,640,360` requests left Control plus a primary click. |
 | `--drag BUTTON,X1,Y1,X2,Y2` | Press at the source, move once while held, then release at the destination. Both distinct endpoints must be inside the original granted display. Uses the same button numbers as click. |
+| `--modified-drag MODIFIER,...,BUTTON,X1,Y1,X2,Y2` | Hold one to four distinct USB modifiers through the same bounded drag, releasing the button before releasing the modifiers. |
 | `--key USB_USAGE` | Press and release one validated USB keyboard page-7 physical usage, in decimal; for example `4`. This is not Unicode or a keyboard-layout translation. |
 | `--chord MODIFIER,...,KEY` | Hold one to four distinct USB modifiers (224–231) through one physical key tap, then release in reverse order. For example, `224,225,19` requests Control–Shift–P. |
 | `--scroll X,Y,DX,DY` | Scroll at the host-desktop point by integer lines on each axis. Each delta is between −120 and 120; at least one is nonzero. |
@@ -78,7 +80,7 @@ can return pixels and the pictured frame's original input handles. It does not
 make a later input request atomic with the observation or refresh that evidence.
 
 Clicks, drags and key taps contain two reliable actions. Modifier shortcuts
-contain at most ten. Line scrolls contain one to eight: each action has at most
+and modifier-held mouse gestures contain at most ten. Line scrolls contain one to eight: each action has at most
 32 total wheel steps, matching the X11 executor's existing submission bound.
 Horizontal lines precede vertical lines, with the original signs, exact total
 distance and target point preserved. Previously the CLI accepted up to 120
@@ -153,6 +155,39 @@ unknown result and fences the original owner. Existing held-state cleanup can
 release the button, but does not undo a window move, selection or other effect.
 Changing either endpoint under an existing request ID cannot execute a new drag.
 
+### Hold modifiers through a click or drag
+
+A modifier shortcut releases its keys before it completes. To keep Control,
+Shift, Alt or Super held during a mouse gesture, submit one modified mouse
+operation. For example, using a fresh observation and its next request ID:
+
+```bash
+fr robot input NODE_ID --connection-id CONNECTION_ID \
+  --lease LOCAL_LEASE --request-id NEXT_REQUEST_ID --observation-id OBSERVATION_ID \
+  --max-observation-age-ms 1000 --modified-click 225,1,640,360 --json
+```
+
+This requests a physical left-Shift primary click. A desktop application may
+interpret it as range selection. For a Control-held drag, obtain another fresh
+observation and submit `--modified-drag 224,1,-100,20,200,40` with that
+observation's handles and next request ID. The application determines the
+meaning of the gesture; an OS receipt does not prove a selection or copy.
+
+One to four distinct modifier usages are accepted. Their command-line order is
+canonicalized: modifiers press in ascending usage order, the button presses and
+releases at the specified point or endpoints, then modifiers release in reverse
+order. These are four, six, eight or ten reliable actions, all within the existing
+request ledger bound. There is no persistent modifier state between requests.
+
+The complete operation requires keyboard, button and absolute-pointer
+capabilities. Its click point or both distinct drag endpoints are checked before
+the first modifier can be encoded. An invalid destination cannot leave behind a
+modifier press. Every later action still requires its preceding host receipt and
+the original observation, focus, view generations and authority. Failure after a
+submitted prefix preserves the partial or unknown effect and fences the original
+owner; its existing held-state cleanup releases keys/buttons without replaying
+the remainder or inventing a new ticket.
+
 ## Identity, expiry and cancellation
 
 Every accepted request fixes its complete arguments, observation identity,
@@ -207,6 +242,13 @@ fr robot session close NODE_ID --connection-id CONNECTION_ID --json
 ```
 
 ## Verification boundary
+
+The modifier-held mouse extension adds parser/serialization, action-order,
+whole-gesture admission and partial-effect regressions against the existing
+request owner and ledger. In this editing session the execution environment was
+unavailable: these new regressions have been source-reviewed but have not been
+compiled or executed. The historical results below qualify their stated earlier
+source only; they do not establish native or live execution of this extension.
 
 The pointer extension passes all 502 `fr-client` package tests, including 29
 native request-ledger tests, plus 98 actual-source CLI tests covering options,

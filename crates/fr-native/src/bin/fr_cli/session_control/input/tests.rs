@@ -28,6 +28,11 @@ fn view() -> InputView {
 fn candidate(age_upper_us: u64) -> Candidate {
     Candidate {
         view: view(),
+        capabilities: fr_core::input_submission::Capabilities::default()
+            .with(fr_core::input_submission::Capability::Keys)
+            .with(fr_core::input_submission::Capability::Absolute)
+            .with(fr_core::input_submission::Capability::Buttons)
+            .with(fr_core::input_submission::Capability::LineScroll),
         bounds: fr_core::input::InputBounds::new(
             fr_core::input::DesktopPoint { x: -800, y: -200 },
             1600,
@@ -1298,4 +1303,266 @@ fn cancelled_move_keeps_unknown_effect_and_a_late_receipt_cannot_restart_owner()
         }),
         Err(Refusal::Stopped)
     );
+}
+
+fn modified_operation(drag: bool, modifiers: u8) -> Operation {
+    if drag {
+        Operation::ModifiedDrag {
+            modifiers,
+            button: 1,
+            from_x: -800,
+            from_y: -200,
+            to_x: 799,
+            to_y: 599,
+        }
+    } else {
+        Operation::ModifiedClick {
+            modifiers,
+            button: 1,
+            x: -800,
+            y: -200,
+        }
+    }
+}
+
+fn modified_request(shared: &Shared, drag: bool) -> Request {
+    Request {
+        operation: modified_operation(drag, 0b0000_1111),
+        ..request(&snapshot(shared), 1)
+    }
+}
+
+#[test]
+fn modified_gestures_preflight_every_coordinate_before_any_modifier() {
+    for (x, y) in [
+        (-801, 0),
+        (800, 0),
+        (0, -201),
+        (0, 600),
+        (i32::MIN, i32::MAX),
+    ] {
+        for operation in [
+            Operation::ModifiedClick {
+                modifiers: 15,
+                button: 1,
+                x,
+                y,
+            },
+            Operation::ModifiedDrag {
+                modifiers: 15,
+                button: 1,
+                from_x: x,
+                from_y: y,
+                to_x: 799,
+                to_y: 599,
+            },
+            Operation::ModifiedDrag {
+                modifiers: 15,
+                button: 1,
+                from_x: -800,
+                from_y: -200,
+                to_x: x,
+                to_y: y,
+            },
+        ] {
+            let shared = fresh();
+            let request = Request {
+                operation,
+                ..request(&snapshot(&shared), 1)
+            };
+            assert_eq!(shared.locked().submit(request), Err(Refusal::OutOfBounds));
+            let refused = retained(&shared, request);
+            assert_eq!(refused.actions_total, 10);
+            assert_eq!(refused.actions_encoded, 0);
+            assert_eq!(refused.submitted_operations, 0);
+            assert_eq!(refused.disposition, InputDisposition::Refused);
+            assert!(shared.locked().pending.is_none());
+            assert!(snapshot(&shared).ready);
+            assert_eq!(
+                report(&shared.locked().submit(request).unwrap().unwrap()),
+                refused
+            );
+        }
+    }
+}
+
+#[test]
+fn modified_gestures_require_the_entire_original_capability_grant() {
+    use fr_core::input_submission::{Capabilities, Capability};
+    for drag in [false, true] {
+        for mask in 0_u8..7 {
+            let shared = fresh();
+            let mut capabilities = Capabilities::default().with(Capability::LineScroll);
+            for (bit, capability) in [
+                (1, Capability::Keys),
+                (2, Capability::Buttons),
+                (4, Capability::Absolute),
+            ] {
+                if mask & bit != 0 {
+                    capabilities = capabilities.with(capability);
+                }
+            }
+            shared.locked().live.as_mut().unwrap().capabilities = capabilities;
+            let request = modified_request(&shared, drag);
+            assert_eq!(shared.locked().submit(request), Err(Refusal::InputUnavailable));
+            let refused = retained(&shared, request);
+            assert_eq!(refused.actions_encoded, 0);
+            assert_eq!(refused.submitted_operations, 0);
+            assert_eq!(refused.disposition, InputDisposition::Refused);
+            assert!(shared.locked().pending.is_none());
+            assert!(!shared.locked().ledger.is_closed());
+        }
+        let shared = fresh();
+        let request = modified_request(&shared, drag);
+        shared.locked().live.as_mut().unwrap().capabilities = Capabilities::default();
+        assert_eq!(shared.locked().submit(request), Err(Refusal::ViewChanged));
+        assert_eq!(retained(&shared, request).actions_encoded, 0);
+    }
+}
+
+fn modified_receipt(sequence: u64) -> InputResult {
+    InputResult {
+        // Four modifiers, two reliable position+button barriers, four releases.
+        submitted_operations: if (4..=5).contains(&sequence) { 2 } else { 1 },
+        ..receipt(sequence)
+    }
+}
+
+#[test]
+fn modified_gestures_keep_ten_action_receipts_and_twelve_native_operations() {
+    for drag in [false, true] {
+        let shared = fresh();
+        let request = modified_request(&shared, drag);
+        assert_eq!(shared.locked().submit(request), Ok(None));
+        for sequence in 0..10 {
+            encoded(&shared, 1, sequence);
+            assert!(!ready(&shared, 1), "each modifier/button needs its own receipt");
+            assert_eq!(shared.locked().submit(request), Ok(None));
+            assert_eq!(
+                shared.locked().submit(Request {
+                    operation: modified_operation(drag, 0b0000_0111),
+                    ..request
+                }),
+                Err(Refusal::RequestChanged)
+            );
+            shared.result(ResultEvent::Completed(modified_receipt(sequence)));
+        }
+        let complete = retained(&shared, request);
+        assert_eq!(complete.actions_total, 10);
+        assert_eq!(complete.actions_encoded, 10);
+        assert_eq!(complete.actions_submitted, 10);
+        assert_eq!(complete.acknowledged_actions, 10);
+        assert_eq!(complete.submitted_operations, 12);
+        assert_eq!(complete.unacknowledged_actions, 0);
+        assert_eq!(complete.disposition, InputDisposition::Committed);
+        assert_eq!(validate_report(complete, request), Ok(()));
+        assert_eq!(
+            report(&shared.locked().submit(request).unwrap().unwrap()),
+            complete
+        );
+        assert!(shared.locked().pending.is_none());
+        assert!(snapshot(&shared).ready);
+    }
+}
+
+#[test]
+fn interrupted_modified_gestures_keep_the_exact_prefix_and_retire_the_owner() {
+    const OPERATIONS: [u32; 11] = [0, 1, 2, 3, 4, 6, 8, 9, 10, 11, 12];
+    for drag in [false, true] {
+        for prefix in 1_u8..10 {
+            for missing_receipt in [false, true] {
+                let shared = fresh();
+                let request = modified_request(&shared, drag);
+                let mut waiting = Box::pin(shared.submit(request));
+                assert!(poll(waiting.as_mut()).is_pending());
+                for sequence in 0..u64::from(prefix) {
+                    encoded(&shared, 1, sequence);
+                    shared.result(ResultEvent::Completed(modified_receipt(sequence)));
+                }
+                encoded(&shared, 1, u64::from(prefix));
+                if !missing_receipt {
+                    shared.result(ResultEvent::Completed(InputResult {
+                        stage: Stage::Admitted,
+                        outcome: InputOutcome::CancelledBeforeSubmission,
+                        submitted_operations: 0,
+                        reason: Some(fr_wire::input_result::Reason::Revoked),
+                        ..receipt(u64::from(prefix))
+                    }));
+                }
+                drop(waiting);
+                let actual = retained(&shared, request);
+                assert_eq!(actual.actions_total, 10);
+                assert_eq!(actual.actions_encoded, prefix + 1);
+                assert_eq!(actual.actions_submitted, prefix);
+                assert_eq!(actual.submitted_operations, OPERATIONS[usize::from(prefix)]);
+                assert_eq!(actual.unacknowledged_actions, u8::from(missing_receipt));
+                assert_eq!(
+                    actual.disposition,
+                    if missing_receipt {
+                        InputDisposition::UnknownEffect
+                    } else {
+                        InputDisposition::Partial
+                    }
+                );
+                assert!(!snapshot(&shared).ready);
+                assert!(shared.locked().pending.is_none());
+                assert_eq!(
+                    report(&shared.locked().submit(request).unwrap().unwrap()),
+                    actual
+                );
+                assert_eq!(
+                    shared.locked().submit(Request {
+                        request_id: 2,
+                        ..request
+                    }),
+                    Err(Refusal::Stopped)
+                );
+                if missing_receipt {
+                    shared.result(ResultEvent::Completed(modified_receipt(u64::from(prefix))));
+                    let late = retained(&shared, request);
+                    assert_eq!(late.actions_submitted, prefix + 1);
+                    assert_eq!(late.submitted_operations, OPERATIONS[usize::from(prefix + 1)]);
+                    assert_eq!(late.unacknowledged_actions, 0);
+                    assert!(!snapshot(&shared).ready, "late evidence cannot resume input");
+                    assert!(shared.locked().pending.is_none());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn modified_gesture_expiry_fences_held_modifiers_and_buttons_without_replaying() {
+    for drag in [false, true] {
+        for prefix in [1_u8, 5] {
+            let shared = fresh();
+            let request = modified_request(&shared, drag);
+            let mut waiting = Box::pin(shared.submit(request));
+            assert!(poll(waiting.as_mut()).is_pending());
+            for sequence in 0..u64::from(prefix) {
+                encoded(&shared, 1, sequence);
+                shared.result(ResultEvent::Completed(modified_receipt(sequence)));
+            }
+            {
+                let mut state = shared.locked();
+                let now = state.now(Instant::now()).unwrap();
+                state.ledger.expire(now + 2_000_000).unwrap();
+                state.finish_if_retained();
+                assert!(state.stopped && state.ledger.is_closed());
+                assert!(state.pending.is_none() && state.live.is_none() && state.pinned.is_none());
+            }
+            drop(waiting);
+            let expired = retained(&shared, request);
+            assert_eq!(expired.end, native::End::Expired);
+            assert_eq!(expired.disposition, InputDisposition::Partial);
+            assert_eq!(expired.actions_encoded, prefix);
+            assert_eq!(expired.actions_submitted, prefix);
+            assert_eq!(expired.submitted_operations, if prefix == 1 { 1 } else { 6 });
+            assert_eq!(expired.unacknowledged_actions, 0);
+            assert_eq!(
+                report(&shared.locked().submit(request).unwrap().unwrap()),
+                expired
+            );
+        }
+    }
 }

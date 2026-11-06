@@ -5,8 +5,9 @@ fr robot session open NODE_ID --foreground --role control --accept-input
 fr robot input NODE_ID --connection-id ID --status [--json]
 fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     --observation-id INTEGER --max-observation-age-ms 1..1000
-    (--move X,Y | --click BUTTON,X,Y | --drag BUTTON,X1,Y1,X2,Y2 | --key USB_USAGE
-     | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
+    (--move X,Y | --click BUTTON,X,Y | --modified-click MODIFIER,...,BUTTON,X,Y
+     | --drag BUTTON,X1,Y1,X2,Y2 | --modified-drag MODIFIER,...,BUTTON,X1,Y1,X2,Y2
+     | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
 
 Find the public connection ID with fr robot session status NODE_ID --json.
 Keep the foreground viewer focused. The explicit automation owner requests one
@@ -31,6 +32,14 @@ Both distinct endpoints must be inside the original granted display before any
 press is sent. Each of its two reliable actions waits for its original receipt;
 the original observation and deadline remain in force through the release.
 This is a bounded single move, with no recorded path or persistent held button.
+--modified-click and --modified-drag hold one to four distinct USB modifiers
+(224..231) through the corresponding mouse gesture. For example,
+--modified-click 224,1,640,360 requests physical left Ctrl + primary click.
+Both keyboard and absolute-pointer/button control must be granted. The complete
+modifier set and all points are checked before the first modifier press.
+Modifiers press in ascending usage order; after the button release, modifiers
+release in reverse order. Each of at most ten actions waits for its own receipt
+under the same original observation and deadline.
 --key taps a physical USB page-7 usage (decimal), not Unicode or a keyboard-layout
 guess. Scroll deltas are integer lines on each axis, at most 120 in magnitude.
 Large scrolls use up to eight reliable actions of at most 32 total lines each,

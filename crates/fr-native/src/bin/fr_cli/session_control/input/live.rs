@@ -47,6 +47,29 @@ impl Operation {
                 };
                 Self::Click { button, x, y }.action(index)
             }
+            Self::ModifiedClick {
+                modifiers,
+                button,
+                x,
+                y,
+            } if self.valid() => {
+                Self::Click { button, x, y }.action_with_modifiers(modifiers, index)
+            }
+            Self::ModifiedDrag {
+                modifiers,
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            } if self.valid() => Self::Drag {
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            }
+            .action_with_modifiers(modifiers, index),
             Self::KeyTap { usage } if index < 2 => Some(Action::Key {
                 key: PhysicalKey::new(usage)?,
                 transition: if index == 0 {
@@ -80,6 +103,32 @@ impl Operation {
             }
             _ => None,
         }
+    }
+    fn action_with_modifiers(self, modifiers: u8, index: u8) -> Option<Action<'static>> {
+        let held = u8::try_from(modifiers.count_ones()).ok()?;
+        let release_start = held.checked_add(self.count())?;
+        let total = release_start.checked_add(held)?;
+        if index >= total {
+            return None;
+        }
+        if (held..release_start).contains(&index) {
+            return self.action(index - held);
+        }
+        // Each modifier remains held across both reliable button barriers.
+        // Reverse release order mirrors the canonical presses, just as a chord.
+        let pressed = index < held;
+        let ordinal = if pressed { index } else { total - index - 1 };
+        let usage = (224_u16..=231)
+            .filter(|key| modifiers & (1 << (*key - 224)) != 0)
+            .nth(usize::from(ordinal))?;
+        Some(Action::Key {
+            key: PhysicalKey::new(usage)?,
+            transition: if pressed {
+                KeyTransition::Press
+            } else {
+                KeyTransition::Release
+            },
+        })
     }
 }
 impl Shared {
@@ -119,6 +168,7 @@ impl Shared {
                     sample,
                     at,
                     bounds: viewer.granted_input_bounds(),
+                    capabilities: viewer.granted_capabilities(),
                 })
         } else {
             None
@@ -146,7 +196,9 @@ impl Shared {
         let current = state.live;
         let valid = focused
             && current.is_some_and(|live| {
-                live.view == pending.original.view && live.bounds == pending.original.bounds
+                live.view == pending.original.view
+                    && live.bounds == pending.original.bounds
+                    && live.capabilities == pending.original.capabilities
             })
             && pending
                 .original
@@ -441,6 +493,108 @@ mod tests {
             for index in 0..=255 {
                 assert!(drag.action(index).is_none());
             }
+        }
+    }
+
+    fn modified_gestures(modifiers: u8, button: u8) -> [Operation; 2] {
+        [
+            Operation::ModifiedClick {
+                modifiers,
+                button,
+                x: -800,
+                y: -200,
+            },
+            Operation::ModifiedDrag {
+                modifiers,
+                button,
+                from_x: -800,
+                from_y: -200,
+                to_x: 799,
+                to_y: 599,
+            },
+        ]
+    }
+
+    #[test]
+    fn modified_gestures_keep_every_modifier_held_through_both_button_barriers() {
+        for modifiers in 1_u8..=255 {
+            if modifiers.count_ones() > 4 {
+                continue;
+            }
+            let usages: Vec<_> = (224_u16..=231)
+                .filter(|usage| modifiers & (1 << (*usage - 224)) != 0)
+                .collect();
+            let count = u8::try_from(usages.len()).unwrap();
+            for button in 1..=5 {
+                for operation in modified_gestures(modifiers, button) {
+                    assert_eq!(operation.count(), 2 * count + 2);
+                    let mut held = BTreeSet::new();
+                    for index in 0..operation.count() {
+                        assert!(operation.pointer(index).is_none());
+                        match operation.action(index).expect("every bounded action exists") {
+                            Action::Key { key, transition } => {
+                                if index < count {
+                                    assert_eq!(key.usage(), usages[usize::from(index)]);
+                                    assert_eq!(transition, KeyTransition::Press);
+                                    assert!(held.insert(key.usage()));
+                                } else {
+                                    let ordinal = operation.count() - index - 1;
+                                    assert_eq!(key.usage(), usages[usize::from(ordinal)]);
+                                    assert_eq!(transition, KeyTransition::Release);
+                                    assert!(held.remove(&key.usage()));
+                                }
+                            }
+                            Action::Button {
+                                button: actual,
+                                pressed,
+                                position,
+                            } => {
+                                assert_eq!(actual as u8, button);
+                                assert_eq!(held.iter().copied().collect::<Vec<_>>(), usages);
+                                assert!(index == count || index == count + 1);
+                                assert_eq!(pressed, index == count);
+                                let expected = if !pressed
+                                    && matches!(operation, Operation::ModifiedDrag { .. })
+                                {
+                                    DesktopPoint { x: 799, y: 599 }
+                                } else {
+                                    DesktopPoint { x: -800, y: -200 }
+                                };
+                                assert_eq!(position, expected);
+                            }
+                            _ => panic!("only physical modifiers and reliable buttons are allowed"),
+                        }
+                    }
+                    assert!(held.is_empty());
+                    for index in operation.count()..=u8::MAX {
+                        assert!(operation.action(index).is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_modified_gestures_never_emit_even_the_first_modifier() {
+        for (modifiers, button) in [(0, 1), (31, 1), (255, 1), (1, 0), (1, 6), (1, 255)] {
+            for operation in modified_gestures(modifiers, button) {
+                assert!(!operation.valid());
+                for index in 0..=u8::MAX {
+                    assert!(operation.action(index).is_none());
+                }
+            }
+        }
+        let stationary = Operation::ModifiedDrag {
+            modifiers: 1,
+            button: 1,
+            from_x: -100,
+            from_y: 20,
+            to_x: -100,
+            to_y: 20,
+        };
+        assert!(!stationary.valid());
+        for index in 0..=u8::MAX {
+            assert!(stationary.action(index).is_none());
         }
     }
 }

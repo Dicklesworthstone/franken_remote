@@ -32,6 +32,11 @@ fn image() -> fr_media::worker::presentation_snapshot::Snapshot {
 fn ready() -> (Shared, Channel) {
     let shared = Shared::new([1; 16], [2; 16]).unwrap();
     shared.locked().live = Some(Candidate {
+        capabilities: fr_core::input_submission::Capabilities::default()
+            .with(fr_core::input_submission::Capability::Keys)
+            .with(fr_core::input_submission::Capability::Absolute)
+            .with(fr_core::input_submission::Capability::Buttons)
+            .with(fr_core::input_submission::Capability::LineScroll),
         bounds: fr_core::input::InputBounds::new(
             fr_core::input::DesktopPoint { x: -800, y: 0 },
             800,

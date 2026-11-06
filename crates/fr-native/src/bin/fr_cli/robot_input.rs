@@ -32,6 +32,13 @@ pub(crate) enum Operation {
         x: i32,
         y: i32,
     },
+    /// A complete click while the canonical physical modifier set stays held.
+    ModifiedClick {
+        modifiers: u8,
+        button: u8,
+        x: i32,
+        y: i32,
+    },
     KeyTap {
         usage: u16,
     },
@@ -42,6 +49,15 @@ pub(crate) enum Operation {
     },
     /// One press at the source, then a held move and release at the destination.
     Drag {
+        button: u8,
+        from_x: i32,
+        from_y: i32,
+        to_x: i32,
+        to_y: i32,
+    },
+    /// A complete drag while the canonical physical modifier set stays held.
+    ModifiedDrag {
+        modifiers: u8,
         button: u8,
         from_x: i32,
         from_y: i32,
@@ -66,7 +82,9 @@ impl Operation {
                 .unwrap_or(u8::MAX)
             }
             Self::Click { .. } | Self::KeyTap { .. } | Self::Drag { .. } => 2,
-            Self::KeyChord { modifiers, .. } => {
+            Self::KeyChord { modifiers, .. }
+            | Self::ModifiedClick { modifiers, .. }
+            | Self::ModifiedDrag { modifiers, .. } => {
                 // A byte has at most eight set bits, including invalid requests.
                 u8::try_from(2 * (modifiers.count_ones() + 1)).expect("bounded modifier set")
             }
@@ -79,6 +97,21 @@ impl Operation {
                 (-120..=120).contains(&dx) && (-120..=120).contains(&dy) && (dx != 0 || dy != 0)
             }
             Self::Click { button, .. } => (1..=5).contains(&button),
+            Self::ModifiedClick {
+                modifiers, button, ..
+            } => (1..=4).contains(&modifiers.count_ones()) && (1..=5).contains(&button),
+            Self::ModifiedDrag {
+                modifiers,
+                button,
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+            } => {
+                (1..=4).contains(&modifiers.count_ones())
+                    && (1..=5).contains(&button)
+                    && (from_x, from_y) != (to_x, to_y)
+            }
             Self::Drag {
                 button,
                 from_x,
@@ -140,6 +173,13 @@ impl Operation {
                 to_x,
                 to_y,
                 ..
+            }
+            | Self::ModifiedDrag {
+                from_x,
+                from_y,
+                to_x,
+                to_y,
+                ..
             } => Some((
                 fr_core::input::DesktopPoint {
                     x: from_x,
@@ -149,6 +189,45 @@ impl Operation {
             )),
             _ => None,
         }
+    }
+    /// Check the entire gesture before its first action can press a modifier.
+    #[cfg(any(feature = "linux-desktop", test))]
+    pub fn within_bounds(self, bounds: fr_core::input::InputBounds) -> bool {
+        if let Some((from, to)) = self.drag_points() {
+            return bounds.contains(from) && bounds.contains(to);
+        }
+        match self {
+            Self::Move { x, y }
+            | Self::Scroll { x, y, .. }
+            | Self::Click { x, y, .. }
+            | Self::ModifiedClick { x, y, .. } => {
+                bounds.contains(fr_core::input::DesktopPoint { x, y })
+            }
+            _ => true,
+        }
+    }
+    /// Preflight all capabilities, including the position barrier of each
+    /// button/scroll action. A supported modifier alone cannot admit a gesture.
+    #[cfg(any(feature = "linux-desktop", test))]
+    pub fn supported(self, capabilities: fr_core::input_submission::Capabilities) -> bool {
+        use fr_core::input_submission::{Capabilities, Capability};
+        let required = match self {
+            Self::Move { .. } => Capabilities::default().with(Capability::Absolute),
+            Self::Scroll { .. } => Capabilities::default()
+                .with(Capability::Absolute)
+                .with(Capability::LineScroll),
+            Self::Click { .. } | Self::Drag { .. } => Capabilities::default()
+                .with(Capability::Absolute)
+                .with(Capability::Buttons),
+            Self::KeyTap { .. } | Self::KeyChord { .. } => {
+                Capabilities::default().with(Capability::Keys)
+            }
+            Self::ModifiedClick { .. } | Self::ModifiedDrag { .. } => Capabilities::default()
+                .with(Capability::Absolute)
+                .with(Capability::Buttons)
+                .with(Capability::Keys),
+        };
+        capabilities.contains_all(required)
     }
     fn parse(flag: &str, value: &str) -> Result<Self, Failure> {
         let values = value
@@ -171,6 +250,22 @@ impl Operation {
                 to_x,
                 to_y,
             },
+            ("--modified-click", [modifiers @ .., button, x, y]) => Self::ModifiedClick {
+                modifiers: Self::modifier_mask(modifiers)?,
+                button: u8::try_from(*button).map_err(|_| usage())?,
+                x: *x,
+                y: *y,
+            },
+            ("--modified-drag", [modifiers @ .., button, from_x, from_y, to_x, to_y]) => {
+                Self::ModifiedDrag {
+                    modifiers: Self::modifier_mask(modifiers)?,
+                    button: u8::try_from(*button).map_err(|_| usage())?,
+                    from_x: *from_x,
+                    from_y: *from_y,
+                    to_x: *to_x,
+                    to_y: *to_y,
+                }
+            }
             ("--key", &[usage_value]) => Self::KeyTap {
                 usage: u16::try_from(usage_value).map_err(|_| usage())?,
             },
@@ -182,6 +277,16 @@ impl Operation {
         let [modifiers @ .., key] = values else {
             return Err(usage());
         };
+        let operation = Self::KeyChord {
+            modifiers: Self::modifier_mask(modifiers)?,
+            usage: u16::try_from(*key).map_err(|_| usage())?,
+        };
+        if !operation.valid() {
+            return Err(usage());
+        }
+        Ok(operation)
+    }
+    fn modifier_mask(modifiers: &[i32]) -> Result<u8, Failure> {
         if !(1..=4).contains(&modifiers.len()) {
             return Err(usage());
         }
@@ -196,14 +301,7 @@ impl Operation {
             }
             mask |= bit;
         }
-        let operation = Self::KeyChord {
-            modifiers: mask,
-            usage: u16::try_from(*key).map_err(|_| usage())?,
-        };
-        if !operation.valid() {
-            return Err(usage());
-        }
-        Ok(operation)
+        Ok(mask)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -489,7 +587,8 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--request-id" => request_id = Some(value.parse().map_err(|_| usage())?),
             "--observation-id" => observation_id = Some(value.parse().map_err(|_| usage())?),
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
-            "--move" | "--scroll" | "--click" | "--key" | "--chord" | "--drag" => {
+            "--move" | "--scroll" | "--click" | "--key" | "--chord" | "--drag"
+            | "--modified-click" | "--modified-drag" => {
                 if operation.is_some() {
                     return Err(usage());
                 }

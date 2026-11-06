@@ -779,3 +779,137 @@ fn malformed_or_mixed_move_requests_refuse_before_local_io() {
         refused(&args);
     }
 }
+
+#[test]
+fn modified_pointer_commands_preserve_canonical_modifiers_and_signed_coordinates() {
+    for (flag, value, reordered, expected, tag) in [
+        (
+            "--modified-click",
+            "224,225,227,231,5,-2147483648,2147483647",
+            "231,227,224,225,5,-2147483648,2147483647",
+            Operation::ModifiedClick {
+                modifiers: 0b1000_1011,
+                button: 5,
+                x: i32::MIN,
+                y: i32::MAX,
+            },
+            "modified_click",
+        ),
+        (
+            "--modified-drag",
+            "224,225,227,231,5,-2147483648,2147483647,2147483647,-2147483648",
+            "231,227,224,225,5,-2147483648,2147483647,2147483647,-2147483648",
+            Operation::ModifiedDrag {
+                modifiers: 0b1000_1011,
+                button: 5,
+                from_x: i32::MIN,
+                from_y: i32::MAX,
+                to_x: i32::MAX,
+                to_y: i32::MIN,
+            },
+            "modified_drag",
+        ),
+    ] {
+        let request = command(&action(flag, value)).unwrap().request.unwrap();
+        let reordered = command(&action(flag, reordered)).unwrap().request.unwrap();
+        assert!(request == reordered && request.operation == expected);
+        assert!(request.valid());
+        assert_eq!(request.operation.count(), fr_client::robot::input::native::MAX_ACTIONS);
+        let body = serde_json::to_vec(&request).unwrap();
+        assert!(body.len() <= 512);
+        assert_eq!(body, serde_json::to_vec(&reordered).unwrap());
+        assert!(serde_json::from_slice::<Request>(&body).unwrap() == request);
+        assert_eq!(serde_json::to_value(request).unwrap()["operation"]["kind"], tag);
+        assert!(request.operation.pointer(0).is_none());
+
+        for modifiers in 0_u8..=255 {
+            let mut body = serde_json::to_value(request).unwrap();
+            body["operation"]["modifiers"] = modifiers.into();
+            let decoded: Request = serde_json::from_value(body).unwrap();
+            assert_eq!(decoded.valid(), (1..=4).contains(&modifiers.count_ones()));
+            if decoded.valid() {
+                assert_eq!(u32::from(decoded.operation.count()), 2 * modifiers.count_ones() + 2);
+                assert!(decoded.operation.count() <= fr_client::robot::input::native::MAX_ACTIONS);
+            }
+        }
+        for button in [0, 6, 255] {
+            let mut body = serde_json::to_value(request).unwrap();
+            body["operation"]["button"] = button.into();
+            assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
+        }
+        for field in ["modifiers", "button"] {
+            let mut body = serde_json::to_value(request).unwrap();
+            body["operation"][field] = 256.into();
+            assert!(serde_json::from_value::<Request>(body).is_err());
+        }
+        for field in ["hold_ms", "steps", "repeat", "text"] {
+            let mut body = serde_json::to_value(request).unwrap();
+            body["operation"][field] = 1.into();
+            assert!(serde_json::from_value::<Request>(body).is_err());
+        }
+    }
+}
+
+#[test]
+fn modified_pointer_commands_refuse_invalid_modifiers_and_incomplete_gestures() {
+    for (flag, suffix) in [
+        ("--modified-click", "1,-100,20"),
+        ("--modified-drag", "1,-100,20,200,40"),
+    ] {
+        for modifiers in [
+            "223",
+            "232",
+            "-1",
+            "256",
+            "224,224",
+            "231,224,231",
+            "224,225,226,227,228",
+            "224,private-modifier",
+        ] {
+            let failure = refused(&action(flag, &format!("{modifiers},{suffix}")));
+            assert!(!format!("{failure:?}").contains("private-modifier"));
+        }
+        refused(&action(flag, suffix));
+        let mut duplicate = action(flag, &format!("224,{suffix}"));
+        duplicate.extend(words(&format!("{flag} 225,{suffix}")));
+        refused(&duplicate);
+        let mut mixed = action(flag, &format!("224,{suffix}"));
+        mixed.extend(words("--key 4"));
+        refused(&mixed);
+    }
+    for value in [
+        "224,0,0,0",
+        "224,6,0,0",
+        "224,256,0,0",
+        "224,-1,0,0",
+        "224,1,0",
+        "224,1,0,0,0",
+        "224,1,-2147483649,0",
+        "224,1,0,2147483648",
+        "224,1,,0",
+    ] {
+        refused(&action("--modified-click", value));
+    }
+    for value in [
+        "224,0,0,0,1,1",
+        "224,6,0,0,1,1",
+        "224,256,0,0,1,1",
+        "224,1,0,0,0,0",
+        "224,1,-100,20,-100,20",
+        "224,1,0,0,1",
+        "224,1,0,0,1,1,2",
+        "224,1,0,0,2147483648,1",
+        "224,1,0,0,1,-2147483649",
+        "224,1,0,0,,1",
+    ] {
+        refused(&action("--modified-drag", value));
+    }
+    let request = command(&action("--modified-drag", "224,1,-100,20,200,40"))
+        .unwrap()
+        .request
+        .unwrap();
+    let mut body = serde_json::to_value(request).unwrap();
+    body["operation"]["to_x"] = (-100).into();
+    body["operation"]["to_y"] = 20.into();
+    assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
+}
