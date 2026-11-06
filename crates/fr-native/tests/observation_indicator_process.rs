@@ -17,9 +17,11 @@ use std::{
         },
     },
     process::{Child, Command, ExitStatus, Stdio},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
+static SERIAL: Mutex<()> = Mutex::new(());
 
 struct Running {
     child: Option<Child>,
@@ -102,6 +104,7 @@ impl Drop for Running {
 
 #[test]
 fn real_x11_child_maps_then_enforces_protocol_and_parent_lifetime() {
+    let _serial = SERIAL.lock().unwrap();
     let display = match std::env::var("DISPLAY") {
         Ok(display) => display,
         Err(_) if std::env::var_os("FR_OBSERVATION_INDICATOR_REQUIRED").is_none() => {
@@ -182,4 +185,44 @@ fn real_x11_child_maps_then_enforces_protocol_and_parent_lifetime() {
             _ => unreachable!("fixture mode"),
         }
     }
+}
+
+#[test]
+fn microphone_role_requires_its_own_check_and_never_becomes_an_approval() {
+    let _serial = SERIAL.lock().unwrap();
+    let display = match std::env::var("DISPLAY") {
+        Ok(display) => display,
+        Err(_) if std::env::var_os("FR_OBSERVATION_INDICATOR_REQUIRED").is_none() => return,
+        Err(error) => panic!("required native display missing: {error}"),
+    };
+    for (open, check, foreign) in [
+        (Kind::OpenMicrophone, Kind::CheckMicrophone, Kind::Check),
+        (Kind::Open, Kind::Check, Kind::CheckMicrophone),
+        (
+            Kind::OpenMicrophone,
+            Kind::CheckMicrophone,
+            Kind::ApprovalCheck,
+        ),
+    ] {
+        let mut native = Running::start(&display);
+        assert_eq!(native.exchange(open, 1).kind, Kind::Ready);
+        assert_eq!(native.exchange(check, 2).kind, Kind::Ready);
+        let wrong_role = Frame {
+            kind: foreign,
+            sequence: 3,
+            epoch: 77,
+        };
+        native
+            .command
+            .as_mut()
+            .unwrap()
+            .write_all(&wrong_role.encode().unwrap())
+            .unwrap();
+        assert_eq!(native.finish().code(), Some(65));
+    }
+    let mut native = Running::start(&display);
+    assert_eq!(native.exchange(Kind::OpenMicrophone, 1).kind, Kind::Ready);
+    assert_eq!(native.exchange(Kind::CheckMicrophone, 2).kind, Kind::Ready);
+    assert_eq!(native.exchange(Kind::Stop, 3).kind, Kind::Stopped);
+    assert!(native.finish().success());
 }

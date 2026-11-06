@@ -82,6 +82,7 @@ pub struct ControlProfile {
     backend: Backend,
     adaptive_capture: bool,
     clipboard: bool,
+    microphone: Option<crate::native_microphone::Configuration>,
     /// `frd run --files DIR`: the operator's pinned drop directory.
     files: Option<crate::native_files::Directory>,
     file_download: Option<crate::native_files::HostSelection>,
@@ -118,6 +119,7 @@ impl ControlProfile {
             backend,
             adaptive_capture: false,
             clipboard: false,
+            microphone: None,
             files: None,
             file_download: None,
         })
@@ -167,6 +169,13 @@ impl ControlProfile {
     }
     pub const fn clipboard(&self) -> bool {
         self.clipboard
+    }
+    /// Independent local microphone enable. Every session gets its own
+    /// revocation-only privacy surface before any AudioUp offer or native output.
+    #[must_use]
+    pub fn with_microphone(mut self, config: crate::native_microphone::Configuration) -> Self {
+        self.microphone = Some(config);
+        self
     }
     pub const fn capabilities(&self) -> Capabilities {
         self.capabilities
@@ -270,6 +279,13 @@ impl ControlledDesktop {
         let status = match &mut self.media {
             Media::Reaped(status) => return Ok(*status),
             Media::Live(publisher) => {
+                // Only capture's own ReapPending may be reconciled by the
+                // outer launch receipt. A microphone/UI cleanup failure must
+                // remain a failure even if that unrelated capture child exits.
+                publisher
+                    .reap_microphone(cleanup, deadline)
+                    .await
+                    .map_err(|_| crate::worker::Error::Unavailable)?;
                 // The clipboard owner first (fenced by `close` already): its
                 // worker thread ends only after its X11 child was stopped and
                 // reaped. A timeout keeps every owner for a later reap.
@@ -322,6 +338,10 @@ impl ControlledDesktop {
         // The managed service takes its attachment at CALL time, as before.
         let prepared = match &mut self.media {
             Media::Live(publisher) => Ok((
+                self.profile
+                    .microphone
+                    .as_ref()
+                    .map(|config| publisher.configure_microphone(config.clone())),
                 // The drop lane, when both the operator and this controller
                 // selected it; absence is typed on the controller's side.
                 self.profile
@@ -349,7 +369,14 @@ impl ControlledDesktop {
             Media::Reaped(_) => Err(Error::Closed),
         };
         async move {
-            let (_files, _download, clipboard, observation, service) = prepared?;
+            let (microphone, _files, _download, clipboard, observation, service) = prepared?;
+            if let Some(Err(error)) = microphone
+                && error != crate::microphone_quic::Error::NotSelected
+            {
+                return Err(Error::Startup(crate::session_startup::Error::Microphone(
+                    error,
+                )));
+            }
             drive_control(
                 agent,
                 &cx,

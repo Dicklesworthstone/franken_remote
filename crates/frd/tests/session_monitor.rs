@@ -263,6 +263,7 @@ fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
             adaptive_capture: false,
             clipboard: false,
             audio: None,
+            microphone: None,
             files: None,
             file_send: None,
             session_monitor: Some(configuration(mode)),

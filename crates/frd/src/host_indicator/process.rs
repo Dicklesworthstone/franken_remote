@@ -19,8 +19,36 @@ const OPEN_BUDGET: Duration = Duration::from_secs(3);
 const CHECK_BUDGET: Duration = Duration::from_millis(250);
 const CHECK_INTERVAL: Duration = Duration::from_millis(50);
 const TURN: Duration = Duration::from_millis(5);
-static OCCUPIED: AtomicBool = AtomicBool::new(false);
-static RETIRED: Mutex<Option<JoinHandle<Result<(), Error>>>> = Mutex::new(None);
+// Each locally selected role has one bounded native worker. A microphone-only
+// stop surface may coexist with observation indication, but neither role can
+// replace an uncollected original child.
+static OBSERVATION: Capacity = Capacity::new();
+static MICROPHONE: Capacity = Capacity::new();
+struct Capacity {
+    occupied: AtomicBool,
+    retired: Mutex<Option<JoinHandle<Result<(), Error>>>>,
+}
+impl Capacity {
+    const fn new() -> Self {
+        Self {
+            occupied: AtomicBool::new(false),
+            retired: Mutex::new(None),
+        }
+    }
+}
+#[derive(Clone, Copy)]
+pub(super) enum Role {
+    Observation,
+    Microphone,
+}
+impl Role {
+    fn capacity(self) -> &'static Capacity {
+        match self {
+            Self::Observation => &OBSERVATION,
+            Self::Microphone => &MICROPHONE,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -146,13 +174,22 @@ pub struct Owner {
     control: Control,
     worker: Option<JoinHandle<Result<(), Error>>>,
     finished: Option<Result<(), Error>>,
+    capacity: &'static Capacity,
 }
 impl Owner {
     pub fn start(
         launch: ProcessLaunch,
         on_stop: impl Fn() + Send + Sync + 'static,
     ) -> Result<Self, Error> {
-        if let Err(error) = claim() {
+        Self::start_role(launch, on_stop, Role::Observation)
+    }
+    pub(super) fn start_role(
+        launch: ProcessLaunch,
+        on_stop: impl Fn() + Send + Sync + 'static,
+        role: Role,
+    ) -> Result<Self, Error> {
+        let capacity = role.capacity();
+        if let Err(error) = claim(capacity) {
             on_stop();
             return Err(error);
         }
@@ -168,17 +205,18 @@ impl Owner {
             .name("fr-observation-ui".into())
             .spawn(move || {
                 let _guard = Guard(running.clone());
-                io::run(&launch, &running)
+                io::run(&launch, &running, role)
             });
         if let Ok(worker) = worker {
             Ok(Self {
                 control: Control(shared),
                 worker: Some(worker),
                 finished: None,
+                capacity,
             })
         } else {
             shared.stop(Error::Unavailable);
-            OCCUPIED.store(false, Ordering::Release);
+            capacity.occupied.store(false, Ordering::Release);
             Err(Error::Unavailable)
         }
     }
@@ -209,7 +247,7 @@ impl Owner {
         });
         // Never release capacity on uncertain cleanup, including a panic.
         if result.is_ok() {
-            OCCUPIED.store(false, Ordering::Release);
+            self.capacity.occupied.store(false, Ordering::Release);
         }
         self.finished = Some(result);
         Some(result)
@@ -219,7 +257,9 @@ impl Drop for Owner {
     fn drop(&mut self) {
         self.stop();
         if let Some(worker) = self.worker.take() {
-            let mut retired = RETIRED
+            let mut retired = self
+                .capacity
+                .retired
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             debug_assert!(retired.is_none());
@@ -227,16 +267,17 @@ impl Drop for Owner {
         }
     }
 }
-fn claim() -> Result<(), Error> {
-    let mut retired = RETIRED.lock().map_err(|_| Error::Panicked)?;
+fn claim(capacity: &Capacity) -> Result<(), Error> {
+    let mut retired = capacity.retired.lock().map_err(|_| Error::Panicked)?;
     if retired.as_ref().is_some_and(|worker| !worker.is_finished()) {
         return Err(Error::Busy);
     }
     if let Some(worker) = retired.take() {
         worker.join().map_err(|_| Error::Panicked)??;
-        OCCUPIED.store(false, Ordering::Release);
+        capacity.occupied.store(false, Ordering::Release);
     }
-    OCCUPIED
+    capacity
+        .occupied
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map(|_| ())
         .map_err(|_| Error::Busy)

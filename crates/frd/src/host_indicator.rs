@@ -7,6 +7,7 @@
 //! A scoped liveness watcher checks the native-I/O worker independently. UI
 //! loss requests the original host's stop and normal teardown; neither the
 //! host future nor its media/firewall cleanup is cancelled and abandoned.
+pub mod microphone;
 mod process;
 use crate::{
     host_run::{self, Encoder, Options, Reporter, StopHandle, policy},

@@ -1,5 +1,5 @@
 //! One native-I/O thread, private socketpairs and the read-only UI protocol.
-use super::{CHECK_BUDGET, CHECK_INTERVAL, Error, ProcessLaunch, Shared, TURN};
+use super::{CHECK_BUDGET, CHECK_INTERVAL, Error, ProcessLaunch, Role, Shared, TURN};
 use crate::input_process::kill_group;
 use fr_core::{
     indicator_process::{FRAME_BYTES, Frame, Kind},
@@ -13,7 +13,7 @@ use std::{
     time::Instant,
 };
 
-pub(super) fn run(launch: &ProcessLaunch, shared: &Shared) -> Result<(), Error> {
+pub(super) fn run(launch: &ProcessLaunch, shared: &Shared, role: Role) -> Result<(), Error> {
     if let Err(error) = shared.check() {
         shared.stop(error);
         return Ok(());
@@ -32,7 +32,10 @@ pub(super) fn run(launch: &ProcessLaunch, shared: &Shared) -> Result<(), Error> 
         signals,
         shared,
     };
-    let error = process.serve(launch.epoch).err().unwrap_or(Error::Stopped);
+    let error = process
+        .serve(launch.epoch, role)
+        .err()
+        .unwrap_or(Error::Stopped);
     shared.stop(error);
     process.finish()
 }
@@ -43,11 +46,14 @@ struct Process<'a> {
     shared: &'a Shared,
 }
 impl Process<'_> {
-    fn serve(&mut self, epoch: u128) -> Result<(), Error> {
+    fn serve(&mut self, epoch: u128, role: Role) -> Result<(), Error> {
         let until = self.shared.state.lock().map_err(|_| Error::Panicked)?.until;
         self.exchange(
             Frame {
-                kind: Kind::Open,
+                kind: match role {
+                    Role::Observation => Kind::Open,
+                    Role::Microphone => Kind::OpenMicrophone,
+                },
                 sequence: 1,
                 epoch,
             },
@@ -61,7 +67,10 @@ impl Process<'_> {
             let until = issued.checked_add(CHECK_BUDGET).ok_or(Error::Expired)?;
             self.exchange(
                 Frame {
-                    kind: Kind::Check,
+                    kind: match role {
+                        Role::Observation => Kind::Check,
+                        Role::Microphone => Kind::CheckMicrophone,
+                    },
                     sequence,
                     epoch,
                 },

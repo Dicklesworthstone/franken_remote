@@ -56,6 +56,7 @@ fn fixture(
             owner: Owner::Observation(Box::new(observation.clone())),
             window: AtomicU32::new(0),
             last_turn: Mutex::new(Instant::now()),
+            microphone: None,
         })),
         task: None,
         observation: observation.clone(),

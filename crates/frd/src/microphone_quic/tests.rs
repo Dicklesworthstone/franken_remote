@@ -193,6 +193,96 @@ fn original_input_connection_and_separate_microphone_consent_precede_native_setu
 }
 
 #[test]
+fn local_microphone_permission_refusal_retires_the_completed_pair_before_native_setup() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        let failure = Host::new_with_permission(
+            &mut f.link.h,
+            f.lane.take().unwrap(),
+            &f.input,
+            &f.link.selection,
+            true,
+            absent_launch(),
+            Some(Arc::new(|| false)),
+        )
+        .unwrap_err();
+        let (reason, lane) = failure.into_parts();
+        assert_eq!(reason, Error::Permission);
+        assert_eq!(lane.is_retired(&f.link.h), Ok(true));
+        f.link.h.tick(&f.cx, || true).unwrap();
+        assert!(!f.link.h.is_closed());
+        assert!(!f.input.control().is_stopped());
+        assert!(f.input_pair.0.completed_on(&f.link.h).is_ok());
+    });
+}
+
+#[test]
+fn local_microphone_permission_loss_while_idle_preserves_the_original_input() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        let permitted = Arc::new(AtomicBool::new(true));
+        let check = permitted.clone();
+        let mut host = Host::new_with_permission(
+            &mut f.link.h,
+            f.lane.take().unwrap(),
+            &f.input,
+            &f.link.selection,
+            true,
+            absent_launch(),
+            Some(Arc::new(move || check.load(Ordering::Acquire))),
+        )
+        .unwrap();
+        assert_eq!(host.state(), State::Idle);
+        permitted.store(false, Ordering::Release);
+        // Deliberately bypass Host::service: the retained original-connection
+        // predicate must observe the local surface's loss on ordinary I/O.
+        f.link.h.tick(&f.cx, || true).unwrap();
+        assert!(host.control().is_stopped());
+        assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
+        assert_eq!(host.reason(), Some(Error::Permission));
+        assert_eq!(host.statistics(), Statistics::default());
+        assert!(host.retirement().is_none(), "no native source was started");
+        assert!(!f.link.h.is_closed());
+        assert!(!f.input.control().is_stopped());
+        assert!(f.input_pair.0.completed_on(&f.link.h).is_ok());
+        // A later healthy observation cannot revive this original attachment.
+        permitted.store(true, Ordering::Release);
+        assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
+        assert!(host.control().is_stopped());
+        f.link.h.tick(&f.cx, || true).unwrap();
+    });
+}
+
+#[test]
+fn local_microphone_permission_denial_never_waits_for_native_ownership() {
+    let permitted = Arc::new(AtomicBool::new(true));
+    let check = permitted.clone();
+    let shared = Arc::new(Shared {
+        permission: Some(Arc::new(move || check.load(Ordering::Acquire))),
+        ..Shared::default()
+    });
+    assert_eq!(shared.check(), Ok(()));
+    let native_owner = shared.native.lock().unwrap();
+    permitted.store(false, Ordering::Release);
+    let worker_shared = shared.clone();
+    let surface_stop = Control(shared.clone()).downgrade();
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        let permission = worker_shared.check_permission();
+        surface_stop.request_stop();
+        send.send(permission).unwrap();
+    });
+    let result = receive.recv_timeout(Duration::from_secs(1));
+    // Always release and join, including a regression that waited on the
+    // native owner. The test reports failure instead of stranding its thread.
+    drop(native_owner);
+    worker.join().unwrap();
+    assert_eq!(result.unwrap(), Err(Error::Permission));
+    permitted.store(true, Ordering::Release);
+    assert_eq!(shared.check(), Err(Error::Closed));
+}
+
+#[test]
 fn a_foreign_constructor_returns_the_original_live_proof_without_mutating_either_connection() {
     runtime().block_on(async {
         let mut original = Fixture::new().await;

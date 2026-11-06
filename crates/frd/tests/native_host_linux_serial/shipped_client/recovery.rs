@@ -36,6 +36,7 @@ impl Hosted {
             adaptive_capture: false,
             clipboard: false,
             audio: None,
+            microphone: None,
             files: None,
             file_send: None,
             session_monitor: None,

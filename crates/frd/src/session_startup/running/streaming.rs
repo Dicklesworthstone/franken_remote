@@ -89,6 +89,7 @@ pub struct StreamingHost {
     quality: Option<QualitySender>,
     presentation: Option<HostPresentation>,
     clipboard: Option<crate::native_clipboard::Application>,
+    microphone: Option<crate::native_microphone::Application>,
     /// Present only when the viewer selected `remote-cursor` (plan §11.4).
     cursor: Option<Box<cursor::StreamCursor>>,
     files: Option<files::Lane>,
@@ -186,6 +187,7 @@ impl StreamingHost {
             quality,
             presentation,
             clipboard: None,
+            microphone: None,
             files: None,
             media: None,
             reference_recovery: false,
@@ -269,6 +271,36 @@ impl StreamingHost {
             Host::Control(host) => host.file_batch_report(),
             Host::Observe(_) | Host::Closed => None,
         }
+    }
+    pub(crate) fn configure_microphone(
+        &mut self,
+        config: crate::native_microphone::Configuration,
+    ) -> Result<(), crate::microphone_quic::Error> {
+        use crate::microphone_quic::Error as E;
+        if self.stream.served || self.microphone.is_some() {
+            return Err(E::AlreadyAttached);
+        }
+        let session = self.host.session().map_err(|_| E::Closed)?;
+        session.check().map_err(|_| E::Closed)?;
+        if !fr_wire::audio_up::uplink_selected(&session.opened.selected) {
+            return Err(E::NotSelected);
+        }
+        self.microphone = Some(crate::native_microphone::Application::new(config)?);
+        Ok(())
+    }
+    pub(crate) async fn reap_microphone(
+        &mut self,
+        cx: &Cx,
+        deadline: crate::worker::Deadline,
+    ) -> Result<(), crate::worker::Error> {
+        let Some(app) = &mut self.microphone else {
+            return Ok(());
+        };
+        let host = match &self.host {
+            Host::Control(host) => Some(host),
+            _ => None,
+        };
+        app.reap(host, cx, deadline).await
     }
     pub(crate) fn configure_clipboard(
         &mut self,
@@ -362,6 +394,9 @@ impl StreamingHost {
     /// cleanup/late receipts remain with its original independently polled Driver.
     pub fn close(&mut self) {
         self.host.close();
+        if let Some(app) = &mut self.microphone {
+            app.close();
+        }
         if let Some(lane) = &mut self.files {
             lane.close();
         }
@@ -600,6 +635,10 @@ impl StreamingHost {
                         .map_err(Error::Clipboard)?;
                 }
                 files::between_turns(self.files.as_mut(), &mut self.host, clipboard_view, nonce);
+                if let (Some(app), Host::Control(host)) = (&mut self.microphone, &mut self.host) {
+                    app.host(host, clipboard_view, nonce)
+                        .map_err(Error::Microphone)?;
+                }
                 asupersync::runtime::yield_now().await;
             }
         });

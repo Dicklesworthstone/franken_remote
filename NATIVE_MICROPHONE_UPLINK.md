@@ -15,12 +15,60 @@ host clock. The receiver derives its permission checks from that original owner.
 The original `ControlledHost` now owns the role-8 attachment and the existing
 supervised receiver as part of its normal control session. The library API below
 requires a separate local microphone approval and retains the original input
-controller. Public `fr connect` and `frd run` microphone offers remain disabled:
-visible client/host talk and stop controls are still required before enabling
-those command paths. No driver or OS default source is selected implicitly.
+controller. `frd run --microphone` now supplies the host application's independent
+permission, local Stop microphone surface, original-controller attachment and
+actual device/codec/UI cleanup. It remains off by default, and a client must
+separately select microphone forwarding and explicitly start a talk generation.
+No driver or OS default source is selected implicitly.
 See [NATIVE_MICROPHONE_CAPTURE.md](NATIVE_MICROPHONE_CAPTURE.md) for the actual
 client recording/encoding boundary and [VIRTUAL_MIC.md](VIRTUAL_MIC.md) for
 explicit virtual-source selection and the underlying native owner.
+
+## Host command and local stop
+
+Install matching `fr-microphone-worker`, `fr-opus-worker` and
+`fr-observation-indicator` beside `frd`. The native build needs
+`linux-microphone-playout,linux-input`; `frd` itself links neither PipeWire nor
+libopus. Add the independent local enable to an otherwise configured control
+host:
+
+```sh
+frd run --software-explicit --input-agent /absolute/path/fr-input-agent \
+  --microphone --microphone-server /absolute/path/pipewire-0
+```
+
+The server defaults to `$XDG_RUNTIME_DIR/pipewire-0` only when the operator omits
+`--microphone-server`. It is a local socket selection, never a peer value.
+Missing workers, an unavailable socket, a view-only host and incompatible
+capability combinations refuse explicitly. The optional microphone capability
+may replace the optional quality-decision diagnostic when the existing
+24-capability ceiling is reached; authority, file and media capabilities and
+the ceiling itself remain unchanged.
+
+Only a controller that positively selected `native-audio-up` creates the
+separate Stop microphone window. The original input grant and its first renewal
+are required before the host offers the one-use microphone attachment. That
+window must be mapped and responsive before the offer; it discloses microphone
+permission, not a claim that an application is recording. Ordinary host
+applications may select the resulting FrankenRemote virtual source once a
+client's explicit talk generation has completed real native setup.
+
+Closing, hiding or stopping this window revokes microphone permission for this
+original attachment. Its commands use device-attributed XInput2 events;
+FrankenRemote's XTest input cannot operate it. This is an X11 trust boundary,
+not isolation from the selected desktop user or other same-user X clients.
+The privacy check also runs in attachment admission, retained transport guards
+and the independently supervised native worker. A stalled session task cannot
+extend UI permission. The stop callback uses weak, nonblocking handles and
+cannot retain or reauthorize a replacement attachment.
+
+A completed, drained microphone lane retires independently of input. An
+unfinished attachment or uncertain retained acknowledgement keeps the existing
+conservative connection-fencing policy. At share cleanup, the host requires
+both original audio-child exit receipts and the privacy worker's actual join;
+a capture-child receipt cannot substitute for a failed microphone cleanup.
+These application changes do not claim physical-device or live-tailnet audio
+qualification.
 
 ## Controlled host integration
 

@@ -2,6 +2,7 @@
 //! The child is a protocol fixture, NOT native X11 or visibility evidence.
 use super::*;
 use fr_core::indicator_process::{Frame, Kind};
+static CHILDREN: Mutex<()> = Mutex::new(());
 
 fn opening(now: Instant) -> State {
     State {
@@ -122,6 +123,7 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn real_child_faults_gate_startup_stop_the_original_host_and_drain_before_return() {
+    let _serial = CHILDREN.lock().unwrap();
     use crate::host_run::StopHandle;
     use fr_core::input_submission::process::{Signal, encode_signal};
     const FIXTURE: &str = r"#!/usr/bin/python3
@@ -260,5 +262,106 @@ while True:
         assert_eq!(owner.try_finish(), Some(Ok(())));
         // Every following mode must reclaim the SAME global capacity only
         // after the previous thread joined and its child was reaped.
+    }
+}
+
+#[test]
+fn microphone_readiness_is_never_a_positive_approval_reply() {
+    for kind in [Kind::OpenMicrophone, Kind::CheckMicrophone] {
+        let request = Frame {
+            kind,
+            sequence: 1,
+            epoch: 19,
+        };
+        assert_eq!(
+            io::response(request, &request.reply(Kind::Ready).encode().unwrap()),
+            Ok(())
+        );
+        for reply in [Kind::Allowed, Kind::Denied, Kind::Stopped] {
+            assert_eq!(
+                io::response(request, &request.reply(reply).encode().unwrap()),
+                Err(Error::Protocol)
+            );
+        }
+    }
+}
+
+#[test]
+fn microphone_child_has_its_own_role_capacity_and_original_stop() {
+    let _serial = CHILDREN.lock().unwrap();
+    const FIXTURE: &str = r"#!/usr/bin/python3
+import socket
+s = socket.socket(fileno=0)
+expected = 1
+check = None
+while True:
+    data = bytearray()
+    while len(data) < 32:
+        part = s.recv(32 - len(data))
+        if not part: raise SystemExit(0)
+        data.extend(part)
+    if data[:4] != b'FRIV' or int.from_bytes(data[8:16], 'big') != expected:
+        raise SystemExit(1)
+    if expected == 1:
+        if data[5] not in (1, 7): raise SystemExit(1)
+        check = 2 if data[5] == 1 else 8
+    elif data[5] != check:
+        raise SystemExit(1)
+    expected += 1
+    data[5] = 129
+    s.sendall(data)
+";
+    let path = std::env::temp_dir().join(format!("fr-indicator-roles-{}.py", std::process::id()));
+    crate::executable::write(&path, FIXTURE);
+    let observation_stopped = Arc::new(AtomicBool::new(false));
+    let microphone_stopped = Arc::new(AtomicBool::new(false));
+    let observed = observation_stopped.clone();
+    let mut observation = Owner::start(
+        ProcessLaunch::new(&path, ":0", None, 19).unwrap(),
+        move || observed.store(true, Ordering::Release),
+    )
+    .unwrap();
+    let heard = microphone_stopped.clone();
+    let mut microphone = Owner::start_role(
+        ProcessLaunch::new(&path, ":0", None, 20).unwrap(),
+        move || heard.store(true, Ordering::Release),
+        Role::Microphone,
+    )
+    .unwrap();
+    let until = Instant::now() + OPEN_BUDGET;
+    while observation.control().status() != Status::Ready
+        || microphone.control().status() != Status::Ready
+    {
+        assert!(Instant::now() < until);
+        assert!(!observation_stopped.load(Ordering::Acquire));
+        assert!(!microphone_stopped.load(Ordering::Acquire));
+        thread::sleep(TURN);
+    }
+    let duplicate_stopped = Arc::new(AtomicBool::new(false));
+    let duplicate = duplicate_stopped.clone();
+    assert!(matches!(
+        Owner::start_role(
+            ProcessLaunch::new(&path, ":0", None, 21).unwrap(),
+            move || duplicate.store(true, Ordering::Release),
+            Role::Microphone,
+        ),
+        Err(Error::Busy)
+    ));
+    assert!(duplicate_stopped.load(Ordering::Acquire));
+    microphone.stop();
+    assert!(microphone_stopped.load(Ordering::Acquire));
+    assert!(!observation_stopped.load(Ordering::Acquire));
+    assert_eq!(observation.control().status(), Status::Ready);
+    for owner in [&mut microphone, &mut observation] {
+        owner.stop();
+        let until = Instant::now() + OPEN_BUDGET;
+        loop {
+            if let Some(result) = owner.try_finish() {
+                assert_eq!(result, Ok(()));
+                break;
+            }
+            assert!(Instant::now() < until);
+            thread::sleep(TURN);
+        }
     }
 }

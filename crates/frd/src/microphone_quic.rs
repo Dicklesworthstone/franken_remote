@@ -18,7 +18,7 @@ use fr_transport::quic::{
 };
 use fr_wire::{audio, negotiation::Selection};
 use std::sync::{
-    Arc, Mutex, PoisonError,
+    Arc, Mutex, PoisonError, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -120,6 +120,7 @@ struct IoState {
 }
 #[derive(Default)]
 struct Shared {
+    permission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     stopped: AtomicBool,
     native: Mutex<Option<native::Control>>,
     io: Mutex<IoState>,
@@ -188,7 +189,17 @@ impl Shared {
         }
         Ok(())
     }
+    fn check_permission(&self) -> Result<(), Error> {
+        if self.permission.as_ref().is_some_and(|check| !check()) {
+            // This also runs inside a retained transport predicate. The exact
+            // native handle is fenced there, without a mailbox lock.
+            self.stopped.store(true, Ordering::Release);
+            return Err(Error::Permission);
+        }
+        Ok(())
+    }
     fn check(&self) -> Result<(), Error> {
+        self.check_permission()?;
         if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }
@@ -215,6 +226,25 @@ impl Control {
     }
     pub fn is_stopped(&self) -> bool {
         self.0.check().is_err()
+    }
+    pub(crate) fn downgrade(&self) -> WeakControl {
+        WeakControl(Arc::downgrade(&self.0))
+    }
+}
+/// A privacy surface cannot keep an old attachment alive or form a cycle with
+/// its retained permission predicate. Revocation never waits on native work.
+#[derive(Clone)]
+pub(crate) struct WeakControl(Weak<Shared>);
+impl WeakControl {
+    pub(crate) fn request_stop(&self) {
+        if let Some(shared) = self.0.upgrade() {
+            shared.stopped.store(true, Ordering::Release);
+            if let Ok(native) = shared.native.try_lock()
+                && let Some(native) = native.as_ref()
+            {
+                native.request_stop();
+            }
+        }
     }
 }
 
@@ -256,11 +286,23 @@ impl Host {
     /// caller. The containing session retains its admission and input driver.
     pub fn new(
         q: &mut QuicRecords,
+        lane: AudioUpChannel,
+        input: &QuicInput,
+        selection: &Selection,
+        approved: bool,
+        launch: native::Launch,
+    ) -> Result<Self, AttachError> {
+        Self::new_with_permission(q, lane, input, selection, approved, launch, None)
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_permission(
+        q: &mut QuicRecords,
         mut lane: AudioUpChannel,
         input: &QuicInput,
         selection: &Selection,
         approved: bool,
         launch: native::Launch,
+        permission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     ) -> Result<Self, AttachError> {
         if let Err(error) = lane.check(q) {
             return Err(AttachError::new(Error::Transport(error), lane));
@@ -274,7 +316,10 @@ impl Host {
                 return Err(AttachError::new(Error::Input(error), lane));
             }
         };
-        let shared = Arc::new(Shared::default());
+        let shared = Arc::new(Shared {
+            permission,
+            ..Shared::default()
+        });
         let setup = (|| {
             if !lane.is_host() {
                 return Err(Error::WrongRole);
@@ -749,6 +794,7 @@ fn permits_io(
             cx.timer_driver().ok_or(Error::Clock)?.now().as_nanos() / 1000,
         );
         controller.deadline(now).map_err(Error::Authority)?;
+        shared.check_permission()?;
         if shared.stopped.load(Ordering::Acquire) {
             return Err(Error::Closed);
         }

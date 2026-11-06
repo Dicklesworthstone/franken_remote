@@ -2,11 +2,13 @@
 //! host's observation owner (`SharingIndicator`), or a session child's local
 //! revoke callback (`start_with` / `start_observation_with` / `LocalIndicator`).
 //!
-//! This is a revocation-only surface, never an approval mechanism. The selected
+//! The indicators revoke only. The separately selected `MicrophonePanel` also
+//! reports explicit local talk gestures; no gesture itself grants authority. The selected
 //! desktop user, X server and window manager remain trusted. A mapped X11 window
 //! is not proof of physical visibility under a compositor. No input grab, global
 //! hotkey, clipboard text or peer-supplied label is installed; the only callback
 //! is the local owner's own nonblocking revoke.
+use fr_media::worker::presentation::X11Target;
 #[cfg(feature = "linux-session-ui")]
 use frd::media::ObservationControl;
 use std::{
@@ -27,10 +29,23 @@ const MAP_TIMEOUT: Duration = Duration::from_secs(2);
 /// A mapped but stuck native event worker cannot remain positive evidence.
 const PROGRESS_TIMEOUT: Duration = Duration::from_millis(250);
 
+mod microphone;
+pub use microphone::{MicrophonePanel, MicrophoneState};
+
 unsafe extern "C" {
     fn fr_indicator_open(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_open_control(display: *const c_char, window: *mut u32) -> *mut c_void;
     fn fr_indicator_open_clipboard(display: *const c_char, window: *mut u32) -> *mut c_void;
+    fn fr_indicator_open_microphone(display: *const c_char, window: *mut u32) -> *mut c_void;
+    fn fr_indicator_open_microphone_client(
+        display: *const c_char,
+        window: *mut u32,
+        parent: u32,
+        width: u32,
+        height: u32,
+    ) -> *mut c_void;
+    fn fr_indicator_microphone_state(handle: *mut c_void, state: u32) -> c_int;
+    fn fr_indicator_layout_valid(handle: *mut c_void) -> c_int;
     fn fr_indicator_close(handle: *mut c_void);
     fn fr_indicator_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_indicator_draw(handle: *mut c_void) -> c_int;
@@ -119,6 +134,10 @@ enum Mode {
     Control,
     /// Clipboard-only privacy switch; it never revokes desktop/input owners.
     Clipboard,
+    /// Original host microphone permission, with an independent terminal stop.
+    MicrophoneHost,
+    /// Muted-first local microphone panel with explicit attributed talk.
+    MicrophoneClient(Option<X11Target>),
 }
 struct Shared {
     owner: Owner,
@@ -127,9 +146,13 @@ struct Shared {
     // Written only after a bounded native event/draw turn completes. The
     // separate child supervisor may inspect this while XCB itself is stuck.
     last_turn: Mutex<Instant>,
+    microphone: Option<microphone::Shared>,
 }
 impl Shared {
     fn stop(&self, reason: StopReason) {
+        if let Some(microphone) = &self.microphone {
+            microphone.stop();
+        }
         // Fence the actual session/input owner FIRST, without a native/UI lock.
         // Status becoming terminal is never proof that native cleanup finished.
         self.owner.revoke(reason);
@@ -219,6 +242,7 @@ fn launch(
         state: AtomicU8::new(0),
         window: AtomicU32::new(0),
         last_turn: Mutex::new(Instant::now()),
+        microphone: matches!(mode, Mode::MicrophoneClient(_)).then(microphone::Shared::new),
     }));
     let shared = control.0.clone();
     let started = Instant::now();
@@ -359,6 +383,23 @@ pub fn start_clipboard_with(
         task: Some(task),
     })
 }
+/// Microphone-only local revocation. The caller supplies the already selected
+/// session's independent microphone permit; this UI never enables permission.
+/// Require mapped, responsive state before any microphone attachment is admitted.
+pub fn start_microphone_with(
+    display: &str,
+    on_revoke: impl Fn(StopReason) + Send + Sync + 'static,
+) -> Result<LocalIndicator, Error> {
+    let (control, task) = launch(
+        display,
+        Owner::Local(Box::new(on_revoke)),
+        Mode::MicrophoneHost,
+    )?;
+    Ok(LocalIndicator {
+        control,
+        task: Some(task),
+    })
+}
 /// The executor's indicator owner; shown for the whole lease. Same explicit
 /// cleanup contract as `SharingIndicator`.
 #[must_use]
@@ -411,6 +452,43 @@ fn local_display(display: &str) -> bool {
     let valid = |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
     pieces.next().is_some_and(valid) && pieces.next().is_none_or(valid) && pieces.next().is_none()
 }
+fn event(shared: &Shared, kind: u32, mapped: &mut bool, draw: &mut bool) -> bool {
+    match kind {
+        0 => {}
+        1 => *draw = true,
+        2 => {
+            *mapped = true;
+            *draw = true;
+        }
+        3 => shared.stop(StopReason::Hidden),
+        4 => shared.stop(StopReason::WindowLost),
+        5 => shared.stop(StopReason::User),
+        7 if shared.microphone.is_some() => {
+            // A click that arrived before the first completed draw cannot
+            // wait in a queue and later become consent.
+            if shared.state.load(Ordering::Acquire) == 1
+                && !shared
+                    .microphone
+                    .as_ref()
+                    .expect("selected microphone")
+                    .talk()
+            {
+                shared.stop(StopReason::NativeFailure);
+            }
+            *draw = true;
+        }
+        8 if shared.microphone.is_some() => {
+            shared
+                .microphone
+                .as_ref()
+                .expect("selected microphone")
+                .mute();
+            *draw = true;
+        }
+        _ => shared.stop(StopReason::NativeFailure),
+    }
+    shared.live()
+}
 fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
     if !shared.live() {
         return;
@@ -423,6 +501,14 @@ fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
             Mode::Sharing => fr_indicator_open(display.as_ptr(), &raw mut window),
             Mode::Control => fr_indicator_open_control(display.as_ptr(), &raw mut window),
             Mode::Clipboard => fr_indicator_open_clipboard(display.as_ptr(), &raw mut window),
+            Mode::MicrophoneHost => fr_indicator_open_microphone(display.as_ptr(), &raw mut window),
+            Mode::MicrophoneClient(parent) => fr_indicator_open_microphone_client(
+                display.as_ptr(),
+                &raw mut window,
+                parent.map_or(0, X11Target::window),
+                parent.map_or(0, X11Target::width),
+                parent.map_or(0, X11Target::height),
+            ),
         }
     };
     let Some(handle) = NonNull::new(handle) else {
@@ -435,6 +521,7 @@ fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
     }
     shared.window.store(window, Ordering::Release);
     let mut mapped = false;
+    let mut microphone_label = None;
     loop {
         if !shared.live() {
             return;
@@ -458,29 +545,30 @@ fn run(shared: &Shared, display: &CString, started: Instant, mode: Mode) {
                     return;
                 }
             }
-            match kind {
-                0 => {}
-                1 => draw = true,
-                2 => {
-                    mapped = true;
-                    draw = true;
-                }
-                3 => {
-                    shared.stop(StopReason::Hidden);
-                    return;
-                }
-                4 => {
-                    shared.stop(StopReason::WindowLost);
-                    return;
-                }
-                5 => {
-                    shared.stop(StopReason::User);
-                    return;
-                }
-                _ => {
+            if !event(shared, kind, &mut mapped, &mut draw) {
+                return;
+            }
+        }
+        if let Some(microphone) = &shared.microphone {
+            // SAFETY: the same single-thread native handle owns the exact
+            // geometry. Check AFTER draining MapNotify and BEFORE publishing
+            // readiness, including when a WM ignored the initial position.
+            if unsafe { fr_indicator_layout_valid(native.0.as_ptr()) } == 0 {
+                shared.stop(StopReason::Hidden);
+                return;
+            }
+            let label = microphone.label();
+            if microphone_label != Some(label) || draw {
+                // SAFETY: the unique native handle was opened in microphone
+                // client mode; the enum is a bounded, content-free label.
+                if unsafe { fr_indicator_microphone_state(native.0.as_ptr(), u32::from(label)) }
+                    == 0
+                {
                     shared.stop(StopReason::NativeFailure);
                     return;
                 }
+                microphone_label = Some(label);
+                draw = true;
             }
         }
         if draw && shared.live() {

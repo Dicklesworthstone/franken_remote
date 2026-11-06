@@ -383,6 +383,7 @@ fn options(
         adaptive_capture: false,
         clipboard: false,
         audio,
+        microphone: None,
         files: None,
         file_send: None,
         session_monitor: None,

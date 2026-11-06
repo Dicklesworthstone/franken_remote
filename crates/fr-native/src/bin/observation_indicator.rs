@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
-//! Read-only, parent-bound "Stop sharing" surface for an observation cohort.
+//! Parent-bound revocation surfaces for an observation cohort or an independent
+//! per-session microphone permission. The selected role never changes in place.
 //! Uses the existing device-attributed X11 indicator. This process has no input
 //! executor, capture, clipboard, or network-protocol path. A separate initial
 //! approval record selects its one-use device-attributed consent role.
@@ -112,7 +113,12 @@ mod linux {
             {
                 return crate::approval::serve(command, signals, frame);
             }
-            Ok(frame) if frame.kind == Kind::Open && frame.sequence == 1 => frame,
+            Ok(frame)
+                if matches!(frame.kind, Kind::Open | Kind::OpenMicrophone)
+                    && frame.sequence == 1 =>
+            {
+                frame
+            }
             Ok(_) => return PROTOCOL,
             Err(error) => return error,
         };
@@ -121,8 +127,9 @@ mod linux {
         let Ok(notify) = signals.try_clone() else {
             return CHANNEL;
         };
+        let microphone = hello.kind == Kind::OpenMicrophone;
         let opened = std::env::var("DISPLAY").ok().and_then(|display| {
-            sharing_indicator::start_observation_with(&display, move |reason| {
+            let on_revoke = move |reason: sharing_indicator::StopReason| {
                 if !flag.swap(true, Ordering::AcqRel) {
                     let signal = if reason.is_local_user() {
                         Signal::LocalRevoke
@@ -131,7 +138,12 @@ mod linux {
                     };
                     let _ = notify.send(&process::encode_signal(signal));
                 }
-            })
+            };
+            if microphone {
+                sharing_indicator::start_microphone_with(&display, on_revoke)
+            } else {
+                sharing_indicator::start_observation_with(&display, on_revoke)
+            }
             .ok()
         });
         let Some(mut indicator) = opened else {
@@ -170,7 +182,14 @@ mod linux {
                     }
                     return send(&mut command, request, Kind::Stopped).map_or(CHANNEL, |()| 0);
                 }
-                Kind::Check => {
+                Kind::Check | Kind::CheckMicrophone
+                    if request.kind
+                        == if microphone {
+                            Kind::CheckMicrophone
+                        } else {
+                            Kind::Check
+                        } =>
+                {
                     if stopped(signals, &revoked) || !indicator.control().responsive() {
                         let _ = send(&mut command, request, Kind::Refused);
                         return REFUSED;

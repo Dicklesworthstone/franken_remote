@@ -71,12 +71,17 @@ jobs:
       - name: Native event-worker liveness and child channel regressions
         run: |
           cargo test -p fr-native --no-default-features --features linux-input --lib sharing_indicator::responsiveness --locked
+          cargo test -p fr-native --no-default-features --features linux-input --lib sharing_indicator::microphone --locked
           cargo test -p fr-native --no-default-features --features linux-input --lib approval_surface --locked
           cargo test -p fr-native --no-default-features --features linux-input --bin fr-observation-indicator --locked
       - name: Require real native child mapping and process retirement
         run: |
           FR_OBSERVATION_INDICATOR_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
             cargo test -p fr-native --no-default-features --features linux-input --test observation_indicator_process --locked -- --nocapture
+      - name: Require real microphone controls and attributed talk gestures
+        run: |
+          FR_NATIVE_MICROPHONE_UI_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \
+            cargo test -p fr-native --no-default-features --features linux-input --test microphone_panel_x11 --locked -- --nocapture
 
 # This focused lane does not replace or weaken rust-verification.yml. It runs
 # the new native feature even when an unrelated all-targets fixture is broken.

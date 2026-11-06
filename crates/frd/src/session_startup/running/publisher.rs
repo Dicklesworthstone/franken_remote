@@ -182,10 +182,28 @@ impl std::fmt::Debug for NativePublisher {
     }
 }
 impl NativePublisher {
-    /// Configure once before serving control. Factory/identifiers are local,
-    /// independently permitted and never received from the peer. Clipboard starts
-    /// automatically only after the ORIGINAL input grant and bilateral readiness;
-    /// merely observing a desktop never opens or reads a clipboard.
+    /// Configure the separately approved host microphone endpoint before
+    /// serving control. The original mapped privacy surface must remain live;
+    /// neither this profile nor an input grant activates client capture.
+    pub fn configure_microphone(
+        &mut self,
+        config: crate::native_microphone::Configuration,
+    ) -> Result<(), crate::microphone_quic::Error> {
+        if self.input.is_none() {
+            return Err(crate::microphone_quic::Error::NotSelected);
+        }
+        self.host.configure_microphone(config)
+    }
+    /// Observe the original virtual source, Opus child and local privacy UI
+    /// retired. A timed out reap retains their owners for a later attempt.
+    pub async fn reap_microphone(
+        &mut self,
+        cleanup: &Cx,
+        deadline: Deadline,
+    ) -> Result<(), crate::worker::Error> {
+        self.host.reap_microphone(cleanup, deadline).await
+    }
+    /// Configure the separately permitted clipboard on this original publisher.
     pub fn configure_clipboard(
         &mut self,
         config: crate::native_clipboard::Configuration,

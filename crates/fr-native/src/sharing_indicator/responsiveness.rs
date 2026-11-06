@@ -11,6 +11,7 @@ fn fixture(mapped: bool, last: Instant) -> (IndicatorControl, Arc<AtomicBool>) {
         state: AtomicU8::new(u8::from(mapped)),
         window: AtomicU32::new(0),
         last_turn: Mutex::new(last),
+        microphone: None,
     }));
     (control, revoked)
 }

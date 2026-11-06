@@ -8,6 +8,7 @@ use fr_transport::quic::{
     Route, audio::AudioUpChannel,
 };
 use fr_wire::{attachment::MediaRole, negotiation::Selection};
+use std::sync::Arc;
 
 pub(super) struct Pending {
     cx: Cx,
@@ -17,6 +18,7 @@ pub(super) struct Pending {
     controller: HostController,
     selection: Selection,
     launch: native::Launch,
+    permission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     last: u64,
 }
 fn at(cx: &Cx) -> Result<u64, uplink::Error> {
@@ -31,6 +33,9 @@ fn at(cx: &Cx) -> Result<u64, uplink::Error> {
 impl Pending {
     pub(super) fn check(&mut self) -> Result<(), uplink::Error> {
         let now = at(&self.cx)?;
+        if self.permission.as_ref().is_some_and(|check| !check()) {
+            return Err(uplink::Error::Permission);
+        }
         if now < self.last {
             return Err(uplink::Error::Clock);
         }
@@ -58,10 +63,14 @@ impl Pending {
         request: ChannelRequest,
         controller: HostController,
         launch: native::Launch,
+        permission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<Self, uplink::Error> {
         if !fr_wire::audio_up::uplink_selected(scope.selection) {
             return Err(uplink::Error::NotSelected);
+        }
+        if permission.as_ref().is_some_and(|check| !check()) {
+            return Err(uplink::Error::Permission);
         }
         let last = at(cx)?;
         controller
@@ -73,6 +82,7 @@ impl Pending {
         let channel = q
             .offer_media_role(cx, scope, request, MediaRole::AudioUp, || {
                 authorize()
+                    && permission.as_ref().is_none_or(|check| check())
                     && at(cx)
                         .is_ok_and(|t| controller.deadline(HostInstant::from_micros(t)).is_ok())
             })
@@ -85,6 +95,7 @@ impl Pending {
             controller,
             selection: scope.selection.clone(),
             launch,
+            permission,
             last,
         })
     }
@@ -100,8 +111,10 @@ impl Pending {
         let controller = &self.controller;
         let cx = &self.cx;
         let until = self.channel.deadline_us();
+        let permission = &self.permission;
         let mut permitted = || {
             authorize()
+                && permission.as_ref().is_none_or(|check| check())
                 && at(cx).is_ok_and(|t| {
                     t < until && controller.deadline(HostInstant::from_micros(t)).is_ok()
                 })
@@ -130,7 +143,15 @@ impl Pending {
         }
         self.check()?;
         let lane = AudioUpChannel::new(q, self.channel).map_err(uplink::Error::Transport)?;
-        uplink::Host::new(q, lane, input, &self.selection, true, self.launch)
-            .map_err(|error| error.reason())
+        uplink::Host::new_with_permission(
+            q,
+            lane,
+            input,
+            &self.selection,
+            true,
+            self.launch,
+            self.permission,
+        )
+        .map_err(|error| error.reason())
     }
 }

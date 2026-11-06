@@ -214,6 +214,7 @@ struct Shared {
     channel: Channel,
     options: Configuration,
     controller: HostController,
+    permission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     clock: Clock,
     stopped: AtomicBool,
     revoke: OnceLock<Arc<UnixStream>>,
@@ -261,6 +262,12 @@ impl Shared {
             return Err(Error::Stopped);
         }
         let checked = (|| {
+            // The original local privacy surface remains a separate, live
+            // requirement even while the network owner is stalled. This check
+            // runs on the independently supervised native-I/O thread as well.
+            if self.permission.as_ref().is_some_and(|check| !check()) {
+                return Err(Error::Permission);
+            }
             // Sample raw time before the conservatively extrapolated original
             // host clock; any sampling gap shortens, rather than renews, the cap.
             let raw = monotonic_ns()?;
@@ -403,7 +410,36 @@ impl Process {
         launch: Launch,
         now: impl FnOnce() -> HostInstant,
     ) -> Result<Self, Error> {
+        Self::start_with_permission(
+            controller,
+            channel,
+            selection,
+            approved,
+            configuration,
+            launch,
+            now,
+            None,
+        )
+    }
+    /// Retain an independently polled local permission check for this exact
+    /// native generation. It must be bounded, nonblocking and content-free.
+    /// Its failure is terminal; neither a later UI event nor reconnect can
+    /// revive these original child processes or their queued samples.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn start_with_permission(
+        controller: HostController,
+        channel: Channel,
+        selection: &Selection,
+        approved: bool,
+        configuration: &[u8],
+        launch: Launch,
+        now: impl FnOnce() -> HostInstant,
+        permission: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Result<Self, Error> {
         validate_scope(&controller, channel, selection, approved)?;
+        if permission.as_ref().is_some_and(|check| !check()) {
+            return Err(Error::Permission);
+        }
         let offer = audio::decode_configuration(configuration, channel.id)
             .map_err(|_| Error::Configuration)?;
         let options = Configuration {
@@ -416,6 +452,7 @@ impl Process {
             channel,
             options,
             controller,
+            permission,
             clock: Clock::bind(now)?,
             stopped: AtomicBool::new(false),
             revoke: OnceLock::new(),

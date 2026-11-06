@@ -17,6 +17,8 @@ pub enum Kind {
     ApproveView = 4,
     ApproveControl = 5,
     ApprovalCheck = 6,
+    OpenMicrophone = 7,
+    CheckMicrophone = 8,
     Ready = 129,
     Stopped = 130,
     Refused = 131,
@@ -33,6 +35,8 @@ impl Kind {
                 | Self::ApproveView
                 | Self::ApproveControl
                 | Self::ApprovalCheck
+                | Self::OpenMicrophone
+                | Self::CheckMicrophone
         )
     }
     const fn parse(value: u8) -> Result<Self, Error> {
@@ -43,6 +47,8 @@ impl Kind {
             4 => Ok(Self::ApproveView),
             5 => Ok(Self::ApproveControl),
             6 => Ok(Self::ApprovalCheck),
+            7 => Ok(Self::OpenMicrophone),
+            8 => Ok(Self::CheckMicrophone),
             129 => Ok(Self::Ready),
             130 => Ok(Self::Stopped),
             131 => Ok(Self::Refused),
@@ -115,7 +121,10 @@ impl Frame {
             return Err(Error);
         }
         match (request.kind, self.kind) {
-            (Kind::Open | Kind::Check, Kind::Ready | Kind::Refused)
+            (
+                Kind::Open | Kind::Check | Kind::OpenMicrophone | Kind::CheckMicrophone,
+                Kind::Ready | Kind::Refused,
+            )
             | (Kind::Stop, Kind::Stopped | Kind::Refused)
             | (
                 Kind::ApproveView | Kind::ApproveControl | Kind::ApprovalCheck,
@@ -149,6 +158,8 @@ mod tests {
             Kind::ApproveView,
             Kind::ApproveControl,
             Kind::ApprovalCheck,
+            Kind::OpenMicrophone,
+            Kind::CheckMicrophone,
             Kind::Allowed,
             Kind::Denied,
         ] {
@@ -240,7 +251,13 @@ mod approval_tests {
 
     #[test]
     fn ordinary_indicator_commands_can_never_accept_positive_consent() {
-        for kind in [Kind::Open, Kind::Check, Kind::Stop] {
+        for kind in [
+            Kind::Open,
+            Kind::Check,
+            Kind::Stop,
+            Kind::OpenMicrophone,
+            Kind::CheckMicrophone,
+        ] {
             let request = Frame {
                 kind,
                 sequence: 17,

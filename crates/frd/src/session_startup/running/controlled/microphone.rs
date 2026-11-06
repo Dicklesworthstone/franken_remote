@@ -93,6 +93,18 @@ impl ControlledHost {
         approved: bool,
         launch: native::Launch,
     ) -> Result<(), uplink::Error> {
+        self.offer_microphone_with_permission(request, approved, launch, None)
+    }
+    /// A separately approved native application may additionally require its
+    /// original local privacy surface to stay live throughout negotiation and
+    /// native output. This check only restricts the existing controller grant.
+    pub(crate) fn offer_microphone_with_permission(
+        &mut self,
+        request: ChannelRequest,
+        approved: bool,
+        launch: native::Launch,
+        permission: Option<std::sync::Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Result<(), uplink::Error> {
         if self.microphone.used {
             return Err(uplink::Error::AlreadyAttached);
         }
@@ -116,6 +128,7 @@ impl ControlledHost {
             request,
             controller,
             launch,
+            permission,
             || opened.control.check().is_ok(),
         )?;
         self.microphone.pending = Some(pending);

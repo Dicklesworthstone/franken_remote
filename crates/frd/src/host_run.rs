@@ -19,10 +19,12 @@
 pub mod approval;
 pub mod audio;
 pub mod encoder;
+pub mod microphone;
 pub use encoder::Encoder;
 pub mod policy;
 pub mod video;
 pub use audio::AudioOptions;
+pub use microphone::MicrophoneOptions;
 
 use crate::{
     input_agent::Seat,
@@ -117,6 +119,9 @@ pub struct Options {
     /// `--audio`: local playback-audio enable. `None` keeps audio off and the
     /// capability unoffered.
     pub audio: Option<AudioOptions>,
+    /// Independent host microphone enable; every original controller requires
+    /// its own live privacy surface and explicit client talk.
+    pub microphone: Option<MicrophoneOptions>,
     /// `--files DIR`: the operator's pinned, validated drop directory for the
     /// controller's explicit sends. Requires `input_agent`. `None` keeps the
     /// file capabilities unoffered (a controller asking gets typed absence).
@@ -136,6 +141,7 @@ pub enum Error {
     Runtime,
     Entropy,
     Configuration,
+    MicrophoneCapabilities,
     Cleanup(&'static str),
     Policy(crate::host_policy::live::Error),
     LocalApprovalUnavailable,
@@ -179,6 +185,7 @@ impl Error {
             Self::Runtime => "runtime_unavailable",
             Self::Entropy => "entropy_unavailable",
             Self::Configuration => "invalid_configuration",
+            Self::MicrophoneCapabilities => "microphone_capability_limit",
             Self::Cleanup(_) => "cleanup_incomplete",
             Self::Policy(_) => "host_policy_unavailable",
             Self::LocalApprovalUnavailable => "local_approval_unavailable",
@@ -398,15 +405,17 @@ fn control_capabilities() -> Capabilities {
         .with(Capability::LineScroll)
 }
 
-fn request(
-    attempt: u64,
-    host_boot: HostBootId,
-    os_session: u32,
-    scope: Scope,
-    (control, clipboard, files, download): (Option<Capabilities>, bool, bool, bool),
+fn selected_offer(
+    (control, clipboard, files, download, microphone): (
+        Option<Capabilities>,
+        bool,
+        bool,
+        bool,
+        bool,
+    ),
     audio: bool,
     adaptive_capture: bool,
-) -> Result<Request, serial::Error> {
+) -> Result<Offer, serial::Error> {
     let offer = if download {
         let selected = if files {
             host_offer_with_duplex(control.is_some(), clipboard, audio)
@@ -428,6 +437,34 @@ fn request(
     } else {
         offer
     };
+    let offer = if microphone {
+        fr_wire::audio_up::with_microphone(offer).map_err(|_| serial::Error::Configuration)?
+    } else {
+        offer
+    };
+    Ok(offer)
+}
+
+fn request(
+    attempt: u64,
+    host_boot: HostBootId,
+    os_session: u32,
+    scope: Scope,
+    (control, clipboard, files, download, microphone): (
+        Option<Capabilities>,
+        bool,
+        bool,
+        bool,
+        bool,
+    ),
+    audio: bool,
+    adaptive_capture: bool,
+) -> Result<Request, serial::Error> {
+    let offer = selected_offer(
+        (control, clipboard, files, download, microphone),
+        audio,
+        adaptive_capture,
+    )?;
     let fresh = |_| serial::Error::Configuration;
     Ok(Request {
         connection_id: ConnectionId::new(&random_bytes::<16>().map_err(fresh)?)
@@ -685,6 +722,23 @@ fn run_inner(
         approval.validate(options)?;
     }
     let control = probe_control(options)?;
+    if options.microphone.is_some() {
+        selected_offer(
+            (
+                control,
+                options.clipboard,
+                options.files.is_some(),
+                options
+                    .file_send
+                    .as_ref()
+                    .is_some_and(crate::native_files::HostSelection::is_available),
+                true,
+            ),
+            options.audio.is_some(),
+            options.adaptive_capture,
+        )
+        .map_err(|_| Error::MicrophoneCapabilities)?;
+    }
     probe_encoder(options, encoder)?;
     // Started before anything is bound; kept for the whole run.
     let monitor = match &options.session_monitor {
@@ -902,7 +956,8 @@ fn check(options: &Options) -> Result<(), Error> {
     {
         return Err(Error::Configuration);
     }
-    audio::check(options)
+    audio::check(options)?;
+    microphone::check(options)
 }
 
 fn signals(enabled: bool) -> Signals {
@@ -1090,6 +1145,14 @@ impl Share<'_> {
                 profile.with_clipboard()
             } else {
                 profile
+            };
+            let profile = match &self.options.microphone {
+                Some(microphone) => profile.with_microphone(microphone::profile(
+                    self.options,
+                    microphone,
+                    random_nonzero_u128()?,
+                )?),
+                None => profile,
             };
             let profile = match &self.options.files {
                 Some(directory) => profile.with_files(directory.clone()),
@@ -1283,6 +1346,7 @@ impl Share<'_> {
                 .file_send
                 .as_ref()
                 .is_some_and(crate::native_files::HostSelection::is_available),
+            self.options.microphone.is_some(),
         );
         let audio = self.options.audio.is_some();
         let adaptive_capture = self.options.adaptive_capture;
@@ -1682,11 +1746,11 @@ mod tests {
     #[test]
     fn only_explicit_adaptive_requests_offer_receiver_metrics_including_full_duplex() {
         for profile in [
-            (None, false, false, false),
-            (Some(core()), false, false, false),
-            (Some(core()), true, true, false),
-            (Some(core()), true, false, true),
-            (Some(core()), true, true, true),
+            (None, false, false, false, false),
+            (Some(core()), false, false, false, false),
+            (Some(core()), true, true, false, false),
+            (Some(core()), true, false, true, false),
+            (Some(core()), true, true, true, false),
         ] {
             for adaptive in [false, true] {
                 let request = request(
@@ -1715,6 +1779,39 @@ mod tests {
     }
 
     #[test]
+    fn microphone_is_separately_offered_only_with_the_original_control_profile() {
+        for adaptive in [false, true] {
+            let plain =
+                selected_offer((Some(core()), true, false, false, false), false, adaptive).unwrap();
+            assert!(
+                plain
+                    .capabilities
+                    .iter()
+                    .all(|cap| cap.name != fr_wire::audio_up::CAPABILITY)
+            );
+            let enabled =
+                selected_offer((Some(core()), true, false, false, true), false, adaptive).unwrap();
+            assert!(
+                enabled
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == fr_wire::audio_up::CAPABILITY && !cap.required)
+            );
+            assert!(
+                enabled
+                    .capabilities
+                    .iter()
+                    .all(|cap| cap.name != fr_wire::audio::CAPABILITY)
+            );
+            for cap in &plain.capabilities {
+                assert!(enabled.capabilities.contains(cap));
+            }
+            enabled.validate().unwrap();
+        }
+        assert!(selected_offer((None, false, false, false, true), false, false).is_err());
+    }
+
+    #[test]
     fn every_request_allocates_fresh_unpredictable_identifiers() {
         let boot = HostBootId::from_raw(9);
         let a = request(
@@ -1722,7 +1819,7 @@ mod tests {
             boot,
             5,
             Scope::OwnUser,
-            (None, false, false, false),
+            (None, false, false, false, false),
             false,
             false,
         )
@@ -1732,7 +1829,7 @@ mod tests {
             boot,
             5,
             Scope::OwnUser,
-            (Some(core()), false, false, false),
+            (Some(core()), false, false, false, false),
             false,
             false,
         )
@@ -1742,7 +1839,7 @@ mod tests {
             boot,
             5,
             Scope::OwnUser,
-            (Some(core()), true, false, false),
+            (Some(core()), true, false, false, false),
             false,
             false,
         )
@@ -1752,7 +1849,7 @@ mod tests {
             boot,
             5,
             Scope::OwnUser,
-            (None, false, false, false),
+            (None, false, false, false, false),
             true,
             false,
         )
@@ -1762,7 +1859,7 @@ mod tests {
             boot,
             5,
             Scope::OwnUser,
-            (Some(core()), false, true, false),
+            (Some(core()), false, true, false, false),
             false,
             false,
         )
@@ -1802,6 +1899,7 @@ mod tests {
             input_agent: None,
             clipboard: false,
             audio: None,
+            microphone: None,
             files: None,
             file_send: None,
             session_monitor: None,

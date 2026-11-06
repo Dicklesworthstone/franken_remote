@@ -143,6 +143,7 @@ fn indicator_stops_a_share(label: &str, local_stop: impl FnOnce(&str, u64)) {
         adaptive_capture: false,
         clipboard: false,
         audio: None,
+        microphone: None,
         files: None,
         file_send: None,
         session_monitor: None,
@@ -249,6 +250,7 @@ fn a_local_stop_tells_the_view_only_viewer_the_host_is_stopping() {
         adaptive_capture: false,
         clipboard: false,
         audio: None,
+        microphone: None,
         files: None,
         file_send: None,
         session_monitor: None,
@@ -333,6 +335,7 @@ fn approval_host(
         adaptive_capture: false,
         clipboard: false,
         audio: None,
+        microphone: None,
         files: None,
         file_send: None,
         session_monitor: Some(frd::session_monitor::Configuration {

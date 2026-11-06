@@ -21,13 +21,15 @@ struct fr_indicator {
     xcb_font_t font;
     xcb_atom_t protocols, close;
     uint8_t escape, enter, space;
-    uint8_t mode, mapped, allow_pressed;
+    uint8_t mode, mapped, allow_pressed, microphone_state;
     uint8_t xi_opcode;
     uint16_t allow_source, allow_master;
     uint32_t allow_time;
+    uint32_t root, parent, parent_width, parent_height;
     int input_gate;
 };
-enum { MODE_SHARING = 0, MODE_CONTROL = 3, MODE_CLIPBOARD = 4 };
+enum { MODE_SHARING = 0, MODE_CONTROL = 3, MODE_CLIPBOARD = 4,
+       MODE_MICROPHONE_HOST = 5, MODE_MICROPHONE_CLIENT = 6 };
 /* XI2 wire constants (XI2.h / XI2proto.h). Requests are sent raw through
  * xcbext so no libxcb-xinput dependency is added. */
 enum { XI_QUERY_VERSION = 47, XI_SELECT_EVENTS = 46, XI_QUERY_DEVICE = 48 };
@@ -37,7 +39,7 @@ enum { XI_ALL_MASTER_DEVICES = 1 };
 static xcb_extension_t xinput = { "XInputExtension", 0 };
 /* One returned event accounts for one consumed XCB event, including ignored
  * events. Rust imposes the turn limit and checks authority between events. */
-enum { IGNORE, REDRAW, MAPPED, HIDDEN, LOST, STOP, ALLOW };
+enum { IGNORE, REDRAW, MAPPED, HIDDEN, LOST, STOP, ALLOW, TALK, MUTE };
 static int checked(struct fr_indicator *h, xcb_void_cookie_t cookie) {
     xcb_generic_error_t *e = xcb_request_check(h->c, cookie);
     int ok = !e && !xcb_connection_has_error(h->c);
@@ -164,7 +166,95 @@ static int keys(struct fr_indicator *h) {
     }
     free(r); free(e); return h->escape && h->enter && h->space;
 }
-static struct fr_indicator *open_window(const char *display, uint32_t *window, uint8_t mode) {
+struct indicator_rect { int32_t x, y, width, height; };
+/* The exact local viewer and its bounded WM ancestry, never a global search. */
+static int rectangle(struct fr_indicator *h, uint32_t window, uint32_t width,
+        uint32_t height, struct indicator_rect *out) {
+    xcb_generic_error_t *e = NULL;
+    xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(h->c, xcb_get_geometry(h->c, window), &e);
+    int valid = g && !e && g->root == h->root && g->width == width && g->height == height;
+    free(g); free(e); e = NULL;
+    if (!valid) return 0;
+    xcb_get_window_attributes_reply_t *a = xcb_get_window_attributes_reply(h->c,
+        xcb_get_window_attributes(h->c, window), &e);
+    valid = a && !e && a->map_state == XCB_MAP_STATE_VIEWABLE;
+    free(a); free(e); e = NULL;
+    if (!valid) return 0;
+    uint32_t outer = window;
+    int rooted = 0;
+    for (unsigned depth = 0; depth < 8; ++depth) {
+        xcb_query_tree_reply_t *q = xcb_query_tree_reply(h->c, xcb_query_tree(h->c, outer), &e);
+        valid = q && !e && q->root == h->root && q->parent && q->parent != outer;
+        uint32_t next = valid ? q->parent : 0;
+        free(q); free(e); e = NULL;
+        if (!valid) return 0;
+        if (next == h->root) { rooted = 1; break; }
+        outer = next;
+    }
+    if (!rooted) return 0;
+    g = xcb_get_geometry_reply(h->c, xcb_get_geometry(h->c, outer), &e);
+    valid = g && !e && g->root == h->root;
+    int32_t border = valid ? g->border_width : 0;
+    if (valid) {
+        out->width = (int32_t)g->width + 2 * border;
+        out->height = (int32_t)g->height + 2 * border;
+    }
+    free(g); free(e); e = NULL;
+    if (!valid) return 0;
+    xcb_translate_coordinates_reply_t *t = xcb_translate_coordinates_reply(h->c,
+        xcb_translate_coordinates(h->c, outer, h->root, 0, 0), &e);
+    valid = t && !e && t->same_screen;
+    if (valid) { out->x = (int32_t)t->dst_x - border; out->y = (int32_t)t->dst_y - border; }
+    free(t); free(e);
+    return valid && !xcb_connection_has_error(h->c);
+}
+static int separate(const struct indicator_rect *a, const struct indicator_rect *b) {
+    return a->x + a->width <= b->x || b->x + b->width <= a->x ||
+        a->y + a->height <= b->y || b->y + b->height <= a->y;
+}
+static int on_screen(const struct indicator_rect *r, int32_t width, int32_t height) {
+    return r->x >= 0 && r->y >= 0 && r->x <= INT16_MAX && r->y <= INT16_MAX &&
+        r->x + r->width <= width && r->y + r->height <= height;
+}
+static int position(struct fr_indicator *h, int32_t width, int32_t height,
+        int16_t *x, int16_t *y) {
+    struct indicator_rect parent;
+    if (!rectangle(h, h->parent, h->parent_width, h->parent_height, &parent) ||
+        !on_screen(&parent, width, height)) return 0;
+    int32_t px = parent.x < width - WIDTH - 4 ? parent.x : width - WIDTH - 4;
+    int32_t py = parent.y < height - HEIGHT - 4 ? parent.y : height - HEIGHT - 4;
+    for (int32_t gap = 24; gap >= 0; gap -= 24) {
+        /* Prefer the vertical space; the separate clipboard panel prefers a
+         * horizontal slot. No existing drawable is moved or resized. */
+        struct indicator_rect choices[] = {
+            {px, parent.y + parent.height + gap, WIDTH + 4, HEIGHT + 4},
+            {px, parent.y - HEIGHT - 4 - gap, WIDTH + 4, HEIGHT + 4},
+            {parent.x - WIDTH - 4 - gap, py, WIDTH + 4, HEIGHT + 4},
+            {parent.x + parent.width + gap, py, WIDTH + 4, HEIGHT + 4},
+        };
+        for (unsigned i = 0; i < sizeof(choices) / sizeof(choices[0]); ++i) {
+            if (on_screen(&choices[i], width, height) && separate(&choices[i], &parent)) {
+                *x = (int16_t)choices[i].x; *y = (int16_t)choices[i].y; return 1;
+            }
+        }
+    }
+    return 0;
+}
+int fr_indicator_layout_valid(struct fr_indicator *h) {
+    if (!h || xcb_connection_has_error(h->c)) return 0;
+    if (!h->parent || !h->mapped) return 1;
+    struct indicator_rect parent, panel;
+    if (!rectangle(h, h->parent, h->parent_width, h->parent_height, &parent) ||
+        !rectangle(h, h->window, WIDTH, HEIGHT, &panel) || !separate(&parent, &panel)) return 0;
+    xcb_generic_error_t *e = NULL;
+    xcb_get_geometry_reply_t *g = xcb_get_geometry_reply(h->c, xcb_get_geometry(h->c, h->root), &e);
+    int valid = g && !e && g->root == h->root &&
+        on_screen(&parent, g->width, g->height) && on_screen(&panel, g->width, g->height);
+    free(g); free(e);
+    return valid && !xcb_connection_has_error(h->c);
+}
+static struct fr_indicator *open_window(const char *display, uint32_t *window, uint8_t mode,
+        uint32_t parent, uint32_t parent_width, uint32_t parent_height) {
     if (!display || !window) return NULL;
     struct fr_indicator *h = calloc(1, sizeof(*h));
     if (!h) return NULL;
@@ -173,7 +263,7 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     /* Whole-display exclusion is stronger than a race-prone geometry snapshot.
      * A prepared/in-flight native input operation makes this prompt refuse
      * BEFORE it creates or maps a window. No polling/retry or X server grab. */
-    if (mode == 1 || mode == 2) {
+    if (mode == 1 || mode == 2 || mode == MODE_MICROPHONE_CLIENT) {
         h->input_gate = fr_input_gate_open(display);
         if (h->input_gate < 0 || fr_input_gate_lock(h->input_gate, 1) != 1) goto fail;
     }
@@ -184,15 +274,27 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);
     if (!it.rem || it.data->width_in_pixels < WIDTH + 4 ||
         it.data->height_in_pixels < HEIGHT + 4) goto fail;
+    h->root = it.data->root;
+    h->parent = parent; h->parent_width = parent_width; h->parent_height = parent_height;
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { it.data->white_pixel,
         XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY |
         XCB_EVENT_MASK_VISIBILITY_CHANGE };
     /* Keep the clipboard switch separate from the top-left control indicator.
      * Obscuring either surface remains a terminal stop for its own owner. */
-    int16_t top = mode == MODE_CLIPBOARD ? (int16_t)(it.data->height_in_pixels - HEIGHT - 4) : 0;
+    int16_t top = mode == MODE_CLIPBOARD || mode == MODE_MICROPHONE_CLIENT
+        ? (int16_t)(it.data->height_in_pixels - HEIGHT - 4) : 0;
+    int16_t left = mode == MODE_MICROPHONE_HOST || mode == MODE_MICROPHONE_CLIENT
+        ? (int16_t)(it.data->width_in_pixels - WIDTH - 4) : 0;
+    if (parent) {
+        if (mode != MODE_MICROPHONE_CLIENT ||
+            !position(h, it.data->width_in_pixels, it.data->height_in_pixels, &left, &top)) goto fail;
+        uint32_t events = XCB_EVENT_MASK_STRUCTURE_NOTIFY;
+        if (!checked(h, xcb_change_window_attributes_checked(h->c, parent,
+            XCB_CW_EVENT_MASK, &events))) goto fail;
+    }
     if (!checked(h, xcb_create_window_checked(h->c, XCB_COPY_FROM_PARENT,
-        h->window, it.data->root, 0, top, WIDTH, HEIGHT, 2,
+        h->window, it.data->root, left, top, WIDTH, HEIGHT, 2,
         XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
         XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, values))) goto fail;
     h->font = xcb_generate_id(h->c);
@@ -208,11 +310,23 @@ static struct fr_indicator *open_window(const char *display, uint32_t *window, u
     xcb_atom_t above = atom(h, "_NET_WM_STATE_ABOVE");
     const char *title = mode == MODE_CONTROL ? "FrankenRemote - Stop remote control"
         : mode == MODE_CLIPBOARD ? "FrankenRemote - Clipboard sharing"
+        : mode == MODE_MICROPHONE_HOST ? "FrankenRemote - Remote microphone permission"
+        : mode == MODE_MICROPHONE_CLIENT ? "FrankenRemote - Microphone"
         : mode ? "FrankenRemote - Local approval" : "FrankenRemote - Stop sharing";
     const char class[] = "franken-remote\0FrankenRemote\0";
     uint32_t size[18] = {0};
-    size[0] = (1u << 4) | (1u << 5); /* ICCCM PMinSize | PMaxSize */
+    size[0] = (1u << 2) | (1u << 4) | (1u << 5); /* PPosition | PMinSize | PMaxSize */
+    size[1] = (uint32_t)left; size[2] = (uint32_t)top;
     size[5] = size[7] = WIDTH; size[6] = size[8] = HEIGHT;
+    if (mode == MODE_MICROPHONE_CLIENT) {
+        /* A talk click must not steal the original controlled viewer's keyboard
+         * focus. No WM_TAKE_FOCUS, input grab, or native SetInputFocus exists. */
+        uint32_t hints[9] = {1, 0, 0, 0, 0, 0, 0, 0, 0};
+        xcb_atom_t utility = atom(h, "_NET_WM_WINDOW_TYPE_UTILITY");
+        if (!utility || !property(h, XCB_ATOM_WM_HINTS, XCB_ATOM_WM_HINTS, 32, 9, hints) ||
+            !property(h, atom(h, "_NET_WM_WINDOW_TYPE"), XCB_ATOM_ATOM, 32, 1, &utility) ||
+            (parent && !property(h, XCB_ATOM_WM_TRANSIENT_FOR, XCB_ATOM_WINDOW, 32, 1, &parent))) goto fail;
+    }
     if (!h->close || !utf8 || !above ||
         !property(h, h->protocols, XCB_ATOM_ATOM, 32, 1, &h->close) ||
         !property(h, XCB_ATOM_WM_NAME, XCB_ATOM_STRING, 8, (uint32_t)strlen(title), title) ||
@@ -227,19 +341,34 @@ fail:
     fr_indicator_close(h); return NULL;
 }
 struct fr_indicator *fr_indicator_open(const char *display, uint32_t *window) {
-    return open_window(display, window, MODE_SHARING);
+    return open_window(display, window, MODE_SHARING, 0, 0, 0);
 }
 /* Remote-control indicator for the input executor: fails (NULL) without XI2. */
 struct fr_indicator *fr_indicator_open_control(const char *display, uint32_t *window) {
-    return open_window(display, window, MODE_CONTROL);
+    return open_window(display, window, MODE_CONTROL, 0, 0, 0);
 }
 struct fr_indicator *fr_indicator_open_clipboard(const char *display, uint32_t *window) {
-    return open_window(display, window, MODE_CLIPBOARD);
+    return open_window(display, window, MODE_CLIPBOARD, 0, 0, 0);
+}
+struct fr_indicator *fr_indicator_open_microphone(const char *display, uint32_t *window) {
+    return open_window(display, window, MODE_MICROPHONE_HOST, 0, 0, 0);
+}
+struct fr_indicator *fr_indicator_open_microphone_client(const char *display, uint32_t *window,
+        uint32_t parent, uint32_t width, uint32_t height) {
+    if ((!parent && (width || height)) || (parent && (!width || !height))) return NULL;
+    return open_window(display, window, MODE_MICROPHONE_CLIENT, parent, width, height);
+}
+/* The label is a bounded local projection, never microphone authority. */
+int fr_indicator_microphone_state(struct fr_indicator *h, uint32_t state) {
+    if (!h || h->mode != MODE_MICROPHONE_CLIENT || state > 2) return 0;
+    if (h->microphone_state != state) h->allow_pressed = 0;
+    h->microphone_state = (uint8_t)state;
+    return 1;
 }
 /* Role comes from Rust's original one-use Approval, never a remote UI string. */
 struct fr_indicator *fr_approval_open(const char *display, uint32_t role, uint32_t *window) {
     if (role > 1) return NULL;
-    return open_window(display, window, (uint8_t)(role + 1));
+    return open_window(display, window, (uint8_t)(role + 1), 0, 0, 0);
 }
 int fr_indicator_draw(struct fr_indicator *h) {
     if (!h || xcb_connection_has_error(h->c)) return 0;
@@ -258,6 +387,23 @@ int fr_indicator_draw(struct fr_indicator *h) {
                              x[i], y[i], lines[i]);
         return xcb_flush(h->c) > 0;
     }
+    if (h->mode == MODE_MICROPHONE_CLIENT) {
+        const char *lines[] = {
+            h->microphone_state == 2 ? "Your microphone is LIVE to the remote host"
+                : h->microphone_state == 1 ? "Microphone is waiting for the host"
+                : "Your microphone is MUTED",
+            "Mute keeps this session's microphone available.",
+            "TALK", "MUTE", "TURN OFF",
+            "Click Talk explicitly. Esc / close: turn off."};
+        const int16_t x[] = {16, 16, 76, 224, 366, 16};
+        const int16_t y[] = {27, 53, 103, 103, 103, 138};
+        xcb_rectangle_t boxes[] = {{16, 73, 144, 46}, {168, 73, 144, 46}, {320, 73, 144, 46}};
+        xcb_poly_rectangle(h->c, h->window, h->gc, 3, boxes);
+        for (unsigned i = 0; i < 6; ++i)
+            xcb_image_text_8(h->c, (uint8_t)strlen(lines[i]), h->window, h->gc,
+                             x[i], y[i], lines[i]);
+        return xcb_flush(h->c) > 0;
+    }
     const char *sharing[] = {"FrankenRemote sharing is authorized",
         "Closing or hiding this window stops sharing.",
         "STOP SHARING", "Esc / Enter / Space: stop sharing"};
@@ -267,8 +413,12 @@ int fr_indicator_draw(struct fr_indicator *h) {
     const char *clipboard[] = {"Text clipboard sharing is ON",
         "Closing or hiding turns off clipboard sharing.",
         "TURN OFF", "Esc / Enter / Space: turn off clipboard"};
+    const char *microphone[] = {"Remote microphone permission is ON",
+        "Closing or hiding turns off this permission.",
+        "TURN OFF", "Esc / Enter / Space: turn off microphone"};
     const char **lines = h->mode == MODE_CONTROL ? control
-        : h->mode == MODE_CLIPBOARD ? clipboard : sharing;
+        : h->mode == MODE_CLIPBOARD ? clipboard
+        : h->mode == MODE_MICROPHONE_HOST ? microphone : sharing;
     const int16_t x[] = {16, 16, 204, 16}, y[] = {27, 53, 103, 138};
     xcb_rectangle_t border = {16, 73, 448, 46};
     xcb_poly_rectangle(h->c, h->window, h->gc, 1, &border);
@@ -309,13 +459,28 @@ static void xi_input(struct fr_indicator *h, const xcb_generic_event_t *e, uint3
     int inside = x >= 16 * 65536 && x < 464 * 65536 &&
                  y >= 73 * 65536 && y < 119 * 65536;
     int approval = h->mode == 1 || h->mode == 2;
+    int microphone = h->mode == MODE_MICROPHONE_CLIENT;
+    if (microphone && !fr_indicator_layout_valid(h)) {
+        h->allow_pressed = 0; *kind = HIDDEN; return;
+    }
     if (evtype == XI_KEY_PRESS) {
         h->allow_pressed = 0;
-        if (detail == h->escape || detail == h->enter || detail == h->space) *kind = STOP;
+        if (detail == h->escape) *kind = STOP;
+        else if (detail == h->enter || detail == h->space) *kind = microphone ? MUTE : STOP;
     } else if (evtype == XI_BUTTON_PRESS) {
         h->allow_pressed = 0;
         if (detail != 1 || !inside) return;
-        if (!approval || x < 232 * 65536) *kind = STOP;
+        if (microphone) {
+            if (x >= 320 * 65536) *kind = STOP;
+            else if (x >= 168 * 65536 && x < 312 * 65536) {
+                h->microphone_state = 0; *kind = MUTE;
+            } else if (x < 160 * 65536 && h->microphone_state == 0) {
+                h->allow_pressed = 1;
+                h->allow_source = source;
+                h->allow_master = master;
+                h->allow_time = time;
+            }
+        } else if (!approval || x < 232 * 65536) *kind = STOP;
         else if (x >= 248 * 65536) {
             h->allow_pressed = 1;
             h->allow_source = source;
@@ -326,9 +491,14 @@ static void xi_input(struct fr_indicator *h, const xcb_generic_event_t *e, uint3
         /* Positive consent requires a complete recent primary click from the
          * SAME slave and master. No mixed-device halves, stale hold, keyboard
          * shortcut or synthetic release can complete an Allow gesture. */
-        if (approval && h->allow_pressed && detail == 1 && inside && x >= 248 * 65536 &&
+        int positive = approval ? x >= 248 * 65536
+            : microphone && h->microphone_state == 0 && x < 160 * 65536;
+        if (positive && h->allow_pressed && detail == 1 && inside &&
             source == h->allow_source && master == h->allow_master &&
-            (uint32_t)(time - h->allow_time) <= 2000) *kind = ALLOW;
+            (uint32_t)(time - h->allow_time) <= 2000) {
+            *kind = microphone ? TALK : ALLOW;
+            if (microphone) h->microphone_state = 1;
+        }
         h->allow_pressed = 0;
     }
 }
@@ -360,12 +530,14 @@ int fr_indicator_next(struct fr_indicator *h, uint32_t *kind) {
         }
         break;
     case XCB_UNMAP_NOTIFY:
-        if (((xcb_unmap_notify_event_t *)e)->window == h->window) {
+        if (((xcb_unmap_notify_event_t *)e)->window == h->window ||
+            (h->parent && ((xcb_unmap_notify_event_t *)e)->window == h->parent)) {
             h->mapped = h->allow_pressed = 0; *kind = HIDDEN;
         }
         break;
     case XCB_DESTROY_NOTIFY:
-        if (((xcb_destroy_notify_event_t *)e)->window == h->window) {
+        if (((xcb_destroy_notify_event_t *)e)->window == h->window ||
+            (h->parent && ((xcb_destroy_notify_event_t *)e)->window == h->parent)) {
             h->mapped = h->allow_pressed = 0; *kind = LOST;
         }
         break;

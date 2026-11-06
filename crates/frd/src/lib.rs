@@ -59,6 +59,8 @@ pub mod clipboard_quic;
 
 #[cfg(target_os = "linux")]
 pub mod native_clipboard;
+#[cfg(target_os = "linux")]
+pub mod native_microphone;
 
 // The controlled share's out-of-process X11 clipboard owner (never Xlib in frd).
 #[cfg(target_os = "linux")]

@@ -230,6 +230,86 @@ async fn join(state: &mut Fixture, c: &Cx, h: &Cx) -> (Arc<AtomicBool>, Arc<Call
     assert!(!h.is_cancel_requested());
     effects
 }
+
+#[test]
+fn local_host_microphone_permission_is_checked_before_allocating_an_offer() {
+    run(|c, h| async move {
+        let mut state = setup(&c, &h, false).await;
+        let next = state.host.next_channel_binding().unwrap();
+        let before = state.host.io().unwrap().0.usage();
+        let mut binding = state.viewer.media.as_ref().unwrap().binding();
+        binding.parent.id = next;
+        assert_eq!(
+            state.host.offer_microphone_with_permission(
+                ChannelRequest {
+                    binding,
+                    ticket: Ticket(73_000),
+                    timeout: Duration::from_secs(1),
+                },
+                true,
+                launch(),
+                Some(Arc::new(|| false)),
+            ),
+            Err(crate::microphone_quic::Error::Permission)
+        );
+        assert_eq!(state.host.next_channel_binding().unwrap(), next);
+        assert_eq!(state.host.io().unwrap().0.usage(), before);
+        assert!(!state.host.microphone_negotiating());
+        assert!(state.host.microphone_state().is_none());
+        assert!(state.host.microphone_retirement().is_none());
+        assert!(!state.host.control().is_stopped());
+        assert!(!state.viewer.is_closed());
+        state.viewer.close();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
+#[test]
+fn local_host_microphone_permission_loss_during_attachment_fences_the_unfinished_owner() {
+    run(|c, h| async move {
+        let mut state = setup(&c, &h, false).await;
+        let permitted = Arc::new(AtomicBool::new(true));
+        let check = permitted.clone();
+        let mut binding = state.viewer.media.as_ref().unwrap().binding();
+        binding.parent.id = state.host.next_channel_binding().unwrap();
+        state
+            .host
+            .offer_microphone_with_permission(
+                ChannelRequest {
+                    binding,
+                    ticket: Ticket(73_000),
+                    timeout: Duration::from_secs(1),
+                },
+                true,
+                launch(),
+                Some(Arc::new(move || check.load(Ordering::Acquire))),
+            )
+            .unwrap();
+        assert!(state.host.microphone_negotiating());
+        permitted.store(false, Ordering::Release);
+        let mut nonce_value = 80_000;
+        assert!(
+            state
+                .host
+                .drive(Duration::ZERO, || nonce(&mut nonce_value), || None, block)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            state.host.microphone_reason(),
+            Some(crate::microphone_quic::Error::Permission)
+        );
+        assert!(!state.host.microphone_negotiating());
+        assert!(state.host.microphone_state().is_none());
+        assert!(state.host.microphone_retirement().is_none());
+        assert!(state.host.control().is_stopped());
+        state.viewer.close();
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
 #[test]
 fn original_running_pair_keeps_microphone_muted_until_local_permission_and_talk() {
     run(|c, h| async move {

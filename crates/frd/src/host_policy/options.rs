@@ -66,6 +66,10 @@ pub struct RunOptions {
     pub audio_server: Option<PathBuf>,
     /// Sink whose monitor is captured; default: the server's default sink.
     pub audio_sink: Option<String>,
+    /// Separate local enable for the controller's microphone virtual source.
+    pub microphone: bool,
+    /// Exact PipeWire socket; absent resolves below the local runtime directory.
+    pub microphone_server: Option<PathBuf>,
     /// `--files DIR`: the controller's drop directory (needs `input_agent`;
     /// the caller validates it by type before any I/O).
     pub files: Option<PathBuf>,
@@ -147,6 +151,13 @@ impl RunOptions {
                 options.audio = true;
                 continue;
             }
+            if flag == "--microphone" {
+                if options.microphone {
+                    return Err(Error::InvalidArgument);
+                }
+                options.microphone = true;
+                continue;
+            }
             let value = value(&mut iter)?;
             match flag.as_str() {
                 "--port" => {
@@ -178,6 +189,7 @@ impl RunOptions {
                 )?,
                 "--input-agent" => set(&mut options.input_agent, PathBuf::from(value))?,
                 "--audio-server" => set(&mut options.audio_server, PathBuf::from(value))?,
+                "--microphone-server" => set(&mut options.microphone_server, PathBuf::from(value))?,
                 "--audio-sink" => set(&mut options.audio_sink, value.to_owned())?,
                 "--files" => set(&mut options.files, PathBuf::from(value))?,
                 "--send" => options.send.push(PathBuf::from(value)),
@@ -223,6 +235,15 @@ impl RunOptions {
         }
         // Audio selection flags without the enable are a typo, never a default.
         if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
+            return Err(Error::InvalidArgument);
+        }
+        if (options.microphone && options.input_agent.is_none())
+            || (!options.microphone && options.microphone_server.is_some())
+            || options
+                .microphone_server
+                .as_ref()
+                .is_some_and(|path| !path.is_absolute())
+        {
             return Err(Error::InvalidArgument);
         }
         // File limits or conflict choices cannot implicitly enable receiving.
@@ -548,3 +569,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "options/microphone_tests.rs"]
+mod microphone_tests;

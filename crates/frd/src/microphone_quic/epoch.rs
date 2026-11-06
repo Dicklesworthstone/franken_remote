@@ -252,7 +252,7 @@ impl Epoch {
             return Ok(Disposition::Blocked);
         }
         let timer = parameters.cx.timer_driver().ok_or(Error::Clock)?;
-        let process = native::Process::start(
+        let process = native::Process::start_with_permission(
             parameters.controller.clone(),
             parameters.channel,
             parameters.selection,
@@ -260,6 +260,7 @@ impl Epoch {
             bytes,
             parameters.launch.clone(),
             || HostInstant::from_micros(timer.now().as_nanos() / 1000),
+            parameters.shared.permission.clone(),
         )
         .map_err(Error::Native)?;
         if let Err(error) = parameters.shared.install(&process.control()) {

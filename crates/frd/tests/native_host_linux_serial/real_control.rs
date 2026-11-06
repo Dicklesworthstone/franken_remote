@@ -520,6 +520,7 @@ impl Daemon {
             adaptive_capture: false,
             clipboard,
             audio: None,
+            microphone: None,
             files,
             file_send: None,
             session_monitor,

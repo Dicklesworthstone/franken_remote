@@ -115,6 +115,15 @@ OPTIONS:
                     view-only viewer that asks for audio gets the monitor of the
                     selected output, Opus-encoded by the worker. Endpoint-wide:
                     every application playing to that output is captured
+    --microphone    Separately permit the controlling client's microphone (off
+                    by default). Requires --input-agent, matching installed
+                    fr-microphone-worker, fr-opus-worker and fr-observation-indicator.
+                    A local Stop microphone window must remain visible. The client
+                    starts muted and must choose Talk; ordinary host applications
+                    may select the created FrankenRemote microphone. Closing or
+                    hiding its window ends microphone permission for this session.
+    --microphone-server P  Absolute PipeWire socket (default:
+                    $XDG_RUNTIME_DIR/pipewire-0); requires --microphone
     --audio-server P  Absolute PulseAudio socket (default: $PULSE_SERVER, then
                     $XDG_RUNTIME_DIR/pulse/native); requires --audio
     --audio-sink N  Sink whose monitor is captured (default: the server's default
@@ -651,6 +660,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(audio) => audio,
         Err(code) => return code,
     };
+    let microphone = match microphone(&options, json) {
+        Ok(microphone) => microphone,
+        Err(code) => return code,
+    };
     let session_monitor = match session_monitor(&options, &display, json) {
         Ok(monitor) => monitor,
         Err(code) => return code,
@@ -682,6 +695,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         adaptive_capture: options.adaptive_capture,
         clipboard: options.clipboard,
         audio,
+        microphone,
         files,
         file_send,
         session_monitor,
@@ -871,6 +885,60 @@ fn files(
         };
         run_refusal(json, refusal.code(), detail, 2)
     })
+}
+
+/// Independent local microphone approval. Installation paths are resolved
+/// beside frd, never from a peer, PATH search or an on-demand download.
+#[cfg(target_os = "linux")]
+fn microphone(
+    options: &frd::host_policy::options::RunOptions,
+    json: bool,
+) -> Result<Option<frd::host_run::MicrophoneOptions>, ExitCode> {
+    if !options.microphone {
+        return Ok(None);
+    }
+    let server = options.microphone_server.clone().or_else(|| {
+        std::env::var_os("XDG_RUNTIME_DIR").map(|dir| PathBuf::from(dir).join("pipewire-0"))
+    });
+    let Some(server) = server.filter(|p| p.is_absolute() && p.exists()) else {
+        return Err(run_refusal(
+            json,
+            "microphone_endpoint_unavailable",
+            "--microphone needs the local PipeWire socket: pass --microphone-server /absolute/path/pipewire-0 or set XDG_RUNTIME_DIR.",
+            2,
+        ));
+    };
+    let directory = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf));
+    let Some(directory) = directory else {
+        return Err(run_refusal(
+            json,
+            "microphone_workers_unavailable",
+            "Cannot locate the installed microphone workers beside frd.",
+            2,
+        ));
+    };
+    let device = directory.join("fr-microphone-worker");
+    let codec = directory.join("fr-opus-worker");
+    let indicator = directory.join("fr-observation-indicator");
+    if [&device, &codec, &indicator]
+        .into_iter()
+        .any(|p| !p.is_absolute() || !p.is_file())
+    {
+        return Err(run_refusal(
+            json,
+            "microphone_workers_unavailable",
+            "--microphone requires matching fr-microphone-worker, fr-opus-worker and fr-observation-indicator installed beside frd; build fr-native with linux-microphone-playout,linux-input. No device or codec fallback is selected.",
+            2,
+        ));
+    }
+    Ok(Some(frd::host_run::MicrophoneOptions {
+        server,
+        device,
+        codec,
+        indicator,
+    }))
 }
 
 /// The optional LOCAL playback-audio enable. The server socket is local
