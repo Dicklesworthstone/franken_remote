@@ -123,7 +123,6 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn real_child_faults_gate_startup_stop_the_original_host_and_drain_before_return() {
-    let _serial = CHILDREN.lock().unwrap();
     use crate::host_run::StopHandle;
     use fr_core::input_submission::process::{Signal, encode_signal};
     const FIXTURE: &str = r"#!/usr/bin/python3
@@ -166,6 +165,7 @@ while True:
     else:
         s.sendall(data)
 ";
+    let _serial = CHILDREN.lock().unwrap();
     let bytes = |signal| {
         encode_signal(signal)
             .iter()
@@ -288,7 +288,6 @@ fn microphone_readiness_is_never_a_positive_approval_reply() {
 
 #[test]
 fn microphone_child_has_its_own_role_capacity_and_original_stop() {
-    let _serial = CHILDREN.lock().unwrap();
     const FIXTURE: &str = r"#!/usr/bin/python3
 import socket
 s = socket.socket(fileno=0)
@@ -311,6 +310,7 @@ while True:
     data[5] = 129
     s.sendall(data)
 ";
+    let _serial = CHILDREN.lock().unwrap();
     let path = std::env::temp_dir().join(format!("fr-indicator-roles-{}.py", std::process::id()));
     crate::executable::write(&path, FIXTURE);
     let observation_stopped = Arc::new(AtomicBool::new(false));

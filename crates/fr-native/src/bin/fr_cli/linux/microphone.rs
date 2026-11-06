@@ -52,7 +52,7 @@ pub(super) struct Local {
 }
 
 /// A source is always explicit. Socket discovery only resolves the local
-/// PulseAudio server; it never selects a default microphone or starts RECORD.
+/// `PulseAudio` server; it never selects a default microphone or starts RECORD.
 pub(super) fn resolve(
     request: Option<&MicrophoneRequest>,
     display: impl FnOnce() -> Result<String, Failure>,

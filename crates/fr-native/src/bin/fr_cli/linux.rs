@@ -769,6 +769,7 @@ fn control_retry_stop(summary: fr_native::desktop::reconnect::CleanupSummary) ->
     summary.retry_failure().and_then(refusal::observation)
 }
 #[cfg(feature = "linux-desktop")]
+#[allow(clippy::too_many_lines)]
 fn completed_result(
     application: &Session<Interface>,
     result: Result<(), reconnect::Failure>,
@@ -947,6 +948,7 @@ fn offer() -> Offer {
 
 #[cfg(feature = "linux-desktop")]
 #[derive(Default)]
+#[allow(clippy::struct_excessive_bools)]
 struct Progress {
     /// Read-only current host settings on this invocation's existing socket.
     quality: session_control::quality::Publisher,

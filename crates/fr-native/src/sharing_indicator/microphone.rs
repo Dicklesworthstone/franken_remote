@@ -371,7 +371,8 @@ mod tests {
         panel.shared().talk();
         assert!(panel.take_talk_request());
         let check = panel.talk_check();
-        *panel.control().0.last_turn.lock().unwrap() = Instant::now() - PROGRESS_TIMEOUT;
+        *panel.control().0.last_turn.lock().unwrap() =
+            Instant::now().checked_sub(PROGRESS_TIMEOUT).unwrap();
         assert!(!check());
         assert!(stopped.load(Ordering::Acquire));
         assert_eq!(

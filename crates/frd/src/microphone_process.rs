@@ -426,7 +426,7 @@ impl Process {
     /// Its failure is terminal; neither a later UI event nor reconnect can
     /// revive these original child processes or their queued samples.
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_with_permission(
+    pub fn start_with_permission(
         controller: HostController,
         channel: Channel,
         selection: &Selection,

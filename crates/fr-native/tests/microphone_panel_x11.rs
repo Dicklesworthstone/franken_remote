@@ -144,13 +144,13 @@ fn host_microphone_surface_revokes_only_its_supplied_owner() {
     let foreign = Arc::new(AtomicBool::new(false));
     let other = foreign.clone();
     let mut observation = sharing_indicator::start_observation_with(&display, move |_| {
-        other.store(true, Ordering::Release)
+        other.store(true, Ordering::Release);
     })
     .unwrap();
     ready(&observation.control());
     let flag = stopped.clone();
     let mut panel = sharing_indicator::start_microphone_with(&display, move |_| {
-        flag.store(true, Ordering::Release)
+        flag.store(true, Ordering::Release);
     })
     .unwrap();
     let control = panel.control();
@@ -251,7 +251,7 @@ fn exact_viewer_layout_is_retained_and_fullscreen_without_room_refuses() {
     let stopped = Arc::new(AtomicBool::new(false));
     let flag = stopped.clone();
     let mut panel = MicrophonePanel::start_for_viewer(&display, viewer.target, move |_| {
-        flag.store(true, Ordering::Release)
+        flag.store(true, Ordering::Release);
     })
     .unwrap();
     let control = panel.control();
@@ -271,7 +271,7 @@ fn exact_viewer_layout_is_retained_and_fullscreen_without_room_refuses() {
     let stopped = Arc::new(AtomicBool::new(false));
     let flag = stopped.clone();
     let mut panel = MicrophonePanel::start_for_viewer(&display, viewer.target, move |_| {
-        flag.store(true, Ordering::Release)
+        flag.store(true, Ordering::Release);
     })
     .unwrap();
     until(|| stopped.load(Ordering::Acquire));
