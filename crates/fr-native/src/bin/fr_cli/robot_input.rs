@@ -27,6 +27,14 @@ pub(crate) enum Operation {
         dx: i32,
         dy: i32,
     },
+    /// Bounded wheel scrolling while the canonical modifier set stays held.
+    ModifiedScroll {
+        modifiers: u8,
+        x: i32,
+        y: i32,
+        dx: i32,
+        dy: i32,
+    },
     Click {
         button: u8,
         x: i32,
@@ -66,7 +74,6 @@ pub(crate) enum Operation {
     },
 }
 impl Operation {
-    #[cfg(any(target_os = "linux", test))]
     pub fn count(self) -> u8 {
         match self {
             Self::Move { .. } => 1,
@@ -81,6 +88,15 @@ impl Operation {
                 )
                 .unwrap_or(u8::MAX)
             }
+            Self::ModifiedScroll {
+                modifiers,
+                x,
+                y,
+                dx,
+                dy,
+            } => Self::Scroll { x, y, dx, dy }.count().saturating_add(
+                u8::try_from(2 * modifiers.count_ones()).expect("bounded modifier set"),
+            ),
             Self::Click { .. } | Self::KeyTap { .. } | Self::Drag { .. } => 2,
             Self::KeyChord { modifiers, .. }
             | Self::ModifiedClick { modifiers, .. }
@@ -95,6 +111,17 @@ impl Operation {
             Self::Move { .. } => true,
             Self::Scroll { dx, dy, .. } => {
                 (-120..=120).contains(&dx) && (-120..=120).contains(&dy) && (dx != 0 || dy != 0)
+            }
+            Self::ModifiedScroll {
+                modifiers,
+                x,
+                y,
+                dx,
+                dy,
+            } => {
+                (1..=4).contains(&modifiers.count_ones())
+                    && Self::Scroll { x, y, dx, dy }.valid()
+                    && self.count() <= fr_client::robot::input::native::MAX_ACTIONS
             }
             Self::Click { button, .. } => (1..=5).contains(&button),
             Self::ModifiedClick {
@@ -199,6 +226,7 @@ impl Operation {
         match self {
             Self::Move { x, y }
             | Self::Scroll { x, y, .. }
+            | Self::ModifiedScroll { x, y, .. }
             | Self::Click { x, y, .. }
             | Self::ModifiedClick { x, y, .. } => {
                 bounds.contains(fr_core::input::DesktopPoint { x, y })
@@ -214,6 +242,10 @@ impl Operation {
         let required = match self {
             Self::Move { .. } => Capabilities::default().with(Capability::Absolute),
             Self::Scroll { .. } => Capabilities::default()
+                .with(Capability::Absolute)
+                .with(Capability::LineScroll),
+            Self::ModifiedScroll { .. } => Capabilities::default()
+                .with(Capability::Keys)
                 .with(Capability::Absolute)
                 .with(Capability::LineScroll),
             Self::Click { .. } | Self::Drag { .. } => Capabilities::default()
@@ -238,6 +270,13 @@ impl Operation {
         Ok(match (flag, values.as_slice()) {
             ("--move", &[x, y]) => Self::Move { x, y },
             ("--scroll", &[x, y, dx, dy]) => Self::Scroll { x, y, dx, dy },
+            ("--modified-scroll", [modifiers @ .., x, y, dx, dy]) => Self::ModifiedScroll {
+                modifiers: Self::modifier_mask(modifiers)?,
+                x: *x,
+                y: *y,
+                dx: *dx,
+                dy: *dy,
+            },
             ("--click", &[button, x, y]) => Self::Click {
                 button: u8::try_from(button).map_err(|_| usage())?,
                 x,
@@ -588,7 +627,7 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--observation-id" => observation_id = Some(value.parse().map_err(|_| usage())?),
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
             "--move" | "--scroll" | "--click" | "--key" | "--chord" | "--drag"
-            | "--modified-click" | "--modified-drag" => {
+            | "--modified-click" | "--modified-drag" | "--modified-scroll" => {
                 if operation.is_some() {
                     return Err(usage());
                 }

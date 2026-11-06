@@ -18,6 +18,15 @@ impl Operation {
                     unit: ScrollUnit::Lines,
                 })
             }
+            Self::ModifiedScroll {
+                modifiers,
+                x,
+                y,
+                dx,
+                dy,
+            } if self.valid() => {
+                Self::Scroll { x, y, dx, dy }.action_with_modifiers(modifiers, index)
+            }
             Self::Click { button, x, y } if index < 2 => Some(Action::Button {
                 button: match button {
                     1 => PointerButton::Primary,
@@ -114,7 +123,7 @@ impl Operation {
         if (held..release_start).contains(&index) {
             return self.action(index - held);
         }
-        // Each modifier remains held across both reliable button barriers.
+        // Each modifier remains held across every reliable body action.
         // Reverse release order mirrors the canonical presses, just as a chord.
         let pressed = index < held;
         let ordinal = if pressed { index } else { total - index - 1 };
@@ -598,6 +607,111 @@ mod tests {
         assert!(!stationary.valid());
         for index in 0..=u8::MAX {
             assert!(stationary.action(index).is_none());
+        }
+    }
+
+    #[test]
+    fn modified_scroll_keeps_modifiers_held_across_every_native_wheel_batch() {
+        use fr_core::input_submission::scroll::{LINE, LineScroll, MAX_STEPS, WheelDirection};
+
+        for (modifiers, dx, dy, total) in [
+            (1, 0, -3, 3),
+            (0b1000_0001, 20, -20, 6),
+            (1, -120, 120, 10),
+            (0b1000_0001, 120, -72, 10),
+            (0b1000_0011, -120, 8, 10),
+            (0b1100_0011, 32, -32, 10),
+        ] {
+            let operation = Operation::ModifiedScroll {
+                modifiers,
+                x: -700,
+                y: 500,
+                dx,
+                dy,
+            };
+            assert!(operation.valid());
+            assert_eq!(operation.count(), total);
+            let usages: Vec<_> = (224_u16..=231)
+                .filter(|usage| modifiers & (1 << (*usage - 224)) != 0)
+                .collect();
+            let count = u8::try_from(usages.len()).unwrap();
+            let mut held = BTreeSet::new();
+            let mut distance = (0, 0);
+            let mut directions = Vec::new();
+            for index in 0..operation.count() {
+                assert!(operation.pointer(index).is_none());
+                match operation.action(index).expect("every bounded action exists") {
+                    Action::Key { key, transition } => {
+                        if index < count {
+                            assert_eq!(key.usage(), usages[usize::from(index)]);
+                            assert_eq!(transition, KeyTransition::Press);
+                            assert!(held.insert(key.usage()));
+                        } else {
+                            let ordinal = operation.count() - index - 1;
+                            assert_eq!(key.usage(), usages[usize::from(ordinal)]);
+                            assert_eq!(transition, KeyTransition::Release);
+                            assert!(held.remove(&key.usage()));
+                        }
+                    }
+                    Action::Scroll { position, x, y, unit } => {
+                        assert_eq!(held.iter().copied().collect::<Vec<_>>(), usages);
+                        assert_eq!(position, DesktopPoint { x: -700, y: 500 });
+                        assert_eq!(unit, ScrollUnit::Lines);
+                        let native = LineScroll::new(x, y).expect("bounded native wheel action");
+                        assert!(native.native_operations() <= 1 + 2 * MAX_STEPS);
+                        assert!(native.native_operations() > 1);
+                        distance.0 += x / LINE;
+                        distance.1 += y / LINE;
+                        directions.extend(native.steps());
+                    }
+                    _ => panic!("a modified scroll emits only physical keys and reliable wheels"),
+                }
+            }
+            assert_eq!(held, BTreeSet::new());
+            assert_eq!(distance, (dx, dy));
+            let expected: Vec<_> = std::iter::repeat_n(
+                if dx < 0 { WheelDirection::Left } else { WheelDirection::Right },
+                usize::try_from(dx.unsigned_abs()).unwrap(),
+            )
+            .chain(std::iter::repeat_n(
+                if dy < 0 { WheelDirection::Up } else { WheelDirection::Down },
+                usize::try_from(dy.unsigned_abs()).unwrap(),
+            ))
+            .collect();
+            assert_eq!(directions, expected, "horizontal steps still precede vertical steps");
+            for index in operation.count()..=u8::MAX {
+                assert!(operation.action(index).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_modified_scrolls_never_emit_a_modifier_or_partial_wheel_sequence() {
+        for (modifiers, dx, dy) in [
+            (0, 0, 1),
+            (31, 0, 1),
+            (255, 0, 1),
+            (1, 0, 0),
+            (1, 121, 0),
+            (1, 0, -121),
+            (1, i32::MIN, i32::MAX),
+            (255, i32::MIN, i32::MAX),
+            (3, 120, 73),
+            (7, 120, 9),
+            (15, 32, 33),
+        ] {
+            let operation = Operation::ModifiedScroll {
+                modifiers,
+                x: -700,
+                y: 500,
+                dx,
+                dy,
+            };
+            assert!(!operation.valid());
+            for index in 0..=u8::MAX {
+                assert!(operation.action(index).is_none());
+                assert!(operation.pointer(index).is_none());
+            }
         }
     }
 }

@@ -922,3 +922,168 @@ fn modified_pointer_commands_refuse_invalid_modifiers_and_incomplete_gestures() 
     body["operation"]["to_y"] = 20.into();
     assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
 }
+
+#[test]
+fn modified_scroll_commands_preserve_canonical_modifiers_and_signed_points() {
+    let request = command(&action(
+        "--modified-scroll",
+        "224,225,227,231,-2147483648,2147483647,32,-32",
+    ))
+    .unwrap()
+    .request
+    .unwrap();
+    let reordered = command(&action(
+        "--modified-scroll",
+        "231,227,225,224,-2147483648,2147483647,32,-32",
+    ))
+    .unwrap()
+    .request
+    .unwrap();
+    let expected = Operation::ModifiedScroll {
+        modifiers: 0b1000_1011,
+        x: i32::MIN,
+        y: i32::MAX,
+        dx: 32,
+        dy: -32,
+    };
+    assert!(request == reordered && request.operation == expected);
+    assert!(request.valid());
+    assert_eq!(request.operation.count(), 10);
+    assert!(request.operation.pointer(0).is_none());
+    assert!(request.operation.drag_points().is_none());
+    let body = serde_json::to_vec(&request).unwrap();
+    assert!(body.len() <= 512);
+    assert_eq!(body, serde_json::to_vec(&reordered).unwrap());
+    let decoded: Request = serde_json::from_slice(&body).unwrap();
+    assert!(decoded.valid() && decoded == request);
+    let value = serde_json::to_value(request).unwrap();
+    assert_eq!(value["operation"]["kind"], "modified_scroll");
+    assert_eq!(value["operation"]["modifiers"], 0b1000_1011);
+    assert_eq!(value["operation"]["dx"], 32);
+    assert_eq!(value["operation"]["dy"], -32);
+}
+
+#[test]
+fn modified_scroll_budget_includes_every_modifier_and_native_wheel_batch() {
+    for (modifiers, mask, dx, dy, count, valid) in [
+        ("224", 1, 0, -3, 3, true),
+        ("224", 1, 120, 120, 10, true),
+        ("224,225", 3, 120, 72, 10, true),
+        ("224,225", 3, 120, 73, 11, false),
+        ("224,225", 3, 120, 120, 12, false),
+        ("224,225,226", 7, -120, 8, 10, true),
+        ("224,225,226", 7, -120, 9, 11, false),
+        ("224,225,226,227", 15, -32, 32, 10, true),
+        ("224,225,226,227", 15, -32, 33, 11, false),
+    ] {
+        let operation = Operation::ModifiedScroll {
+            modifiers: mask,
+            x: -700,
+            y: 500,
+            dx,
+            dy,
+        };
+        assert_eq!(operation.count(), count);
+        assert_eq!(operation.valid(), valid);
+        let args = action(
+            "--modified-scroll",
+            &format!("{modifiers},-700,500,{dx},{dy}"),
+        );
+        if valid {
+            let request = command(&args).unwrap().request.unwrap();
+            assert!(request.operation == operation && request.valid());
+            assert!(request.operation.count() <= fr_client::robot::input::native::MAX_ACTIONS);
+        } else {
+            refused(&args);
+        }
+    }
+    // Compound budgeting never narrows the original unmodified scroll range.
+    let plain = command(&action("--scroll", "-700,500,120,-120"))
+        .unwrap()
+        .request
+        .unwrap();
+    assert_eq!(plain.operation.count(), 8);
+    assert!(plain.valid());
+}
+
+#[test]
+fn malformed_or_mixed_modified_scroll_commands_refuse_before_local_io() {
+    for value in [
+        "",
+        "0,0,0,1",
+        "224,0,0,1",
+        "224,0,0,0,0",
+        "224,0,0,121,0",
+        "224,0,0,0,-121",
+        "224,0,0,-2147483648,2147483647",
+        "224,-2147483649,0,0,1",
+        "224,0,2147483648,0,1",
+        "224,0,0,0,2147483648",
+        "224,0,,0,1",
+        "224,0,0,0,1,",
+        "223,0,0,0,1",
+        "232,0,0,0,1",
+        "-1,0,0,0,1",
+        "224,224,0,0,0,1",
+        "231,224,231,0,0,0,1",
+        "224,225,226,227,228,0,0,0,1",
+        "224,private-modifier,0,0,0,1",
+    ] {
+        let failure = refused(&action("--modified-scroll", value));
+        assert!(!format!("{failure:?}").contains("private-modifier"));
+    }
+    for suffix in [
+        "--modified-scroll 225,-700,500,0,1",
+        "--modified-click 224,1,-700,500",
+        "--modified-drag 224,1,-700,500,0,0",
+        "--scroll -700,500,0,1",
+        "--key 4",
+        "--status",
+    ] {
+        let mut args = action("--modified-scroll", "224,-700,500,0,-3");
+        args.extend(words(suffix));
+        refused(&args);
+    }
+}
+
+#[test]
+fn raw_modified_scroll_rejects_invalid_masks_extra_fields_and_saturated_counts() {
+    let request = command(&action("--modified-scroll", "224,-700,500,0,-3"))
+        .unwrap()
+        .request
+        .unwrap();
+    for (modifiers, dx, dy) in [
+        (0, 0, 1),
+        (31, 0, 1),
+        (255, 0, 1),
+        (1, 0, 0),
+        (1, 121, 0),
+        (1, 0, -121),
+        (3, 120, 73),
+        (7, 120, 9),
+        (15, 32, 33),
+    ] {
+        let mut body = serde_json::to_value(request).unwrap();
+        body["operation"]["modifiers"] = modifiers.into();
+        body["operation"]["dx"] = dx.into();
+        body["operation"]["dy"] = dy.into();
+        assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
+    }
+    for modifiers in [1, 15, 255] {
+        let mut body = serde_json::to_value(request).unwrap();
+        body["operation"]["modifiers"] = modifiers.into();
+        body["operation"]["dx"] = i32::MIN.into();
+        body["operation"]["dy"] = i32::MAX.into();
+        let decoded: Request = serde_json::from_value(body).unwrap();
+        assert!(!decoded.valid());
+        assert_eq!(decoded.operation.count(), u8::MAX);
+    }
+    let mut body = serde_json::to_value(request).unwrap();
+    body["operation"]["modifiers"] = 256.into();
+    assert!(serde_json::from_value::<Request>(body).is_err());
+    for field in ["button", "hold_ms", "repeat", "text"] {
+        let mut body = serde_json::to_value(request).unwrap();
+        body["operation"][field] = 1.into();
+        assert!(serde_json::from_value::<Request>(body).is_err());
+    }
+}

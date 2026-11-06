@@ -7,7 +7,8 @@ fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     --observation-id INTEGER --max-observation-age-ms 1..1000
     (--move X,Y | --click BUTTON,X,Y | --modified-click MODIFIER,...,BUTTON,X,Y
      | --drag BUTTON,X1,Y1,X2,Y2 | --modified-drag MODIFIER,...,BUTTON,X1,Y1,X2,Y2
-     | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY) [--json]
+     | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY
+     | --modified-scroll MODIFIER,...,X,Y,DX,DY) [--json]
 
 Find the public connection ID with fr robot session status NODE_ID --json.
 Keep the foreground viewer focused. The explicit automation owner requests one
@@ -45,6 +46,14 @@ guess. Scroll deltas are integer lines on each axis, at most 120 in magnitude.
 Large scrolls use up to eight reliable actions of at most 32 total lines each,
 horizontal before vertical. Each waits for the preceding host receipt under the
 same original observation and deadline; an interrupted prefix is never replayed.
+--modified-scroll holds one to four distinct USB modifiers through all wheel
+actions, then releases them in reverse order. For example,
+--modified-scroll 224,640,360,0,-3 requests a left Ctrl + wheel gesture.
+It requires keyboard, absolute-pointer and line-scroll control. The entire
+gesture must fit ten actions, including modifier presses/releases: one modifier
+allows every plain scroll; two allow at most 192 total lines, three 128, four 64.
+The existing 120-line per-axis limit still applies. Invalid combinations refuse
+before any modifier press; later failures use the same original-owner cleanup.
 --chord holds one to four distinct USB modifiers (224..231) through one
 non-modifier key tap; for example, 224,225,19 is physical left Ctrl+Shift+P.
 Modifiers press in ascending usage order, then the key; releases run in reverse.

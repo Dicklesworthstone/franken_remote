@@ -2,9 +2,9 @@
 
 The Linux native desktop CLI can explicitly accept bounded robot input on its
 original authenticated control session. It supports an absolute pointer move,
-a click, a bounded drag, modifier-held clicks and drags, a physical key tap,
-a modifier shortcut, or integer line scrolling. The owner retains the host lease, input ticket,
-original viewport and transport; local commands receive comparison
+a click, a bounded drag, integer line scrolling, modifier-held mouse gestures,
+a physical key tap, or a modifier shortcut. The owner retains the host lease,
+input ticket, original viewport and transport; local commands receive comparison
 handles and content-free results.
 
 This is an experimental native slice of plan §18, with the authority and
@@ -68,6 +68,7 @@ forms are:
 | `--key USB_USAGE` | Press and release one validated USB keyboard page-7 physical usage, in decimal; for example `4`. This is not Unicode or a keyboard-layout translation. |
 | `--chord MODIFIER,...,KEY` | Hold one to four distinct USB modifiers (224–231) through one physical key tap, then release in reverse order. For example, `224,225,19` requests Control–Shift–P. |
 | `--scroll X,Y,DX,DY` | Scroll at the host-desktop point by integer lines on each axis. Each delta is between −120 and 120; at least one is nonzero. |
+| `--modified-scroll MODIFIER,...,X,Y,DX,DY` | Hold one to four distinct USB modifiers through line scrolling, then release them in reverse order. The complete gesture, including modifiers, must fit ten actions. |
 
 The age bound must be 1–1000 milliseconds. Existing host and viewer limits may
 be stricter. Coordinates may be negative on desktops with a negative display
@@ -79,9 +80,11 @@ explicit [live screenshot](docs/native-client-cli.md#screenshots-from-an-existin
 can return pixels and the pictured frame's original input handles. It does not
 make a later input request atomic with the observation or refresh that evidence.
 
-Clicks, drags and key taps contain two reliable actions. Modifier shortcuts
-and modifier-held mouse gestures contain at most ten. Line scrolls contain one to eight: each action has at most
-32 total wheel steps, matching the X11 executor's existing submission bound.
+Clicks, drags and key taps contain two reliable actions. Modifier shortcuts,
+modified clicks and modified drags contain at most ten. Plain line scrolls
+contain one to eight wheel actions; modified scrolls include their modifier
+presses and releases within the same ten-action limit. Each wheel action has at
+most 32 total steps, matching the X11 executor's existing submission bound.
 Horizontal lines precede vertical lines, with the original signs, exact total
 distance and target point preserved. Previously the CLI accepted up to 120
 lines per axis but sent them as one action, which the native executor refused
@@ -188,6 +191,51 @@ submitted prefix preserves the partial or unknown effect and fences the original
 owner; its existing held-state cleanup releases keys/buttons without replaying
 the remainder or inventing a new ticket.
 
+### Hold modifiers through scrolling
+
+Use `--modified-scroll` for a wheel gesture that requires a modifier to stay
+held. For example, with a fresh observation and its next request ID:
+
+```bash
+fr robot input NODE_ID --connection-id CONNECTION_ID \
+  --lease LOCAL_LEASE --request-id NEXT_REQUEST_ID --observation-id OBSERVATION_ID \
+  --max-observation-age-ms 1000 --modified-scroll 224,640,360,0,-3 --json
+```
+
+This requests left Control held across three vertical wheel steps with a
+negative delta at `(640,360)`. Applications commonly use Control-wheel for zoom;
+the application decides the meaning, and an OS receipt does not prove a zoom
+change. All wheel segments keep the original position, signs and total distance.
+
+The complete gesture requires keyboard, absolute-pointer and line-scroll
+capabilities. The position, modifiers, deltas and complete action budget are
+checked before the first modifier press. Modifier usages are canonicalized in
+the same way as modified clicks: ascending presses, the entire scroll, then
+reverse releases. Each wheel segment still waits for its original receipt.
+
+Wheel segments contain at most 32 total lines. Modifier presses and releases
+share the existing ten-action request limit, so the accepted total distance is:
+
+| Distinct modifiers | Maximum `abs(DX) + abs(DY)` |
+| --- | ---: |
+| 1 | 240 lines; every valid plain scroll |
+| 2 | 192 lines |
+| 3 | 128 lines |
+| 4 | 64 lines |
+
+Each individual delta must also remain between −120 and 120, and at least one
+must be nonzero. A combination that exceeds the budget is rejected as a whole;
+it never sends a prefix or silently truncates the requested distance. For
+example, two modifiers with `DX=120,DY=72` fit exactly, while `DY=73` is refused.
+
+A successful simple Control-wheel request uses three actions: Control press,
+wheel submission, Control release. A larger gesture may use all ten. The
+original observation and deadline apply throughout. Expiry, cancellation or a
+failed receipt after a submitted prefix preserves the confirmed effects and
+fences the original owner for its existing key cleanup. A retained result or
+late receipt cannot restart the remaining scroll.
+
+
 ## Identity, expiry and cancellation
 
 Every accepted request fixes its complete arguments, observation identity,
@@ -243,12 +291,12 @@ fr robot session close NODE_ID --connection-id CONNECTION_ID --json
 
 ## Verification boundary
 
-The modifier-held mouse extension adds parser/serialization, action-order,
-whole-gesture admission and partial-effect regressions against the existing
+The modifier-held click, drag and scroll extensions add parser/serialization,
+action-order, complete admission and partial-effect regressions against the existing
 request owner and ledger. In this editing session the execution environment was
 unavailable: these new regressions have been source-reviewed but have not been
 compiled or executed. The historical results below qualify their stated earlier
-source only; they do not establish native or live execution of this extension.
+source only; they do not establish native or live execution of these extensions.
 
 The pointer extension passes all 502 `fr-client` package tests, including 29
 native request-ledger tests, plus 98 actual-source CLI tests covering options,
