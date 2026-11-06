@@ -553,7 +553,6 @@ impl StreamingHost {
                 last_capture,
                 next_capture,
                 input_wake: super::input_wake::Wake::default(),
-                repair_turn: false,
                 feedback: self.feedback.as_mut(),
                 presentation: self.presentation.as_mut(),
                 cursor,
@@ -780,7 +779,6 @@ struct VideoServices<'a, S> {
     last_capture: Option<u64>,
     next_capture: u64,
     input_wake: super::input_wake::Wake,
-    repair_turn: bool,
     feedback: Option<&'a mut HostFeedback>,
     presentation: Option<&'a mut HostPresentation>,
     cursor: Option<&'a cursor::StreamCursor>,
@@ -995,21 +993,17 @@ impl<S: Services> Services for VideoServices<'_, S> {
         .map_err(|error| failure.map_or(Error::Transport(error), Error::MediaTransport))?;
         let observation = self.collect_capture(&cx)?;
         observe_source_after_dispatch(self.sender, self.presentation.as_deref_mut(), q)?;
-        let mut idle = 0;
         let view = self.sender.feedback_view().map_err(Error::MediaTransport)?;
         for _ in 0..self.policy.records_per_turn {
             if !self.permitted() {
                 return Err(Error::Authority);
             }
-            let lane = if self.repair_turn {
-                Lane::Repair
-            } else {
-                Lane::Original
-            };
-            self.repair_turn = !self.repair_turn;
+            // The pending record owns its turn across backpressure. Only its
+            // actual admission selects the next lane; retry/poll parity must
+            // not let a busy original tail repeatedly bypass eligible repairs.
             match self
                 .sender
-                .transmit(&cx, q, lane)
+                .transmit_interleaved(&cx, q)
                 .map_err(Error::MediaTransport)?
             {
                 Progress::Pending(_) => {
@@ -1018,16 +1012,12 @@ impl<S: Services> Services for VideoServices<'_, S> {
                 }
                 Progress::Accepted(_) => {
                     self.send_evidence.accepted(view, now(&cx)?);
-                    idle = 0;
                     self.statistics.admitted_records =
                         self.statistics.admitted_records.saturating_add(1);
                 }
-                Progress::Idle => {
-                    idle += 1;
-                    if idle == 2 {
-                        break;
-                    }
-                }
+                // Interleaved egress already checks both eligible lanes. An
+                // obsolete optional packet also yields here before fresh work.
+                Progress::Idle => break,
             }
         }
         let current = self.service_lanes(q, &cx)?;

@@ -481,7 +481,6 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             last_work: None,
             last_capture: None,
             next_capture: 0,
-            repair_turn: false,
             feedback: None,
             presentation: None,
             input_wake: super::super::input_wake::Wake::default(),
@@ -647,6 +646,7 @@ fn unpolled_native_future_is_dropped_only_after_observation_is_fenced() {
 }
 
 mod adaptive;
+mod repair_fairness;
 
 // Reuse the original capture, real attachments and supervised decoder fixture.
 pub(in crate::session_startup) async fn feedback_pair(

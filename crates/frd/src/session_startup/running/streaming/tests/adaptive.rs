@@ -227,7 +227,6 @@ fn empty_original_egress_does_not_report_ready_before_raw_capture_admission() {
             last_capture: None,
             next_capture: current + 100_000,
             input_wake: super::super::super::input_wake::Wake::default(),
-            repair_turn: false,
             feedback: None,
             presentation: None,
             cursor: None,

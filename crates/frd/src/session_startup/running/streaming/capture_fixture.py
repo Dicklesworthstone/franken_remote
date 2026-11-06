@@ -35,7 +35,8 @@ try:
             reply(h,265,struct.pack('>QQQ',frame,last,observed)); continue
         reference = 0 if last is None or forced else last
         predicted = int(last is not None and not forced)
-        payload = struct.pack('>QQQQB',frame,observed,0,reference,predicted) + bytes(7) + bytes([frame%255])*128
+        size = 32768 if last is not None and MODE == 'fragmented' else 128
+        payload = struct.pack('>QQQQB',frame,observed,0,reference,predicted) + bytes(7) + bytes([frame%255])*size
         reply(h,258,payload)
         last = frame
 except (EOFError,BrokenPipeError):

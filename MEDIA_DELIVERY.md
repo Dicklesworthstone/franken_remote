@@ -10,6 +10,15 @@ Call `next_packet` only when the Asupersync transport has resource/congestion ad
 
 Forward incoming authenticated repair records to `queue_repair`, then ask `next_repair_packet` for one original cached fragment at a time. Actual cached fragment counts, sorted range bounds, one precharged pending repair job per cached picture, retry cadence, maximum rounds, and aggregate repair-byte allowance all apply. Repair traffic also passes the transport's normal congestion controller. Recovery-generation replacement does not replenish a session's repair-byte allowance. Retransmission never extends the original picture's retention deadline.
 
+Private native streaming and the shared publisher select originals and eligible
+repairs through the scheduler in `Egress::transmit_interleaved`. The last
+admitted record selects the next lane; repeated backpressure polls retain the
+same prepared record and cannot spend a repair's turn. An empty or paced lane
+permits the other lane to advance within the same bounded call. Original expiry,
+repair budgets and the fixed reference horizon remain unchanged. The native host
+regression uses real TLS/UDP queue backpressure and the production service loop
+with synthetic codec bytes; it does not qualify a live impaired network.
+
 An announced datagram picture can retain an early repair request in its own
 inline job slot. That fixed job becomes eligible once all original fragments
 named in its ranges have been packetized; an unrelated tail no longer delays
