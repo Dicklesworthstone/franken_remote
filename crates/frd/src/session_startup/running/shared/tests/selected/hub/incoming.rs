@@ -427,6 +427,7 @@ fn incoming_host_original_deadline_includes_queue_time_and_approval_to_attachmen
                 // the ORIGINAL Host cutoff, not a new two-second post-approval lease.
                 while !matches!(ticket.state(), State::Finished(_)) {
                     let _ = session.drive(Duration::from_millis(1), block).await;
+                    asupersync::runtime::yield_now().await;
                     assert!(
                         now(&clock).unwrap() < until + 100_000,
                         "approval reset startup budget"
@@ -517,6 +518,7 @@ fn incoming_host_notification_unwind_fences_before_retained_service_future_is_dr
         let mut client = Box::pin(async {
             loop {
                 let _ = viewer.drive(Duration::from_millis(1)).await;
+                asupersync::runtime::yield_now().await;
             }
         });
         poll_fn(|task| {
@@ -575,6 +577,7 @@ fn incoming_host_source_revoked_inside_approval_cannot_publish_observation() {
         let mut client = Box::pin(async {
             loop {
                 let _ = viewer.drive(Duration::from_millis(1)).await;
+                asupersync::runtime::yield_now().await;
             }
         });
         let result = poll_fn(|task| {
