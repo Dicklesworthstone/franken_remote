@@ -520,9 +520,10 @@ impl InputSink for EmptySink {
 #[test]
 fn blocked_initialization_expires_without_grant_and_keeps_seat_until_native_destruction() {
     run(|cx, _second| async move {
-        // The 60 ms ticket must expire first. A slow runner can spend 200 ms
-        // before the check (setup, worker start), which then expires the
-        // authorization instead and reports ObservationExpired.
+        // The 60 ms ticket must be what expires. The observation's lifetime runs
+        // from setup through this test's 80 ms sleep, and live() checks it
+        // first, so a short one (200 ms) lapsed first on a slow runner and
+        // reported ObservationExpired.
         let policy = AuthorityPolicy {
             authorization_lifetime: HostDuration::from_millis_checked(2_000).unwrap(),
             ticket_lifetime: HostDuration::from_millis_checked(60).unwrap(),
