@@ -96,6 +96,7 @@ impl ProjectedClock {
     fn independent(&self) -> Self {
         let cursor = self.cursor.lock().map_or(
             projection::Cursor {
+                sampled_client: u64::MAX,
                 client: u64::MAX,
                 host: u64::MAX,
             },

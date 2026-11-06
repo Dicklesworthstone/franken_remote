@@ -130,6 +130,7 @@ impl Owner {
         Ok(ControllerAuthority {
             state: Arc::downgrade(&self.state),
             cursor: Arc::new(Mutex::new(Cursor {
+                sampled_client: now.0,
                 client: now.0,
                 host: m.last_host,
             })),

@@ -22,6 +22,9 @@ use std::sync::{
 /// cannot replace the sample the native owner is about to validate.
 #[derive(Clone, Copy)]
 pub(super) struct Cursor {
+    /// Last raw sample from this consumer, for ordered-clock regression checks.
+    pub(super) sampled_client: u64,
+    /// Effective local instant paired with `host`, including owner progress.
     pub(super) client: u64,
     pub(super) host: u64,
 }
@@ -345,6 +348,7 @@ impl Owner {
             }
         }
         let cursor = Arc::new(Mutex::new(Cursor {
+            sampled_client: now.0,
             client: now.0,
             host: at.as_micros(),
         }));
@@ -444,13 +448,13 @@ impl State {
     ) -> Result<(HostInstant, ClientInstant), Error> {
         let mut c = cursor.lock().map_err(|_| Error::Stopped)?;
         let mut m = self.inner.lock().map_err(|_| Error::Stopped)?;
-        if !concurrent && now.0 < c.client {
+        if !concurrent && now.0 < c.sampled_client {
             return self.failure(Error::Clock);
         }
-        let now = ClientInstant(now.0.max(c.client));
-        let local = now.0.max(m.last_client);
+        let sampled_client = now.0.max(c.sampled_client);
+        let local = sampled_client.max(c.client).max(m.last_client);
         self.lifecycle(&mut m, local)?;
-        let rolling = c.host.checked_add(now.0 - c.client).ok_or(Error::Clock)?;
+        let rolling = c.host.checked_add(local - c.client).ok_or(Error::Clock)?;
         let base = m
             .last_host
             .checked_add(local - m.last_client)
@@ -464,10 +468,12 @@ impl State {
         // Paused samples still advance this cursor, including maintenance
         // clocks. No fresh-looking fallback clock can extend a retained item.
         *c = Cursor {
-            // The concurrent host sample already includes owner progress up
-            // to `local`. Pair it with that same instant so another overtaken
-            // sample cannot count the intervening duration a second time.
-            client: if concurrent { local } else { now.0 },
+            sampled_client,
+            // Every host sample already includes owner progress up to `local`.
+            // Keep its accounting anchor separate from the consumer's raw
+            // sample so overtaking neither double-counts time nor hides a
+            // genuine regression on an independently ordered consumer.
+            client: local,
             host,
         };
         self.ready_at(&mut m, local, host, require_view)?;
