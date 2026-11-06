@@ -5,6 +5,8 @@ fr send NODE_ID --connection-id ID --status [--json]
 fr send NODE_ID --connection-id ID --lease HANDLE --send /absolute/path... [--json]
 fr send NODE_ID --connection-id ID --lease HANDLE --status [--request N] [--json]
 fr send NODE_ID --connection-id ID --lease HANDLE --cancel N [--json]
+fr send NODE_ID --connection-id ID --lease HANDLE --pause N [--json]
+fr send NODE_ID --connection-id ID --lease HANDLE --resume N [--json]
 
 Start with explicit --file-commands, alone or with initial --send / --file-drop.
 Host approval, control and frd --files DIR are still required. Find connection_id
@@ -16,13 +18,23 @@ traversal refuse. After the separately bounded foreground lookup, the file-owner
 request has one two-second budget, including selection; neither phase retries.
 Finish the previous transfer before another selection; an earlier paused batch
 still holds the intake and original cumulative limits remain in force. Inspect
-command batches with --status --request N and cancel them with --cancel N; the
-original panel/hotkeys keep their original selection, and no CLI pause is added.
+command batches with --status --request N. --pause N / --resume N change only that
+batch's original pacing intent; --cancel N requests its cancellation. The original
+panel/hotkeys keep their original selection.
+Pause gates new source/record admission; already admitted bytes and preparation
+may finish. Original expiry, authority checks, receipts and cleanup keep running.
+pause_requested is local intent; paused is the sender's last gate observation,
+unknown until observed. They can differ after either command. The command's
+pacing_changed_by_command means an intent transition only; false also covers a
+duplicate or terminal/cancelled batch. Resume never recreates expired work.
 Up to 64 exact request results remain until owner cleanup.
 Admission/queued bytes do not prove host publication; inspect the request's actual
 receipt, uncertainty and cleanup. --cancel N only requests that original batch's
 cancellation and cannot erase earlier effects or cancel a successor's handle.
-After an unknown reply inspect the SAME file lease; never automatically resend.
+After an unknown reply inspect the SAME file lease; never automatically repeat
+a send, pause or resume. New clients use local protocol v2 and refuse an older
+owner before any command; there is no fallback. Current owners still accept
+existing v1 send/status/cancel clients, whose pause fields remain unavailable.
 No new connection is opened. Same-user kernel credentials and the exact node,
 connection and file lease are checked before sending. File command consent is
 spent at the first upload setup, even if control has not yet been granted.

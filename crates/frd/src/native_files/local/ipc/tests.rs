@@ -37,6 +37,7 @@ fn connection() -> String {
 struct Records {
     paths: Vec<Vec<PathBuf>>,
     cancelled: Vec<bool>,
+    pause_requested: Vec<bool>,
 }
 #[derive(Default)]
 struct Probe {
@@ -84,6 +85,7 @@ impl Handler for Probe {
             status.selected = u16::try_from(paths.len()).unwrap();
             status.phase = Phase::WaitingForControl;
             status.cancel_requested = records.cancelled[index];
+            status.pause_requested = Some(records.pause_requested[index]);
         }
         Ok(status)
     }
@@ -110,6 +112,7 @@ impl Handler for Probe {
         let mut records = self.records.lock().unwrap();
         records.paths.push(paths.to_vec());
         records.cancelled.push(false);
+        records.pause_requested.push(false);
         drop(records);
         self.status(None)
     }
@@ -124,6 +127,18 @@ impl Handler for Probe {
         *cancelled = true;
         drop(records);
         Ok((self.status(Some(sequence))?, requested))
+    }
+    fn set_paused(&self, sequence: u64, paused: bool) -> Result<(Status, bool), Error> {
+        let mut records = self.records.lock().unwrap();
+        let index = usize::try_from(sequence.checked_sub(1).ok_or(Error::InvalidRequest)?).unwrap();
+        let cancelled = *records.cancelled.get(index).ok_or(Error::UnknownRequest)?;
+        let intent = &mut records.pause_requested[index];
+        let changed = !cancelled && *intent != paused;
+        if changed {
+            *intent = paused;
+        }
+        drop(records);
+        Ok((self.status(Some(sequence))?, changed))
     }
     fn close(&self) {
         self.closed.store(true, Ordering::Release);
@@ -378,7 +393,13 @@ fn trailing_bytes_and_oversized_headers_never_reach_the_selection_worker() {
     let payload = wire::paths(&["/one".into()]).unwrap();
     write(
         &mut stream,
-        &wire::command(wire::Command::Send(1), instance, payload.len()).unwrap(),
+        &wire::command(
+            wire::Version::V1,
+            wire::Command::Send(1),
+            instance,
+            payload.len(),
+        )
+        .unwrap(),
         until,
     )
     .unwrap();
@@ -387,14 +408,27 @@ fn trailing_bytes_and_oversized_headers_never_reach_the_selection_worker() {
     stream.shutdown(Shutdown::Write).unwrap();
     let mut response = [0; wire::RESULT_BYTES];
     read(&mut stream, &mut response, until).unwrap();
-    assert_eq!(wire::result(&response, instance), Err(Error::Protocol));
+    assert_eq!(
+        wire::result(wire::Version::V1, &response, instance),
+        Err(Error::Protocol)
+    );
 
     let (mut stream, instance, until) = raw(&owner);
-    let mut header = wire::command(wire::Command::Send(1), instance, payload.len()).unwrap();
+    let mut header = wire::command(
+        wire::Version::V1,
+        wire::Command::Send(1),
+        instance,
+        payload.len(),
+    )
+    .unwrap();
     header[34..38].copy_from_slice(&u32::MAX.to_be_bytes());
     write(&mut stream, &header, until).unwrap();
     stream.shutdown(Shutdown::Write).unwrap();
-    assert!(read(&mut stream, &mut response, until).is_err());
+    read(&mut stream, &mut response, until).unwrap();
+    assert_eq!(
+        wire::result(wire::Version::V1, &response, instance),
+        Err(Error::InvalidPaths)
+    );
     assert_eq!(handler.records.lock().unwrap().paths.len(), 0);
     stop(&owner);
 }
@@ -406,7 +440,13 @@ fn command_requires_end_of_frame_and_keeps_the_original_handshake_budget() {
     let payload = wire::paths(&["/not-yet-consented".into()]).unwrap();
     write(
         &mut stream,
-        &wire::command(wire::Command::Send(1), instance, payload.len()).unwrap(),
+        &wire::command(
+            wire::Version::V1,
+            wire::Command::Send(1),
+            instance,
+            payload.len(),
+        )
+        .unwrap(),
         until,
     )
     .unwrap();
@@ -540,7 +580,12 @@ fn a_lost_or_malformed_post_command_reply_is_never_a_safe_retry() {
         stream.read_exact(&mut identify).unwrap();
         assert_eq!(identify, wire::IDENTIFY);
         stream
-            .write_all(&wire::identity_record(&target, instance, Status::default()))
+            .write_all(&wire::identity_record(
+                wire::Version::V1,
+                &target,
+                instance,
+                Status::default(),
+            ))
             .unwrap();
         let mut command = Vec::new();
         (&mut stream)
@@ -618,13 +663,19 @@ fn status_codec_retains_partial_evidence_and_rejects_ambiguous_refusal_frames() 
         complete: false,
         failed: true,
         cancel_requested: true,
+        pause_requested: None,
+        paused: None,
         queued_bytes: Some(12_345),
         total_bytes: Some(50_000),
         cleanup: Cleanup::Failed,
     };
-    let response = wire::result_record(instance, Ok((status, true)));
+    let response = wire::result_record(wire::Version::V1, instance, Ok((status, true)));
     assert_eq!(
-        wire::result(response.as_slice().try_into().unwrap(), instance),
+        wire::result(
+            wire::Version::V1,
+            response.as_slice().try_into().unwrap(),
+            instance
+        ),
         Ok((status, true))
     );
     let completed = Status {
@@ -633,30 +684,392 @@ fn status_codec_retains_partial_evidence_and_rejects_ambiguous_refusal_frames() 
         cleanup: Cleanup::Confirmed,
         ..status
     };
-    let response = wire::result_record(instance, Ok((completed, false)));
+    let response = wire::result_record(wire::Version::V1, instance, Ok((completed, false)));
     assert_eq!(
-        wire::result(response.as_slice().try_into().unwrap(), instance),
+        wire::result(
+            wire::Version::V1,
+            response.as_slice().try_into().unwrap(),
+            instance
+        ),
         Ok((completed, false))
     );
     let refusal = Error::Selection {
         index: 7,
         reason: SelectionFailure::Changed,
     };
-    let response = wire::result_record(instance, Err(refusal));
+    let response = wire::result_record(wire::Version::V1, instance, Err(refusal));
     assert_eq!(
-        wire::result(response.as_slice().try_into().unwrap(), instance),
+        wire::result(
+            wire::Version::V1,
+            response.as_slice().try_into().unwrap(),
+            instance
+        ),
         Err(refusal)
     );
-    let mut ambiguous = wire::result_record(instance, Err(Error::Busy));
+    let mut ambiguous = wire::result_record(wire::Version::V1, instance, Err(Error::Busy));
     ambiguous[28] = 1;
     assert_eq!(
-        wire::result(ambiguous.as_slice().try_into().unwrap(), instance),
+        wire::result(
+            wire::Version::V1,
+            ambiguous.as_slice().try_into().unwrap(),
+            instance
+        ),
         Err(Error::OutcomeUnknown)
     );
-    let mut ambiguous = wire::result_record(instance, Err(Error::Busy));
+    let mut ambiguous = wire::result_record(wire::Version::V1, instance, Err(Error::Busy));
     ambiguous[27] = 1;
     assert_eq!(
-        wire::result(ambiguous.as_slice().try_into().unwrap(), instance),
+        wire::result(
+            wire::Version::V1,
+            ambiguous.as_slice().try_into().unwrap(),
+            instance
+        ),
         Err(Error::OutcomeUnknown)
     );
+}
+
+#[test]
+fn versioned_status_keeps_pause_intent_separate_and_legacy_observations_unknown() {
+    use wire::Version::{V1, V2};
+    let instance = [42; 16];
+    for (requested, observed) in [
+        (None, None),
+        (Some(true), None),
+        (Some(true), Some(false)),
+        (Some(false), Some(true)),
+        (Some(true), Some(true)),
+    ] {
+        let status = Status {
+            sequence: 3,
+            selected: 2,
+            started: 2,
+            published: 1,
+            publication_unknown: 1,
+            cleanup: Cleanup::Confirmed,
+            pause_requested: requested,
+            paused: observed,
+            ..Status::default()
+        };
+        let legacy = Status {
+            pause_requested: None,
+            paused: None,
+            ..status
+        };
+        for (version, expected) in [(V1, legacy), (V2, status)] {
+            let response = wire::result_record(version, instance, Ok((status, false)));
+            assert_eq!(response.len(), wire::RESULT_BYTES);
+            assert_eq!(
+                wire::result(version, response.as_slice().try_into().unwrap(), instance),
+                Ok((expected, false))
+            );
+            let identity = wire::identity_record(version, "owner", instance, status);
+            assert_eq!(
+                wire::identity(
+                    version,
+                    identity[..wire::IDENTITY_BYTES].try_into().unwrap()
+                ),
+                Ok((instance, 5, expected))
+            );
+        }
+    }
+}
+
+#[test]
+fn pacing_commands_require_v2_exact_request_and_empty_payload() {
+    use wire::Version::{V1, V2};
+    let instance = [43; 16];
+    for operation in [wire::Command::Pause(8), wire::Command::Resume(8)] {
+        assert_eq!(
+            wire::command(V1, operation, instance, 0),
+            Err(Error::InvalidRequest)
+        );
+        let header = wire::command(V2, operation, instance, 0).unwrap();
+        let (parsed, actual, length) = wire::header(V2, &header).unwrap();
+        assert!(matches!(
+            parsed,
+            wire::Command::Pause(8) | wire::Command::Resume(8)
+        ));
+        assert_eq!((actual, length), (instance, 0));
+        assert!(wire::header(V1, &header).is_err());
+        let mut legacy_opcode = header;
+        legacy_opcode[4] = b'1';
+        assert!(wire::header(V1, &legacy_opcode).is_err());
+        for offset in [31, 33, 37] {
+            let mut malformed = header;
+            if offset == 31 {
+                malformed[24..32].fill(0);
+            } else {
+                malformed[offset] = 1;
+            }
+            assert!(wire::header(V2, &malformed).is_err());
+        }
+        let mut unknown = header;
+        unknown[5..7].copy_from_slice(b"XX");
+        assert!(wire::header(V2, &unknown).is_err());
+    }
+    assert_eq!(
+        wire::command(V2, wire::Command::Pause(0), instance, 0),
+        Err(Error::InvalidRequest)
+    );
+    assert_eq!(
+        wire::command(V2, wire::Command::Resume(0), instance, 0),
+        Err(Error::InvalidRequest)
+    );
+    assert_eq!(
+        upload::pause("unopened", "unopened", 0),
+        Err(Error::InvalidRequest)
+    );
+    assert_eq!(
+        upload::resume("unopened", "unopened", 0),
+        Err(Error::InvalidRequest)
+    );
+    assert_eq!(
+        wire::Version::from_identify(b"FRFS3ID\0"),
+        Err(Error::Protocol)
+    );
+}
+
+#[test]
+fn malformed_or_cross_version_pacing_reply_keeps_outcome_unknown() {
+    use wire::Version::{V1, V2};
+    let instance = [44; 16];
+    let status = Status {
+        sequence: 1,
+        selected: 1,
+        pause_requested: Some(true),
+        ..Status::default()
+    };
+    let valid = wire::result_record(V2, instance, Ok((status, true)));
+    assert_eq!(
+        wire::result(V1, valid.as_slice().try_into().unwrap(), instance),
+        Err(Error::OutcomeUnknown)
+    );
+    for offset in [28 + 6, 28 + 7, 28 + 30] {
+        let mut malformed = valid.clone();
+        malformed[offset] = 3;
+        assert_eq!(
+            wire::result(V2, malformed.as_slice().try_into().unwrap(), instance),
+            Err(Error::OutcomeUnknown)
+        );
+    }
+    let mut refusal = wire::result_record(V2, instance, Err(Error::Busy));
+    refusal[28 + 6] = 2;
+    assert_eq!(
+        wire::result(V2, refusal.as_slice().try_into().unwrap(), instance),
+        Err(Error::OutcomeUnknown)
+    );
+}
+
+#[test]
+fn live_upload_pacing_targets_only_its_retained_request_and_original_lease() {
+    let connection = connection();
+    let handler = Arc::new(Probe::default());
+    let owner = Owner::bind_upload(&connection, handler.clone()).unwrap();
+    let info = upload::inspect(&connection).unwrap();
+    for _ in 0..2 {
+        upload::send(&connection, &info.instance, &["/explicit".into()]).unwrap();
+    }
+    let paused = upload::pause(&connection, &info.instance, 1).unwrap();
+    assert!(paused.changed);
+    assert_eq!(paused.info.status.pause_requested, Some(true));
+    assert_eq!(
+        paused.info.status.paused, None,
+        "recording handler proves delivery, not sender effect"
+    );
+    assert!(
+        !upload::pause(&connection, &info.instance, 1)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        upload::status(&connection, &info.instance, Some(2))
+            .unwrap()
+            .status
+            .pause_requested,
+        Some(false)
+    );
+    assert_eq!(
+        upload::resume(&connection, &"f".repeat(32), 1),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        upload::resume(&connection, &info.instance, 3),
+        Err(Error::UnknownRequest)
+    );
+    assert!(
+        upload::resume(&connection, &info.instance, 1)
+            .unwrap()
+            .changed
+    );
+    upload::pause(&connection, &info.instance, 1).unwrap();
+    upload::cancel(&connection, &info.instance, 1).unwrap();
+    let terminal = upload::resume(&connection, &info.instance, 1).unwrap();
+    assert!(!terminal.changed);
+    assert!(terminal.info.status.cancel_requested);
+    assert_eq!(terminal.info.status.pause_requested, Some(true));
+    assert_eq!(handler.records.lock().unwrap().paths.len(), 2);
+    stop(&owner);
+}
+
+/// Real old-client framing against the current upload owner, including kernel
+/// credentials and the original single budget; no fallback or second selection.
+fn legacy_upload(
+    target: &str,
+    instance: [u8; 16],
+    header: [u8; wire::COMMAND_BYTES],
+    payload: &[u8],
+) -> Result<(Status, bool), Error> {
+    let until = Instant::now().checked_add(HANDSHAKE).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let mut stream = connect(Scope::Upload, uid, target)?;
+    check_peer(&stream, uid)?;
+    write(&mut stream, &wire::IDENTIFY, until)?;
+    let mut identity = [0; wire::IDENTITY_BYTES];
+    read(&mut stream, &mut identity, until)?;
+    let (actual, length, _) = wire::identity(wire::Version::V1, &identity)?;
+    assert_eq!(actual, instance);
+    let mut name = [0; MAX_NAME];
+    read(&mut stream, &mut name[..length], until)?;
+    assert_eq!(&name[..length], target.as_bytes());
+    write(&mut stream, &header, until)?;
+    write(&mut stream, payload, until)?;
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut response = [0; wire::RESULT_BYTES];
+    read(&mut stream, &mut response, until)?;
+    wire::result(wire::Version::V1, &response, instance)
+}
+
+#[test]
+fn current_owner_serves_old_upload_clients_and_refuses_old_pacing_opcodes() {
+    use wire::Version::{V1, V2};
+    let connection = connection();
+    let handler = Arc::new(Probe::default());
+    let owner = Owner::bind_upload(&connection, handler.clone()).unwrap();
+    let info = owner.info().unwrap();
+    let instance = wire::parse_instance(&info.instance).unwrap();
+    let payload = wire::paths(&["/old-client-selection".into()]).unwrap();
+    let send = wire::command(V1, wire::Command::Send(1), instance, payload.len()).unwrap();
+    let (status, _) = legacy_upload(&connection, instance, send, &payload).unwrap();
+    assert_eq!(status.sequence, 1);
+    assert_eq!(
+        status.pause_requested, None,
+        "v1 cannot report a new observation as false"
+    );
+    upload::pause(&connection, &info.instance, 1).unwrap();
+    let status = wire::command(V1, wire::Command::Status(Some(1)), instance, 0).unwrap();
+    assert_eq!(
+        legacy_upload(&connection, instance, status, &[])
+            .unwrap()
+            .0
+            .paused,
+        None
+    );
+    let mut unsupported = wire::command(V2, wire::Command::Resume(1), instance, 0).unwrap();
+    unsupported[4] = b'1';
+    assert_eq!(
+        legacy_upload(&connection, instance, unsupported, &[]),
+        Err(Error::Protocol)
+    );
+    assert_eq!(handler.records.lock().unwrap().pause_requested, vec![true]);
+    let cancel = wire::command(V1, wire::Command::Cancel(1), instance, 0).unwrap();
+    assert!(legacy_upload(&connection, instance, cancel, &[]).unwrap().1);
+    stop(&owner);
+}
+
+#[test]
+fn new_upload_client_refuses_legacy_owner_before_command_without_fallback() {
+    let connection = connection();
+    let uid = rustix::process::geteuid().as_raw();
+    let address = SocketAddr::from_abstract_name(name(Scope::Upload, uid, &connection)).unwrap();
+    let listener = UnixListener::bind_addr(&address).unwrap();
+    let instance = [74; 16];
+    let client_target = connection.clone();
+    let peer = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(HANDSHAKE)).unwrap();
+        stream.set_write_timeout(Some(HANDSHAKE)).unwrap();
+        let mut identify = [0; 8];
+        stream.read_exact(&mut identify).unwrap();
+        assert_eq!(identify, wire::Version::V2.identify());
+        // A legacy owner cannot authenticate a V2 status contract. Returning
+        // its old identity must fail before any command write, with no retry.
+        stream
+            .write_all(&wire::identity_record(
+                wire::Version::V1,
+                &connection,
+                instance,
+                Status::default(),
+            ))
+            .unwrap();
+        let mut command = [0; wire::COMMAND_BYTES];
+        match stream.read(&mut command) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            result => panic!("legacy owner received command bytes: {result:?}"),
+        }
+    });
+    assert_eq!(
+        upload::pause(&client_target, &wire::hex(&instance), 9),
+        Err(Error::Protocol),
+        "a post-command failure would instead be OutcomeUnknown"
+    );
+    peer.join().unwrap();
+}
+
+#[test]
+fn v2_pacing_post_command_lost_malformed_or_legacy_reply_is_unknown_without_replay() {
+    for mode in 0..3 {
+        let connection = connection();
+        let uid = rustix::process::geteuid().as_raw();
+        let address =
+            SocketAddr::from_abstract_name(name(Scope::Upload, uid, &connection)).unwrap();
+        let listener = UnixListener::bind_addr(&address).unwrap();
+        let instance = [75; 16];
+        let client_target = connection.clone();
+        let peer = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(HANDSHAKE)).unwrap();
+            stream.set_write_timeout(Some(HANDSHAKE)).unwrap();
+            let mut identify = [0; 8];
+            stream.read_exact(&mut identify).unwrap();
+            assert_eq!(identify, wire::Version::V2.identify());
+            stream
+                .write_all(&wire::identity_record(
+                    wire::Version::V2,
+                    &connection,
+                    instance,
+                    Status::default(),
+                ))
+                .unwrap();
+            let mut command = [0; wire::COMMAND_BYTES];
+            stream.read_exact(&mut command).unwrap();
+            let (operation, original, length) = wire::header(wire::Version::V2, &command).unwrap();
+            assert!(matches!(operation, wire::Command::Pause(9)));
+            assert_eq!((original, length), (instance, 0));
+            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+            if mode == 0 {
+                return;
+            }
+            let status = Status {
+                sequence: 9,
+                pause_requested: Some(true),
+                ..Status::default()
+            };
+            let version = if mode == 1 {
+                wire::Version::V1
+            } else {
+                wire::Version::V2
+            };
+            let mut response = wire::result_record(version, instance, Ok((status, true)));
+            if mode == 2 {
+                response[28 + 7] = 3;
+            }
+            stream.write_all(&response).unwrap();
+        });
+        assert_eq!(
+            upload::pause(&client_target, &wire::hex(&instance), 9),
+            Err(Error::OutcomeUnknown)
+        );
+        peer.join().unwrap();
+    }
 }

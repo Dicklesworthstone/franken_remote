@@ -6,6 +6,8 @@ pub(super) enum Action {
     Send(Vec<PathBuf>),
     Status(Option<u64>),
     Cancel(u64),
+    Pause(u64),
+    Resume(u64),
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Options {
@@ -37,7 +39,7 @@ impl Options {
         }
         let (mut connection, mut lease) = (None, None);
         let (mut status, mut json) = (false, false);
-        let (mut request, mut cancel) = (None, None);
+        let (mut request, mut cancel, mut pacing) = (None, None, None);
         let mut paths = Vec::new();
         let mut path_bytes = 0_usize;
         while let Some(arg) = iter.next() {
@@ -50,6 +52,10 @@ impl Options {
                 "--lease" if lease.is_none() => lease = Some(handle(iter.next())?),
                 "--request" if request.is_none() => request = Some(number(iter.next())?),
                 "--cancel" if cancel.is_none() => cancel = Some(number(iter.next())?),
+                "--pause" if pacing.is_none() => pacing = Some(Action::Pause(number(iter.next())?)),
+                "--resume" if pacing.is_none() => {
+                    pacing = Some(Action::Resume(number(iter.next())?));
+                }
                 "--send" => {
                     let value = iter.next().ok_or(Invalid)?;
                     let path = PathBuf::from(value);
@@ -70,16 +76,12 @@ impl Options {
             }
         }
         let connection = connection.ok_or(Invalid)?;
-        let action = if status && cancel.is_none() && paths.is_empty() {
-            Action::Status(request)
-        } else if let Some(sequence) =
-            cancel.filter(|_| !status && request.is_none() && paths.is_empty())
-        {
-            Action::Cancel(sequence)
-        } else if !status && request.is_none() && cancel.is_none() && !paths.is_empty() {
-            Action::Send(paths)
-        } else {
-            return Err(Invalid);
+        let action = match (status, request, cancel, pacing, paths.is_empty()) {
+            (true, request, None, None, true) => Action::Status(request),
+            (false, None, Some(sequence), None, true) => Action::Cancel(sequence),
+            (false, None, None, Some(action), true) => action,
+            (false, None, None, None, false) => Action::Send(paths),
+            _ => return Err(Invalid),
         };
         // Only a read of the latest status may discover an instance. Never
         // discover a replacement and apply an old request or a new selection.

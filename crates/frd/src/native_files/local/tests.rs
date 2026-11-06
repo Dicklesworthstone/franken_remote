@@ -231,3 +231,89 @@ fn old_upload_request_cancellation_cannot_target_a_new_command_or_drop() {
     assert_eq!(handler.status(Some(1)).unwrap().phase, Phase::Finished);
     assert_eq!(handler.results.batches()[0].sequence, 1);
 }
+
+#[test]
+fn upload_pacing_preserves_original_pending_selection_expiry_and_observed_gate() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let intake = SendIntake::new(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        sender::Policy::default(),
+    );
+    let handler = Selections::new(Intake::Upload(intake.clone()));
+    intake.set_ready(true);
+    handler
+        .select(&paths(), until(), &AtomicBool::new(false))
+        .unwrap();
+    let pending = intake.take().unwrap();
+    let original_until = pending.until_us;
+    let original_lifetime = pending.request.lifetime;
+    let paused = handler.set_paused(1, true).unwrap();
+    assert!(paused.1);
+    assert_eq!(paused.0.pause_requested, Some(true));
+    assert_eq!(paused.0.paused, None);
+    assert!(!intake.ready());
+    assert_eq!(
+        handler.select(&paths(), until(), &AtomicBool::new(false)),
+        Err(Error::Busy),
+        "pausing does not admit a successor"
+    );
+    pending
+        .control
+        .observe(None, Some(sender::Stage::Streaming), None, Some(false));
+    let observed = handler.status(Some(1)).unwrap();
+    assert_eq!(observed.pause_requested, Some(true));
+    assert_eq!(observed.paused, Some(false));
+    pending
+        .control
+        .observe(None, Some(sender::Stage::Streaming), None, Some(true));
+    let resumed = handler.set_paused(1, false).unwrap();
+    assert!(resumed.1);
+    assert_eq!(resumed.0.pause_requested, Some(false));
+    assert_eq!(
+        resumed.0.paused,
+        Some(true),
+        "resume cannot fabricate a native acknowledgement"
+    );
+    assert_eq!(pending.until_us, original_until);
+    assert_eq!(pending.request.lifetime, original_lifetime);
+    assert!(intake.take().is_none(), "no command resubmits a selection");
+    assert_eq!(handler.results.batches().len(), 1);
+    assert_eq!(resumed.0.published, 0);
+    assert_eq!(resumed.0.cleanup, Cleanup::Unknown);
+    handler.close();
+}
+
+#[test]
+fn upload_pacing_cannot_revive_cancelled_or_terminal_request_or_touch_unrelated_drop() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let intake = SendIntake::new(
+        runtime.request_cx_with_budget(Budget::INFINITE),
+        sender::Policy::default(),
+    );
+    let handler = Selections::new(Intake::Upload(intake.clone()));
+    intake.set_ready(true);
+    handler
+        .select(&paths(), until(), &AtomicBool::new(false))
+        .unwrap();
+    let first = intake.take().unwrap();
+    assert!(handler.set_paused(1, true).unwrap().1);
+    handler.cancel(1).unwrap();
+    assert!(!handler.set_paused(1, false).unwrap().1);
+    assert!(first.control.snapshot().pause_requested);
+    first
+        .control
+        .update(|status| status.phase = SendPhase::Finished);
+    intake.set_ready(true);
+    let dropped = intake
+        .submit(Selection::select(&paths()).unwrap().request().unwrap())
+        .unwrap();
+    let _drop = intake.take().unwrap();
+    assert!(!handler.set_paused(1, false).unwrap().1);
+    assert_eq!(handler.set_paused(0, true), Err(Error::InvalidRequest));
+    assert_eq!(handler.set_paused(2, true), Err(Error::UnknownRequest));
+    assert!(!dropped.snapshot().pause_requested);
+    assert!(!dropped.snapshot().cancel_requested);
+    handler.close();
+    assert_eq!(handler.set_paused(1, false), Err(Error::Closed));
+    assert!(!dropped.snapshot().pause_requested);
+}

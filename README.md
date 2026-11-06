@@ -108,8 +108,10 @@ For later selections from another local command, explicitly add `--file-commands
 to the original control connection. Use `fr robot session status NODE_ID --json`
 to obtain its connection ID, then `fr send NODE_ID --connection-id ID --status`
 to obtain the original file lease. Submit with `fr send NODE_ID --connection-id ID
---lease HANDLE --send /absolute/path`; inspect or cancel its returned request
-with `--status --request N` or `--cancel N`. Commands reuse the original bounded
+--lease HANDLE --send /absolute/path`; inspect its returned request with
+`--status --request N`, change its pacing with `--pause N` / `--resume N`, or cancel
+with `--cancel N`. Pause intent and the sender's observed gate are reported
+separately; original deadlines continue. Commands reuse the original bounded
 upload intake and never reconnect, renew file consent or retry an uncertain send.
 See [live upload commands](NATIVE_FILE_SEND.md#local-commands-on-the-original-client-upload).
 

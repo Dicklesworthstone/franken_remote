@@ -91,3 +91,53 @@ fn lost_reply_and_selection_refusal_keep_handles_but_never_paths() {
     assert!(refusal.text.contains("Selection #3: symlink"));
     assert!(!refusal.text.contains("do-not-disclose"));
 }
+
+#[test]
+fn pacing_reports_local_intent_and_observed_gate_without_claiming_an_acknowledgement() {
+    let mut command = command(Action::Resume(9));
+    let observed = info(Status {
+        sequence: 9,
+        selected: 2,
+        started: 2,
+        published: 1,
+        publication_unknown: 1,
+        pause_requested: Some(false),
+        paused: Some(true),
+        ..Status::default()
+    });
+    let output = json(&success(
+        &command,
+        &observed,
+        "resume_requested",
+        Some(true),
+    ));
+    let data = &output["data"];
+    assert_eq!(data["request"], 9);
+    assert_eq!(data["pacing_changed_by_command"], true);
+    assert!(data["cancellation_requested_by_command"].is_null());
+    assert_eq!(data["pause_requested"], false);
+    assert_eq!(data["paused"], true);
+    assert_eq!(data["published"], 1);
+    assert_eq!(data["publication_unknown"], 1);
+    command.json = false;
+    let text = success(&command, &observed, "resume_requested", Some(true)).text;
+    assert!(text.contains("Resume intent changed: true"));
+    assert!(text.contains("Pause requested: false; sender last observed paused: true"));
+    let unknown = info(Status::default());
+    assert!(
+        success(&command, &unknown, "status", None)
+            .text
+            .contains("Pause requested: unknown")
+    );
+}
+
+#[test]
+fn pacing_refusal_and_uncertain_reply_retain_only_the_original_request() {
+    for action in [Action::Pause(4), Action::Resume(4)] {
+        let command = command(action);
+        let output = json(&failure(&command, Error::OutcomeUnknown));
+        assert_eq!(output["outcome"], "unknown_external_effect");
+        assert_eq!(output["data"]["request"], 4);
+        assert_eq!(output["data"]["lease"], command.lease.unwrap());
+    }
+}

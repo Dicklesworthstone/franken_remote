@@ -378,6 +378,8 @@ fr send NODE_ID --connection-id ID --status --json
 fr send NODE_ID --connection-id ID --lease HANDLE --send /absolute/file --send /absolute/tree --json
 fr send NODE_ID --connection-id ID --lease HANDLE --status --request N --json
 fr send NODE_ID --connection-id ID --lease HANDLE --cancel N --json
+fr send NODE_ID --connection-id ID --lease HANDLE --pause N --json
+fr send NODE_ID --connection-id ID --lease HANDLE --resume N --json
 ```
 
 The host still needs its explicit `--files DIR`, approval and control grant.
@@ -397,8 +399,9 @@ the original `SendIntake`: an unfinished or paused transfer, cancelled intake,
 expired authority or spent cumulative quota still refuses the next selection.
 
 Each admitted command has its own retained request number, receipts and exact
-cancellation handle. Use `fr send --status --request N` and `--cancel N` for these
-batches; the original upload panel and shortcuts keep their original selection.
+control handle. Use `fr send --status --request N`, `--pause N`, `--resume N`
+and `--cancel N` for these batches; the original upload panel and shortcuts keep
+their original selection.
 At most 64 command results remain until owner cleanup. Local admission and queued
 bytes do not prove publication; the report separates published/refused items,
 unknown publication, unknown durability and source cleanup. Cancellation cannot
@@ -408,6 +411,30 @@ output includes admitted command outcomes without paths, names or contents.
 `first_index` and `selected` count in the `index` fields of `files_sent` /
 `files_refused`, so mixed
 initial, dropped and command selections retain exact attribution after cleanup.
+
+Pause and resume change the pacing intent of that exact retained request.
+They gate new source and record admission; already admitted bytes or preparation
+may finish. Original batch/transfer/record expiry, current authority checks,
+receipts and cleanup continue while paused. A pause command never makes the
+intake ready for another selection or extends a lifetime. Resume cannot revive
+a cancelled or terminal transfer, target another batch, or reopen an intake.
+
+Status separates `pause_requested` (latest local intent) from `paused` (the
+original sender's last observed admission gate). Either can be unknown when
+unavailable; a fresh command can legitimately leave the two values different.
+`pacing_changed_by_command` reports only whether this command changed the local
+intent. False includes a duplicate request or a cancelled/terminal transfer;
+true does not prove immediate pause, draining, rollback or remote publication.
+After an ambiguous response inspect the same connection and file lease without
+automatically repeating the command.
+
+Local protocol v2 selects its version at identification and keeps it for every
+fixed-size frame. New upload clients refuse an older owner at identification,
+before sending a mutation; there is no automatic fallback. Current owners still
+serve existing v1 send/status/cancel clients with the original reserved bytes
+zero, so v1 pause observations remain unavailable. Mixed versions and unknown
+opcodes refuse before dispatch; a lost, malformed or mismatched post-command
+reply remains an unknown outcome.
 
 Consent is spent at the first upload setup, even if control has not yet been
 requested. A startup or viewing retry, display change or fresh F8 control does
@@ -419,7 +446,10 @@ from falsely authorizing another attempt.
 
 The exact production IPC/parser/report sources compile together independently
 of the transport runtime. Portable parsing, framing/credential and result
-regressions run locally; abstract-socket integration tests are blocked here by
-`bind` returning `EPERM`. Real `SendIntake` cancellation/result-retention and
-native retry/consent regressions are included as runtime-dependent targets.
+regressions run locally. The actual peer state machine also runs over Unix
+socket pairs, covering both versions, exact pacing dispatch, retained status
+samples and refusal before dispatch. Creating named Unix sockets is blocked
+here by `EPERM`, so endpoint namespace and public-client integration tests
+remain pending. Real `SendIntake` pacing/expiry/isolation, cancellation/result
+retention and native retry/consent regressions are runtime-dependent targets.
 These checks do not establish live-tailnet or native desktop qualification.

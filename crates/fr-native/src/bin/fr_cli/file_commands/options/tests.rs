@@ -118,3 +118,31 @@ fn no_ambiguous_action_or_handle_can_reach_ipc() {
         );
     }
 }
+
+#[test]
+fn pacing_requires_one_explicit_action_exact_request_and_original_file_lease() {
+    for (flag, expected) in [
+        ("--pause", Action::Pause(19)),
+        ("--resume", Action::Resume(19)),
+    ] {
+        assert_eq!(
+            parse(&["--lease", LEASE, flag, "19"]).unwrap().action,
+            expected
+        );
+        for invalid in [
+            vec![flag, "19"],
+            vec!["--lease", LEASE, flag],
+            vec!["--lease", LEASE, flag, "0"],
+            vec!["--lease", LEASE, flag, "+1"],
+            vec!["--lease", LEASE, flag, "18446744073709551616"],
+            vec!["--lease", LEASE, flag, "1", "--status"],
+            vec!["--lease", LEASE, flag, "1", "--request", "1"],
+            vec!["--lease", LEASE, flag, "1", "--send", "/file"],
+            vec!["--lease", LEASE, flag, "1", "--cancel", "1"],
+            vec!["--lease", LEASE, flag, "1", "--pause", "2"],
+            vec!["--lease", LEASE, flag, "1", "--resume", "2"],
+        ] {
+            assert_eq!(parse(&invalid), Err(Invalid), "{invalid:?}");
+        }
+    }
+}

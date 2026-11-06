@@ -24,6 +24,12 @@ enum Scope {
     Upload,
 }
 impl Scope {
+    fn version(self) -> wire::Version {
+        match self {
+            Self::Host => wire::Version::V1,
+            Self::Upload => wire::Version::V2,
+        }
+    }
     fn check_target(self, target: &str) -> Result<(), Error> {
         check_target(target)?;
         if matches!(self, Self::Upload) {
@@ -84,7 +90,7 @@ pub enum Error {
     Unavailable,
     Protocol,
     Timeout,
-    /// The original owner may have admitted the selection or cancellation.
+    /// The original owner may have admitted the selection or changed its local control.
     OutcomeUnknown,
 }
 impl fmt::Display for Error {
@@ -149,6 +155,10 @@ pub struct Status {
     pub complete: bool,
     pub failed: bool,
     pub cancel_requested: bool,
+    /// Latest local intent; unavailable for legacy V1 peers or no selection.
+    pub pause_requested: Option<bool>,
+    /// Last original-sender observation, not acknowledgement of the latest intent.
+    pub paused: Option<bool>,
     pub queued_bytes: Option<u64>,
     pub total_bytes: Option<u64>,
     pub cleanup: Cleanup,
@@ -172,6 +182,14 @@ pub struct Cancellation {
     pub requested: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pacing {
+    pub info: Info,
+    /// This command changed the original local intent, not necessarily the
+    /// sender's current gate. The status retains those observations separately.
+    pub changed: bool,
+}
+
 /// The socket worker handles only bounded metadata. Source selection belongs
 /// to the one separate worker; neither callback runs on the authority runtime.
 pub(super) trait Handler: Send + Sync + 'static {
@@ -183,6 +201,7 @@ pub(super) trait Handler: Send + Sync + 'static {
         stopped: &AtomicBool,
     ) -> Result<Status, Error>;
     fn cancel(&self, sequence: u64) -> Result<(Status, bool), Error>;
+    fn set_paused(&self, sequence: u64, paused: bool) -> Result<(Status, bool), Error>;
     fn close(&self);
 }
 
@@ -245,7 +264,7 @@ fn command(
     if instance != expected {
         return Err(Error::WrongInstance);
     }
-    let request = wire::command(command, instance, payload.len())?;
+    let request = wire::command(scope.version(), command, instance, payload.len())?;
     // From the first command write onward a lost reply cannot prove refusal.
     let result = (|| {
         write(&mut stream, &request, until)?;
@@ -258,21 +277,27 @@ fn command(
         Ok(bytes)
     })()
     .map_err(|_: Error| Error::OutcomeUnknown)?;
-    let (status, cancelled) = wire::result(&result, instance)?;
+    let (status, changed) = wire::result(scope.version(), &result, instance)?;
     let matches = match command {
         wire::Command::Send(count) => {
-            status.sequence != 0 && usize::from(status.selected) == count && !cancelled
+            status.sequence != 0 && usize::from(status.selected) == count && !changed
         }
         wire::Command::Status(sequence) => {
-            sequence.is_none_or(|sequence| status.sequence == sequence) && !cancelled
+            sequence.is_none_or(|sequence| status.sequence == sequence) && !changed
         }
         wire::Command::Cancel(sequence) => status.sequence == sequence,
+        wire::Command::Pause(sequence) => {
+            status.sequence == sequence && (!changed || status.pause_requested == Some(true))
+        }
+        wire::Command::Resume(sequence) => {
+            status.sequence == sequence && (!changed || status.pause_requested == Some(false))
+        }
     };
     if !matches {
         return Err(Error::OutcomeUnknown);
     }
     info.status = status;
-    Ok((info, cancelled))
+    Ok((info, changed))
 }
 
 fn identify(scope: Scope, target: &str) -> Result<(UnixStream, Info, [u8; 16], Instant), Error> {
@@ -283,10 +308,10 @@ fn identify(scope: Scope, target: &str) -> Result<(UnixStream, Info, [u8; 16], I
     let uid = rustix::process::geteuid().as_raw();
     let mut stream = connect(scope, uid, target)?;
     check_peer(&stream, uid)?;
-    write(&mut stream, &wire::IDENTIFY, until)?;
+    write(&mut stream, &scope.version().identify(), until)?;
     let mut bytes = [0; wire::IDENTITY_BYTES];
     read(&mut stream, &mut bytes, until)?;
-    let (instance, length, status) = wire::identity(&bytes)?;
+    let (instance, length, status) = wire::identity(scope.version(), &bytes)?;
     let mut name = [0; MAX_NAME];
     read(&mut stream, &mut name[..length], until)?;
     if name[..length] != *target.as_bytes() {

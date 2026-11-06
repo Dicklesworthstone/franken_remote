@@ -25,8 +25,8 @@ use std::{
 mod ipc;
 pub use ipc::{
     Cancellation, Cleanup, Error, Info, MAX_HISTORY, MAX_PATH_BYTES, MAX_PATHS,
-    MAX_TOTAL_PATH_BYTES, Phase, SelectionFailure, Stage, Status, Submission, cancel, inspect,
-    send, status, upload, validate_target,
+    MAX_TOTAL_PATH_BYTES, Pacing, Phase, SelectionFailure, Stage, Status, Submission, cancel,
+    inspect, send, status, upload, validate_target,
 };
 
 /// Owns only this local endpoint and its fixed workers. Drop/stop immediately
@@ -181,6 +181,8 @@ impl Selections {
         };
         status.failed = snapshot.status.absence.is_some();
         status.cancel_requested = snapshot.cancel_requested;
+        status.pause_requested = Some(snapshot.pause_requested);
+        status.paused = snapshot.paused;
         status.queued_bytes = snapshot.current.map(|progress| progress.queued_bytes);
         status.total_bytes = snapshot.current.and_then(|progress| progress.total_bytes);
         status.cleanup = match snapshot.cleanup {
@@ -291,6 +293,21 @@ impl ipc::Handler for Selections {
         let record = records.get(index).ok_or(Error::UnknownRequest)?;
         let requested = record.control.cancel();
         Ok((self.snapshot(&records, Some(sequence))?, requested))
+    }
+    fn set_paused(&self, sequence: u64, paused: bool) -> Result<(Status, bool), Error> {
+        let records = self.records();
+        let index = usize::try_from(sequence.checked_sub(1).ok_or(Error::InvalidRequest)?)
+            .map_err(|_| Error::UnknownRequest)?;
+        let record = records.get(index).ok_or(Error::UnknownRequest)?;
+        if self.intake.is_closed() {
+            return Err(Error::Closed);
+        }
+        let changed = if paused {
+            record.control.pause()
+        } else {
+            record.control.resume()
+        };
+        Ok((self.snapshot(&records, Some(sequence))?, changed))
     }
     fn close(&self) {
         self.intake.close();

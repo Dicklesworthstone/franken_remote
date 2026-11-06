@@ -231,6 +231,7 @@ struct Peer {
     stream: UnixStream,
     until: Instant,
     phase: Phase,
+    version: wire::Version,
     bytes: Vec<u8>,
     used: usize,
 }
@@ -245,6 +246,7 @@ impl Peer {
                 .checked_add(HANDSHAKE)
                 .ok_or(Error::Unavailable)?,
             phase: Phase::Identify,
+            version: wire::Version::V1,
             bytes: vec![0; wire::IDENTIFY.len()],
             used: 0,
         })
@@ -289,7 +291,7 @@ impl Peer {
         }
     }
     fn reply(&mut self, instance: [u8; 16], result: Result<(Status, bool), Error>) {
-        self.bytes = wire::result_record(instance, result);
+        self.bytes = wire::result_record(self.version, instance, result);
         self.used = 0;
         self.phase = Phase::Reply;
     }
@@ -313,6 +315,12 @@ impl Peer {
             }
             wire::Command::Cancel(sequence) => {
                 self.reply(instance, shared.handler.cancel(sequence));
+            }
+            wire::Command::Pause(sequence) => {
+                self.reply(instance, shared.handler.set_paused(sequence, true));
+            }
+            wire::Command::Resume(sequence) => {
+                self.reply(instance, shared.handler.set_paused(sequence, false));
             }
             wire::Command::Send(count) => {
                 let paths = wire::decode_paths(&self.bytes, count)?;
@@ -356,10 +364,13 @@ impl Peer {
                 if !self.receive()? {
                     return Ok(false);
                 }
-                if self.bytes != wire::IDENTIFY {
-                    return Err(Error::Protocol);
-                }
-                self.bytes = wire::identity_record(target, instance, shared.handler.status(None)?);
+                self.version = wire::Version::from_identify(&self.bytes)?;
+                self.bytes = wire::identity_record(
+                    self.version,
+                    target,
+                    instance,
+                    shared.handler.status(None)?,
+                );
                 self.used = 0;
                 self.phase = Phase::Identity;
             }
@@ -374,12 +385,21 @@ impl Peer {
                 if !self.receive()? {
                     return Ok(false);
                 }
-                let (command, expected, length) = wire::header(
+                let (command, expected, length) = match wire::header(
+                    self.version,
                     self.bytes
                         .as_slice()
                         .try_into()
                         .map_err(|_| Error::Protocol)?,
-                )?;
+                ) {
+                    Ok(header) => header,
+                    Err(error) => {
+                        // No callback has run. Unknown/mixed-version opcodes
+                        // receive an explicit refusal, never a pacing effect.
+                        self.reply(instance, Err(error));
+                        return Ok(false);
+                    }
+                };
                 if expected != instance {
                     self.reply(instance, Err(Error::WrongInstance));
                     return Ok(false);
@@ -471,3 +491,6 @@ fn socket_loop(
         thread::park_timeout(TICK);
     }
 }
+
+#[cfg(test)]
+mod pair_tests;

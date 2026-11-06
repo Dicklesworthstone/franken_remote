@@ -21,7 +21,7 @@ pub(crate) fn requested(args: &[String]) -> bool {
 pub(crate) fn run(args: &[String]) -> Result<Output, Failure> {
     let command = options::Options::parse(args).map_err(|_| Failure::new(
         "invalid_file_command",
-        "Use fr send NODE_ID --connection-id ID --status. Sending (--send /absolute/path), history (--status --request N), and cancellation (--cancel N) require the original --lease HANDLE. See fr --help.",
+        "Use fr send NODE_ID --connection-id ID --status. Sending (--send /absolute/path), history (--status --request N), cancellation (--cancel N), and pacing (--pause N / --resume N) require the original --lease HANDLE. See fr --help.",
         2,
     ))?;
     #[cfg(target_os = "linux")]

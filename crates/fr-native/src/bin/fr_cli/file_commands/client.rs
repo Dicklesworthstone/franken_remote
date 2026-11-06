@@ -54,10 +54,18 @@ pub(super) fn run(command: &Options) -> Result<Output, Failure> {
                 )
             })
         }
+        (Action::Pause(sequence), Some(lease)) => {
+            upload::pause(&command.connection, lease, *sequence)
+                .map(|pacing| (pacing.info, "pause_requested", Some(pacing.changed)))
+        }
+        (Action::Resume(sequence), Some(lease)) => {
+            upload::resume(&command.connection, lease, *sequence)
+                .map(|pacing| (pacing.info, "resume_requested", Some(pacing.changed)))
+        }
         _ => unreachable!("parser requires the original file instance"),
     };
     Ok(match result {
-        Ok((info, operation, cancelled)) => report::success(command, &info, operation, cancelled),
+        Ok((info, operation, changed)) => report::success(command, &info, operation, changed),
         Err(error) => report::failure(command, error),
     })
 }

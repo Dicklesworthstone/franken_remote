@@ -10,9 +10,15 @@ pub(super) fn success(
     command: &Options,
     info: &Info,
     operation: &str,
-    cancellation: Option<bool>,
+    changed: Option<bool>,
 ) -> Output {
     let s = &info.status;
+    let cancellation = (operation == "cancel_requested")
+        .then_some(changed)
+        .flatten();
+    let pacing = matches!(operation, "pause_requested" | "resume_requested")
+        .then_some(changed)
+        .flatten();
     let text = if command.json {
         json!({
             "schema_version": 1, "outcome": "success",
@@ -27,23 +33,31 @@ pub(super) fn success(
                 "publication_unknown": s.publication_unknown, "durability_unknown": s.durability_unknown,
                 "complete": s.complete, "failed": s.failed,
                 "cancel_requested": s.cancel_requested,
+                "pause_requested": s.pause_requested, "paused": s.paused,
+                "pacing_changed_by_command": pacing,
                 "cancellation_requested_by_command": cancellation,
                 "queued_bytes": s.queued_bytes, "total_bytes": s.total_bytes,
                 "cleanup": cleanup(s.cleanup), "new_connection_opened": false
             }
         }).to_string()
     } else {
-        let operation = match (operation, cancellation) {
+        let operation = match (operation, changed) {
             ("send_admitted", _) => {
                 "Selection admitted locally; publication is not yet confirmed.".to_owned()
             }
-            (_, Some(requested)) => format!(
+            ("cancel_requested", Some(requested)) => format!(
                 "Cancellation requested: {requested}. Earlier publication and unknown effects remain."
             ),
+            ("pause_requested", Some(changed)) => format!(
+                "Pause intent changed: {changed}. The original transfer deadline continues."
+            ),
+            ("resume_requested", Some(changed)) => {
+                format!("Resume intent changed: {changed}. No transfer is retried or reopened.")
+            }
             _ => "Status of the original local upload owner.".to_owned(),
         };
         format!(
-            "{operation}\nTarget: {}\nConnection ID: {}\nFile lease: {}\nRequest: {}; selected: {}; phase: {}; stage: {}.\nReady for another selection: {}; closed: {}.\nPublished: {}; refused: {}; interrupted: {}; publication unknown: {}; durability unknown: {}.\nComplete: {}; failed: {}; source cleanup: {}. Queued bytes do not prove publication.\n",
+            "{operation}\nTarget: {}\nConnection ID: {}\nFile lease: {}\nRequest: {}; selected: {}; phase: {}; stage: {}.\nReady for another selection: {}; closed: {}.\nPause requested: {}; sender last observed paused: {}. These are separate observations.\nPublished: {}; refused: {}; interrupted: {}; publication unknown: {}; durability unknown: {}.\nComplete: {}; failed: {}; source cleanup: {}. Queued bytes do not prove publication.\n",
             command.target,
             command.connection,
             info.instance,
@@ -53,6 +67,8 @@ pub(super) fn success(
             stage(s.stage),
             s.ready,
             s.closed,
+            observation(s.pause_requested),
+            observation(s.paused),
             s.published,
             s.refused,
             s.interrupted,
@@ -66,12 +82,22 @@ pub(super) fn success(
     Output { text, exit: 0 }
 }
 
+fn observation(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "true",
+        Some(false) => "false",
+        None => "unknown",
+    }
+}
+
 pub(super) fn failure(command: &Options, error: Error) -> Output {
     let (code, detail) = error_detail(error);
     let unknown = error == Error::OutcomeUnknown;
     let request = match command.action {
         Action::Status(sequence) => sequence,
-        Action::Cancel(sequence) => Some(sequence),
+        Action::Cancel(sequence) | Action::Pause(sequence) | Action::Resume(sequence) => {
+            Some(sequence)
+        }
         Action::Send(_) => None,
     };
     let selection = match error {

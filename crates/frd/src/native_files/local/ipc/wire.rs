@@ -17,6 +17,35 @@ const SEND: [u8; 8] = *b"FRFS1SN\0";
 const STATUS: [u8; 8] = *b"FRFS1ST\0";
 const CANCEL: [u8; 8] = *b"FRFS1CA\0";
 const RESULT: [u8; 8] = *b"FRFS1RS\0";
+/// Both versions retain the original fixed frame and path budgets. V1 never
+/// emits pacing fields or admits pacing commands; V2 uses two reserved status
+/// bytes for independent requested/observed tri-state samples.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Version {
+    V1,
+    V2,
+}
+impl Version {
+    fn tag(self, mut tag: [u8; 8]) -> [u8; 8] {
+        tag[4] = match self {
+            Self::V1 => b'1',
+            Self::V2 => b'2',
+        };
+        tag
+    }
+    pub(super) fn identify(self) -> [u8; 8] {
+        self.tag(IDENTIFY)
+    }
+    pub(super) fn from_identify(bytes: &[u8]) -> Result<Self, Error> {
+        match bytes {
+            b"FRFS1ID\0" => Ok(Self::V1),
+            b"FRFS2ID\0" => Ok(Self::V2),
+            _ => Err(Error::Protocol),
+        }
+    }
+}
+const PAUSE: [u8; 8] = *b"FRFS1PA\0";
+const RESUME: [u8; 8] = *b"FRFS1RE\0";
 const STATUS_BYTES: usize = 48;
 pub(super) const IDENTITY_BYTES: usize = 26 + STATUS_BYTES;
 pub(super) const COMMAND_BYTES: usize = 38;
@@ -28,8 +57,11 @@ pub(super) enum Command {
     Send(usize),
     Status(Option<u64>),
     Cancel(u64),
+    Pause(u64),
+    Resume(u64),
 }
 pub(super) fn command(
+    version: Version,
     command: Command,
     instance: [u8; 16],
     length: usize,
@@ -39,9 +71,13 @@ pub(super) fn command(
         Command::Send(count) if (1..=MAX_PATHS).contains(&count) => (SEND, 0, count),
         Command::Status(sequence) => (STATUS, sequence.unwrap_or(0), 0),
         Command::Cancel(sequence) if sequence != 0 => (CANCEL, sequence, 0),
+        Command::Pause(sequence) if version == Version::V2 && sequence != 0 => (PAUSE, sequence, 0),
+        Command::Resume(sequence) if version == Version::V2 && sequence != 0 => {
+            (RESUME, sequence, 0)
+        }
         _ => return Err(Error::InvalidRequest),
     };
-    bytes[..8].copy_from_slice(&tag);
+    bytes[..8].copy_from_slice(&version.tag(tag));
     bytes[8..24].copy_from_slice(&instance);
     bytes[24..32].copy_from_slice(&sequence.to_be_bytes());
     bytes[32..34].copy_from_slice(
@@ -54,10 +90,13 @@ pub(super) fn command(
             .map_err(|_| Error::InvalidPaths)?
             .to_be_bytes(),
     );
-    header(&bytes)?;
+    header(version, &bytes)?;
     Ok(bytes)
 }
-pub(super) fn header(bytes: &[u8; COMMAND_BYTES]) -> Result<(Command, [u8; 16], usize), Error> {
+pub(super) fn header(
+    version: Version,
+    bytes: &[u8; COMMAND_BYTES],
+) -> Result<(Command, [u8; 16], usize), Error> {
     let mut instance = [0; 16];
     instance.copy_from_slice(&bytes[8..24]);
     let sequence = u64::from_be_bytes(bytes[24..32].try_into().map_err(|_| Error::Protocol)?);
@@ -66,7 +105,7 @@ pub(super) fn header(bytes: &[u8; COMMAND_BYTES]) -> Result<(Command, [u8; 16], 
         bytes[34..38].try_into().map_err(|_| Error::Protocol)?,
     ))
     .map_err(|_| Error::Protocol)?;
-    let command = if bytes[..8] == SEND {
+    let command = if bytes[..8] == version.tag(SEND) {
         if sequence != 0
             || !(1..=MAX_PATHS).contains(&count)
             || !(3..=MAX_PAYLOAD).contains(&length)
@@ -74,10 +113,24 @@ pub(super) fn header(bytes: &[u8; COMMAND_BYTES]) -> Result<(Command, [u8; 16], 
             return Err(Error::InvalidPaths);
         }
         Command::Send(count)
-    } else if bytes[..8] == STATUS && count == 0 && length == 0 {
+    } else if bytes[..8] == version.tag(STATUS) && count == 0 && length == 0 {
         Command::Status((sequence != 0).then_some(sequence))
-    } else if bytes[..8] == CANCEL && sequence != 0 && count == 0 && length == 0 {
+    } else if bytes[..8] == version.tag(CANCEL) && sequence != 0 && count == 0 && length == 0 {
         Command::Cancel(sequence)
+    } else if version == Version::V2
+        && sequence != 0
+        && count == 0
+        && length == 0
+        && bytes[..8] == version.tag(PAUSE)
+    {
+        Command::Pause(sequence)
+    } else if version == Version::V2
+        && sequence != 0
+        && count == 0
+        && length == 0
+        && bytes[..8] == version.tag(RESUME)
+    {
+        Command::Resume(sequence)
     } else {
         return Err(Error::Protocol);
     };
@@ -146,21 +199,29 @@ pub(super) fn decode_paths(mut bytes: &[u8], count: usize) -> Result<Vec<PathBuf
     Ok(paths)
 }
 
-pub(super) fn identity_record(target: &str, instance: [u8; 16], status: Status) -> Vec<u8> {
+pub(super) fn identity_record(
+    version: Version,
+    target: &str,
+    instance: [u8; 16],
+    status: Status,
+) -> Vec<u8> {
     let mut bytes = vec![0; IDENTITY_BYTES];
-    bytes[..8].copy_from_slice(&IDENTITY);
+    bytes[..8].copy_from_slice(&version.tag(IDENTITY));
     bytes[8..24].copy_from_slice(&instance);
     bytes[24..26].copy_from_slice(
         &u16::try_from(target.len())
             .expect("validated local label")
             .to_be_bytes(),
     );
-    encode_status(status, &mut bytes[26..]);
+    encode_status(version, status, &mut bytes[26..]);
     bytes.extend_from_slice(target.as_bytes());
     bytes
 }
-pub(super) fn identity(bytes: &[u8; IDENTITY_BYTES]) -> Result<([u8; 16], usize, Status), Error> {
-    if bytes[..8] != IDENTITY {
+pub(super) fn identity(
+    version: Version,
+    bytes: &[u8; IDENTITY_BYTES],
+) -> Result<([u8; 16], usize, Status), Error> {
+    if bytes[..8] != version.tag(IDENTITY) {
         return Err(Error::Protocol);
     }
     let mut instance = [0; 16];
@@ -169,16 +230,20 @@ pub(super) fn identity(bytes: &[u8; IDENTITY_BYTES]) -> Result<([u8; 16], usize,
     if !(1..=MAX_NAME).contains(&length) {
         return Err(Error::Protocol);
     }
-    Ok((instance, length, decode_status(&bytes[26..])?))
+    Ok((instance, length, decode_status(version, &bytes[26..])?))
 }
-pub(super) fn result_record(instance: [u8; 16], result: Result<(Status, bool), Error>) -> Vec<u8> {
+pub(super) fn result_record(
+    version: Version,
+    instance: [u8; 16],
+    result: Result<(Status, bool), Error>,
+) -> Vec<u8> {
     let mut bytes = vec![0; RESULT_BYTES];
-    bytes[..8].copy_from_slice(&RESULT);
+    bytes[..8].copy_from_slice(&version.tag(RESULT));
     bytes[8..24].copy_from_slice(&instance);
     match result {
-        Ok((status, cancelled)) => {
-            bytes[27] = u8::from(cancelled);
-            encode_status(status, &mut bytes[28..]);
+        Ok((status, changed)) => {
+            bytes[27] = u8::from(changed);
+            encode_status(version, status, &mut bytes[28..]);
         }
         Err(error) => {
             let (code, index) = error_code(error);
@@ -189,10 +254,11 @@ pub(super) fn result_record(instance: [u8; 16], result: Result<(Status, bool), E
     bytes
 }
 pub(super) fn result(
+    version: Version,
     bytes: &[u8; RESULT_BYTES],
     instance: [u8; 16],
 ) -> Result<(Status, bool), Error> {
-    if bytes[..8] != RESULT || bytes[8..24] != instance || bytes[27] > 1 {
+    if bytes[..8] != version.tag(RESULT) || bytes[8..24] != instance || bytes[27] > 1 {
         return Err(Error::OutcomeUnknown);
     }
     let code = u16::from_be_bytes([bytes[24], bytes[25]]);
@@ -206,11 +272,11 @@ pub(super) fn result(
         return Err(Error::OutcomeUnknown);
     }
     Ok((
-        decode_status(&bytes[28..]).map_err(|_| Error::OutcomeUnknown)?,
+        decode_status(version, &bytes[28..]).map_err(|_| Error::OutcomeUnknown)?,
         bytes[27] != 0,
     ))
 }
-fn encode_status(status: Status, bytes: &mut [u8]) {
+fn encode_status(version: Version, status: Status, bytes: &mut [u8]) {
     bytes[0] = u8::from(status.ready);
     bytes[1] = u8::from(status.closed);
     bytes[2] = status.phase as u8;
@@ -221,6 +287,11 @@ fn encode_status(status: Status, bytes: &mut [u8]) {
         | u8::from(status.cancel_requested) << 2
         | u8::from(status.queued_bytes.is_some()) << 3
         | u8::from(status.total_bytes.is_some()) << 4;
+    if version == Version::V2 {
+        let observation = |value: Option<bool>| value.map_or(0, |value| 1 + u8::from(value));
+        bytes[6] = observation(status.pause_requested);
+        bytes[7] = observation(status.paused);
+    }
     bytes[8..16].copy_from_slice(&status.sequence.to_be_bytes());
     for (offset, value) in [
         status.selected,
@@ -239,12 +310,14 @@ fn encode_status(status: Status, bytes: &mut [u8]) {
     bytes[32..40].copy_from_slice(&status.queued_bytes.unwrap_or(0).to_be_bytes());
     bytes[40..48].copy_from_slice(&status.total_bytes.unwrap_or(0).to_be_bytes());
 }
-fn decode_status(bytes: &[u8]) -> Result<Status, Error> {
+fn decode_status(version: Version, bytes: &[u8]) -> Result<Status, Error> {
     if bytes.len() != STATUS_BYTES
         || bytes[0] > 1
         || bytes[1] > 1
         || bytes[5] & !31 != 0
-        || bytes[6..8] != [0; 2]
+        || (version == Version::V1 && bytes[6..8] != [0; 2])
+        || bytes[6] > 2
+        || bytes[7] > 2
         || bytes[30..32] != [0; 2]
     {
         return Err(Error::Protocol);
@@ -296,6 +369,8 @@ fn decode_status(bytes: &[u8]) -> Result<Status, Error> {
         complete: bytes[5] & 1 != 0,
         failed: bytes[5] & 2 != 0,
         cancel_requested: bytes[5] & 4 != 0,
+        pause_requested: (bytes[6] != 0).then_some(bytes[6] == 2),
+        paused: (bytes[7] != 0).then_some(bytes[7] == 2),
         queued_bytes: (bytes[5] & 8 != 0)
             .then(|| u64::from_be_bytes(bytes[32..40].try_into().expect("fixed status"))),
         total_bytes: (bytes[5] & 16 != 0)
