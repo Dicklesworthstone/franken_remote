@@ -44,7 +44,7 @@ use crate::{
     session_monitor::{self, Monitor, Status as Lifetime},
     session_startup::{
         Configuration, host_offer_with_download, host_offer_with_duplex, host_offer_with_files,
-        shared_viewers, with_line_scroll, with_receiver_metrics,
+        shared_viewers, with_line_scroll, with_quality_decisions, with_receiver_metrics,
     },
     worker::{Deadline, EncoderProbe, Launch, Retirement},
 };
@@ -422,7 +422,9 @@ fn request(
         offer(control, clipboard, audio, files)
     };
     let offer = if adaptive_capture {
-        with_receiver_metrics(offer).map_err(|_| serial::Error::Configuration)?
+        with_receiver_metrics(offer)
+            .and_then(with_quality_decisions)
+            .map_err(|_| serial::Error::Configuration)?
     } else {
         offer
     };

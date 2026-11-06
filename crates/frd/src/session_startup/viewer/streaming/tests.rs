@@ -284,6 +284,7 @@ fn lost_final_picture(ack_stall: Duration) {
                     None,
                     None,
                     None,
+                    None,
                     &c,
                     &mut |_| {},
                     &mut block,
@@ -400,6 +401,7 @@ fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
                     &mut repair,
                     None,
                     &mut stats,
+                    None,
                     None,
                     None,
                     None,
@@ -641,3 +643,5 @@ fn pre_decoder_stop_handle_survives_the_original_session_handoff() {
 mod recovery;
 
 mod continuation;
+
+mod quality;

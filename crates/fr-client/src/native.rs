@@ -7,11 +7,12 @@ use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     attachment, clock, control, cursor, decoder, display,
     negotiation::{Capability, Offer, Role},
-    presented, receiver_metrics, recovery_request,
+    presented, quality_decision, receiver_metrics, recovery_request,
 };
 
 /// Offer the same bounded recovery and solicited decoder-load paths used by the
-/// canonical running viewer. Optional means an older host can omit a feature;
+/// canonical running viewer, plus optional quality-decision reporting. Optional
+/// means an older host can omit a feature;
 /// it NEVER means the client may send its records without positive selection.
 /// All four bootstrap capabilities remain mandatory. No input, clipboard,
 /// audio, file, visible-presentation or control capability is implied.
@@ -174,7 +175,7 @@ pub fn control_offer_with_clipboard_and_files() -> Offer {
             required: false,
         });
     }
-    combined.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    finish_capabilities(&mut combined.capabilities);
     combined
 }
 
@@ -205,8 +206,8 @@ pub fn control_offer_with_auxiliary(clipboard: bool, files: bool, audio: bool) -
                 required: false,
             });
         }
-        combined.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
     }
+    finish_capabilities(&mut combined.capabilities);
     combined
 }
 
@@ -222,7 +223,7 @@ pub fn control_offer_with_download(clipboard: bool, audio: bool) -> Offer {
             cap.version = fr_wire::files::DOWNLOAD_VERSION;
         }
     }
-    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    finish_capabilities(&mut offer.capabilities);
     offer
 }
 
@@ -247,6 +248,8 @@ pub fn control_offer_with_duplex(clipboard: bool, audio: bool) -> Offer {
             required: false,
         });
     }
+    // Omit diagnostics first; reporting never displaces an existing feature.
+    omit_excess_quality(&mut offer.capabilities);
     // At capacity, keep decoder-load feedback and use the legacy bounded bulk
     // record size. The fullest profile also keeps its existing fixed attachment
     // allowance path; no authority/privacy gate or numeric limit is changed.
@@ -260,7 +263,7 @@ pub fn control_offer_with_duplex(clipboard: bool, audio: bool) -> Offer {
             .capabilities
             .retain(|cap| cap.name != attachment::credit::CAPABILITY);
     }
-    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    finish_capabilities(&mut offer.capabilities);
     offer
 }
 
@@ -278,6 +281,11 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
         (
             receiver_metrics::CAPABILITY,
             receiver_metrics::VERSION,
+            false,
+        ),
+        (
+            quality_decision::CAPABILITY,
+            quality_decision::VERSION,
             false,
         ),
         (
@@ -332,7 +340,7 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
         required: *required,
     })
     .collect();
-    capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    finish_capabilities(&mut capabilities);
     Offer {
         versions: vec![0],
         profile: 1,
@@ -341,4 +349,17 @@ fn offer(role: Role, extra: &[(&str, u16, bool)]) -> Offer {
         limits: ProtocolLimits::ABSOLUTE,
         capabilities,
     }
+}
+
+/// The new diagnostic boundary yields its slot before any older capability.
+/// Composite offers call this again after adding their own auxiliary features.
+fn omit_excess_quality(capabilities: &mut Vec<Capability>) {
+    if capabilities.len() > fr_wire::negotiation::MAX_CAPABILITIES {
+        capabilities.retain(|capability| capability.name != quality_decision::CAPABILITY);
+    }
+}
+
+fn finish_capabilities(capabilities: &mut Vec<Capability>) {
+    omit_excess_quality(capabilities);
+    capabilities.sort_by(|a, b| a.name.cmp(&b.name));
 }

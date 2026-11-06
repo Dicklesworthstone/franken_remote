@@ -129,6 +129,9 @@ impl StreamingViewer {
         if let Some(audio) = &mut self.audio {
             audio.close();
         }
+        if let Some(quality) = &mut self.quality {
+            quality.close();
+        }
         if let Some(app) = &mut self.clipboard {
             app.close();
         }

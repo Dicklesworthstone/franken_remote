@@ -125,6 +125,7 @@ impl StreamingViewer {
                     self.recovery.as_deref_mut(),
                     &mut self.statistics,
                     self.feedback.as_mut(),
+                    self.quality.as_mut(),
                     self.presentation.as_mut(),
                     self.cursor.as_mut(),
                     self.audio.as_mut(),

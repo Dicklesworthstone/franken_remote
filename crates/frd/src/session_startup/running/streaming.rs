@@ -11,6 +11,7 @@ use super::{ControlledHost, Error, HostSession, Services, now};
 use crate::{
     input_watchdog::{Control, StopReason},
     media::presented::{self, HostPresentation},
+    media::quality_decision::{Point as QualityPoint, Sender as QualitySender},
     media::receiver_feedback::{self as feedback, HostFeedback, Setup},
     media::{
         CaptureSource, CaptureUpdate, ObservationControl,
@@ -85,6 +86,7 @@ pub struct StreamingHost {
     host: Host,
     stream: Stream,
     feedback: Option<HostFeedback>,
+    quality: Option<QualitySender>,
     presentation: Option<HostPresentation>,
     clipboard: Option<crate::native_clipboard::Application>,
     /// Present only when the viewer selected `remote-cursor` (plan §11.4).
@@ -157,9 +159,19 @@ impl StreamingHost {
                     )
                     .map_err(Error::PresentedState)?;
             }
-            Ok((feedback, presentation))
+            let quality = QualitySender::selected(
+                &session.opened.selected,
+                session.opened.binding,
+                stream
+                    .sender
+                    .feedback_view()
+                    .map_err(Error::MediaTransport)?,
+                Route::Stream(session.opened.routes.outbound),
+            )
+            .map_err(Error::QualityDecision)?;
+            Ok((feedback, presentation, quality))
         })();
-        let (feedback, presentation) = match admitted {
+        let (feedback, presentation, quality) = match admitted {
             Ok(owners) => owners,
             Err(error) => {
                 host.close();
@@ -171,6 +183,7 @@ impl StreamingHost {
             host,
             stream,
             feedback,
+            quality,
             presentation,
             clipboard: None,
             files: None,
@@ -554,6 +567,7 @@ impl StreamingHost {
                 next_capture,
                 input_wake: super::input_wake::Wake::default(),
                 feedback: self.feedback.as_mut(),
+                quality: self.quality.as_mut(),
                 presentation: self.presentation.as_mut(),
                 cursor,
                 media: self.media.as_ref(),
@@ -780,6 +794,7 @@ struct VideoServices<'a, S> {
     next_capture: u64,
     input_wake: super::input_wake::Wake,
     feedback: Option<&'a mut HostFeedback>,
+    quality: Option<&'a mut QualitySender>,
     presentation: Option<&'a mut HostPresentation>,
     cursor: Option<&'a cursor::StreamCursor>,
     media: Option<&'a crate::media_quic::NegotiatedMedia>,
@@ -820,6 +835,15 @@ impl<S> VideoServices<'_, S> {
             feedback
                 .service(q, cx, current)
                 .map_err(Error::ReceiverFeedback)?;
+        }
+        if let Some(quality) = &mut self.quality {
+            let point = self
+                .pacing
+                .as_deref()
+                .and_then(|pacing| QualityPoint::current(pacing, self.bitrate.as_deref()));
+            quality
+                .service(q, cx, point, now(cx)?)
+                .map_err(Error::QualityDecision)?;
         }
         // Admission can observe a later clock (and retire an expired query).
         // Capture pacing must not reuse the pre-admission timestamp behind

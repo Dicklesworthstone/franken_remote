@@ -106,6 +106,8 @@ struct Members {
     cursor: fr_media::cursor::HostCursor,
     /// The share's ONE bounded playback-audio packet ring (count and bytes).
     audio: fr_media::audio_delivery::AudioRing,
+    /// Current fixed-size state copied only from the original adaptive source.
+    quality: Option<super::quality_decision::Point>,
 }
 impl Members {
     /// Fanout happens only after native effects have been recorded by the source.
@@ -290,6 +292,7 @@ impl Publisher {
                 last: now,
                 cursor: fr_media::cursor::HostCursor::new(),
                 audio: fr_media::audio_delivery::AudioRing::new(),
+                quality: None,
             })),
         })
     }
@@ -500,10 +503,12 @@ impl Publisher {
                     .members
                     .lock()
                     .map_err(|_| Error::Poisoned)
-                    .and_then(|m| {
+                    .and_then(|mut m| {
                         adaptive.observe_receivers(&m)?;
                         let peers = m.peer_evidence(m.last, adaptive.interval_us());
-                        adaptive.sample(m.last, false, peers)
+                        let interval = adaptive.sample(m.last, false, peers)?;
+                        m.quality = adaptive.quality_point();
+                        Ok(interval)
                     });
                 if let Err(error) = sample {
                     return Poll::Ready(Err(error));
@@ -529,6 +534,7 @@ impl Publisher {
                 update.observed_micros(),
                 !update.is_unchanged(),
             )?;
+            members.quality = adaptive.quality_point();
         }
         let result = members.publish_capture(&update, refused);
         drop(update);

@@ -2,7 +2,7 @@
 use super::{Cx, Error, QuicRecords, Route, quic};
 use fr_media::receiver_feedback::{Admission, Error as FeedbackError};
 
-pub(super) fn send(
+pub(in crate::media) fn send(
     q: &mut QuicRecords,
     cx: &Cx,
     route: Route,

@@ -9,6 +9,7 @@ pub(in crate::session_startup) mod files;
 mod interactive;
 mod live_snapshot;
 mod native_turn;
+mod quality;
 mod recovery;
 mod repair;
 mod repair_send;
@@ -34,6 +35,7 @@ use fr_media::{
 };
 use fr_transport::quic::{self, Disposition, Route};
 pub use interactive::{InteractiveCloseOutcome, InteractiveState, ViewingControl};
+pub use quality::{Fault as QualityFault, Handle as QualityHandle};
 use repair::Repair;
 use std::{
     future::{Future, poll_fn},
@@ -55,6 +57,7 @@ pub enum Error {
     Replacement(crate::media_quic::replacement::Error),
     Transport(quic::Error),
     Feedback(feedback::Error),
+    Quality(QualityFault),
     PresentedState(presented::Error),
     Freshness(fr_media::freshness::Error),
     /// A malformed or hostile remote cursor record (typed, no pixels).
@@ -92,6 +95,13 @@ pub struct Statistics {
     pub recovered_streams: u64,
     /// Presented source-age upper bounds at admitted reports (age of information).
     pub presented_age: crate::media::presented::AgeHistogram,
+    /// Fully validated host advisory records; not delivered frames or evidence
+    /// of transport quality. Includes obsolete records retired during recovery.
+    pub host_quality_decisions_received: u64,
+    /// Last host report for the most recently installed media view, retained
+    /// after closure as historical diagnostics. Recovery clears this snapshot;
+    /// no report means unknown. Neither bitrate field measures delivered bytes.
+    pub last_host_quality_decision: Option<fr_wire::quality_decision::Decision>,
 }
 impl Statistics {
     fn presented(&mut self, stage: PresentationStage) {
@@ -273,6 +283,7 @@ pub struct StreamingViewer {
     repair: Repair,
     recovery: Option<Box<recovery_control::Receiver>>,
     feedback: Option<ViewerFeedback>,
+    quality: Option<quality::ViewerQuality>,
     presentation: Option<ViewerPresentation>,
     /// Present only when the host selected `remote-cursor`.
     cursor: Option<cursor::ViewerCursor>,
@@ -416,9 +427,19 @@ impl StreamingViewer {
             let recovery = recovery::attach(session, media, &receiver)?;
             let cursor = cursor::ViewerCursor::attach(media, &session.transport)?;
             let audio = audio::ViewerAudio::attach(media, &session.transport)?;
-            Ok((feedback, presentation, recovery, cursor, audio))
+            let mut quality = quality::ViewerQuality::attach(
+                &session.opened.selection,
+                session.opened.binding,
+                media.binding(),
+                session.routes.inbound,
+            )
+            .map_err(Error::Quality)?;
+            if let Some(quality) = &mut quality {
+                quality.set_lifetime(receiver.receiver_lifetime());
+            }
+            Ok((feedback, presentation, recovery, cursor, audio, quality))
         })();
-        let (feedback, presentation, recovery, cursor, audio) = match setup {
+        let (feedback, presentation, recovery, cursor, audio, quality) = match setup {
             Ok(owners) => owners,
             Err(error) => {
                 peer.close();
@@ -437,6 +458,7 @@ impl StreamingViewer {
             repair: Repair::default(),
             recovery: recovery.map(Box::new),
             feedback,
+            quality,
             presentation,
             cursor,
             audio,
@@ -687,8 +709,30 @@ impl StreamingViewer {
                 .as_ref()
                 .map(|p| p.ages)
                 .unwrap_or_default(),
+            host_quality_decisions_received: self.quality.as_ref().map_or(0, |q| q.received),
+            last_host_quality_decision: self.quality.as_ref().and_then(|q| q.last()),
             ..self.statistics
         }
+    }
+    /// The host's latest reported operating point for this still-running media
+    /// view. This is advisory, not measured FPS, current freshness or permission
+    /// to submit input. Absent negotiation, recovery and closure return None.
+    pub fn current_quality_decision(&self) -> Option<fr_wire::quality_decision::Decision> {
+        if self.control.is_stopped()
+            || self.receiver.state() != fr_media::delivery::ReceiveState::Streaming
+        {
+            return None;
+        }
+        self.quality
+            .as_ref()
+            .and_then(quality::ViewerQuality::current)
+    }
+    /// A detached read-only status view, fenced by the original session and
+    /// receiver lifetime. It performs no I/O and cannot keep the viewer alive.
+    pub fn quality_handle(&self) -> Option<QualityHandle> {
+        self.quality
+            .as_ref()
+            .map(|quality| quality.handle(self.control()))
     }
     /// Actually admitted advisory reports; these are not display acknowledgements.
     pub fn receiver_feedback_reports(&self) -> u64 {
@@ -819,6 +863,9 @@ impl StreamingViewer {
             )?;
             if recovering {
                 self.clear_snapshot();
+                if let Some(quality) = &mut self.quality {
+                    quality.begin_recovery().map_err(Error::Quality)?;
+                }
             }
             // The loss already fenced the old receiver scope: a control grant
             // suspends now, before another turn could act on that view.
@@ -884,6 +931,7 @@ impl StreamingViewer {
                     self.recovery.as_deref_mut(),
                     &mut self.statistics,
                     self.feedback.as_mut(),
+                    self.quality.as_mut(),
                     self.presentation.as_mut(),
                     self.cursor.as_mut(),
                     self.audio.as_mut(),
@@ -915,6 +963,7 @@ impl StreamingViewer {
                             self.recovery.as_deref_mut(),
                             &mut self.statistics,
                             self.feedback.as_mut(),
+                            self.quality.as_mut(),
                             self.presentation.as_mut(),
                             self.cursor.as_mut(),
                             self.audio.as_mut(),
@@ -1038,6 +1087,7 @@ async fn network(
     mut recovery: Option<&mut recovery_control::Receiver>,
     statistics: &mut Statistics,
     mut feedback: Option<&mut ViewerFeedback>,
+    mut quality: Option<&mut quality::ViewerQuality>,
     mut presentation: Option<&mut ViewerPresentation>,
     mut cursor: Option<&mut cursor::ViewerCursor>,
     mut audio: Option<&mut audio::ViewerAudio>,
@@ -1068,6 +1118,9 @@ async fn network(
     let recovering = recovery::service(peer, recovery.as_deref_mut(), receiver, repair, cx);
     live_snapshot::retire_stale(receiver, snapshot_channel);
     let recovering = recovering?;
+    if recovering && let Some(quality) = &mut quality {
+        quality.begin_recovery().map_err(Error::Quality)?;
+    }
     if recovering && let Peer::Control(viewer) = peer {
         viewer.enter_recovery().map_err(Error::Control)?;
     }
@@ -1102,7 +1155,14 @@ async fn network(
     let mut failure = None;
     let driven = peer
         .drive(Duration::from_millis(5), result, |route, bytes| {
-            if feedback::is_feedback(bytes) {
+            if quality::is_quality(bytes) {
+                let quality = quality.as_mut().ok_or_else(|| {
+                    failure = Some(Error::Quality(QualityFault::NotSelected));
+                })?;
+                quality.receive(route, bytes).map_err(|error| {
+                    failure = Some(Error::Quality(error));
+                })
+            } else if feedback::is_feedback(bytes) {
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
                 })?;
@@ -1149,6 +1209,9 @@ async fn network(
     let recovering = recovery::service(peer, recovery, receiver, repair, cx);
     live_snapshot::retire_stale(receiver, snapshot_channel);
     let recovering = recovering?;
+    if recovering && let Some(quality) = &mut quality {
+        quality.begin_recovery().map_err(Error::Quality)?;
+    }
     if recovering && let Peer::Control(viewer) = peer {
         viewer.enter_recovery().map_err(Error::Control)?;
     }

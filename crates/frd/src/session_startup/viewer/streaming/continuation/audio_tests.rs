@@ -228,6 +228,7 @@ async fn turn(f: &mut Fixture) {
     let mut link = Link {
         parent: Parent::Observe(viewer),
         audio: Some(audio),
+        quality: None,
         refused: &refused,
     };
     let (a, b) = Box::pin(support::both(
@@ -367,6 +368,7 @@ fn cancelled_recovery_parent_cannot_poll_the_audio_output() {
         let mut link = Link {
             parent: Parent::Observe(&mut f.viewer),
             audio: Some(&mut f.audio),
+            quality: None,
             refused: &refused,
         };
         assert!(
@@ -389,6 +391,7 @@ fn cancellation_inside_audio_service_fences_output_even_after_native_success() {
         let mut link = Link {
             parent: Parent::Observe(&mut f.viewer),
             audio: Some(&mut f.audio),
+            quality: None,
             refused: &refused,
         };
         assert_eq!(

@@ -6,6 +6,29 @@ use fr_transport::quic::{Disposition, QuicRecords, Route};
 use fr_wire::{Progress, decoder::Binding, negotiation::ControlBinding};
 
 impl Subscriber {
+    /// Read content-free scheduling state only through this original connection
+    /// and live member. A recovering/unseeded member gets no current report.
+    pub(crate) fn quality_point(
+        &mut self,
+        q: &QuicRecords,
+    ) -> Result<Option<crate::media::quality_decision::Point>, Error> {
+        let shared = self.members.upgrade().ok_or(Error::Closed)?;
+        let mut members = shared.lock().map_err(|_| Error::Poisoned)?;
+        let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
+        if !q.is_bound_to(&entry.connection) {
+            return Err(Error::ForeignConnection);
+        }
+        members.tick()?;
+        let entry = members.entries[self.slot].as_ref().ok_or(Error::Closed)?;
+        if let Some(error) = entry.failure {
+            return Err(error);
+        }
+        entry.check_media(q)?;
+        if entry.fenced() || entry.join.is_some() || entry.starting.is_some() {
+            return Ok(None);
+        }
+        Ok(members.quality)
+    }
     pub(crate) fn original_source(&self) -> super::JoinQueue {
         super::JoinQueue {
             members: self.members.clone(),

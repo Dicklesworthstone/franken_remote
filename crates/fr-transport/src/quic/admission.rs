@@ -128,6 +128,7 @@ fn limited_metadata(route: StreamRoute, bytes: &[u8], streams: &[StreamRoute]) -
             kind == Kind::Progress as u16
                 || kind == Kind::PresentedState as u16
                 || kind == Kind::StageMetrics as u16
+                || kind == Kind::QualityDecision as u16
         })
         && streams.iter().any(|stream| {
             stream.outbound
@@ -187,7 +188,8 @@ mod tests {
         for kind in 0..=u16::MAX {
             let expected = kind == Kind::Progress as u16
                 || kind == Kind::PresentedState as u16
-                || kind == Kind::StageMetrics as u16;
+                || kind == Kind::StageMetrics as u16
+                || kind == Kind::QualityDecision as u16;
             assert_eq!(
                 limited_metadata(control, &header(kind), &[control]),
                 expected

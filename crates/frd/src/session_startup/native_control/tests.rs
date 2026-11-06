@@ -699,8 +699,8 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         host_offer_with_files(false, false, false, true),
         host_offer(false)
     );
-    // Concatenating the independent lanes carries 22 capabilities within the
-    // existing bound, including the optional solicited decoder-load extension.
+    // Concatenating the independent lanes carries 23 capabilities within the
+    // existing bound, including optional decoder-load and quality reporting.
     let mut both_lanes = fr_client::native::control_offer_with_clipboard();
     both_lanes.capabilities.extend(
         files
@@ -710,7 +710,7 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
             .cloned(),
     );
     both_lanes.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
-    assert_eq!(both_lanes.capabilities.len(), 22);
+    assert_eq!(both_lanes.capabilities.len(), 23);
     assert!(both_lanes.validate().is_ok());
     // The bounded combined profile negotiates each lane independently.
     let mut minimal = host_offer_with_files(true, true, false, true);
@@ -733,6 +733,104 @@ fn the_drop_lane_and_clipboard_require_independent_positive_selection() {
         assert_eq!(
             crate::session_startup::clipboard::selected(&selection).is_ok(),
             clipboard
+        );
+    }
+}
+
+#[test]
+fn quality_reporting_is_optional_idempotent_and_preserves_the_original_host_offer() {
+    use fr_wire::quality_decision;
+    for control in [false, true] {
+        let original = with_receiver_metrics(host_offer(control)).unwrap();
+        let offer = with_quality_decisions(original.clone()).unwrap();
+        offer.validate().unwrap();
+        assert_eq!(offer.capabilities.len(), original.capabilities.len() + 1);
+        let capability = offer
+            .capabilities
+            .iter()
+            .find(|cap| cap.name == quality_decision::CAPABILITY)
+            .unwrap();
+        assert_eq!(capability.version, quality_decision::VERSION);
+        assert!(!capability.required);
+        assert_eq!(with_quality_decisions(offer.clone()).unwrap(), offer);
+        let mut without = offer.clone();
+        without
+            .capabilities
+            .retain(|cap| cap.name != quality_decision::CAPABILITY);
+        assert_eq!(without, original);
+        let viewer = if control {
+            fr_client::native::control_offer()
+        } else {
+            fr_client::native::observation_offer()
+        };
+        let selected = offer.intersect(&viewer).unwrap().select().unwrap();
+        assert!(quality_decision::selected(&selected));
+        assert!(profile(&selected, control));
+        let mut legacy = viewer.clone();
+        legacy
+            .capabilities
+            .retain(|cap| cap.name != quality_decision::CAPABILITY);
+        let absent = offer.intersect(&legacy).unwrap().select().unwrap();
+        assert!(!quality_decision::selected(&absent));
+        assert_eq!(
+            absent,
+            original.intersect(&legacy).unwrap().select().unwrap()
+        );
+    }
+}
+
+#[test]
+fn quality_reporting_at_the_full_host_limit_drops_no_existing_feature() {
+    use fr_wire::{negotiation::MAX_CAPABILITIES, quality_decision, receiver_metrics};
+    let base = host_offer_with_files(true, true, true, true);
+    let one_slot = with_receiver_metrics(base.clone()).unwrap();
+    assert_eq!(one_slot.capabilities.len(), MAX_CAPABILITIES - 1);
+    let at_limit = with_quality_decisions(one_slot.clone()).unwrap();
+    assert_eq!(at_limit.capabilities.len(), MAX_CAPABILITIES);
+    assert!(quality_decision::selected(&at_limit.select().unwrap()));
+    for capability in &one_slot.capabilities {
+        assert!(
+            at_limit.capabilities.contains(capability),
+            "{}",
+            capability.name
+        );
+    }
+    let full = with_receiver_metrics(with_line_scroll(base)).unwrap();
+    assert_eq!(full.capabilities.len(), MAX_CAPABILITIES);
+    for retained in [
+        attachment::BULK_RECORD_CAPABILITY,
+        attachment::credit::CAPABILITY,
+        receiver_metrics::CAPABILITY,
+    ] {
+        assert!(
+            full.capabilities.iter().any(|cap| cap.name == retained),
+            "{retained}"
+        );
+    }
+    let offered = with_quality_decisions(full.clone()).unwrap();
+    assert_eq!(offered, full);
+    assert!(!quality_decision::selected(&offered.select().unwrap()));
+}
+
+#[test]
+fn quality_reporting_does_not_rewrite_an_existing_incompatible_boundary() {
+    use fr_wire::{negotiation::Error, quality_decision};
+    let offer = with_quality_decisions(host_offer(true)).unwrap();
+    for required in [false, true] {
+        let mut wrong = offer.clone();
+        let capability = wrong
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == quality_decision::CAPABILITY)
+            .unwrap();
+        if required {
+            capability.required = true;
+        } else {
+            capability.version += 1;
+        }
+        assert_eq!(
+            with_quality_decisions(wrong),
+            Err(Error::RequiredCapability)
         );
     }
 }

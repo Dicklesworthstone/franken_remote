@@ -1,4 +1,4 @@
-//! Actual UDP/TLS reservation for canonical decoder-metric and renewal records.
+//! Actual UDP/TLS reservation for canonical decoder/quality and renewal records.
 //! Application producers and authority are fixtures; this does not qualify
 //! live requester cadence, renewed authority, a native decoder or impaired WANs.
 use super::{Disposition, Error, Policy, Route, clock, runtime, support};
@@ -15,6 +15,7 @@ use fr_wire::{
     authority, decoder,
     input::{InputDelivery, InputDirection},
     negotiation::ControlBinding,
+    quality_decision::{self, Decision, Mode, Reason},
     receiver_metrics::{self, Load},
 };
 use std::time::Duration;
@@ -62,6 +63,30 @@ fn metric(direction: InputDirection, sequence: u64) -> Vec<u8> {
     bytes
 }
 
+fn quality(direction: InputDirection, sequence: u64) -> Vec<u8> {
+    assert_eq!(direction, InputDirection::HostToViewer);
+    let mut bytes = vec![0; quality_decision::RECORD_BYTES];
+    let length = quality_decision::encode(
+        Decision {
+            sequence,
+            capture_interval_us: 40_000,
+            mode: Mode::Active,
+            reason: Reason::SendAdmission,
+            applied_bitrate_bps: Some(2_000_000),
+            pending_bitrate_bps: Some(1_000_000),
+        },
+        binding(),
+        &ProtocolLimits::ABSOLUTE,
+        &mut bytes,
+        direction,
+        InputDelivery::Reliable,
+    )
+    .unwrap();
+    assert_eq!(length, 150);
+    assert_eq!(length, bytes.len());
+    bytes
+}
+
 fn renewal(direction: InputDirection, scope: authority::Scope, until: u64) -> Vec<u8> {
     let message = match direction {
         InputDirection::HostToViewer => authority::Message::Challenge {
@@ -88,7 +113,13 @@ fn renewal(direction: InputDirection, scope: authority::Scope, until: u64) -> Ve
     bytes
 }
 
-async fn check_reservation(cx: &Cx, policy: Policy, direction: InputDirection, records: usize) {
+async fn check_reservation(
+    cx: &Cx,
+    policy: Policy,
+    direction: InputDirection,
+    records: usize,
+    record: fn(InputDirection, u64) -> Vec<u8>,
+) {
     let (client, host) = support::native_pair(cx, "localhost", ALPN).await;
     let (mut client, cr) = QuicRecords::bootstrap(client.unwrap(), cx, policy).unwrap();
     let (mut host, hr) = QuicRecords::bootstrap(host.unwrap(), cx, policy).unwrap();
@@ -104,7 +135,7 @@ async fn check_reservation(cx: &Cx, policy: Policy, direction: InputDirection, r
     let until = clock(cx) + 2_000_000;
     let mut expected = Vec::new();
     for sequence in 1..=records {
-        let bytes = metric(direction, u64::try_from(sequence).unwrap());
+        let bytes = record(direction, u64::try_from(sequence).unwrap());
         sender.send(cx, outgoing, &bytes, until, || true).unwrap();
         expected.push(bytes);
         if sequence == 1 {
@@ -120,7 +151,7 @@ async fn check_reservation(cx: &Cx, policy: Policy, direction: InputDirection, r
     );
     let before = sender.usage();
     assert_eq!(
-        sender.send(cx, outgoing, &metric(direction, 100), until, || true),
+        sender.send(cx, outgoing, &record(direction, 100), until, || true),
         Err(Error::Backpressure)
     );
     assert_eq!(sender.usage(), before);
@@ -176,7 +207,7 @@ fn queries_and_replies_leave_both_renewal_record_slots_on_the_real_control_pair(
     for direction in [InputDirection::HostToViewer, InputDirection::ViewerToHost] {
         runtime().block_on(async {
             let cx = Cx::current().unwrap();
-            check_reservation(&cx, Policy::default(), direction, 14).await;
+            check_reservation(&cx, Policy::default(), direction, 14, metric).await;
         });
     }
 }
@@ -194,7 +225,43 @@ fn byte_pressure_leaves_renewal_room_before_the_record_limit_is_reached() {
                 critical_send_records: 128,
                 ..Policy::default()
             };
-            check_reservation(&cx, policy, direction, records).await;
+            check_reservation(&cx, policy, direction, records, metric).await;
         });
     }
+}
+
+#[test]
+fn quality_decisions_leave_two_renewals_on_the_actual_session_control_pair() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        // The first report enters a native, unacknowledged flight. Fourteen
+        // retained reports consume all advisory slots in the default budget;
+        // the observation and control challenges must still both be admitted.
+        check_reservation(
+            &cx,
+            Policy::default(),
+            InputDirection::HostToViewer,
+            14,
+            quality,
+        )
+        .await;
+    });
+}
+
+#[test]
+fn quality_decisions_preserve_the_512_byte_reserve_before_count_pressure() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let policy = Policy {
+            critical_send_bytes: 4096,
+            critical_send_records: 128,
+            ..Policy::default()
+        };
+        // Twenty-three 150-byte reports use 3450 bytes. A twenty-fourth would
+        // use 3600 and cross the 3584-byte advisory ceiling even though the
+        // full 4096-byte budget and 128-record allowance still have capacity.
+        // The same original stream then carries both authority challenges and
+        // ACK reclamation restores every original byte/record charge.
+        check_reservation(&cx, policy, InputDirection::HostToViewer, 23, quality).await;
+    });
 }

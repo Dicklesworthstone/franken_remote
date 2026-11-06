@@ -120,6 +120,7 @@ fn exercise(native_failure: bool) {
             &mut Link {
                 parent: Parent::Observe(&mut viewer),
                 audio: None,
+                quality: None,
                 refused: &refused,
             },
             &budget,

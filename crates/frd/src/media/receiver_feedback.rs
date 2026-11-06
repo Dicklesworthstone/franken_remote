@@ -15,7 +15,7 @@ use fr_wire::{
     receiver_metrics::{self as wire, Load},
 };
 
-mod admission;
+pub(super) mod admission;
 
 const WORK_RETENTION_US: u64 = 250_000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -134,6 +134,9 @@ fn install_evidence(host: &mut StreamingHost) -> Result<(), Error> {
         .sender
         .feedback_view()
         .map_err(Error::MediaTransport)?;
+    if let Some(quality) = &mut host.quality {
+        quality.rebind(view).map_err(Error::QualityDecision)?;
+    }
     host.feedback = Setup::selected(&session.opened.selected, session.opened.binding, view)
         .map_err(Error::ReceiverFeedback)?
         .map(|s| {

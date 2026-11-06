@@ -5,6 +5,7 @@ use crate::{
     media::{
         ObservationControl,
         presented::{self, HostPresentation},
+        quality_decision::Sender as QualitySender,
         receiver_feedback::{self as feedback, HostFeedback, Setup},
         shared_publisher::Subscriber,
     },
@@ -38,6 +39,7 @@ pub struct SharedHost {
     subscriber: Option<Subscriber>,
     presentation: Option<HostPresentation>,
     feedback: Option<HostFeedback>,
+    quality: Option<QualitySender>,
     repair: Route,
     statistics: SharedStatistics,
     recovery: Option<recovery::Handoff>,
@@ -139,12 +141,20 @@ impl HostSession {
             })
             .transpose()
             .map_err(Error::ReceiverFeedback)?;
+        let quality = QualitySender::selected(
+            &self.opened.selected,
+            self.opened.binding,
+            view,
+            Route::Stream(self.opened.routes.outbound),
+        )
+        .map_err(Error::QualityDecision)?;
         Ok(SharedHost {
             selection: self.opened.selected.clone(),
             session: self,
             subscriber: Some(subscriber),
             presentation,
             feedback,
+            quality,
             repair,
             statistics: SharedStatistics::default(),
             recovery: None,
@@ -234,6 +244,7 @@ impl SharedHost {
             recovery: &mut self.recovery,
             presentation: &mut self.presentation,
             feedback: &mut self.feedback,
+            quality: &mut self.quality,
             statistics: &mut self.statistics,
             other,
         };
@@ -292,6 +303,7 @@ struct SharedServices<'a, F> {
     recovery: &'a mut Option<recovery::Handoff>,
     presentation: &'a mut Option<HostPresentation>,
     feedback: &'a mut Option<HostFeedback>,
+    quality: &'a mut Option<QualitySender>,
     statistics: &'a mut SharedStatistics,
     other: &'a mut F,
 }
@@ -398,6 +410,17 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
                 self.subscriber
                     .receiver_unnegotiated(q, view)
                     .map_err(Error::SharedPublication)?;
+            }
+            if self.recovery.is_none()
+                && let Some(quality) = &mut *self.quality
+            {
+                let point = self
+                    .subscriber
+                    .quality_point(q)
+                    .map_err(Error::SharedPublication)?;
+                quality
+                    .service(q, &cx, point, now(&cx)?)
+                    .map_err(Error::QualityDecision)?;
             }
         }
         Ok(())

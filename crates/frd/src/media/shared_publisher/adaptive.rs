@@ -101,6 +101,9 @@ pub(super) struct CapturePacing {
     receiver_views: [Option<Binding>; super::MAX_SUBSCRIBERS],
 }
 impl CapturePacing {
+    pub(super) fn quality_point(&self) -> Option<crate::media::quality_decision::Point> {
+        crate::media::quality_decision::Point::current(&self.controller, self.bitrate.as_ref())
+    }
     fn new(minimum: Duration, maximum: Duration, fps: u16) -> Result<Self, Error> {
         if fps == 0
             || minimum > Duration::from_secs(1)
@@ -426,7 +429,9 @@ impl Publisher {
             adaptive.observe_receivers(&members)?;
             members.peer_evidence(now, adaptive.controller.interval_us())
         };
-        adaptive.sample(now, ready, peers).map(Some)
+        let interval = adaptive.sample(now, ready, peers)?;
+        self.members.lock().map_err(|_| Error::Poisoned)?.quality = adaptive.quality_point();
+        Ok(Some(interval))
     }
 }
 

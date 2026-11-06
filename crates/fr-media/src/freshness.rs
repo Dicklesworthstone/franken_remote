@@ -175,6 +175,17 @@ impl ReceiverLifetime {
     }
 }
 
+impl ReceivePipeline {
+    /// Read-only lifetime of this exact receiver epoch. Recovery, close and
+    /// owner drop fence it; retaining it creates no presentation evidence.
+    pub fn receiver_lifetime(&self) -> ReceiverLifetime {
+        ReceiverLifetime {
+            scope: self.presentation_scope().0,
+            lineage: self.presentation_lineage(),
+        }
+    }
+}
+
 /// One configured stream's decode -> submit -> visible path. On replacement,
 /// create a new tracker with new bindings and close this one. A configuration
 /// change invalidates the input owner; a reference recovery moves an input

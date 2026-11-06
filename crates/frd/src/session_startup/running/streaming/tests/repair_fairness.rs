@@ -149,6 +149,7 @@ fn native_backpressure_retries_preserve_the_next_repair_turn() {
             next_capture: u64::MAX,
             input_wake: super::super::super::input_wake::Wake::default(),
             feedback: None,
+            quality: None,
             presentation: None,
             cursor: None,
             media: None,

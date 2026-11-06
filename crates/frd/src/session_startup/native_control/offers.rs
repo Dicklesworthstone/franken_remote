@@ -303,6 +303,35 @@ pub fn with_receiver_metrics(mut offer: Offer) -> Result<Offer, negotiation::Err
     Ok(offer)
 }
 
+/// Offer reports of the real adaptive source's operating point. These optional
+/// diagnostics yield at the existing capability ceiling; adding them never
+/// removes another capability or widens the negotiation/resource limits.
+pub fn with_quality_decisions(mut offer: Offer) -> Result<Offer, negotiation::Error> {
+    use fr_wire::quality_decision::{CAPABILITY, VERSION};
+    offer.validate()?;
+    if let Some(existing) = offer.capabilities.iter().find(|cap| cap.name == CAPABILITY) {
+        return if existing.version == VERSION && !existing.required {
+            Ok(offer)
+        } else {
+            Err(negotiation::Error::RequiredCapability)
+        };
+    }
+    if offer.capabilities.len() < negotiation::MAX_CAPABILITIES {
+        offer
+            .capabilities
+            .try_reserve_exact(1)
+            .map_err(|_| negotiation::Error::Allocation)?;
+        offer.capabilities.push(Capability {
+            name: CAPABILITY.into(),
+            version: VERSION,
+            required: false,
+        });
+        offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    offer.validate()?;
+    Ok(offer)
+}
+
 #[cfg(test)]
 #[path = "offers/tests.rs"]
 mod tests;

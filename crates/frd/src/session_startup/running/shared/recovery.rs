@@ -187,6 +187,9 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> SharedServices<'_, F> {
         }
         *self.presentation = presentation;
         *self.feedback = feedback;
+        if let Some(quality) = &mut *self.quality {
+            quality.rebind(view).map_err(Error::QualityDecision)?;
+        }
         *self.recovery = None;
         self.statistics.recovered_streams = self.statistics.recovered_streams.saturating_add(1);
         Ok(())

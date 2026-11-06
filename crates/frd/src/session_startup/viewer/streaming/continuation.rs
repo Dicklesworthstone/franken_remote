@@ -38,6 +38,7 @@ enum Parent<'a> {
 pub(super) struct Link<'a> {
     parent: Parent<'a>,
     audio: Option<&'a mut super::audio::ViewerAudio>,
+    quality: Option<&'a mut super::quality::ViewerQuality>,
     refused: &'a Cell<Option<Error>>,
 }
 impl Link<'_> {
@@ -55,6 +56,7 @@ impl Link<'_> {
         let Self {
             parent,
             audio,
+            quality,
             refused,
         } = self;
         let session = match parent {
@@ -81,12 +83,26 @@ impl Link<'_> {
         // Its pending configuration/stop reply retains its original deadline.
         // Parent drive validates its renewed observation before dispatch. Do
         // not hold the pre-drive heard deadline over a newly accepted renewal.
-        let routed = lanes(
+        let mut routed = lanes(
             audio.as_deref_mut(),
             || cx.checkpoint().is_ok(),
             refused,
             &mut dispatch,
         );
+        let routed = |route, bytes: &[u8]| {
+            if super::quality::is_quality(bytes) {
+                return quality
+                    .as_deref_mut()
+                    .ok_or(super::QualityFault::NotSelected)
+                    .and_then(|quality| quality.receive(route, bytes))
+                    .map_err(|error| {
+                        if refused.get().is_none() {
+                            refused.set(Some(Error::Quality(error)));
+                        }
+                    });
+            }
+            routed(route, bytes)
+        };
         match parent {
             Parent::Observe(session) => session.drive(wait, routed).await.map_err(Error::Session),
             Parent::Viewing(session, viewing) => viewing.drive(session, wait, routed).await,
@@ -631,6 +647,9 @@ impl super::StreamingViewer {
         self.clear_snapshot();
         self.initial = None;
         self.repair.clear();
+        if let Some(quality) = &mut self.quality {
+            quality.begin_recovery().map_err(Error::Quality)?;
+        }
         // Only lifetime counters cross epochs; old pending replies and source
         // evidence do not. Late old metrics are explicitly retired by Dispatch.
         let feedback_sent = self.feedback.take().map_or(0, |f| f.sent);
@@ -652,6 +671,7 @@ impl super::StreamingViewer {
                     Link {
                         parent: Parent::Observe(&mut session),
                         audio: self.audio.as_mut(),
+                        quality: self.quality.as_mut(),
                         refused: &refused,
                     },
                     media,
@@ -686,6 +706,7 @@ impl super::StreamingViewer {
                     Link {
                         parent: Parent::Control(&mut viewer, result),
                         audio: self.audio.as_mut(),
+                        quality: self.quality.as_mut(),
                         refused: &refused,
                     },
                     previous,
@@ -734,6 +755,7 @@ impl super::StreamingViewer {
                     Link {
                         parent: Parent::Viewing(&mut session, &mut viewing),
                         audio: self.audio.as_mut(),
+                        quality: self.quality.as_mut(),
                         refused: &refused,
                     },
                     media,
@@ -818,6 +840,17 @@ impl super::StreamingViewer {
         .map_err(Error::PresentedState)?;
         if let Some(presentation) = &mut self.presentation {
             presentation.sent = presentation_sent;
+        }
+        if let Some(quality) = &mut self.quality {
+            quality
+                .rebind(
+                    &session.opened.selection,
+                    session.opened.binding,
+                    media.binding(),
+                    session.routes.inbound,
+                )
+                .map_err(Error::Quality)?;
+            quality.set_lifetime(self.receiver.receiver_lifetime());
         }
         self.presenter
             .check_stream(&session.transport, media, &self.receiver)

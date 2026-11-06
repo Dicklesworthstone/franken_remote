@@ -7,7 +7,7 @@ use fr_core::ids::{HostBootId, OsSessionId, RemoteSessionId};
 use fr_wire::{
     attachment, clock, control, decoder, display,
     negotiation::{self, ControlBinding, Message, Offer, Role, Selection},
-    presented, receiver_metrics, recovery_request,
+    presented, quality_decision, receiver_metrics, recovery_request,
 };
 
 fn bytes(message: &Message) -> Vec<u8> {
@@ -63,7 +63,7 @@ fn shipped_profile_is_observation_only_with_mandatory_bootstrap_and_optional_rec
     let offer = observation_offer();
     offer.validate().unwrap();
     assert_eq!(offer.role, Role::Observe);
-    assert_eq!(offer.capabilities.len(), 8);
+    assert_eq!(offer.capabilities.len(), 9);
     for name in [
         display::CAPABILITY,
         decoder::CAPABILITY,
@@ -76,6 +76,7 @@ fn shipped_profile_is_observation_only_with_mandatory_bootstrap_and_optional_rec
     }
     for name in [
         receiver_metrics::CAPABILITY,
+        quality_decision::CAPABILITY,
         recovery_request::CAPABILITY,
         fr_wire::cursor::CAPABILITY,
         attachment::credit::CAPABILITY,
@@ -345,7 +346,7 @@ fn audio_offer_adds_only_the_optional_downlink_and_negotiates_both_ways() {
 fn combined_control_profile_completes_real_startup_within_the_capability_bound() {
     let combined = fr_client::native::control_offer_with_clipboard_and_files();
     combined.validate().unwrap();
-    assert_eq!(combined.capabilities.len(), 22);
+    assert_eq!(combined.capabilities.len(), 23);
     assert!(combined.capabilities.len() <= negotiation::MAX_CAPABILITIES);
     for cap in control_offer().capabilities {
         assert!(
@@ -413,3 +414,6 @@ mod bulk;
 
 #[path = "native_profile/credit.rs"]
 mod credit;
+
+#[path = "native_profile/quality.rs"]
+mod quality;

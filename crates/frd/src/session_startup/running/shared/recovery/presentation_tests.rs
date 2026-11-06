@@ -21,6 +21,7 @@ fn with_services<T>(
         recovery: &mut host.recovery,
         presentation: &mut host.presentation,
         feedback: &mut host.feedback,
+        quality: &mut host.quality,
         statistics: &mut host.statistics,
         other: &mut other,
     };

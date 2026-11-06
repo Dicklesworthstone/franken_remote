@@ -434,6 +434,9 @@ impl NativeObserver {
     pub fn statistics(&self) -> streaming::Statistics {
         self.viewer.statistics()
     }
+    pub fn quality_handle(&self) -> Option<streaming::QualityHandle> {
+        self.viewer.quality_handle()
+    }
     pub fn budget_usage(&self) -> BudgetUsage {
         self.viewer.budget_usage()
     }

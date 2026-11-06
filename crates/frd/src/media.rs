@@ -42,6 +42,8 @@ pub use presented::Error as PresentedStateError;
 pub use recovery_source::CaptureRecovery;
 pub(crate) mod receiver_feedback;
 pub use receiver_feedback::Error as ReceiverFeedbackError;
+pub(crate) mod quality_decision;
+pub use quality_decision::Error as QualityDecisionError;
 pub mod renewal;
 #[cfg(target_os = "linux")]
 pub mod streaming;

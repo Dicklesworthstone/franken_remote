@@ -36,7 +36,7 @@ mod native_control;
 pub use native_control::{
     CLIPBOARD_CAPABILITIES, FILE_CAPABILITIES, host_offer, host_offer_with, host_offer_with_audio,
     host_offer_with_download, host_offer_with_duplex, host_offer_with_files, with_line_scroll,
-    with_receiver_metrics,
+    with_quality_decisions, with_receiver_metrics,
 };
 mod opening;
 mod running;
@@ -73,8 +73,8 @@ pub use viewer::streaming::audio::{
 pub use viewer::streaming::{
     ControlState as ViewerControlState, Error as StreamingViewerError, InteractiveCloseOutcome,
     InteractiveState as InteractiveViewerState, PendingControl as PendingViewerControl,
-    Presentation, Statistics as ViewerStatistics, StreamingViewer, StreamingViewerControl,
-    ViewingControl as ViewingViewerControl,
+    Presentation, QualityHandle as ViewerQualityHandle, Statistics as ViewerStatistics,
+    StreamingViewer, StreamingViewerControl, ViewingControl as ViewingViewerControl,
 };
 pub use viewer::{Viewer, ViewerSession};
 
@@ -86,6 +86,7 @@ const CONSUMED: u8 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    QualityDecision(crate::media::QualityDecisionError),
     PublicationRegistry(crate::broker::session_registry::PublicationError),
     SharedPublication(crate::media::shared_publisher::Error),
     ReferenceRecovery(crate::media_quic::replacement::Error),

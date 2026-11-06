@@ -216,6 +216,7 @@ fn admission<'a, S: Services>(
             next_capture: 0,
             input_wake: crate::session_startup::running::input_wake::Wake::default(),
             feedback: host.feedback.as_mut(),
+            quality: None,
             presentation: host.presentation.as_mut(),
             cursor: None,
             media: host.media.as_ref(),
