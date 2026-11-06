@@ -121,7 +121,12 @@ impl Shared {
             || control.viewport_generation != Some(view.viewport.as_raw())
             || control.configuration_generation != Some(view.configuration.as_raw())
             || control.recovery_generation != Some(view.recovery.as_raw())
-            || state.live.is_none_or(|live| live.view != view)
+            || control.input_support.as_ref() != Some(&original.support())
+            || state.live.is_none_or(|live| {
+                live.view != view
+                    || live.bounds != original.bounds
+                    || live.capabilities != original.capabilities
+            })
         {
             return Err(Refusal::NotCurrent);
         }

@@ -508,6 +508,7 @@ fn fractional_age_rounds_up_and_expired_status_never_exposes_an_action_pin() {
     assert!(!expired.ready);
     assert!(expired.lease.is_none() && expired.observation_id.is_none());
     assert!(expired.frame.is_none() && expired.source_age_upper_ms.is_none());
+    assert!(expired.input_support.is_none());
 }
 
 #[test]
@@ -560,6 +561,7 @@ fn snapshot_validation_refuses_incoherent_ready_claims_and_physical_visibility()
     assert!(!cleared.ready);
     assert!(cleared.lease.is_none() && cleared.observation_id.is_none());
     assert!(cleared.geometry_generation.is_none() && cleared.viewport_generation.is_none());
+    assert!(cleared.input_support.is_none());
 }
 
 #[test]
@@ -1845,4 +1847,143 @@ fn modified_scroll_expiry_fences_held_keys_and_keeps_confirmed_wheel_effects() {
             Err(Refusal::Stopped)
         );
     }
+}
+
+#[test]
+fn status_discloses_only_the_original_grants_signed_bounds_and_capabilities() {
+    use fr_core::input_submission::{Capabilities, Capability};
+    for (capabilities, expected) in [
+        (Capabilities::default(), vec![]),
+        (
+            Capabilities::default().with(Capability::Keys),
+            vec!["physical_keys"],
+        ),
+        (
+            Capabilities::default()
+                .with(Capability::Buttons)
+                .with(Capability::Absolute),
+            vec!["absolute_pointer", "buttons"],
+        ),
+        (
+            Capabilities::default()
+                .with(Capability::LineScroll)
+                .with(Capability::Buttons)
+                .with(Capability::Absolute)
+                .with(Capability::Keys),
+            vec!["physical_keys", "absolute_pointer", "buttons", "line_scroll"],
+        ),
+        (
+            Capabilities::default()
+                .with(Capability::Repeat)
+                .with(Capability::Relative)
+                .with(Capability::PixelScroll)
+                .with(Capability::Text),
+            vec![],
+        ),
+    ] {
+        let shared = fresh();
+        shared.locked().live.as_mut().unwrap().capabilities = capabilities;
+        let actual = snapshot(&shared);
+        let support = actual.input_support.as_ref().expect("known original grant");
+        assert!(support.valid());
+        let value = serde_json::to_value(&actual).unwrap();
+        assert_eq!(
+            value["input_support"],
+            serde_json::json!({
+                "bounds": {"x": -800, "y": -200, "width": 1600, "height": 800},
+                "capabilities": expected,
+            })
+        );
+        assert_eq!(shared.locked().pinned.unwrap().1.support(), *support);
+        let bytes = serde_json::to_vec(&Response::Status {
+            snapshot: actual.clone(),
+        })
+        .unwrap();
+        assert!(bytes.len() <= MAX_REPLY);
+        let decoded: Snapshot = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, actual);
+        assert_eq!(validate_snapshot(&decoded), Ok(()));
+        shared.retire();
+        assert!(snapshot(&shared).input_support.is_none());
+    }
+}
+
+#[test]
+fn legacy_ready_status_keeps_absent_support_unknown_and_clearing_drops_known_support() {
+    let shared = fresh();
+    let actual = snapshot(&shared);
+    let mut legacy = serde_json::to_value(&actual).unwrap();
+    legacy.as_object_mut().unwrap().remove("input_support");
+    let mut decoded: Snapshot = serde_json::from_value(legacy).unwrap();
+    assert!(decoded.ready);
+    assert!(decoded.input_support.is_none());
+    assert_eq!(validate_snapshot(&decoded), Ok(()));
+    assert_eq!(decoded.lease, actual.lease);
+    assert_eq!(decoded.observation_id, actual.observation_id);
+    clear_snapshot(&mut decoded);
+    assert_eq!(validate_snapshot(&decoded), Ok(()));
+    assert!(decoded.input_support.is_none());
+
+    let mut cleared = actual.clone();
+    clear_snapshot(&mut cleared);
+    assert_eq!(validate_snapshot(&cleared), Ok(()));
+    assert!(cleared.input_support.is_none());
+    cleared.input_support = actual.input_support;
+    assert_eq!(validate_snapshot(&cleared), Err(Error::Protocol));
+}
+
+#[test]
+fn status_refuses_invalid_bounds_duplicates_noncanonical_and_unknown_capabilities() {
+    use crate::robot_input::{InputCapability, InputRectangle};
+    let shared = fresh();
+    let actual = snapshot(&shared);
+    for (x, y, width, height, valid) in [
+        (-800, -200, 1600, 800, true),
+        (i32::MAX, i32::MAX, 1, 1, true),
+        (i32::MIN, i32::MIN, u32::MAX, u32::MAX, true),
+        (-800, -200, 0, 800, false),
+        (-800, -200, 1600, 0, false),
+        (i32::MAX, 0, 2, 1, false),
+        (0, i32::MAX, 1, 2, false),
+        (0, 0, u32::MAX, 1, false),
+    ] {
+        let mut changed = actual.clone();
+        changed.input_support.as_mut().unwrap().bounds = InputRectangle {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert_eq!(validate_snapshot(&changed).is_ok(), valid);
+    }
+    for capabilities in [
+        vec![InputCapability::PhysicalKeys, InputCapability::PhysicalKeys],
+        vec![InputCapability::Buttons, InputCapability::AbsolutePointer],
+        vec![
+            InputCapability::PhysicalKeys,
+            InputCapability::AbsolutePointer,
+            InputCapability::Buttons,
+            InputCapability::LineScroll,
+            InputCapability::PhysicalKeys,
+        ],
+    ] {
+        let mut changed = actual.clone();
+        changed.input_support.as_mut().unwrap().capabilities = capabilities;
+        assert_eq!(validate_snapshot(&changed), Err(Error::Protocol));
+    }
+    for capabilities in [
+        serde_json::json!(["text"]),
+        serde_json::json!(["relative"]),
+        serde_json::json!(["physical_keys", "unknown"]),
+    ] {
+        let mut value = serde_json::to_value(&actual).unwrap();
+        value["input_support"]["capabilities"] = capabilities;
+        assert!(serde_json::from_value::<Snapshot>(value).is_err());
+    }
+    let mut extra = serde_json::to_value(&actual).unwrap();
+    extra["input_support"]["ticket"] = 1.into();
+    assert!(serde_json::from_value::<Snapshot>(extra).is_err());
+    let mut extra = serde_json::to_value(&actual).unwrap();
+    extra["input_support"]["bounds"]["z"] = 1.into();
+    assert!(serde_json::from_value::<Snapshot>(extra).is_err());
 }

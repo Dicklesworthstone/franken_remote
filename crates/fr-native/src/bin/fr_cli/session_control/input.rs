@@ -132,6 +132,7 @@ pub(super) fn validate_snapshot(snapshot: &crate::robot_input::Snapshot) -> Resu
             snapshot.frame].into_iter().all(|v| v.is_some())
         && snapshot.source_age_upper_ms.is_some_and(|age| age < 1000);
     let empty = snapshot.lease.is_none()
+        && snapshot.input_support.is_none()
         && [
             snapshot.observation_id,
             snapshot.geometry_generation,
@@ -145,6 +146,7 @@ pub(super) fn validate_snapshot(snapshot: &crate::robot_input::Snapshot) -> Resu
         .all(|v| v.is_none());
     if snapshot.next_request_id == Some(0)
         || snapshot.physical_visibility_proven
+        || snapshot.input_support.as_ref().is_some_and(|support| !support.valid())
         || !(if snapshot.ready { complete } else { empty })
     {
         return Err(Error::Protocol);
@@ -171,6 +173,7 @@ pub(super) fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
     snapshot.recovery_generation = None;
     snapshot.frame = None;
     snapshot.source_age_upper_ms = None;
+    snapshot.input_support = None;
 }
 
 #[cfg(any(feature = "linux-desktop", test))]
@@ -184,6 +187,9 @@ struct Candidate {
 }
 #[cfg(any(feature = "linux-desktop", test))]
 impl Candidate {
+    fn support(self) -> crate::robot_input::InputSupport {
+        crate::robot_input::InputSupport::from_grant(self.bounds, self.capabilities)
+    }
     fn age(self, at: Instant) -> Option<u64> {
         self.sample.age_upper_us.checked_add(
             u64::try_from(
@@ -260,6 +266,7 @@ impl State {
             recovery_generation: None,
             frame: None,
             source_age_upper_ms: None,
+            input_support: None,
             physical_visibility_proven: false,
         }
     }
@@ -305,6 +312,7 @@ impl State {
             recovery_generation: Some(candidate.view.recovery.as_raw()),
             frame: Some(candidate.sample.stamp.frame),
             source_age_upper_ms: Some(age),
+            input_support: Some(candidate.support()),
             physical_visibility_proven: false,
         }
     }

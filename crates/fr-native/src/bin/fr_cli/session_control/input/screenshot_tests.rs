@@ -100,6 +100,10 @@ fn image_returns_the_original_pin_and_new_status_invalidates_its_seal() {
     let control = metadata.control.as_ref().unwrap();
     assert_eq!(control.observation_id, Some(original_id));
     assert_eq!(control.frame, Some(7));
+    assert_eq!(
+        control.input_support.as_ref(),
+        Some(&shared.locked().pinned.unwrap().1.support())
+    );
     assert_eq!(shared.check_export(&metadata), Ok(()));
     let Response::Status { snapshot } = shared.status() else {
         panic!("status");
@@ -191,4 +195,63 @@ fn capture_waiter_is_send_without_carrying_a_shared_state_guard() {
     fn send<T: Send>(_: T) {}
     let (shared, _channel) = ready();
     send(shared.capture());
+}
+
+#[test]
+fn changed_grant_during_capture_cannot_replace_the_original_support() {
+    for change_bounds in [false, true] {
+        let (shared, channel) = ready();
+        let mut capture = Box::pin(shared.capture());
+        assert!(poll(capture.as_mut()).is_pending());
+        let work = channel.take().unwrap();
+        let original = shared.locked().pinned.unwrap().1.support();
+        {
+            let mut state = shared.locked();
+            let current = state.live.as_mut().unwrap();
+            if change_bounds {
+                current.bounds = fr_core::input::InputBounds::new(
+                    fr_core::input::DesktopPoint { x: -801, y: 0 },
+                    800,
+                    600,
+                )
+                .unwrap();
+            } else {
+                current.capabilities = fr_core::input_submission::Capabilities::default()
+                    .with(fr_core::input_submission::Capability::Keys);
+            }
+        }
+        work.complete(Ok(image()));
+        assert!(matches!(
+            poll(capture.as_mut()),
+            Poll::Ready(Err(Refusal::NotCurrent))
+        ));
+        let state = shared.locked();
+        assert_eq!(state.pinned.unwrap().1.support(), original);
+        assert!(!state.stopped && state.pending.is_none());
+    }
+}
+
+#[test]
+fn export_rechecks_the_exact_support_at_the_original_pin() {
+    let (shared, channel) = ready();
+    let mut capture = Box::pin(shared.capture());
+    assert!(poll(capture.as_mut()).is_pending());
+    channel.take().unwrap().complete(Ok(image()));
+    let Poll::Ready(Ok((metadata, _image))) = poll(capture.as_mut()) else {
+        panic!("the original captured picture must complete");
+    };
+    assert_eq!(shared.check_export(&metadata), Ok(()));
+    for field in 0..3 {
+        let mut changed = metadata.clone();
+        let control = changed.control.as_mut().unwrap();
+        match field {
+            0 => control.input_support.as_mut().unwrap().bounds.x -= 1,
+            1 => control.input_support.as_mut().unwrap().capabilities.clear(),
+            _ => control.input_support = None,
+        }
+        // Each is a valid independent status shape, including a legacy unknown
+        // grant, but none describes this original export's pinned support.
+        assert_eq!(super::super::validate_snapshot(control), Ok(()));
+        assert_eq!(shared.check_export(&changed), Err(Refusal::NotCurrent));
+    }
 }

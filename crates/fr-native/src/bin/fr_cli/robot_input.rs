@@ -399,6 +399,76 @@ impl Refusal {
         }
     }
 }
+/// The input capabilities used by the public bounded robot operations.
+/// In a known support object, omitted capabilities are not granted.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum InputCapability {
+    PhysicalKeys,
+    AbsolutePointer,
+    Buttons,
+    LineScroll,
+}
+/// Signed host desktop pixels, with exclusive right and bottom edges.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InputRectangle {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+/// Descriptive limits from the SAME pinned candidate as the input observation.
+/// These values do not issue an input ticket or authorize any action.
+#[cfg(any(target_os = "linux", test))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct InputSupport {
+    pub bounds: InputRectangle,
+    pub capabilities: Vec<InputCapability>,
+}
+#[cfg(any(target_os = "linux", test))]
+impl InputSupport {
+    #[cfg(any(feature = "linux-desktop", test))]
+    pub fn from_grant(
+        bounds: fr_core::input::InputBounds,
+        capabilities: fr_core::input_submission::Capabilities,
+    ) -> Self {
+        use fr_core::input_submission::Capability;
+        Self {
+            bounds: InputRectangle {
+                x: bounds.origin().x,
+                y: bounds.origin().y,
+                width: bounds.width(),
+                height: bounds.height(),
+            },
+            capabilities: [
+                (InputCapability::PhysicalKeys, Capability::Keys),
+                (InputCapability::AbsolutePointer, Capability::Absolute),
+                (InputCapability::Buttons, Capability::Buttons),
+                (InputCapability::LineScroll, Capability::LineScroll),
+            ]
+            .into_iter()
+            .filter_map(|(name, capability)| capabilities.contains(capability).then_some(name))
+            .collect(),
+        }
+    }
+    pub fn valid(&self) -> bool {
+        fr_core::input::InputBounds::new(
+            fr_core::input::DesktopPoint {
+                x: self.bounds.x,
+                y: self.bounds.y,
+            },
+            self.bounds.width,
+            self.bounds.height,
+        )
+        .is_some()
+            && self.capabilities.len() <= 4
+            && self.capabilities.windows(2).all(|pair| pair[0] < pair[1])
+    }
+}
 /// One explicitly requested observation; its identity pins the original source
 /// age and ALL input generations. Reading status never refreshes an old action.
 #[cfg(any(target_os = "linux", test))]
@@ -415,6 +485,9 @@ pub(crate) struct Snapshot {
     pub recovery_generation: Option<u64>,
     pub frame: Option<u64>,
     pub source_age_upper_ms: Option<u64>,
+    /// Older local owners omit this field. Missing support is unknown, not full.
+    #[serde(default)]
+    pub input_support: Option<InputSupport>,
     pub physical_visibility_proven: bool,
 }
 #[cfg(any(target_os = "linux", test))]

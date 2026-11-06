@@ -74,6 +74,18 @@ fn fixture(control: bool) -> (Metadata, Snapshot) {
         recovery_generation: Some(0),
         frame: Some(0),
         source_age_upper_ms: Some(990),
+        input_support: Some(crate::robot_input::InputSupport::from_grant(
+            fr_core::input::InputBounds::new(
+                fr_core::input::DesktopPoint { x: -800, y: 0 },
+                800,
+                600,
+            )
+            .unwrap(),
+            fr_core::input_submission::Capabilities::default()
+                .with(fr_core::input_submission::Capability::Absolute)
+                .with(fr_core::input_submission::Capability::Keys)
+                .with(fr_core::input_submission::Capability::Buttons),
+        )),
         physical_visibility_proven: false,
     });
     (
@@ -113,6 +125,7 @@ fn delivery_expiry_keeps_historical_pixels_but_clears_input_handles_without_repi
     assert_eq!(data["control_authority"]["ready"], false);
     assert!(data["control_authority"]["lease"].is_null());
     assert!(data["control_authority"]["observation_id"].is_null());
+    assert!(data["control_authority"]["input_support"].is_null());
     assert_eq!(data["control_authority"]["next_request_id"], 11);
     assert_eq!(data["artifact"]["producing_frame_serial"], 0);
     assert!(output.exists());
@@ -128,6 +141,13 @@ fn fresh_control_report_reuses_the_exported_frames_original_input_pin() {
     assert_eq!(data["current_input_precondition"], true);
     assert_eq!(data["control_authority"]["observation_id"], 7);
     assert_eq!(data["control_authority"]["next_request_id"], 11);
+    assert_eq!(
+        data["control_authority"]["input_support"],
+        serde_json::json!({
+            "bounds": {"x": -800, "y": 0, "width": 800, "height": 600},
+            "capabilities": ["physical_keys", "absolute_pointer", "buttons"],
+        })
+    );
     assert_eq!(
         data["control_authority"]["frame"],
         data["artifact"]["producing_frame_serial"]

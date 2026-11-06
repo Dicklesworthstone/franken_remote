@@ -14,7 +14,13 @@ Find the public connection ID with fr robot session status NODE_ID --json.
 Keep the foreground viewer focused. The explicit automation owner requests one
 control lease and has no reconnect, clipboard, files or native input forwarding.
 --status returns a bounded input observation with all view generations and a
-local comparison lease handle. Source age includes measured clock uncertainty;
+local comparison lease handle. Ready observations also include input_support:
+signed host-desktop bounds (x,y,width,height) and the original grant's supported
+physical_keys, absolute_pointer, buttons and line_scroll capabilities.
+A missing/null input_support from an older owner means unknown support. Expiry
+clears this metadata with the observation's authority handles; it grants nothing
+on its own. Screenshot control_authority carries the same original support.
+Source age includes measured clock uncertainty;
 compositor submission is not proof of optical visibility or application success.
 For an image tied to that input observation, use fr robot observe NODE_ID
 --connection-id ID --screenshot /path/new-screen.png --json. Its control_authority

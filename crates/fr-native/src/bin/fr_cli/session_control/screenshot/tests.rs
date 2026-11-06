@@ -55,6 +55,18 @@ pub(super) fn metadata(control: bool) -> Metadata {
         recovery_generation: Some(0),
         frame: Some(0),
         source_age_upper_ms: Some(500),
+        input_support: Some(crate::robot_input::InputSupport::from_grant(
+            fr_core::input::InputBounds::new(
+                fr_core::input::DesktopPoint { x: -800, y: 0 },
+                800,
+                600,
+            )
+            .unwrap(),
+            fr_core::input_submission::Capabilities::default()
+                .with(fr_core::input_submission::Capability::Absolute)
+                .with(fr_core::input_submission::Capability::Keys)
+                .with(fr_core::input_submission::Capability::Buttons),
+        )),
         physical_visibility_proven: false,
     });
     Metadata::new(
@@ -124,12 +136,14 @@ fn image_must_match_the_original_frame_geometry_and_all_known_generations() {
 fn original_input_age_includes_delivery_and_writing_and_expiry_clears_handles() {
     let mut value = metadata(true);
     let original_id = value.control.as_ref().unwrap().observation_id;
+    let original_support = value.control.as_ref().unwrap().input_support.clone();
     value.elapse(499).unwrap();
     assert_eq!(
         value.control.as_ref().unwrap().source_age_upper_ms,
         Some(999)
     );
     assert_eq!(value.control.as_ref().unwrap().observation_id, original_id);
+    assert_eq!(value.control.as_ref().unwrap().input_support, original_support);
     value.elapse(1).unwrap();
     let expired = value.control.as_ref().unwrap();
     assert!(!expired.ready);
@@ -137,6 +151,7 @@ fn original_input_age_includes_delivery_and_writing_and_expiry_clears_handles() 
     assert_eq!(expired.observation_id, None);
     assert_eq!(expired.frame, None);
     assert_eq!(expired.source_age_upper_ms, None);
+    assert_eq!(expired.input_support, None);
     assert_eq!(expired.next_request_id, Some(1));
     assert_eq!(
         value.validate_image(&image()),
@@ -155,6 +170,37 @@ fn complete_metadata_is_bounded_and_rejects_unknown_fields() {
     let mut value = serde_json::to_value(reply).unwrap();
     value["metadata"]["pixels"] = serde_json::json!([1, 2, 3]);
     assert!(serde_json::from_value::<Reply>(value).is_err());
+}
+
+#[test]
+fn legacy_screenshot_support_stays_unknown_instead_of_using_display_geometry() {
+    let mut value = serde_json::to_value(Reply::Image {
+        metadata: Box::new(metadata(true)),
+    })
+    .unwrap();
+    value["metadata"]["control"]
+        .as_object_mut()
+        .unwrap()
+        .remove("input_support");
+    let Reply::Image { mut metadata } = serde_json::from_value(value).unwrap() else {
+        panic!("legacy screenshot metadata must remain readable");
+    };
+    assert_eq!(metadata.validate_image(&image()), Ok(()));
+    assert!(metadata.control.as_ref().unwrap().ready);
+    assert!(metadata.control.as_ref().unwrap().input_support.is_none());
+    metadata.elapse(1).unwrap();
+    assert!(metadata.control.as_ref().unwrap().input_support.is_none());
+}
+
+#[test]
+fn expired_screenshot_cannot_reintroduce_support_from_historical_pixels() {
+    let mut value = metadata(true);
+    let original_support = value.control.as_ref().unwrap().input_support.clone();
+    value.elapse(500).unwrap();
+    assert!(!value.control.as_ref().unwrap().ready);
+    assert!(value.control.as_ref().unwrap().input_support.is_none());
+    value.control.as_mut().unwrap().input_support = original_support;
+    assert_eq!(value.validate_image(&image()), Err(Error::Protocol));
 }
 
 #[cfg(feature = "linux-desktop")]

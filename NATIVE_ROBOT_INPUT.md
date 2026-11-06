@@ -44,6 +44,60 @@ host bearer ticket. Missing or expired evidence returns `ready: false` with
 unknown fields left null. Source age includes the original clock uncertainty
 and conservative local elapsed time, including the status round trip.
 
+
+### Discover the original input support
+
+Ready observations include an optional `input_support` object from the same
+original grant as their lease and view generations. For example:
+
+```json
+{
+  "input_support": {
+    "bounds": { "x": -800, "y": -200, "width": 1600, "height": 800 },
+    "capabilities": [
+      "physical_keys",
+      "absolute_pointer",
+      "buttons",
+      "line_scroll"
+    ]
+  }
+}
+```
+
+The signed origin and positive pixel dimensions describe accepted host-desktop
+coordinates. In this example, valid x values run from −800 through 799 and valid
+y values from −200 through 599. The right and bottom edges are excluded. Points
+outside these bounds are refused, never clamped.
+
+The capability names describe the original backend grant. Use them to choose an
+operation without consuming a request merely to probe support:
+
+| Operation | Required capabilities |
+| --- | --- |
+| Move | `absolute_pointer` |
+| Click or drag | `absolute_pointer`, `buttons` |
+| Key tap or key chord | `physical_keys` |
+| Scroll | `absolute_pointer`, `line_scroll` |
+| Modified click or drag | `physical_keys`, `absolute_pointer`, `buttons` |
+| Modified scroll | `physical_keys`, `absolute_pointer`, `line_scroll` |
+
+Each operation still checks its complete arguments, original observation,
+generations, capabilities and deadlines before submission. This metadata is
+descriptive; it does not replace the authenticated owner or grant new authority.
+
+An absent or null `input_support` on an older owner's ready response means that
+support is unknown. The client accepts that older response without inventing
+bounds or assuming any capability. A present object is validated as a complete,
+bounded description: valid signed bounds and at most four distinct, canonically
+ordered known capabilities. Expired or unavailable observations clear it along
+with their authority handles.
+
+A screenshot's `control_authority.input_support` comes from its pictured frame's
+original pinned input observation. Use that object with that screenshot's
+handles. A later status request cannot refresh the pictured frame or replace its
+grant. The screenshot already reports display geometry and image dimensions;
+this addition does not introduce a new image-to-desktop transform.
+
 ## Submit one bounded operation
 
 Use the values from the same owner's ready status. The following example is a
@@ -74,8 +128,9 @@ The age bound must be 1–1000 milliseconds. Existing host and viewer limits may
 be stricter. Coordinates may be negative on desktops with a negative display
 origin; the original input encoder still checks the selected display bounds.
 The owner converts scroll lines to the existing fixed-point wire units. The
-caller must already know its target host coordinates; this status response
-does not provide a screenshot or a local-to-host coordinate transform. An
+caller uses signed host coordinates within `input_support.bounds` when that
+metadata is available. Status does not provide a screenshot or a local-to-host
+coordinate transform. An
 explicit [live screenshot](docs/native-client-cli.md#screenshots-from-an-existing-foreground-owner)
 can return pixels and the pictured frame's original input handles. It does not
 make a later input request atomic with the observation or refresh that evidence.
@@ -291,9 +346,9 @@ fr robot session close NODE_ID --connection-id CONNECTION_ID --json
 
 ## Verification boundary
 
-The modifier-held click, drag and scroll extensions add parser/serialization,
-action-order, complete admission and partial-effect regressions against the existing
-request owner and ledger. In this editing session the execution environment was
+The modifier-held gestures and original input-support metadata add
+parser/serialization, action-order, complete admission, observation-expiry and
+partial-effect regressions against the existing request owner and ledger. In this editing session the execution environment was
 unavailable: these new regressions have been source-reviewed but have not been
 compiled or executed. The historical results below qualify their stated earlier
 source only; they do not establish native or live execution of these extensions.
