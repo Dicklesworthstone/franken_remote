@@ -152,7 +152,7 @@ fn owner() -> (Owner, Arc<Probe>) {
 fn wait(mut ready: impl FnMut() -> bool) {
     let until = Instant::now().checked_add(Duration::from_secs(3)).unwrap();
     while !ready() {
-        pause(until).unwrap();
+        wait_io(until).unwrap();
     }
 }
 fn stop(owner: &Owner) {
@@ -161,8 +161,7 @@ fn stop(owner: &Owner) {
 }
 fn raw(owner: &Owner) -> (UnixStream, [u8; 16], Instant) {
     let info = owner.info().unwrap();
-    let (stream, _, instance, until) = identify(Scope::Host, &info.target).unwrap();
-    (stream, instance, until)
+    legacy_identify(Scope::Host, &info.target).unwrap()
 }
 
 #[test]
@@ -355,6 +354,14 @@ fn replacement_instance_never_receives_a_stale_selection_or_cancellation() {
     );
     assert_eq!(
         cancel(&old.target, &old.instance, 1),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        pause(&old.target, &old.instance, 1),
+        Err(Error::WrongInstance)
+    );
+    assert_eq!(
+        resume(&old.target, &old.instance, 1),
         Err(Error::WrongInstance)
     );
     assert_eq!(handler.records.lock().unwrap().paths.len(), 0);
@@ -551,7 +558,7 @@ fn a_stalled_selection_does_not_refresh_its_original_command_deadline() {
             &info.instance,
             &["/fresh-explicit-selection".into()],
         ) {
-            Err(Error::Busy) => pause(until).unwrap(),
+            Err(Error::Busy) => wait_io(until).unwrap(),
             result => break result.unwrap(),
         }
     };
@@ -578,10 +585,10 @@ fn a_lost_or_malformed_post_command_reply_is_never_a_safe_retry() {
         check_peer(&stream, uid).unwrap();
         let mut identify = [0; 8];
         stream.read_exact(&mut identify).unwrap();
-        assert_eq!(identify, wire::IDENTIFY);
+        assert_eq!(identify, wire::Version::V2.identify());
         stream
             .write_all(&wire::identity_record(
-                wire::Version::V1,
+                wire::Version::V2,
                 &target,
                 instance,
                 Status::default(),
@@ -604,6 +611,11 @@ fn a_lost_or_malformed_post_command_reply_is_never_a_safe_retry() {
 
 #[test]
 fn request_bounds_are_checked_before_connect_or_allocation() {
+    assert_eq!(pause("unopened", "unopened", 0), Err(Error::InvalidRequest));
+    assert_eq!(
+        resume("unopened", "unopened", 0),
+        Err(Error::InvalidRequest)
+    );
     assert_eq!(validate_target("../target"), Err(Error::InvalidTarget));
     assert_eq!(
         check_target(&"a".repeat(MAX_NAME + 1)),
@@ -911,26 +923,34 @@ fn live_upload_pacing_targets_only_its_retained_request_and_original_lease() {
     stop(&owner);
 }
 
-/// Real old-client framing against the current upload owner, including kernel
+/// Real V1 identification keeps old-client tests independent of the version
+/// used by current clients, on the same credential-checked endpoint.
+fn legacy_identify(scope: Scope, target: &str) -> Result<(UnixStream, [u8; 16], Instant), Error> {
+    let until = Instant::now().checked_add(HANDSHAKE).unwrap();
+    let uid = rustix::process::geteuid().as_raw();
+    let mut stream = connect(scope, uid, target)?;
+    check_peer(&stream, uid)?;
+    write(&mut stream, &wire::IDENTIFY, until)?;
+    let mut identity = [0; wire::IDENTITY_BYTES];
+    read(&mut stream, &mut identity, until)?;
+    let (instance, length, _) = wire::identity(wire::Version::V1, &identity)?;
+    let mut name = [0; MAX_NAME];
+    read(&mut stream, &mut name[..length], until)?;
+    assert_eq!(&name[..length], target.as_bytes());
+    Ok((stream, instance, until))
+}
+
+/// Real old-client framing against the current owner, including kernel
 /// credentials and the original single budget; no fallback or second selection.
-fn legacy_upload(
+fn legacy_command(
+    scope: Scope,
     target: &str,
     instance: [u8; 16],
     header: [u8; wire::COMMAND_BYTES],
     payload: &[u8],
 ) -> Result<(Status, bool), Error> {
-    let until = Instant::now().checked_add(HANDSHAKE).unwrap();
-    let uid = rustix::process::geteuid().as_raw();
-    let mut stream = connect(Scope::Upload, uid, target)?;
-    check_peer(&stream, uid)?;
-    write(&mut stream, &wire::IDENTIFY, until)?;
-    let mut identity = [0; wire::IDENTITY_BYTES];
-    read(&mut stream, &mut identity, until)?;
-    let (actual, length, _) = wire::identity(wire::Version::V1, &identity)?;
+    let (mut stream, actual, until) = legacy_identify(scope, target)?;
     assert_eq!(actual, instance);
-    let mut name = [0; MAX_NAME];
-    read(&mut stream, &mut name[..length], until)?;
-    assert_eq!(&name[..length], target.as_bytes());
     write(&mut stream, &header, until)?;
     write(&mut stream, payload, until)?;
     stream.shutdown(Shutdown::Write).unwrap();
@@ -939,92 +959,76 @@ fn legacy_upload(
     wire::result(wire::Version::V1, &response, instance)
 }
 
+fn pacing(
+    scope: Scope,
+    target: &str,
+    instance: &str,
+    sequence: u64,
+    paused: bool,
+) -> Result<Pacing, Error> {
+    match (scope, paused) {
+        (Scope::Host, true) => pause(target, instance, sequence),
+        (Scope::Host, false) => resume(target, instance, sequence),
+        (Scope::Upload, true) => upload::pause(target, instance, sequence),
+        (Scope::Upload, false) => upload::resume(target, instance, sequence),
+    }
+}
+
 #[test]
-fn current_owner_serves_old_upload_clients_and_refuses_old_pacing_opcodes() {
+fn current_owners_serve_old_clients_and_refuse_old_pacing_opcodes() {
     use wire::Version::{V1, V2};
-    let connection = connection();
-    let handler = Arc::new(Probe::default());
-    let owner = Owner::bind_upload(&connection, handler.clone()).unwrap();
-    let info = owner.info().unwrap();
-    let instance = wire::parse_instance(&info.instance).unwrap();
-    let payload = wire::paths(&["/old-client-selection".into()]).unwrap();
-    let send = wire::command(V1, wire::Command::Send(1), instance, payload.len()).unwrap();
-    let (status, _) = legacy_upload(&connection, instance, send, &payload).unwrap();
-    assert_eq!(status.sequence, 1);
-    assert_eq!(
-        status.pause_requested, None,
-        "v1 cannot report a new observation as false"
-    );
-    upload::pause(&connection, &info.instance, 1).unwrap();
-    let status = wire::command(V1, wire::Command::Status(Some(1)), instance, 0).unwrap();
-    assert_eq!(
-        legacy_upload(&connection, instance, status, &[])
-            .unwrap()
-            .0
-            .paused,
-        None
-    );
-    let mut unsupported = wire::command(V2, wire::Command::Resume(1), instance, 0).unwrap();
-    unsupported[4] = b'1';
-    assert_eq!(
-        legacy_upload(&connection, instance, unsupported, &[]),
-        Err(Error::Protocol)
-    );
-    assert_eq!(handler.records.lock().unwrap().pause_requested, vec![true]);
-    let cancel = wire::command(V1, wire::Command::Cancel(1), instance, 0).unwrap();
-    assert!(legacy_upload(&connection, instance, cancel, &[]).unwrap().1);
-    stop(&owner);
-}
-
-#[test]
-fn new_upload_client_refuses_legacy_owner_before_command_without_fallback() {
-    let connection = connection();
-    let uid = rustix::process::geteuid().as_raw();
-    let address = SocketAddr::from_abstract_name(name(Scope::Upload, uid, &connection)).unwrap();
-    let listener = UnixListener::bind_addr(&address).unwrap();
-    let instance = [74; 16];
-    let client_target = connection.clone();
-    let peer = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(HANDSHAKE)).unwrap();
-        stream.set_write_timeout(Some(HANDSHAKE)).unwrap();
-        let mut identify = [0; 8];
-        stream.read_exact(&mut identify).unwrap();
-        assert_eq!(identify, wire::Version::V2.identify());
-        // A legacy owner cannot authenticate a V2 status contract. Returning
-        // its old identity must fail before any command write, with no retry.
-        stream
-            .write_all(&wire::identity_record(
-                wire::Version::V1,
-                &connection,
-                instance,
-                Status::default(),
-            ))
-            .unwrap();
-        let mut command = [0; wire::COMMAND_BYTES];
-        match stream.read(&mut command) {
-            Ok(0) => {}
-            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
-            result => panic!("legacy owner received command bytes: {result:?}"),
+    for scope in [Scope::Host, Scope::Upload] {
+        let connection = connection();
+        let handler = Arc::new(Probe::default());
+        let owner = match scope {
+            Scope::Host => Owner::bind(&connection, handler.clone()),
+            Scope::Upload => Owner::bind_upload(&connection, handler.clone()),
         }
-    });
-    assert_eq!(
-        upload::pause(&client_target, &wire::hex(&instance), 9),
-        Err(Error::Protocol),
-        "a post-command failure would instead be OutcomeUnknown"
-    );
-    peer.join().unwrap();
+        .unwrap();
+        let info = owner.info().unwrap();
+        let instance = wire::parse_instance(&info.instance).unwrap();
+        let payload = wire::paths(&["/old-client-selection".into()]).unwrap();
+        let send = wire::command(V1, wire::Command::Send(1), instance, payload.len()).unwrap();
+        let (status, _) = legacy_command(scope, &connection, instance, send, &payload).unwrap();
+        assert_eq!(status.sequence, 1);
+        assert_eq!(
+            status.pause_requested, None,
+            "v1 cannot report a new observation as false"
+        );
+        pacing(scope, &connection, &info.instance, 1, true).unwrap();
+        let status = wire::command(V1, wire::Command::Status(Some(1)), instance, 0).unwrap();
+        assert_eq!(
+            legacy_command(scope, &connection, instance, status, &[])
+                .unwrap()
+                .0
+                .paused,
+            None
+        );
+        let mut unsupported = wire::command(V2, wire::Command::Resume(1), instance, 0).unwrap();
+        unsupported[4] = b'1';
+        assert_eq!(
+            legacy_command(scope, &connection, instance, unsupported, &[]),
+            Err(Error::Protocol)
+        );
+        assert_eq!(handler.records.lock().unwrap().pause_requested, vec![true]);
+        let cancel = wire::command(V1, wire::Command::Cancel(1), instance, 0).unwrap();
+        assert!(
+            legacy_command(scope, &connection, instance, cancel, &[])
+                .unwrap()
+                .1
+        );
+        stop(&owner);
+    }
 }
 
 #[test]
-fn v2_pacing_post_command_lost_malformed_or_legacy_reply_is_unknown_without_replay() {
-    for mode in 0..3 {
+fn new_clients_refuse_legacy_owners_before_command_without_fallback() {
+    for scope in [Scope::Host, Scope::Upload] {
         let connection = connection();
         let uid = rustix::process::geteuid().as_raw();
-        let address =
-            SocketAddr::from_abstract_name(name(Scope::Upload, uid, &connection)).unwrap();
+        let address = SocketAddr::from_abstract_name(name(scope, uid, &connection)).unwrap();
         let listener = UnixListener::bind_addr(&address).unwrap();
-        let instance = [75; 16];
+        let instance = [74; 16];
         let client_target = connection.clone();
         let peer = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -1033,43 +1037,88 @@ fn v2_pacing_post_command_lost_malformed_or_legacy_reply_is_unknown_without_repl
             let mut identify = [0; 8];
             stream.read_exact(&mut identify).unwrap();
             assert_eq!(identify, wire::Version::V2.identify());
+            // A legacy owner cannot authenticate a V2 status contract. Returning
+            // its old identity must fail before any command write, with no retry.
             stream
                 .write_all(&wire::identity_record(
-                    wire::Version::V2,
+                    wire::Version::V1,
                     &connection,
                     instance,
                     Status::default(),
                 ))
                 .unwrap();
             let mut command = [0; wire::COMMAND_BYTES];
-            stream.read_exact(&mut command).unwrap();
-            let (operation, original, length) = wire::header(wire::Version::V2, &command).unwrap();
-            assert!(matches!(operation, wire::Command::Pause(9)));
-            assert_eq!((original, length), (instance, 0));
-            assert_eq!(stream.read(&mut [0]).unwrap(), 0);
-            if mode == 0 {
-                return;
+            match stream.read(&mut command) {
+                Ok(0) => {}
+                Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+                result => panic!("legacy owner received command bytes: {result:?}"),
             }
-            let status = Status {
-                sequence: 9,
-                pause_requested: Some(true),
-                ..Status::default()
-            };
-            let version = if mode == 1 {
-                wire::Version::V1
-            } else {
-                wire::Version::V2
-            };
-            let mut response = wire::result_record(version, instance, Ok((status, true)));
-            if mode == 2 {
-                response[28 + 7] = 3;
-            }
-            stream.write_all(&response).unwrap();
         });
         assert_eq!(
-            upload::pause(&client_target, &wire::hex(&instance), 9),
-            Err(Error::OutcomeUnknown)
+            pacing(scope, &client_target, &wire::hex(&instance), 9, true),
+            Err(Error::Protocol),
+            "a post-command failure would instead be OutcomeUnknown"
         );
         peer.join().unwrap();
+    }
+}
+
+#[test]
+fn v2_pacing_post_command_lost_malformed_or_legacy_reply_is_unknown_without_replay() {
+    for scope in [Scope::Host, Scope::Upload] {
+        for mode in 0..3 {
+            let connection = connection();
+            let uid = rustix::process::geteuid().as_raw();
+            let address = SocketAddr::from_abstract_name(name(scope, uid, &connection)).unwrap();
+            let listener = UnixListener::bind_addr(&address).unwrap();
+            let instance = [75; 16];
+            let client_target = connection.clone();
+            let peer = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(HANDSHAKE)).unwrap();
+                stream.set_write_timeout(Some(HANDSHAKE)).unwrap();
+                let mut identify = [0; 8];
+                stream.read_exact(&mut identify).unwrap();
+                assert_eq!(identify, wire::Version::V2.identify());
+                stream
+                    .write_all(&wire::identity_record(
+                        wire::Version::V2,
+                        &connection,
+                        instance,
+                        Status::default(),
+                    ))
+                    .unwrap();
+                let mut command = [0; wire::COMMAND_BYTES];
+                stream.read_exact(&mut command).unwrap();
+                let (operation, original, length) =
+                    wire::header(wire::Version::V2, &command).unwrap();
+                assert!(matches!(operation, wire::Command::Pause(9)));
+                assert_eq!((original, length), (instance, 0));
+                assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+                if mode == 0 {
+                    return;
+                }
+                let status = Status {
+                    sequence: 9,
+                    pause_requested: Some(true),
+                    ..Status::default()
+                };
+                let version = if mode == 1 {
+                    wire::Version::V1
+                } else {
+                    wire::Version::V2
+                };
+                let mut response = wire::result_record(version, instance, Ok((status, true)));
+                if mode == 2 {
+                    response[28 + 7] = 3;
+                }
+                stream.write_all(&response).unwrap();
+            });
+            assert_eq!(
+                pacing(scope, &client_target, &wire::hex(&instance), 9, true),
+                Err(Error::OutcomeUnknown)
+            );
+            peer.join().unwrap();
+        }
     }
 }

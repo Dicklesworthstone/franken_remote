@@ -24,12 +24,6 @@ enum Scope {
     Upload,
 }
 impl Scope {
-    fn version(self) -> wire::Version {
-        match self {
-            Self::Host => wire::Version::V1,
-            Self::Upload => wire::Version::V2,
-        }
-    }
     fn check_target(self, target: &str) -> Result<(), Error> {
         check_target(target)?;
         if matches!(self, Self::Upload) {
@@ -46,6 +40,10 @@ impl Scope {
 /// namespace can never address a host's independently opted-in send endpoint.
 pub mod upload;
 
+// Current callers require the pacing/status contract before sending commands.
+// The owner still accepts V1 clients on this same socket; clients never retry
+// with an older version after either identification or an uncertain command.
+const CLIENT_VERSION: wire::Version = wire::Version::V2;
 pub const MAX_PATHS: usize = 8;
 pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_TOTAL_PATH_BYTES: usize = MAX_PATHS * MAX_PATH_BYTES;
@@ -252,6 +250,33 @@ pub fn cancel(target: &str, instance: &str, sequence: u64) -> Result<Cancellatio
     Ok(Cancellation { info, requested })
 }
 
+/// Pause one original host selection without extending its authority or expiry.
+pub fn pause(target: &str, instance: &str, sequence: u64) -> Result<Pacing, Error> {
+    set_paused(Scope::Host, target, instance, sequence, true)
+}
+/// Resume that same selection; never reselect, retry or recreate expired work.
+pub fn resume(target: &str, instance: &str, sequence: u64) -> Result<Pacing, Error> {
+    set_paused(Scope::Host, target, instance, sequence, false)
+}
+fn set_paused(
+    scope: Scope,
+    target: &str,
+    instance: &str,
+    sequence: u64,
+    paused: bool,
+) -> Result<Pacing, Error> {
+    if sequence == 0 {
+        return Err(Error::InvalidRequest);
+    }
+    let operation = if paused {
+        wire::Command::Pause(sequence)
+    } else {
+        wire::Command::Resume(sequence)
+    };
+    let (info, changed) = command(scope, target, instance, operation, &[])?;
+    Ok(Pacing { info, changed })
+}
+
 fn command(
     scope: Scope,
     target: &str,
@@ -264,7 +289,7 @@ fn command(
     if instance != expected {
         return Err(Error::WrongInstance);
     }
-    let request = wire::command(scope.version(), command, instance, payload.len())?;
+    let request = wire::command(CLIENT_VERSION, command, instance, payload.len())?;
     // From the first command write onward a lost reply cannot prove refusal.
     let result = (|| {
         write(&mut stream, &request, until)?;
@@ -277,7 +302,7 @@ fn command(
         Ok(bytes)
     })()
     .map_err(|_: Error| Error::OutcomeUnknown)?;
-    let (status, changed) = wire::result(scope.version(), &result, instance)?;
+    let (status, changed) = wire::result(CLIENT_VERSION, &result, instance)?;
     let matches = match command {
         wire::Command::Send(count) => {
             status.sequence != 0 && usize::from(status.selected) == count && !changed
@@ -308,10 +333,10 @@ fn identify(scope: Scope, target: &str) -> Result<(UnixStream, Info, [u8; 16], I
     let uid = rustix::process::geteuid().as_raw();
     let mut stream = connect(scope, uid, target)?;
     check_peer(&stream, uid)?;
-    write(&mut stream, &scope.version().identify(), until)?;
+    write(&mut stream, &CLIENT_VERSION.identify(), until)?;
     let mut bytes = [0; wire::IDENTITY_BYTES];
     read(&mut stream, &mut bytes, until)?;
-    let (instance, length, status) = wire::identity(scope.version(), &bytes)?;
+    let (instance, length, status) = wire::identity(CLIENT_VERSION, &bytes)?;
     let mut name = [0; MAX_NAME];
     read(&mut stream, &mut name[..length], until)?;
     if name[..length] != *target.as_bytes() {
@@ -384,7 +409,7 @@ fn check_time(until: Instant) -> Result<(), Error> {
         Ok(())
     }
 }
-fn pause(until: Instant) -> Result<(), Error> {
+fn wait_io(until: Instant) -> Result<(), Error> {
     let remaining = until
         .checked_duration_since(Instant::now())
         .filter(|remaining| !remaining.is_zero())
@@ -399,7 +424,7 @@ fn read(stream: &mut UnixStream, mut bytes: &mut [u8], until: Instant) -> Result
             Ok(0) => return Err(Error::Protocol),
             Ok(count) => bytes = &mut bytes[count..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(until)?,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => wait_io(until)?,
             Err(_) => return Err(Error::Unavailable),
         }
     }
@@ -412,7 +437,7 @@ fn write(stream: &mut UnixStream, mut bytes: &[u8], until: Instant) -> Result<()
             Ok(0) => return Err(Error::Unavailable),
             Ok(count) => bytes = &bytes[count..],
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => pause(until)?,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => wait_io(until)?,
             Err(_) => return Err(Error::Unavailable),
         }
     }

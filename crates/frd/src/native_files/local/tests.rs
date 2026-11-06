@@ -317,3 +317,95 @@ fn upload_pacing_cannot_revive_cancelled_or_terminal_request_or_touch_unrelated_
     assert_eq!(handler.set_paused(1, false), Err(Error::Closed));
     assert!(!dropped.snapshot().pause_requested);
 }
+
+#[test]
+fn host_socket_pacing_preserves_original_batch_expiry_and_fences_successors() {
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let bridge = HostSendIntake::new();
+    let intake = bridge
+        .bind(runtime.request_cx_with_budget(Budget::INFINITE))
+        .unwrap();
+    intake.set_ready(true);
+    let owner = Owner::bind(
+        &format!("host-pacing-{}", std::process::id()),
+        bridge.clone(),
+    )
+    .unwrap();
+    let info = owner.info().unwrap();
+    let first = send(&info.target, &info.instance, &paths()).unwrap();
+    let pending = intake.take().unwrap();
+    let original_until = pending.until_us;
+    let original_lifetime = pending.request.lifetime;
+
+    let paused = pause(&info.target, &info.instance, first.sequence).unwrap();
+    assert!(paused.changed);
+    assert_eq!(paused.info.status.pause_requested, Some(true));
+    assert_eq!(paused.info.status.paused, None);
+    assert!(pending.control.snapshot().pause_requested);
+    assert!(!paused.info.status.ready);
+    assert_eq!(
+        send(&info.target, &info.instance, &paths()),
+        Err(Error::Busy),
+        "a paused original selection keeps the intake occupied"
+    );
+    assert!(
+        !pause(&info.target, &info.instance, first.sequence)
+            .unwrap()
+            .changed
+    );
+    // A sender observation can lag the command, and stays independent when
+    // the same original control is resumed. No publication is fabricated.
+    pending
+        .control
+        .observe(None, Some(sender::Stage::Streaming), None, Some(true));
+    let resumed = resume(&info.target, &info.instance, first.sequence).unwrap();
+    assert!(resumed.changed);
+    assert_eq!(resumed.info.status.pause_requested, Some(false));
+    assert_eq!(resumed.info.status.paused, Some(true));
+    assert_eq!(resumed.info.status.published, 0);
+    assert_eq!(resumed.info.status.cleanup, Cleanup::Unknown);
+    assert_eq!(pending.until_us, original_until);
+    assert_eq!(pending.request.lifetime, original_lifetime);
+    assert!(intake.take().is_none());
+
+    // This fixture does not run ATP: finish the first control without claiming
+    // any cleanup or receipt, then admit a genuinely new explicit selection.
+    pending
+        .control
+        .update(|status| status.phase = SendPhase::Finished);
+    intake.set_ready(true);
+    let second = send(&info.target, &info.instance, &paths()).unwrap();
+    let successor = intake.take().unwrap();
+    assert_eq!(second.sequence, first.sequence + 1);
+    assert!(
+        !pause(&info.target, &info.instance, first.sequence)
+            .unwrap()
+            .changed
+    );
+    assert_eq!(
+        pause(&info.target, &info.instance, second.sequence + 1),
+        Err(Error::UnknownRequest)
+    );
+    assert!(!successor.control.snapshot().pause_requested);
+    assert!(!successor.control.snapshot().cancel_requested);
+    assert_eq!(owner.results().batches().len(), 2);
+    pause(&info.target, &info.instance, second.sequence).unwrap();
+    cancel(&info.target, &info.instance, second.sequence).unwrap();
+    assert!(
+        !resume(&info.target, &info.instance, second.sequence)
+            .unwrap()
+            .changed
+    );
+    assert!(successor.control.snapshot().pause_requested);
+    assert!(successor.control.snapshot().cancel_requested);
+    owner.stop();
+    assert!(successor.control.snapshot().cancel_requested);
+    let deadline = until();
+    while !owner.is_complete() {
+        assert!(
+            Instant::now() < deadline,
+            "original endpoint workers did not join"
+        );
+        std::thread::yield_now();
+    }
+}

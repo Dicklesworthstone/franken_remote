@@ -6,6 +6,8 @@ pub(super) enum Action {
     Send(Vec<PathBuf>),
     Status(Option<u64>),
     Cancel(u64),
+    Pause(u64),
+    Resume(u64),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +27,7 @@ impl Options {
         let mut status = false;
         let mut request = None;
         let mut cancel = None;
+        let mut pacing = None;
         let mut json = false;
         let mut paths = Vec::new();
         let mut path_bytes = 0_usize;
@@ -41,6 +44,10 @@ impl Options {
                 }
                 "--request" if request.is_none() => request = Some(number(iter.next())?),
                 "--cancel" if cancel.is_none() => cancel = Some(number(iter.next())?),
+                "--pause" if pacing.is_none() => pacing = Some(Action::Pause(number(iter.next())?)),
+                "--resume" if pacing.is_none() => {
+                    pacing = Some(Action::Resume(number(iter.next())?));
+                }
                 _ if arg.starts_with('-') => return Err(Invalid),
                 _ => {
                     let path = PathBuf::from(arg);
@@ -74,19 +81,24 @@ impl Options {
         }
         // An old sequence number is meaningful only with its original owner.
         // Never inspect a replacement and apply a former command's cancellation.
-        if (request.is_some() || cancel.is_some()) && instance.is_none() {
+        if (request.is_some() || cancel.is_some() || pacing.is_some()) && instance.is_none() {
             return Err(Invalid);
         }
         let action = if status {
-            if cancel.is_some() || !paths.is_empty() {
+            if cancel.is_some() || pacing.is_some() || !paths.is_empty() {
                 return Err(Invalid);
             }
             Action::Status(request)
         } else if let Some(sequence) = cancel {
-            if request.is_some() || !paths.is_empty() {
+            if request.is_some() || pacing.is_some() || !paths.is_empty() {
                 return Err(Invalid);
             }
             Action::Cancel(sequence)
+        } else if let Some(action) = pacing {
+            if request.is_some() || !paths.is_empty() {
+                return Err(Invalid);
+            }
+            action
         } else {
             if request.is_some() || paths.is_empty() {
                 return Err(Invalid);
@@ -201,5 +213,62 @@ mod tests {
         }
         assert!(parse(&["--target", &"n".repeat(65), "/file"]).is_err());
         assert!(parse(&["--target", "host", &format!("/{}", "x".repeat(4096))]).is_err());
+    }
+
+    #[test]
+    fn pacing_requires_an_exact_original_instance_and_nonzero_request() {
+        for (flag, expected) in [
+            ("--pause", Action::Pause(7)),
+            ("--resume", Action::Resume(7)),
+        ] {
+            assert_eq!(
+                parse(&[
+                    "--target",
+                    "host",
+                    "--instance",
+                    INSTANCE,
+                    flag,
+                    "7",
+                    "--json"
+                ])
+                .unwrap()
+                .action,
+                expected
+            );
+            for args in [
+                vec!["--target", "host", flag, "7"],
+                vec!["--target", "host", "--instance", INSTANCE, flag],
+                vec!["--target", "host", "--instance", INSTANCE, flag, "0"],
+                vec!["--target", "host", "--instance", INSTANCE, flag, "-1"],
+                vec![
+                    "--target",
+                    "host",
+                    "--instance",
+                    INSTANCE,
+                    flag,
+                    "18446744073709551616",
+                ],
+            ] {
+                assert!(parse(&args).is_err(), "{args:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn pacing_refuses_mixed_or_repeated_actions_before_io() {
+        for flag in ["--pause", "--resume"] {
+            for suffix in [
+                vec!["--status"],
+                vec!["--request", "7"],
+                vec!["--cancel", "7"],
+                vec!["--pause", "7"],
+                vec!["--resume", "7"],
+                vec!["/source"],
+            ] {
+                let mut args = vec!["--target", "host", "--instance", INSTANCE, flag, "7"];
+                args.extend(suffix);
+                assert!(parse(&args).is_err(), "{args:?}");
+            }
+        }
     }
 }

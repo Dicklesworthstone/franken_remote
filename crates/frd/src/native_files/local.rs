@@ -26,7 +26,7 @@ mod ipc;
 pub use ipc::{
     Cancellation, Cleanup, Error, Info, MAX_HISTORY, MAX_PATH_BYTES, MAX_PATHS,
     MAX_TOTAL_PATH_BYTES, Pacing, Phase, SelectionFailure, Stage, Status, Submission, cancel,
-    inspect, send, status, upload, validate_target,
+    inspect, pause, resume, send, status, upload, validate_target,
 };
 
 /// Owns only this local endpoint and its fixed workers. Drop/stop immediately

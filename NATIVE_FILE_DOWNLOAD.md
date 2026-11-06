@@ -77,12 +77,14 @@ queues a selection for an unknown future controller.
 
 The successful command returns `operation: "send_admitted"`, the original
 32-digit hexadecimal `instance`, and a nonzero `request` number. This confirms
-**local admission only**. Save that instance and request to inspect or cancel the
-same batch later. Replace `ORIGINAL_INSTANCE` and `1` in these examples with the
+**local admission only**. Save that instance and request to inspect, pause, resume
+or cancel the same batch later. Replace `ORIGINAL_INSTANCE` and `1` with the
 values returned for the batch:
 
 ```bash
 frd send --target desk --instance ORIGINAL_INSTANCE --status --request 1 --json
+frd send --target desk --instance ORIGINAL_INSTANCE --pause 1 --json
+frd send --target desk --instance ORIGINAL_INSTANCE --resume 1 --json
 frd send --target desk --instance ORIGINAL_INSTANCE --cancel 1 --json
 ```
 
@@ -93,7 +95,19 @@ frd send --target desk --instance ORIGINAL_INSTANCE --cancel 1 --json
 | `refused`, `interrupted`, `publication_unknown` | Distinct retained outcomes; none can be inferred from queued-byte progress. |
 | `complete` / `failed` | Whether the batch reached a terminal report and whether it failed. Completion alone is not success. |
 | `queued_bytes` / `total_bytes` | Source progress when available; a full byte count does not confirm publication. |
+| `pause_requested` | The original request's latest local pacing intent; `null` before a selection or when unavailable. |
+| `paused` | The original sender's last observed pacing gate; `null` until observed. This can differ from the current intent. |
+| `pacing_changed_by_command` | Whether this pause/resume command changed local intent. `false` also covers duplicate commands and terminal or cancelled requests; `null` for other operations. |
 | `cleanup` | Separately observed source cleanup: `unknown`, `confirmed`, or `failed`. |
+
+Pause gates new source and record admission on the original host sender. Already
+admitted bytes and preparation may finish, while authority checks, receipts and
+cleanup continue. The original absolute deadline continues while paused: pause
+does not reserve unlimited time or extend the control lease. Resume changes the
+same request's intent; it never reopens a source, retries a transfer or revives
+expired or cancelled work. A paused batch keeps the intake occupied, so another
+selection must wait for that batch to finish. Status retains actual publication,
+uncertainty and cleanup even when a pacing command makes no change.
 
 After a successful batch, wait for `ready: true` before submitting another
 `frd send --target desk /absolute/path`. Later batches reuse the same authenticated
@@ -103,12 +117,14 @@ absolute transfer deadlines remain in force. A new batch cannot reset them.
 Up to 64 original command handles are retained for the life of the endpoint;
 exhaustion refuses further admission instead of discarding earlier results.
 
-Historical status and cancellation require the original instance explicitly.
+Historical status, cancellation and pacing require the original instance explicitly.
 If a host exits and another process reuses `desk`, an old command refuses instead
 of acting on that replacement. Commands without an explicit instance discover
 the current owner once and pin that instance for their operation. A lost reply
-can produce `file_command_outcome_unknown`; inspect that original instance before
-making another explicit selection. The command never automatically resends.
+can produce `file_command_outcome_unknown`; inspect that original instance and
+request before another explicit action. The error retains a known request number
+for status, cancel, pause and resume, but cannot invent one for an unacknowledged
+new selection. Commands never automatically repeat or change instances.
 
 Cancelling an active batch retires its original download lane. Desktop control
 and an independently negotiated upload can continue, but further downloads need
@@ -118,6 +134,10 @@ in their original results; cancellation is not rollback.
 
 The local endpoint uses a same-effective-user Linux abstract Unix socket, with
 bounded peers, payloads and command deadlines. It is not exposed to the tailnet.
+Current host and upload clients require local protocol v2 and refuse an older
+owner during identification before sending their command, without falling back.
+Current owners still accept existing v1 send/status/cancel clients on the same
+endpoint; v1 carries no pacing observations and rejects pause/resume opcodes.
 Closing the host immediately fences selection admission; a delayed filesystem
 operation cannot submit into another session. Thread completion is reported only
 after the original workers have actually joined. This feature adds explicit

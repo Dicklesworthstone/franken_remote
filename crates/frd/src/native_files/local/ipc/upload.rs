@@ -1,5 +1,7 @@
 //! Client-upload entry points to the same bounded, credential-checked protocol.
-use super::{Cancellation, Error, Info, Pacing, Scope, Submission, command, identify, wire};
+use super::{
+    Cancellation, Error, Info, Pacing, Scope, Submission, command, identify, set_paused, wire,
+};
 use std::path::PathBuf;
 
 pub fn inspect(connection: &str) -> Result<Info, Error> {
@@ -52,26 +54,9 @@ pub fn cancel(connection: &str, instance: &str, sequence: u64) -> Result<Cancell
 
 /// Pause one retained request under its original authority and expiry.
 pub fn pause(connection: &str, instance: &str, sequence: u64) -> Result<Pacing, Error> {
-    set_paused(connection, instance, sequence, true)
+    set_paused(Scope::Upload, connection, instance, sequence, true)
 }
 /// Resume the same request; never retry, reopen or select another transfer.
 pub fn resume(connection: &str, instance: &str, sequence: u64) -> Result<Pacing, Error> {
-    set_paused(connection, instance, sequence, false)
-}
-fn set_paused(
-    connection: &str,
-    instance: &str,
-    sequence: u64,
-    paused: bool,
-) -> Result<Pacing, Error> {
-    if sequence == 0 {
-        return Err(Error::InvalidRequest);
-    }
-    let operation = if paused {
-        wire::Command::Pause(sequence)
-    } else {
-        wire::Command::Resume(sequence)
-    };
-    let (info, changed) = command(Scope::Upload, connection, instance, operation, &[])?;
-    Ok(Pacing { info, changed })
+    set_paused(Scope::Upload, connection, instance, sequence, false)
 }

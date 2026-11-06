@@ -28,6 +28,8 @@ USAGE:
     frd send --target NAME --status [--json]
     frd send --target NAME --instance HEX --status --request N [--json]
     frd send --target NAME --instance HEX --cancel N [--json]
+    frd send --target NAME --instance HEX --pause N [--json]
+    frd send --target NAME --instance HEX --resume N [--json]
     frd status [--json]
     frd approval [get | set local | set none]
     frd sharing [get | set own-user | set tailnet]
