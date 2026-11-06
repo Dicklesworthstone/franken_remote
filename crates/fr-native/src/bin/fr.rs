@@ -77,6 +77,7 @@ impl Failure {
         self
     }
 }
+#[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
     let mut args = Vec::new();
     let mut json = false;

@@ -410,6 +410,7 @@ struct Profile {
 }
 
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_lines)]
 fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
     use frd::host_run::Event;
 

@@ -148,7 +148,7 @@ fn invalid_dimensions_and_partial_input_support_cannot_pass_readiness() {
         let report = Report::new("software", ":1", Ok(admitted()), Some(Err(error)));
         assert_eq!(report.refusal_code, Some(code));
         assert_eq!(capability(&report, "video_encode").status, "passed");
-        assert!(report.input_capabilities.is_empty());
+        assert_eq!(report.input_capabilities, [] as [&str; 0]);
     }
 }
 

@@ -59,7 +59,7 @@ impl<'a> Report<'a> {
     fn new(
         encoder: &'a str,
         display: &'a str,
-        encoded: Result<EncoderProbe, WorkerError>,
+        probe: Result<EncoderProbe, WorkerError>,
         input: Option<Result<Capabilities, PlatformError>>,
     ) -> Self {
         let mut report = Self {
@@ -71,7 +71,7 @@ impl<'a> Report<'a> {
             refusal_code: None,
             next_action: None,
         };
-        report.encoder_result(encoded);
+        report.encoder_result(probe);
         if let Some(input) = input {
             report.input_result(input);
         }
@@ -190,19 +190,19 @@ impl<'a> Report<'a> {
                         (!capabilities.contains(*capability)).then_some(*name)
                     })
                     .collect();
-                if !missing.is_empty() {
-                    self.refuse("input_injection", "blocked", "native_input_capability_missing", "The selected input agent lacks an operation required by native control. Check XTEST/XKB availability on this display.");
-                    let _ = write!(
-                        self.capability("input_injection").detail,
-                        " Missing: {}. No input was injected.",
-                        missing.join(", ")
-                    );
-                } else {
+                if missing.is_empty() {
                     let names = self.input_capabilities.join(", ");
                     let row = self.capability("input_injection");
                     row.status = "passed";
                     row.detail = format!(
                         "The selected input agent discovered {names}. This is executor capability discovery; no key, pointer or text was injected and no application effect was measured."
+                    );
+                } else {
+                    self.refuse("input_injection", "blocked", "native_input_capability_missing", "The selected input agent lacks an operation required by native control. Check XTEST/XKB availability on this display.");
+                    let _ = write!(
+                        self.capability("input_injection").detail,
+                        " Missing: {}. No input was injected.",
+                        missing.join(", ")
                     );
                 }
             }
