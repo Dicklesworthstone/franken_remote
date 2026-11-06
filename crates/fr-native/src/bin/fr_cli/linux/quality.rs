@@ -88,7 +88,7 @@ mod tests {
             ",\"host_quality_decisions_received\":0,\"last_host_quality_decision\":null"
         );
         assert!(text(Some(&statistics)).contains("unknown"));
-        assert!(text(None).is_empty());
+        assert_eq!(text(None), "");
     }
 
     #[test]

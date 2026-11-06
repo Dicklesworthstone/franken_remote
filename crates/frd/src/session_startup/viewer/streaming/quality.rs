@@ -260,7 +260,8 @@ fn checked_binding(
         return Err(Fault::Binding);
     }
     if inbound.maximum < wire::RECORD_BYTES
-        || selection.limits.max_control_message_bytes() < wire::RECORD_BYTES as u32
+        || usize::try_from(selection.limits.max_control_message_bytes())
+            .is_ok_and(|max| max < wire::RECORD_BYTES)
     {
         return Err(Fault::Wire(WireError::ResourceLimit));
     }

@@ -710,7 +710,10 @@ impl StreamingViewer {
                 .map(|p| p.ages)
                 .unwrap_or_default(),
             host_quality_decisions_received: self.quality.as_ref().map_or(0, |q| q.received),
-            last_host_quality_decision: self.quality.as_ref().and_then(|q| q.last()),
+            last_host_quality_decision: self
+                .quality
+                .as_ref()
+                .and_then(quality::ViewerQuality::last),
             ..self.statistics
         }
     }

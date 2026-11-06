@@ -1,8 +1,9 @@
 //! Real pacing/bitrate state and the production sender with explicit admission
 //! outcomes. Native encoder and network qualification are separate tests.
 use super::*;
+use asupersync::net::quic_native::StreamId;
 use fr_core::ids::*;
-use fr_transport::quic::{Messages, Priority, StreamId, StreamRoute};
+use fr_transport::quic::{Messages, Priority, StreamRoute};
 
 fn view() -> Binding {
     Binding {
