@@ -106,7 +106,7 @@ fn decision(sequence: u64) -> Decision {
     }
 }
 
-fn send(pair: &mut Pair, h: &Cx, binding: decoder::Binding, value: Decision) {
+async fn send(pair: &mut Pair, c: &Cx, h: &Cx, binding: decoder::Binding, value: Decision) {
     let mut bytes = [0; wire::RECORD_BYTES];
     let n = wire::encode(
         value,
@@ -117,15 +117,26 @@ fn send(pair: &mut Pair, h: &Cx, binding: decoder::Binding, value: Decision) {
         input::InputDelivery::Reliable,
     )
     .unwrap();
-    let (q, routes) = pair.host.io().unwrap();
-    q.send(
-        h,
-        Route::Stream(routes.outbound),
-        &bytes[..n],
-        now(h).unwrap() + 1_000_000,
-        || true,
-    )
-    .unwrap();
+    // The first send can meet backpressure. Production retries it, so drive
+    // both sides until the record is admitted, within its original deadline.
+    let send_by = now(h).unwrap() + 1_000_000;
+    loop {
+        let (q, routes) = pair.host.io().unwrap();
+        match q.send(
+            h,
+            Route::Stream(routes.outbound),
+            &bytes[..n],
+            send_by,
+            || true,
+        ) {
+            Ok(()) => return,
+            Err(quic::Error::Backpressure) => {
+                assert!(now(h).unwrap() < send_by, "quality record never admitted");
+                turn(pair, c).await.unwrap();
+            }
+            Err(error) => panic!("quality record send failed: {error:?}"),
+        }
+    }
 }
 
 async fn turn(pair: &mut Pair, c: &Cx) -> Result<(), Error> {
@@ -193,7 +204,7 @@ fn authenticated_quality_reports_do_not_change_media_or_input_evidence() {
             .handle(StreamingViewerControl::observing(c.clone()));
         assert_eq!(handle.current(), None);
         let binding = pair.binding;
-        send(&mut pair, &h, binding, decision(1));
+        send(&mut pair, &c, &h, binding, decision(1)).await;
         let until = now(&c).unwrap() + 1_000_000;
         while pair.quality.as_ref().unwrap().received == 0 {
             assert!(
@@ -241,7 +252,7 @@ fn current_quality_handle_cannot_outlive_cancellation_close_or_its_original_owne
                 .unwrap()
                 .handle(StreamingViewerControl::observing(c.clone()));
             let binding = pair.binding;
-            send(&mut pair, &h, binding, decision(1));
+            send(&mut pair, &c, &h, binding, decision(1)).await;
             let until = now(&c).unwrap() + 1_000_000;
             while handle.current().is_none() {
                 assert!(now(&c).unwrap() < until);
@@ -271,7 +282,7 @@ fn an_unselected_or_foreign_quality_report_is_a_named_terminal_protocol_refusal(
             if selected {
                 binding.display += 1;
             }
-            send(&mut pair, &h, binding, decision(1));
+            send(&mut pair, &c, &h, binding, decision(1)).await;
             let until = now(&c).unwrap() + 1_000_000;
             let error = loop {
                 assert!(
