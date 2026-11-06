@@ -6,7 +6,7 @@ use fr_core::limits::ProtocolLimits;
 use fr_wire::{
     attachment,
     negotiation::{self, Capability, Message, Offer, Role, Selection},
-    receiver_metrics,
+    quality_decision, receiver_metrics,
 };
 use frd::session_startup::{
     host_offer, host_offer_with_download, host_offer_with_duplex, host_offer_with_files,
@@ -120,6 +120,13 @@ fn every_control_auxiliary_and_file_direction_profile_retains_negotiated_metrics
                 client.validate().unwrap();
                 assert!(present(&client, receiver_metrics::CAPABILITY));
                 for cap in native::control_offer().capabilities {
+                    // The quality advisory is a diagnostic. A full offer omits
+                    // it before any older feature, and only a full one does.
+                    if cap.name == quality_decision::CAPABILITY
+                        && client.capabilities.len() == negotiation::MAX_CAPABILITIES
+                    {
+                        continue;
+                    }
                     // The full duplex profile already used fixed bounded credit;
                     // every authority, privacy, cursor and recovery gate remains.
                     if cap.name != attachment::credit::CAPABILITY {
