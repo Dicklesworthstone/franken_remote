@@ -279,15 +279,17 @@ fn dropped_controller_or_microphone_authority_cannot_be_replaced_by_equal_ids() 
 #[test]
 fn native_setup_delay_cannot_restart_the_original_host_clock() {
     let input = input(HostInstant::ORIGIN);
-    // The grant has only 20ms left on its original clock. Delaying native setup
-    // cannot convert that remaining interval into a fresh provisional lease.
+    // The grant has 200ms left on its original clock. Delaying native setup
+    // past that cannot convert the remaining interval into a fresh provisional
+    // lease. The margin is real time between binding the clock and checking
+    // it: with 20ms, a stalled runner once expired the grant at bind.
     let owner = Authority::from_input(&input, channel(), &selection(), true, || {
-        HostInstant::from_micros(2_980_000)
+        HostInstant::from_micros(2_800_000)
     })
     .unwrap();
     let control = owner.control();
     assert!(control.permitted());
-    std::thread::sleep(Duration::from_millis(25));
+    std::thread::sleep(Duration::from_millis(250));
     assert!(matches!(
         Receiver::new(
             owner,
