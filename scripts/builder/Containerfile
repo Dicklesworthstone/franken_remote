@@ -6,8 +6,15 @@
 # from rust-toolchain.toml. The FFmpeg SDK is Ubuntu's, as in CI; the curated
 # SDK under native/ and an FFmpeg ABI pin are not part of this image.
 #
+# The base is pinned, but apt installs whatever the Ubuntu archive serves on
+# the day the image is built, so package versions drift between builds, as on
+# CI's runners. smoke.sh prints the installed versions.
+#
+# x86_64 only, like CI: the digest below is ubuntu:26.04's linux/amd64 image
+# and rustup-init is the x86_64 build.
+#
 # Build and run it through scripts/builder/run.sh.
-FROM ubuntu@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+FROM ubuntu@sha256:157dc3d6e4a3e4f2c68d12df9df9ed6e808b59af6d4c3757b432b4f519916725
 
 ARG RUSTUP_VERSION=1.29.3
 ARG RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
@@ -18,13 +25,15 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
 # What GitHub's runner image already provides first, then CI's exact package
 # list. libxcursor1 is in the first group: fr-native's cursor tests link
 # libXcursor.so.1 (tests/cursor_support), and CI gets it only from the runner
-# image.
-RUN apt-get update && apt-get install -y \
-        ca-certificates curl git build-essential python3 libxcursor1 \
-        libpipewire-0.3-dev pipewire pipewire-bin libavcodec-dev libavutil-dev \
-        libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 \
-        libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio \
-        pkg-config xvfb xauth xfonts-base iproute2 nftables
+# image. The list is saved to /etc/fr-builder-packages for smoke.sh.
+ARG PACKAGES="ca-certificates curl git build-essential python3 libxcursor1 \
+    libpipewire-0.3-dev pipewire pipewire-bin libavcodec-dev libavutil-dev \
+    libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 \
+    libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio \
+    pkg-config xvfb xauth xfonts-base iproute2 nftables"
+RUN printf '%s\n' ${PACKAGES} > /etc/fr-builder-packages \
+    && apt-get update \
+    && xargs apt-get install -y < /etc/fr-builder-packages
 
 # The toolchain lives outside any user's home so the container can run as the
 # caller's uid; run.sh mounts a writable CARGO_HOME for registry and git caches.

@@ -21,8 +21,12 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 docker=${FR_BUILDER_DOCKER:-docker}
 tag=${FR_BUILDER_TAG:-franken-remote-builder:local}
 target=${FR_BUILDER_TARGET:?set FR_BUILDER_TARGET to a host directory for build output}
+target=${target%/}
 cargo_home=${FR_BUILDER_CARGO_HOME:-$target.cargo-home}
 mkdir -p "$target" "$cargo_home"
+# docker run -v reads a bare relative name as a named volume; pass absolute paths.
+target=$(cd "$target" && pwd)
+cargo_home=$(cd "$cargo_home" && pwd)
 "$docker" build -f "$root/scripts/builder/Containerfile" -t "$tag" "$root/scripts/builder"
 if [ "${1:-}" = "--" ]; then shift; fi
 if [ $# -eq 0 ]; then set -- scripts/builder/smoke.sh; fi

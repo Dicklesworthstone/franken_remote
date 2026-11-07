@@ -8,14 +8,19 @@ cd "$(dirname "$0")/../.." || exit 1
 : "${CARGO_INCREMENTAL:=0}" "${RUST_MIN_STACK:=16777216}"
 export CARGO_PROFILE_DEV_DEBUG CARGO_PROFILE_TEST_DEBUG CARGO_INCREMENTAL RUST_MIN_STACK
 
+echo "== tree"
+if rev=$(git rev-parse HEAD 2>&1); then
+    echo "$rev, $(git status --porcelain | wc -l) uncommitted paths"
+else
+    echo "no git revision: $rev"
+fi
 echo "== builder"
 . /etc/os-release && echo "$PRETTY_NAME"
 rustc --version
 cargo --version
-echo "== native packages"
-dpkg-query -W -f='${Package} ${Version}\n' libpipewire-0.3-dev libavcodec-dev libavutil-dev \
-    libswscale-dev libx11-dev libxcb1-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 \
-    libx11-xcb1 libxcursor1 libopus0 libpulse0 pulseaudio xvfb nftables
+echo "== packages"
+# The image's whole apt list (Containerfile PACKAGES), with installed versions.
+xargs dpkg-query -W -f='${Package} ${Version}\n' < /etc/fr-builder-packages
 echo "== pkg-config"
 for module in libpipewire-0.3 libavcodec libavutil libswscale x11 xcb xcb-render; do
     echo "$module $(pkg-config --modversion "$module" 2>/dev/null || echo MISSING)"
