@@ -129,14 +129,20 @@ fn hub_drives_late_joins_and_reuses_slots_without_reusing_cancellation_authority
             fixture(&rt, policy, entropy()).await;
         let pid = publisher.worker_id();
         Box::pin(together(&mut hub, &mut publisher, async {
-            let (c, h, host, viewer) =
-                sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
-            let selection = host.selection().clone();
-            let control = host.original_observation();
-            let second_ticket = admission.admit(host).unwrap();
-            assert_eq!(second_ticket.state(), State::Starting);
-            let mut second = Box::pin(accept(viewer, c, h, control, selection)).await;
-            until_ready(&mut second.peer).await;
+            // The first viewer keeps consuming its connection while the second
+            // joins, as the third join below does for the second viewer.
+            let (second_ticket, mut second) = Box::pin(with_client(&mut first.peer, async {
+                let (c, h, host, viewer) =
+                    sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
+                let selection = host.selection().clone();
+                let control = host.original_observation();
+                let second_ticket = admission.admit(host).unwrap();
+                assert_eq!(second_ticket.state(), State::Starting);
+                let mut second = Box::new(Box::pin(accept(viewer, c, h, control, selection)).await);
+                until_ready(&mut second.peer).await;
+                (second_ticket, second)
+            }))
+            .await;
             assert_eq!(second_ticket.state(), State::Serving);
             assert!(first.peer.control.check().is_ok());
             old.close();
@@ -317,17 +323,23 @@ fn hub_entropy_callbacks_run_outside_the_registry_lock() {
             }
             Ok(u128::from(900_000 + count.fetch_add(1, Ordering::Relaxed)))
         });
-        let (mut publisher, _owner, _first, mut hub, admission, _) =
+        let (mut publisher, _owner, mut first, mut hub, admission, _) =
             fixture(&rt, service::Policy::default(), random).await;
         *handle.lock().unwrap() = Some(admission.clone());
         Box::pin(together(&mut hub, &mut publisher, async {
-            let (c, h, host, viewer) =
-                sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
-            let selection = host.selection().clone();
-            let control = host.original_observation();
-            let ticket = admission.admit(host).unwrap();
-            let mut peer = Box::pin(accept(viewer, c, h, control, selection)).await;
-            until_ready(&mut peer.peer).await;
+            // The first viewer keeps consuming its connection during the join.
+            // Paused, its task can finish first and leave the hub empty.
+            let (ticket, _peer) = Box::pin(with_client(&mut first.peer, async {
+                let (c, h, host, viewer) =
+                    sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
+                let selection = host.selection().clone();
+                let control = host.original_observation();
+                let ticket = admission.admit(host).unwrap();
+                let mut peer = Box::new(Box::pin(accept(viewer, c, h, control, selection)).await);
+                until_ready(&mut peer.peer).await;
+                (ticket, peer)
+            }))
+            .await;
             assert_eq!(ticket.state(), State::Serving);
             assert!(callbacks.load(Ordering::Relaxed) >= 3);
         }))
