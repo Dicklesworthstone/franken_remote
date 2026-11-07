@@ -327,8 +327,9 @@ fn hub_entropy_callbacks_run_outside_the_registry_lock() {
             fixture(&rt, service::Policy::default(), random).await;
         *handle.lock().unwrap() = Some(admission.clone());
         Box::pin(together(&mut hub, &mut publisher, async {
-            // The first viewer keeps consuming its connection during the join.
-            // Paused, its task can finish first and leave the hub empty.
+            // Drive the first viewer during the join, as a live client would. Left
+            // idle on a loaded host, it and the joining viewer both failed, and the
+            // hub exited with no viewers left.
             let (ticket, _peer) = Box::pin(with_client(&mut first.peer, async {
                 let (c, h, host, viewer) =
                     sessions(&rt, 14, Role::Observe, &[fr_wire::display::CAPABILITY]).await;
