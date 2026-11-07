@@ -14,6 +14,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
       - 'scripts/verify.sh'
       - 'scripts/count.py'
       - 'scripts/audit.py'
