@@ -1,0 +1,40 @@
+# Pinned builder for FrankenRemote's all-features Rust lane (fr-rc-gates-builder-image-l3i).
+#
+# It mirrors .github/workflows/rust-verification.yml on ubuntu-26.04: the same
+# native package set ("Install Linux native media SDKs"; keep the two lists in
+# step), the build tools GitHub's runner image preinstalls, and the toolchain
+# from rust-toolchain.toml. The FFmpeg SDK is Ubuntu's, as in CI; the curated
+# SDK under native/ and an FFmpeg ABI pin are not part of this image.
+#
+# Build and run it through scripts/builder/run.sh.
+FROM ubuntu@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+
+ARG RUSTUP_VERSION=1.29.3
+ARG RUSTUP_SHA256=b1c8cb14e30889e7e2999e6b69e62d9e9b9ffc0f4df8180564d306d9680e6c55
+ARG TOOLCHAIN=nightly-2026-08-31
+
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+
+# What GitHub's runner image already provides first, then CI's exact package
+# list. libxcursor1 is in the first group: fr-native's cursor tests link
+# libXcursor.so.1 (tests/cursor_support), and CI gets it only from the runner
+# image.
+RUN apt-get update && apt-get install -y \
+        ca-certificates curl git build-essential python3 libxcursor1 \
+        libpipewire-0.3-dev pipewire pipewire-bin libavcodec-dev libavutil-dev \
+        libswscale-dev libx11-dev libxcb-render0-dev libxcb1-dev libxtst6 libxi6 \
+        libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio \
+        pkg-config xvfb xauth xfonts-base iproute2 nftables
+
+# The toolchain lives outside any user's home so the container can run as the
+# caller's uid; run.sh mounts a writable CARGO_HOME for registry and git caches.
+ENV RUSTUP_HOME=/opt/rustup PATH=/opt/cargo/bin:$PATH
+RUN curl -fsSLo /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/x86_64-unknown-linux-gnu/rustup-init" \
+    && echo "${RUSTUP_SHA256}  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init \
+    && CARGO_HOME=/opt/cargo /tmp/rustup-init -y --no-modify-path --profile minimal \
+        --default-toolchain "${TOOLCHAIN}" --component rustfmt,clippy \
+        --target wasm32-unknown-unknown \
+    && chmod -R a+rX /opt/rustup /opt/cargo \
+    && rustc --version && cargo --version
