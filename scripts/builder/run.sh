@@ -4,6 +4,9 @@
 #   FR_BUILDER_TARGET=/scratch/fr-builder-target scripts/builder/run.sh            # smoke.sh
 #   FR_BUILDER_TARGET=... scripts/builder/run.sh -- ./scripts/verify.sh clippy      # any command
 #
+# Paths may be relative. None of the checkout, target or cargo home paths may
+# contain ':', which docker run -v reads as a separator.
+#
 # FR_BUILDER_TARGET (required): host directory used as CARGO_TARGET_DIR. An
 #   all-features workspace test build needs tens of GB; never point it at a
 #   target directory that a host-native build also uses.
@@ -17,16 +20,20 @@
 # caller. It needs Docker (or a compatible CLI named by FR_BUILDER_DOCKER) and
 # network access while building the image and fetching crates.
 set -euo pipefail
+# An exported CDPATH can send cd elsewhere and make it print, corrupting $(cd ...).
+unset CDPATH
 root=$(cd "$(dirname "$0")/../.." && pwd)
 docker=${FR_BUILDER_DOCKER:-docker}
 tag=${FR_BUILDER_TAG:-franken-remote-builder:local}
 target=${FR_BUILDER_TARGET:?set FR_BUILDER_TARGET to a host directory for build output}
-target=${target%/}
-cargo_home=${FR_BUILDER_CARGO_HOME:-$target.cargo-home}
-mkdir -p "$target" "$cargo_home"
 # docker run -v reads a bare relative name as a named volume; pass absolute paths.
-target=$(cd "$target" && pwd)
-cargo_home=$(cd "$cargo_home" && pwd)
+# Resolve the target before deriving the default cargo home from it, so a
+# trailing slash cannot put the cargo home inside the target.
+mkdir -p -- "$target"
+target=$(cd -- "$target" && pwd)
+cargo_home=${FR_BUILDER_CARGO_HOME:-$target.cargo-home}
+mkdir -p -- "$cargo_home"
+cargo_home=$(cd -- "$cargo_home" && pwd)
 "$docker" build -f "$root/scripts/builder/Containerfile" -t "$tag" "$root/scripts/builder"
 if [ "${1:-}" = "--" ]; then shift; fi
 if [ $# -eq 0 ]; then set -- scripts/builder/smoke.sh; fi
