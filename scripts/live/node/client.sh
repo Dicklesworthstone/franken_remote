@@ -5,7 +5,15 @@ set -u
 CMD=$1; WORK=$2; N=$3; R=$4; shift 4
 H=$(dirname "$0"); D=$WORK/$R
 export $(bash "$H/display.sh" "$N" "$WORK")
-viewer() { for _ in $(seq 1 60); do W=$(xdotool search --name '^FrankenRemote$' 2>/dev/null | head -1); [ -n "$W" ] && break; sleep 0.5; done; echo "${W:-}"; }
+# The viewer's title gains shortcut hints once control or a display switch is
+# offered (viewer_switch.c, viewer_input.c). Match those, never the clipboard,
+# audio, progress or host-picker windows ("FrankenRemote - shared clipboard"...).
+VIEWER_TITLE='^FrankenRemote($| - (View only|Ctrl\+Alt\+Shift|Remote system shortcuts))'
+# display.sh gives both nodes a 1920x1080 screen; the viewer fits that picture
+# into a smaller window (clipboard strip and margins reserved), so pixel checks
+# map host points through the viewer's fit.
+HOST_SIZE=1920x1080
+viewer() { for _ in $(seq 1 60); do W=$(xdotool search --name "$VIEWER_TITLE" 2>/dev/null | head -1); [ -n "$W" ] && break; sleep 0.5; done; echo "${W:-}"; }
 case $CMD in
 prepare) # STOP
   mkdir -p "$D"; head -c 100000 /dev/urandom > "$D/send.bin"
@@ -24,16 +32,18 @@ connect) # BIN NODE (one attempt: the host runs --once, so a reconnect
 drive) # TEXT
   W=$(viewer); echo "viewer=${W:-none}"; [ -z "$W" ] && exit 0
   xdotool windowfocus --sync "$W"; sleep 4
-  echo "view=$(python3 "$H/window_colour.py" "$DISPLAY" "$W" 336699)"
+  echo "view=$(python3 "$H/window_colour.py" "$DISPLAY" "$W" 336699 24 "$HOST_SIZE")"
   eval "$(xdotool getwindowgeometry --shell "$W")"
   xdotool mousemove $((X + 800)) $((Y + 550)); sleep 1
   xdotool type --delay 120 hello; sleep 1
   xdotool click 4; sleep 0.5; xdotool click 5; sleep 3
   echo "clip_before=$(timeout 3 xclip -o -selection clipboard 2>/dev/null)"
   (printf '%s' "$1" | setsid nohup bash -c 'exec -a "fr-live-clip-$0" xclip -selection clipboard -loops 0' "$R" > /dev/null 2>&1 &) ;;
-watch) # COUNT TIMEOUT: pixel (100,1000) of the viewer, the host colours in order
+watch) # COUNT TIMEOUT: the viewer pixel showing host point (960,880), the host colours in order.
+  # That point is bare root on the host: clear of xev (600x400+600+400), xclock
+  # and the 480x148 sharing indicators at the left edge.
   W=$(viewer); SEQ=""; for i in $(seq 0 $(($1 - 1))); do [ $((i % 2)) = 0 ] && SEQ="$SEQ 993366" || SEQ="$SEQ 336699"; done
-  python3 "$H/watch_pixel.py" "$DISPLAY" "$W" 100 1000 "$2" $SEQ ;;
+  python3 "$H/watch_pixel.py" "$DISPLAY" "$W" 960 880 "$HOST_SIZE" "$2" $SEQ ;;
 clip-read) timeout 3 xclip -o -selection clipboard 2>/dev/null; echo ;;
 finish) # SWITCH BIN NODE
   W=$(viewer); [ -n "$W" ] && python3 "$H/close_window.py" "$DISPLAY" "$W"

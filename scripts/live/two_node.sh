@@ -44,8 +44,10 @@ echo "== client: file, PulseAudio + recorder, fr connect"
 SENT=$(client prepare "$STOP" | tee /dev/stderr | value file_sha256)
 client connect "$CB" "$NODE"
 echo "== client: focus, view, keys, wheel, copy"
-HOST_VIEW=$(host view); echo "host root samples: $HOST_VIEW"
 DRIVE=$(client drive "fr-live-client-$R" | tee /dev/stderr)
+# After drive, as the viewer was sampled: control is granted by then, so the
+# host's sharing indicators are mapped on both sides of the comparison.
+HOST_VIEW=$(host view); echo "host root samples: $HOST_VIEW"
 # Glass-to-glass: the host root changes colour at scheduled instants; the
 # client polls one viewer pixel every ~2 ms (NTP-synced clocks).
 FLIPS=6; FSTART=$(($(ssh "$HS" date +%s) + 3))
@@ -71,7 +73,8 @@ row() { printf '%-28s %-4s %s\n' "$1" "$2" "$3"; }
 {
   echo "run $R ($(date -u +%FT%TZ)); path $(echo "$FINISH" | value path)"
   row session_open "$([ "$(field opened)" != None ] && [ "$(field opened)" -ge 1 ] 2>/dev/null && echo PASS || echo FAIL)" "opened=$(field opened) role=$(field role)"
-  # The same 64x36 grid over the host root and the (same-size) viewer window.
+  # The same 64x36 grid over the host root and over the part of the viewer
+  # window that presents it (client.sh passes the host size for the fit).
   row view_pixels "$(python3 -c "import sys
 h, v = (int(a.split()[0].split('/')[0]) / int(a.split()[0].split('/')[1]) for a in sys.argv[1:3])
 print('PASS' if h >= 0.2 and abs(h - v) <= 0.1 else 'FAIL')" "$HOST_VIEW" "$VIEW" 2>/dev/null || echo FAIL)" "#336699 samples: host $HOST_VIEW, viewer $VIEW"
@@ -81,7 +84,7 @@ print('PASS' if h >= 0.2 and abs(h - v) <= 0.1 else 'FAIL')" "$HOST_VIEW" "$VIEW
   row clipboard_host_presession "$([ "$(echo "$DRIVE" | value clip_before)" = "fr-live-host-before-$R" ] && echo PASS || echo FAIL)" ""
   row clipboard_client_to_host "$([ "$HOST_CLIP" = "fr-live-client-$R" ] && echo PASS || echo FAIL)" ""
   row clipboard_host_to_client "$([ "$CLIENT_CLIP" = "fr-live-host-after-$R" ] && echo PASS || echo FAIL)" ""
-  row file_send "$([ -n "$SENT" ] && [ "$(echo "$EVIDENCE" | value file_sha256)" = "$SENT" ] && echo PASS || echo FAIL)" "100000 bytes, sha256 match"
+  row file_send "$([ -n "$SENT" ] && [ "$(echo "$EVIDENCE" | value file_sha256)" = "$SENT" ] && echo PASS || echo FAIL)" "100000 bytes; sha256 sent ${SENT:0:16}, host $(echo "$EVIDENCE" | value file_sha256 | cut -c1-16)"
   if [ "$A" = 0 ]; then row audio_tone SKIP "AUDIO=0: no sound server on a node"; else
   row audio_tone "$([ "$(echo "$FINISH" | value verdict)" = pass ] && echo PASS || echo FAIL)" "switch->client $(echo "$FINISH" | value switch_to_client_detect_ms) ms; $(echo "$FINISH" | grep -o 'sustained_hz2_blocks=[0-9/]*')"; fi
   row controller_close_exchange "$(echo "$COMPLETION" | python3 -c "import json,sys
