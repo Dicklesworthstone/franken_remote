@@ -527,8 +527,14 @@ fn build_tailnet_macos() {
         "Tailscale discovery requires a native Apple SDK"
     );
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    // Compile for the deployment target rustc links for (11.0 by default on
+    // Apple silicon), not the build host's OS: on a newer host, clang would
+    // otherwise flag APIs deprecated after that target and -Werror stops.
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let target = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
     assert!(
         Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .arg(format!("-mmacosx-version-min={target}"))
             .args([
                 "-std=c11",
                 "-O2",
