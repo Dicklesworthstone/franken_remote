@@ -1,5 +1,8 @@
 //! Fork/exec stays outside the authority poll, with the original launch custody.
-use super::*;
+use super::{
+    Cx, Deadline, Error, Launch, ProtocolLimits, Time, Worker, bounded, live_deadline, now,
+    runtime_ready,
+};
 
 impl Worker {
     pub(super) async fn spawn_checked<E: From<Error> + Send + 'static>(

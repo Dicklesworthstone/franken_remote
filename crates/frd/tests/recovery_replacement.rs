@@ -10,7 +10,7 @@ mod net;
 #[allow(dead_code)]
 mod worker_support;
 use asupersync::cx::Cx;
-use fr_core::{ids::*, limits::ProtocolLimits};
+use fr_core::limits::ProtocolLimits;
 use fr_media::delivery::{MediaBudget, ReceivePipeline, ReceivePolicy};
 use fr_transport::quic::{self, *};
 use fr_wire::{

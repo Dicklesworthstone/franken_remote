@@ -1,4 +1,4 @@
-//! One authenticated Linux LocalAPI query, projected through the shared parser.
+//! One authenticated Linux `LocalAPI` query, projected through the shared parser.
 use super::{LocalApi, Lookup, bounded, now, wall_now};
 use crate::{Discovery, Error, metadata};
 use asupersync::cx::Cx;

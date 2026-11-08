@@ -214,7 +214,7 @@ impl Peer {
         }
     }
     /// A real failed receiver may retain its native job while the host retires
-    /// the old routes. Keep only that original dispatch scope; ordinary parts()
+    /// the old routes. Keep only that original dispatch scope; ordinary `parts()`
     /// still requires live media outside this explicit recovery transition.
     fn retiring_parts(&mut self) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {
         match self {
@@ -850,8 +850,18 @@ impl StreamingViewer {
             }),
         }
     }
-    #[allow(clippy::too_many_lines)]
+    /// The serving loop's future is about 16 KiB; box it once here so every
+    /// caller awaits a pointer-sized future.
     async fn serve_inner(
+        &mut self,
+        ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
+        result: &mut impl FnMut(ResultEvent),
+        other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+    ) -> Result<(), Error> {
+        Box::pin(self.serve_loop(ui, result, other)).await
+    }
+    #[allow(clippy::too_many_lines)]
+    async fn serve_loop(
         &mut self,
         ui: &mut impl FnMut(acquisition::Dispatch<'_>, Option<Presentation>) -> Result<(), ()>,
         result: &mut impl FnMut(ResultEvent),

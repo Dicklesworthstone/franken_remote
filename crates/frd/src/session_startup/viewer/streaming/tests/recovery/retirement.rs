@@ -262,7 +262,7 @@ fn unsolicited_media_retirement_still_ends_a_healthy_controlled_viewer() {
         let exercise = async {
             loop {
                 assert!(now(&c).unwrap() < until, "unsolicited reset was ignored");
-                let (sent, received) = Box::pin(support::both(
+                let (sent, delivery) = Box::pin(support::both(
                     host.io()
                         .unwrap()
                         .0
@@ -279,7 +279,7 @@ fn unsolicited_media_retirement_still_ends_a_healthy_controlled_viewer() {
                     ),
                 ))
                 .await;
-                if let Err(error) = received {
+                if let Err(error) = delivery {
                     assert_eq!(
                         error,
                         Error::Control(controlled::Error::Media(
@@ -347,7 +347,7 @@ fn recovery_network_turn_retires_old_queries_and_holds_the_next_feedback_owner()
             {
                 queued += 1;
             }
-            let (sent, received) = Box::pin(support::both(
+            let (sent, delivery) = Box::pin(support::both(
                 host.drive(
                     Duration::from_millis(1),
                     || Ok(crate::session_startup::tests::unique_nonce()),
@@ -379,7 +379,7 @@ fn recovery_network_turn_retires_old_queries_and_holds_the_next_feedback_owner()
             ))
             .await;
             sent.unwrap();
-            received.unwrap();
+            delivery.unwrap();
             assert_eq!(feedback.sent, 0);
             let until = watcher.next_deadline().unwrap();
             assert_eq!(*deadline.get_or_insert(until), until);
