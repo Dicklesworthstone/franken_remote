@@ -20,8 +20,10 @@ use fr_wire::{
 };
 use std::{future::Future, sync::Arc, time::Duration};
 
+pub(in crate::quic) mod client_abort;
 mod deferred;
 mod exchange;
+mod packet;
 pub(in crate::quic) use deferred::Armed;
 pub use deferred::{ClosedRegistration, ClosedReport, RevocationRegistration, RevocationReport};
 pub use exchange::CloseOutcome;

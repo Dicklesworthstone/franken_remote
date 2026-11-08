@@ -230,17 +230,39 @@ impl Client {
                     .into_owned_connection(cx.clone())
                     .map_err(Error::Tailnet)?;
                 let lease = owner.lease();
-                let viewer = join_viewer(
+                let mut viewer = join_viewer(
                     &application_cx,
                     native,
                     Arc::new(move || lease.check().is_ok()),
                     offer,
                     cfg,
                 )?;
-                run_application(&cx, owner.serve(), application(viewer)).await
+                let abort = fr_transport::quic::ClientAbortReport::default();
+                viewer
+                    .arm_client_abort(&cx, abort.registration())
+                    .map_err(Error::Session)?;
+                // Finish INSIDE the supervised application future: the ready
+                // boundary below cancels the connection and its destination
+                // lease. Renewal keeps progressing during this bounded attempt.
+                // The original application result is never replaced by the
+                // best-effort socket write or mistaken for remote cleanup.
+                run_application(
+                    &cx,
+                    owner.serve(),
+                    finish_application(application(viewer), abort),
+                )
+                .await
             }),
         }
     }
+}
+async fn finish_application<T>(
+    application: impl Future<Output = T>,
+    abort: fr_transport::quic::ClientAbortReport,
+) -> T {
+    let result = application.await;
+    let _ = abort.finish().await;
+    result
 }
 fn join_viewer(
     cx: &Cx,

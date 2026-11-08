@@ -23,9 +23,10 @@ ordinary receive callback, new connection, deadline extension, or I/O in Drop.
 Already transmitted application packets cannot be retracted.
 
 The immediate `close_with_closed` / `close_with_revocation` APIs and the client
-CloseRequest exchange retain their existing native-backlog refusal. This fallback
-is confined to already-registered host teardown. A missing registration, abandoned
-in-flight socket, or dropped report consumer does not acquire another socket.
+CloseRequest exchange retain their existing native-backlog refusal. Registered
+client aborts use the same close-only native operation under the additional
+rules below. A missing registration or dropped consumer never acquires another
+socket.
 
 ## Application error codes
 
@@ -35,6 +36,7 @@ The reason phrase is empty. Codes carry only the original owner's typed reason:
 |---|---|---|
 | Session Closed | `0x4652_0100 + reason` | ClosedReason 1 through 9, as in PROTOCOL_CLOSURE.md |
 | Lease revoked | `0x4652_0200 + reason` | LeaseRevoked Reason 1 through 10, as in PROTOCOL_LEASE_REVOKED.md |
+| Client aborted | `0x4652_0300 + reason` | 1 failure, 2 delivery/record deadline expired, 3 authority lost, 4 cancelled |
 
 For example, host failure at session scope is `0x4652_0107`, host stopping is
 `0x4652_0102`, and local input revocation is `0x4652_0201`. Zero/reserved reasons
@@ -97,3 +99,50 @@ Namespace evidence: before this, two optional impairment rows ended
 `native_session_failed` with `Transport(Closed)` once the host began sending
 this close (40 ms RTT with 5% loss, controlled; 200 ms RTT, view-only).
 Live-tailnet qualification remains under bead `fr-t4lj`.
+
+## Abrupt client notification (2026-11-08)
+
+An error in the original viewer can now notify its host before the host's next
+renewal expires. `ClientAbortReport` is registered on the exact established
+client connection before negotiation traffic, after its immutable destination
+guard. It survives the same startup, viewing and control-promotion handoffs.
+It does not require a negotiated control route and never creates an FRD0 report.
+
+Closure first fences that original application, then captures only a socket
+left by the existing terminal owner. A successful explicit `CloseRequest`
+exchange keeps sole custody, its original context and its actual host report;
+the abort fallback neither cancels that exchange nor sends a second packet.
+When ordinary transport service directly observes a deadline, authorization or
+cancellation failure, its assigned client code is retained. An abandoned native
+operation (including an outer drive timeout) and other local error paths use the
+generic client-failure code. These codes contain no text, paths, input events,
+clipboard content, lease receipts or fabricated cleanup stages.
+
+The native connector awaits the captured close inside its supervised application
+future, while destination renewal still runs. It preserves the original
+application result regardless of notification success. The fixed 250 ms budget
+starts at synchronous closure, before the fence callback. Late completion,
+cleanup cancellation and lost destination evidence suppress the packet; they
+cannot restart its budget or authorize ordinary traffic. Both queued and
+unacknowledged native application output are discarded by the existing protected
+close operation rather than flushed after the fence. An already-closed peer
+receives no echo.
+
+The reconnecting CLI provisions separate application and connection contexts,
+so stopping its viewer does not itself cancel terminal notification. The lower
+level `Client::run` API shares a context: if its application cancels that context,
+notification is suppressed. Dropping the outer future cannot finish async I/O,
+and no background task is spawned to claim otherwise. A successful socket write
+is not peer acknowledgement or proof of remote key release. The host decodes
+the client-only family only in the server role, and still performs its own
+ordered authority and resource cleanup.
+
+`crates/fr-transport/tests/client_abort.rs` covers original custody, numeric
+codes, queued data, native backlog, explicit-close priority, direction checks,
+abandonment, late polling and immutable security guards over real localhost
+TLS/UDP. `native_connection::tests::client_abort` covers the actual viewer and
+connector supervision boundary. These fixtures do not qualify a live tailnet
+or a physical desktop. Formatting and the documentation gate pass locally;
+execution of the new tests remains pending because the pinned, unchanged
+Asupersync dependency is killed for memory exhaustion even in a single-job
+metadata-only build in this runner.

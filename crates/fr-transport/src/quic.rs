@@ -28,6 +28,7 @@ pub use admission::SendAdmission;
 use send_epoch::SendEpoch;
 
 mod lifetime;
+pub use lifetime::terminal::client_abort::{ClientAbortRegistration, ClientAbortReport};
 pub use lifetime::terminal::{
     CloseOutcome, ClosedRegistration, ClosedReport, ControlCloseRegistration, ControlCloseReport,
     ControlCloseSignal, RevocationRegistration, RevocationReport,
@@ -46,7 +47,7 @@ mod startup;
 pub use startup::ControlRoutes;
 
 mod peer_close;
-pub use peer_close::PeerClose;
+pub use peer_close::{ClientCloseReason, PeerClose};
 
 pub const ALPN: &[u8] = b"fr-remote/0";
 /// Unidirectional streams per connection over its WHOLE lifetime: QUIC stream
@@ -425,6 +426,7 @@ pub struct QuicRecords {
     identity: Arc<()>,
     // Drop order: the exact input fence precedes native socket destruction.
     deferred_revocation: Option<Box<lifetime::terminal::Armed>>,
+    client_abort: Option<Box<lifetime::terminal::client_abort::Armed>>,
     lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     terminal_lifetime_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     operation_check: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
@@ -542,6 +544,7 @@ impl QuicRecords {
             terminal_lifetime_check: None,
             operation_check: None,
             deferred_revocation: None,
+            client_abort: None,
             clock_attached: false,
             display_selection_claimed: false,
             attachments: Vec::new(),
@@ -626,7 +629,14 @@ impl QuicRecords {
         self.native.is_none()
     }
     pub fn close(&mut self) {
+        self.close_with_cause(ClientCloseReason::Failure);
+    }
+    fn close_on_error(&mut self, error: Error) {
+        self.close_with_cause(ClientCloseReason::from_error(error));
+    }
+    fn close_with_cause(&mut self, reason: ClientCloseReason) {
         self.capture_revocation();
+        self.capture_client_abort(reason);
         self.native = None;
         self.pending_datagrams.clear();
         self.pending_writes.clear();
@@ -680,14 +690,14 @@ impl QuicRecords {
             return Err(Error::Closed);
         }
         if cx.checkpoint().is_err() {
-            self.close();
+            self.close_on_error(Error::Cancelled);
             return Err(Error::Cancelled);
         }
         if self.lifetime_check.as_ref().is_some_and(|check| !check())
             || self.operation_check.as_ref().is_some_and(|check| !check())
             || !authorize()
         {
-            self.close();
+            self.close_on_error(Error::Unauthorized);
             return Err(Error::Unauthorized);
         }
         let result = (|| {
@@ -715,8 +725,8 @@ impl QuicRecords {
             }
             Ok(now)
         })();
-        if result.is_err() {
-            self.close();
+        if let Err(error) = result {
+            self.close_on_error(error);
         }
         result
     }
@@ -930,8 +940,8 @@ impl QuicRecords {
         .await
         .map_err(|_| Error::Expired)
         .and_then(core::convert::identity);
-        if result.is_err() {
-            self.close();
+        if let Err(error) = result {
+            self.close_on_error(error);
         }
         result
     }
@@ -1078,8 +1088,8 @@ impl QuicRecords {
             self.native_io_unsettled = false;
         }
         self.native = Some(native);
-        if result.is_err() {
-            self.close();
+        if let Err(error) = result {
+            self.close_on_error(error);
         }
         result
     }
@@ -1251,8 +1261,8 @@ impl QuicRecords {
         mut handler: impl FnMut(Route, &[u8], Option<DatagramReceipt>) -> Result<Disposition, ()>,
     ) -> Result<usize, Error> {
         let result = self.receive_inner(cx, &mut authorize, &mut ready, &mut handler);
-        if result.is_err() {
-            self.close();
+        if let Err(error) = result {
+            self.close_on_error(error);
         }
         result
     }

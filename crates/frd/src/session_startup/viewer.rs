@@ -68,6 +68,23 @@ impl Viewer {
             .map_err(Error::from)
     }
 
+    /// The connector retains the consumer and services destination renewal
+    /// while this original viewer's terminal packet is attempted. Cancellation
+    /// of a shared connection/application context still suppresses the packet.
+    pub(crate) fn arm_client_abort(
+        &mut self,
+        cleanup: &Cx,
+        registration: quic::ClientAbortRegistration,
+    ) -> Result<(), Error> {
+        let control = self.control();
+        let transport = self.transport.as_mut().ok_or(Error::Closed)?;
+        transport
+            .arm_client_abort(cleanup, &transport.binding(), registration, move || {
+                control.stop();
+            })
+            .map_err(Error::from)
+    }
+
     /// TLS/hostname/ALPN verification has already completed in Asupersync. The
     /// chosen endpoint must come from the caller's qualified tailnet connection
     /// path. This does not accept a plaintext socket or enable skip-verification.

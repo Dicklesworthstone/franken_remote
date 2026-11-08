@@ -126,7 +126,9 @@ pub(super) fn reconnect(error: native_connection::reconnect::Failure) -> Option<
     match native_connection::reconnect::peer_close(error) {
         Some(PeerClose::Session(reason)) => return crate::closure::host_close_code(reason),
         Some(PeerClose::Lease(reason)) => return Some(crate::terminal::closed_by_code(reason)),
-        None => {}
+        // Client-only close codes are rejected by the native receiving role.
+        // Even a manually constructed error cannot fabricate a host report.
+        Some(PeerClose::Client(_)) | None => {}
     }
     match error {
         native_connection::reconnect::Failure::Connection(error) => connection(error),

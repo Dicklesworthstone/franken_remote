@@ -9,6 +9,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     task::Waker,
 };
+mod client_abort;
 mod namespace;
 pub(super) fn roots() -> Vec<Certificate> {
     vec![Certificate::from_der(
