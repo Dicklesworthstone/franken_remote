@@ -6,9 +6,9 @@ fn promote(p: &mut Pair, previous: &ClosedRegistration) -> (RevocationReport, Ar
     let reporting = RevocationReport::default();
     let fenced = Arc::new(AtomicBool::new(false));
     let flag = fenced.clone();
-    p.server
+    p.local
         .promote_closed_report(
-            &p.server.binding(),
+            &p.local.binding(),
             p.control,
             binding(),
             report().lease,
@@ -32,9 +32,9 @@ fn actual_lease_custody_supersedes_closed_without_revoking_observation_or_sendin
         let (revocation, lease) = promote(&mut p, &closed.registration());
         assert!(!observation.load(Ordering::Acquire));
         assert!(!lease.load(Ordering::Acquire));
-        assert_eq!(p.server.tick(&cx, || true), Ok(()));
+        assert_eq!(p.local.tick(&cx, || true), Ok(()));
         assert_eq!(closed.finish(outcome()).await, None);
-        p.server.close();
+        p.local.close();
         assert!(lease.load(Ordering::Acquire));
         assert!(!observation.load(Ordering::Acquire));
         super::super::deferred::delivered(&mut p, &cx, revocation).await;
@@ -52,9 +52,9 @@ fn foreign_connection_slot_route_and_session_cannot_retire_the_original_fence() 
             let (foreign, foreign_fence) = arm(&mut other, &cx);
             let replacement = RevocationReport::default();
             let original = if wrong == 0 {
-                other.server.binding()
+                other.local.binding()
             } else {
-                p.server.binding()
+                p.local.binding()
             };
             let previous = if wrong == 1 {
                 foreign.registration()
@@ -67,7 +67,7 @@ fn foreign_connection_slot_route_and_session_cannot_retire_the_original_fence() 
                 ..binding()
             };
             assert_eq!(
-                p.server.promote_closed_report(
+                p.local.promote_closed_report(
                     &original,
                     route,
                     session,
@@ -81,13 +81,13 @@ fn foreign_connection_slot_route_and_session_cannot_retire_the_original_fence() 
             assert_eq!(replacement.finish().await, None);
             assert!(!fenced.load(Ordering::Acquire));
             assert!(!foreign_fence.load(Ordering::Acquire));
-            assert_eq!(p.server.tick(&cx, || true), Ok(()));
-            assert_eq!(other.server.tick(&cx, || true), Ok(()));
-            p.server.close();
+            assert_eq!(p.local.tick(&cx, || true), Ok(()));
+            assert_eq!(other.local.tick(&cx, || true), Ok(()));
+            p.local.close();
             delivered(&mut p, &cx, closed).await;
             assert!(fenced.load(Ordering::Acquire));
             assert!(!foreign_fence.load(Ordering::Acquire));
-            other.server.close();
+            other.local.close();
             assert!(foreign_fence.load(Ordering::Acquire));
         });
     }
@@ -104,8 +104,8 @@ fn already_used_replacement_cannot_disarm_the_original_report() {
         let (replacement, other_fence) = promote(&mut other, &other_closed.registration());
         assert_eq!(other_closed.finish(outcome()).await, None);
         assert_eq!(
-            p.server.promote_closed_report(
-                &p.server.binding(),
+            p.local.promote_closed_report(
+                &p.local.binding(),
                 p.control,
                 binding(),
                 report().lease,
@@ -117,9 +117,9 @@ fn already_used_replacement_cannot_disarm_the_original_report() {
         );
         assert!(!fenced.load(Ordering::Acquire));
         assert!(!other_fence.load(Ordering::Acquire));
-        p.server.close();
+        p.local.close();
         delivered(&mut p, &cx, closed).await;
-        other.server.close();
+        other.local.close();
         super::super::deferred::delivered(&mut other, &cx, replacement).await;
     });
 }
@@ -137,8 +137,8 @@ fn finished_or_abandoned_consumers_cannot_be_resurrected_by_promotion() {
             if finish_previous {
                 assert_eq!(closed.finish(outcome()).await, Some(Err(Error::Closed)));
                 assert_eq!(
-                    p.server.promote_closed_report(
-                        &p.server.binding(),
+                    p.local.promote_closed_report(
+                        &p.local.binding(),
                         p.control,
                         binding(),
                         report().lease,
@@ -152,8 +152,8 @@ fn finished_or_abandoned_consumers_cannot_be_resurrected_by_promotion() {
             } else {
                 drop(replacement);
                 assert_eq!(
-                    p.server.promote_closed_report(
-                        &p.server.binding(),
+                    p.local.promote_closed_report(
+                        &p.local.binding(),
                         p.control,
                         binding(),
                         report().lease,
@@ -163,10 +163,10 @@ fn finished_or_abandoned_consumers_cannot_be_resurrected_by_promotion() {
                     ),
                     Err(Error::Closed)
                 );
-                p.server.close();
+                p.local.close();
                 delivered(&mut p, &cx, closed).await;
             }
-            p.server.close();
+            p.local.close();
             assert!(fenced.load(Ordering::Acquire));
         });
     }
@@ -182,13 +182,13 @@ fn promotion_preserves_the_original_cleanup_cancellation_and_terminal_security()
             let mut p = pair(&session).await;
             let allowed = Arc::new(AtomicBool::new(true));
             let guard = allowed.clone();
-            p.server
+            p.local
                 .retain_lifetime_check(&session, Arc::new(move || guard.load(Ordering::Acquire)))
                 .unwrap();
             let (closed, observation) = arm(&mut p, &cleanup);
             let (revocation, lease) = promote(&mut p, &closed.registration());
             assert_eq!(closed.finish(outcome()).await, None);
-            p.server.close();
+            p.local.close();
             if cancel {
                 cleanup.cancel_fast(CancelKind::User);
             } else {
@@ -216,7 +216,7 @@ fn abandoning_a_promoted_owner_fences_only_the_actual_lease() {
         let mut p = pair(&cx).await;
         let (closed, observation) = arm(&mut p, &cx);
         let (revocation, lease) = promote(&mut p, &closed.registration());
-        drop(p.server);
+        drop(p.local);
         assert!(lease.load(Ordering::Acquire));
         assert!(!observation.load(Ordering::Acquire));
         assert_eq!(closed.finish(outcome()).await, None);
@@ -231,11 +231,11 @@ fn promotion_cannot_replace_a_captured_socket_or_restart_its_original_deadline()
         let mut p = pair(&cx).await;
         let (closed, observation) = arm(&mut p, &cx);
         let replacement = RevocationReport::default();
-        let original = p.server.binding();
-        p.server.close();
+        let original = p.local.binding();
+        p.local.close();
         assert!(observation.load(Ordering::Acquire));
         assert_eq!(
-            p.server.promote_closed_report(
+            p.local.promote_closed_report(
                 &original,
                 p.control,
                 binding(),
@@ -265,8 +265,8 @@ fn confirmation_requires_the_exact_promoted_slot_and_never_replaces_its_fence() 
         let foreign = other.registration();
         for wrong in 0..3 {
             assert_eq!(
-                p.server.confirm_revocation_report(
-                    &p.server.binding(),
+                p.local.confirm_revocation_report(
+                    &p.local.binding(),
                     p.control,
                     binding(),
                     InputLeaseId::from_raw(if wrong == 0 { 999 } else { 2 }),
@@ -281,8 +281,8 @@ fn confirmation_requires_the_exact_promoted_slot_and_never_replaces_its_fence() 
             );
         }
         assert_eq!(
-            p.server.confirm_revocation_report(
-                &p.server.binding(),
+            p.local.confirm_revocation_report(
+                &p.local.binding(),
                 p.control,
                 binding(),
                 report().lease,
@@ -292,8 +292,8 @@ fn confirmation_requires_the_exact_promoted_slot_and_never_replaces_its_fence() 
             Ok(())
         );
         assert_eq!(
-            p.server.promote_closed_report(
-                &p.server.binding(),
+            p.local.promote_closed_report(
+                &p.local.binding(),
                 p.control,
                 binding(),
                 report().lease,
@@ -305,7 +305,7 @@ fn confirmation_requires_the_exact_promoted_slot_and_never_replaces_its_fence() 
         );
         assert!(!observation.load(Ordering::Acquire));
         assert!(!lease.load(Ordering::Acquire));
-        p.server.close();
+        p.local.close();
         assert!(lease.load(Ordering::Acquire));
         super::super::deferred::delivered(&mut p, &cx, revocation).await;
     });

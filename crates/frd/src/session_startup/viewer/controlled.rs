@@ -108,8 +108,9 @@ pub struct ControlledViewer {
     input: Box<PresentedInput>,
     viewport: fr_client::input::viewport::Viewport,
     channels: NegotiatedInput,
-    /// Absent only while a reference recovery holds the media (plan 12.3):
-    /// input is then suspended, and its renewals stay serviced without media.
+    /// Retained while a native job drains after reference loss, then handed to
+    /// recovery (plan 12.3). Input's recovery state fences the old live routes
+    /// before the peer can retire them; renewals keep their original owner.
     media: Option<NegotiatedMedia>,
     clock: ClockSync,
     clock_at: u64,
@@ -479,7 +480,13 @@ impl ControlledViewer {
             .viewer_routes(&self.session.transport)
             .map_err(Error::Input)?;
         if let Some(media) = &self.media {
-            media.check(&self.session.transport).map_err(Error::Media)?;
+            if self.channels.recovering() {
+                media
+                    .retiring_viewer_routes(&self.session.transport)
+                    .map_err(Error::Media)?;
+            } else {
+                media.check(&self.session.transport).map_err(Error::Media)?;
+            }
         }
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.maintenance_deadline(t)?;
@@ -764,11 +771,13 @@ impl ControlledViewer {
             .channels
             .viewer_routes(&self.session.transport)
             .map_err(Error::Input)?;
-        // During a reference recovery there is no media: its progress belongs
-        // to the recovery's own dispatch, never to this grant's evidence.
+        // The original native job may still retain media after recovery has
+        // begun. Its old progress is obsolete even before take_media_for_recovery
+        // moves the owner; it must never refresh this grant's input evidence.
         let progress = self
             .media
             .as_ref()
+            .filter(|_| !self.channels.recovering())
             .map(|media| {
                 media
                     .progress_route(&self.session.transport)
@@ -1106,7 +1115,7 @@ impl Drop for Operation<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 
 #[test]
 fn inline_viewer_owners_fit_composed_native_service_stacks() {

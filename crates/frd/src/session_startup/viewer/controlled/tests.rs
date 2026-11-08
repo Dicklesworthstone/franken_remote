@@ -206,6 +206,33 @@ async fn fixture_with_clipboard(
     managed: bool,
     clipboard: ClipboardMode,
 ) -> Fixture {
+    Box::pin(fixture_with_recovery(
+        client_cx,
+        host_cx,
+        capabilities,
+        decode,
+        feedback,
+        managed,
+        clipboard,
+        false,
+    ))
+    .await
+}
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    clippy::fn_params_excessive_bools
+)]
+async fn fixture_with_recovery(
+    client_cx: &Cx,
+    host_cx: &Cx,
+    capabilities: Capabilities,
+    decode: bool,
+    feedback: bool,
+    managed: bool,
+    clipboard: ClipboardMode,
+    recovery: bool,
+) -> Fixture {
     let mut wire_capabilities: Vec<WireCapability> = [
         fr_wire::clock::CAPABILITY,
         decoder::CAPABILITY,
@@ -315,6 +342,13 @@ async fn fixture_with_clipboard(
             name: fr_wire::receiver_metrics::CAPABILITY.into(),
             version: 1,
             required: false,
+        });
+    }
+    if recovery {
+        wire_capabilities.push(WireCapability {
+            name: fr_wire::recovery_request::CAPABILITY.into(),
+            version: fr_wire::recovery_request::VERSION,
+            required: true,
         });
     }
     wire_capabilities.sort_by(|a, b| a.name.cmp(&b.name));
@@ -669,6 +703,37 @@ async fn fixture_with_clipboard(
         effects,
         observation,
     }
+}
+/// Reuse the original real control/clock/attachment fixture in streaming's
+/// recovery-race tests. Codec output and native effects remain explicit fixtures.
+pub(in crate::session_startup::viewer) async fn recovery_fixture(
+    client_cx: &Cx,
+    host_cx: &Cx,
+) -> (
+    ControlledHost,
+    ControlledViewer,
+    NegotiatedMedia,
+    ReceivePipeline,
+    Driver,
+) {
+    let fixture = Box::pin(fixture_with_recovery(
+        client_cx,
+        host_cx,
+        caps(),
+        false,
+        false,
+        true,
+        ClipboardMode::Disabled,
+        true,
+    ))
+    .await;
+    (
+        fixture.host,
+        fixture.viewer,
+        fixture.host_media,
+        fixture.receiver,
+        fixture.driver.unwrap(),
+    )
 }
 fn announce(
     host: &mut ControlledHost,

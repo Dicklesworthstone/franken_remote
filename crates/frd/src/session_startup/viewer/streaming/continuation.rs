@@ -216,7 +216,7 @@ impl Budget {
 /// Old advisory queries are validated and retired, not answered using a new
 /// receiver's counters. Their requester expires them to unknown. New-generation
 /// queries stay queued for the new feedback owner after the handshake finishes.
-struct Dispatch<'a> {
+pub(super) struct Dispatch<'a> {
     inbound: Route,
     old: Binding,
     next: Binding,
@@ -231,7 +231,7 @@ struct Dispatch<'a> {
     refused: &'a Cell<Option<Error>>,
 }
 impl Dispatch<'_> {
-    fn receive(
+    pub(super) fn receive(
         &self,
         route: Route,
         bytes: &[u8],
@@ -290,6 +290,36 @@ impl Dispatch<'_> {
         Err(())
     }
 }
+impl<'a> Dispatch<'a> {
+    /// The exact old dispatch scope also applies while a native job drains,
+    /// before the outer serving loop can move its media into the replacement.
+    /// Peer resets may already have retired those routes; no new media or input
+    /// evidence can be admitted through this map.
+    pub(super) fn retiring(
+        session: &ViewerSession,
+        previous: &NegotiatedMedia,
+        refused: &'a Cell<Option<Error>>,
+    ) -> Result<Self, Error> {
+        let mut old = previous.binding();
+        old.parent = session.opened.binding;
+        let mut next = old;
+        next.recovery = next.recovery.next().ok_or(Error::Closed)?;
+        Ok(Self {
+            inbound: Route::Stream(session.routes.inbound),
+            old,
+            next,
+            metrics: session.opened.selection.capabilities.iter().any(|c| {
+                c.name == receiver_metrics::CAPABILITY && c.version == receiver_metrics::VERSION
+            }),
+            limits: session.opened.selection.limits,
+            active: None,
+            obsolete: previous
+                .retiring_viewer_routes(&session.transport)
+                .map_err(Error::Routes)?,
+            refused,
+        })
+    }
+}
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run(
     link: &mut Link<'_>,
@@ -310,24 +340,7 @@ async fn run(
         cx: session.cx.clone(),
         until: report.next_deadline().ok_or(Error::Closed)?,
     };
-    let mut old = previous.binding();
-    old.parent = session.opened.binding;
-    let mut next = old;
-    next.recovery = next.recovery.next().ok_or(Error::Closed)?;
-    let mut dispatch = Dispatch {
-        inbound: Route::Stream(session.routes.inbound),
-        old,
-        next,
-        metrics: session.opened.selection.capabilities.iter().any(|c| {
-            c.name == receiver_metrics::CAPABILITY && c.version == receiver_metrics::VERSION
-        }),
-        limits: session.opened.selection.limits,
-        active: None,
-        obsolete: previous
-            .retiring_viewer_routes(&session.transport)
-            .map_err(Error::Routes)?,
-        refused,
-    };
+    let mut dispatch = Dispatch::retiring(session, &previous, refused)?;
     // A locally queued request is not host receipt. Wait for the authenticated
     // NEXT configuration offer before sending resets for our old media streams.
     // The offer stays in its original bounded receive slot for Replacement.

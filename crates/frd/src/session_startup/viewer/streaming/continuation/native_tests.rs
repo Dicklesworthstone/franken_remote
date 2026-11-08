@@ -2,11 +2,8 @@
 //! The native completion is a scheduled future, not codec or pixel evidence.
 use super::*;
 use crate::session_startup::{
-    running::{
-        controlled::tests::attach,
-        tests::{pair_initialized, run},
-    },
-    viewer::streaming::StreamingViewerControl,
+    running::tests::{pair_initialized, run},
+    viewer::streaming::{StreamingViewerControl, tests::media_pair},
 };
 use fr_wire::negotiation::Capability;
 use std::{
@@ -62,18 +59,7 @@ fn exercise(native_failure: bool) {
         .collect();
         caps.sort_by(|a, b| a.name.cmp(&b.name));
         let (mut host, mut viewer) = pair_initialized(&c, &h, caps, |_| {}).await;
-        let (_, config) =
-            attach(&mut host, &mut viewer, &c, &h, MediaRole::Configuration, 18).await;
-        let (_, recovery) = attach(&mut host, &mut viewer, &c, &h, MediaRole::Recovery, 19).await;
-        let (_, video) = attach(&mut host, &mut viewer, &c, &h, MediaRole::Video, 20).await;
-        let media = NegotiatedMedia::new(
-            &viewer.transport,
-            host.selection(),
-            &config,
-            &recovery,
-            &video,
-        )
-        .unwrap();
+        let (_, media) = media_pair(&mut host, &mut viewer, &c, &h).await;
         let original = viewer.transport.binding();
         let early = viewer.control();
         let mut old = media.binding();

@@ -10,48 +10,6 @@ fn closed_report() -> fr_wire::closure::Closed {
         effects: fr_wire::closure::OutstandingEffects::Unknown,
     }
 }
-async fn collect_terminal(
-    cx: &Cx,
-    pair: &mut Pair,
-    end: impl std::future::Future<Output = Result<(), Error>>,
-) -> (Result<(), Error>, Vec<Vec<u8>>) {
-    let done = Cell::new(false);
-    let mut received = Vec::new();
-    let (outcome, ()) = Box::pin(both(
-        async {
-            let result = end.await;
-            done.set(true);
-            result
-        },
-        async {
-            while !done.get() {
-                pair.client
-                    .drive(cx, Duration::from_millis(1), || true)
-                    .await
-                    .unwrap();
-                pair.client
-                    .receive(
-                        cx,
-                        || true,
-                        |route, bytes| {
-                            assert_eq!(
-                                route,
-                                Route::Stream(StreamRoute {
-                                    outbound: false,
-                                    ..pair.control
-                                })
-                            );
-                            received.push(bytes.to_vec());
-                            Ok(Disposition::Consumed)
-                        },
-                    )
-                    .unwrap();
-            }
-        },
-    ))
-    .await;
-    (outcome, received)
-}
 #[test]
 fn closed_reports_preserve_unknown_and_known_effects_without_sending_queued_media() {
     use fr_wire::closure::{self, Cleanup, OutstandingEffects};
@@ -69,7 +27,7 @@ fn closed_reports_preserve_unknown_and_known_effects_without_sending_queued_medi
             },
         ] {
             let mut pair = pair(&cx).await;
-            pair.server
+            pair.local
                 .send(
                     &cx,
                     Route::Stream(pair.bulk),
@@ -78,13 +36,13 @@ fn closed_reports_preserve_unknown_and_known_effects_without_sending_queued_medi
                     || true,
                 )
                 .unwrap();
-            let original = pair.server.binding();
-            let end =
-                pair.server
-                    .close_with_closed(&cx, &original, pair.control, binding(), report);
-            assert!(pair.server.is_closed());
-            assert_eq!(pair.server.usage().retained_send_records, 0);
-            let (outcome, received) = collect_terminal(&cx, &mut pair, end).await;
+            let original = pair.local.binding();
+            let end = pair
+                .local
+                .close_with_closed(&cx, &original, pair.control, binding(), report);
+            assert!(pair.local.is_closed());
+            assert_eq!(pair.local.usage().retained_send_records, 0);
+            let (outcome, received) = terminal::collect(&cx, &mut pair, end, <[u8]>::to_vec).await;
             assert_eq!(outcome, Ok(()));
             assert_eq!(received.len(), 1);
             assert_eq!(received[0].len(), closure::CLOSED_BYTES);
@@ -98,7 +56,7 @@ fn closed_reports_preserve_unknown_and_known_effects_without_sending_queued_medi
                 ),
                 Ok(report)
             );
-            assert_eq!(pair.server.tick(&cx, || true), Err(Error::Closed));
+            assert_eq!(pair.local.tick(&cx, || true), Err(Error::Closed));
         }
     });
 }
@@ -108,15 +66,15 @@ fn closed_report_abandonment_expiry_and_cancel_never_restart_the_original_owner(
         runtime().block_on(async {
             let cx = Cx::current().unwrap();
             let mut pair = pair(&cx).await;
-            let original = pair.server.binding();
-            let end = pair.server.close_with_closed(
+            let original = pair.local.binding();
+            let end = pair.local.close_with_closed(
                 &cx,
                 &original,
                 pair.control,
                 binding(),
                 closed_report(),
             );
-            assert!(pair.server.is_closed());
+            assert!(pair.local.is_closed());
             match action {
                 0 => drop(end),
                 1 => {
@@ -128,7 +86,7 @@ fn closed_report_abandonment_expiry_and_cancel_never_restart_the_original_owner(
                     assert_eq!(end.await, Err(Error::Cancelled));
                 }
             }
-            assert!(pair.server.is_closed());
+            assert!(pair.local.is_closed());
         });
     }
 }
@@ -137,17 +95,17 @@ fn closed_report_wrong_proof_is_nonmutating_but_bad_matched_reports_close() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx).await;
-        let foreign = pair.client.binding();
+        let foreign = pair.peer.binding();
         assert_eq!(
-            pair.server
+            pair.local
                 .close_with_closed(&cx, &foreign, pair.control, binding(), closed_report())
                 .await,
             Err(Error::WrongRoute)
         );
-        assert_eq!(pair.server.tick(&cx, || true), Ok(()));
-        let original = pair.server.binding();
+        assert_eq!(pair.local.tick(&cx, || true), Ok(()));
+        let original = pair.local.binding();
         assert_eq!(
-            pair.server
+            pair.local
                 .close_with_closed(
                     &cx,
                     &original,
@@ -161,19 +119,19 @@ fn closed_report_wrong_proof_is_nonmutating_but_bad_matched_reports_close() {
                 .await,
             Err(Error::Malformed)
         );
-        assert!(pair.server.is_closed());
+        assert!(pair.local.is_closed());
     });
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx).await;
-        let original = pair.server.binding();
+        let original = pair.local.binding();
         assert_eq!(
-            pair.server
+            pair.local
                 .close_with_closed(&cx, &original, pair.bulk, binding(), closed_report())
                 .await,
             Err(Error::WrongRoute)
         );
-        assert!(pair.server.is_closed());
+        assert!(pair.local.is_closed());
     });
 }
 #[test]
@@ -181,7 +139,7 @@ fn closed_report_does_not_flush_partially_staged_payload_or_ignore_the_security_
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx).await;
-        pair.server
+        pair.local
             .send(
                 &cx,
                 Route::Stream(pair.bulk),
@@ -190,30 +148,30 @@ fn closed_report_does_not_flush_partially_staged_payload_or_ignore_the_security_
                 || true,
             )
             .unwrap();
-        pair.server
+        pair.local
             .drive(&cx, Duration::ZERO, || true)
             .await
             .unwrap();
-        let original = pair.server.binding();
+        let original = pair.local.binding();
         assert_eq!(
-            pair.server
+            pair.local
                 .close_with_closed(&cx, &original, pair.control, binding(), closed_report())
                 .await,
             Err(Error::Backpressure)
         );
-        assert!(pair.server.is_closed());
+        assert!(pair.local.is_closed());
     });
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx).await;
         let allowed = Arc::new(AtomicBool::new(true));
         let guard = allowed.clone();
-        pair.server
+        pair.local
             .retain_lifetime_check(&cx, Arc::new(move || guard.load(Ordering::Acquire)))
             .unwrap();
-        let original = pair.server.binding();
+        let original = pair.local.binding();
         let end =
-            pair.server
+            pair.local
                 .close_with_closed(&cx, &original, pair.control, binding(), closed_report());
         allowed.store(false, Ordering::Release);
         assert_eq!(end.await, Err(Error::Unauthorized));
@@ -224,11 +182,11 @@ fn armed_revocation_is_not_replaced_by_a_competing_closed_report() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx).await;
-        let original = pair.server.binding();
+        let original = pair.local.binding();
         let report_owner = RevocationReport::default();
         let fenced = Arc::new(AtomicBool::new(false));
         let check = fenced.clone();
-        pair.server
+        pair.local
             .arm_revocation_report(
                 &cx,
                 &original,
@@ -243,14 +201,17 @@ fn armed_revocation_is_not_replaced_by_a_competing_closed_report() {
             )
             .unwrap();
         let end =
-            pair.server
+            pair.local
                 .close_with_closed(&cx, &original, pair.control, binding(), closed_report());
-        assert!(pair.server.is_closed());
+        assert!(pair.local.is_closed());
         assert!(fenced.load(Ordering::Acquire));
         assert_eq!(end.await, Err(Error::InvalidPolicy));
-        let (outcome, received) = collect_terminal(&cx, &mut pair, async move {
-            report_owner.finish().await.expect("armed report")
-        })
+        let (outcome, received) = terminal::collect(
+            &cx,
+            &mut pair,
+            async move { report_owner.finish().await.expect("armed report") },
+            <[u8]>::to_vec,
+        )
         .await;
         assert_eq!(outcome, Ok(()));
         assert_eq!(received.len(), 1);

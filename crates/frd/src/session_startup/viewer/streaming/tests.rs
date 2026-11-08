@@ -167,6 +167,56 @@ fn capabilities() -> Vec<negotiation::Capability> {
 fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
     Ok(Disposition::Blocked)
 }
+/// One real, role-specific attachment exchange for each canonical media lane.
+/// Shared by receiver, recovery, quality and audio tests; no route is invented.
+pub(super) async fn media_pair(
+    host: &mut crate::session_startup::running::HostSession,
+    viewer: &mut crate::session_startup::ViewerSession,
+    c: &Cx,
+    h: &Cx,
+) -> (NegotiatedMedia, NegotiatedMedia) {
+    use fr_wire::attachment::MediaRole;
+    let (hc, vc) = attach(host, viewer, c, h, MediaRole::Configuration, 18).await;
+    let (hr, vr) = attach(host, viewer, c, h, MediaRole::Recovery, 19).await;
+    let (hv, vv) = attach(host, viewer, c, h, MediaRole::Video, 20).await;
+    let selection = host.selection().clone();
+    (
+        NegotiatedMedia::new(host.io().unwrap().0, &selection, &hc, &hr, &hv).unwrap(),
+        NegotiatedMedia::new(viewer.io().unwrap().0, &selection, &vc, &vr, &vv).unwrap(),
+    )
+}
+/// The production network turn with no unrelated optional application lanes.
+#[allow(clippy::too_many_arguments)]
+async fn network_turn(
+    peer: &mut Peer,
+    receiver: &mut ReceivePipeline,
+    repair: &mut Repair,
+    recovery: Option<&mut recovery_control::Receiver>,
+    statistics: &mut Statistics,
+    feedback: Option<&mut ViewerFeedback>,
+    cx: &Cx,
+    other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+) -> Result<(), Error> {
+    network(
+        peer,
+        None,
+        None,
+        receiver,
+        None,
+        repair,
+        recovery,
+        statistics,
+        feedback,
+        None,
+        None,
+        None,
+        None,
+        cx,
+        &mut |_| {},
+        other,
+    )
+    .await
+}
 #[test]
 fn actual_quic_viewer_service_repairs_an_entirely_lost_final_picture() {
     lost_final_picture(Duration::ZERO);
@@ -181,36 +231,7 @@ fn actual_quic_repair_survives_a_120ms_ack_stall_within_reference_horizon() {
 fn lost_final_picture(ack_stall: Duration) {
     run(|c, h| async move {
         let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
-        let (hc, vc) = attach(
-            &mut host,
-            &mut viewer,
-            &c,
-            &h,
-            attachment::MediaRole::Configuration,
-            18,
-        )
-        .await;
-        let (hr, vr) = attach(
-            &mut host,
-            &mut viewer,
-            &c,
-            &h,
-            attachment::MediaRole::Recovery,
-            19,
-        )
-        .await;
-        let (hv, vv) = attach(
-            &mut host,
-            &mut viewer,
-            &c,
-            &h,
-            attachment::MediaRole::Video,
-            20,
-        )
-        .await;
-        let selection = host.selection().clone();
-        let hm = NegotiatedMedia::new(host.io().unwrap().0, &selection, &hc, &hr, &hv).unwrap();
-        let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selection, &vc, &vr, &vv).unwrap();
+        let (hm, vm) = media_pair(&mut host, &mut viewer, &c, &h).await;
         let cfg = vm
             .receiver_config(viewer.io().unwrap().0, ReceivePolicy::default())
             .unwrap();
@@ -221,7 +242,7 @@ fn lost_final_picture(ack_stall: Duration) {
         let progress_until = now(&h).unwrap() + 200_000;
         let mut progress_sent = false;
         let repair_route = Route::Stream(hm.repair_stream(q).unwrap());
-        let datagram = Route::Datagram(hv.completed_on(q).unwrap().datagram.unwrap());
+        let datagram = hm.packet_route_for_test(Channel::Video);
         let mut peer = Peer::Observe {
             session: viewer,
             media: vm,
@@ -271,22 +292,14 @@ fn lost_final_picture(ack_stall: Duration) {
                         Ok(Disposition::Consumed)
                     },
                 ),
-                network(
+                network_turn(
                     &mut peer,
-                    None,
-                    None,
                     &mut receiver,
-                    None,
                     &mut repair,
                     None,
                     &mut stats,
                     None,
-                    None,
-                    None,
-                    None,
-                    None,
                     &c,
-                    &mut |_| {},
                     &mut block,
                 ),
             ))
@@ -335,17 +348,7 @@ fn lost_final_picture(ack_stall: Duration) {
 fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
     run(|c, h| async move {
         let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
-        let mut attached = Vec::new();
-        for (role, channel) in [
-            (attachment::MediaRole::Configuration, 18),
-            (attachment::MediaRole::Recovery, 19),
-            (attachment::MediaRole::Video, 20),
-        ] {
-            attached.push(attach(&mut host, &mut viewer, &c, &h, role, channel).await);
-        }
-        let selection = host.selection().clone();
-        let [(_, vc), (_, vr), (_, vv)] = [&attached[0], &attached[1], &attached[2]];
-        let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selection, vc, vr, vv).unwrap();
+        let (_, vm) = media_pair(&mut host, &mut viewer, &c, &h).await;
         let cfg = vm
             .receiver_config(viewer.io().unwrap().0, ReceivePolicy::default())
             .unwrap();
@@ -392,22 +395,14 @@ fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
                     },
                     block,
                 ),
-                network(
+                network_turn(
                     &mut peer,
-                    None,
-                    None,
                     &mut receiver,
-                    None,
                     &mut repair,
                     None,
                     &mut stats,
                     None,
-                    None,
-                    None,
-                    None,
-                    None,
                     &c,
-                    &mut |_| {},
                     &mut |_, _| Err(()),
                 ),
             ))

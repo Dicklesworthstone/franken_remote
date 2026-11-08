@@ -256,33 +256,39 @@ fn target_failure_fences_before_dropping_pending_application_work() {
         assert!(dropped.load(Ordering::Acquire));
     });
 }
+async fn ending_application(
+    cx: &Cx,
+    ended: Result<(), fr_tailnet::Error>,
+    message: &'static str,
+) -> Result<&'static str, Error> {
+    let stopped = AtomicBool::new(false);
+    let service = poll_fn(|_| {
+        if stopped.load(Ordering::Acquire) {
+            Poll::Ready(ended)
+        } else {
+            Poll::Pending
+        }
+    });
+    let application = async {
+        stopped.store(true, Ordering::Release);
+        message
+    };
+    run_application(cx, service, application).await
+}
 #[test]
 fn a_lease_the_application_stopped_while_finishing_is_the_reported_cause() {
     let runtime = network::runtime();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on(async {
-        // The application's transport check stops the destination lease and
-        // the application then ends with its own (unnamed) failure.
-        let stopped = Arc::new(AtomicBool::new(false));
-        let service = {
-            let stopped = stopped.clone();
-            std::future::poll_fn(move |_| {
-                if stopped.load(Ordering::Acquire) {
-                    Poll::Ready(Err(fr_tailnet::Error::Expired))
-                } else {
-                    Poll::Pending
-                }
-            })
-        };
-        let application = {
-            let stopped = stopped.clone();
-            async move {
-                stopped.store(true, Ordering::Release);
-                "transport unauthorized"
-            }
-        };
+        // A real destination failure discovered by the ending application wins
+        // over its less specific transport refusal.
         assert_eq!(
-            run_application(&cx, service, application).await,
+            ending_application(
+                &cx,
+                Err(fr_tailnet::Error::Expired),
+                "transport unauthorized"
+            )
+            .await,
             Err(Error::Tailnet(fr_tailnet::Error::Expired))
         );
     });
@@ -292,29 +298,10 @@ fn a_lease_cancelled_by_the_ending_session_leaves_the_session_cause() {
     let runtime = network::runtime();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on(async {
-        // The application fails for its own reason and its teardown cancels
-        // the destination lease on the way out. Cancellation is not a cause.
+        // Normal service completion or teardown cancellation is not a cause.
         for ended in [Err(fr_tailnet::Error::Cancelled), Ok(())] {
-            let stopped = Arc::new(AtomicBool::new(false));
-            let service = {
-                let stopped = stopped.clone();
-                std::future::poll_fn(move |_| {
-                    if stopped.load(Ordering::Acquire) {
-                        Poll::Ready(ended)
-                    } else {
-                        Poll::Pending
-                    }
-                })
-            };
-            let application = {
-                let stopped = stopped.clone();
-                async move {
-                    stopped.store(true, Ordering::Release);
-                    "view stale"
-                }
-            };
             assert_eq!(
-                run_application(&cx, service, application).await,
+                ending_application(&cx, ended, "view stale").await,
                 Ok("view stale")
             );
         }

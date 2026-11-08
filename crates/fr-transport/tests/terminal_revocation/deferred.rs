@@ -7,10 +7,10 @@ fn arm(pair: &mut Pair, cleanup: &Cx) -> (RevocationReport, Arc<AtomicBool>) {
     let reporting = RevocationReport::default();
     let fenced = Arc::new(AtomicBool::new(false));
     let signal = fenced.clone();
-    pair.server
+    pair.local
         .arm_revocation_report(
             cleanup,
-            &pair.server.binding(),
+            &pair.local.binding(),
             pair.control,
             binding(),
             report().lease,
@@ -25,55 +25,17 @@ fn arm(pair: &mut Pair, cleanup: &Cx) -> (RevocationReport, Arc<AtomicBool>) {
 }
 
 pub(super) async fn delivered(pair: &mut Pair, cleanup: &Cx, reporting: RevocationReport) {
-    assert!(pair.server.is_closed());
-    let done = Cell::new(false);
-    let mut messages = Vec::new();
-    let (result, ()) = Box::pin(both(
-        async {
-            let result = reporting.finish().await;
-            done.set(true);
-            result
-        },
-        async {
-            while !done.get() {
-                pair.client
-                    .drive(cleanup, Duration::from_millis(1), || true)
-                    .await
-                    .unwrap();
-                pair.client
-                    .receive(
-                        cleanup,
-                        || true,
-                        |route, bytes| {
-                            assert_eq!(
-                                route,
-                                Route::Stream(StreamRoute {
-                                    outbound: false,
-                                    ..pair.control
-                                })
-                            );
-                            messages.push(
-                                lease_revoked::decode(
-                                    bytes,
-                                    binding(),
-                                    report().lease,
-                                    &ProtocolLimits::ABSOLUTE,
-                                    InputDirection::HostToViewer,
-                                    InputDelivery::Reliable,
-                                )
-                                .unwrap(),
-                            );
-                            Ok(Disposition::Consumed)
-                        },
-                    )
-                    .unwrap();
-            }
-        },
-    ))
+    assert!(pair.local.is_closed());
+    let (result, messages) = terminal::collect(
+        cleanup,
+        pair,
+        reporting.finish(),
+        terminal::decode_revocation,
+    )
     .await;
     assert_eq!(result, Some(Ok(())));
     assert_eq!(messages, [report()]);
-    assert_eq!(pair.server.tick(cleanup, || true), Err(Error::Closed));
+    assert_eq!(pair.local.tick(cleanup, || true), Err(Error::Closed));
 }
 
 #[test]
@@ -82,7 +44,7 @@ fn authorization_failure_fences_then_reports_without_flushing_queued_media() {
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
         let (reporting, fenced) = arm(&mut p, &cx);
-        p.server
+        p.local
             .send(
                 &cx,
                 Route::Stream(p.bulk),
@@ -92,12 +54,12 @@ fn authorization_failure_fences_then_reports_without_flushing_queued_media() {
             )
             .unwrap();
         assert_eq!(
-            p.server
+            p.local
                 .receive(&cx, || false, |_, _| panic!("no post-fence dispatch")),
             Err(Error::Unauthorized)
         );
         assert!(fenced.load(Ordering::Acquire));
-        assert_eq!(p.server.usage().retained_send_records, 0);
+        assert_eq!(p.local.usage().retained_send_records, 0);
         delivered(&mut p, &cx, reporting).await;
     });
 }
@@ -112,10 +74,7 @@ fn returned_pending_io_cancellation_transfers_only_terminal_custody() {
         let (reporting, fenced) = arm(&mut p, &cleanup);
         let mut exercised = false;
         for _ in 0..16 {
-            let mut operation = pin!(
-                p.server
-                    .drive(&session, Duration::from_millis(100), || true)
-            );
+            let mut operation = pin!(p.local.drive(&session, Duration::from_millis(100), || true));
             let pending = std::future::poll_fn(|task| {
                 Poll::Ready(operation.as_mut().poll(task).is_pending())
             })
@@ -150,7 +109,7 @@ fn abandoned_pending_io_still_reports_the_revocation_once() {
         let (reporting, fenced) = arm(&mut p, &cx);
         let mut exercised = false;
         for _ in 0..16 {
-            let mut operation = pin!(p.server.drive(&cx, Duration::from_millis(100), || true));
+            let mut operation = pin!(p.local.drive(&cx, Duration::from_millis(100), || true));
             if std::future::poll_fn(|task| Poll::Ready(operation.as_mut().poll(task).is_pending()))
                 .await
             {
@@ -160,7 +119,7 @@ fn abandoned_pending_io_still_reports_the_revocation_once() {
         }
         assert!(exercised);
         assert!(fenced.load(Ordering::Acquire));
-        assert_eq!(p.server.tick(&cx, || true), Err(Error::Closed));
+        assert_eq!(p.local.tick(&cx, || true), Err(Error::Closed));
         delivered(&mut p, &cx, reporting).await;
     });
 }
@@ -173,9 +132,9 @@ fn one_registration_cannot_arm_a_second_connection_or_use_foreign_identity() {
         let mut b = pair(&cx).await;
         let (reporting, _) = arm(&mut a, &cx);
         assert_eq!(
-            b.server.arm_revocation_report(
+            b.local.arm_revocation_report(
                 &cx,
-                &a.server.binding(),
+                &a.local.binding(),
                 b.control,
                 binding(),
                 report().lease,
@@ -184,11 +143,11 @@ fn one_registration_cannot_arm_a_second_connection_or_use_foreign_identity() {
             ),
             Err(Error::WrongRoute)
         );
-        assert!(!b.server.is_closed());
+        assert!(!b.local.is_closed());
         assert_eq!(
-            b.server.arm_revocation_report(
+            b.local.arm_revocation_report(
                 &cx,
-                &b.server.binding(),
+                &b.local.binding(),
                 b.control,
                 binding(),
                 report().lease,
@@ -197,8 +156,8 @@ fn one_registration_cannot_arm_a_second_connection_or_use_foreign_identity() {
             ),
             Err(Error::InvalidPolicy)
         );
-        assert!(!b.server.is_closed());
-        a.server.close();
+        assert!(!b.local.is_closed());
+        a.local.close();
         delivered(&mut a, &cx, reporting).await;
     });
 }
@@ -210,11 +169,11 @@ fn immutable_ingress_guard_is_not_bypassed_by_deferred_reporting() {
         let mut p = pair(&cx).await;
         let alive = Arc::new(AtomicBool::new(true));
         let guard = alive.clone();
-        p.server
+        p.local
             .retain_lifetime_check(&cx, Arc::new(move || guard.load(Ordering::Acquire)))
             .unwrap();
         let (reporting, fenced) = arm(&mut p, &cx);
-        p.server.close();
+        p.local.close();
         alive.store(false, Ordering::Release);
         assert_eq!(reporting.finish().await, Some(Err(Error::Unauthorized)));
         assert!(fenced.load(Ordering::Acquire));
@@ -227,7 +186,7 @@ fn native_payload_backlog_remains_a_terminal_refusal() {
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
         let (reporting, fenced) = arm(&mut p, &cx);
-        p.server
+        p.local
             .send(
                 &cx,
                 Route::Stream(p.bulk),
@@ -236,8 +195,8 @@ fn native_payload_backlog_remains_a_terminal_refusal() {
                 || true,
             )
             .unwrap();
-        p.server.drive(&cx, Duration::ZERO, || true).await.unwrap();
-        p.server.close();
+        p.local.drive(&cx, Duration::ZERO, || true).await.unwrap();
+        p.local.close();
         assert!(fenced.load(Ordering::Acquire));
         assert_eq!(reporting.finish().await, Some(Err(Error::Backpressure)));
     });
@@ -249,7 +208,7 @@ fn report_deadline_starts_at_close_not_at_consumer_poll() {
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
         let (reporting, fenced) = arm(&mut p, &cx);
-        p.server.close();
+        p.local.close();
         assert!(fenced.load(Ordering::Acquire));
         asupersync::time::sleep(cx.now(), Duration::from_millis(260)).await;
         assert_eq!(reporting.finish().await, Some(Err(Error::Expired)));
@@ -264,12 +223,12 @@ fn abandoning_either_owner_never_fabricates_delivery_or_reopens_io() {
         let mut p = pair(&cx).await;
         let (reporting, fenced) = arm(&mut p, &cx);
         drop(reporting);
-        p.server.close();
+        p.local.close();
         assert!(fenced.load(Ordering::Acquire));
-        assert!(p.server.is_closed());
+        assert!(p.local.is_closed());
         let mut p = pair(&cx).await;
         let (reporting, fenced) = arm(&mut p, &cx);
-        drop(p.server);
+        drop(p.local);
         assert!(
             fenced.load(Ordering::Acquire),
             "drop must fence before destroying socket"
@@ -288,7 +247,7 @@ fn paired_guards_keep_normal_cancellation_terminal_but_preserve_security_for_the
         let security = Arc::new(AtomicBool::new(true));
         let retained = security.clone();
         let terminal = security.clone();
-        p.server
+        p.local
             .retain_lifetime_checks(
                 &cx,
                 Arc::new(move || {
@@ -299,7 +258,7 @@ fn paired_guards_keep_normal_cancellation_terminal_but_preserve_security_for_the
             .unwrap();
         let (reporting, fenced) = arm(&mut p, &cx);
         active.store(false, Ordering::Release);
-        assert_eq!(p.server.tick(&cx, || true), Err(Error::Unauthorized));
+        assert_eq!(p.local.tick(&cx, || true), Err(Error::Unauthorized));
         assert!(fenced.load(Ordering::Acquire));
         delivered(&mut p, &cx, reporting).await;
     });
@@ -314,7 +273,7 @@ fn paired_guards_never_bypass_security_loss_during_terminal_preparation_or_drain
             let security = Arc::new(AtomicBool::new(true));
             let ordinary = security.clone();
             let terminal = security.clone();
-            p.server
+            p.local
                 .retain_lifetime_checks(
                     &cx,
                     Arc::new(move || ordinary.load(Ordering::Acquire)),
@@ -325,11 +284,11 @@ fn paired_guards_never_bypass_security_loss_during_terminal_preparation_or_drain
             if !after_close {
                 security.store(false, Ordering::Release);
             }
-            p.server.close();
+            p.local.close();
             security.store(false, Ordering::Release);
             assert!(fenced.load(Ordering::Acquire));
             assert_eq!(reporting.finish().await, Some(Err(Error::Unauthorized)));
-            assert!(p.server.is_closed());
+            assert!(p.local.is_closed());
         });
     }
 }
@@ -339,21 +298,21 @@ fn both_lifetime_guards_are_frozen_before_traffic_and_cannot_be_retrofitted() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
-        p.server
+        p.local
             .retain_lifetime_check(&cx, Arc::new(|| true))
             .unwrap();
         assert_eq!(
-            p.server
+            p.local
                 .retain_lifetime_checks(&cx, Arc::new(|| true), Arc::new(|| true)),
             Err(Error::InvalidPolicy)
         );
         let mut other = pair(&cx).await;
         assert_eq!(
             other
-                .server
+                .local
                 .retain_lifetime_checks(&cx, Arc::new(|| true), Arc::new(|| false)),
             Err(Error::Unauthorized)
         );
-        assert!(other.server.is_closed());
+        assert!(other.local.is_closed());
     });
 }

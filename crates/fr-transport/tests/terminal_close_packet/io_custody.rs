@@ -41,7 +41,7 @@ async fn with_native_history(cx: &Cx) -> Pair {
             break;
         }
     }
-    from_native_pair(cx, client, server)
+    terminal::from_native_pair(cx, server, client)
 }
 
 async fn observe_report(pair: &mut Pair, cx: &Cx, reporting: RevocationReport) {
@@ -55,12 +55,12 @@ async fn observe_report(pair: &mut Pair, cx: &Cx, reporting: RevocationReport) {
         },
         async {
             while !done.get() {
-                pair.client
+                pair.peer
                     .drive_io_once(cx, Duration::from_millis(5))
                     .await
                     .unwrap();
-                assert!(pair.client.connection_mut().recv_datagram().is_none());
-                if let Ok(bytes) = pair.client.connection_mut().read_stream(
+                assert!(pair.peer.connection_mut().recv_datagram().is_none());
+                if let Ok(bytes) = pair.peer.connection_mut().read_stream(
                     cx,
                     pair.control.stream,
                     pair.control.maximum,
@@ -72,23 +72,8 @@ async fn observe_report(pair: &mut Pair, cx: &Cx, reporting: RevocationReport) {
     ))
     .await;
     assert_eq!(result, Some(Ok(())));
-    assert!(!pair.client.connection().close_was_peer_initiated());
-    assert_eq!(
-        fr_wire::lease_revoked::decode(
-            &received,
-            binding(),
-            InputLeaseId::from_raw(2),
-            &ProtocolLimits::ABSOLUTE,
-            fr_wire::input::InputDirection::HostToViewer,
-            fr_wire::input::InputDelivery::Reliable,
-        ),
-        Ok(fr_wire::lease_revoked::Revoked {
-            lease: InputLeaseId::from_raw(2),
-            reason: Reason::LocalRevoke,
-            cleanup: fr_wire::lease_revoked::CleanupStage::Fenced,
-            effects: fr_wire::lease_revoked::EffectStage::Unknown,
-        })
-    );
+    assert!(!pair.peer.connection().close_was_peer_initiated());
+    assert_eq!(terminal::decode_revocation(&received), terminal::report());
 }
 
 #[test]
@@ -99,43 +84,29 @@ fn native_datagram_history_requires_a_completed_owned_turn_before_a_report() {
             let mut pair = Box::pin(with_native_history(&cx)).await;
             let (reporting, fenced) = arm(&mut pair, &cx);
             if complete_owned_turn {
-                pair.server
+                pair.local
                     .drive(&cx, Duration::ZERO, || true)
                     .await
                     .unwrap();
             }
-            pair.server.close();
+            pair.local.close();
             assert!(fenced.load(Ordering::Acquire));
-            assert!(pair.server.is_closed());
+            assert!(pair.local.is_closed());
             if complete_owned_turn {
                 Box::pin(observe_report(&mut pair, &cx, reporting)).await;
             } else {
                 assert_eq!(reporting.finish().await, Some(Err(Error::Backpressure)));
                 observe_close(&mut pair, &cx, 0x4652_0201).await;
             }
-            assert_eq!(pair.server.tick(&cx, || true), Err(Error::Closed));
+            assert_eq!(pair.local.tick(&cx, || true), Err(Error::Closed));
         }));
     }
 }
 
 fn queue_large_recovery(pair: &mut Pair, cx: &Cx) -> usize {
-    let limits = MediaLimits::new(ProtocolLimits::ABSOLUTE, 65536, 16384, 64).unwrap();
-    let mut bytes = vec![0; 65536];
-    let data = vec![99; 60_000];
-    let n = fr_wire::encode_recovery(
-        fr_wire::RecoveryChunk {
-            frame: 0,
-            total_bytes: 60_000,
-            offset: 0,
-            capture_micros: 1,
-            bytes: &data,
-        },
-        pair.bulk.binding,
-        &limits,
-        &mut bytes,
-    )
-    .unwrap();
-    pair.server
+    let bytes = terminal::recovery_bytes(60_000);
+    let n = bytes.len();
+    pair.local
         .send(
             cx,
             Route::Stream(pair.bulk),
@@ -154,18 +125,18 @@ fn incomplete_payload_native_io(drop_pending: bool) {
     rt.block_on(Box::pin(async {
         let mut pair = Box::pin(pair(&session)).await;
         let (reporting, fenced) = arm(&mut pair, &cleanup);
-        let original = pair.server.binding();
+        let original = pair.local.binding();
         let record_bytes = queue_large_recovery(&mut pair, &session);
         // At most one bounded prefix turn enters native output; the full
         // recovery record is larger. No peer consumes or ACKs it yet.
-        pair.server
+        pair.local
             .drive(&session, Duration::ZERO, || true)
             .await
             .unwrap();
-        assert_eq!(pair.server.usage().retained_send_records, 1);
+        assert_eq!(pair.local.usage().retained_send_records, 1);
         let mut exercised = false;
         for _ in 0..16 {
-            let mut operation = Box::pin(pair.server.drive(
+            let mut operation = Box::pin(pair.local.drive(
                 &session,
                 Duration::from_millis(100),
                 || true,
@@ -189,15 +160,15 @@ fn incomplete_payload_native_io(drop_pending: bool) {
         assert!(exercised, "must exercise genuinely pending native I/O");
         assert!(fenced.load(Ordering::Acquire));
         assert!(!cleanup.is_cancel_requested());
-        assert!(pair.server.is_closed());
-        assert!(pair.server.is_bound_to(&original));
-        assert_eq!(pair.server.usage().retained_send_records, 0);
+        assert!(pair.local.is_closed());
+        assert!(pair.local.is_bound_to(&original));
+        assert_eq!(pair.local.usage().retained_send_records, 0);
         assert_eq!(reporting.finish().await, Some(Err(Error::Backpressure)));
         observe_close(&mut pair, &cleanup, 0x4652_0201).await;
         // An earlier prefix may already have crossed UDP. Closing cannot
         // retract it, but must never finish or replay its original record.
         let received = pair
-            .client
+            .peer
             .connection()
             .inner()
             .streams()
@@ -205,14 +176,14 @@ fn incomplete_payload_native_io(drop_pending: bool) {
             .map_or(0, |stream| stream.recv_offset);
         assert!(received < u64::try_from(record_bytes).unwrap());
         let control = pair
-            .client
+            .peer
             .connection()
             .inner()
             .streams()
             .stream(pair.control.stream)
             .map_or(0, |stream| stream.recv_offset);
         assert_eq!(control, 0, "a close packet must not claim report delivery");
-        assert_eq!(pair.server.tick(&cleanup, || true), Err(Error::Closed));
+        assert_eq!(pair.local.tick(&cleanup, || true), Err(Error::Closed));
     }));
 }
 

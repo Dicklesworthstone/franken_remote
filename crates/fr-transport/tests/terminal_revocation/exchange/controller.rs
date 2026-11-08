@@ -3,37 +3,8 @@
 use super::*;
 
 async fn receive_request(cx: &Cx, pair: &mut Pair) {
-    let until = clock(cx) + 250_000;
-    let mut received = false;
-    while !received {
-        assert!(clock(cx) < until);
-        pair.server
-            .drive(cx, Duration::from_millis(1), || true)
-            .await
-            .unwrap();
-        pair.server
-            .receive(
-                cx,
-                || true,
-                |route, bytes| {
-                    assert_eq!(route, Route::Stream(pair.incoming));
-                    assert_eq!(
-                        closure::decode_request(
-                            bytes,
-                            binding(),
-                            &ProtocolLimits::ABSOLUTE,
-                            InputDirection::ViewerToHost,
-                            InputDelivery::Reliable
-                        )
-                        .unwrap(),
-                        request()
-                    );
-                    received = true;
-                    Ok(Disposition::Consumed)
-                },
-            )
-            .unwrap();
-    }
+    let routes = pair.routes();
+    terminal::receive_request(cx, &mut pair.local, routes, clock(cx) + 250_000).await;
 }
 
 #[test]
@@ -58,8 +29,8 @@ fn exact_lease_report_ends_controller_exchange_without_fabricating_session_clean
                     ..report()
                 };
                 let routes = routes(&p);
-                let original = p.client.binding();
-                let close = p.client.close_control_with_request(
+                let original = p.peer.binding();
+                let close = p.peer.close_control_with_request(
                     &cx,
                     &original,
                     routes,
@@ -69,13 +40,13 @@ fn exact_lease_report_ends_controller_exchange_without_fabricating_session_clean
                     u64::MAX,
                 );
                 assert!(
-                    p.client.is_closed(),
+                    p.peer.is_closed(),
                     "no input can be sent after construction"
                 );
                 let (outcome, sent) = Box::pin(both(close, async {
                     receive_request(&cx, &mut p).await;
-                    let original = p.server.binding();
-                    p.server
+                    let original = p.local.binding();
+                    p.local
                         .close_with_revocation(&cx, &original, p.control, binding(), expected)
                         .await
                 }))
@@ -94,9 +65,9 @@ fn controller_can_receive_closed_without_inventing_a_lease_release() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
-        let original = p.client.binding();
+        let original = p.peer.binding();
         let routes = routes(&p);
-        let close = p.client.close_control_with_request(
+        let close = p.peer.close_control_with_request(
             &cx,
             &original,
             routes,
@@ -143,7 +114,7 @@ fn foreign_lease_session_or_invalid_stage_never_becomes_terminal_evidence() {
             if invalid == 2 {
                 bytes[REVOKED_BYTES - 2] = 0xff;
             }
-            p.server
+            p.local
                 .send(
                     &cx,
                     Route::Stream(p.control),
@@ -152,9 +123,9 @@ fn foreign_lease_session_or_invalid_stage_never_becomes_terminal_evidence() {
                     || true,
                 )
                 .unwrap();
-            let original = p.client.binding();
+            let original = p.peer.binding();
             let routes = routes(&p);
-            let close = p.client.close_control_with_request(
+            let close = p.peer.close_control_with_request(
                 &cx,
                 &original,
                 routes,
@@ -172,7 +143,7 @@ fn foreign_lease_session_or_invalid_stage_never_becomes_terminal_evidence() {
                 },
                 async {
                     while !done.get() {
-                        p.server
+                        p.local
                             .drive(&cx, Duration::from_millis(1), || true)
                             .await
                             .unwrap();
@@ -219,7 +190,7 @@ fn only_the_first_terminal_report_is_retained_even_if_another_is_already_queued(
                 [closed.as_slice(), revoked.as_slice()]
             };
             for bytes in records {
-                p.server
+                p.local
                     .send(
                         &cx,
                         Route::Stream(p.control),
@@ -229,9 +200,9 @@ fn only_the_first_terminal_report_is_retained_even_if_another_is_already_queued(
                     )
                     .unwrap();
             }
-            let original = p.client.binding();
+            let original = p.peer.binding();
             let routes = routes(&p);
-            let close = p.client.close_control_with_request(
+            let close = p.peer.close_control_with_request(
                 &cx,
                 &original,
                 routes,
@@ -249,7 +220,7 @@ fn only_the_first_terminal_report_is_retained_even_if_another_is_already_queued(
                 },
                 async {
                     while !done.get() {
-                        p.server
+                        p.local
                             .drive(&cx, Duration::from_millis(1), || true)
                             .await
                             .unwrap();
@@ -273,10 +244,10 @@ fn controller_close_preserves_native_backlog_refusal_and_foreign_proof_nonmutati
         let cx = Cx::current().unwrap();
         let mut p = pair(&cx).await;
         let routes = routes(&p);
-        let original = p.client.binding();
-        let foreign = p.server.binding();
+        let original = p.peer.binding();
+        let foreign = p.local.binding();
         let outcome = p
-            .client
+            .peer
             .close_control_with_request(
                 &cx,
                 &foreign,
@@ -288,8 +259,8 @@ fn controller_close_preserves_native_backlog_refusal_and_foreign_proof_nonmutati
             )
             .await;
         assert_eq!(outcome.exchange.transport, Err(Error::WrongRoute));
-        assert!(!p.client.is_closed());
-        p.client
+        assert!(!p.peer.is_closed());
+        p.peer
             .send(
                 &cx,
                 Route::Stream(routes.outbound),
@@ -298,10 +269,10 @@ fn controller_close_preserves_native_backlog_refusal_and_foreign_proof_nonmutati
                 || true,
             )
             .unwrap();
-        p.client.drive(&cx, Duration::ZERO, || true).await.unwrap();
-        assert!(p.client.usage().retained_send_records > 0);
+        p.peer.drive(&cx, Duration::ZERO, || true).await.unwrap();
+        assert!(p.peer.usage().retained_send_records > 0);
         let outcome = p
-            .client
+            .peer
             .close_control_with_request(
                 &cx,
                 &original,
@@ -314,7 +285,7 @@ fn controller_close_preserves_native_backlog_refusal_and_foreign_proof_nonmutati
             .await;
         assert_eq!(outcome.exchange.transport, Err(Error::Backpressure));
         assert_eq!(outcome.revocation, None);
-        assert!(p.client.is_closed());
+        assert!(p.peer.is_closed());
     });
 }
 
@@ -326,17 +297,17 @@ fn zero_lease_cancel_security_loss_and_delayed_poll_never_restart_controller_clo
             let mut p = pair(&cx).await;
             let allowed = Arc::new(AtomicBool::new(true));
             let gate = allowed.clone();
-            p.client
+            p.peer
                 .retain_lifetime_check(&cx, Arc::new(move || gate.load(Ordering::Acquire)))
                 .unwrap();
             let routes = routes(&p);
-            let original = p.client.binding();
+            let original = p.peer.binding();
             let lease = if refusal == 0 {
                 InputLeaseId::from_raw(0)
             } else {
                 report().lease
             };
-            let close = p.client.close_control_with_request(
+            let close = p.peer.close_control_with_request(
                 &cx,
                 &original,
                 routes,
@@ -345,7 +316,7 @@ fn zero_lease_cancel_security_loss_and_delayed_poll_never_restart_controller_clo
                 request(),
                 clock(&cx) + 10_000,
             );
-            assert!(p.client.is_closed());
+            assert!(p.peer.is_closed());
             let expected = match refusal {
                 0 => Error::WrongRoute,
                 1 => {

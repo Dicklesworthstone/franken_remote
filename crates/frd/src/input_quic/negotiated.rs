@@ -162,6 +162,11 @@ impl NegotiatedInput {
     pub const fn ticket_profile(&self) -> Profile {
         self.ticket_profile
     }
+    /// The original negotiated input owner has entered reference recovery.
+    /// Its old media may retire while authority and input feedback stay live.
+    pub(crate) const fn recovering(&self) -> bool {
+        self.recovering
+    }
     /// The view input records must name: the attachment's, at the current
     /// recovery generation.
     fn current_view(&self) -> InputView {

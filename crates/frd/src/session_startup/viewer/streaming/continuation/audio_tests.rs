@@ -12,6 +12,7 @@ use crate::{
         },
         tests::support,
         viewer::streaming::audio::{AudioEnd, AudioOutput, OutputRefused, ViewerAudio},
+        viewer::streaming::tests::media_pair,
     },
 };
 use fr_core::audio::{AudioChannels, AudioDirection, AudioGeneration, AudioStopReason};
@@ -160,9 +161,7 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
     .collect();
     caps.sort_by(|a, b| a.name.cmp(&b.name));
     let (mut host, mut viewer) = pair_initialized(c, h, caps, |_| {}).await;
-    let (_, config) = attach(&mut host, &mut viewer, c, h, MediaRole::Configuration, 18).await;
-    let (_, recovery) = attach(&mut host, &mut viewer, c, h, MediaRole::Recovery, 19).await;
-    let (_, video) = attach(&mut host, &mut viewer, c, h, MediaRole::Video, 20).await;
+    let (_, mut media) = media_pair(&mut host, &mut viewer, c, h).await;
     let (ha, va) = attach(
         &mut host,
         &mut viewer,
@@ -172,14 +171,6 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
         AUDIO_BINDING,
     )
     .await;
-    let mut media = NegotiatedMedia::new(
-        viewer.io().unwrap().0,
-        host.selection(),
-        &config,
-        &recovery,
-        &video,
-    )
-    .unwrap();
     media.attach_audio(viewer.io().unwrap().0, &va).unwrap();
     let channel = ha.completed_on(host.io().unwrap().0).unwrap();
     let host_audio = AudioLanes {

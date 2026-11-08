@@ -91,11 +91,15 @@ pub(super) fn service(
     );
     if recovering {
         repair.clear();
-        if let Peer::Viewing {
-            session, viewing, ..
-        } = peer
-        {
-            viewing.begin_recovery(session)?;
+        match peer {
+            Peer::Viewing {
+                session, viewing, ..
+            } => viewing.begin_recovery(session)?,
+            // service can admit the request inside an outstanding native job's
+            // network turn. Fence input and the old media checks BEFORE that
+            // turn can transmit it and read the host's replacement resets.
+            Peer::Control(viewer) => viewer.enter_recovery().map_err(Error::Control)?,
+            _ => {}
         }
     }
     Ok(recovering)

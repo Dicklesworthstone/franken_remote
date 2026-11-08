@@ -1,5 +1,46 @@
 # Implementation status
 
+## Native session recovery and abrupt client failure (2026-11-08)
+
+The original viewer can report an abrupt failure to its host through a bounded,
+content-free protected QUIC close on the existing authenticated socket. The
+connector retains destination renewal while that attempt runs and preserves
+the original application result. A normal explicit closing exchange keeps sole
+socket custody; queued application output is discarded, and a close write never
+claims peer acknowledgement, remote input release or native cleanup. This
+addresses the silent-client-end mechanism in `fr-t4lj`; live two-machine
+acceptance remains pending. See [transport close](PROTOCOL_TRANSPORT_CLOSE.md).
+
+Reference recovery now fences the original controlled input owner before a
+network turn can transmit the recovery request and receive the host's resets.
+While an outstanding native decode or presentation operation drains, that same
+owner tolerates only retirement of its exact old media routes. Old progress
+cannot renew input evidence, and successor attachments remain owned by the
+existing recovery handshake. The original connection, grant and absolute
+recovery deadline stay in place. Unexpected media retirement outside this
+explicit transition still ends the session with `InvalidRoutes`.
+
+This fixes a source-identified race relevant to `fr-live-invalid-routes-45mn`:
+previously the post-I/O controlled-viewer check required live old media routes
+before the outer loop could detach them for recovery. It is not yet proof that
+this race explains every failure in the reported live runs.
+
+Added actual localhost TLS/UDP regressions cover protected client close
+custody, cancellation, destination loss, deadlines, queued native data, and
+connector supervision. Recovery regressions retain a real receiver budget
+inside simulated native work across authenticated peer resets and check that
+unsolicited resets still fail. Codec/native completion and authority fixtures
+are explicitly simulated; these tests do not qualify hardware or a live tailnet.
+Pinned formatting and the documentation gate pass locally. Full check/test
+attempts, including a single-job metadata-only transport check, are blocked by
+SIGKILL compiling the unchanged pinned Asupersync dependency under this runner's
+shared memory limit. At client-close commit `18f6bd5`, GitHub's macOS all-targets
+check passes. Its strict Clippy run found one documentation-markup error,
+corrected in this tree. Linux and runtime execution results, and compilation
+of the later recovery changes, remain pending; no new runtime test pass is
+claimed here. Shared terminal and recovery fixtures retain all scenarios while
+keeping this implementation within the existing handwritten-source limit.
+
 ## Native readiness, hardware selection and transfer pacing (2026-11-06)
 
 Three public operations now reach their existing native owners:

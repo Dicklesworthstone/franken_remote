@@ -1,5 +1,6 @@
 //! The same network function used by `StreamingViewer::serve`, with actual
 //! session renewal and TLS/UDP. Decoder completion remains explicitly simulated.
+mod retirement;
 use super::*;
 use crate::session_startup::running::HostSession;
 use fr_media::delivery::ReceiveState;
@@ -26,36 +27,7 @@ async fn pair(c: &Cx, h: &Cx) -> Ready {
     });
     caps.sort_by(|a, b| a.name.cmp(&b.name));
     let (mut host, mut viewer) = pair_initialized(c, h, caps, |_| {}).await;
-    let (hc, vc) = attach(
-        &mut host,
-        &mut viewer,
-        c,
-        h,
-        attachment::MediaRole::Configuration,
-        18,
-    )
-    .await;
-    let (hr, vr) = attach(
-        &mut host,
-        &mut viewer,
-        c,
-        h,
-        attachment::MediaRole::Recovery,
-        19,
-    )
-    .await;
-    let (hv, vv) = attach(
-        &mut host,
-        &mut viewer,
-        c,
-        h,
-        attachment::MediaRole::Video,
-        20,
-    )
-    .await;
-    let selection = host.selection().clone();
-    let hm = NegotiatedMedia::new(host.io().unwrap().0, &selection, &hc, &hr, &hv).unwrap();
-    let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selection, &vc, &vr, &vv).unwrap();
+    let (hm, vm) = media_pair(&mut host, &mut viewer, c, h).await;
     let cfg = vm
         .receiver_config(
             viewer.io().unwrap().0,
@@ -100,6 +72,7 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
         let mut nonce = 8000_u128;
         let mut reports = 0;
         let mut original = None;
+        let mut replies_at_recovery = None;
         let mut obsolete_sent = false;
         let end = initial + 3_250_000;
         while now(&c).unwrap() < end {
@@ -143,22 +116,14 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
                         block(r, bytes)
                     },
                 ),
-                network(
+                network_turn(
                     &mut peer,
-                    None,
-                    None,
                     &mut receiver,
-                    None,
                     &mut repairs,
                     Some(&mut watcher),
                     &mut statistics,
                     Some(&mut vf),
-                    None,
-                    None,
-                    None,
-                    None,
                     &c,
-                    &mut |_| {},
                     &mut block,
                 ),
             ))
@@ -167,6 +132,9 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
             b.unwrap();
             if let Some(until) = watcher.next_deadline() {
                 assert_eq!(*original.get_or_insert(until), until);
+                // The original feedback owner remains borrowed while native
+                // work drains, but only the replacement may answer new queries.
+                assert_eq!(*replies_at_recovery.get_or_insert(vf.sent), vf.sent);
                 assert_eq!(receiver.state(), ReceiveState::NeedsRecovery);
                 assert_eq!(receiver.budget_usage(), BudgetUsage::default());
                 assert_eq!(repairs.len, 0);
@@ -178,8 +146,9 @@ fn normal_network_loop_reports_lost_reference_and_keeps_original_observation_ren
         }
         assert!(announced);
         assert_eq!(reports, 1);
-        assert!(hf.accepted > 15);
+        assert!(hf.accepted > 0);
         assert!(vf.sent >= hf.accepted);
+        assert!(replies_at_recovery.is_some());
         assert!(obsolete_sent);
         assert_eq!(watcher.state(), recovery_control::State::Requested);
         assert!(host.renewed_until().unwrap().as_micros() > initial + 3_000_000);
@@ -202,22 +171,14 @@ fn malformed_receiver_remains_terminal_without_emitting_a_recovery_record() {
                 .receive(Channel::Video, b"not a media record", now(&c).unwrap())
                 .is_err()
         );
-        let result = network(
+        let result = network_turn(
             &mut peer,
-            None,
-            None,
             &mut receiver,
-            None,
             &mut Repair::default(),
             Some(&mut watcher),
             &mut Statistics::default(),
             None,
-            None,
-            None,
-            None,
-            None,
             &c,
-            &mut |_| {},
             &mut block,
         )
         .await;
@@ -239,33 +200,17 @@ fn malformed_receiver_remains_terminal_without_emitting_a_recovery_record() {
 fn omitted_recovery_owner_preserves_the_original_terminal_failure() {
     run(|c, h| async move {
         let (mut host, mut peer, mut receiver, mut watcher, _) = Box::pin(pair(&c, &h)).await;
-        let (session, media) = peer.parts().unwrap();
-        let cfg = media
-            .receiver_config(&session.transport, ReceivePolicy::default())
-            .unwrap();
-        let stamp = now(&c).unwrap();
-        let (_, bytes) = progress(cfg, stamp);
-        receiver
-            .receive(Channel::MediaConfig, &bytes, stamp)
-            .unwrap();
+        pending(&mut peer, &mut receiver, &c);
         asupersync::time::sleep(c.now(), Duration::from_millis(130)).await;
         assert_eq!(
-            network(
+            network_turn(
                 &mut peer,
-                None,
-                None,
                 &mut receiver,
-                None,
                 &mut Repair::default(),
                 None,
                 &mut Statistics::default(),
                 None,
-                None,
-                None,
-                None,
-                None,
                 &c,
-                &mut |_| {},
                 &mut block
             )
             .await,
@@ -278,6 +223,20 @@ fn omitted_recovery_owner_preserves_the_original_terminal_failure() {
         receiver.close();
         watcher.close();
     });
+}
+
+/// Announce the next actual dependency without delivering its picture.
+fn pending(peer: &mut Peer, receiver: &mut ReceivePipeline, cx: &Cx) -> ReceiveConfig {
+    let (session, media) = peer.parts().unwrap();
+    let cfg = media
+        .receiver_config(&session.transport, ReceivePolicy::default())
+        .unwrap();
+    let stamp = now(cx).unwrap();
+    let (_, bytes) = progress(cfg, stamp);
+    receiver
+        .receive(Channel::MediaConfig, &bytes, stamp)
+        .unwrap();
+    cfg
 }
 
 fn send_obsolete(

@@ -213,6 +213,22 @@ impl Peer {
             Self::Closed => Err(Error::Closed),
         }
     }
+    /// A real failed receiver may retain its native job while the host retires
+    /// the old routes. Keep only that original dispatch scope; ordinary parts()
+    /// still requires live media outside this explicit recovery transition.
+    fn retiring_parts(&mut self) -> Result<(&mut ViewerSession, &NegotiatedMedia), Error> {
+        match self {
+            Self::Observe { session, media } | Self::Viewing { session, media, .. } => {
+                session.check().map_err(Error::Session)?;
+                media
+                    .retiring_viewer_routes(&session.transport)
+                    .map_err(Error::Routes)?;
+                Ok((session, media))
+            }
+            Self::Control(v) => v.streaming_parts().map_err(Error::Control),
+            Self::Acquiring { .. } | Self::Closed => Err(Error::Closed),
+        }
+    }
     /// Parent-only service during a failed observation. Retired media cannot
     /// suppress original renewal, clocks or advisory reply cleanup.
     fn parent(&mut self) -> Result<&mut ViewerSession, Error> {
@@ -870,11 +886,6 @@ impl StreamingViewer {
                     quality.begin_recovery().map_err(Error::Quality)?;
                 }
             }
-            // The loss already fenced the old receiver scope: a control grant
-            // suspends now, before another turn could act on that view.
-            if recovering && let Peer::Control(viewer) = &mut self.peer {
-                viewer.enter_recovery().map_err(Error::Control)?;
-            }
             if recovering
                 && recovery::enabled(&self.peer, self.recovery.as_deref())
                 && self.recovery_state() == Some(recovery_control::State::Requested)
@@ -1124,9 +1135,6 @@ async fn network(
     if recovering && let Some(quality) = &mut quality {
         quality.begin_recovery().map_err(Error::Quality)?;
     }
-    if recovering && let Peer::Control(viewer) = peer {
-        viewer.enter_recovery().map_err(Error::Control)?;
-    }
     // Promotion retains the original reporter's admitted prefix. Bind it
     // before feedback can arrive; preparation/backpressure advances nothing.
     if let Some(viewer) = peer
@@ -1140,11 +1148,23 @@ async fn network(
             .bind_readiness_reporter(reporter.admitted_cursor())
             .map_err(Error::Control)?;
     }
-    let (session, media) = peer.parts()?;
-    let routes = media
-        .viewer_routes(&session.transport)
-        .map_err(Error::Routes)?;
-    if let Some(cursor) = cursor.as_deref_mut() {
+    let (session, media) = if recovering {
+        peer.retiring_parts()?
+    } else {
+        peer.parts()?
+    };
+    let refused = std::cell::Cell::new(None);
+    let retiring = recovering
+        .then(|| continuation::Dispatch::retiring(session, media, &refused))
+        .transpose()?;
+    let routes = (!recovering)
+        .then(|| {
+            media
+                .viewer_routes(&session.transport)
+                .map_err(Error::Routes)
+        })
+        .transpose()?;
+    if !recovering && let Some(cursor) = cursor.as_deref_mut() {
         cursor.refresh(media, &session.transport)?;
     }
     if let Some(audio) = audio.as_deref_mut() {
@@ -1165,6 +1185,17 @@ async fn network(
                 quality.receive(route, bytes).map_err(|error| {
                     failure = Some(Error::Quality(error));
                 })
+            } else if let Some(audio) = audio.as_deref_mut().filter(|a| a.owns(route, bytes)) {
+                // Audio is never media progress, decode or freshness evidence;
+                // its datagrams are always consumed (dropped when not active).
+                audio.receive(route, bytes, &mut || cx.checkpoint().is_ok());
+                Ok(Disposition::Consumed)
+            } else if let Some(retiring) = &retiring {
+                // A request can be sent and answered by resets inside THIS
+                // drive, before the outer loop can enter resume_stream. Drain
+                // only exact old routes and queries; hold next queries and
+                // attachment offers for their replacement owners.
+                retiring.receive(route, bytes, other)
             } else if feedback::is_feedback(bytes) {
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
@@ -1183,12 +1214,10 @@ async fn network(
                     failure = Some(Error::Cursor(e));
                 })?;
                 Ok(Disposition::Consumed)
-            } else if let Some(audio) = audio.as_deref_mut().filter(|a| a.owns(route, bytes)) {
-                // Audio is never media progress, decode or freshness evidence;
-                // its datagrams are always consumed (dropped when not active).
-                audio.receive(route, bytes, &mut || cx.checkpoint().is_ok());
-                Ok(Disposition::Consumed)
-            } else if let Some((_, channel)) = routes.iter().find(|(r, _)| *r == route) {
+            } else if let Some((_, channel)) = routes
+                .as_ref()
+                .and_then(|routes| routes.iter().find(|(r, _)| *r == route))
+            {
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
                 })?;
@@ -1205,7 +1234,7 @@ async fn network(
             }
         })
         .await;
-    if let Some(error) = failure {
+    if let Some(error) = failure.or(refused.take()) {
         return Err(error);
     }
     driven?;
@@ -1214,9 +1243,6 @@ async fn network(
     let recovering = recovering?;
     if recovering && let Some(quality) = &mut quality {
         quality.begin_recovery().map_err(Error::Quality)?;
-    }
-    if recovering && let Peer::Control(viewer) = peer {
-        viewer.enter_recovery().map_err(Error::Control)?;
     }
     // Source evidence is serviced independently of codec progress and before
     // advisory telemetry. No report can be derived from decode completion alone.
@@ -1253,7 +1279,10 @@ async fn network(
         }
     }
     // The session's renewal, repair and input services get their turn first.
-    if let Some(feedback) = feedback {
+    // The old responder may retain one previously prepared reply while native
+    // work drains. It cannot answer for the failed chain or the replacement;
+    // resume_stream drops it only after that borrowed work has drained.
+    if !recovering && let Some(feedback) = feedback {
         let session = peer.parent()?;
         feedback
             .service(&mut session.transport, cx, now(cx).map_err(Error::Session)?)

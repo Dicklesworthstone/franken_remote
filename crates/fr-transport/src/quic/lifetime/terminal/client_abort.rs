@@ -80,7 +80,7 @@ impl QuicRecords {
     /// promotion. Both are fixed before service and cannot be replaced on error.
     /// The immutable destination/security gate must already be installed.
     ///
-    /// This lower-priority slot does not displace a normal CloseRequest or an
+    /// This lower-priority slot does not displace a normal `CloseRequest` or an
     /// already-registered terminal owner. Only a socket left by those paths can
     /// be captured, and only a content-free native close can subsequently run.
     pub fn arm_client_abort(

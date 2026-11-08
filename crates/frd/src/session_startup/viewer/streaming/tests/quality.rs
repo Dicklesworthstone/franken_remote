@@ -27,41 +27,7 @@ async fn pair(c: &Cx, h: &Cx, selected: bool) -> Pair {
     }
     caps.sort_by(|a, b| a.name.cmp(&b.name));
     let (mut host, mut viewer) = pair_initialized(c, h, caps, |_| {}).await;
-    let (_, config) = attach(
-        &mut host,
-        &mut viewer,
-        c,
-        h,
-        attachment::MediaRole::Configuration,
-        18,
-    )
-    .await;
-    let (_, recovery) = attach(
-        &mut host,
-        &mut viewer,
-        c,
-        h,
-        attachment::MediaRole::Recovery,
-        19,
-    )
-    .await;
-    let (_, video) = attach(
-        &mut host,
-        &mut viewer,
-        c,
-        h,
-        attachment::MediaRole::Video,
-        20,
-    )
-    .await;
-    let media = NegotiatedMedia::new(
-        &viewer.transport,
-        host.selection(),
-        &config,
-        &recovery,
-        &video,
-    )
-    .unwrap();
+    let (_, media) = media_pair(&mut host, &mut viewer, c, h).await;
     let receiver = running(
         media
             .receiver_config(&viewer.transport, ReceivePolicy::default())

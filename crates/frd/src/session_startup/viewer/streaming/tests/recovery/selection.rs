@@ -4,19 +4,6 @@ use super::*;
 use crate::session_startup::viewer::streaming::recovery as recovery_flow;
 use std::cell::Cell;
 
-fn pending(peer: &mut Peer, receiver: &mut ReceivePipeline, cx: &Cx) -> ReceiveConfig {
-    let (session, media) = peer.parts().unwrap();
-    let cfg = media
-        .receiver_config(&session.transport, ReceivePolicy::default())
-        .unwrap();
-    let stamp = now(cx).unwrap();
-    let (_, bytes) = progress(cfg, stamp);
-    receiver
-        .receive(Channel::MediaConfig, &bytes, stamp)
-        .unwrap();
-    cfg
-}
-
 #[test]
 fn reference_expiry_at_dequeue_reports_loss_without_starting_native_work() {
     run(|c, h| async move {

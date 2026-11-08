@@ -18,10 +18,10 @@ fn arm(
     let fenced = Arc::new(AtomicBool::new(false));
     let flag = fenced.clone();
     let app = app.clone();
-    let original = p.client.binding();
+    let original = p.peer.binding();
     let route = routes(p);
     let signal = p
-        .client
+        .peer
         .arm_control_close_request(
             cleanup,
             &original,
@@ -54,8 +54,8 @@ fn native_request_fences_immediately_and_normal_close_transfers_the_exact_exchan
         assert!(app.is_cancel_requested());
         assert!(!cleanup.is_cancel_requested());
         assert_eq!(signal.request(closure::Reason::ClientFailure), Ok(false));
-        assert_eq!(p.client.tick(&app, || true), Err(Error::Cancelled));
-        assert!(p.client.is_closed());
+        assert_eq!(p.peer.tick(&app, || true), Err(Error::Cancelled));
+        assert!(p.peer.is_closed());
         let (outcome, sent) = Box::pin(both(
             reporter.finish(),
             request_then_report(&cleanup, &mut p, final_report()),
@@ -80,7 +80,7 @@ fn pending_native_io_returns_only_terminal_custody_after_the_local_input_fence()
         let (reporter, signal, fenced) = arm(&mut p, &app, &cleanup, clock(&cleanup) + 1_000_000);
         let mut exercised = false;
         for _ in 0..16 {
-            let mut io = pin!(p.client.drive(&app, Duration::from_millis(100), || true));
+            let mut io = pin!(p.peer.drive(&app, Duration::from_millis(100), || true));
             if poll_fn(|task| Poll::Ready(io.as_mut().poll(task).is_pending())).await {
                 assert_eq!(signal.request(closure::Reason::Requested), Ok(true));
                 assert!(fenced.load(Ordering::Acquire));
@@ -97,7 +97,7 @@ fn pending_native_io_returns_only_terminal_custody_after_the_local_input_fence()
         .await;
         assert_eq!(outcome.unwrap().exchange.report, Some(final_report()));
         assert_eq!(sent, Ok(()));
-        assert!(p.client.is_closed());
+        assert!(p.peer.is_closed());
     });
 }
 
@@ -114,14 +114,14 @@ fn deadline_refresh_is_allowed_before_intent_but_never_after_it() {
         asupersync::time::sleep(cleanup.now(), Duration::from_millis(3)).await;
         assert_eq!(signal.request(closure::Reason::Requested), Ok(true));
         signal.update_deadline(u64::MAX).unwrap();
-        p.client.close();
+        p.peer.close();
         let finish = reporter.finish();
         asupersync::time::sleep(cleanup.now(), Duration::from_millis(25)).await;
         assert_eq!(
             finish.await.unwrap().exchange.transport,
             Err(Error::Expired)
         );
-        assert!(p.client.is_closed());
+        assert!(p.peer.is_closed());
     });
 }
 
@@ -133,7 +133,7 @@ fn emergency_close_and_abandoned_consumers_never_invent_a_local_request() {
         let app = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
         let mut p = pair(&cleanup).await;
         let (reporter, signal, fenced) = arm(&mut p, &app, &cleanup, u64::MAX);
-        p.client.close();
+        p.peer.close();
         assert!(fenced.load(Ordering::Acquire));
         assert!(!signal.is_requested());
         assert_eq!(reporter.finish().await, None);
@@ -146,8 +146,8 @@ fn emergency_close_and_abandoned_consumers_never_invent_a_local_request() {
             Err(Error::Closed)
         );
         assert!(fenced.load(Ordering::Acquire));
-        p.client.close();
-        assert!(p.client.is_closed());
+        p.peer.close();
+        assert!(p.peer.is_closed());
     });
 }
 
@@ -165,7 +165,7 @@ fn abandoned_native_io_transfers_only_terminal_custody_like_a_returned_cancellat
         let (reporter, signal, fenced) = arm(&mut p, &app, &cleanup, clock(&cleanup) + 1_000_000);
         let mut exercised = false;
         for _ in 0..16 {
-            let mut io = pin!(p.client.drive(&app, Duration::from_millis(100), || true));
+            let mut io = pin!(p.peer.drive(&app, Duration::from_millis(100), || true));
             if poll_fn(|task| Poll::Ready(io.as_mut().poll(task).is_pending())).await {
                 assert_eq!(signal.request(closure::Reason::Requested), Ok(true));
                 assert!(fenced.load(Ordering::Acquire));
@@ -174,8 +174,8 @@ fn abandoned_native_io_transfers_only_terminal_custody_like_a_returned_cancellat
             }
         }
         assert!(exercised);
-        assert!(p.client.is_closed());
-        assert_eq!(p.client.tick(&cleanup, || true), Err(Error::Closed));
+        assert!(p.peer.is_closed());
+        assert_eq!(p.peer.tick(&cleanup, || true), Err(Error::Closed));
         // Bounded: a socket lost with the dropped turn would send no request.
         let (outcome, sent) = asupersync::time::timeout(
             cleanup.now(),
@@ -189,7 +189,7 @@ fn abandoned_native_io_transfers_only_terminal_custody_like_a_returned_cancellat
         .expect("the captured request was exchanged");
         assert_eq!(outcome.unwrap().exchange.report, Some(final_report()));
         assert_eq!(sent, Ok(()));
-        assert!(p.client.is_closed());
+        assert!(p.peer.is_closed());
     });
 }
 
@@ -203,13 +203,13 @@ fn native_backlog_and_security_loss_still_refuse_after_the_fence() {
             let mut p = pair(&cleanup).await;
             let allowed = Arc::new(AtomicBool::new(true));
             let gate = allowed.clone();
-            p.client
+            p.peer
                 .retain_lifetime_check(&cleanup, Arc::new(move || gate.load(Ordering::Acquire)))
                 .unwrap();
             let (reporter, signal, fenced) = arm(&mut p, &app, &cleanup, u64::MAX);
             if backlog {
                 let route = routes(&p).outbound;
-                p.client
+                p.peer
                     .send(
                         &cleanup,
                         Route::Stream(route),
@@ -218,16 +218,16 @@ fn native_backlog_and_security_loss_still_refuse_after_the_fence() {
                         || true,
                     )
                     .unwrap();
-                p.client
+                p.peer
                     .drive(&cleanup, Duration::ZERO, || true)
                     .await
                     .unwrap();
-                assert!(p.client.usage().retained_send_records > 0);
+                assert!(p.peer.usage().retained_send_records > 0);
             } else {
                 allowed.store(false, Ordering::Release);
             }
             signal.request(closure::Reason::Requested).unwrap();
-            p.client.close();
+            p.peer.close();
             assert!(fenced.load(Ordering::Acquire));
             let outcome = reporter.finish().await.unwrap();
             assert_eq!(
@@ -251,9 +251,9 @@ fn wrong_connection_and_competing_registrations_cannot_replace_the_original_slot
         let mut p = pair(&cx).await;
         let first = ControlCloseReport::default();
         let route = routes(&p);
-        let other = p.server.binding();
+        let other = p.local.binding();
         assert!(matches!(
-            p.client.arm_control_close_request(
+            p.peer.arm_control_close_request(
                 &cx,
                 &other,
                 route,
@@ -265,10 +265,10 @@ fn wrong_connection_and_competing_registrations_cannot_replace_the_original_slot
             ),
             Err(Error::WrongRoute)
         ));
-        assert!(!p.client.is_closed());
-        let original = p.client.binding();
+        assert!(!p.peer.is_closed());
+        let original = p.peer.binding();
         let _signal = p
-            .client
+            .peer
             .arm_control_close_request(
                 &cx,
                 &original,
@@ -282,7 +282,7 @@ fn wrong_connection_and_competing_registrations_cannot_replace_the_original_slot
             .unwrap();
         let second = ControlCloseReport::default();
         assert!(matches!(
-            p.client.arm_control_close_request(
+            p.peer.arm_control_close_request(
                 &cx,
                 &original,
                 route,
@@ -295,7 +295,7 @@ fn wrong_connection_and_competing_registrations_cannot_replace_the_original_slot
             Err(Error::InvalidPolicy)
         ));
         assert_eq!(
-            p.client.arm_closed_report(
+            p.peer.arm_closed_report(
                 &cx,
                 &original,
                 route.outbound,
@@ -305,8 +305,8 @@ fn wrong_connection_and_competing_registrations_cannot_replace_the_original_slot
             ),
             Err(Error::InvalidPolicy)
         );
-        assert!(!p.client.is_closed());
-        p.client.close();
+        assert!(!p.peer.is_closed());
+        p.peer.close();
         assert_eq!(first.finish().await, None);
         assert_eq!(second.finish().await, None);
     });

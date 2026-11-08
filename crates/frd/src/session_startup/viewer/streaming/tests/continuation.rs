@@ -1,6 +1,6 @@
 //! Actual running viewer, TLS/UDP, child IPC and deadline/generation owners.
 //! Host records and child decoded pixels are test fixtures, not HEVC evidence.
-use super::{attach, capabilities, run, support};
+use super::{capabilities, media_pair, run, support};
 use crate::{
     media::{Presenter, decoder_startup},
     media_quic::NegotiatedMedia,
@@ -133,6 +133,26 @@ fn send_cache(
             .unwrap();
     }
 }
+/// Keep renewal running while the scenario deliberately withholds media.
+/// Only the original repair lane is consumed; all other records stay queued.
+async fn host_turn(
+    host: &mut crate::session_startup::running::HostSession,
+    repair: Option<Route>,
+    nonce_base: u128,
+) -> Result<(), crate::session_startup::Error> {
+    host.drive(
+        Duration::from_millis(5),
+        || Ok(u128::from(stamp()) + nonce_base),
+        |route, _| {
+            Ok(if Some(route) == repair {
+                Disposition::Consumed
+            } else {
+                Disposition::Blocked
+            })
+        },
+    )
+    .await
+}
 async fn wait_ack(
     host: &mut crate::session_startup::running::HostSession,
     media: &NegotiatedMedia,
@@ -174,13 +194,7 @@ async fn wait_ack(
             return;
         }
         assert!(Instant::now() < until, "missing decoder acknowledgement");
-        host.drive(
-            Duration::from_millis(5),
-            || Ok(u128::from(stamp()) + 8000),
-            |_, _| Ok(Disposition::Blocked),
-        )
-        .await
-        .unwrap();
+        host_turn(host, None, 8000).await.unwrap();
     }
 }
 
@@ -400,18 +414,7 @@ fn exercise(scenario: Scenario) {
                 Scenario::NoOffer | Scenario::Cancel | Scenario::Unclaimed
             ) {
                 while !done.get() {
-                    if host
-                        .drive(
-                            Duration::from_millis(5),
-                            || Ok(u128::from(stamp()) + 11000),
-                            |route, _| {
-                                Ok(if route == repair_route {
-                                    Disposition::Consumed
-                                } else {
-                                    Disposition::Blocked
-                                })
-                            },
-                        )
+                    if host_turn(&mut host, Some(repair_route), 11000)
                         .await
                         .is_err()
                     {
@@ -425,19 +428,9 @@ fn exercise(scenario: Scenario) {
                 while failed_at.elapsed() < Duration::from_millis(3200) {
                     // Regression: the viewer MUST NOT reset these before our offer.
                     hm.check(host.io().unwrap().0).unwrap();
-                    host.drive(
-                        Duration::from_millis(5),
-                        || Ok(u128::from(stamp()) + 12000),
-                        |route, _| {
-                            Ok(if route == repair_route {
-                                Disposition::Consumed
-                            } else {
-                                Disposition::Blocked
-                            })
-                        },
-                    )
-                    .await
-                    .unwrap();
+                    host_turn(&mut host, Some(repair_route), 12000)
+                        .await
+                        .unwrap();
                 }
                 assert!(host.renewed_until().unwrap() > original_lease);
             }
@@ -461,13 +454,7 @@ fn exercise(scenario: Scenario) {
                 {
                     break;
                 }
-                host.drive(
-                    Duration::from_millis(5),
-                    || Ok(u128::from(stamp()) + 13000),
-                    |_, _| Ok(Disposition::Blocked),
-                )
-                .await
-                .unwrap();
+                host_turn(&mut host, None, 13000).await.unwrap();
             }
             hm = replacement.finish(&h, host.io().unwrap().0).unwrap();
             assert!(host.io().unwrap().0.is_bound_to(&original_connection));
@@ -510,18 +497,7 @@ fn exercise(scenario: Scenario) {
                 .unwrap();
             if scenario == Scenario::BadConfiguration {
                 while !done.get() {
-                    if host
-                        .drive(
-                            Duration::from_millis(5),
-                            || Ok(u128::from(stamp()) + 14000),
-                            |route, _| {
-                                Ok(if route == repair_route {
-                                    Disposition::Consumed
-                                } else {
-                                    Disposition::Blocked
-                                })
-                            },
-                        )
+                    if host_turn(&mut host, Some(repair_route), 14000)
                         .await
                         .is_err()
                     {
@@ -547,18 +523,7 @@ fn exercise(scenario: Scenario) {
             put(&mut cache, 3, Some(2), DeliveryMode::Datagrams, stamp());
             send_cache(&mut host, &hm, &mut cache);
             while !done.get() {
-                if host
-                    .drive(
-                        Duration::from_millis(5),
-                        || Ok(u128::from(stamp()) + 15000),
-                        |route, _| {
-                            Ok(if route == repair_route {
-                                Disposition::Consumed
-                            } else {
-                                Disposition::Blocked
-                            })
-                        },
-                    )
+                if host_turn(&mut host, Some(repair_route), 15000)
                     .await
                     .is_err()
                 {
@@ -699,21 +664,4 @@ async fn observing_pair(
         viewer.finish().unwrap(),
     )
 }
-async fn media_pair(
-    host: &mut crate::session_startup::running::HostSession,
-    viewer: &mut crate::session_startup::ViewerSession,
-    c: &Cx,
-    h: &Cx,
-) -> (NegotiatedMedia, NegotiatedMedia) {
-    use fr_wire::attachment::MediaRole;
-    let (hc, vc) = attach(host, viewer, c, h, MediaRole::Configuration, 18).await;
-    let (hr, vr) = attach(host, viewer, c, h, MediaRole::Recovery, 19).await;
-    let (hv, vv) = attach(host, viewer, c, h, MediaRole::Video, 20).await;
-    let selection = host.selection().clone();
-    (
-        NegotiatedMedia::new(host.io().unwrap().0, &selection, &hc, &hr, &hv).unwrap(),
-        NegotiatedMedia::new(viewer.io().unwrap().0, &selection, &vc, &vr, &vv).unwrap(),
-    )
-}
-
 mod disconnect;

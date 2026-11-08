@@ -11,23 +11,11 @@ impl Drop for Retired {
     }
 }
 
-fn lose(peer: &mut Peer, receiver: &mut ReceivePipeline, cx: &Cx) {
-    let (session, media) = peer.parts().unwrap();
-    let cfg = media
-        .receiver_config(&session.transport, ReceivePolicy::default())
-        .unwrap();
-    let stamp = now(cx).unwrap();
-    let (_, bytes) = progress(cfg, stamp);
-    receiver
-        .receive(Channel::MediaConfig, &bytes, stamp)
-        .unwrap();
-}
-
 #[test]
 fn fenced_completion_is_retired_without_receipt_or_deadline_refresh() {
     run(|c, h| async move {
         let (mut host, mut peer, mut receiver, mut watcher, _) = Box::pin(pair(&c, &h)).await;
-        lose(&mut peer, &mut receiver, &c);
+        pending(&mut peer, &mut receiver, &c);
         let mut repairs = Repair::default();
         asupersync::time::sleep(c.now(), Duration::from_millis(30)).await;
         repairs.prepare(&mut receiver, now(&c).unwrap()).unwrap();
@@ -82,7 +70,7 @@ fn fenced_completion_is_retired_without_receipt_or_deadline_refresh() {
 fn expiry_between_completion_preflight_and_receiver_acceptance_is_reported_once() {
     run(|c, h| async move {
         let (mut host, mut peer, mut receiver, mut watcher, _) = Box::pin(pair(&c, &h)).await;
-        lose(&mut peer, &mut receiver, &c);
+        pending(&mut peer, &mut receiver, &c);
         let mut repairs = Repair::default();
         let called = Cell::new(false);
         let receipt = recovery_flow::admit::<media::PresentationReceipt>(
@@ -121,7 +109,7 @@ fn expiry_between_completion_preflight_and_receiver_acceptance_is_reported_once(
 fn completion_without_recovery_negotiation_keeps_terminal_expiry() {
     run(|c, h| async move {
         let (mut host, mut peer, mut receiver, mut watcher, _) = Box::pin(pair(&c, &h)).await;
-        lose(&mut peer, &mut receiver, &c);
+        pending(&mut peer, &mut receiver, &c);
         asupersync::time::sleep(c.now(), Duration::from_millis(130)).await;
         let result = recovery_flow::admit::<media::PresentationReceipt>(
             &mut peer,
