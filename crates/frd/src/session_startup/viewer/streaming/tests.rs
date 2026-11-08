@@ -346,13 +346,57 @@ fn lost_final_picture(ack_stall: Duration) {
 /// client reported such an end as `native_session_failed`).
 #[test]
 fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
+    unclaimed_host_record(false);
+}
+
+#[test]
+fn an_unclaimed_host_record_during_recovery_keeps_its_named_cause() {
+    unclaimed_host_record(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn unclaimed_host_record(recovering: bool) {
     run(|c, h| async move {
-        let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
+        let mut caps = capabilities();
+        if recovering {
+            caps.push(negotiation::Capability {
+                name: recovery_request::CAPABILITY.into(),
+                version: recovery_request::VERSION,
+                required: true,
+            });
+            caps.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        let (mut host, mut viewer) = pair_initialized(&c, &h, caps, |_| {}).await;
         let (_, vm) = media_pair(&mut host, &mut viewer, &c, &h).await;
         let cfg = vm
             .receiver_config(viewer.io().unwrap().0, ReceivePolicy::default())
             .unwrap();
         let mut receiver = running(cfg, now(&c).unwrap());
+        let mut report = super::recovery::attach(&viewer, &vm, &receiver).unwrap();
+        assert_eq!(report.is_some(), recovering);
+        if recovering {
+            // A real failed-chain transition selects the retirement dispatcher
+            // before it receives the unrelated record on authenticated control.
+            let at = now(&c).unwrap();
+            let (descriptor, _) = progress(cfg, at);
+            let mut bytes = [0; 1150];
+            let n = encode_progress(
+                Progress {
+                    descriptor,
+                    observed_micros: at,
+                    observation: SourceObservation::Captured,
+                    pipeline: PipelineState::Failed,
+                },
+                cfg.bindings.for_channel(Channel::MediaConfig),
+                &cfg.limits,
+                &mut bytes,
+            )
+            .unwrap();
+            assert_eq!(
+                receiver.receive(Channel::MediaConfig, &bytes[..n], at),
+                Err(DeliveryError::ReferenceExpired)
+            );
+        }
         // ClipboardReady is a session-control kind; a view-only session has no
         // clipboard lane to claim it.
         let kind = 0x0054_u16;
@@ -399,7 +443,7 @@ fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
                     &mut peer,
                     &mut receiver,
                     &mut repair,
-                    None,
+                    report.as_mut(),
                     &mut stats,
                     None,
                     &c,
@@ -413,6 +457,17 @@ fn an_unclaimed_host_record_ends_the_session_naming_its_kind() {
             }
         };
         assert_eq!(ended, Error::UnclaimedRecord(kind));
+        if let Some(report) = &mut report {
+            assert!(matches!(
+                report.state(),
+                recovery_control::State::Pending | recovery_control::State::Requested
+            ));
+            assert_eq!(
+                receiver.state(),
+                fr_media::delivery::ReceiveState::NeedsRecovery
+            );
+            report.close();
+        }
         host.close();
         peer.close();
         receiver.close();

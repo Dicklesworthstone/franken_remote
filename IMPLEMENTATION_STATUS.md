@@ -26,6 +26,9 @@ cannot renew input evidence, and successor attachments remain owned by the
 existing recovery handshake. The original connection, grant and absolute
 recovery deadline stay in place. Unexpected media retirement outside this
 explicit transition still ends the session with `InvalidRoutes`.
+Unexpected application records during native draining also retain their exact
+`UnclaimedRecord(kind)` cause. The same authenticated TLS regression exercises
+this refusal in both healthy streaming and explicit reference recovery.
 
 This fixes a source-identified race relevant to `fr-live-invalid-routes-45mn`:
 previously the post-I/O controlled-viewer check required live old media routes

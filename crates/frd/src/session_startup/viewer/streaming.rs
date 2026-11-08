@@ -1195,7 +1195,11 @@ async fn network(
                 // drive, before the outer loop can enter resume_stream. Drain
                 // only exact old routes and queries; hold next queries and
                 // attachment offers for their replacement owners.
-                retiring.receive(route, bytes, other)
+                retiring.receive(route, bytes, &mut |route, bytes| {
+                    other(route, bytes).map_err(|()| {
+                        failure = Some(unclaimed(bytes));
+                    })
+                })
             } else if feedback::is_feedback(bytes) {
                 let current = now(cx).map_err(|e| {
                     failure = Some(Error::Session(e));
