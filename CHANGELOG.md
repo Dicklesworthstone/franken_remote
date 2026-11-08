@@ -1,5 +1,14 @@
 # Changelog
 
+## 2026-11-08 — the host log names how a controlled viewer ended
+
+- When a controlled share's viewer ended on its own side, `frd` kept only a
+  count, finished or failed, and dropped the error. `share_ended` now also
+  shows `viewer_end: Some(...)`, the viewer's typed ending as the host saw it
+  (codes only, no content). On 11-08, 8 live runs ended on the client with
+  `Media(InvalidRoutes)` while the host logged just `failed: 1`, so it is
+  not known which side ended them first. The next such run will say.
+
 ## 2026-11-08 — a key held across the end of a view suspension no longer ends control
 
 - A stale view suspends control input (plan 11.3), and a key or button pressed

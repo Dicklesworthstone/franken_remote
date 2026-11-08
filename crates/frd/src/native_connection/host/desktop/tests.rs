@@ -40,6 +40,7 @@ fn report() -> desktop::Report {
     desktop::Report {
         source_renewals: 0,
         viewers: crate::session_startup::shared_viewers::Statistics::default(),
+        viewer_end: None,
     }
 }
 fn owner<D, N>(supervisor: &Cx, driver: &dispatch::Driver, desktop: D, listener: N) -> Run<D, N> {

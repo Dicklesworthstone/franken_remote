@@ -713,8 +713,14 @@ impl Driver {
 /// A running controlled share ends like a shared one: its viewer's own ending
 /// (departure, protocol, deadline, its lease ending) is the served viewer's
 /// recorded outcome, while capture, consent, local and input-cleanup failures
-/// remain host faults. Opening failures never reach here.
+/// remain host faults. Opening failures never reach here. The viewer's own
+/// ending stays on the report as its typed code, so the share's log names it.
 fn controlled_outcome(result: Result<Report, super::super::Error>) -> Result<Report, Error> {
+    let ended = result.as_ref().err().copied();
+    let served = |failed| Report {
+        viewer_end: ended,
+        ..super::controlled::served(failed)
+    };
     match result.map_err(Error::from) {
         Ok(report) => Ok(report),
         // The controller closed its own session: finished, not failed.
@@ -726,9 +732,9 @@ fn controlled_outcome(result: Result<Report, super::super::Error>) -> Result<Rep
                 )) if session.is_peer_departure()
             ) =>
         {
-            Ok(super::controlled::served(false))
+            Ok(served(false))
         }
-        Err(error) if error.is_peer_outcome() => Ok(super::controlled::served(true)),
+        Err(error) if error.is_peer_outcome() => Ok(served(true)),
         Err(error) => Err(error),
     }
 }
@@ -895,12 +901,24 @@ mod tests {
             ),
             (1, 1, 0)
         );
+        assert_eq!(
+            left.viewer_end,
+            Some(Desktop::Publication(Publication::Session(
+                Session::Renewal(crate::media::renewal::Error::PeerClosed)
+            )))
+        );
         // Any other renewal end of that viewer is still its failure.
         let lost = super::controlled_outcome(Err(Desktop::Publication(Publication::Session(
             Session::Renewal(crate::media::renewal::Error::Expired),
         ))))
         .unwrap();
         assert_eq!((lost.viewers.finished, lost.viewers.failed), (0, 1));
+        assert_eq!(
+            lost.viewer_end,
+            Some(Desktop::Publication(Publication::Session(
+                Session::Renewal(crate::media::renewal::Error::Expired)
+            )))
+        );
     }
 
     #[test]
@@ -910,6 +928,19 @@ mod tests {
         ))))
         .unwrap();
         assert_eq!((peer.viewers.admitted, peer.viewers.failed), (1, 1));
+        // The share's log names how the viewer ended, not only that it failed.
+        assert_eq!(
+            peer.viewer_end,
+            Some(Desktop::Publication(Publication::Session(
+                Session::Transport(quic::Error::Expired)
+            )))
+        );
+        assert_eq!(
+            super::controlled_outcome(Ok(super::super::controlled::served(false)))
+                .unwrap()
+                .viewer_end,
+            None
+        );
         for fault in [
             Desktop::InputCleanup,
             Desktop::NoInputPermission,

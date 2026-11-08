@@ -75,6 +75,10 @@ pub enum LocalAction {
 pub struct Report {
     pub source_renewals: u64,
     pub viewers: shared_viewers::Statistics,
+    /// How a controlled share's one viewer ended, as the host saw it, when
+    /// that ending was the viewer's own (departure or a viewer-side failure).
+    /// A typed code, no content. None for shared shares.
+    pub viewer_end: Option<Error>,
 }
 
 impl SessionAgent {
@@ -174,6 +178,7 @@ impl<L> Running<'_, L> {
         Report {
             source_renewals: self.source_renewals,
             viewers,
+            viewer_end: None,
         }
     }
 }

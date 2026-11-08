@@ -479,6 +479,7 @@ pub(super) fn served(failed: bool) -> Report {
             finished: u64::from(!failed),
             failed: u64::from(failed),
         },
+        viewer_end: None,
     }
 }
 /// Configure the controller-only clipboard on this publication before its
