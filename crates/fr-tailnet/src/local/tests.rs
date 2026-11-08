@@ -13,12 +13,7 @@ use asupersync::{
     types::CancelKind,
 };
 use serde_json::{Value, json};
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixListener,
-    sync::atomic::AtomicUsize,
-    thread::{self, JoinHandle},
-};
+use std::sync::atomic::AtomicUsize;
 
 fn endpoints() -> ConnectionAddresses {
     ConnectionAddresses {
@@ -69,7 +64,7 @@ fn evaluate_membership_fixture(
     )
     .map(|(_, p, _)| p)
 }
-fn peer_mut(status: &mut Value) -> &mut Value {
+pub(super) fn peer_mut(status: &mut Value) -> &mut Value {
     status["Peer"]
         .as_object_mut()
         .unwrap()
@@ -78,91 +73,10 @@ fn peer_mut(status: &mut Value) -> &mut Value {
         .unwrap()
 }
 
-pub(super) struct Server {
-    pub(super) client: LocalApi,
-    stop: Arc<AtomicBool>,
-    pub(super) calls: Arc<AtomicUsize>,
-    thread: Option<JoinHandle<()>>,
-}
+pub(super) mod support;
+use support::runtime;
+pub(super) use support::{Server, response};
 impl Server {
-    fn new(replies: Vec<Vec<u8>>, pause: Duration) -> Self {
-        Self::with_reply_hook(replies, move |_| thread::sleep(pause))
-    }
-    pub(super) fn with_reply_hook(
-        replies: Vec<Vec<u8>>,
-        mut before_reply: impl FnMut(usize) + Send + 'static,
-    ) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let unique = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!(
-            "fr-localapi-{}-{unique}-{}.sock",
-            std::process::id(),
-            wall_now().unwrap()
-        ));
-        let listener = UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let (stopped, counted) = (stop.clone(), calls.clone());
-        let thread = thread::spawn(move || {
-            let mut index = 0usize;
-            while !stopped.load(Ordering::Acquire) {
-                let (mut socket, _) = match listener.accept() {
-                    Ok(v) => v,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(e) => panic!("fixture accept: {e}"),
-                };
-                socket
-                    .set_read_timeout(Some(Duration::from_millis(300)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0];
-                while request.len() < 2048 && !request.ends_with(b"\r\n\r\n") {
-                    match socket.read(&mut byte) {
-                        Ok(1) => request.push(byte[0]),
-                        _ => break,
-                    }
-                }
-                if request.is_empty() {
-                    continue;
-                } // Expected credential-refusal test.
-                let request = String::from_utf8(request).unwrap();
-                assert!(
-                    request.contains("Host: local-tailscaled.sock\r\n"),
-                    "exact LocalAPI Host required"
-                );
-                assert!(
-                    request.starts_with("GET /localapi/v0/status?peers=true ")
-                        || request.starts_with("GET /localapi/v0/status?peers=false ")
-                        || request.starts_with("GET /localapi/v0/whois?addr=100.64.0.2%3A30001 ")
-                );
-                counted.fetch_add(1, Ordering::SeqCst);
-                before_reply(index);
-                let reply = &replies[index.min(replies.len() - 1)];
-                index += 1;
-                // The client may cancel or refuse an oversize response partway through.
-                if let Err(e) = socket.write_all(reply) {
-                    assert!(matches!(
-                        e.kind(),
-                        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
-                    ));
-                }
-            }
-        });
-        let mut client = LocalApi::new(&path).unwrap();
-        // Private test setup allows tests to run under an unprivileged CI UID.
-        // Production LocalApi::new ALWAYS requires root; no public override.
-        client.daemon_uid = UnixStream::pair().unwrap().0.peer_cred().unwrap().uid;
-        Self {
-            client,
-            stop,
-            calls,
-            thread: Some(thread),
-        }
-    }
     fn fixture(status: &Value, who: &Value, chunked: bool) -> Self {
         Self::new(
             vec![
@@ -176,36 +90,6 @@ impl Server {
     fn responses(vals: &[&Value], pause: Duration) -> Self {
         Self::new(vals.iter().map(|v| response(v, false)).collect(), pause)
     }
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.thread.take().unwrap().join().unwrap();
-    }
-}
-pub(super) fn response(value: &Value, chunked: bool) -> Vec<u8> {
-    let data = serde_json::to_vec(value).unwrap();
-    if chunked {
-        let mut out = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n".to_vec();
-        for part in data.chunks(17) {
-            write!(out, "{:x}\r\n", part.len()).unwrap();
-            out.extend_from_slice(part);
-            out.extend_from_slice(b"\r\n");
-        }
-        out.extend_from_slice(b"0\r\n\r\n");
-        out
-    } else {
-        let mut out = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",data.len()).into_bytes();
-        out.extend_from_slice(&data);
-        out
-    }
-}
-fn runtime() -> asupersync::runtime::Runtime {
-    RuntimeBuilder::new()
-        .worker_threads(2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
 }
 
 macro_rules! run_async {

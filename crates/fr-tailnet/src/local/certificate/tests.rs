@@ -1,5 +1,6 @@
 //! Real Unix/HTTP, `WebPKI` and UDP/TLS; identity and CA are explicit fixtures.
 use super::*;
+use crate::local::tests::support::{Http, both, openssl, request, runtime};
 use asupersync::{
     net::{
         quic_core::{ConnectionId, TransportParameters},
@@ -7,69 +8,22 @@ use asupersync::{
             NativeQuicConnectionConfig, NativeQuicUdpConnection, QuicUdpEndpoint,
             QuicUdpEndpointConfig, handshake_driver::client_config,
         },
-        unix::UnixStream,
     },
-    runtime::{Runtime, RuntimeBuilder},
     time::{sleep, timeout},
 };
 use serde_json::{Value, json};
 use std::{
-    future::{Future, poll_fn},
-    io::{Read, Write},
-    os::unix::{fs::DirBuilderExt, net::UnixListener},
+    io::Write,
+    os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
-    pin::pin,
-    process::Command,
     sync::{
         OnceLock,
         atomic::{AtomicBool, AtomicUsize},
     },
-    task::Poll,
-    thread::{self, JoinHandle},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 const HOST: &str = "host.fixture.ts.net";
-fn runtime() -> Runtime {
-    RuntimeBuilder::new()
-        .worker_threads(2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-}
-async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
-    let (mut a, mut b) = (pin!(a), pin!(b));
-    let (mut ar, mut br) = (None, None);
-    poll_fn(|cx| {
-        if ar.is_none()
-            && let Poll::Ready(value) = a.as_mut().poll(cx)
-        {
-            ar = Some(value);
-        }
-        if br.is_none()
-            && let Poll::Ready(value) = b.as_mut().poll(cx)
-        {
-            br = Some(value);
-        }
-        if ar.is_some() && br.is_some() {
-            Poll::Ready((ar.take().unwrap(), br.take().unwrap()))
-        } else {
-            Poll::Pending
-        }
-    })
-    .await
-}
-fn openssl(dir: &Path, args: &[&str]) {
-    let result = Command::new("openssl")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "fixture OpenSSL failed: {}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-}
 fn pki() -> &'static Path {
     static PKI: OnceLock<PathBuf> = OnceLock::new();
     PKI.get_or_init(|| {
@@ -164,100 +118,65 @@ struct Fixture {
     status: Arc<Mutex<Value>>,
     hold: Arc<AtomicBool>,
     cert_calls: Arc<AtomicUsize>,
-    stop: Arc<AtomicBool>,
-    task: Option<JoinHandle<()>>,
+    _http: Http,
 }
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let path = pki().join(format!("api-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
-        let listener = UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
         let reply = Arc::new(Mutex::new(Reply::pair("one")));
         let status = Arc::new(Mutex::new(status()));
         let hold = Arc::new(AtomicBool::new(false));
         let cert_calls = Arc::new(AtomicUsize::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
-        let (responses, metadata, blocked, counter, ended) = (
+        let (responses, metadata, blocked, counter) = (
             reply.clone(),
             status.clone(),
             hold.clone(),
             cert_calls.clone(),
-            stop.clone(),
         );
-        let task = thread::spawn(move || {
-            let mut requests = Vec::new();
-            while !ended.load(Ordering::Acquire) {
-                let (mut socket, _) = match listener.accept() {
-                    Ok(v) => v,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(e) => panic!("fixture accept: {e}"),
+        let http = Http::start(&path, move |mut socket, ended| {
+            let (responses, metadata, blocked, counter) = (
+                responses.clone(),
+                metadata.clone(),
+                blocked.clone(),
+                counter.clone(),
+            );
+            Some(thread::spawn(move || {
+                let Some(text) = request(
+                    &mut socket,
+                    Duration::from_secs(1),
+                    Some(Duration::from_secs(1)),
+                ) else {
+                    return;
                 };
-                let (responses, metadata, blocked, counter, ended) = (
-                    responses.clone(),
-                    metadata.clone(),
-                    blocked.clone(),
-                    counter.clone(),
-                    ended.clone(),
-                );
-                requests.push(thread::spawn(move || {
-                    socket
-                        .set_read_timeout(Some(Duration::from_secs(1)))
-                        .unwrap();
-                    socket
-                        .set_write_timeout(Some(Duration::from_secs(1)))
-                        .unwrap();
-                    let mut request = Vec::new();
-                    let mut byte = [0];
-                    while request.len() < 2048 && !request.ends_with(b"\r\n\r\n") {
-                        match socket.read(&mut byte) {
-                            Ok(1) => request.push(byte[0]),
-                            _ => break,
-                        }
+                let response = if text.starts_with("GET /localapi/v0/status?peers=false ") {
+                    Reply {
+                        body: serde_json::to_vec(&*metadata.lock().unwrap()).unwrap(),
+                        content_type: "application/json".into(),
+                        code: 200,
+                        chunked: false,
                     }
-                    if request.is_empty() {
-                        return;
+                } else {
+                    assert!(text.starts_with(&format!(
+                        "GET /localapi/v0/cert/{HOST}?type=pair&min_validity=24h "
+                    )));
+                    assert!(text.contains("Accept: text/plain\r\n"));
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    while blocked.load(Ordering::Acquire) && !ended.load(Ordering::Acquire) {
+                        thread::sleep(Duration::from_millis(1));
                     }
-                    let text = String::from_utf8(request).unwrap();
-                    assert!(text.contains("Host: local-tailscaled.sock\r\n"));
-                    let response = if text.starts_with("GET /localapi/v0/status?peers=false ") {
-                        Reply {
-                            body: serde_json::to_vec(&*metadata.lock().unwrap()).unwrap(),
-                            content_type: "application/json".into(),
-                            code: 200,
-                            chunked: false,
-                        }
-                    } else {
-                        assert!(text.starts_with(&format!(
-                            "GET /localapi/v0/cert/{HOST}?type=pair&min_validity=24h "
-                        )));
-                        assert!(text.contains("Accept: text/plain\r\n"));
-                        counter.fetch_add(1, Ordering::SeqCst);
-                        while blocked.load(Ordering::Acquire) && !ended.load(Ordering::Acquire) {
-                            thread::sleep(Duration::from_millis(1));
-                        }
-                        responses.lock().unwrap().clone()
-                    };
-                    let _ = socket.write_all(&response.bytes());
-                }));
-            }
-            for task in requests {
-                task.join().unwrap();
-            }
+                    responses.lock().unwrap().clone()
+                };
+                let _ = socket.write_all(&response.bytes());
+            }))
         });
-        let mut api = LocalApi::new(path).unwrap();
-        api.daemon_uid = UnixStream::pair().unwrap().0.peer_cred().unwrap().uid;
         Self {
-            api,
+            api: http.client.clone(),
             reply,
             status,
             hold,
             cert_calls,
-            stop,
-            task: Some(task),
+            _http: http,
         }
     }
     async fn identity(&self, cx: &Cx) -> NativeServerIdentity {
@@ -265,12 +184,6 @@ impl Fixture {
             .native_server_identity(cx, roots(), CertificatePolicy::default())
             .await
             .unwrap()
-    }
-}
-impl Drop for Fixture {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.task.take().unwrap().join().unwrap();
     }
 }
 fn due(identity: &NativeServerIdentity, cx: &Cx) {

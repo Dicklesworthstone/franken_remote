@@ -2,6 +2,10 @@
 //! (in the explicit namespace lane) real non-loopback-address UDP/TLS.
 use super::*;
 use crate::PeerSelector;
+use crate::local::tests::{
+    peer_mut,
+    support::{Server, both, openssl, response, runtime},
+};
 use asupersync::types::CancelKind;
 use asupersync::{
     net::{
@@ -15,15 +19,9 @@ use asupersync::{
     tls::Certificate,
 };
 use serde_json::{Value, json};
-use std::{
-    io::Write,
-    os::unix::net::UnixListener,
-    sync::atomic::AtomicUsize,
-    thread::{self, JoinHandle},
-};
+use std::sync::atomic::AtomicUsize;
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     sync::OnceLock,
 };
 
@@ -38,18 +36,6 @@ fn metadata() -> Value {
     s["Self"]["DNSName"] = json!("local.fixture.ts.net.");
     peer_mut(&mut s)["DNSName"] = json!("remote.fixture.ts.net.");
     s
-}
-fn openssl(dir: &Path, args: &[&str]) {
-    let out = Command::new("openssl")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap();
-    assert!(
-        out.status.success(),
-        "fixture OpenSSL: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
 }
 fn pki() -> &'static Path {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
@@ -185,7 +171,7 @@ fn only_the_pinned_handshake_udp_io_codes_allow_family_fallback() {
 
 #[test]
 fn fallback_validates_both_pairs_before_claiming_the_shared_slot() {
-    let server = Server::new(
+    let server = fixture_server(
         vec![response(&dual_stack_metadata(), false)],
         Duration::ZERO,
     );
@@ -237,7 +223,7 @@ fn fallback_validates_both_pairs_before_claiming_the_shared_slot() {
 
 #[test]
 fn fallback_does_not_restart_an_unpolled_deadline_or_ignore_cancellation() {
-    let server = Server::new(
+    let server = fixture_server(
         vec![response(&dual_stack_metadata(), false)],
         Duration::ZERO,
     );
@@ -270,28 +256,6 @@ fn fallback_does_not_restart_an_unpolled_deadline_or_ignore_cancellation() {
         assert_eq!(calls, server.calls.load(Ordering::SeqCst));
     });
 }
-async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
-    let (mut a, mut b) = (pin!(a), pin!(b));
-    let (mut ar, mut br) = (None, None);
-    poll_fn(|cx| {
-        if ar.is_none()
-            && let Poll::Ready(v) = a.as_mut().poll(cx)
-        {
-            ar = Some(v);
-        }
-        if br.is_none()
-            && let Poll::Ready(v) = b.as_mut().poll(cx)
-        {
-            br = Some(v);
-        }
-        if ar.is_some() && br.is_some() {
-            Poll::Ready((ar.take().unwrap(), br.take().unwrap()))
-        } else {
-            Poll::Pending
-        }
-    })
-    .await
-}
 
 #[test]
 fn outbound_trust_requires_ca_roots_and_has_no_peer_leaf_pinning() {
@@ -320,7 +284,7 @@ fn outbound_trust_requires_ca_roots_and_has_no_peer_leaf_pinning() {
 }
 #[test]
 fn invalid_routes_cannot_allocate_a_socket_or_requery_metadata() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(3));
@@ -351,7 +315,7 @@ fn invalid_routes_cannot_allocate_a_socket_or_requery_metadata() {
 }
 #[test]
 fn dial_slot_is_claimed_before_poll_and_shared_across_clones() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(3));
@@ -373,7 +337,7 @@ fn dial_slot_is_claimed_before_poll_and_shared_across_clones() {
 }
 #[test]
 fn unpolled_time_is_part_of_the_original_dial_deadline() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_millis(100));
@@ -393,7 +357,7 @@ fn unpolled_time_is_part_of_the_original_dial_deadline() {
 }
 #[test]
 fn foreign_or_expired_target_and_bad_roots_never_start_a_handshake() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let foreign = NativeClient::new(
@@ -518,7 +482,7 @@ async fn endpoint(cx: &Cx) -> QuicUdpEndpoint {
 #[test]
 #[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
 fn native_dial_revalidates_during_lost_flight_and_returns_the_exact_tls_connection() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(8));
@@ -559,7 +523,7 @@ fn native_dial_revalidates_during_lost_flight_and_returns_the_exact_tls_connecti
 #[test]
 #[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
 fn native_dial_rejects_wrong_certificate_name_without_exposing_connection() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(4));
@@ -594,7 +558,7 @@ fn native_dial_cannot_survive_node_reassignment_during_tls() {
     peer_mut(&mut changed)["PublicKey"] = json!(format!("nodekey:{}", "3".repeat(64)));
     let mut rows = vec![response(&original, false); 4];
     rows.push(response(&changed, false));
-    let server = Server::new(rows, Duration::ZERO);
+    let server = fixture_server(rows, Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(3));
@@ -609,7 +573,7 @@ fn native_dial_cannot_survive_node_reassignment_during_tls() {
 #[test]
 #[ignore = "explicit network namespace lane: scripts/verify-native-dial.sh"]
 fn native_dial_timeout_and_abandonment_release_socket_and_slot() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_millis(150));
@@ -647,7 +611,7 @@ fn native_dial_ipv6_uses_the_selected_node_addresses_and_expired_handoff_refuses
     data["Self"]["TailscaleIPs"] = json!(["fd7a:115c:a1e0::1"]);
     data["TailscaleIPs"] = json!(["fd7a:115c:a1e0::1"]);
     peer_mut(&mut data)["TailscaleIPs"] = json!(["fd7a:115c:a1e0::2"]);
-    let server = Server::new(vec![response(&data, false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&data, false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(5));
@@ -691,7 +655,7 @@ fn native_dial_inspection_budget_reaches_ipv6_after_a_silent_ipv4() {
 }
 
 fn fallback_after_silent_ipv4(budget: Duration) {
-    let server = Server::new(
+    let server = fixture_server(
         vec![response(&dual_stack_metadata(), false)],
         Duration::ZERO,
     );
@@ -748,7 +712,7 @@ fn native_dial_falls_back_after_immediate_route_io_without_application_replay() 
     // The isolated runner assigns only .1 and .2, with no route to .3.
     // Bind succeeds locally; the real UDP send must report a route I/O error.
     peer_mut(&mut data)["TailscaleIPs"] = json!(["100.64.0.3", "fd7a:115c:a1e0::2"]);
-    let server = Server::new(vec![response(&data, false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&data, false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(6));
@@ -811,7 +775,7 @@ fn native_dial_falls_back_after_immediate_route_io_without_application_replay() 
 
 #[test]
 fn caller_cancellation_stops_dial_without_leaving_the_shared_slot_busy() {
-    let server = Server::new(vec![response(&metadata(), false)], Duration::ZERO);
+    let server = fixture_server(vec![response(&metadata(), false)], Duration::ZERO);
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let dialer = client(&server, Duration::from_secs(5));
@@ -825,94 +789,8 @@ fn caller_cancellation_stops_dial_without_leaving_the_shared_slot_busy() {
     });
 }
 
-fn peer_mut(s: &mut Value) -> &mut Value {
-    s["Peer"]
-        .as_object_mut()
-        .unwrap()
-        .values_mut()
-        .next()
-        .unwrap()
-}
-fn response(value: &Value, _chunked: bool) -> Vec<u8> {
-    let body = serde_json::to_vec(value).unwrap();
-    let mut data = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len()).into_bytes();
-    data.extend(body);
-    data
-}
-fn runtime() -> asupersync::runtime::Runtime {
-    asupersync::runtime::RuntimeBuilder::new()
-        .worker_threads(2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-}
-struct Server {
-    client: LocalApi,
-    stop: Arc<AtomicBool>,
-    calls: Arc<AtomicUsize>,
-    task: Option<JoinHandle<()>>,
-}
-impl Server {
-    fn new(replies: Vec<Vec<u8>>, pause: Duration) -> Self {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let path = pki().join(format!("api-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
-        let listener = UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
-        let calls = Arc::new(AtomicUsize::new(0));
-        let (ended, counted) = (stop.clone(), calls.clone());
-        let task = thread::spawn(move || {
-            let mut index = 0;
-            while !ended.load(Ordering::Acquire) {
-                let (mut socket, _) = match listener.accept() {
-                    Ok(value) => value,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(1));
-                        continue;
-                    }
-                    Err(e) => panic!("fixture accept: {e}"),
-                };
-                socket
-                    .set_read_timeout(Some(Duration::from_millis(300)))
-                    .unwrap();
-                let mut request = Vec::new();
-                let mut byte = [0];
-                while request.len() < 2048 && !request.ends_with(b"\r\n\r\n") {
-                    match socket.read(&mut byte) {
-                        Ok(1) => request.push(byte[0]),
-                        _ => break,
-                    }
-                }
-                if request.is_empty() {
-                    continue;
-                }
-                let text = String::from_utf8(request).unwrap();
-                assert!(text.starts_with("GET /localapi/v0/status?peers=true "));
-                assert!(text.contains("Host: local-tailscaled.sock\r\n"));
-                counted.fetch_add(1, Ordering::SeqCst);
-                thread::sleep(pause);
-                let _ = socket.write_all(&replies[index.min(replies.len() - 1)]);
-                index += 1;
-            }
-        });
-        let mut client = LocalApi::new(path).unwrap();
-        client.daemon_uid = asupersync::net::unix::UnixStream::pair()
-            .unwrap()
-            .0
-            .peer_cred()
-            .unwrap()
-            .uid;
-        Self {
-            client,
-            stop,
-            calls,
-            task: Some(task),
-        }
-    }
-}
-impl Drop for Server {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        self.task.take().unwrap().join().unwrap();
-    }
+fn fixture_server(replies: Vec<Vec<u8>>, pause: Duration) -> Server {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let path = pki().join(format!("api-{}", NEXT.fetch_add(1, Ordering::SeqCst)));
+    Server::status_only(&path, replies, pause, false)
 }

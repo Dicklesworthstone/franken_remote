@@ -21,7 +21,6 @@ use asupersync::{
 use std::{
     fmt,
     future::{Future, poll_fn},
-    io::Read,
     net::{IpAddr, SocketAddr},
     pin::pin,
     sync::{
