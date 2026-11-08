@@ -21,9 +21,16 @@ mod files;
 mod host_choice;
 #[path = "linux/hosts_probe.rs"]
 mod hosts_probe;
-#[cfg(any(test, feature = "linux-desktop"))]
+#[cfg(any(
+    test,
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "linux/lapse.rs"]
 mod lapse;
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[path = "linux/macos.rs"]
+mod macos;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/microphone.rs"]
 mod microphone;
@@ -779,7 +786,26 @@ fn native_cleanup_confirmed(
         )
 }
 
-#[cfg(not(feature = "linux-desktop"))]
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[allow(clippy::too_many_arguments)]
+fn connect(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    api: LocalApi,
+    connection: &Connection,
+    json: bool,
+    automation: bool,
+) -> Result<String, Failure> {
+    macos::connect(
+        runtime, cx, shutdown, stopped, api, connection, json, automation,
+    )
+}
+#[cfg(not(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+)))]
 #[allow(clippy::too_many_arguments)]
 fn connect(
     _runtime: &Runtime,

@@ -19,7 +19,7 @@ fr-tailnet = { workspace = true, optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # The CLI's local profile store uses the same pinned safe filesystem adapter as frd.
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
@@ -37,7 +37,7 @@ macos-media = []
 # macOS client presentation (fr-5a4w): VideoToolbox HEVC decode into
 # IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an
 # AppKit window. Objective-C glue compiled by build.rs; system frameworks only.
-macos-desktop = []
+macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer"]
 linux-media = []
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []

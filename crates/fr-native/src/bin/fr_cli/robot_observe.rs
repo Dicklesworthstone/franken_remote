@@ -2,7 +2,11 @@
 use super::{Failure, options};
 use std::{collections::BTreeSet, path::PathBuf};
 
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[path = "robot_observe/artifact.rs"]
 mod artifact;
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]

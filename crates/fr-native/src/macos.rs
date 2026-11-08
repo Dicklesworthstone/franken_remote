@@ -16,6 +16,7 @@ use fr_core::limits::ProtocolLimits;
 use fr_media::access_unit::{EncodedAccessUnit, FrameId, FrameKind};
 use fr_media::config::{CodecConfiguration, ColorRange};
 use fr_media::hevc::HevcGuard;
+use fr_media::worker::overlay::Update as CursorUpdate;
 use std::time::Duration;
 
 #[repr(C)]
@@ -49,10 +50,31 @@ unsafe extern "C" {
         overflow: *mut c_int,
     ) -> usize;
     fn fr_mac_window_number(window: *mut c_void) -> isize;
+    fn fr_mac_window_state(
+        window: *mut c_void,
+        width: *mut u32,
+        height: *mut u32,
+        key: *mut c_int,
+        visible: *mut c_int,
+    ) -> c_int;
+    fn fr_mac_window_set_resizable(window: *mut c_void, resizable: c_int) -> c_int;
     fn fr_mac_window_renderer(window: *mut c_void) -> *mut c_void;
     fn fr_mac_surface_offscreen(width: u32, height: u32, out: *mut *mut c_void) -> c_int;
     fn fr_mac_window_free(window: *mut c_void);
     fn fr_mac_renderer_presented(renderer: *mut c_void) -> u64;
+    #[allow(clippy::too_many_arguments)]
+    fn fr_mac_renderer_cursor(
+        renderer: *mut c_void,
+        kind: c_int,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+        hotspot_x: u32,
+        hotspot_y: u32,
+        rgba: *const u8,
+        len: usize,
+    ) -> c_int;
     fn fr_mac_renderer_release(renderer: *mut c_void);
     fn fr_mac_decoder_new(
         renderer: *mut c_void,
@@ -68,8 +90,13 @@ unsafe extern "C" {
         out: *mut *mut c_void,
     ) -> c_int;
     fn fr_mac_decoder_hardware(decoder: *mut c_void) -> c_int;
-    fn fr_mac_decoder_decode(decoder: *mut c_void, bytes: *const u8, len: usize, pts: i64)
-    -> c_int;
+    fn fr_mac_decoder_decode(
+        decoder: *mut c_void,
+        bytes: *const u8,
+        len: usize,
+        pts: i64,
+        present: c_int,
+    ) -> c_int;
     fn fr_mac_decoder_free(decoder: *mut c_void);
 }
 
@@ -153,6 +180,18 @@ pub enum WindowEvent {
     Overflow,
 }
 
+/// What input and visibility evidence may rely on, sampled on the main thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowState {
+    /// The aspect-fit picture in drawable (physical) pixels; (0, 0) before
+    /// the first layout.
+    pub picture: (u32, u32),
+    /// The window receives keyboard input.
+    pub key: bool,
+    /// Some of the window is on screen: not hidden, minimized or occluded.
+    pub visible: bool,
+}
+
 /// The viewer window. Main thread only.
 pub struct Window {
     raw: NonNull<c_void>,
@@ -181,6 +220,30 @@ impl Window {
             buffer: vec![RawEvent::default(); 256],
             _main_thread: PhantomData,
         })
+    }
+    /// Current picture size and input-relevant window state.
+    pub fn state(&self) -> Result<WindowState, NativeError> {
+        let (mut width, mut height, mut key, mut visible) = (0, 0, 0, 0);
+        // SAFETY: live handle on its owning thread; all out pointers writable.
+        status(unsafe {
+            fr_mac_window_state(
+                self.raw.as_ptr(),
+                &raw mut width,
+                &raw mut height,
+                &raw mut key,
+                &raw mut visible,
+            )
+        })?;
+        Ok(WindowState {
+            picture: (width, height),
+            key: key != 0,
+            visible: visible != 0,
+        })
+    }
+    /// Fix (false) or free (true) the window's size.
+    pub fn set_resizable(&self, resizable: bool) -> Result<(), NativeError> {
+        // SAFETY: live handle on its owning thread.
+        status(unsafe { fr_mac_window_set_resizable(self.raw.as_ptr(), c_int::from(resizable)) })
     }
     /// The `CGWindowID` (for `screencapture -l`).
     pub fn number(&self) -> isize {
@@ -336,6 +399,47 @@ impl Surface {
         // SAFETY: live renderer reference.
         unsafe { fr_mac_renderer_presented(self.raw.as_ptr()) }
     }
+    /// Install the single client-rendered remote cursor (hotspot in decoded
+    /// picture pixels; the host capture excludes the pointer) and redraw the
+    /// retained picture with it. `Move` needs an earlier `Shape`; `Hidden`
+    /// keeps the shape. A refused update changes nothing. This is not a
+    /// decode, presentation receipt or visibility proof.
+    pub fn cursor(&self, update: &CursorUpdate<'_>) -> Result<(), NativeError> {
+        let (kind, x, y, shape) = match *update {
+            CursorUpdate::Hidden => (0, 0, 0, None),
+            CursorUpdate::Move { x, y } => (1, x, y, None),
+            CursorUpdate::Shape {
+                x,
+                y,
+                width,
+                height,
+                hotspot_x,
+                hotspot_y,
+                rgba,
+            } => {
+                fr_media::cursor::check_geometry(width, height, hotspot_x, hotspot_y, rgba.len())
+                    .map_err(|_| NativeError::InvalidConfiguration)?;
+                (2, x, y, Some((width, height, hotspot_x, hotspot_y, rgba)))
+            }
+        };
+        let (width, height, hotspot_x, hotspot_y, rgba) = shape.unwrap_or((0, 0, 0, 0, &[]));
+        // SAFETY: live renderer reference; the glue copies the checked shape
+        // into a Metal texture before returning.
+        status(unsafe {
+            fr_mac_renderer_cursor(
+                self.raw.as_ptr(),
+                kind,
+                x,
+                y,
+                u32::from(width),
+                u32::from(height),
+                u32::from(hotspot_x),
+                u32::from(hotspot_y),
+                rgba.as_ptr(),
+                rgba.len(),
+            )
+        })
+    }
 }
 impl Drop for Surface {
     fn drop(&mut self) {
@@ -434,6 +538,15 @@ impl HevcDecoder {
     /// one transaction: a refused or failed unit leaves the guard unchanged.
     /// A decode failure closes the decoder; recovery is a new IDR on a new one.
     pub fn submit(&mut self, unit: &EncodedAccessUnit) -> Result<(), NativeError> {
+        self.submit_unit(unit, true)
+    }
+    /// `submit`, drawing only when `present`: a late picture still decodes
+    /// so the pictures that reference it stay decodable.
+    pub fn submit_unit(
+        &mut self,
+        unit: &EncodedAccessUnit,
+        present: bool,
+    ) -> Result<(), NativeError> {
         if self.closed {
             return Err(NativeError::Closed);
         }
@@ -466,7 +579,13 @@ impl HevcDecoder {
         // SAFETY: the admitted sample lives for this synchronous call and the
         // glue copies it into a CoreMedia block buffer before decoding.
         if let Err(error) = status(unsafe {
-            fr_mac_decoder_decode(self.raw.as_ptr(), bytes.as_ptr(), bytes.len(), pts)
+            fr_mac_decoder_decode(
+                self.raw.as_ptr(),
+                bytes.as_ptr(),
+                bytes.len(),
+                pts,
+                c_int::from(present),
+            )
         }) {
             self.closed = true;
             return Err(error);
@@ -482,6 +601,11 @@ impl Drop for HevcDecoder {
         unsafe { fr_mac_decoder_free(self.raw.as_ptr()) };
     }
 }
+
+// The frd session on top of this window and decoder (needs the CLI's frd).
+#[cfg(feature = "cli")]
+#[path = "macos/session.rs"]
+pub mod session;
 
 #[cfg(test)]
 #[path = "macos/tests.rs"]

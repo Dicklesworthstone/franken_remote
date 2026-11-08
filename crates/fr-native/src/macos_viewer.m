@@ -72,6 +72,14 @@ static NSString *const kShader =
      "  float2 c = (chroma.sample(s, in.uv).rg - range.z) * range.w;\n"
      "  float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);\n"
      "  return float4(saturate(rgb), 1.0);\n"
+     "}\n"
+     "vertex V fr_cursor_vertex(uint id [[vertex_id]], constant float4 &rect [[buffer(0)]]) {\n"
+     "  float2 p = float2(id & 1, id >> 1);\n"
+     "  V out; out.position = float4(mix(rect.xy, rect.zw, p), 0, 1); out.uv = p; return out;\n"
+     "}\n"
+     "fragment float4 fr_cursor_fragment(V in [[stage_in]], texture2d<float> shape [[texture(0)]],\n"
+     "    sampler s [[sampler(0)]]) {\n"
+     "  return shape.sample(s, in.uv);\n"
      "}\n";
 
 // ---------------------------------------------------------------- renderer
@@ -93,6 +101,17 @@ static NSString *const kShader =
     double scale;            // pixels per point
     CGRect fit;              // drawable pixels, top-left origin
     uint64_t presented;
+    // The single client-rendered remote cursor: straight-alpha RGBA8 shape,
+    // hotspot position in picture pixels. The host capture excludes it.
+    id<MTLRenderPipelineState> cursorPipeline;
+    id<MTLTexture> cursorShape;
+    uint32_t cursorWidth;
+    uint32_t cursorHeight;
+    int64_t cursorLeft;      // position minus hotspot
+    int64_t cursorTop;
+    uint32_t cursorHotX;
+    uint32_t cursorHotY;
+    BOOL cursorShown;
 }
 @end
 
@@ -149,6 +168,7 @@ static NSString *const kShader =
             [encoder setFragmentSamplerState:sampler atIndex:0];
             [encoder setFragmentBytes:range length:sizeof(range) atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [self drawCursorLocked:encoder];
         }
     }
     [encoder endEncoding];
@@ -162,6 +182,28 @@ static NSString *const kShader =
     [commands presentDrawable:target];
     [commands commit];
     return FR_MAC_OK;
+}
+
+// Caller holds the lock: the cursor quad over the fitted picture, scaled with
+// it and clipped to it, blended with straight alpha.
+- (void)drawCursorLocked:(id<MTLRenderCommandEncoder>)encoder {
+    if (!cursorShown || !cursorShape || sourceWidth == 0 || sourceHeight == 0) return;
+    double dw = drawable.width, dh = drawable.height;
+    double kx = fit.size.width / sourceWidth, ky = fit.size.height / sourceHeight;
+    double left = fit.origin.x + (double)cursorLeft * kx, top = fit.origin.y + (double)cursorTop * ky;
+    double right = left + cursorWidth * kx, bottom = top + cursorHeight * ky;
+    float rect[4] = {(float)(left / dw * 2 - 1), (float)(1 - top / dh * 2), (float)(right / dw * 2 - 1),
+                     (float)(1 - bottom / dh * 2)};
+    MTLViewport whole = {0, 0, dw, dh, 0, 1};
+    MTLScissorRect clip = {(NSUInteger)fit.origin.x, (NSUInteger)fit.origin.y, (NSUInteger)fit.size.width,
+                           (NSUInteger)fit.size.height};
+    [encoder setViewport:whole];
+    [encoder setScissorRect:clip];
+    [encoder setRenderPipelineState:cursorPipeline];
+    [encoder setVertexBytes:rect length:sizeof(rect) atIndex:0];
+    [encoder setFragmentTexture:cursorShape atIndex:0];
+    [encoder setFragmentSamplerState:sampler atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
 }
 
 - (int)present:(CVPixelBufferRef)picture {
@@ -223,13 +265,26 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
     pd.fragmentFunction = [library newFunctionWithName:@"fr_fragment"];
     pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;
     r->pipeline = [r->device newRenderPipelineStateWithDescriptor:pd error:&error];
+    MTLRenderPipelineDescriptor *cd = [MTLRenderPipelineDescriptor new];
+    cd.vertexFunction = [library newFunctionWithName:@"fr_cursor_vertex"];
+    cd.fragmentFunction = [library newFunctionWithName:@"fr_cursor_fragment"];
+    MTLRenderPipelineColorAttachmentDescriptor *blend = cd.colorAttachments[0];
+    blend.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    blend.blendingEnabled = YES;
+    blend.rgbBlendOperation = MTLBlendOperationAdd;
+    blend.alphaBlendOperation = MTLBlendOperationAdd;
+    blend.sourceRGBBlendFactor = MTLBlendFactorSourceAlpha;
+    blend.destinationRGBBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    blend.sourceAlphaBlendFactor = MTLBlendFactorOne;
+    blend.destinationAlphaBlendFactor = MTLBlendFactorOneMinusSourceAlpha;
+    r->cursorPipeline = [r->device newRenderPipelineStateWithDescriptor:cd error:&error];
     MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
     sd.minFilter = MTLSamplerMinMagFilterLinear;
     sd.magFilter = MTLSamplerMinMagFilterLinear;
     sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
     sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
     r->sampler = [r->device newSamplerStateWithDescriptor:sd];
-    if (!r->pipeline || !r->sampler ||
+    if (!r->pipeline || !r->cursorPipeline || !r->sampler ||
         CVMetalTextureCacheCreate(NULL, NULL, r->device, NULL, &r->cache) != kCVReturnSuccess) {
         *status = FR_MAC_UNAVAILABLE;
         return nil;
@@ -538,6 +593,39 @@ intptr_t fr_mac_window_number(void *handle) {
     return owner->window.windowNumber;
 }
 
+// The picture's current size in drawable pixels, whether the window is key,
+// and whether any of it is on screen (not hidden, minimized or occluded).
+int fr_mac_window_state(void *handle, uint32_t *width, uint32_t *height, int *key,
+                        int *visible) {
+    if (!handle || !width || !height || !key || !visible) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    FrRenderer *r = owner->renderer;
+    os_unfair_lock_lock(&r->lock);
+    CGRect f = r->fit;
+    os_unfair_lock_unlock(&r->lock);
+    *width = f.size.width >= 1 ? (uint32_t)f.size.width : 0;
+    *height = f.size.height >= 1 ? (uint32_t)f.size.height : 0;
+    NSWindow *w = owner->window;
+    *key = w.isKeyWindow ? 1 : 0;
+    *visible = w.isVisible && !w.isMiniaturized &&
+                       (w.occlusionState & NSWindowOcclusionStateVisible)
+                   ? 1
+                   : 0;
+    return FR_MAC_OK;
+}
+
+// Fix or free the window's size. An input layout is valid for one size only.
+int fr_mac_window_set_resizable(void *handle, int resizable) {
+    if (!handle) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    NSWindowStyleMask style = owner->window.styleMask;
+    owner->window.styleMask =
+        resizable ? (style | NSWindowStyleMaskResizable) : (style & ~NSWindowStyleMaskResizable);
+    return FR_MAC_OK;
+}
+
 // A renderer with no window, drawing into a detached layer of a fixed pixel
 // size: decode and presentation tests off the main thread.
 int fr_mac_surface_offscreen(uint32_t width, uint32_t height, void **out) {
@@ -558,6 +646,59 @@ void *fr_mac_window_renderer(void *handle) {
     if (!handle) return NULL;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     return (__bridge_retained void *)owner->renderer;
+}
+
+// The remote cursor: kind 0 hides it (the shape is kept), 1 moves the hotspot
+// of the existing shape, 2 replaces the shape (≤ 256×256 RGBA8, straight
+// alpha) and shows it. Redraws the retained picture with the new cursor when
+// one has been presented; a refused update changes nothing.
+int fr_mac_renderer_cursor(void *handle, int kind, int32_t x, int32_t y, uint32_t width,
+                           uint32_t height, uint32_t hotspot_x, uint32_t hotspot_y,
+                           const uint8_t *rgba, size_t len) {
+    if (!handle) return FR_MAC_INVALID;
+    FrRenderer *r = (__bridge FrRenderer *)handle;
+    id<MTLTexture> shape = nil;
+    if (kind == 2) {
+        if (!rgba || width == 0 || height == 0 || width > 256 || height > 256 ||
+            hotspot_x >= width || hotspot_y >= height || len != (size_t)width * height * 4) {
+            return FR_MAC_INVALID;
+        }
+        MTLTextureDescriptor *td =
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                               width:width
+                                                              height:height
+                                                           mipmapped:NO];
+        td.usage = MTLTextureUsageShaderRead;
+        shape = [r->device newTextureWithDescriptor:td];
+        if (!shape) return FR_MAC_ALLOCATION;
+        [shape replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                 mipmapLevel:0
+                   withBytes:rgba
+                 bytesPerRow:(NSUInteger)width * 4];
+    } else if (kind != 0 && kind != 1) {
+        return FR_MAC_INVALID;
+    }
+    os_unfair_lock_lock(&r->lock);
+    int status = FR_MAC_OK;
+    if (kind == 1 && !r->cursorShape) {
+        status = FR_MAC_INVALID;
+    } else {
+        if (kind == 2) {
+            r->cursorShape = shape;
+            r->cursorWidth = width;
+            r->cursorHeight = height;
+            r->cursorHotX = hotspot_x;
+            r->cursorHotY = hotspot_y;
+        }
+        r->cursorShown = kind != 0;
+        if (kind != 0) {
+            r->cursorLeft = (int64_t)x - r->cursorHotX;
+            r->cursorTop = (int64_t)y - r->cursorHotY;
+        }
+        if (r->last) status = [r drawLocked];
+    }
+    os_unfair_lock_unlock(&r->lock);
+    return status;
 }
 
 uint64_t fr_mac_renderer_presented(void *handle) {
@@ -679,8 +820,10 @@ int fr_mac_decoder_hardware(void *handle) {
     return hardware;
 }
 
-// Decodes one length-prefixed access unit synchronously and presents it.
-int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t pts) {
+// Decodes one length-prefixed access unit synchronously and, when `present`
+// is set, draws it. A decode-only unit still advances the reference chain.
+int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t pts,
+                          int present) {
     if (!handle || !bytes || !len) return FR_MAC_INVALID;
     FrDecoder *d = (__bridge FrDecoder *)handle;
     int result = FR_MAC_OK;
@@ -714,7 +857,7 @@ int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_
         if (status != noErr || d->status != noErr || !d->image ||
             (info & kVTDecodeInfo_FrameDropped))
             return FR_MAC_CODEC;
-        result = [d->renderer present:d->image];
+        if (present) result = [d->renderer present:d->image];
         CVPixelBufferRelease(d->image);
         d->image = NULL;
     }

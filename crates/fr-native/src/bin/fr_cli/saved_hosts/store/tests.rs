@@ -2,7 +2,8 @@ use super::*;
 use std::os::unix::fs::{PermissionsExt, symlink};
 fn root() -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
+    // The store refuses symlinked components; macOS's TMPDIR is under /var.
+    let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
         "fr-saved-hosts-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)

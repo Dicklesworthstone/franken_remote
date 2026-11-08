@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 // Other platforms retain shared grammar/output; only implemented paths dispatch.
+// The macOS desktop client (fr-5a4w) runs hosts, status and connect; robot
+// automation, screenshots and the session-control server stay Linux-only.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
 #[path = "fr_cli/closure.rs"]
@@ -11,7 +13,10 @@ mod discovery;
 mod file_commands;
 #[path = "fr_cli/help.rs"]
 mod help;
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "fr_cli/linux.rs"]
 mod linux;
 #[path = "fr_cli/options.rs"]
@@ -27,10 +32,16 @@ mod robot_open;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "fr_cli/runtime.rs"]
 mod runtime;
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "fr_cli/saved_hosts.rs"]
 mod saved_hosts;
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "fr_cli/session_control.rs"]
 mod session_control;
 #[path = "fr_cli/terminal.rs"]
@@ -169,7 +180,10 @@ fn main() -> ExitCode {
             ExitCode::from(74)
         };
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     if let Some(result) = linux::probe_native(&parsed) {
         return match result {
             Ok((text, exit)) => {
@@ -182,15 +196,18 @@ fn main() -> ExitCode {
             Err(failure) => finish(Err(failure), parsed.json),
         };
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     let result = linux::run(&parsed);
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "macos-desktop")))]
     let result = if matches!(parsed.command, options::Command::Hosts) {
         discovery::run(&parsed)
     } else {
         Err(Failure::new(
             "platform_unavailable",
-            "This macOS client currently supports local Tailscale discovery with fr hosts; native connection and desktop operations are not implemented.",
+            "This macOS build supports local Tailscale discovery with fr hosts; build fr-native with the macos-desktop feature for fr connect and fr status.",
             2,
         ))
     };

@@ -120,7 +120,11 @@ pub(super) fn observation(error: ObserverError) -> Option<Failure> {
         _ => None,
     }
 }
-#[cfg(any(test, feature = "linux-desktop"))]
+#[cfg(any(
+    test,
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn reconnect(error: native_connection::reconnect::Failure) -> Option<Failure> {
     use native_connection::reconnect::PeerClose;
     match native_connection::reconnect::peer_close(error) {

@@ -1,5 +1,6 @@
 //! Same-user local inspection, observation and stop of ONE foreground owner.
-//! The abstract socket owns no daemon, PID, input lease, transport or retry.
+//! The rendezvous socket (abstract on Linux, a file in a private per-user
+//! directory on macOS) owns no daemon, PID, input lease, transport or retry.
 //! Only the original foreground supervisor can confirm its native cleanup.
 #![forbid(unsafe_code)]
 
@@ -106,14 +107,12 @@ impl Owner {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let uid = own_uid()?;
         let address = name(uid, target);
-        let listener = match UnixListener::bind_abstract(&address).await {
+        let listener = match listen(&address, uid).await {
             Ok(listener) => listener,
             Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                 // Public socket occupancy is not proof of a same-user owner.
                 bounded(cx, Deadline::new(cx, HANDSHAKE)?, async {
-                    let stream = UnixStream::connect_abstract(&address)
-                        .await
-                        .map_err(|_| Error::Unavailable)?;
+                    let stream = dial(&address).await.map_err(|_| Error::Unavailable)?;
                     check_peer(&stream, uid)
                 })
                 .await?;
@@ -325,7 +324,7 @@ async fn identified(cx: &Cx, target: &str) -> Result<(UnixStream, Info, [u8; 16]
     check_target(target)?;
     let uid = own_uid()?;
     bounded(cx, Deadline::new(cx, HANDSHAKE)?, async {
-        let mut stream = UnixStream::connect_abstract(&name(uid, target))
+        let mut stream = dial(&name(uid, target))
             .await
             .map_err(|error| match error.kind() {
                 io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound => Error::NoSession,
@@ -446,9 +445,79 @@ fn check_peer(stream: &UnixStream, uid: u32) -> Result<(), Error> {
         _ => Err(Error::UntrustedPeer),
     }
 }
-fn name(uid: u32, target: &str) -> Vec<u8> {
+/// Linux: an abstract name. Anyone may connect; `check_peer` admits only
+/// this user.
+#[cfg(target_os = "linux")]
+type Address = Vec<u8>;
+/// macOS has no abstract namespace: a socket file inside a directory that
+/// only this user owns and can enter, plus the same `check_peer`.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+type Address = std::path::PathBuf;
+#[cfg(target_os = "linux")]
+fn name(uid: u32, target: &str) -> Address {
     let digest = fr_client::robot::sha256::sha256_hex(target.as_bytes());
     format!("frankenremote.connect.v1.{uid}.{digest}").into_bytes()
+}
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn name(uid: u32, target: &str) -> Address {
+    // `sun_path` holds 104 bytes; 160 bits of the digest keep this at 66.
+    let digest = fr_client::robot::sha256::sha256_hex(target.as_bytes());
+    format!("/tmp/frankenremote-{uid}/connect-v1-{}", &digest[..40]).into()
+}
+#[cfg(target_os = "linux")]
+async fn dial(address: &Address) -> io::Result<UnixStream> {
+    UnixStream::connect_abstract(address).await
+}
+#[cfg(target_os = "linux")]
+#[cfg(any(feature = "linux-desktop", test))]
+async fn listen(address: &Address, _uid: u32) -> io::Result<UnixListener> {
+    UnixListener::bind_abstract(address).await
+}
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+async fn dial(address: &Address) -> io::Result<UnixStream> {
+    private_directory(address, None)?;
+    UnixStream::connect(address).await
+}
+/// A crashed owner leaves its socket file behind. Only a refused connection
+/// proves that nobody listens there; a live owner still yields `AddrInUse`.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[cfg(any(feature = "linux-desktop", test))]
+async fn listen(address: &Address, uid: u32) -> io::Result<UnixListener> {
+    private_directory(address, Some(uid))?;
+    match UnixListener::bind(address).await {
+        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+            match UnixStream::connect(address).await {
+                Err(probe) if probe.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(address)?;
+                    UnixListener::bind(address).await
+                }
+                _ => Err(error),
+            }
+        }
+        other => other,
+    }
+}
+/// The parent directory must be a real directory owned by this user with no
+/// group or other access; `create` makes it (mode 0700) when absent.
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+fn private_directory(address: &std::path::Path, create: Option<u32>) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let directory = address.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    if create.is_some() {
+        match std::fs::DirBuilder::new().mode(0o700).create(directory) {
+            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
+            _ => {}
+        }
+    }
+    let metadata = std::fs::symlink_metadata(directory)?;
+    let uid = match create {
+        Some(uid) => uid,
+        None => UnixStream::pair()?.0.peer_cred()?.uid,
+    };
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
+        return Err(io::ErrorKind::PermissionDenied.into());
+    }
+    Ok(())
 }
 fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);

@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 fn file() -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let root = std::env::temp_dir().join(format!(
+    // The store refuses symlinked components; macOS's TMPDIR is under /var.
+    let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
         "fr-saved-selection-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)

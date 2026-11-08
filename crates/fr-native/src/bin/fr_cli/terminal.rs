@@ -50,7 +50,10 @@ const fn code(reason: Reason) -> &'static str {
 /// The host closed the connection with this lease reason as its close code,
 /// because no `LeaseRevoked` report could be sent. Same code; no report, so
 /// cleanup and effects are unknown.
-#[cfg(all(target_os = "linux", any(test, feature = "linux-desktop")))]
+#[cfg(any(
+    all(target_os = "linux", any(test, feature = "linux-desktop")),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn closed_by_code(reason: Reason) -> Failure {
     Failure {
         code: code(reason),

@@ -1,7 +1,10 @@
 //! Bounded content-free closing evidence, never an inferred remote cleanup result.
 use super::Failure;
 use fr_wire::closure::{Cleanup, Closed, OutstandingEffects};
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 use frd::session_startup::ViewerCloseOutcome;
 
 /// Keep exact peer stages but project transport errors to completion, not raw
@@ -12,7 +15,10 @@ pub(super) struct Report {
     transport_completed: bool,
     host: Option<Closed>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 impl From<ViewerCloseOutcome> for Report {
     fn from(outcome: ViewerCloseOutcome) -> Self {
         Self {
@@ -112,7 +118,10 @@ impl Report {
 /// report's cleanup and outstanding-effect stages ride along unchanged. This
 /// client sent no close request, so none is shown as acknowledged, and
 /// nothing is claimed undone, retried or replayed.
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn host_closed(report: Closed) -> Option<Failure> {
     let (code, next) = closed_code(report.reason)?;
     let mut failure = Failure::new(code, next, 1);
@@ -125,7 +134,10 @@ pub(super) fn host_closed(report: Closed) -> Option<Failure> {
 }
 /// The same reason carried only by the host's close code (no Closed report
 /// arrived): named alike, with no host report and nothing about its cleanup.
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn host_close_code(reason: fr_wire::closure::ClosedReason) -> Option<Failure> {
     let (code, _specific) = closed_code(reason)?;
     Some(Failure::new(
@@ -134,7 +146,10 @@ pub(super) fn host_close_code(reason: fr_wire::closure::ClosedReason) -> Option<
         1,
     ))
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 fn closed_code(reason: fr_wire::closure::ClosedReason) -> Option<(&'static str, &'static str)> {
     use fr_wire::closure::ClosedReason;
     Some(match reason {
@@ -205,7 +220,13 @@ pub(super) fn preserve<T>(
     })
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(
+    test,
+    any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    )
+))]
 mod tests {
     use super::*;
     use fr_transport::quic::Error;

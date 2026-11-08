@@ -1,6 +1,6 @@
 //! Real same-user abstract sockets; synthetic reports explicitly test only the
 //! local inspection grammar, not host delivery, decoding or hardware behavior.
-use super::super::{IDENTIFY, Owner, UnixListener, hex, identity_record, name, own_uid};
+use super::super::{IDENTIFY, Owner, hex, identity_record, listen, name, own_uid};
 use super::*;
 use asupersync::{runtime::RuntimeBuilder, types::Budget};
 use std::{
@@ -70,9 +70,8 @@ fn same_socket_quality_reply_is_pinned_bounded_and_validated_before_exposure() {
         runtime.block_on(async {
             let target = target(&cx);
             let instance = [9; 16];
-            let listener = UnixListener::bind_abstract(&name(own_uid().unwrap(), &target))
-                .await
-                .unwrap();
+            let uid = own_uid().unwrap();
+            let listener = listen(&name(uid, &target), uid).await.unwrap();
             let server = async {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut opening = [0; 8];

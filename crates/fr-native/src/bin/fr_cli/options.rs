@@ -1522,21 +1522,22 @@ mod tests {
     }
     #[test]
     fn trust_roots_and_worker_default_to_installed_locations() {
+        #[cfg(not(target_os = "macos"))]
+        let bundle = PathBuf::from("/etc/ssl/certs/ca-certificates.crt");
+        #[cfg(target_os = "macos")]
+        let bundle = PathBuf::from("/etc/ssl/cert.pem");
         let o = options("connect n-host --view-only --experimental-native --display only").unwrap();
         let Command::Connect(c) = o.command else {
             unreachable!("connection required");
         };
-        assert_eq!(
-            c.target.roots,
-            PathBuf::from("/etc/ssl/certs/ca-certificates.crt")
-        );
+        assert_eq!(c.target.roots, bundle);
         let exe = std::env::current_exe().unwrap();
         assert_eq!(c.worker, exe.parent().unwrap().join("fr-media-worker"));
         let o = options("displays n-host --experimental-native").unwrap();
         let Command::Displays(t) = o.command else {
             unreachable!("inspection required");
         };
-        assert_eq!(t.roots, PathBuf::from("/etc/ssl/certs/ca-certificates.crt"));
+        assert_eq!(t.roots, bundle);
     }
     #[test]
     fn unknown_duplicate_credential_and_policy_switches_are_not_ignored() {

@@ -124,6 +124,48 @@ fn videotoolbox_decodes_the_admitted_stream_into_the_metal_surface() {
     eprintln!("videotoolbox hardware decoder: {:?}", decoder.hardware());
 }
 
+#[test]
+fn remote_cursor_needs_a_checked_shape_and_redraws_without_a_presentation() {
+    let units = units();
+    let surface = Surface::offscreen(128, 96).unwrap();
+    // Before any shape a move has nothing to draw.
+    assert_eq!(
+        surface.cursor(&CursorUpdate::Move { x: 1, y: 1 }),
+        Err(NativeError::InvalidConfiguration)
+    );
+    let rgba = vec![255_u8; 4 * 4 * 4];
+    let shape = |hotspot_x, rgba| CursorUpdate::Shape {
+        x: 10,
+        y: 10,
+        width: 4,
+        height: 4,
+        hotspot_x,
+        hotspot_y: 1,
+        rgba,
+    };
+    // Geometry is checked before the glue: hotspot inside, exact RGBA length.
+    for bad in [shape(4, &rgba[..]), shape(1, &rgba[..60])] {
+        assert_eq!(surface.cursor(&bad), Err(NativeError::InvalidConfiguration));
+    }
+    let mut decoder = HevcDecoder::new(
+        surface,
+        config(),
+        ProtocolLimits::ABSOLUTE,
+        &record(&units[0]),
+    )
+    .unwrap();
+    decoder.submit(&units[0]).unwrap();
+    let surface = decoder.surface();
+    surface.cursor(&shape(1, &rgba)).unwrap();
+    // Off the picture is clipped, not refused; hiding keeps the shape.
+    surface
+        .cursor(&CursorUpdate::Move { x: 200, y: -5 })
+        .unwrap();
+    surface.cursor(&CursorUpdate::Hidden).unwrap();
+    surface.cursor(&CursorUpdate::Move { x: 3, y: 3 }).unwrap();
+    assert_eq!(surface.presented(), 1, "a cursor redraw is not a picture");
+}
+
 /// A canonical-layout record carrying `sps` between the fixture's own VPS
 /// and PPS.
 fn record_with_sps(sps: &[u8]) -> Vec<u8> {

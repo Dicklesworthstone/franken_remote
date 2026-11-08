@@ -1,11 +1,18 @@
 //! Explicit local automation through the original foreground control owner.
 //! Commands contain comparison handles only; host tickets never leave that owner.
 use crate::{Failure, options};
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use fr_client::robot::{InputDisposition, input::native::Report};
 use serde::{Deserialize, Serialize};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "robot_input/client.rs"]
 mod client;
 
@@ -363,7 +370,11 @@ impl Request {
             && self.operation.valid()
     }
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Refusal {
@@ -380,7 +391,11 @@ pub(crate) enum Refusal {
     Stopped,
     OutOfBounds,
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Refusal {
     pub fn code(self) -> &'static str {
         match self {
@@ -401,7 +416,11 @@ impl Refusal {
 }
 /// The input capabilities used by the public bounded robot operations.
 /// In a known support object, omitted capabilities are not granted.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum InputCapability {
@@ -411,7 +430,11 @@ pub(crate) enum InputCapability {
     LineScroll,
 }
 /// Signed host desktop pixels, with exclusive right and bottom edges.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InputRectangle {
@@ -422,14 +445,22 @@ pub(crate) struct InputRectangle {
 }
 /// Descriptive limits from the SAME pinned candidate as the input observation.
 /// These values do not issue an input ticket or authorize any action.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct InputSupport {
     pub bounds: InputRectangle,
     pub capabilities: Vec<InputCapability>,
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl InputSupport {
     #[cfg(any(feature = "linux-desktop", test))]
     pub fn from_grant(
@@ -471,7 +502,11 @@ impl InputSupport {
 }
 /// One explicitly requested observation; its identity pins the original source
 /// age and ALL input generations. Reading status never refreshes an old action.
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Snapshot {
@@ -490,7 +525,11 @@ pub(crate) struct Snapshot {
     pub input_support: Option<InputSupport>,
     pub physical_visibility_proven: bool,
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Response {
@@ -498,7 +537,11 @@ pub(crate) enum Response {
     Result { report: Report },
     Refused { reason: Refusal },
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Response {
     pub fn render(self, json: bool) -> Result<Output, Failure> {
         let (outcome, stage, error, data, exit) = match self {
@@ -547,7 +590,11 @@ impl Response {
         Ok(Output { text, exit })
     }
 }
-#[cfg(any(target_os = "linux", test))]
+#[cfg(any(
+    target_os = "linux",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 pub(crate) fn protocol() -> Failure {
     Failure::new(
         "local_session_protocol",
@@ -591,7 +638,14 @@ pub(crate) fn id(text: &str) -> Result<[u8; 16], Failure> {
 }
 // Unsupported platforms still validate the complete request before refusing.
 // Only the Linux owner consumes the validated fields.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg_attr(
+    not(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    )),
+    allow(dead_code)
+)]
 pub(crate) struct Command {
     pub target: String,
     pub connection: String,
@@ -742,11 +796,17 @@ fn command(args: &[String]) -> Result<Command, Failure> {
 pub(super) fn run(args: &[String]) -> Result<Output, Failure> {
     if args.iter().any(|a| a == "--accept-input") {
         let parsed = opening(args)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(
+            target_os = "linux",
+            all(target_os = "macos", feature = "macos-desktop")
+        ))]
         {
             return crate::linux::run_automation(&parsed).map(|text| Output { text, exit: 0 });
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(
+            target_os = "linux",
+            all(target_os = "macos", feature = "macos-desktop")
+        )))]
         {
             let _ = parsed;
             return Err(Failure::new(
@@ -757,11 +817,17 @@ pub(super) fn run(args: &[String]) -> Result<Output, Failure> {
         }
     }
     let command = command(args)?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     {
         client::run(&command)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-desktop")
+    )))]
     {
         let _ = command;
         Err(Failure::new(

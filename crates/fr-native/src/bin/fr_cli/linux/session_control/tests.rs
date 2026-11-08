@@ -56,7 +56,11 @@ fn kernel_credentials_and_bounded_exact_targets_are_required() {
         assert_eq!(check_target(&invalid), Err(Error::InvalidTarget));
     }
     assert_eq!(check_target(&"x".repeat(MAX_TARGET)), Ok(()));
+    // Linux abstract names fit `sun_path` (108 bytes); macOS paths fit 104.
+    #[cfg(target_os = "linux")]
     assert!(name(u32::MAX, &"x".repeat(MAX_TARGET)).len() < 108);
+    #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+    assert!(name(u32::MAX, &"x".repeat(MAX_TARGET)).as_os_str().len() < 104);
     assert_ne!(name(uid, "n-host"), name(uid, "n-hos"));
     assert_ne!(name(uid, "n-host"), name(uid.wrapping_add(1), "n-host"));
 }
@@ -196,7 +200,7 @@ fn pending_local_callers_are_bounded_and_bad_framing_cannot_stop() {
         let address = name(own_uid().unwrap(), &target);
         let mut clients = Vec::new();
         for _ in 0..=MAX_PEERS {
-            clients.push(UnixStream::connect_abstract(&address).await.unwrap());
+            clients.push(dial(&address).await.unwrap());
         }
         turn(&mut owner, &cx).await;
         assert_eq!(owner.peers.len(), MAX_PEERS);
@@ -230,9 +234,7 @@ fn an_incomplete_handshake_expires_on_its_original_deadline() {
     runtime.block_on(async {
         let target = target(&cx);
         let mut owner = Owner::bind(&cx, &target).await.unwrap();
-        let _stalled = UnixStream::connect_abstract(&name(own_uid().unwrap(), &target))
-            .await
-            .unwrap();
+        let _stalled = dial(&name(own_uid().unwrap(), &target)).await.unwrap();
         let clock = cx.timer_driver().unwrap();
         let began = clock.now().as_nanos();
         {
@@ -263,7 +265,7 @@ fn exhausted_rejected_accepts_wake_the_next_original_caller() {
         let address = name(own_uid().unwrap(), &target);
         let mut invalid = Vec::new();
         for _ in 0..MAX_PEERS {
-            let mut stream = UnixStream::connect_abstract(&address).await.unwrap();
+            let mut stream = dial(&address).await.unwrap();
             stream.write_all(b"INVALID!").await.unwrap();
             invalid.push(stream);
         }
