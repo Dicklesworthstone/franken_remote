@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-08 — a key held across the end of a view suspension no longer ends control
+
+- A stale view suspends control input (plan 11.3), and a key or button pressed
+  during the suspension is dropped. If the view recovered before the user let
+  go, the client tried to send that release for a press the host never saw.
+  Its own input model refused the release as an invalid transition, which
+  ended the session. The release, or a repeat, is now dropped with its press,
+  as an aged press's already was. Not seen live (the harness's xdotool releases
+  within a millisecond); a frd test shows it on the previous code.
+- `fr` reports `input_dropped_suspended`: local events dropped because of a
+  suspension. Before, nothing counted them. In a live ts2-to-ts1 run the host
+  saw `hel` of a typed `hello` while the completion showed 10 suspensions and
+  `input_dropped_aged` 0.
+
 ## 2026-11-04 — taking control survives a late picture report
 
 - While the host started its native input owner for a new control grant, one

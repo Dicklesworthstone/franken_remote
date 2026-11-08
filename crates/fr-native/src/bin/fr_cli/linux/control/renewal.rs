@@ -15,6 +15,7 @@ pub(crate) struct Fresh {
     pub(super) suspensions: u32,
     pub(super) suspended_us: u64,
     pub(super) dropped_aged: u64,
+    pub(super) dropped_suspended: u64,
     pub(super) ended: Option<Result<(), Failure>>,
     pub(super) cleanup: Option<CleanupSummary>,
 }
@@ -65,7 +66,7 @@ impl Fresh {
             },
         );
         format!(
-            "{{\"attempt\":{},\"requested\":true,\"granted\":{},\"capabilities\":{capabilities},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"end\":{},\"close_exchange\":{},\"lease_report\":{}}}",
+            "{{\"attempt\":{},\"requested\":true,\"granted\":{},\"capabilities\":{capabilities},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"input_dropped_suspended\":{},\"end\":{},\"close_exchange\":{},\"lease_report\":{}}}",
             self.attempt,
             self.granted,
             self.results,
@@ -73,6 +74,7 @@ impl Fresh {
             self.suspensions,
             self.suspended_us / 1_000,
             self.dropped_aged,
+            self.dropped_suspended,
             self.end()
                 .map_or_else(|| "null".to_owned(), crate::output::quoted),
             self.exchange()

@@ -78,6 +78,13 @@ pub(super) struct Receiver {
     dropped_buttons: [bool; 5],
     /// Captured events dropped as obsolete local input (counts only).
     dropped: u64,
+    /// Presses a stale view refused (plan 11.3). The host never saw them, so
+    /// a release or repeat after input resumes goes with them too.
+    refused_keys: [bool; 256],
+    refused_buttons: [bool; 5],
+    /// Captured events dropped because a stale view suspended input,
+    /// including those followers (counts only).
+    suspended: u64,
 }
 /// What the host may hold for this grant: a sent press not yet released.
 #[derive(Debug, Clone, Copy)]
@@ -255,6 +262,25 @@ fn follows_dropped(event: &Event, keys: &mut [bool; 256], buttons: &mut [bool; 5
         _ => false,
     }
 }
+/// Record a press the host never saw, so its later release or repeat goes
+/// with it.
+fn unseen_press(event: &Event, keys: &mut [bool; 256], buttons: &mut [bool; 5]) {
+    match event {
+        Event::Key {
+            key,
+            transition: KeyTransition::Press,
+        } => keys[usize::from(key.usage())] = true,
+        Event::Positioned {
+            action:
+                PositionedAction::Button {
+                    button,
+                    pressed: true,
+                },
+            ..
+        } => buttons[*button as usize - 1] = true,
+        _ => {}
+    }
+}
 /// A press that reaches the session supersedes an earlier dropped one.
 fn sent(event: &Event, keys: &mut [bool; 256], buttons: &mut [bool; 5]) {
     match event {
@@ -281,10 +307,16 @@ impl Receiver {
             dropped_keys: [false; 256],
             dropped_buttons: [false; 5],
             dropped: 0,
+            refused_keys: [false; 256],
+            refused_buttons: [false; 5],
+            suspended: 0,
         }
     }
     pub(super) const fn dropped(&self) -> u64 {
         self.dropped
+    }
+    pub(super) const fn suspended(&self) -> u64 {
+        self.suspended
     }
     /// Local input older than its dispatch bound is obsolete work (AGENTS.md
     /// 5), never a reason to end control: an aged press, repeat, motion,
@@ -323,21 +355,11 @@ impl Receiver {
     }
     fn note_dropped(&mut self, event: &Event) {
         self.dropped = self.dropped.saturating_add(1);
-        match event {
-            Event::Key {
-                key,
-                transition: KeyTransition::Press,
-            } => self.dropped_keys[usize::from(key.usage())] = true,
-            Event::Positioned {
-                action:
-                    PositionedAction::Button {
-                        button,
-                        pressed: true,
-                    },
-                ..
-            } => self.dropped_buttons[*button as usize - 1] = true,
-            _ => {}
-        }
+        unseen_press(event, &mut self.dropped_keys, &mut self.dropped_buttons);
+    }
+    fn note_refused(&mut self, event: &Event) {
+        self.suspended = self.suspended.saturating_add(1);
+        unseen_press(event, &mut self.refused_keys, &mut self.refused_buttons);
     }
     fn front(&mut self) -> Result<Option<&Captured>, Error> {
         if self.pending.is_none() {
@@ -410,6 +432,16 @@ impl ControlledViewer {
             receiver.pending = None;
             return Ok(());
         }
+        // Likewise for a press a stale view refused, even once input resumed.
+        if follows_dropped(
+            &captured.event,
+            &mut receiver.refused_keys,
+            &mut receiver.refused_buttons,
+        ) {
+            receiver.suspended = receiver.suspended.saturating_add(1);
+            receiver.pending = None;
+            return Ok(());
+        }
         let result = match &captured.event {
             Event::Key { key, transition } => self
                 .action(Action::Key {
@@ -444,6 +476,11 @@ impl ControlledViewer {
                     &mut receiver.dropped_keys,
                     &mut receiver.dropped_buttons,
                 );
+                sent(
+                    &captured.event,
+                    &mut receiver.refused_keys,
+                    &mut receiver.refused_buttons,
+                );
                 receiver.pending = None;
                 Ok(())
             }
@@ -453,11 +490,17 @@ impl ControlledViewer {
             ) => Ok(()),
             // A stale view suspends input (plan 11.3): this event is refused and
             // dropped, never queued for later. So is a release of a key or button
-            // that suspension already released on the host. The session continues.
+            // that suspension already released on the host. A refused press is
+            // remembered: its release may come after input resumes, and the host
+            // never saw the press. The session continues.
             Err(super::Error::View(input::presentation::Error::Input(
                 input::Error::ViewSuspended | input::Error::ReleasedBySuspension,
             ))) => {
-                receiver.pending = None;
+                let Captured { event, .. } = receiver
+                    .pending
+                    .take()
+                    .ok_or(super::Error::Capture(Error::Unavailable))?;
+                receiver.note_refused(&event);
                 Ok(())
             }
             Err(super::Error::Viewport(input::viewport::Error::OutsideImage))

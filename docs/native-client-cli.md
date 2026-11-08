@@ -366,9 +366,12 @@ A stale or unknown view suspends control input instead of ending the session
   after the lapse.
 - A release of a key held across the suspension is dropped, since the host
   already released it.
+- A key or button pressed while suspended is dropped. So is its release or
+  repeat, even after input resumes, since the host never saw the press.
 - A suspension longer than 10 s ends the session with `view_stale`.
 - `input_suspensions` and `input_suspended_ms` report how often and how long
-  input was suspended.
+  input was suspended. `input_dropped_suspended` counts the events dropped
+  because of a suspension.
 
 Local input has a 100 ms dispatch bound from when it was captured. While a new
 picture waits for its visibility confirmation, the client holds input, because

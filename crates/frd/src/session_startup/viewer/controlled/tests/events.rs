@@ -400,6 +400,115 @@ fn an_aged_press_is_dropped_with_its_release_and_control_continues() {
         assert!(shutdown.handoff_safe());
     });
 }
+/// A key or button pressed on a stale view is refused (plan 11.3). When the
+/// view recovers before the user lets go, the host never saw the press, so
+/// its release goes with it: sending it would be a protocol error that ended
+/// control on an ordinary keystroke under load.
+#[test]
+fn a_press_refused_by_a_suspension_takes_its_release_after_input_resumes() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture_with_caps(
+            &client,
+            &host,
+            caps().with(Capability::Buttons),
+        ))
+        .await;
+        let layout = layout(&mut state);
+        let mut source = state.viewer.capture_input().unwrap();
+        let driver = state.driver.take().unwrap();
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                let click = |pressed| Event::Positioned {
+                    location: layout.at(LocalPoint::pixels(20, 20)),
+                    action: PositionedAction::Button {
+                        button: PointerButton::Primary,
+                        pressed,
+                    },
+                };
+                // No host turns: no fresh evidence, so the view lapses.
+                let until = state
+                    .viewer
+                    .input
+                    .view_deadline(ClientInstant(now(&client).unwrap()))
+                    .unwrap()
+                    .0;
+                while now(&client).unwrap() < until {
+                    asupersync::time::sleep(client.now(), Duration::from_millis(1)).await;
+                }
+                state
+                    .viewer
+                    .drive(Duration::ZERO, |_| {}, block)
+                    .await
+                    .unwrap();
+                assert!(state.viewer.input.suspended_since().is_some());
+                let at = source.clock().unwrap();
+                source.push(physical(KeyTransition::Press), at).unwrap();
+                source.push(click(true), at).unwrap();
+                for _ in 0..4 {
+                    state
+                        .viewer
+                        .drive(Duration::ZERO, |_| {}, block)
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(state.viewer.input_dropped_suspended(), 2);
+                // Fresh evidence and a ticket issued after the lapse resume
+                // input on the same grant.
+                let (mut counter, mut ticket) = (30000, 40000);
+                let resume_by = now(&client).unwrap() + 3_000_000;
+                while state.viewer.input.suspended_since().is_some() {
+                    assert!(now(&client).unwrap() < resume_by, "input never resumed");
+                    let (left, right) =
+                        turn(&mut state, &client, &host, &mut counter, &mut ticket).await;
+                    left.unwrap();
+                    right.unwrap();
+                }
+                // The user lets go only now.
+                let fresh = source.clock().unwrap();
+                source
+                    .push(physical(KeyTransition::Release), fresh)
+                    .unwrap();
+                source.push(click(false), fresh).unwrap();
+                let quiet = now(&client).unwrap() + 150_000;
+                while now(&client).unwrap() < quiet {
+                    let (left, right) =
+                        turn(&mut state, &client, &host, &mut counter, &mut ticket).await;
+                    left.unwrap();
+                    right.unwrap();
+                }
+                assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
+                assert!(!state.viewer.is_closed());
+                assert_eq!(state.viewer.input_dropped_suspended(), 4);
+                assert_eq!(state.viewer.input_dropped_aged(), 0);
+                // Fresh input on the same grant still reaches the host.
+                let fresh = source.clock().unwrap();
+                source.push(physical(KeyTransition::Press), fresh).unwrap();
+                source
+                    .push(physical(KeyTransition::Release), fresh)
+                    .unwrap();
+                let operations = Box::pin(turns_until(&mut state, &client, &host, |ops| {
+                    ops.len() == 2
+                }))
+                .await;
+                let op = |transition| Op::Key {
+                    key: PhysicalKey::new(4).unwrap(),
+                    transition,
+                };
+                assert_eq!(
+                    operations,
+                    [op(KeyTransition::Press), op(KeyTransition::Release)]
+                );
+                assert_eq!(state.viewer.input_dropped_suspended(), 4);
+                source.stop();
+                state.viewer.close();
+                state.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+    });
+}
 
 mod text;
 

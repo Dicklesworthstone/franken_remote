@@ -441,6 +441,12 @@ impl ControlledViewer {
     pub fn input_dropped_aged(&self) -> u64 {
         self.events.as_ref().map_or(0, events::Receiver::dropped)
     }
+    /// Captured local events dropped because a stale view suspended input
+    /// (plan 11.3), with a refused press's later release or repeat. Counts
+    /// only, no content.
+    pub fn input_dropped_suspended(&self) -> u64 {
+        self.events.as_ref().map_or(0, events::Receiver::suspended)
+    }
     pub fn control(&self) -> ViewerControl {
         self.control.clone()
     }

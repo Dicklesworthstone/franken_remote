@@ -1619,7 +1619,7 @@ fn control_history(progress: &Progress, control: &control::Counters) -> crate::C
     let fresh = control.fresh_history();
     let mut history = crate::ControlHistory {
         json: format!(
-            ",\"last_attempt_mode\":\"{}\",\"viewing_reconnects\":{},\"control_request_attempt\":{},\"control_attempt_end\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{granted},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{},\"control_close_exchange\":{},\"control_lease_report\":{}{}",
+            ",\"last_attempt_mode\":\"{}\",\"viewing_reconnects\":{},\"control_request_attempt\":{},\"control_attempt_end\":{},\"control_requested\":{},\"control_granted\":{},\"control_capabilities_granted\":{granted},\"wheel_unavailable\":{},\"input_results\":{},\"input_submitted_to_os\":{},\"input_suspensions\":{},\"input_suspended_ms\":{},\"input_dropped_aged\":{},\"input_dropped_suspended\":{},\"clipboard_requested\":{},\"clipboard_active\":{},\"clipboard_received\":{},\"clipboard_absence\":{},\"clipboard_ended\":{},\"control_close_exchange\":{},\"control_lease_report\":{}{}",
             control.mode.name(),
             control.viewing_reconnects,
             control
@@ -1634,6 +1634,7 @@ fn control_history(progress: &Progress, control: &control::Counters) -> crate::C
             control.suspensions,
             control.suspended_us / 1_000,
             control.dropped_aged,
+            control.dropped_suspended,
             control.clipboard.is_some(),
             clipboard.active,
             clipboard.received,
@@ -2103,11 +2104,13 @@ mod tests {
             counters.suspensions = 2;
             counters.suspended_us = 1_499_999;
             counters.dropped_aged = 3;
+            counters.dropped_suspended = 4;
             counters.ended = Some(Ok(()));
             let json = completion(&ended, true, None);
             assert!(json.contains("\"input_suspensions\":2"), "{json}");
             assert!(json.contains("\"input_suspended_ms\":1499"), "{json}");
             assert!(json.contains("\"input_dropped_aged\":3"), "{json}");
+            assert!(json.contains("\"input_dropped_suspended\":4"), "{json}");
             assert!(serde_json::from_str::<serde_json::Value>(&json).is_ok());
         }
 

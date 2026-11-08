@@ -218,6 +218,9 @@ pub(super) struct Counters {
     /// Captured local events dropped as obsolete after aging past their
     /// dispatch bound (counts only).
     pub(super) dropped_aged: u64,
+    /// Captured local events dropped because a stale view suspended input,
+    /// with a refused press's later release or repeat (counts only).
+    pub(super) dropped_suspended: u64,
     /// The original request-bearing attempt's outcome, frozen at its cleanup.
     /// Later viewing-only attempts cannot replace this evidence.
     pub(super) ended: Option<Result<(), Failure>>,
@@ -334,18 +337,21 @@ impl Counters {
         let capabilities = viewer.granted_capabilities();
         let (suspensions, suspended_us) = viewer.suspension_totals();
         let dropped_aged = viewer.input_dropped_aged();
+        let dropped_suspended = viewer.input_dropped_suspended();
         if let Some(fresh) = self.current_fresh() {
             fresh.granted = true;
             fresh.capabilities = Some(capabilities);
             fresh.suspensions = suspensions;
             fresh.suspended_us = suspended_us;
             fresh.dropped_aged = dropped_aged;
+            fresh.dropped_suspended = dropped_suspended;
         } else if self.request_attempt == Some(self.current_attempt) {
             self.granted = true;
             self.capabilities = Some(capabilities);
             self.suspensions = suspensions;
             self.suspended_us = suspended_us;
             self.dropped_aged = dropped_aged;
+            self.dropped_suspended = dropped_suspended;
         } else {
             return Err(CallbackError);
         }
