@@ -8,7 +8,7 @@ use fr_core::{
     input::{KeyTransition, PhysicalKey},
     input_submission::{Capabilities, Capability as InputCapability},
 };
-use fr_media::freshness::ClockPolicy;
+use fr_media::{freshness::ClockPolicy, worker::Backend};
 use fr_wire::lease_revoked::{CleanupStage, EffectStage};
 use frd::{
     input_agent::Seat,
