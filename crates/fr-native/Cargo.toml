@@ -34,6 +34,10 @@ fr-tailnet.workspace = true
 [features]
 default = ["cli"]
 macos-media = []
+# macOS client presentation (fr-5a4w): VideoToolbox HEVC decode into
+# IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an
+# AppKit window. Objective-C glue compiled by build.rs; system frameworks only.
+macos-desktop = []
 linux-media = []
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []
@@ -97,6 +101,10 @@ must_use_candidate = "allow"
 [[example]]
 name = "native_roundtrip"
 required-features = ["linux-media"]
+
+[[example]]
+name = "macos_present"
+required-features = ["macos-desktop"]
 
 [[bin]]
 name = "fr-media-worker"

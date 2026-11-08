@@ -9,6 +9,7 @@ fn main() {
     build_viewer_input();
     build_viewer_window();
     build_host_picker();
+    build_macos_viewer();
     println!("cargo:rerun-if-changed=src/bridge.c");
     println!("cargo:rerun-if-changed=src/x11_image.c");
     println!("cargo:rerun-if-changed=src/x11_image.h");
@@ -565,4 +566,68 @@ fn build_tailnet_macos() {
     println!("cargo:rustc-link-lib=static=frtailnetmacos");
     println!("cargo:rustc-link-lib=framework=CoreFoundation");
     println!("cargo:rustc-link-lib=framework=Security");
+}
+
+/// macOS viewer glue (fr-5a4w): `AppKit` window, `VideoToolbox` decode and `Metal`
+/// presentation. System frameworks only; nothing is downloaded or bundled.
+fn build_macos_viewer() {
+    println!("cargo:rerun-if-changed=src/macos_viewer.m");
+    if env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS viewer cross-builds require an explicit SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_viewer.m", "-o"])
+            .arg(out.join("macosviewer.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "install the Xcode command line tools (xcode-select --install)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacosviewer.a"))
+            .arg(out.join("macosviewer.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacosviewer");
+    for framework in [
+        "AppKit",
+        "CoreFoundation",
+        "CoreGraphics",
+        "CoreMedia",
+        "CoreVideo",
+        "Foundation",
+        "Metal",
+        "QuartzCore",
+        "VideoToolbox",
+    ] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-lib=objc");
 }
