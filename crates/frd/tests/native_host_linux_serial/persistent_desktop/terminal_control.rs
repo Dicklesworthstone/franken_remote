@@ -20,6 +20,9 @@ use frd::{
 };
 use std::cell::Cell;
 
+#[path = "terminal_control/callback_failure.rs"]
+mod callback_failure;
+
 fn executable(name: &str, body: &str) -> PathBuf {
     let path = fixture::pki().join(name);
     crate::executable::write(&path, body);
@@ -53,6 +56,57 @@ fn presenter_fixture() -> Launch {
 fn keys() -> Capabilities {
     Capabilities::default().with(InputCapability::Keys)
 }
+fn control_driver(source: Cx, image: &std::path::Path, seat: Seat) -> dispatch::Driver {
+    let mut agent = SessionAgent::new(
+        ApprovalMode::Unattended,
+        PlatformKind::LinuxX11,
+        2,
+        InputBounds::new(DesktopPoint { x: -320, y: 40 }, 320, 240).unwrap(),
+    );
+    agent
+        .permissions_mut()
+        .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
+    agent
+        .with_control(
+            ControlProfile::new(
+                image,
+                ":0",
+                None,
+                seat,
+                keys(),
+                30,
+                2_000_000,
+                Backend::SoftwareExplicit,
+            )
+            .unwrap(),
+        )
+        .native_incoming(
+            source,
+            shared_viewers::Policy::default(),
+            // A genuine quiet interval lets ACKs drain. Native backlog still
+            // refuses reporting; no buffer, lifetime or lease is widened.
+            Duration::from_millis(200),
+            entropy(),
+        )
+        .unwrap()
+        .1
+}
+fn unattended_request(n: u64) -> Result<Request, serial::Error> {
+    let mut request = request(n)?;
+    request.session.offer = frd::session_startup::host_offer(true);
+    request.session.require_approval = false;
+    Ok(request)
+}
+async fn fixture_viewer(cx: &Cx, offer: fr_wire::negotiation::Offer) -> Viewer {
+    Viewer::new(
+        cx.clone(),
+        fixture::client(cx, address()).await,
+        offer,
+        quic::Policy::default(),
+        Duration::from_secs(3),
+    )
+    .unwrap()
+}
 
 #[test]
 #[ignore = "explicit isolated user/mount/network namespace; synthetic ingress and native-effect fixtures"]
@@ -68,46 +122,9 @@ fn supervisor_stop_delivers_revocation_then_reaps_the_original_controlled_deskto
         let (setup, _unused_source_control, mut retirement, _) = setup(source.clone(), "normal");
         let (image, log) = input_fixture();
         let seat = Seat::default();
-        let mut agent = SessionAgent::new(
-            ApprovalMode::Unattended,
-            PlatformKind::LinuxX11,
-            2,
-            InputBounds::new(DesktopPoint { x: -320, y: 40 }, 320, 240).unwrap(),
-        );
-        agent
-            .permissions_mut()
-            .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
-        let (_, mut driver) = agent
-            .with_control(
-                ControlProfile::new(
-                    &image,
-                    ":0",
-                    None,
-                    seat.clone(),
-                    keys(),
-                    30,
-                    2_000_000,
-                    Backend::SoftwareExplicit,
-                )
-                .unwrap(),
-            )
-            .native_incoming(
-                source.clone(),
-                shared_viewers::Policy::default(),
-                // A genuine quiet interval in this fixture allows ACKs to drain.
-                // Native backlog still refuses reporting; no buffers are erased
-                // and no record lifetime, lease or transport limit is widened.
-                Duration::from_millis(200),
-                entropy(),
-            )
-            .unwrap();
+        let mut driver = control_driver(source.clone(), &image, seat.clone());
         let connections = Connections {
-            request: |n| {
-                let mut request = request(n)?;
-                request.session.offer = frd::session_startup::host_offer(true);
-                request.session.require_approval = false;
-                Ok(request)
-            },
+            request: unattended_request,
             approval: |_, _| panic!("explicit unattended profile"),
             completed: |_, _| Ok(serial::Action::Continue),
         };
@@ -124,15 +141,7 @@ fn supervisor_stop_delivers_revocation_then_reaps_the_original_controlled_deskto
         let receipts = Cell::new(0_u32);
         let stopped = Cell::new(false);
         let viewing = async {
-            let native = fixture::client(&client, address()).await;
-            let viewer = Viewer::new(
-                client.clone(),
-                native,
-                fr_client::native::control_offer(),
-                quic::Policy::default(),
-                Duration::from_secs(3),
-            )
-            .unwrap();
+            let viewer = fixture_viewer(&client, fr_client::native::control_offer()).await;
             let mut observer = viewer
                 .observe_for_control(
                     presenter_fixture(),

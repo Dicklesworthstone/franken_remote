@@ -82,15 +82,16 @@ where
                 )
                 .await?,
         );
-        let initial = self
-            .observer
-            .as_ref()
-            .ok_or(ObserverError::Order)?
-            .initial_presentation();
-        (self.ui)(attempt, Some(initial)).map_err(|_| ObserverError::Application)?;
-        self.observer
-            .as_mut()
-            .ok_or(ObserverError::Order)?
+        let observer = self.observer.as_mut().ok_or(ObserverError::Order)?;
+        let initial = observer.initial_presentation();
+        if (self.ui)(attempt, Some(initial)).is_err() {
+            // The outer application boundary may finish terminal reporting as
+            // soon as we return. Fence this original owner first, while keeping
+            // it available for the supervisor's explicit native reaping.
+            observer.close();
+            return Err(ObserverError::Application);
+        }
+        observer
             .serve(|frame| (self.ui)(attempt, frame).map_err(|_| ()))
             .await
             .map_err(ObserverError::Streaming)
@@ -266,7 +267,12 @@ where
                 .await?,
         );
         let observer = self.observer.as_mut().ok_or(ObserverError::Order)?;
-        (self.setup)(attempt, observer).map_err(|_| ObserverError::Application)?;
+        if (self.setup)(attempt, observer).is_err() {
+            // Setup can already have attached native work. Stop publication
+            // before returning, retaining the owner for all cleanup stages.
+            observer.close();
+            return Err(ObserverError::Application);
+        }
         observer
             .serve_interactive_control(
                 self.sequence,

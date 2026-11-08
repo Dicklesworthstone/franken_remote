@@ -11,6 +11,13 @@ claims peer acknowledgement, remote input release or native cleanup. This
 addresses the silent-client-end mechanism in `fr-t4lj`; live two-machine
 acceptance remains pending. See [transport close](PROTOCOL_TRANSPORT_CLOSE.md).
 
+The native reconnect adapters also fence their original observer before
+returning an initial UI or setup callback failure. They preserve that failure
+and retain the same native worker for the existing explicit cleanup; the next
+attempt remains forbidden until cleanup completes. Two TLS/bootstrap and actual
+child-reaping regressions are included in the existing isolated-namespace CI
+lane. Platform permissions and codec output remain labeled fixtures.
+
 Reference recovery now fences the original controlled input owner before a
 network turn can transmit the recovery request and receive the host's resets.
 While an outstanding native decode or presentation operation drains, that same
