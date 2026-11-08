@@ -1,6 +1,8 @@
 //! Real supervised IPC with explicit observation responses and opaque payloads.
 //! These exercise the original authority owner, not live tailnet or HEVC proof.
 use super::*;
+#[path = "../support/worker_pool.rs"]
+mod worker_pool;
 use asupersync::{time::sleep_until, types::Time};
 use fr_core::{authority::AuthorityError, time::HostInstant};
 use fr_media::access_unit::FrameId;
@@ -31,27 +33,10 @@ fn observation(runtime: &Runtime, id: u128) -> ObservationControl {
 }
 
 fn fixture(name: &str, source: &str, mode: &str) -> std::path::PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let file = std::env::temp_dir().join(format!(
-        "fr-{name}-authority-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(&file, source.replace("@MODE@", mode));
-    file
-}
-
-fn configuration() -> Configuration {
-    Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
-        max_access_unit_bytes: 1024 * 1024,
-        generation: epoch().configuration,
-    }
+    image(
+        &format!("fr-{name}-authority"),
+        source.replace("@MODE@", mode),
+    )
 }
 
 async fn start_source(control: &ObservationControl, mode: &str) -> Result<CaptureSource, Error> {
@@ -140,12 +125,14 @@ async fn with_renewals<F: Future>(
     (result, responses)
 }
 
-async fn during_pending<F: Future>(clock: &Cx, operation: F, action: impl FnOnce()) -> F::Output {
+async fn during_pending<F: Future>(
+    clock: &Cx,
+    delay: Duration,
+    operation: F,
+    action: impl FnOnce(),
+) -> F::Output {
     let mut operation = pin!(operation);
-    let mut timer = pin!(sleep(
-        clock.timer_driver().unwrap().now(),
-        Duration::from_millis(150),
-    ));
+    let mut timer = pin!(sleep(clock.timer_driver().unwrap().now(), delay));
     let mut action = Some(action);
     poll_fn(|task| {
         if let Poll::Ready(result) = operation.as_mut().poll(task) {
@@ -232,13 +219,18 @@ fn unanswered_challenges_and_revocation_do_not_keep_a_silent_capture_alive() {
             let mut source = delayed_source(&control, "silent").await;
             let original_until = near_expiry(&clock, &control).await;
             let before = host_now(&clock).unwrap();
-            let result = during_pending(&clock, source.capture_if_changed(&control, true), || {
-                if revoke {
-                    control.revoke();
-                } else {
-                    control.issue_challenge(501).unwrap();
-                }
-            })
+            let result = during_pending(
+                &clock,
+                Duration::from_millis(150),
+                source.capture_if_changed(&control, true),
+                || {
+                    if revoke {
+                        control.revoke();
+                    } else {
+                        control.issue_challenge(501).unwrap();
+                    }
+                },
+            )
             .await;
             if revoke {
                 assert_eq!(result.unwrap_err(), Error::Worker(WorkerError::Cancelled));
@@ -366,5 +358,32 @@ fn renewed_observation_keeps_a_slow_monitor_configuration_past_the_old_cap() {
                 assert!(host_now(&clock).unwrap() >= original_until);
             }
         }
+    });
+}
+
+#[test]
+fn a_queued_launch_services_renewals_before_the_pool_can_claim_it() {
+    run_shared!(rt, clock, {
+        let control = observation(&rt, 313);
+        let mut pool = worker_pool::HeldPool::new(&clock).await;
+        let original_until = near_expiry(&clock, &control).await;
+        let (result, responses) = with_renewals(
+            &clock,
+            &control,
+            during_pending(
+                &clock,
+                Duration::from_millis(700),
+                start_source(&control, "direct"),
+                || pool.release(),
+            ),
+        )
+        .await;
+        let mut source = result.unwrap();
+        assert!(responses >= 2);
+        assert!(host_now(&clock).unwrap() >= original_until);
+        assert!(control.observation_until().unwrap() > original_until);
+        control.check().unwrap();
+        pool.finish().await;
+        stop(&mut source, &clock).await;
     });
 }

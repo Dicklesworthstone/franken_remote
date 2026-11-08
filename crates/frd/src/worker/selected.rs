@@ -14,27 +14,23 @@ pub struct MonitorDiscovery {
 }
 impl MonitorDiscovery {
     pub async fn start(cx: &Cx, launch: Launch, deadline: Deadline) -> Result<Self, Error> {
-        Self::start_checked(cx, launch, deadline, || Ok(deadline.0)).await
+        Self::start_checked(cx, launch, deadline, move || Ok(deadline.0)).await
     }
     /// `start` with discovery checked against the caller's live authority on
     /// every poll. A timely renewal can carry it past the first sampled expiry;
     /// nothing moves the original work ceiling.
-    pub(crate) async fn start_checked<E: From<Error>>(
+    pub(crate) async fn start_checked<E: From<Error> + Send + 'static>(
         cx: &Cx,
         launch: Launch,
         deadline: Deadline,
-        mut live: impl FnMut() -> Result<Time, E>,
+        live: impl FnMut() -> Result<Time, E> + Clone + Send + 'static,
     ) -> Result<Self, E> {
         if launch.role != Role::Capture {
             return Err(Error::Protocol(worker::Error::WrongRole).into());
         }
-        super::runtime_ready(cx)?;
-        // No process starts at an elapsed work or authority bound.
-        let until = live()?.min(deadline.0);
-        if super::now(cx)? >= until {
-            return Err(Error::Deadline.into());
-        }
-        let mut worker = Worker::spawn(launch, ProtocolLimits::ABSOLUTE)?;
+        let mut worker =
+            Worker::spawn_checked(cx, launch, ProtocolLimits::ABSOLUTE, deadline, live.clone())
+                .await?;
         let result = worker
             .exchange_checked(cx, Kind::DiscoverMonitors, Vec::new(), None, deadline, live)
             .await?;

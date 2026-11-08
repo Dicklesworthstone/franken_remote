@@ -3,13 +3,13 @@
 use super::*;
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
-    ids::{CodecConfigurationGeneration, RemoteSessionId},
+    ids::RemoteSessionId,
     input::{DesktopPoint, InputBounds},
     limits::ProtocolLimits,
 };
 use fr_media::{
     delivery::{MediaBudget, ReceivePipeline, ReceivePolicy, SharedFramePool},
-    worker::{Backend, Configuration as Codec, Role as WorkerRole},
+    worker::{Configuration as Codec, Role as WorkerRole},
 };
 use fr_transport::quic::{self, Disposition, MediaChannel, Messages, Route, StreamRoute};
 use fr_wire::{
@@ -34,7 +34,6 @@ use frd::{
     },
     worker::{Deadline, Launch, Retirement},
 };
-use std::fmt::Write;
 
 // Reuse the existing protocol-only viewer fixture without changing its checks.
 #[path = "../../src/session_startup/running/shared/tests/selected/hub/incoming/client.rs"]
@@ -48,13 +47,8 @@ fn block(_: Route, _: &[u8]) -> Result<Disposition, ()> {
 }
 fn codec() -> Codec {
     Codec {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
         max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
-        generation: CodecConfigurationGeneration::INITIAL,
+        ..crate::worker_support::configuration()
     }
 }
 #[allow(clippy::unnecessary_wraps)]
@@ -95,28 +89,14 @@ fn driver(handle: &RuntimeHandle) -> dispatch::Driver {
         .1
 }
 fn setup(handle: &RuntimeHandle) -> (Setup, ObservationControl, Retirement) {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut payload = String::new();
-    for nal in [
-        "40010c01ffff01600000030090000003000003003cba0240",
-        "42010101600000030090000003000003003ca00a080f165ba4a4c2f016a020202080000003008000000f04",
-        "4401c0718112",
-        "2801ade06702f86753c11ead2f1f6a69",
-    ] {
-        write!(payload, "{:08x}{nal}", nal.len() / 2).unwrap();
-    }
-    let path = std::env::temp_dir().join(format!(
-        "fr-protected-desktop-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    let payload = crate::worker_support::hevc_payload();
     let script = include_str!("../support/local_source_fixture.py")
         .replace("@MODE@", "changing")
         .replace(
             "b\"synthetic-monitor-unit\"",
             &format!("bytes.fromhex('{payload}')"),
         );
-    crate::executable::write(&path, script);
+    let path = crate::worker_support::image("fr-protected-desktop", script);
     let cx = handle.try_request_cx_with_budget(Budget::INFINITE).unwrap();
     let mut authority = SessionAuthority::new(
         RemoteSessionId::from_raw(100),

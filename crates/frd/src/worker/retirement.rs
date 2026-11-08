@@ -28,6 +28,7 @@ struct Custody {
 }
 enum Phase {
     Prepared,
+    Launching,
     NotStarted,
     Running,
     Retired,
@@ -59,6 +60,9 @@ impl Registration {
             Retirement { shared },
         )
     }
+    pub(super) fn launching(&self) {
+        lock(&self.shared).phase = Phase::Launching;
+    }
     pub(super) fn started(&self) {
         lock(&self.shared).phase = Phase::Running;
     }
@@ -79,7 +83,7 @@ impl Registration {
 impl Drop for Registration {
     fn drop(&mut self) {
         let mut state = lock(&self.shared);
-        if matches!(state.phase, Phase::Prepared) {
+        if matches!(state.phase, Phase::Prepared | Phase::Launching) {
             // The launch was consumed/dropped before a child existed. Running
             // without a transferred child would remain unconfirmed, not None.
             state.phase = Phase::NotStarted;
@@ -89,12 +93,24 @@ impl Drop for Registration {
 impl Retirement {
     /// Collect only a retired original child. `None` means the one-shot launch
     /// positively ended before spawn; `Some` is the exact OS exit receipt.
-    /// A still-owned launch/worker returns `ReapPending` and is NOT killed here.
+    /// An in-flight launch is awaited; an unsubmitted launch or caller-owned
+    /// worker returns `ReapPending`. Neither is killed by this cleanup owner.
     /// Cancellation, timeout and dropping this future retain custody for a
     /// subsequent drain with an independent cleanup context. The deadline is
     /// absolute and never refreshed by polling or child progress.
     pub async fn reap(&mut self, cx: &Cx, deadline: Deadline) -> Result<Option<ExitStatus>, Error> {
         let mut previous = check(cx, deadline, None)?;
+        // An abandoned queued/claimed launch still owns its captures and any
+        // late child. Wait for that exact handoff, never infer no child from an
+        // empty slot or kill a worker that its successful caller still owns.
+        while matches!(lock(&self.shared).phase, Phase::Launching) {
+            sleep_until(
+                Time::from_nanos(previous.as_nanos().saturating_add(5_000_000))
+                    .min(deadline.time()),
+            )
+            .await;
+            previous = check(cx, deadline, Some(previous))?;
+        }
         let mut collecting = {
             let mut state = lock(&self.shared);
             match &state.phase {

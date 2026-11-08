@@ -12,29 +12,14 @@ use frd::media::{
 
 fn config() -> Configuration {
     Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
         bitrate: 10_000,
         max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
-        generation: CodecConfigurationGeneration::INITIAL,
+        ..crate::worker_support::configuration()
     }
 }
 fn declaration(media: &NegotiatedMedia, fps: u16) -> Vec<u8> {
     let mut guard = HevcGuard::new(config().codec().unwrap(), ProtocolLimits::ABSOLUTE, 4).unwrap();
-    let mut au = Vec::new();
-    for nal in [
-        "40010c01ffff01600000030090000003000003003cba0240",
-        "42010101600000030090000003000003003ca00a080f165ba4a4c2f016a020202080000003008000000f04",
-        "4401c0718112",
-        "2801ade06702f86753c11ead2f1f6a69",
-    ] {
-        au.extend_from_slice(&[0, 0, 0, 1]);
-        for hex in nal.as_bytes().as_chunks::<2>().0 {
-            au.push(u8::from_str_radix(std::str::from_utf8(hex).unwrap(), 16).unwrap());
-        }
-    }
+    let au = crate::worker_support::hevc_access_unit(true);
     guard.validate_annex_b(&au, true).unwrap();
     let record = guard.decoder_record().unwrap();
     let codec = record.codec().replacen("hvc1.", "hev1.", 1);
@@ -87,14 +72,8 @@ async fn initial(
     media: &NegotiatedMedia,
     cx: &Cx,
 ) -> (Presenter, ReceivePipeline) {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "fr-recovery-decoder-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &path,
+    let path = crate::worker_support::image(
+        "fr-recovery-decoder",
         include_str!("../../src/media/presentation/decoder_fixture.py").replace(
             "time.sleep(@DECODE_SECONDS@)",
             "time.sleep(.5 if int.from_bytes(b[:8], 'big') == 9 else .01)",

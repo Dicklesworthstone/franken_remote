@@ -15,6 +15,7 @@ def reply(header, kind, body):
 h = read(36)
 b = read(struct.unpack('>I', h[32:])[0])
 if MODE == 'stall-configure':
+    open(os.path.splitext(__file__)[0] + '.configured', 'wb').close()
     time.sleep(60)
 if MODE == 'exit-configure':
     raise SystemExit(7)

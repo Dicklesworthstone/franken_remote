@@ -3,12 +3,10 @@
 #![cfg(target_os = "linux")]
 #[path = "support/executable.rs"]
 mod executable;
-use asupersync::{
-    cx::Cx,
-    runtime::{Runtime, RuntimeBuilder},
-    time::sleep,
-    types::Budget,
-};
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
+use asupersync::{cx::Cx, runtime::Runtime, time::sleep, types::Budget};
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
     ids::*,
@@ -19,7 +17,7 @@ use fr_core::{
 };
 use fr_media::{
     delivery::*,
-    worker::{Backend, Configuration, Kind, Role},
+    worker::{Kind, Role},
 };
 use fr_wire::{
     Channel, MediaLimits,
@@ -36,15 +34,7 @@ use frd::{
     worker::{Deadline, Launch},
 };
 use std::time::Duration;
-
-fn runtime() -> Runtime {
-    RuntimeBuilder::new()
-        .worker_threads(1)
-        .blocking_threads(1, 2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-}
+use worker_support::{configuration, image, runtime};
 
 macro_rules! run_shared {
     ($rt:ident, $cx:ident, $body:expr) => {{
@@ -126,33 +116,12 @@ fn receiver(cx: &Cx, l: MediaLimits, b: MediaBindings) -> ReceivePipeline {
     r
 }
 async fn source(c: &ObservationControl, changing: bool) -> CaptureSource {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let file = std::env::temp_dir().join(format!(
-        "fr-shared-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &file,
+    let file = image(
+        "fr-shared",
         include_str!("support/shared_capture_fixture.py")
             .replace("@CHANGING@", if changing { "True" } else { "False" }),
     );
-    CaptureSource::start(
-        c,
-        Launch::new(&file, ":0", None, Role::Capture, 77).unwrap(),
-        Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: epoch().configuration,
-        },
-    )
-    .await
-    .unwrap()
+    worker_support::capture(c, &file, 77).await
 }
 async fn capture(
     c: &ObservationControl,

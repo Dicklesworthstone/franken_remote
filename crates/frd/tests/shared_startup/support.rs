@@ -2,6 +2,9 @@
 #[path = "../../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 pub(super) mod net;
+#[path = "../support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
 use asupersync::cx::Cx;
 use fr_core::{ids::*, limits::ProtocolLimits};
 use fr_transport::quic::*;
@@ -216,17 +219,13 @@ use fr_core::{
 };
 use fr_media::{
     delivery::SharedFramePool,
-    worker::{Backend, Configuration, Kind, Role as WorkerRole},
+    worker::{Configuration, Kind, Role as WorkerRole},
 };
 use frd::{
     media::{CaptureSource, ObservationControl, host_now},
     worker::{Deadline, Launch},
 };
-use std::{
-    fmt::Write,
-    path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::path::PathBuf;
 
 pub(super) fn runtime() -> Runtime {
     net::runtime()
@@ -249,27 +248,15 @@ pub(super) fn gate(rt: &Runtime, session: u128) -> ObservationControl {
 }
 pub(super) fn configuration() -> Configuration {
     Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
         max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
-        generation: CodecConfigurationGeneration::INITIAL,
+        ..worker_support::configuration()
     }
 }
 pub(super) fn pool() -> SharedFramePool {
     SharedFramePool::new(ProtocolLimits::ABSOLUTE, 32 * 1024 * 1024, 8).unwrap()
 }
 pub(super) fn fixture(script: &str, prefix: &str) -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "fr-shared-startup-{prefix}-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(&path, script);
-    path
+    worker_support::image(&format!("fr-shared-startup-{prefix}"), script)
 }
 pub(super) async fn source(control: &ObservationControl, valid: bool) -> CaptureSource {
     source_variant(control, valid, false, false).await
@@ -284,22 +271,7 @@ pub(super) async fn source_variant(
 ) -> CaptureSource {
     // Canned parameter sets and a slice for real bounded host parsing, not a
     // live HEVC encoder. Subsequent decoder completion is explicitly synthetic.
-    let mut au = Vec::new();
-    for nal in [
-        "40010c01ffff01600000030090000003000003003cba0240",
-        "42010101600000030090000003000003003ca00a080f165ba4a4c2f016a020202080000003008000000f04",
-        "4401c0718112",
-        "2801ade06702f86753c11ead2f1f6a69",
-    ] {
-        au.extend_from_slice(&u32::try_from(nal.len() / 2).unwrap().to_be_bytes());
-        for h in nal.as_bytes().as_chunks::<2>().0 {
-            au.push(u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap());
-        }
-    }
-    let mut payload = String::new();
-    for value in au {
-        write!(payload, "{value:02x}").unwrap();
-    }
+    let payload = worker_support::hevc_payload();
     let script = include_str!("../support/recovery_worker_fixture.py").replace("@MODE@", "healthy");
     let script = if valid {
         script.replace(

@@ -20,11 +20,12 @@ impl DiscoveredSource {
         control.check()?;
         // A fixed work ceiling, with the original authority re-read on every
         // poll (as running capture): a timely renewal keeps a slow start.
+        let live = control.clone();
         let discovery = MonitorDiscovery::start_checked(
             &control.context(),
             launch,
             crate::worker::Deadline::after(&control.context(), Duration::from_secs(2))?,
-            || control.live_deadline(),
+            move || live.live_deadline(),
         )
         .await?;
         control.check()?;

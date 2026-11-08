@@ -453,12 +453,13 @@ impl CaptureSource {
         // Startup keeps one fixed work ceiling and re-reads the original
         // authority on every poll, as running capture does. Under host load a
         // timely renewal must not lose a start issued shortly before it.
+        let live = control.clone();
         let worker = Worker::start_checked(
             &control.cx,
             launch,
             configuration,
             Deadline::after(&control.cx, Duration::from_secs(2))?,
-            || control.live_deadline(),
+            move || live.live_deadline(),
         )
         .await?;
         if worker.role() != Role::Capture {

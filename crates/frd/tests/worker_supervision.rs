@@ -1,13 +1,16 @@
 #![cfg(target_os = "linux")]
 #[path = "support/executable.rs"]
 mod executable;
+#[path = "support/worker_pool.rs"]
+mod worker_pool;
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
 use asupersync::{
     cx::Cx,
-    runtime::{Runtime, RuntimeBuilder},
     types::{Budget, CancelKind},
 };
-use fr_core::ids::CodecConfigurationGeneration;
-use fr_media::worker::{Backend, Configuration, Kind, Role};
+use fr_media::worker::{Kind, Role};
 use frd::worker::{Deadline, Error, Launch, State, Worker};
 use std::{
     future::{Future, poll_fn},
@@ -17,40 +20,12 @@ use std::{
     task::Poll,
     time::Duration,
 };
-fn runtime() -> Runtime {
-    RuntimeBuilder::new()
-        .worker_threads(1)
-        .blocking_threads(1, 2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-}
-fn config() -> Configuration {
-    Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
-        max_access_unit_bytes: 1024 * 1024,
-        generation: CodecConfigurationGeneration::INITIAL,
-    }
-}
+use worker_support::{configuration as config, deadline, image, runtime};
 fn fixture(mode: &str) -> PathBuf {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "fr-worker-fixture-{}-{n}-{mode}.py",
-        std::process::id()
-    ));
-    crate::executable::write(
-        &path,
+    image(
+        &format!("fr-worker-fixture-{mode}"),
         include_str!("support/worker_fixture.py").replace("@MODE@", mode),
-    );
-    path
-}
-fn deadline(cx: &Cx, ms: u64) -> Deadline {
-    Deadline::after(cx, Duration::from_millis(ms)).unwrap()
+    )
 }
 async fn worker(cx: &Cx, mode: &str) -> Worker {
     Worker::start(

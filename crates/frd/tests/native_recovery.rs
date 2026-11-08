@@ -3,7 +3,10 @@
 #![cfg(target_os = "linux")]
 #[path = "support/executable.rs"]
 mod executable;
-use asupersync::{cx::Cx, runtime::RuntimeBuilder, time::sleep};
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
+use asupersync::{cx::Cx, time::sleep};
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
     ids::*,
@@ -14,7 +17,7 @@ use fr_core::{
 };
 use fr_media::{
     delivery::{DeliveryError, MediaBindings, MediaEpoch, SendError, SendPolicy},
-    worker::{Backend, Configuration, Kind, Role},
+    worker::Kind,
 };
 use fr_wire::{
     Channel, MediaLimits,
@@ -25,18 +28,11 @@ use fr_wire::{
 };
 use frd::{
     media::{CaptureSource, Error, ObservationControl, Subscription, host_now},
-    worker::{Deadline, Launch, State},
+    worker::{Deadline, State},
 };
-use std::{path::PathBuf, time::Duration};
+use std::time::Duration;
+use worker_support::{image, runtime};
 
-fn runtime() -> asupersync::runtime::Runtime {
-    RuntimeBuilder::new()
-        .worker_threads(1)
-        .blocking_threads(1, 2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-}
 fn binding() -> Binding {
     Binding {
         parent: ControlBinding {
@@ -89,36 +85,12 @@ fn control(cx: &Cx, id: u128) -> (ObservationControl, InputSession) {
         .unwrap();
     (control, input)
 }
-fn fixture(mode: &str) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "fr-recovery-{}-{}-{mode}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &path,
+async fn source(control: &ObservationControl, mode: &str) -> CaptureSource {
+    let file = image(
+        &format!("fr-recovery-{mode}"),
         include_str!("support/recovery_worker_fixture.py").replace("@MODE@", mode),
     );
-    path
-}
-async fn source(control: &ObservationControl, mode: &str) -> CaptureSource {
-    CaptureSource::start(
-        control,
-        Launch::new(&fixture(mode), ":0", None, Role::Capture, 77).unwrap(),
-        Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: CodecConfigurationGeneration::INITIAL,
-        },
-    )
-    .await
-    .unwrap()
+    worker_support::capture(control, &file, 77).await
 }
 async fn subscription(
     control: &ObservationControl,

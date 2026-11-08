@@ -3,13 +3,13 @@
 use super::*;
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
-    ids::{CodecConfigurationGeneration, RemoteSessionId},
+    ids::RemoteSessionId,
     input::{DesktopPoint, InputBounds},
     limits::ProtocolLimits,
 };
 use fr_media::{
     delivery::SharedFramePool,
-    worker::{Backend, Configuration as Codec, Role as WorkerRole},
+    worker::{Configuration as Codec, Role as WorkerRole},
 };
 use fr_transport::quic::{self, Disposition, Route};
 use fr_wire::{
@@ -99,30 +99,16 @@ fn choose(catalog: &Catalog) -> Result<(Select, Codec), ()> {
             .selection(catalog.displays()[0].handle)
             .map_err(|_| ())?,
         Codec {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
             max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
-            generation: CodecConfigurationGeneration::INITIAL,
+            ..crate::worker_support::configuration()
         },
     ))
 }
 /// A scripted capture worker speaking the real worker protocol with fixture
 /// HEVC; returns the executable and the path it records its PID in.
 pub(super) fn source_script(mode: &str) -> (PathBuf, PathBuf) {
-    use std::fmt::Write;
     static NEXT: AtomicU64 = AtomicU64::new(0);
-    let mut payload = String::new();
-    for nal in [
-        "40010c01ffff01600000030090000003000003003cba0240",
-        "42010101600000030090000003000003003ca00a080f165ba4a4c2f016a020202080000003008000000f04",
-        "4401c0718112",
-        "2801ade06702f86753c11ead2f1f6a69",
-    ] {
-        write!(payload, "{:08x}{nal}", nal.len() / 2).unwrap();
-    }
+    let payload = crate::worker_support::hevc_payload();
     let path = fixture::pki().join(format!(
         "desktop-source-{}.py",
         NEXT.fetch_add(1, Ordering::Relaxed)

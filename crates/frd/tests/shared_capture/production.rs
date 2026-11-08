@@ -24,32 +24,11 @@ fn physical(pictures: usize) -> SharedFramePool {
     SharedFramePool::new(ProtocolLimits::ABSOLUTE, 2 * 1024 * 1024, pictures).unwrap()
 }
 async fn delayed(c: &ObservationControl, mode: &str) -> CaptureSource {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let file = std::env::temp_dir().join(format!(
-        "fr-shared-production-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &file,
+    let file = image(
+        "fr-shared-production",
         include_str!("../support/shared_production_fixture.py").replace("@MODE@", mode),
     );
-    CaptureSource::start(
-        c,
-        Launch::new(&file, ":0", None, Role::Capture, 77).unwrap(),
-        Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: epoch().configuration,
-        },
-    )
-    .await
-    .unwrap()
+    worker_support::capture(c, &file, 77).await
 }
 async fn pending(
     future: std::pin::Pin<&mut impl Future<Output = Result<SharedCaptureUpdate, Error>>>,

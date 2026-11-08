@@ -2,36 +2,27 @@
 #![cfg(target_os = "linux")]
 #[path = "support/executable.rs"]
 mod executable;
-use asupersync::{cx::Cx, runtime::RuntimeBuilder};
-use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
+use asupersync::cx::Cx;
+use fr_core::limits::ProtocolLimits;
 use fr_media::{
     access_unit::FrameId,
-    worker::{self, Backend, Configuration, Kind, Role},
+    worker::{self, Configuration, Kind, Role},
 };
 use frd::worker::{Deadline, Error, Launch, State, Worker};
 use std::time::Duration;
+use worker_support::{configuration, image, runtime};
 
 fn run(test: impl AsyncFnOnce(Cx)) {
-    RuntimeBuilder::new()
-        .worker_threads(1)
-        .blocking_threads(1, 2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-        .block_on(async {
-            test(Cx::current().unwrap()).await;
-        });
+    runtime().block_on(async {
+        test(Cx::current().unwrap()).await;
+    });
 }
 async fn worker(cx: &Cx, header_only: bool) -> Worker {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let file = std::env::temp_dir().join(format!(
-        "fr-response-cap-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &file,
+    let file = image(
+        "fr-response-cap",
         include_str!("support/response_capacity_fixture.py")
             .replace("@HEADER_ONLY@", if header_only { "True" } else { "False" }),
     );
@@ -39,13 +30,8 @@ async fn worker(cx: &Cx, header_only: bool) -> Worker {
         cx,
         Launch::new(&file, ":0", None, Role::Capture, 77).unwrap(),
         Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
             max_access_unit_bytes: 8192,
-            generation: CodecConfigurationGeneration::INITIAL,
+            ..configuration()
         },
         Deadline::after(cx, Duration::from_secs(2)).unwrap(),
     )

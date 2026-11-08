@@ -12,6 +12,7 @@ use asupersync::{
 };
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind, Record, Role};
+mod launch;
 #[cfg(test)]
 mod live_deadline_tests;
 mod readiness;
@@ -436,18 +437,18 @@ impl Worker {
         configuration: Configuration,
         deadline: Deadline,
     ) -> Result<Self, Error> {
-        Self::start_checked(cx, launch, configuration, deadline, || Ok(deadline.0)).await
+        Self::start_checked(cx, launch, configuration, deadline, move || Ok(deadline.0)).await
     }
     /// `start` with the configure exchange checked against the caller's live
     /// authority on every poll, as `request_checked` checks running work. A
     /// timely renewal can carry a slow start past the first sampled expiry;
     /// nothing moves the original work ceiling.
-    pub(crate) async fn start_checked<E: From<Error>>(
+    pub(crate) async fn start_checked<E: From<Error> + Send + 'static>(
         cx: &Cx,
         launch: Launch,
         configuration: Configuration,
         deadline: Deadline,
-        live: impl FnMut() -> Result<Time, E>,
+        live: impl FnMut() -> Result<Time, E> + Clone + Send + 'static,
     ) -> Result<Self, E> {
         let body = configuration.encode().map_err(Error::from)?;
         Self::start_with_body(
@@ -475,11 +476,11 @@ impl Worker {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
         let body = capture.encode()?;
-        runtime_ready(cx)?;
-        if now(cx)? >= deadline.0 {
-            return Err(Error::Deadline);
-        }
-        let mut worker = Self::spawn(launch, ProtocolLimits::ABSOLUTE)?;
+        let mut worker =
+            Self::spawn_checked(cx, launch, ProtocolLimits::ABSOLUTE, deadline, move || {
+                Ok::<_, Error>(deadline.0)
+            })
+            .await?;
         match worker
             .exchange(cx, Kind::ConfigureAudio, body.clone(), deadline)
             .await
@@ -524,28 +525,22 @@ impl Worker {
                 configuration.encode_decoder(record)?,
             ),
         };
-        Self::start_with_body(cx, launch, configuration, body, kind, deadline, || {
+        Self::start_with_body(cx, launch, configuration, body, kind, deadline, move || {
             Ok(deadline.0)
         })
         .await
     }
-    async fn start_with_body<E: From<Error>>(
+    async fn start_with_body<E: From<Error> + Send + 'static>(
         cx: &Cx,
         launch: Launch,
         configuration: Configuration,
         body: Vec<u8>,
         kind: Kind,
         deadline: Deadline,
-        mut live: impl FnMut() -> Result<Time, E>,
+        live: impl FnMut() -> Result<Time, E> + Clone + Send + 'static,
     ) -> Result<Self, E> {
-        runtime_ready(cx)?;
         let limits = configuration.limits().map_err(Error::from)?;
-        // No process starts at an elapsed work or authority bound.
-        let until = live()?.min(deadline.0);
-        if now(cx)? >= until {
-            return Err(Error::Deadline.into());
-        }
-        let mut worker = Self::spawn(launch, limits)?;
+        let mut worker = Self::spawn_checked(cx, launch, limits, deadline, live.clone()).await?;
         let result = worker
             .exchange_checked(cx, kind, body.clone(), None, deadline, live)
             .await;
@@ -601,16 +596,13 @@ impl Worker {
         if let Some(path) = xauthority {
             command.env("XAUTHORITY", path);
         }
-        // Spawn is a bounded-count local syscall, not codec setup. The child
-        // performs all native initialization behind its private Configure RPC.
+        // The drained blocking launch owns this potentially slow fork/exec.
+        // Native codec initialization remains behind the private Configure RPC.
         let mut child = command
             .spawn()
             .map_err(|error| Error::SpawnFailed(error.into()))?;
         let input = child.stdin();
         let output = child.stdout();
-        if let Some(registration) = &retirement {
-            registration.started();
-        }
         // Establish custody before any fallible post-spawn check. Even absent
         // pipes must leave the original child available for confirmed cleanup.
         let worker = Self {
@@ -637,14 +629,14 @@ impl Worker {
         launch: Launch,
         deadline: Deadline,
     ) -> Result<CaptureDiscovery, Error> {
-        runtime_ready(cx)?;
         if launch.role != Role::Capture {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
-        if now(cx)? >= deadline.0 {
-            return Err(Error::Deadline);
-        }
-        let mut worker = Self::spawn(launch, ProtocolLimits::ABSOLUTE)?;
+        let mut worker =
+            Self::spawn_checked(cx, launch, ProtocolLimits::ABSOLUTE, deadline, move || {
+                Ok::<_, Error>(deadline.0)
+            })
+            .await?;
         let reply = worker
             .exchange(cx, Kind::DiscoverCapture, Vec::new(), deadline)
             .await?;
@@ -999,6 +991,86 @@ mod tests {
         time::{TimerDriverHandle, VirtualClock},
     };
     use std::sync::Arc;
+
+    #[test]
+    fn a_claimed_late_launch_keeps_its_actual_child_until_retirement() {
+        let runtime = RuntimeBuilder::new()
+            .worker_threads(1)
+            .blocking_threads(1, 2)
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cleanup = Cx::current().unwrap();
+            for expire in [false, true] {
+                let owner = runtime.request_cx_with_budget(asupersync::types::Budget::INFINITE);
+                let (launch, mut closing) =
+                    Launch::new(&probe_image("exec sleep 60"), ":0", None, Role::Capture, 74)
+                        .unwrap()
+                        .retain_cleanup()
+                        .unwrap();
+                let until = Deadline::after(&owner, Duration::from_secs(2)).unwrap();
+                let caller_thread = std::thread::current().id();
+                let (entered, receipt) = std::sync::mpsc::channel();
+                let (release, held) = std::sync::mpsc::channel::<()>();
+                let held = Arc::new(std::sync::Mutex::new(held));
+                let mut reads = 0;
+                let mut starting = Box::pin(Worker::spawn_checked(
+                    &owner,
+                    launch,
+                    ProtocolLimits::ABSOLUTE,
+                    until,
+                    move || {
+                        // Hold the blocking thread's second authority check:
+                        // the real child already exists, but is unpublished.
+                        if std::thread::current().id() != caller_thread {
+                            reads += 1;
+                            if reads == 2 {
+                                entered.send(()).unwrap();
+                                let _ = held.lock().unwrap().recv_timeout(Duration::from_secs(5));
+                            }
+                        }
+                        Ok::<_, Error>(until.time())
+                    },
+                ));
+                poll_fn(|task| {
+                    assert!(starting.as_mut().poll(task).is_pending());
+                    if receipt.try_recv().is_ok() {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
+                if expire {
+                    assert_eq!(starting.await.unwrap_err(), Error::Deadline);
+                } else {
+                    drop(starting);
+                }
+                let status = {
+                    let deadline = Deadline::after(&cleanup, Duration::from_secs(1)).unwrap();
+                    let mut reaping = pin!(closing.reap(&cleanup, deadline));
+                    poll_fn(|task| {
+                        assert!(reaping.as_mut().poll(task).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    drop(release);
+                    reaping.await.unwrap().unwrap()
+                };
+                assert!(!status.success());
+                assert_eq!(
+                    closing
+                        .reap(
+                            &cleanup,
+                            Deadline::after(&cleanup, Duration::from_secs(1)).unwrap()
+                        )
+                        .await,
+                    Ok(Some(status))
+                );
+            }
+        });
+    }
 
     #[test]
     fn presentation_export_replies_are_private_to_the_explicit_request() {

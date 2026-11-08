@@ -3,34 +3,23 @@
 #![cfg(target_os = "linux")]
 #[path = "support/executable.rs"]
 mod executable;
-use asupersync::{
-    cx::Cx,
-    runtime::{Runtime, RuntimeBuilder},
-    types::Budget,
-};
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
+use asupersync::{cx::Cx, runtime::Runtime, types::Budget};
 use fr_core::{
     authority::{AuthorityPolicy, SessionAuthority},
-    ids::{CodecConfigurationGeneration, InputLeaseId, RemoteSessionId},
+    ids::{InputLeaseId, RemoteSessionId},
     time::HostDuration,
 };
-use fr_media::worker::{Backend, Configuration, Role};
+use fr_media::worker::Role;
 use frd::{
     media::{CaptureSource, Error, ObservationControl, discovery::DiscoveredSource, host_now},
     worker::{Deadline, Launch, Retirement},
 };
-use std::{
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::time::Duration;
+use worker_support::{configuration, image, runtime};
 
-fn runtime() -> Runtime {
-    RuntimeBuilder::new()
-        .worker_threads(1)
-        .blocking_threads(1, 2)
-        .enable_platform_reactor(true)
-        .build()
-        .unwrap()
-}
 fn owner(rt: &Runtime, id: u128, control: bool) -> ObservationControl {
     let cx = rt.request_cx_with_budget(Budget::INFINITE);
     let now = host_now(&cx).unwrap();
@@ -51,26 +40,9 @@ fn owner(rt: &Runtime, id: u128, control: bool) -> ObservationControl {
     }
     ObservationControl::new(cx, authority).unwrap()
 }
-fn configuration() -> Configuration {
-    Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
-        max_access_unit_bytes: 1024 * 1024,
-        generation: CodecConfigurationGeneration::INITIAL,
-    }
-}
 async fn discover(c: &ObservationControl, mode: &str) -> (DiscoveredSource, Retirement) {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let file = std::env::temp_dir().join(format!(
-        "fr-local-source-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &file,
+    let file = image(
+        "fr-local-source",
         include_str!("support/local_source_fixture.py").replace("@MODE@", mode),
     );
     let (launch, retirement) = Launch::new(&file, ":0", None, Role::Capture, 71)

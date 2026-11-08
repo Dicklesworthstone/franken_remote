@@ -3,48 +3,25 @@
 use super::*;
 use fr_media::{
     delivery::SendPolicy,
-    worker::{Backend, Configuration, Role as WorkerRole},
+    worker::{Configuration, Role as WorkerRole},
 };
 use frd::{
     media::{CaptureSource, ObservationControl},
     media_egress::Lane,
     worker::{Deadline, Launch},
 };
-use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 async fn source(cx: &Cx, control: &ObservationControl) -> CaptureSource {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "fr-handoff-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
     // Valid admitted parameter-set/IDR fixture used only for host configuration
     // parsing. The child is not an actual encoder and no native decode is claimed.
-    let mut au = Vec::new();
-    for nal in [
-        "40010c01ffff01600000030090000003000003003cba0240",
-        "42010101600000030090000003000003003ca00a080f165ba4a4c2f016a020202080000003008000000f04",
-        "4401c0718112",
-        "2801ade06702f86753c11ead2f1f6a69",
-    ] {
-        au.extend_from_slice(&u32::try_from(nal.len() / 2).unwrap().to_be_bytes());
-        for h in nal.as_bytes().as_chunks::<2>().0 {
-            au.push(u8::from_str_radix(std::str::from_utf8(h).unwrap(), 16).unwrap());
-        }
-    }
-    let mut payload = String::new();
-    for value in au {
-        write!(payload, "{value:02x}").unwrap();
-    }
+    let payload = crate::worker_support::hevc_payload();
     let script = include_str!("../support/recovery_worker_fixture.py")
         .replace("@MODE@", "healthy")
         .replace(
             "b\"test-only-unit\"",
             &format!("bytes.fromhex('{payload}')"),
         );
-    crate::executable::write(&path, script);
+    let path = crate::worker_support::image("fr-handoff", script);
     assert!(net::clock(cx) > 0);
     CaptureSource::start(
         control,
@@ -56,13 +33,8 @@ async fn source(cx: &Cx, control: &ObservationControl) -> CaptureSource {
 }
 fn configuration() -> Configuration {
     Configuration {
-        width: 320,
-        height: 240,
-        fps: 30,
-        backend: Backend::SoftwareExplicit,
-        bitrate: 2_000_000,
         max_access_unit_bytes: ProtocolLimits::ABSOLUTE.max_encoded_access_unit_bytes(),
-        generation: CodecConfigurationGeneration::INITIAL,
+        ..crate::worker_support::configuration()
     }
 }
 fn request(view: Binding) -> Vec<u8> {

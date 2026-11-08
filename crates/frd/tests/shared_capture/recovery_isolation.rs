@@ -46,31 +46,12 @@ fn observation(runtime: &Runtime, id: u128) -> ObservationControl {
 }
 
 async fn delayed_source(control: &ObservationControl) -> CaptureSource {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let file = std::env::temp_dir().join(format!(
-        "fr-shared-recovery-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(&file, include_str!("../support/shared_recovery_fixture.py"));
-    CaptureSource::start(
-        control,
-        Launch::new(&file, ":0", None, Role::Capture, 92).unwrap(),
-        Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: epoch().configuration,
-        },
-    )
-    .await
-    .unwrap()
+    let file = image(
+        "fr-shared-recovery",
+        include_str!("../support/shared_recovery_fixture.py"),
+    );
+    worker_support::capture(control, &file, 92).await
 }
-
 async fn shared_capture(
     source: &mut CaptureSource,
     control: &ObservationControl,

@@ -1,5 +1,33 @@
 # Implementation status
 
+## Supervised native process launch (2026-11-08)
+
+Capture startup, monitor discovery, decoder startup and audio startup now submit
+process creation through the pinned Asupersync drained blocking pool. A slow
+fork/exec no longer runs inside the poll that services session renewal. One
+original absolute work deadline covers queueing, process creation and the
+following configuration exchange; this change does not extend startup ceilings.
+The same original authority and cancellation context are checked before
+submission, when the pool claims the launch, after process creation, and before
+returning its result. Role and configuration refusals still precede launch.
+
+Cleanup distinguishes a launch still owned by the pool from a positively
+unstarted process or a caller-owned worker. Cancellation before the pool claims a queued launch prevents that launch
+from creating a child. A child returned after cancellation or
+expiry is killed and transferred to its original retirement owner; cleanup waits
+within its own unchanged deadline for that handoff and the actual OS exit
+receipt. A missing child handle is never treated as proof of exit.
+
+New regressions hold the actual bounded pool, exercise queued expiry,
+cancellation and abandonment, retain a real late child through cleanup, and
+service observation renewals while a launch waits past the first sampled
+authority expiry. Existing worker scenarios share identical fixture setup and
+payloads to preserve the handwritten-source limit. This is a source change for
+`fr-6zrg`, not proof of the cause of the remaining live startup failures. Pinned full-workspace formatting and documentation checks pass. The fixed
+source-count check passes at 499,979 Rust lines and 17,756 glue lines. Full runtime execution of this revision remains pending on a capable
+runner; the local shared filesystem is full and unchanged Asupersync
+compilation previously exceeded this runner's 8 GiB memory limit.
+
 ## Native session recovery and abrupt client failure (2026-11-08)
 
 The original viewer can report an abrupt failure to its host through a bounded,
@@ -44,12 +72,15 @@ are explicitly simulated; these tests do not qualify hardware or a live tailnet.
 Pinned formatting and the documentation gate pass locally. Full check/test
 attempts, including a single-job metadata-only transport check, are blocked by
 SIGKILL compiling the unchanged pinned Asupersync dependency under this runner's
-shared memory limit. At client-close commit `18f6bd5`, GitHub's macOS all-targets
-check passes. Its strict Clippy run found one documentation-markup error,
-corrected in this tree. Linux and runtime execution results, and compilation
-of the later recovery changes, remain pending; no new runtime test pass is
-claimed here. Shared terminal and recovery fixtures retain all scenarios while
-keeping this implementation within the existing handwritten-source limit.
+shared memory limit. At client-close commit `18f6bd5`, GitHub's Linux
+all-targets/all-features check and macOS all-targets check passed, along with all
+13 new transport client-abort tests and both connector supervision tests. That
+revision's full test run still failed one receiver-load headroom-probe assertion;
+the native dial-certificate and clipboard-stall lanes repeated earlier failures.
+Its strict Clippy run found one documentation-markup error, corrected in this
+tree. The later recovery and callback regressions still await completed runtime
+verification. Formatting at `58235bb` passed. Shared terminal and recovery
+fixtures retain all scenarios within the existing handwritten-source limit.
 
 ## Native readiness, hardware selection and transfer pacing (2026-11-06)
 

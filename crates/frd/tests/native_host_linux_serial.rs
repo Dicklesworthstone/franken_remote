@@ -12,6 +12,9 @@ mod fixture;
 #[allow(dead_code)]
 #[path = "../../fr-transport/tests/support/mod.rs"]
 mod network;
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
 use asupersync::{
     cx::Cx,
     runtime::RuntimeHandle,

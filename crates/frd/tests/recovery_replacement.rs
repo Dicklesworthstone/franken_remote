@@ -6,6 +6,9 @@ mod executable;
 #[path = "../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 mod net;
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
 use asupersync::cx::Cx;
 use fr_core::{ids::*, limits::ProtocolLimits};
 use fr_media::delivery::{MediaBudget, ReceivePipeline, ReceivePolicy};

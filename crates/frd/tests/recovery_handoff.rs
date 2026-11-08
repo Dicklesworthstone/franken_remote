@@ -6,6 +6,9 @@ mod executable;
 #[path = "../../fr-transport/tests/support/mod.rs"]
 #[allow(dead_code)]
 mod net;
+#[path = "support/worker.rs"]
+#[allow(dead_code)]
+mod worker_support;
 use asupersync::cx::Cx;
 use fr_core::{ids::*, limits::ProtocolLimits};
 use fr_media::delivery::{MediaBudget, ReceivePipeline, ReceivePolicy};
@@ -243,41 +246,20 @@ fn observation(cx: &Cx) -> frd::media::ObservationControl {
 
 use fr_media::{
     delivery::SendPolicy,
-    worker::{Backend, Configuration, Role as WorkerRole},
+    worker::{Configuration, Role as WorkerRole},
 };
 use frd::{
     media::{CaptureSource, ObservationControl},
     media_quic::{Error, QuicEgress},
     worker::{Deadline, Launch},
 };
-use std::sync::atomic::{AtomicU64, Ordering};
 
 async fn source(control: &ObservationControl) -> CaptureSource {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let path = std::env::temp_dir().join(format!(
-        "fr-handoff-{}-{}.py",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    crate::executable::write(
-        &path,
+    let path = worker_support::image(
+        "fr-handoff",
         include_str!("support/recovery_worker_fixture.py").replace("@MODE@", "healthy"),
     );
-    CaptureSource::start(
-        control,
-        Launch::new(&path, ":0", None, WorkerRole::Capture, 1).unwrap(),
-        Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: CodecConfigurationGeneration::INITIAL,
-        },
-    )
-    .await
-    .unwrap()
+    worker_support::capture(control, &path, 1).await
 }
 fn request(mut view: Binding) -> [u8; wire::REQUEST_BYTES] {
     view.parent = parent();
