@@ -1,5 +1,7 @@
 //! Real authority and native executor; the sink's OS effects are explicit traces.
 use super::*;
+use fr_core::input_submission::PlatformError;
+use std::sync::atomic::AtomicBool;
 
 #[test]
 fn consent_fences_a_blocked_preflight_before_its_first_submission() {

@@ -5,13 +5,14 @@ use asupersync::{
 };
 use fr_core::{ids::InputTicketId, input::InputEvent, input_sequence::InputOutcome};
 use fr_wire::input::{InputDelivery, MAX_INPUT_RECORD_BYTES};
+#[cfg(target_os = "linux")]
+use frd::input_watchdog::host_now;
 use frd::{
     input_agent::{AuthorityCommand, Error, Reply, Seat},
-    input_watchdog::{StopReason, host_now},
+    input_watchdog::StopReason,
 };
 use std::{
     sync::{Arc, atomic::Ordering, mpsc},
-    thread,
     time::Duration,
 };
 

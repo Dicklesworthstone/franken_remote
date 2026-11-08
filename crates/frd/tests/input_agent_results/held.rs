@@ -1,8 +1,12 @@
 //! The production native thread and mailbox, with explicit fault-injection sinks.
 use super::*;
-use asupersync::types::CancelKind;
+use asupersync::{cx::Cx, types::CancelKind};
 use fr_core::held_state::{HeldState, HeldStateRequest};
+use fr_core::input_submission::{
+    InputSink, PlatformError, Reconciliation, ReconciliationOutcome, Submission,
+};
 use fr_wire::held_state::{HELD_STATE_BYTES, encode};
+use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 #[derive(Clone, Copy)]
 enum Fault {
     CancelPreparation,

@@ -1,6 +1,10 @@
 //! The actual native-thread agent with an explicit geometry-refusing sink.
 //! Submitted prefixes and held-input cleanup remain owned by that one agent.
 use super::*;
+use fr_core::{
+    input::KeyTransition,
+    input_submission::{InputSink, Operation, PlatformError, Refusal, Submission},
+};
 
 struct Resized(Sink);
 impl InputSink for Resized {
