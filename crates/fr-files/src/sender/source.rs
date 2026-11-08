@@ -1,5 +1,6 @@
 //! Locally selected descriptors, disk-only hashing/reads, one outstanding result.
-#[cfg(test)]
+// Exercises a Linux drop directory end to end (see receive::directory).
+#[cfg(all(test, target_os = "linux"))]
 mod cleanup_tests;
 #[cfg(test)]
 mod tests;

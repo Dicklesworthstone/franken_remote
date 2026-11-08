@@ -13,7 +13,7 @@ fr-wire.workspace = true
 serde_json.workspace = true
 getrandom = "=0.4.3"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 fr-client.workspace = true
 fr-transport.workspace = true
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }

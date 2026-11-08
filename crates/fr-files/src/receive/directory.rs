@@ -544,6 +544,7 @@ impl Drop for PendingDirectory {
     }
 }
 
-#[cfg(test)]
+// Drop directories open only on Linux; macOS refuses file transfer by name.
+#[cfg(all(test, target_os = "linux"))]
 #[path = "directory/conflict_tests.rs"]
 mod conflict_tests;

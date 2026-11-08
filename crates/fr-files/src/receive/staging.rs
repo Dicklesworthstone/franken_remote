@@ -5,8 +5,12 @@
 //! is Linux's unprivileged alternative to `linkat(AT_EMPTY_PATH)`, not permission
 //! to follow a peer-supplied symlink. Both basenames come from the local owner;
 //! the destination is still relative to its original, approved directory fd.
+//! Other platforms have no procfs: they always stage under an exclusively
+//! created private name in the destination directory.
+#[cfg(target_os = "linux")]
+use rustix::fd::{AsRawFd, OwnedFd};
 use rustix::{
-    fd::{AsRawFd, BorrowedFd, OwnedFd},
+    fd::BorrowedFd,
     fs::{self, AtFlags, Mode, OFlags, RenameFlags},
     io::{Errno, Result},
 };
@@ -15,10 +19,12 @@ use std::fs::File;
 // The procfs handle is acquired before receiving bytes, not after the final
 // publication authority check. Its fd table belongs to this process, so an
 // inherited transaction must never consult the parent's fd numbers after fork.
+#[cfg(target_os = "linux")]
 struct ProcFd {
     directory: OwnedFd,
     process: u32,
 }
+#[cfg(target_os = "linux")]
 impl ProcFd {
     fn open() -> Result<Self> {
         let directory = fs::open(
@@ -37,6 +43,7 @@ impl ProcFd {
 }
 
 enum Location {
+    #[cfg(target_os = "linux")]
     Anonymous(ProcFd),
     Named(String),
 }
@@ -48,9 +55,13 @@ pub(super) struct StagingFile {
 }
 impl StagingFile {
     pub(super) fn create(directory: BorrowedFd<'_>, name: &str) -> Result<Self> {
-        Self::create_with_proc(directory, name, ProcFd::open().ok())
+        #[cfg(target_os = "linux")]
+        return Self::create_with_proc(directory, name, ProcFd::open().ok());
+        #[cfg(not(target_os = "linux"))]
+        Self::create_named(directory, name)
     }
 
+    #[cfg(target_os = "linux")]
     fn create_with_proc(
         directory: BorrowedFd<'_>,
         name: &str,
@@ -75,6 +86,10 @@ impl StagingFile {
                 Err(error) => return Err(error),
             }
         }
+        Self::create_named(directory, name)
+    }
+
+    fn create_named(directory: BorrowedFd<'_>, name: &str) -> Result<Self> {
         let fd = fs::openat(
             directory,
             name,
@@ -94,9 +109,13 @@ impl StagingFile {
     /// Called only after integrity, file sync and the original authority gate.
     /// No filesystem open or extra staging copy occurs at this final effect.
     pub(super) fn publish(&self, directory: BorrowedFd<'_>, name: &str) -> Result<()> {
-        let file = self.file.as_ref().ok_or(Errno::BADF)?;
+        if self.file.is_none() {
+            return Err(Errno::BADF);
+        }
         match &self.location {
+            #[cfg(target_os = "linux")]
             Location::Anonymous(proc) => {
+                let file = self.file.as_ref().ok_or(Errno::BADF)?;
                 if proc.process != std::process::id() {
                     return Err(Errno::BADF);
                 }
@@ -124,17 +143,22 @@ impl StagingFile {
         if self.file.is_none() {
             return Ok(());
         }
-        if let Location::Named(name) = &self.location {
-            match fs::unlinkat(directory, name.as_str(), AtFlags::empty()) {
+        match &self.location {
+            Location::Named(name) => match fs::unlinkat(directory, name.as_str(), AtFlags::empty())
+            {
                 Ok(()) | Err(Errno::NOENT) => {}
                 Err(error) => return Err(error),
-            }
+            },
+            #[cfg(target_os = "linux")]
+            Location::Anonymous(_) => {}
         }
         self.file = None;
         Ok(())
     }
 }
 
-#[cfg(test)]
+// The unnamed path, its named fallback and their custody are exercised on
+// Linux tmpfs and procfs.
+#[cfg(all(test, target_os = "linux"))]
 #[path = "staging/tests.rs"]
 mod tests;

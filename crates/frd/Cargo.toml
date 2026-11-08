@@ -5,6 +5,7 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 publish = false
+build = "build.rs"
 [dependencies]
 asupersync.workspace = true
 fr-core.workspace = true
@@ -14,7 +15,13 @@ serde_json.workspace = true
 [lints]
 workspace = true
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[features]
+# The viewer half of frd on macOS (fr-5a4w), for fr-native's macos-desktop
+# client. Off by default: a default macOS build compiles what Linux-only frd
+# compiled before, and the host half stays Linux-only until the macOS host.
+macos-viewer = []
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 fr-client.workspace = true
 fr-transport.workspace = true
 fr-tailnet.workspace = true

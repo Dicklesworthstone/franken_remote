@@ -81,7 +81,7 @@ impl Seat {
     /// Start only with a currently control-capable installed-Tailscale admission.
     /// This does not create local consent, a control lease, a view or a ticket.
     /// The containing session keeps `Admission` alive and refreshes it independently.
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub fn start_admitted<S, F, C>(
         &self,
         cx: Cx,
@@ -129,26 +129,26 @@ impl SeatReservation {
         // Register before spawning: an approval barrier either sees and fences
         // this exact owner or invalidates its pre-existing reservation.
         self.seat.install(self.epoch, &control)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let input_scope = {
             // Only the immutable session/view are retained. This does not issue
             // a ticket; the zero placeholder never leaves this expression.
             let scope = session.ticket_credentials(InputTicketId::from_raw(0));
             (scope.session, scope.view)
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let (session, control_lease) = {
             let mut session = session;
             let control = session.take_control_lease();
             (session, control)
         };
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let authority_cx = cx.clone();
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let clipboard_monitor = fr_core::clipboard::authority::Monitor::from_input(&session);
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let file_authority = fr_files::session::Authority::from_input(&session);
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let microphone_controller =
             fr_media::audio::authority::HostController::from_input(&session);
         let shared = Arc::new(Shared {
@@ -209,17 +209,17 @@ impl SeatReservation {
             native: native.clone(),
             route,
             response_context: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(native_stack)]
             input_scope,
-            #[cfg(target_os = "linux")]
+            #[cfg(native_stack)]
             control_lease,
-            #[cfg(target_os = "linux")]
+            #[cfg(native_stack)]
             authority_cx,
-            #[cfg(target_os = "linux")]
+            #[cfg(native_stack)]
             clipboard_monitor,
-            #[cfg(target_os = "linux")]
+            #[cfg(native_stack)]
             file_authority,
-            #[cfg(target_os = "linux")]
+            #[cfg(native_stack)]
             microphone_controller,
         };
         let driver = Driver {
@@ -260,7 +260,7 @@ pub enum Error {
     RecordTooLarge,
     Wire(WireError),
     Clock(input_watchdog::Error),
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     Admission(fr_tailnet::Error),
 }
 /// These commands are issued by the local authenticated session owner, not
@@ -364,14 +364,14 @@ struct Mailbox {
 }
 #[derive(Default, Clone)]
 pub(crate) struct AdmissionGate {
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub(crate) tailnet: Option<fr_tailnet::Lease>,
 }
 impl AdmissionGate {
     // Off Linux there is no tailnet lease field to consult.
-    #[cfg_attr(not(target_os = "linux"), allow(clippy::unused_self))]
+    #[cfg_attr(not(native_stack), allow(clippy::unused_self))]
     pub(crate) fn permitted(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         if let Some(lease) = &self.tailnet {
             return lease.control().is_ok();
         }
@@ -423,17 +423,17 @@ pub struct Agent {
     native: Thread,
     route: Route,
     response_context: Option<ResultContext>,
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     input_scope: (fr_core::ids::RemoteSessionId, fr_core::input::InputView),
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     control_lease: Option<fr_core::input_submission::ControlLease>,
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     authority_cx: Cx,
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     clipboard_monitor: fr_core::clipboard::authority::Monitor,
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     file_authority: fr_files::session::Authority,
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     microphone_controller: fr_media::audio::authority::HostController,
 }
 impl Agent {
@@ -441,7 +441,7 @@ impl Agent {
     /// worker. This pure handoff grants neither microphone consent nor a new
     /// lease. The microphone owner must check a fresh original-clock deadline
     /// before every admission and maintain its own independent consent fence.
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub fn microphone_controller(&self) -> Option<fr_media::audio::authority::HostController> {
         self.shared.check_admission();
         (!self.shared.control.is_stopped()).then(|| self.microphone_controller.clone())
@@ -449,7 +449,7 @@ impl Agent {
 
     /// The same read-only file authority retained BEFORE moving `InputSession` to
     /// its native worker. This creates no input owner, lease or file permission.
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub(crate) fn file_authority(&self) -> Option<fr_files::session::Authority> {
         self.shared.check_admission();
         (!self.shared.control.is_stopped()).then(|| self.file_authority.clone())
@@ -457,13 +457,13 @@ impl Agent {
 
     /// Read-only access to the SAME native authority after its session has moved
     /// to the worker. This cannot issue tickets or recreate an input owner.
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub(crate) fn clipboard_monitor(&self) -> Option<fr_core::clipboard::authority::Monitor> {
         self.shared.check_admission();
         (!self.shared.control.is_stopped()).then(|| self.clipboard_monitor.clone())
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub(crate) fn matches_observation_view(
         &self,
         observation: &crate::media::ObservationControl,
@@ -478,7 +478,7 @@ impl Agent {
                 .as_ref()
                 .is_some_and(|lease| observation.owns_control_lease(lease))
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub(crate) fn take_control_lease(
         &mut self,
         observation: &crate::media::ObservationControl,

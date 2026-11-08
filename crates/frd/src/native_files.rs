@@ -434,6 +434,7 @@ pub use intake::SendIntake;
 mod host_intake;
 pub use host_intake::HostSendIntake;
 mod download;
+#[cfg(target_os = "linux")]
 pub mod local;
 pub(crate) use download::HostDownload;
 pub use download::{

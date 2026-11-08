@@ -9,12 +9,16 @@
 //! host future nor its media/firewall cleanup is cancelled and abandoned.
 pub mod microphone;
 mod process;
+#[cfg(target_os = "linux")]
 use crate::{
     host_run::{self, Encoder, Options, Reporter, StopHandle, policy},
     input_process::ProcessLaunch,
 };
+#[cfg(target_os = "linux")]
 pub use process::Error as IndicatorError;
+#[cfg(target_os = "linux")]
 use process::{Owner, Status};
+#[cfg(target_os = "linux")]
 use std::{
     fmt,
     path::Path,
@@ -27,6 +31,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(target_os = "linux")]
 pub enum Error {
     Configuration,
     Entropy,
@@ -35,6 +40,7 @@ pub enum Error {
     WatchdogPanicked,
     Cleanup,
 }
+#[cfg(target_os = "linux")]
 impl Error {
     pub fn code(&self) -> &'static str {
         match self {
@@ -50,11 +56,13 @@ impl Error {
         }
     }
 }
+#[cfg(target_os = "linux")]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "frd-indicator: {self:?}")
     }
 }
+#[cfg(target_os = "linux")]
 impl std::error::Error for Error {}
 
 /// Require the locally installed `fr-observation-indicator` before serving a
@@ -62,6 +70,7 @@ impl std::error::Error for Error {}
 /// its separate mandatory per-lease indicator and is refused by this slice.
 /// Missing/unresponsive UI refuses rather than silently disabling the option.
 /// This legacy entry point retains the explicit software encoder profile.
+#[cfg(target_os = "linux")]
 pub fn run_with_policy(
     options: &Options,
     report: &Reporter,
@@ -82,6 +91,7 @@ pub fn run_with_policy(
 /// Preserve the local encoder request through the indicator gate. Explicit
 /// automatic hardware selection still requires real startup probes. The UI
 /// never permits software fallback or changes the selected backend later.
+#[cfg(target_os = "linux")]
 pub fn run_with_policy_and_encoder(
     options: &Options,
     report: &Reporter,
@@ -124,6 +134,7 @@ pub fn run_with_policy_and_encoder(
 }
 /// Once running, a local UI revocation is a normal stop. Before first readiness
 /// EVERY stopped UI is a refusal: an opening failure must not exit as success.
+#[cfg(target_os = "linux")]
 fn fault(status: Status) -> Option<IndicatorError> {
     match status {
         Status::Opening
@@ -132,6 +143,7 @@ fn fault(status: Status) -> Option<IndicatorError> {
         Status::Stopped(error) => Some(error),
     }
 }
+#[cfg(target_os = "linux")]
 fn drive(
     owner: &Owner,
     stop: &StopHandle,
@@ -181,16 +193,20 @@ fn drive(
         failure.map_or(Ok(()), |error| Err(Error::Indicator(error)))
     })
 }
+#[cfg(target_os = "linux")]
 struct Fence<'a>(&'a StopHandle);
+#[cfg(target_os = "linux")]
 impl Drop for Fence<'_> {
     fn drop(&mut self) {
         self.0.request();
     }
 }
+#[cfg(target_os = "linux")]
 struct Finish<'a> {
     done: &'a AtomicBool,
     stop: &'a StopHandle,
 }
+#[cfg(target_os = "linux")]
 impl Drop for Finish<'_> {
     fn drop(&mut self) {
         self.stop.request();
@@ -198,7 +214,7 @@ impl Drop for Finish<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
     #[test]

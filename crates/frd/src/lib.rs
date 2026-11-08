@@ -1,4 +1,11 @@
 #![forbid(unsafe_code)]
+// The macOS viewer build compiles frd's shared session modules, whose host
+// half (capture, injection, ingress, approval) is reached only from the
+// Linux-only host run until the macOS host lands (fr-p1-host-macos-vif).
+#![cfg_attr(
+    all(target_os = "macos", feature = "macos-viewer"),
+    allow(dead_code, unused_imports, unused_variables)
+)]
 // Composed native futures need a deeper compiler proof of their Send bounds.
 // This changes no runtime stack, queue, protocol, or recursion allowance.
 #![recursion_limit = "256"]
@@ -7,10 +14,10 @@
 #[cfg(all(test, target_os = "linux"))]
 mod test_support;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod worker;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod media;
 
 #[cfg(target_os = "linux")]
@@ -20,14 +27,14 @@ pub mod input_watchdog;
 
 pub mod input_agent;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod input_process;
 
 // Original controller-bound virtual microphone with two supervised native children.
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod microphone_process;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod microphone_quic;
 
 pub mod session_agent;
@@ -36,48 +43,48 @@ pub mod status;
 
 pub mod service_install;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod media_egress;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod media_quic;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod input_quic;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod session_startup;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod display_selection;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod native_connection;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod clipboard_quic;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod native_clipboard;
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod native_microphone;
 
 // The controlled share's out-of-process X11 clipboard owner (never Xlib in frd).
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod clipboard_process;
 
 // Explicit viewer-to-host file sending into an operator-approved drop directory.
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod native_files;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod local_sharing;
 
 // Parent-owned terminal consent; no authority, capture or native input here.
 #[cfg(target_os = "linux")]
 pub mod local_approval;
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod broker;
 
 #[cfg(target_os = "linux")]
@@ -88,7 +95,7 @@ pub mod host_policy;
 pub mod host_run;
 
 // Opt-in read-only desktop indicator around the original host run lifetime.
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod host_indicator;
 
 #[cfg(target_os = "linux")]
@@ -102,7 +109,7 @@ mod signals;
 pub mod ingress_helper;
 
 // Private launcher shared by read-only and one-use consent UI children.
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 mod session_ui_process;
 
 // Executable test fixture images, shared with the integration tests.

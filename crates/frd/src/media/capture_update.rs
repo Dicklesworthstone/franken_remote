@@ -139,7 +139,7 @@ impl CaptureSource {
         bitrate: Option<u32>,
     ) -> Result<CaptureUpdate, Error> {
         protocol::validate_bitrate(self.configuration, bitrate)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         let mut selection = super::discovery::SelectionGuard::capture(self, control)?;
         let issued = control.check()?;
         let (maximum_capacity, join_until, shared) = scope.limits();
@@ -226,7 +226,7 @@ impl CaptureSource {
                 .map_err(|error| control.capture_failure(error))?;
         };
         operation.completed = true;
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         selection.finish();
         Ok(CaptureUpdate {
             source: self.source.clone(),

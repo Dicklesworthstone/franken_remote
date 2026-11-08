@@ -31,7 +31,7 @@ mod snapshot;
 pub(crate) mod source_check;
 pub use cursor::CursorReply;
 pub mod decoder_startup;
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod discovery;
 mod grant;
 pub(crate) mod presentation;
@@ -45,7 +45,7 @@ pub use receiver_feedback::Error as ReceiverFeedbackError;
 pub(crate) mod quality_decision;
 pub use quality_decision::Error as QualityDecisionError;
 pub mod renewal;
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 pub mod streaming;
 pub use capture_update::{CaptureUpdate, FanoutReport, PreparedSharedCapture, SharedCaptureUpdate};
 
@@ -169,7 +169,7 @@ impl ObservationControl {
             }
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(native_stack)]
     pub(crate) fn same_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.authority, &other.authority)
     }

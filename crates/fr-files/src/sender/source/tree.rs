@@ -120,7 +120,7 @@ impl Selection {
             let m = file.metadata()?;
             // Detect replacement between no-follow classification and opening.
             // NONBLOCK also prevents a racing FIFO from hanging this disk owner.
-            if m.dev() != stat.st_dev || m.ino() != stat.st_ino {
+            if m.dev() != device(&stat) || m.ino() != stat.st_ino {
                 return Err(Error::SourceChanged);
             }
             let original = identity(&m);
@@ -179,3 +179,16 @@ impl Selection {
     }
 }
 use std::os::unix::fs::MetadataExt;
+
+/// `st_dev` widened exactly as std's `MetadataExt::dev` widens it.
+#[cfg(target_os = "linux")]
+fn device(stat: &fs::Stat) -> u64 {
+    stat.st_dev
+}
+/// `st_dev` widened exactly as std's `MetadataExt::dev` widens it (macOS
+/// `dev_t` is `i32`; std sign-extends it).
+#[cfg(not(target_os = "linux"))]
+#[allow(clippy::cast_sign_loss, reason = "a device number is a bit pattern")]
+fn device(stat: &fs::Stat) -> u64 {
+    stat.st_dev as u64
+}

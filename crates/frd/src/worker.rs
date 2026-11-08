@@ -21,6 +21,8 @@ mod retirement;
 pub use retirement::Retirement;
 mod selected;
 pub use selected::MonitorDiscovery;
+mod local;
+pub use local::LocalPresenter;
 pub mod lifecycle;
 pub use lifecycle::*;
 
@@ -122,6 +124,7 @@ pub struct Launch {
     target: Option<worker::presentation::X11Target>,
     fit_target: bool,
     retirement: Option<retirement::Registration>,
+    local: Option<Box<dyn LocalPresenter>>,
 }
 impl Launch {
     pub fn new(
@@ -152,13 +155,32 @@ impl Launch {
             target: None,
             fit_target: false,
             retirement: None,
+            local: None,
+        })
+    }
+    /// Present through an in-process native decoder instead of a child; see
+    /// [`LocalPresenter`]. No image, display or X11 target applies.
+    pub fn in_process(presenter: Box<dyn LocalPresenter>, epoch: u128) -> Result<Self, Error> {
+        if epoch == 0 {
+            return Err(Error::InvalidLaunch);
+        }
+        Ok(Self {
+            image: PathBuf::new(),
+            display: String::new(),
+            xauthority: None,
+            role: Role::Present,
+            epoch,
+            target: None,
+            fit_target: false,
+            retirement: None,
+            local: Some(presenter),
         })
     }
     /// Keep the exact child collectable if asynchronous startup fails or is
     /// dropped before returning a Worker. Store the returned owner in the
     /// attempt BEFORE polling startup; it is single-use and not cloneable.
     pub fn retain_cleanup(mut self) -> Result<(Self, Retirement), Error> {
-        if self.retirement.is_some() {
+        if self.retirement.is_some() || self.local.is_some() {
             return Err(Error::InvalidLaunch);
         }
         let (registration, owner) = retirement::Registration::new();
@@ -169,7 +191,7 @@ impl Launch {
     /// launch configuration, never a peer request or a decoder-selected input
     /// source. The UI must retain its window until native cleanup completes.
     pub fn present_in(mut self, target: worker::presentation::X11Target) -> Result<Self, Error> {
-        if self.role != Role::Present || self.target.is_some() {
+        if self.role != Role::Present || self.target.is_some() || self.local.is_some() {
             return Err(Error::InvalidLaunch);
         }
         self.target = Some(target);
@@ -193,6 +215,7 @@ impl Launch {
         use std::process::{Command as Probe, Stdio as ProbeStdio};
         if self.role != Role::Capture
             || self.retirement.is_some()
+            || self.local.is_some()
             || !matches!(backend, "nvenc" | "vaapi" | "software")
         {
             return Err(Error::InvalidLaunch);
@@ -421,6 +444,9 @@ pub struct Worker {
     state: State,
     exit: Option<ExitStatus>,
     selected: Option<fr_wire::display::Display>,
+    /// In-process presentation (no child). Dropped on stop, abort or reap.
+    local: Option<Box<dyn LocalPresenter>>,
+    in_process: bool,
 }
 impl fmt::Debug for Worker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -511,6 +537,9 @@ impl Worker {
         if launch.role != Role::Present {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
+        if launch.local.is_some() {
+            return Self::start_local(cx, launch, configuration, record, deadline);
+        }
         let (kind, body) = match launch.target {
             Some(target) if launch.fit_target => (
                 Kind::ConfigureFittedPresentation,
@@ -575,7 +604,11 @@ impl Worker {
             target: _, // Already bound into the immutable private configuration.
             fit_target: _,
             retirement,
+            local,
         } = launch;
+        if local.is_some() {
+            return Err(Error::InvalidLaunch);
+        }
         let mut command = Command::new(image);
         command
             .env_clear()
@@ -616,6 +649,8 @@ impl Worker {
             state: State::Starting,
             exit: None,
             selected: None,
+            local: None,
+            in_process: false,
         };
         if worker.input.is_none() || worker.output.is_none() {
             return Err(Error::PipeFailed);
@@ -660,6 +695,7 @@ impl Worker {
             return;
         }
         self.state = State::Poisoned;
+        self.local = None;
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
         }
@@ -752,6 +788,9 @@ impl Worker {
         deadline: Deadline,
         live: impl FnMut() -> Result<Time, E>,
     ) -> Result<Record, E> {
+        if self.in_process {
+            return self.exchange_local(cx, kind, body, deadline, live);
+        }
         runtime_ready(cx)?;
         let identity = self.identity;
         let next = identity.sequence.checked_add(1).ok_or(Error::Unavailable)?;
@@ -828,6 +867,9 @@ impl Worker {
         }
         if !matches!(self.state, State::Poisoned | State::Stopped) {
             return Err(Error::Unavailable);
+        }
+        if self.in_process {
+            return Ok(self.reap_local());
         }
         let mut previous = now(cx)?;
         loop {
