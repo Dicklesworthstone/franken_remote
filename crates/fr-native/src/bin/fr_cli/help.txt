@@ -4,6 +4,7 @@ fr help [TOPIC...]
 fr COMMAND --help
 
 fr hosts [--json] [--socket /absolute/tailscaled.sock]
+fr peers [--json]
 fr hosts --probe --experimental-native [--probe-limit 1..64]
     [--port 8443] [--trust-roots /absolute/ca-roots.pem] [--ipv6]
     [--json] [--socket PATH]
@@ -52,6 +53,9 @@ Use a command path alone with --help, for example fr robot input --help.
 Help reads no local service or desktop and accepts no target or operational options.
 
 Discovery and connection:
+hosts/peers read one local machine snapshot; peers never probes remote services.
+On macOS these commands use the protected installed Tailscale app. Custom
+--socket paths and native connection/desktop commands remain Linux-only.
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Doctor --probe-native separately captures one local root-display picture and tries
 the explicitly selected HEVC encoder; --input-agent adds capability discovery with

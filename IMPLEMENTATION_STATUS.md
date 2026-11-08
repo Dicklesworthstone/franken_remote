@@ -1,5 +1,49 @@
 # Implementation status
 
+## macOS installed-app discovery (2026-11-08; native qualification pending)
+
+The public `fr hosts [--json]` command now has a macOS implementation through
+the installed Tailscale app's machine-readable CLI. The snapshot-only
+`fr peers` alias shares that implementation and the Linux discovery path.
+The native bridge starts the exact app executable suspended, verifies the
+actual child's Apple signing identity against Tailscale's team and the two
+official GUI app identifiers, and checks the original lookup budget again
+before allowing execution. It never accepts a caller-supplied executable,
+shell command, proxy, LocalAPI token or inherited environment.
+
+One original one-second deadline includes blocking-pool queueing, native
+signature verification, execution, reading and projection. Status is capped at
+1 MiB and uses the same parser, candidate exclusions and output format as Linux.
+A timeout, cancellation or invalid result cannot become an empty successful
+snapshot. The original child stays owned through process-group/leader kill and
+actual reap, including the one-shot CLI's cancellation drain. Cleanup may outlast
+the lookup deadline; that does not permit late execution or publish stale data.
+Concurrent/retried lookups cannot take the single slot before cleanup retires.
+
+This is the first consumed platform slice for `fr-5a4w`, not a macOS remote
+desktop claim. macOS `connect`, capability probes and hosting still return
+`platform_unavailable`. A custom `--socket` returns
+`localapi_endpoint_unsupported` before runtime creation. Discovery returns no
+target lease, observation grant or input authority, and Linux's root UID/PID
+checks remain intact. VideoToolbox/Metal presentation, AppKit input and a
+qualified continuing macOS identity transport remain outstanding.
+
+Added regressions cover shared status projection, exclusions, malformed and
+oversized JSON, cancellation/deadline/clock refusals, public command routing and
+an actual macOS suspended-child signature refusal/reap. Existing test setup was
+consolidated without removing any of the 141 inventoried test functions.
+Targeted pinned formatting and the test-body preservation audit passed before
+the local execution environment disconnected. The last complete source-budget check passed before
+that loss at 499,923 Rust lines and 17,948 glue lines. Source was recovered from
+the recorded edits and immutable GitHub originals; fresh formatting, full Cargo
+checks/tests, the macOS native regression and installed-Tailscale execution
+remain pending. The recovered blobs also total 499,923 Rust lines and 17,948 glue lines under
+the unchanged counting rules. The interrupted parser check did not produce
+passing evidence.
+The broader macOS bead remains open.
+
+See [the command and trust boundary](docs/native-client-cli.md#macos-discovery).
+
 ## Supervised native process launch (2026-11-08)
 
 Capture startup, monitor discovery, decoder startup and audio startup now submit
@@ -384,8 +428,10 @@ limit. Full CLI linking, live screenshots/chords over a tailnet, screenshot
 export from an existing foreground owner and the broader robot acceptance bead
 remain unqualified or incomplete. See [the command contract](docs/native-client-cli.md).
 
-**macOS**: the workspace builds, lints and tests (new CI job). Every `fr`/`frd`
-command refuses with `platform_unavailable`.
+**macOS**: prior workspace checks passed before the native discovery change.
+`fr hosts`/`fr peers` now use the installed-app bridge described above; its native
+build and execution remain pending. Desktop connections and all `frd` operations
+still refuse with `platform_unavailable`.
 
 **CI had never run a test.** Every Rust verification run, the
 observation-indicator lane and every nightly verify lane died with "The runner

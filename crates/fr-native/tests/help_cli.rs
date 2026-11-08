@@ -70,6 +70,46 @@ fn run(args: &[&str]) -> Output {
 }
 
 #[test]
+fn peer_alias_help_is_local_and_remote_probe_options_are_refused() {
+    assert!(run(&["peers", "--help"]).status.success());
+    let output = run(&["peers", "--probe", "--experimental-native", "--json"]);
+    assert_eq!(output.status.code(), Some(2));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "invalid_arguments");
+    assert!(value.get("peers").is_none());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_snapshot_does_not_enable_custom_endpoints_or_remote_operations() {
+    for name in ["hosts", "peers"] {
+        let output = run(&[name, "--socket", "/private/not-an-authority.sock", "--json"]);
+        assert_eq!(output.status.code(), Some(2));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "localapi_endpoint_unsupported");
+        assert!(value.get("peers").is_none());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("not-an-authority"));
+    }
+    for args in [
+        &["hosts", "--probe", "--experimental-native", "--json"][..],
+        &[
+            "connect",
+            "n-fixture",
+            "--view-only",
+            "--experimental-native",
+            "--display",
+            "only",
+            "--json",
+        ][..],
+    ] {
+        let output = run(args);
+        assert_eq!(output.status.code(), Some(2));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "platform_unavailable");
+    }
+}
+
+#[test]
 fn overview_is_bounded_and_discovers_the_detailed_topics() {
     let overview = run(&[]);
     assert!(overview.status.success());

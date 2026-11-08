@@ -229,7 +229,7 @@ fn fixture() -> String {
         r#"{{"Version":"explicit-fixture","BackendState":"Running","TailscaleIPs":["100.64.0.1"],"CurrentTailnet":{{"Name":"fixture.invalid","MagicDNSSuffix":"fixture.ts.net"}},"Self":{{"ID":"n-host","NodeID":1,"PublicKey":"{host_key}","UserID":7,"TailscaleIPs":["100.64.0.1"],"DNSName":"local.fixture.ts.net.","InNetworkMap":true}},"Peer":{{"{peer_key}":{{"ID":"n-peer","NodeID":2,"PublicKey":"{peer_key}","UserID":7,"TailscaleIPs":["100.64.0.2"],"DNSName":"remote.fixture.ts.net.","InNetworkMap":true}}}}}}"#
     )
 }
-fn discovery(stall_and_signal: bool) -> (Output, bool) {
+fn discovery(command_name: &str, stall_and_signal: bool) -> (Output, bool) {
     let socket_path = path("api.sock");
     let listener = UnixListener::bind(&socket_path).unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -273,7 +273,12 @@ fn discovery(stall_and_signal: bool) -> (Output, bool) {
             return;
         }
     });
-    let child = command(&["hosts", "--json", "--socket", socket_path.to_str().unwrap()])
+    let child = command(&[
+        command_name,
+        "--json",
+        "--socket",
+        socket_path.to_str().unwrap(),
+    ])
         .spawn()
         .unwrap();
     let requested = rx.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -304,24 +309,27 @@ fn discovery(stall_and_signal: bool) -> (Output, bool) {
 }
 #[test]
 fn real_cli_discovery_preserves_kernel_credentials_and_unknown_desktop_status() {
-    let (output, is_root) = discovery(false);
-    if is_root {
-        assert!(output.status.success());
-        json(
-            &output,
-            "assert x['snapshot_only'] is True\nassert len(x['peers'])==1\np=x['peers'][0]\nassert p['node_id']=='n-peer'\nassert p['certificate_name']=='remote.fixture.ts.net'\nassert p['addresses']==['100.64.0.2']\nassert p['desktop_available'] is None and p['access_authorized'] is None",
-        );
-    } else {
-        assert_eq!(output.status.code(), Some(1));
-        json(
-            &output,
-            "assert x['error']['code']=='untrusted_localapi'\nassert 'peers' not in x",
-        );
+    for command_name in ["hosts", "peers"] {
+        let (output, is_root) = discovery(command_name, false);
+        if is_root {
+            assert!(output.status.success());
+            json(
+                &output,
+                "assert x['snapshot_only'] is True\nassert len(x['peers'])==1\np=x['peers'][0]\nassert p['node_id']=='n-peer'\nassert p['certificate_name']=='remote.fixture.ts.net'\nassert p['addresses']==['100.64.0.2']\nassert p['desktop_available'] is None and p['access_authorized'] is None",
+            );
+        } else {
+            assert_eq!(output.status.code(), Some(1));
+            json(
+                &output,
+                "assert x['error']['code']=='untrusted_localapi'\nassert 'peers' not in x",
+            );
+        }
     }
 }
+
 #[test]
 fn sigint_terminates_a_stalled_lookup_without_claiming_success() {
-    let (output, is_root) = discovery(true);
+    let (output, is_root) = discovery("hosts", true);
     if is_root {
         assert_eq!(output.status.code(), Some(130));
         json(

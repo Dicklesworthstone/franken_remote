@@ -9,6 +9,7 @@ fn every_topic_has_bounded_help_in_both_command_forms() {
     for (topic, expected) in [
         (&["connect"][..], OVERVIEW),
         (&["hosts"][..], OVERVIEW),
+        (&["peers"][..], OVERVIEW),
         (&["hosts", "save"][..], OVERVIEW),
         (&["hosts", "saved"][..], OVERVIEW),
         (&["hosts", "forget"][..], OVERVIEW),

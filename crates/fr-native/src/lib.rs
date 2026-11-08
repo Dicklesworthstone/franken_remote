@@ -139,3 +139,6 @@ pub mod approval_surface;
 
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
 pub mod file_progress;
+
+#[cfg(all(target_os = "macos", feature = "cli"))]
+pub mod tailnet_macos;

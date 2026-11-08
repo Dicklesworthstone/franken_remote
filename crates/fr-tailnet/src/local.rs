@@ -22,7 +22,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::Poll,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 #[derive(Clone)]
@@ -278,15 +278,7 @@ pub(crate) fn now(cx: &Cx) -> Result<u64, Error> {
         .as_nanos()
         / 1000)
 }
-fn wall_now() -> Result<u64, Error> {
-    u64::try_from(
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| Error::Clock)?
-            .as_micros(),
-    )
-    .map_err(|_| Error::Clock)
-}
+use crate::discovery::wall_now;
 /// Pulse cancellation independently of a stalled HTTP read without restarting
 /// that read or accumulating timers. Dropping this future drops its owned socket.
 async fn bounded<T>(
@@ -362,12 +354,11 @@ pub use certificate::{
 };
 
 mod target;
-pub use target::{PeerSelector, PeerTarget};
+pub use target::PeerTarget;
 
 mod dial;
 pub use dial::{ConnectedPeer, DialRoute, NativeClient};
 
 mod discovery;
-pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
 
 pub mod ingress;

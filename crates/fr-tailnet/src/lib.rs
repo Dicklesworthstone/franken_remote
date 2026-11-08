@@ -1,12 +1,20 @@
 #![forbid(unsafe_code)]
-// Off Linux only the platform-neutral trust/endpoint helpers are reachable;
-// the LocalAPI adapters and their metadata parsers are intentionally inert.
+// Authenticated LocalAPI authority remains Linux-only. macOS also consumes
+// the bounded informational discovery parser through its signed native bridge.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
 //! The Linux adapter implements exact installed-daemon membership admission and
 //! an explicit app-capability alternative. It never infers membership from names,
 //! routed prefixes, reachability, or missing authority evidence.
 mod expiry;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod discovery;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod selector;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use selector::PeerSelector;
 #[cfg(target_os = "linux")]
 mod outbound;
 #[cfg(target_os = "linux")]
@@ -29,8 +37,7 @@ mod metadata;
 #[cfg(target_os = "linux")]
 pub use local::{
     CertificateEvent, CertificateEventKind, CertificatePolicy, ConnectedPeer, CredentialStatus,
-    DialRoute, DiscoveredPeer, Discovery, DiscoveryExclusions, LocalApi, NativeClient,
-    NativeServerIdentity, NodeIdentity, PeerSelector, PeerTarget, PeerTransportPath, ingress,
+    DialRoute, LocalApi, NativeClient, NativeServerIdentity, NodeIdentity, PeerTarget, ingress,
 };
 
 use std::{fmt, net::SocketAddr, time::Duration};

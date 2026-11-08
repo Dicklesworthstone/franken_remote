@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
-// Off Linux every command refuses before using the shared option/output code.
+// Other platforms retain shared grammar/output; only implemented paths dispatch.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
 #[path = "fr_cli/closure.rs"]
 mod closure;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fr_cli/discovery.rs"]
+mod discovery;
 #[path = "fr_cli/file_commands.rs"]
 mod file_commands;
 #[path = "fr_cli/help.rs"]
@@ -21,6 +24,9 @@ mod robot_input;
 mod robot_observe;
 #[path = "fr_cli/robot_open.rs"]
 mod robot_open;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[path = "fr_cli/runtime.rs"]
+mod runtime;
 #[cfg(target_os = "linux")]
 #[path = "fr_cli/saved_hosts.rs"]
 mod saved_hosts;
@@ -178,7 +184,17 @@ fn main() -> ExitCode {
     }
     #[cfg(target_os = "linux")]
     let result = linux::run(&parsed);
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    let result = if matches!(parsed.command, options::Command::Hosts) {
+        discovery::run(&parsed)
+    } else {
+        Err(Failure::new(
+            "platform_unavailable",
+            "This macOS client currently supports local Tailscale discovery with fr hosts; native connection and desktop operations are not implemented.",
+            2,
+        ))
+    };
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(Failure::new(
         "platform_unavailable",
         "Tailnet local authority integration in fr is currently implemented on Linux.",

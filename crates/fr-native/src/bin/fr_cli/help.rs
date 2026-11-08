@@ -28,7 +28,14 @@ pub(super) fn page(args: &[String]) -> Result<Option<&'static str>, InvalidReque
         [command]
             if matches!(
                 command.as_str(),
-                "connect" | "hosts" | "status" | "doctor" | "inspect" | "displays" | "disconnect"
+                "connect"
+                    | "hosts"
+                    | "peers"
+                    | "status"
+                    | "doctor"
+                    | "inspect"
+                    | "displays"
+                    | "disconnect"
             ) =>
         {
             OVERVIEW

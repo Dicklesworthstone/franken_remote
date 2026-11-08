@@ -15,6 +15,9 @@ pub(super) fn parse(args: &[String]) -> Result<Options, Failure> {
         if !seen.insert(flag) {
             return Err(usage());
         }
+        if args[0] == "peers" && !matches!(flag, "--json" | "--socket") {
+            return Err(usage());
+        }
         match flag {
             "--json" => json = true,
             "--socket" => socket = Some(next_path(args, &mut index)?),
@@ -77,10 +80,12 @@ mod tests {
     }
     #[test]
     fn ordinary_discovery_stays_local_and_probe_bounds_are_explicit() {
-        assert!(matches!(
-            options("hosts --json").unwrap().command,
-            Command::Hosts
-        ));
+        for name in ["hosts", "peers"] {
+            let parsed = options(&format!("{name} --json --socket /protected.sock")).unwrap();
+            assert!(matches!(parsed.command, Command::Hosts));
+            assert!(parsed.json);
+            assert_eq!(parsed.socket, Some(PathBuf::from("/protected.sock")));
+        }
         let Command::ProbeHosts(p) = options("hosts --probe --experimental-native --probe-limit 7 --port 9443 --ipv6 --trust-roots /tmp/roots.pem --json").unwrap().command else { panic!("probe hosts"); };
         assert_eq!(p.limit, 7);
         assert_eq!(p.port, 9443);
@@ -112,6 +117,17 @@ mod tests {
             "--probe --experimental-native node-or-subnet",
         ] {
             assert!(options(&format!("hosts {flags}")).is_err(), "{flags}");
+        }
+        for flags in [
+            "--probe",
+            "--probe --experimental-native",
+            "saved",
+            "--json --json",
+        ] {
+            assert_eq!(
+                options(&format!("peers {flags}")).err().unwrap().code,
+                "invalid_arguments"
+            );
         }
     }
 }

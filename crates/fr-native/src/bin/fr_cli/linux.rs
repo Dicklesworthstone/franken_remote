@@ -38,18 +38,20 @@ mod robot;
 mod session_control;
 #[cfg(feature = "linux-desktop")]
 use super::options::DisplayChoice;
+#[cfg(any(test, feature = "linux-desktop"))]
+use super::runtime::await_shutdown;
 use super::{
     Failure,
+    discovery::tailnet,
     options::{Command, Connection, DoctorOptions, Options, Target},
     output,
+    runtime::{self, Shutdown},
 };
-use asupersync::{
-    cx::Cx,
-    runtime::{Runtime, RuntimeBuilder},
-    signal::{Signal, SignalKind, signal},
-    tls::Certificate,
-    types::{Budget, CancelKind},
-};
+#[cfg(test)]
+use asupersync::runtime::RuntimeBuilder;
+#[cfg(any(test, feature = "linux-desktop"))]
+use asupersync::types::Budget;
+use asupersync::{cx::Cx, runtime::Runtime, tls::Certificate};
 #[cfg(feature = "linux-desktop")]
 use fr_native::{
     desktop::{
@@ -58,6 +60,7 @@ use fr_native::{
     },
     viewer_window::{Status as WindowStatus, StopReason, WindowControl},
 };
+use fr_tailnet::Error as TailnetError;
 #[cfg(feature = "linux-desktop")]
 use fr_wire::display::Catalog;
 use fr_wire::negotiation::Offer;
@@ -67,21 +70,18 @@ use frd::{
     session_startup::{InteractiveViewerState, Presentation, viewer_events::Layout},
 };
 use frd::{
-    native_connection::{
-        AddressFamily, Client, Configuration, LocalApi, PeerSelector, TailnetError,
-    },
+    native_connection::{AddressFamily, Client, Configuration, LocalApi, PeerSelector},
     session_startup::ObserverPolicy,
 };
-use std::{
-    cell::Cell,
-    future::{Future, poll_fn},
-    path::Path,
-    pin::pin,
-    task::Poll,
-    time::Duration,
-};
+use std::{cell::Cell, path::Path, time::Duration};
 #[cfg(feature = "linux-desktop")]
 use std::{cell::RefCell, rc::Rc};
+#[cfg(any(test, feature = "linux-desktop"))]
+use std::{
+    future::{Future, poll_fn},
+    pin::pin,
+    task::Poll,
+};
 
 fn failure(code: &'static str, next: &'static str) -> Failure {
     Failure::new(code, next, 1)
@@ -168,102 +168,7 @@ fn input_attach_stopped(error: fr_native::desktop::Error) -> Option<Failure> {
     };
     input_stopped(reason)
 }
-fn tailnet(error: TailnetError) -> Failure {
-    match error {
-        TailnetError::Cancelled => Failure::new(
-            "cancelled",
-            "The lookup/session was stopped; no actions were replayed.",
-            130,
-        ),
-        TailnetError::LocalApiUnavailable => failure(
-            "tailscale_unavailable",
-            "Start installed Tailscale and check the protected LocalAPI socket.",
-        ),
-        TailnetError::BackendNotRunning => failure(
-            "tailscale_not_running",
-            "Connect the installed Tailscale client before retrying.",
-        ),
-        TailnetError::UntrustedLocalApi => failure(
-            "untrusted_localapi",
-            "Use the root-owned installed tailscaled endpoint; do not substitute a user-owned proxy.",
-        ),
-        TailnetError::Timeout => failure(
-            "tailnet_lookup_timeout",
-            "Check the installed Tailscale daemon before retrying.",
-        ),
-        TailnetError::HandshakeTimeout => failure(
-            "host_not_answering",
-            "The host did not complete the connection in time: check that frd run is running there (it serves one viewer at a time, so another session may be active) and that tailnet policy allows UDP to its port; fr hosts shows the path.",
-        ),
-        TailnetError::NativeRouteIo => failure(
-            "tailnet_route_unavailable",
-            "The local UDP path failed during connection setup. Check the installed Tailscale connection and routing; fr hosts shows the host path.",
-        ),
-        TailnetError::KeyExpired => failure(
-            "tailnet_key_expired",
-            "Reauthenticate the affected Tailscale node locally.",
-        ),
-        TailnetError::PeerCertificateRejected => failure(
-            "tls_certificate_rejected",
-            "The host's certificate did not verify for the selected tailnet name against the trusted roots (wrong host, expired, or an untrusted issuer; the TLS stack does not say which). Check the host's Tailscale certificate and any --trust-roots; never disable certificate checks.",
-        ),
-        TailnetError::NativeHandshake
-        | TailnetError::CertificateRejected
-        | TailnetError::InvalidTrustStore => failure(
-            "tls_identity_refused",
-            "Verify the locally provisioned CA roots and selected canonical host; never disable certificate checks.",
-        ),
-        _ => failure(
-            "tailnet_identity_refused",
-            "Inspect installed Tailscale identity, sharing and policy; rerun fr hosts before reconnecting.",
-        ),
-    }
-}
-struct Shutdown {
-    interrupt: Signal,
-    terminate: Signal,
-    hangup: Signal,
-}
 impl Shutdown {
-    fn new() -> Result<Self, Failure> {
-        let open = |kind| {
-            signal(kind).map_err(|_| {
-                failure(
-                    "signal_unavailable",
-                    "Resolve local signal registration before starting a session.",
-                )
-            })
-        };
-        Ok(Self {
-            interrupt: open(SignalKind::interrupt())?,
-            terminate: open(SignalKind::terminate())?,
-            hangup: open(SignalKind::hangup())?,
-        })
-    }
-    async fn run<T>(
-        &mut self,
-        cx: &Cx,
-        stopped: &Cell<bool>,
-        operation: impl Future<Output = T>,
-    ) -> T {
-        await_shutdown(cx, stopped, operation, self.requested()).await
-    }
-    async fn requested(&mut self) {
-        let mut interrupt = pin!(self.interrupt.recv());
-        let mut terminate = pin!(self.terminate.recv());
-        let mut hangup = pin!(self.hangup.recv());
-        poll_fn(|task| {
-            if interrupt.as_mut().poll(task).is_ready()
-                || terminate.as_mut().poll(task).is_ready()
-                || hangup.as_mut().poll(task).is_ready()
-            {
-                Poll::Ready(())
-            } else {
-                Poll::Pending
-            }
-        })
-        .await;
-    }
     #[cfg(feature = "linux-desktop")]
     async fn run_connection<T>(
         &mut self,
@@ -307,26 +212,10 @@ async fn local_or_signal<E>(
     })
     .await;
 }
-/// Signal readiness cancels the supervisor but NEVER drops the reconnect future:
-/// its independent bounded cleanup still runs and its actual result is retained.
-async fn await_shutdown<T>(
-    cx: &Cx,
-    stopped: &Cell<bool>,
-    operation: impl Future<Output = T>,
-    shutdown: impl Future<Output = ()>,
-) -> T {
-    let mut shutdown = pin!(shutdown);
-    let mut operation = pin!(operation);
-    poll_fn(|task| {
-        if !stopped.get() && shutdown.as_mut().poll(task).is_ready() {
-            stopped.set(true);
-            cx.cancel_fast(CancelKind::User);
-        }
-        operation.as_mut().poll(task)
-    })
-    .await
-}
 pub fn run(options: &Options) -> Result<String, Failure> {
+    if matches!(options.command, Command::Hosts) {
+        return super::discovery::run(options);
+    }
     run_mode(options, false)
 }
 /// Local diagnostic children finish before any runtime or tailnet lookup.
@@ -350,19 +239,7 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
         return Ok(text);
     }
     let mut shutdown = Shutdown::new()?;
-    let runtime = RuntimeBuilder::current_thread()
-        .enable_platform_reactor(true)
-        .build()
-        .map_err(|_| {
-            failure(
-                "runtime_unavailable",
-                "Check local process/thread resources.",
-            )
-        })?;
-    let cx = runtime
-        .handle()
-        .try_request_cx_with_budget(Budget::INFINITE)
-        .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))?;
+    let (runtime, cx) = runtime::create()?;
     let stopped = Cell::new(false);
     // Local session closure still works when installed Tailscale is stopped or
     // its socket is unavailable. It never opens another remote connection.
@@ -388,12 +265,7 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
     };
     match &options.command {
         Command::Help => unreachable!("help handled before runtime construction"),
-        Command::Hosts => {
-            let snapshot = runtime
-                .block_on(shutdown.run(&cx, &stopped, api.discover(&cx)))
-                .map_err(tailnet)?;
-            Ok(output::hosts(&snapshot, options.json))
-        }
+        Command::Hosts => unreachable!("discovery handled before session runtime"),
         Command::ProbeHosts(probe) => hosts_probe::run(
             &runtime,
             &cx,
@@ -1729,36 +1601,6 @@ mod tests {
             assert_eq!(tailnet(other).code, "tls_identity_refused");
         }
     }
-    #[test]
-    fn signal_cancels_without_abandoning_the_original_cleanup_future() {
-        let runtime = RuntimeBuilder::current_thread()
-            .enable_platform_reactor(true)
-            .build()
-            .unwrap();
-        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-        let stopped = Cell::new(false);
-        let collected = Cell::new(false);
-        let result = runtime.block_on(await_shutdown(
-            &cx,
-            &stopped,
-            async {
-                assert!(cx.is_cancel_requested());
-                asupersync::time::sleep_until(
-                    cx.timer_driver()
-                        .unwrap()
-                        .now()
-                        .saturating_add_nanos(1_000_000),
-                )
-                .await;
-                collected.set(true);
-                42
-            },
-            async {},
-        ));
-        assert_eq!(result, 42);
-        assert!(stopped.get() && collected.get());
-    }
-
     #[test]
     fn a_failed_local_control_service_does_not_forge_a_stop_or_block_signals() {
         let polls = Cell::new(0);

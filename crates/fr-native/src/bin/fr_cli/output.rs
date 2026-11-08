@@ -128,8 +128,8 @@ pub fn write(text: &str) -> io::Result<()> {
     out.write_all(text.as_bytes())?;
     out.flush()
 }
-#[cfg(target_os = "linux")]
-pub fn hosts(snapshot: &frd::native_connection::Discovery, json: bool) -> String {
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn hosts(snapshot: &fr_tailnet::Discovery, json: bool) -> String {
     let excluded = snapshot.excluded();
     let mut rows = String::new();
     for (i, peer) in snapshot.peers().iter().enumerate() {
@@ -814,7 +814,7 @@ mod tests {
         assert!(text.contains("Known Restrictions:"));
     }
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn hosts_formats_direct_and_derp_relay_in_json_and_text() {
         let peer_direct = fr_tailnet::DiscoveredPeer::from_parts(
             "node-1".into(),
@@ -840,6 +840,12 @@ mod tests {
         );
 
         let json = hosts(&discovery, true);
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["snapshot_only"], true);
+        for peer in value["peers"].as_array().unwrap() {
+            assert!(peer["desktop_available"].is_null());
+            assert!(peer["access_authorized"].is_null());
+        }
         assert!(json.contains("\"schema_version\":1"));
         assert!(
             json.contains(

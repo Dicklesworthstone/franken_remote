@@ -22,7 +22,7 @@ separate, locally installed `fr-media-worker` remains its supervised decoder.
 Building that worker additionally requires `linux-media` and the selected FFmpeg
 SDK. Native package verification is still an installation responsibility.
 
-`hosts` reads the protected installed `tailscaled` Unix socket. A locally selected
+On Linux, `hosts` reads the protected installed `tailscaled` Unix socket. A locally selected
 absolute `--socket` path still requires a root-owned peer; it is not permission to
 use a user-owned proxy or supply identity JSON. No scan, connection, codec probe,
 certificate issuance or hosting operation is performed. The list contains stable
@@ -49,6 +49,56 @@ peer's acknowledged capability intersection or typed failure; unfinished and
 omitted candidates stay explicit. This opens no observation, media or input.
 The advertisement does not qualify the current desktop or codec; see
 [bounded capability discovery](../NATIVE_CAPABILITY_INSPECTION.md#bounded-tailnet-discovery).
+
+## macOS discovery
+
+Build the default CLI on macOS with the repository-pinned Rust toolchain and
+Apple's command-line development tools:
+
+```sh
+cargo build -p fr-native --bin fr --locked
+./target/debug/fr hosts --json
+./target/debug/fr peers --json
+```
+
+Both commands take one informational snapshot. `peers` is a snapshot-only alias;
+it rejects saved-host operations and remote probes. The Linux `hosts` behavior
+above remains unchanged. macOS supports the standard installed
+`/Applications/Tailscale.app/Contents/MacOS/Tailscale` bridge, selected exactly
+with `status --json` and `TAILSCALE_BE_CLI=1` as documented by
+[Tailscale](https://tailscale.com/docs/reference/tailscale-cli?tab=macos).
+No executable is selected from the caller's `PATH`, and no shell is used.
+
+The child starts suspended in its own process group. Before it executes,
+Apple's dynamic `SecCode` check must establish an Apple signing anchor,
+[Tailscale Team ID](https://tailscale.com/docs/integrations/mdm/mac)
+`W5364U7YZB`, and either `io.tailscale.ipn.macsys` or `io.tailscale.ipn.macos`,
+the [official GUI variant identifiers](https://github.com/tailscale/tailscale/blob/v1.104.2/version/prop.go).
+The parent's cancellation and deadline are rechecked after verification and
+before resuming that same child. This validates the actual spawned image,
+including when a pathname is replaced during setup. The native boundary uses
+[Apple's suspended-spawn contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/posix_spawnattr_getflags.3.html);
+the selected user, installed Tailscale authority and host OS remain trusted.
+
+The environment is cleared, then supplies only CLI mode, system utility paths,
+the C locale and the home directory from the OS user record. The child receives
+no inherited application descriptors or stdin. Raw stderr is not exposed.
+Stdout is bounded to 1 MiB and parsed by the existing status projection; no
+human-oriented output becomes identity evidence. Missing or untrusted apps,
+nonzero exits, malformed output, cancellation and timeout produce typed errors.
+The single one-second lookup budget starts before blocking-pool admission.
+Cancellation cleanup retains and reaps the original child before this one-shot
+CLI returns, so cleanup can take longer than the lookup's work deadline.
+
+macOS `--socket` refuses with `localapi_endpoint_unsupported` before starting
+a runtime. This bridge grants no session authority and does not loosen Linux's
+credential-checked Unix socket adapter. `connect`, remote `--probe` and hosting
+remain `platform_unavailable` on macOS.
+
+**Evidence:** this is a consumed source implementation. The macOS build,
+signature-refusal/reap regression and a real installed-app snapshot still need
+to run. In particular, success with either app installation variant is not yet
+qualified. Desktop decoding, rendering and input are outside this slice.
 
 ## Check local capture, encoding and input readiness
 

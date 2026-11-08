@@ -723,7 +723,7 @@ pub fn parse(args: &[String]) -> Result<Options, Failure> {
         {
             parse_saved_hosts(args)
         }
-        "hosts" => hosts::parse(args),
+        "hosts" | "peers" => hosts::parse(args),
         "doctor" => doctor::parse(args),
         "connect" | "displays" => {
             let node = args.get(1).ok_or_else(usage)?;
