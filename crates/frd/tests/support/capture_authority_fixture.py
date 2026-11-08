@@ -28,6 +28,12 @@ header = read(36)
 configuration = read(struct.unpack('>I', header[32:])[0])
 assert struct.unpack('>H', header[6:8])[0] == 1
 generation = struct.unpack('>Q', configuration[20:28])[0]
+# A start slower than the parent's first sampled authority cap, or none at all.
+if MODE == 'silent-start':
+    time.sleep(60)
+    raise SystemExit(9)
+if MODE == 'slow-start':
+    time.sleep(0.7)
 reply(header, 257, configuration)
 pending = None
 while True:

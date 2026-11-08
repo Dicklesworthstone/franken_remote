@@ -18,10 +18,13 @@ pub struct DiscoveredSource {
 impl DiscoveredSource {
     pub async fn start(control: &ObservationControl, launch: Launch) -> Result<Self, Error> {
         control.check()?;
-        let discovery = MonitorDiscovery::start(
+        // A fixed work ceiling, with the original authority re-read on every
+        // poll (as running capture): a timely renewal keeps a slow start.
+        let discovery = MonitorDiscovery::start_checked(
             &control.context(),
             launch,
-            control.deadline(Duration::from_secs(2))?,
+            crate::worker::Deadline::after(&control.context(), Duration::from_secs(2))?,
+            || control.live_deadline(),
         )
         .await?;
         control.check()?;
@@ -41,10 +44,12 @@ impl DiscoveredSource {
     }
     pub async fn check_display(&mut self) -> Result<(), Error> {
         let mut guard = SelectionGuard::new(&self.control);
+        let control = &self.control;
         self.discovery
-            .check_display(
-                &self.control.context(),
-                self.control.deadline(Duration::from_secs(2))?,
+            .check_display_checked(
+                &control.context(),
+                crate::worker::Deadline::after(&control.context(), Duration::from_secs(2))?,
+                || control.live_deadline(),
             )
             .await
             .map_err(|error| self.control.capture_failure(error))?;
@@ -148,14 +153,19 @@ impl DiscoveredSource {
         {
             return Err(Error::InvalidFrame);
         }
-        // Capture the native budget at CALL time, not the first future poll.
-        let deadline = self.control.deadline(Duration::from_secs(2))?;
+        // Capture the native budget at CALL time, not the first future poll,
+        // and refuse an already elapsed authority here, synchronously.
+        self.control.live_deadline()?;
+        let deadline =
+            crate::worker::Deadline::after(&self.control.context(), Duration::from_secs(2))?;
         Ok(async move {
             let mut guard = guard;
             let mut discovery = self.discovery;
             let control = self.control;
             discovery
-                .configure(&control.context(), choice, configuration, deadline)
+                .configure_checked(&control.context(), choice, configuration, deadline, || {
+                    control.live_deadline()
+                })
                 .await
                 .map_err(|error| control.capture_failure(error))?;
             control.check()?;

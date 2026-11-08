@@ -4,7 +4,10 @@ use super::*;
 use asupersync::{time::sleep_until, types::Time};
 use fr_core::{authority::AuthorityError, time::HostInstant};
 use fr_media::access_unit::FrameId;
-use frd::worker::{Error as WorkerError, State};
+use frd::{
+    media::discovery::DiscoveredSource,
+    worker::{Error as WorkerError, State},
+};
 use std::{
     future::{Future, poll_fn},
     pin::pin,
@@ -27,33 +30,74 @@ fn observation(runtime: &Runtime, id: u128) -> ObservationControl {
     ObservationControl::new(cx, authority).unwrap()
 }
 
-async fn delayed_source(control: &ObservationControl, mode: &str) -> CaptureSource {
+fn fixture(name: &str, source: &str, mode: &str) -> std::path::PathBuf {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let file = std::env::temp_dir().join(format!(
-        "fr-capture-authority-{}-{}.py",
+        "fr-{name}-authority-{}-{}.py",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    crate::executable::write(
-        &file,
-        include_str!("../support/capture_authority_fixture.py").replace("@MODE@", mode),
+    crate::executable::write(&file, source.replace("@MODE@", mode));
+    file
+}
+
+fn configuration() -> Configuration {
+    Configuration {
+        width: 320,
+        height: 240,
+        fps: 30,
+        backend: Backend::SoftwareExplicit,
+        bitrate: 2_000_000,
+        max_access_unit_bytes: 1024 * 1024,
+        generation: epoch().configuration,
+    }
+}
+
+async fn start_source(control: &ObservationControl, mode: &str) -> Result<CaptureSource, Error> {
+    let file = fixture(
+        "capture",
+        include_str!("../support/capture_authority_fixture.py"),
+        mode,
     );
     CaptureSource::start(
         control,
         Launch::new(&file, ":0", None, Role::Capture, 91).unwrap(),
-        Configuration {
-            width: 320,
-            height: 240,
-            fps: 30,
-            backend: Backend::SoftwareExplicit,
-            bitrate: 2_000_000,
-            max_access_unit_bytes: 1024 * 1024,
-            generation: epoch().configuration,
-        },
+        configuration(),
     )
     .await
-    .unwrap()
+}
+
+async fn delayed_source(control: &ObservationControl, mode: &str) -> CaptureSource {
+    start_source(control, mode).await.unwrap()
+}
+
+async fn discover(control: &ObservationControl, mode: &str) -> Result<DiscoveredSource, Error> {
+    let file = fixture(
+        "discovery",
+        include_str!("../support/local_source_fixture.py"),
+        mode,
+    );
+    DiscoveredSource::start(
+        control,
+        Launch::new(&file, ":0", None, Role::Capture, 92).unwrap(),
+    )
+    .await
+}
+
+fn refused<T>(result: Result<T, Error>) -> Error {
+    result
+        .err()
+        .expect("the start must not outlive its authority")
+}
+
+fn expired(error: Error) -> bool {
+    // Expiry may fall between the authority callback and the worker's second
+    // clock sample. Both paths fence the same bound.
+    matches!(
+        error,
+        Error::Authority(AuthorityError::ObservationExpired) | Error::Worker(WorkerError::Deadline)
+    )
 }
 
 async fn near_expiry(clock: &Cx, control: &ObservationControl) -> HostInstant {
@@ -219,6 +263,108 @@ fn unanswered_challenges_and_revocation_do_not_keep_a_silent_capture_alive() {
             }
             assert_eq!(source.worker_mut().state(), State::Poisoned);
             reap_failed(&rt, &mut source).await;
+        }
+    });
+}
+
+// Startup, as running capture: each start exchange keeps one fixed two-second
+// work ceiling and re-reads the original authority on every poll. A timely
+// renewal carries a start slower than the first sampled authority cap; with no
+// renewal that cap still ends it.
+
+#[test]
+fn renewed_observation_keeps_a_slow_capture_start_past_the_old_cap() {
+    run_shared!(rt, clock, {
+        for (id, renew) in [(306, true), (307, false)] {
+            let control = observation(&rt, id);
+            let original_until = near_expiry(&clock, &control).await;
+            if renew {
+                let (result, responses) =
+                    with_renewals(&clock, &control, start_source(&control, "slow-start")).await;
+                let mut source = result.unwrap();
+                assert!(responses >= 2);
+                assert!(host_now(&clock).unwrap() >= original_until);
+                assert!(control.observation_until().unwrap() > original_until);
+                control.check().unwrap();
+                stop(&mut source, &clock).await;
+            } else {
+                let error = refused(start_source(&control, "slow-start").await);
+                assert!(expired(error), "{error:?}");
+                assert!(host_now(&clock).unwrap() >= original_until);
+            }
+        }
+    });
+}
+
+#[test]
+fn renewals_cannot_carry_a_silent_capture_start_past_its_two_second_ceiling() {
+    run_shared!(rt, clock, {
+        let control = observation(&rt, 308);
+        let before = host_now(&clock).unwrap();
+        let (result, responses) =
+            with_renewals(&clock, &control, start_source(&control, "silent-start")).await;
+        assert_eq!(refused(result), Error::Worker(WorkerError::Deadline));
+        assert!(responses >= 5);
+        // Not the first sampled one-second authority cap: the work ceiling.
+        assert!(host_now(&clock).unwrap().as_micros() >= before.as_micros() + 2_000_000);
+        control.check().unwrap();
+    });
+}
+
+#[test]
+fn renewed_observation_keeps_a_slow_monitor_discovery_past_the_old_cap() {
+    run_shared!(rt, clock, {
+        for (id, renew) in [(309, true), (310, false)] {
+            let control = observation(&rt, id);
+            let original_until = near_expiry(&clock, &control).await;
+            if renew {
+                let (result, responses) =
+                    with_renewals(&clock, &control, discover(&control, "slow-discover")).await;
+                let discovered = result.unwrap();
+                assert!(responses >= 2);
+                assert!(host_now(&clock).unwrap() >= original_until);
+                control.check().unwrap();
+                // The same child still configures and stops normally.
+                let catalog = discovered.catalog().unwrap();
+                assert_eq!(catalog.displays().len(), 2);
+                let choice = catalog.selection(catalog.displays()[0].handle).unwrap();
+                let mut source = discovered
+                    .configure_local(choice, configuration())
+                    .unwrap()
+                    .await
+                    .unwrap();
+                stop(&mut source, &clock).await;
+            } else {
+                let error = refused(discover(&control, "slow-discover").await);
+                assert!(expired(error), "{error:?}");
+                assert!(host_now(&clock).unwrap() >= original_until);
+            }
+        }
+    });
+}
+
+#[test]
+fn renewed_observation_keeps_a_slow_monitor_configuration_past_the_old_cap() {
+    run_shared!(rt, clock, {
+        for (id, renew) in [(311, true), (312, false)] {
+            let control = observation(&rt, id);
+            let discovered = discover(&control, "slow-configure").await.unwrap();
+            let catalog = discovered.catalog().unwrap();
+            let choice = catalog.selection(catalog.displays()[0].handle).unwrap();
+            let original_until = near_expiry(&clock, &control).await;
+            let configuring = discovered.configure_local(choice, configuration()).unwrap();
+            if renew {
+                let (result, responses) = with_renewals(&clock, &control, configuring).await;
+                let mut source = result.unwrap();
+                assert!(responses >= 2);
+                assert!(host_now(&clock).unwrap() >= original_until);
+                control.check().unwrap();
+                stop(&mut source, &clock).await;
+            } else {
+                let error = refused(configuring.await);
+                assert!(expired(error), "{error:?}");
+                assert!(host_now(&clock).unwrap() >= original_until);
+            }
         }
     });
 }

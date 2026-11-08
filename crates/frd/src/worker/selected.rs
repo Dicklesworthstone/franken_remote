@@ -1,5 +1,5 @@
 //! Discover/configure retains the same private child and original native inventory.
-use super::{Configuration, Cx, Deadline, Error, Kind, Launch, Role, State, Worker, worker};
+use super::{Configuration, Cx, Deadline, Error, Kind, Launch, Role, State, Time, Worker, worker};
 use fr_core::limits::ProtocolLimits;
 use fr_wire::display::{Catalog, Select};
 
@@ -14,19 +14,33 @@ pub struct MonitorDiscovery {
 }
 impl MonitorDiscovery {
     pub async fn start(cx: &Cx, launch: Launch, deadline: Deadline) -> Result<Self, Error> {
+        Self::start_checked(cx, launch, deadline, || Ok(deadline.0)).await
+    }
+    /// `start` with discovery checked against the caller's live authority on
+    /// every poll. A timely renewal can carry it past the first sampled expiry;
+    /// nothing moves the original work ceiling.
+    pub(crate) async fn start_checked<E: From<Error>>(
+        cx: &Cx,
+        launch: Launch,
+        deadline: Deadline,
+        mut live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<Self, E> {
         if launch.role != Role::Capture {
-            return Err(Error::Protocol(worker::Error::WrongRole));
+            return Err(Error::Protocol(worker::Error::WrongRole).into());
         }
         super::runtime_ready(cx)?;
-        if super::now(cx)? >= deadline.0 {
-            return Err(Error::Deadline);
+        // No process starts at an elapsed work or authority bound.
+        let until = live()?.min(deadline.0);
+        if super::now(cx)? >= until {
+            return Err(Error::Deadline.into());
         }
         let mut worker = Worker::spawn(launch, ProtocolLimits::ABSOLUTE)?;
         let result = worker
-            .exchange(cx, Kind::DiscoverMonitors, Vec::new(), deadline)
+            .exchange_checked(cx, Kind::DiscoverMonitors, Vec::new(), None, deadline, live)
             .await?;
         let native_catalog =
-            worker::capture::monitors::decode_catalog(result.body(), &worker.limits)?;
+            worker::capture::monitors::decode_catalog(result.body(), &worker.limits)
+                .map_err(Error::from)?;
         let catalog = aliases(&native_catalog, &worker.limits)?;
         Ok(Self {
             worker,
@@ -45,11 +59,21 @@ impl MonitorDiscovery {
     }
     /// No frame is captured; this receipt must never refresh pixel freshness.
     pub async fn check_display(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), Error> {
+        self.check_display_checked(cx, deadline, || Ok(deadline.0))
+            .await
+    }
+    /// `check_display` checked against the caller's live authority, as `start_checked`.
+    pub(crate) async fn check_display_checked<E: From<Error>>(
+        &mut self,
+        cx: &Cx,
+        deadline: Deadline,
+        live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<(), E> {
         if self.worker.state != State::Starting {
-            return Err(Error::Unavailable);
+            return Err(Error::Unavailable.into());
         }
         self.worker
-            .exchange(cx, Kind::CheckMonitor, Vec::new(), deadline)
+            .exchange_checked(cx, Kind::CheckMonitor, Vec::new(), None, deadline, live)
             .await?;
         Ok(())
     }
@@ -62,13 +86,25 @@ impl MonitorDiscovery {
         configuration: Configuration,
         deadline: Deadline,
     ) -> Result<(), Error> {
+        self.configure_checked(cx, selection, configuration, deadline, || Ok(deadline.0))
+            .await
+    }
+    /// `configure` checked against the caller's live authority, as `start_checked`.
+    pub(crate) async fn configure_checked<E: From<Error>>(
+        &mut self,
+        cx: &Cx,
+        selection: Select,
+        configuration: Configuration,
+        deadline: Deadline,
+        live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<(), E> {
         if self.worker.state != State::Starting {
-            return Err(Error::Unavailable);
+            return Err(Error::Unavailable.into());
         }
         let chosen = self
             .catalog
             .selected(selection)
-            .map_err(|_| worker::Error::GeometryChanged)?;
+            .map_err(|_| Error::from(worker::Error::GeometryChanged))?;
         let position = self
             .catalog
             .displays()
@@ -83,15 +119,23 @@ impl MonitorDiscovery {
             configuration,
             native,
             self.native_catalog,
-        )?;
-        let limits = configuration.limits()?;
+        )
+        .map_err(Error::from)?;
+        let limits = configuration.limits().map_err(Error::from)?;
         let reply = self
             .worker
-            .exchange(cx, Kind::ConfigureMonitor, body.clone(), deadline)
+            .exchange_checked(
+                cx,
+                Kind::ConfigureMonitor,
+                body.clone(),
+                None,
+                deadline,
+                live,
+            )
             .await?;
         if reply.body() != body {
             self.worker.abort();
-            return Err(Error::Protocol(worker::Error::WrongState));
+            return Err(Error::Protocol(worker::Error::WrongState).into());
         }
         self.worker.selected = Some(
             self.catalog

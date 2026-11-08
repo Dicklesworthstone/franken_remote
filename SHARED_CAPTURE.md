@@ -98,7 +98,12 @@ work ceiling while each recipient enforces its own recovery deadline; one
 subscriber cannot shorten another viewer's worker lifetime. Neither a poll reply
 nor an authority renewal moves the work ceiling. Cursor reads retain a one-second
 ceiling and selected-monitor checks retain a two-second ceiling. Startup
-discovery and configuration keep their existing fixed admission deadlines.
+(capture start, monitor discovery, display checks and monitor configuration)
+keeps one fixed two-second ceiling per exchange in the same way. A start used to
+be capped at the authority expiry sampled when it was issued. With the
+one-second grant and its 500 ms refresh margin, that left about 0.5-1 s, and a
+slow worker start on a loaded host failed with `Worker(Deadline)` even though
+renewal was on time.
 
 While those operations wait for IPC, the worker rechecks the original
 `ObservationControl` and its shared tailnet lease before and after every native
@@ -125,11 +130,16 @@ timer wakeups, idle-I/O isolation and refusal around native polls. Three
 `shared_capture::live_authority` tests exercise actual supervised child IPC:
 delayed direct/Poll replies cross the old authority bound only with accepted
 responses, repeated Poll replies cannot restart the two-second work limit, and
-unanswered challenges/revocation terminate a silent child. Their child payloads
-are deliberately opaque and their observation responses are explicit fixtures.
-The new Rust tests await runtime execution at this checkpoint; source review and
-pinned formatting are separate evidence. This is not HEVC, live-tailnet or a
-longer production-native capture-stall qualification.
+unanswered challenges/revocation terminate a silent child. They passed on CI at
+3ad437d9. Four more cover startup:
+- a capture start, a monitor discovery and a monitor configuration whose replies
+  arrive after the old authority bound succeed with accepted responses, and fail
+  without them;
+- a capture start that never answers still ends at its two-second work ceiling.
+
+Their child payloads are deliberately opaque and their observation responses are
+explicit fixtures. This is not HEVC, live-tailnet or a longer production-native
+capture-stall qualification.
 
 ## Recovery deadlines belong to each viewer
 

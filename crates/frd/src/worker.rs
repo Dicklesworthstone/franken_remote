@@ -436,8 +436,30 @@ impl Worker {
         configuration: Configuration,
         deadline: Deadline,
     ) -> Result<Self, Error> {
-        let body = configuration.encode()?;
-        Self::start_with_body(cx, launch, configuration, body, Kind::Configure, deadline).await
+        Self::start_checked(cx, launch, configuration, deadline, || Ok(deadline.0)).await
+    }
+    /// `start` with the configure exchange checked against the caller's live
+    /// authority on every poll, as `request_checked` checks running work. A
+    /// timely renewal can carry a slow start past the first sampled expiry;
+    /// nothing moves the original work ceiling.
+    pub(crate) async fn start_checked<E: From<Error>>(
+        cx: &Cx,
+        launch: Launch,
+        configuration: Configuration,
+        deadline: Deadline,
+        live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<Self, E> {
+        let body = configuration.encode().map_err(Error::from)?;
+        Self::start_with_body(
+            cx,
+            launch,
+            configuration,
+            body,
+            Kind::Configure,
+            deadline,
+            live,
+        )
+        .await
     }
     /// Start the separate audio role: the worker connects the locally
     /// selected playback monitor and configures real Opus before echoing the
@@ -502,23 +524,31 @@ impl Worker {
                 configuration.encode_decoder(record)?,
             ),
         };
-        Self::start_with_body(cx, launch, configuration, body, kind, deadline).await
+        Self::start_with_body(cx, launch, configuration, body, kind, deadline, || {
+            Ok(deadline.0)
+        })
+        .await
     }
-    async fn start_with_body(
+    async fn start_with_body<E: From<Error>>(
         cx: &Cx,
         launch: Launch,
         configuration: Configuration,
         body: Vec<u8>,
         kind: Kind,
         deadline: Deadline,
-    ) -> Result<Self, Error> {
+        mut live: impl FnMut() -> Result<Time, E>,
+    ) -> Result<Self, E> {
         runtime_ready(cx)?;
-        let limits = configuration.limits()?;
-        if now(cx)? >= deadline.0 {
-            return Err(Error::Deadline);
+        let limits = configuration.limits().map_err(Error::from)?;
+        // No process starts at an elapsed work or authority bound.
+        let until = live()?.min(deadline.0);
+        if now(cx)? >= until {
+            return Err(Error::Deadline.into());
         }
         let mut worker = Self::spawn(launch, limits)?;
-        let result = worker.exchange(cx, kind, body.clone(), deadline).await;
+        let result = worker
+            .exchange_checked(cx, kind, body.clone(), None, deadline, live)
+            .await;
         let expected = match kind {
             Kind::ConfigureDecoder => Kind::DecoderReady,
             Kind::ConfigurePresentation => Kind::PresentationReady,
@@ -532,7 +562,7 @@ impl Worker {
             }
             Ok(_) => {
                 worker.abort();
-                Err(Error::Protocol(worker::Error::WrongState))
+                Err(Error::Protocol(worker::Error::WrongState).into())
             }
             Err(error) => {
                 worker.abort();

@@ -2,6 +2,7 @@
 """Synthetic monitor IPC peer. No X11, pixels, HEVC or permission evidence."""
 import os
 import struct
+import time
 
 MODE = "@MODE@"
 
@@ -28,6 +29,9 @@ def display(handle, x):
 
 h, kind, body = record()
 assert kind == 11 and not body
+# Slower than the parent's first sampled authority cap.
+if MODE == "slow-discover":
+    time.sleep(0.7)
 reply(h, 269, struct.pack(">QB", 70, 2) + display(201, -320) + display(202, 0))
 configured = False
 actual_rate = None
@@ -54,6 +58,8 @@ while True:
         generation = int.from_bytes(body[20:28], "big")
         actual_rate = int.from_bytes(body[12:16], "big")
         configured = True
+        if MODE == "slow-configure":
+            time.sleep(0.7)
         reply(h, 270, body)
         continue
     # ReadCursor: no separate cursor exists here (typed Unsupported).
