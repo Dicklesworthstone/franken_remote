@@ -34,7 +34,7 @@ impl Snapshot {
         let result = unsafe {
             fr_tailnet_macos_start(
                 c"/Applications/Tailscale.app/Contents/MacOS/Tailscale".as_ptr(),
-                &mut owner,
+                &raw mut owner,
                 std::ptr::null_mut(),
             )
         };
@@ -64,7 +64,7 @@ impl Snapshot {
                 self.0.as_ptr(),
                 buffer.as_mut_ptr(),
                 buffer.len(),
-                &mut length,
+                &raw mut length,
             )
         };
         match result {
@@ -105,7 +105,8 @@ mod tests {
         let mut pid = 0;
         // SAFETY: fixed actual system image and valid outputs. The same production
         // signature gate runs while suspended; there is no test bypass.
-        let result = unsafe { fr_tailnet_macos_start(c"/bin/echo".as_ptr(), &mut owner, &mut pid) };
+        let result =
+            unsafe { fr_tailnet_macos_start(c"/bin/echo".as_ptr(), &raw mut owner, &raw mut pid) };
         if !owner.is_null() {
             // SAFETY: even an unexpected successful negative owns a real child.
             unsafe { fr_tailnet_macos_destroy(owner) };
@@ -115,7 +116,7 @@ mod tests {
         assert!(pid > 0);
         let mut status = 0;
         // SAFETY: positive original child PID, valid status and Darwin WNOHANG.
-        let waited = unsafe { waitpid(pid, &mut status, 1) };
+        let waited = unsafe { waitpid(pid, &raw mut status, 1) };
         let error = std::io::Error::last_os_error();
         assert_eq!(waited, -1);
         assert_eq!(error.raw_os_error(), Some(10)); // Darwin ECHILD
