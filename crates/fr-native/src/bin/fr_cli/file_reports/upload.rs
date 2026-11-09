@@ -473,6 +473,8 @@ impl Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// No sent entries; `assert_eq!` prints the actual list on failure.
+    const NOTHING_SENT: [(usize, u64, bool); 0] = [];
 
     fn json(summary: &Summary) -> serde_json::Value {
         serde_json::from_str(&format!("{{\"schema_version\":1{}}}", summary.json())).unwrap()
@@ -520,7 +522,7 @@ mod tests {
             cleanup: None,
         };
         let summary = Summary::from_snapshot(&[Some(7)], &snapshot);
-        assert!(summary.sent.is_empty());
+        assert_eq!(summary.sent, NOTHING_SENT);
         assert_eq!(summary.refused, [(0, Some(7), "publication_unknown")]);
         assert!(!summary.text().contains("nothing sent"));
         let output = json(&summary);
@@ -537,7 +539,7 @@ mod tests {
         snapshot.cleanup = Some(Ok(()));
         let cleaned = Summary::from_snapshot(&[Some(7)], &snapshot);
         assert_eq!(json(&cleaned)["files_upload_cleanup"], "finished");
-        assert!(cleaned.sent.is_empty());
+        assert_eq!(cleaned.sent, NOTHING_SENT);
         snapshot.status.phase = SendPhase::Ended;
         snapshot.stage = None;
         snapshot.current = None;
@@ -593,12 +595,12 @@ mod tests {
                 (2, Some(0), "not_sent"),
             ]
         );
-        assert!(waiting.sent.is_empty());
+        assert_eq!(waiting.sent, NOTHING_SENT);
         let unavailable = Summary::unavailable(&sizes, "host_files_unavailable");
         assert_eq!(unavailable.absence, Some("host_files_unavailable"));
         assert_eq!(unavailable.refused, waiting.refused);
         let none = Summary::not_requested();
-        assert!(none.text().is_empty());
+        assert_eq!(none.text(), "");
         assert_eq!(json(&none)["files_absence"], "not_requested");
         assert!(select(&[]).unwrap().is_none());
     }
@@ -668,7 +670,7 @@ mod tests {
             "files_cancelled"
         );
         let cancelled = Summary::unavailable(&[Some(7)], "files_cancelled");
-        assert!(cancelled.sent.is_empty());
+        assert_eq!(cancelled.sent, NOTHING_SENT);
         assert_eq!(json(&cancelled)["files_refused"][0]["reason"], "not_sent");
         assert_eq!(json(&cancelled)["files_absence"], "files_cancelled");
         let refusal = selection_failure(SelectRefusal {

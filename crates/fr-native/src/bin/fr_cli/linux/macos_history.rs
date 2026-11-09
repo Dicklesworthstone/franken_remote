@@ -45,7 +45,7 @@ fn history(report: &Report) -> crate::ControlHistory {
     }
 }
 
-fn preserve(history: crate::ControlHistory, failure: &mut Failure) {
+fn preserve(history: &crate::ControlHistory, failure: &mut Failure) {
     let (mut json, mut text) = failure.control_history.map_or_else(
         || (String::new(), String::new()),
         |previous| (previous.json.clone(), previous.text.clone()),
@@ -66,7 +66,7 @@ pub(super) fn finish(
     let history = history(report);
     match result {
         Err(mut failure) => {
-            preserve(history, &mut failure);
+            preserve(&history, &mut failure);
             Err(failure)
         }
         Ok(text) if json => {
@@ -76,7 +76,7 @@ pub(super) fn finish(
                     "The session completion could not be formatted; earlier display-change cleanup and effect reports remain available in this error.",
                     1,
                 );
-                preserve(history, &mut failure);
+                preserve(&history, &mut failure);
                 return Err(failure);
             };
             Ok(format!("{prefix}{}}}\n", history.json))

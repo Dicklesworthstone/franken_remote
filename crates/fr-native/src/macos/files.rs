@@ -1,6 +1,6 @@
 //! Explicit file choices for one macOS controlling connection.
 //!
-//! This module contains no AppKit or alternate transfer loop. The original
+//! This module contains no `AppKit` or alternate transfer loop. The original
 //! `NativeObserver` owns the existing ATP lanes, disk workers, authority checks
 //! and publication receipts. This owner hands it each preselected request once
 //! and retains only the bounded status/control handles after that handoff.

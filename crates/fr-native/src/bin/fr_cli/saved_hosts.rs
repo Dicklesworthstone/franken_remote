@@ -192,7 +192,7 @@ impl Selection {
     }
     /// Preserve exactly what the local picker displayed. The existing native
     /// connector resolves BOTH fields again before opening the remote session.
-    #[cfg(any(test, feature = "linux-desktop"))]
+    #[cfg(any(test, feature = "linux-desktop", feature = "macos-desktop"))]
     pub(super) fn from_candidate(
         candidate: &fr_client::discovery::picker::Candidate,
         port: u16,

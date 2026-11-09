@@ -2,7 +2,7 @@
 //!
 //! Progress is metadata, not publication. Only actual terminal receipts can
 //! produce a finished label; queued/staged byte counts never do. Polling the
-//! buttons stays on the AppKit thread; file work stays with the original frd
+//! buttons stays on the `AppKit` thread; file work stays with the original frd
 //! owners. No path, file name or contents enter this UI.
 use super::{Window, event_time, files};
 use crate::NativeError;
