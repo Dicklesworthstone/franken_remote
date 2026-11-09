@@ -1,6 +1,6 @@
 //! Installed-tailnet connection kept under renewal through native viewer service.
 //! Reuses fr-tailnet's canonical TLS dialer, not another connection implementation.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub mod host;
 pub mod reconnect;
 

@@ -20,6 +20,9 @@ workspace = true
 # client. Off by default: a default macOS build compiles what Linux-only frd
 # compiled before, and the host half stays Linux-only until the macOS host.
 macos-viewer = []
+# The host half of frd on macOS (fr-p1-host-macos-vif): `frd run` with the
+# macOS capture worker (fr-native macos-media). Off by default.
+macos-host = []
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 fr-client.workspace = true

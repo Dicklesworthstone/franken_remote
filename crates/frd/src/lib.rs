@@ -2,8 +2,13 @@
 // The macOS viewer build compiles frd's shared session modules, whose host
 // half (capture, injection, ingress, approval) is reached only from the
 // Linux-only host run until the macOS host lands (fr-p1-host-macos-vif).
+// The macos-host build compiles that run while it is being wired: Linux-only
+// paths it does not reach yet (Xvfb provisioning, X11 indicators) stay quiet.
 #![cfg_attr(
-    all(target_os = "macos", feature = "macos-viewer"),
+    all(
+        target_os = "macos",
+        any(feature = "macos-viewer", feature = "macos-host")
+    ),
     allow(dead_code, unused_imports, unused_variables)
 )]
 // Composed native futures need a deeper compiler proof of their Send bounds.
@@ -81,27 +86,27 @@ pub mod native_files;
 pub mod local_sharing;
 
 // Parent-owned terminal consent; no authority, capture or native input here.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub mod local_approval;
 
 #[cfg(native_stack)]
 pub mod broker;
 
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub mod host_policy;
 
 // `frd run`: the installed host service composed from the modules above.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub mod host_run;
 
 // Opt-in read-only desktop indicator around the original host run lifetime.
 #[cfg(native_stack)]
 pub mod host_indicator;
 
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub mod session_monitor;
 // One persistent SIGINT/SIGTERM wait for `frd run` and the ingress helper.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 mod signals;
 
 // `frd ingress-helper`: root owner of the ingress rule for an unprivileged run.

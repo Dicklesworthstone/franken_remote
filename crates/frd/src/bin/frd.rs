@@ -175,6 +175,12 @@ OPTIONS:
 #[path = "frd/install.rs"]
 mod local_install;
 
+#[cfg(all(host_stack, target_os = "macos"))]
+#[path = "frd/macos_run.rs"]
+mod macos_run;
+#[cfg(all(host_stack, target_os = "macos"))]
+use macos_run::{audio, file_commands_host, microphone, select_desktop, session_monitor};
+
 #[cfg(target_os = "linux")]
 #[path = "frd/file_commands.rs"]
 mod file_commands;
@@ -250,19 +256,19 @@ fn execute_status(args: &[String], json: bool) -> ExitCode {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 #[path = "frd/approval.rs"]
 mod desktop_approval;
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 #[path = "frd/policy.rs"]
 mod local_policy;
 
 fn execute_policy(args: &[String], approval: bool, json: bool) -> ExitCode {
-    #[cfg(target_os = "linux")]
+    #[cfg(host_stack)]
     {
         local_policy::execute(args, approval, json)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(host_stack))]
     {
         let _ = (args, approval, json);
         eprintln!("Persistent host policy is not implemented on this platform.");
@@ -382,7 +388,7 @@ fn execute_service_status(args: &[String], json: bool) -> ExitCode {
 }
 
 #[allow(clippy::too_many_lines)]
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
     if json {
         println!(
@@ -397,7 +403,7 @@ fn run_refusal(json: bool, code: &str, detail: &str, status: u8) -> ExitCode {
 
 /// What the operator enabled, restated with every listening line so the
 /// console never understates control or overstates lock protection.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 #[allow(clippy::struct_excessive_bools)] // Independent startup facts, not session state.
 #[derive(Clone, Copy)]
 struct Profile {
@@ -409,7 +415,7 @@ struct Profile {
     video: frd::host_run::video::Profile,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 #[allow(clippy::too_many_lines)]
 fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
     use frd::host_run::Event;
@@ -433,6 +439,10 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "video_fps_limit": profile.video.fps(),
                 "encoder_bitrate_target_bps": profile.video.bitrate(),
                 "session_lifetime": if profile.session_lifetime { "monitored" } else { "unmonitored" },
+            }),
+            Event::FamilyNotServed { ipv6 } => serde_json::json!({
+                "event": "family_not_served",
+                "family": if *ipv6 { "ipv6" } else { "ipv4" },
             }),
             Event::PeerFinished {
                 attempts,
@@ -485,7 +495,12 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 }
                 if profile.encoder.is_hardware() {
                     println!(
-                        "frd: experimental hardware HEVC with CPU-staged X11 capture; selection is not hardware qualification"
+                        "{}",
+                        if cfg!(target_os = "macos") {
+                            "frd: hardware HEVC (VideoToolbox) from ScreenCaptureKit; selection is not hardware qualification"
+                        } else {
+                            "frd: experimental hardware HEVC with CPU-staged X11 capture; selection is not hardware qualification"
+                        }
                     );
                 }
                 if profile.observation_indicator {
@@ -498,12 +513,28 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                         "frd: locking, logging out of, switching away from or suspending the \
                          selected logind session ends sharing"
                     );
+                } else if cfg!(target_os = "macos") {
+                    println!(
+                        "frd: warning: locking or logging out of this Mac does NOT end sharing yet"
+                    );
                 } else {
                     println!(
                         "frd: warning: no --logind-session: locking or logging out of this \
                          desktop does NOT end sharing"
                     );
                 }
+            }
+            Event::FamilyNotServed { ipv6 } => {
+                let (family, sysctl) = if *ipv6 {
+                    ("IPv6", "net.inet6.ip6")
+                } else {
+                    ("IPv4", "net.inet.ip")
+                };
+                println!(
+                    "frd: not serving this node's {family} address: the kernel would also accept {family} \
+                     packets for it from outside the tunnel ({sysctl}.forwarding is on or \
+                     {sysctl}.check_interface is off); viewers connect over the other family"
+                );
             }
             Event::PeerFinished { outcome, .. } => println!("frd: peer finished: {outcome}"),
             Event::ShareEnded { outcome } => println!("frd: share ended: {outcome}"),
@@ -516,7 +547,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 type SelectedDesktop = (
     String,
     Option<PathBuf>,
@@ -570,7 +601,7 @@ fn select_desktop(
 
 // One linear, ordered refusal sequence (each typed refusal before any I/O it
 // guards), then the run; splitting it would hide that order.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 #[allow(clippy::too_many_lines)]
 fn execute_run(args: &[String], json: bool) -> ExitCode {
     use frd::host_policy::{Sharing, options::RunOptions};
@@ -590,17 +621,24 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Err(error) => return local_policy::refusal(error, json),
     };
     // Tailscale first: without it nothing else matters (exit 1 = runtime refusal).
-    let tailscale = options
-        .socket
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("/var/run/tailscale/tailscaled.sock"));
-    if !tailscale.exists() {
-        return run_refusal(
-            json,
-            "tailscale_unavailable",
-            "the installed Tailscale LocalAPI socket is missing; start tailscaled",
-            1,
-        );
+    #[cfg(target_os = "linux")]
+    {
+        let tailscale = options
+            .socket
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("/var/run/tailscale/tailscaled.sock"));
+        if !tailscale.exists() {
+            return run_refusal(
+                json,
+                "tailscale_unavailable",
+                "the installed Tailscale LocalAPI socket is missing; start tailscaled",
+                1,
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Err(code) = macos_run::supported(&options, effective.approval, json) {
+        return code;
     }
     let local_ui = match desktop_approval::configuration(&options, effective.approval) {
         Ok(configuration) => configuration,
@@ -662,8 +700,13 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         return run_refusal(
             json,
             "worker_unavailable",
-            "fr-media-worker not found; build fr-native with --features linux-displays (host display discovery; implies linux-media) and pass \
-             --worker /absolute/path/fr-media-worker",
+            if cfg!(target_os = "macos") {
+                "fr-media-worker not found; build fr-native with --features macos-media and pass \
+                 --worker /absolute/path/fr-media-worker"
+            } else {
+                "fr-media-worker not found; build fr-native with --features linux-displays (host display discovery; implies linux-media) and pass \
+                 --worker /absolute/path/fr-media-worker"
+            },
             2,
         );
     };
@@ -686,10 +729,14 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     let mut run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
-        interface: options
-            .interface
-            .clone()
-            .unwrap_or_else(|| "tailscale0".into()),
+        // macOS: empty selects the utun that holds the node's addresses.
+        interface: options.interface.clone().unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                String::new()
+            } else {
+                "tailscale0".into()
+            }
+        }),
         worker,
         display,
         xauthority,
@@ -754,6 +801,13 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         .map_err(|error| (error.code(), error.to_string()))
     } else {
         match options.observation_indicator.as_deref() {
+            // Refused before startup on macOS (macos_run::supported).
+            #[cfg(not(target_os = "linux"))]
+            Some(_) => Err((
+                "observation_indicator_unavailable",
+                "the observation indicator is an X11 window".to_owned(),
+            )),
+            #[cfg(target_os = "linux")]
             Some(image) => frd::host_indicator::run_with_policy_and_encoder(
                 &run_options,
                 &report,
@@ -832,7 +886,7 @@ fn session_monitor(
 }
 
 /// The optional control opt-in: an installed absolute `fr-input-agent`.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 fn input_agent(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
@@ -850,7 +904,7 @@ fn input_agent(
 }
 
 /// Pin only the operator's explicit sources before desktop or network startup.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 fn send(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
@@ -875,7 +929,7 @@ fn send(
 
 /// The optional drop directory: validated by type and pinned by descriptor
 /// before any display, worker or network I/O. The refusal names no path.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 fn files(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
@@ -992,7 +1046,7 @@ fn audio(
     }))
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(host_stack))]
 fn execute_run(_args: &[String], json: bool) -> ExitCode {
     if json {
         println!(
@@ -1004,7 +1058,7 @@ fn execute_run(_args: &[String], json: bool) -> ExitCode {
     ExitCode::from(2)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 fn run_policy(
     options: &frd::host_policy::options::RunOptions,
     effective: frd::host_policy::options::Effective,

@@ -158,6 +158,25 @@ impl Launch {
             local: None,
         })
     }
+    /// A macOS capture worker. Its desktop is the logged-in window-server
+    /// session of this process; no display name or X authority applies.
+    #[cfg(target_os = "macos")]
+    pub fn macos_capture(image: &Path, epoch: u128) -> Result<Self, Error> {
+        if !image.is_absolute() || epoch == 0 {
+            return Err(Error::InvalidLaunch);
+        }
+        Ok(Self {
+            image: image.into(),
+            display: String::new(),
+            xauthority: None,
+            role: Role::Capture,
+            epoch,
+            target: None,
+            fit_target: false,
+            retirement: None,
+            local: None,
+        })
+    }
     /// Present through an in-process native decoder instead of a child; see
     /// [`LocalPresenter`]. No image, display or X11 target applies.
     pub fn in_process(presenter: Box<dyn LocalPresenter>, epoch: u128) -> Result<Self, Error> {
@@ -206,7 +225,8 @@ impl Launch {
         Ok(launch)
     }
     /// One-shot startup probe of the locally selected encoder (`nvenc`,
-    /// `vaapi` or `software`): the worker opens it at the display's root size
+    /// `vaapi` or `software`; `videotoolbox` on macOS): the worker opens it at
+    /// the display's size
     /// and admits one real IDR. Synchronous and bounded, run before any
     /// listener exists; the child is always ended and reaped.
     pub fn probe_encoder(&self, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {
@@ -216,14 +236,18 @@ impl Launch {
         if self.role != Role::Capture
             || self.retirement.is_some()
             || self.local.is_some()
-            || !matches!(backend, "nvenc" | "vaapi" | "software")
+            || !(matches!(backend, "nvenc" | "vaapi" | "software")
+                || cfg!(target_os = "macos") && backend == "videotoolbox")
         {
             return Err(Error::InvalidLaunch);
         }
         let mut command = Probe::new(&self.image);
+        command.env_clear();
+        // A macOS launch has no X11 display; never pass an empty DISPLAY.
+        if !self.display.is_empty() {
+            command.env("DISPLAY", &self.display);
+        }
         command
-            .env_clear()
-            .env("DISPLAY", &self.display)
             .args(["--probe-encoder", backend, "--parent-pid"])
             .arg(std::process::id().to_string())
             .stdin(ProbeStdio::null())
@@ -611,9 +635,11 @@ impl Worker {
             return Err(Error::InvalidLaunch);
         }
         let mut command = Command::new(image);
+        command.env_clear();
+        if !display.is_empty() {
+            command.env("DISPLAY", display);
+        }
         command
-            .env_clear()
-            .env("DISPLAY", display)
             .arg(match role {
                 Role::Capture => "--capture",
                 Role::Present => "--present",

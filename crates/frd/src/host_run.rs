@@ -78,7 +78,7 @@ use std::{
     fmt,
     future::{Future, poll_fn},
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::pin,
     sync::{
         Arc, Mutex,
@@ -252,6 +252,12 @@ pub enum Event {
     Listening {
         address: SocketAddr,
     },
+    /// This node's IPv4 or IPv6 address is not served: the kernel would also
+    /// deliver packets for it that did not arrive through the tunnel (macOS
+    /// with that family's forwarding on or its strong-host check off).
+    FamilyNotServed {
+        ipv6: bool,
+    },
     /// One peer attempt ended, with the share's listener counters. Idle accept
     /// windows that saw no Initial packet are not reported.
     PeerFinished {
@@ -377,6 +383,37 @@ fn probe_control(options: &Options) -> Result<Option<Capabilities>, Error> {
 /// must capture and produce an admitted IDR through the canonical worker probe.
 /// Exact requests never substitute; explicit auto tries NVENC then VAAPI only
 /// after a completed refusal. Timeouts, launch errors and uncertain cleanup stop.
+/// The locally selected capture worker for this platform's desktop: the X11
+/// display and its authority on Linux, the logged-in window server on macOS.
+fn capture_launch(
+    worker: &Path,
+    display: &str,
+    xauthority: Option<&Path>,
+    epoch: u128,
+) -> Result<Launch, crate::worker::Error> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (display, xauthority);
+        Launch::macos_capture(worker, epoch)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Launch::new(worker, display, xauthority, WorkerRole::Capture, epoch)
+    }
+}
+
+/// The host's desktop platform, as the permission model names it.
+const fn host_platform() -> PlatformKind {
+    #[cfg(target_os = "macos")]
+    {
+        PlatformKind::MacOs
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        PlatformKind::LinuxX11
+    }
+}
+
 fn select_encoder(
     options: &Options,
     selection: EncoderSelection,
@@ -388,11 +425,10 @@ fn select_encoder(
         selection,
         || stop.is_requested(),
         |encoder| {
-            let launch = Launch::new(
+            let launch = capture_launch(
                 &options.worker,
                 &options.display,
                 options.xauthority.as_deref(),
-                WorkerRole::Capture,
                 random_nonzero_u128()?,
             )
             .map_err(|_| Error::Configuration)?;
@@ -1017,8 +1053,9 @@ fn local_action(
 }
 
 fn check(options: &Options) -> Result<(), Error> {
+    // An X11 host names its display; macOS shares the login session's.
     if !options.worker.is_absolute()
-        || options.display.is_empty()
+        || options.display.is_empty() != cfg!(target_os = "macos")
         || video::Profile::new(options.fps, options.bitrate).is_err()
         || options
             .input_agent
@@ -1131,11 +1168,65 @@ struct Share<'a> {
     encoder: Encoder,
     approval: Option<&'a approval::Configuration>,
 }
+/// How ingress is enforced, the node addresses served, and the tunnel interface.
+type IngressPlan = (ingress::Enforcement, Vec<std::net::IpAddr>, String);
+
 impl Share<'_> {
     fn cx(&self) -> Result<Cx, Error> {
         self.runtime
             .try_request_cx_with_budget(Budget::INFINITE)
             .map_err(|_| Error::Runtime)
+    }
+
+    /// Linux: every node address, behind an nft rule on the configured TUN
+    /// (without `CAP_NET_ADMIN` the root `frd ingress-helper` owns the rule).
+    /// Ready at once; it is awaited like the macOS plan, which reads sysctls.
+    #[cfg(not(target_os = "macos"))]
+    fn ingress_plan(
+        &self,
+        _broker: &Cx,
+        addresses: &[std::net::IpAddr],
+    ) -> std::future::Ready<Result<IngressPlan, Error>> {
+        let helper = std::path::Path::new(ingress::helper::DEFAULT_SOCKET);
+        std::future::ready(Ok((
+            ingress::Enforcement::detect(helper),
+            addresses.to_vec(),
+            self.options.interface.clone(),
+        )))
+    }
+
+    /// macOS: only the families whose packets the kernel already drops unless
+    /// they arrive on the address's own interface; refuse when there are none.
+    /// The tunnel is the utun holding those addresses unless one was named.
+    #[cfg(target_os = "macos")]
+    async fn ingress_plan(
+        &self,
+        broker: &Cx,
+        addresses: &[std::net::IpAddr],
+    ) -> Result<IngressPlan, Error> {
+        use ingress::strong_host;
+        let mut protected = Vec::with_capacity(addresses.len());
+        for &ip in addresses {
+            if strong_host::enforced(broker, ip.is_ipv6())
+                .await
+                .map_err(Error::Ingress)?
+            {
+                protected.push(ip);
+            } else {
+                (self.report)(Event::FamilyNotServed { ipv6: ip.is_ipv6() });
+            }
+        }
+        let first = *protected
+            .first()
+            .ok_or(Error::Ingress(ingress::Error::StrongHostOff))?;
+        let interface = if self.options.interface.is_empty() {
+            strong_host::tunnel_interface(broker, first)
+                .await
+                .map_err(Error::Ingress)?
+        } else {
+            self.options.interface.clone()
+        };
+        Ok((ingress::Enforcement::StrongHost, protected, interface))
     }
 
     async fn bind(&self, broker: &Cx) -> Result<LinuxServer, Error> {
@@ -1147,14 +1238,13 @@ impl Share<'_> {
         if node.addresses().is_empty() {
             return Err(Error::NoTailnetAddress);
         }
-        // Without CAP_NET_ADMIN the root `frd ingress-helper` owns the rule.
-        let helper = std::path::Path::new(ingress::helper::DEFAULT_SOCKET);
-        let enforcement = ingress::Enforcement::detect(helper);
-        let mut configurations = Vec::with_capacity(node.addresses().len());
-        for &ip in node.addresses() {
+        let (enforcement, addresses, interface) =
+            self.ingress_plan(broker, node.addresses()).await?;
+        let mut configurations = Vec::with_capacity(addresses.len());
+        for ip in addresses {
             let address = SocketAddr::new(ip, self.options.port);
-            let mut ingress = ingress::Configuration::new(address, &self.options.interface)
-                .map_err(Error::Ingress)?;
+            let mut ingress =
+                ingress::Configuration::new(address, &interface).map_err(Error::Ingress)?;
             if let Some((nft, ip)) = &self.options.ingress_tools {
                 ingress = ingress.executables(nft, ip).map_err(Error::Ingress)?;
             }
@@ -1188,7 +1278,7 @@ impl Share<'_> {
         let interval = capture_interval(fps).ok_or(Error::Configuration)?;
         let mut agent = SessionAgent::new(
             ApprovalMode::Unattended,
-            PlatformKind::LinuxX11,
+            host_platform(),
             os_session,
             InputBounds::new(DesktopPoint { x: 0, y: 0 }, 8192, 8192)
                 .ok_or(Error::Configuration)?,
@@ -1284,11 +1374,10 @@ impl Share<'_> {
                     .authorize_observation(host_now(&source).map_err(|_| ())?)
                     .map_err(|_| ())?;
                 let control = ObservationControl::new(source, authority).map_err(|_| ())?;
-                let (launch, retirement) = Launch::new(
+                let (launch, retirement) = capture_launch(
                     &worker,
                     &display,
                     xauthority.as_deref(),
-                    WorkerRole::Capture,
                     random_nonzero_u128().map_err(|_| ())?,
                 )
                 .and_then(Launch::retain_cleanup)

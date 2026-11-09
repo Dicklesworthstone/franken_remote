@@ -18,7 +18,7 @@ pub mod local_priority;
 pub mod macos_injection;
 pub mod permissions;
 pub mod sleep_inhibitor;
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub mod source;
 
 pub use approval::{
@@ -109,13 +109,13 @@ pub struct SessionAgent {
     /// The named local cause of a local stop (lock, suspend, logout), first
     /// wins. It becomes an active control lease's terminal reason.
     local_stop: Option<StopReason>,
-    #[cfg(target_os = "linux")]
+    #[cfg(host_stack)]
     sources: Arc<std::sync::Mutex<source::Sources>>,
     /// Opt-in remote-control profile; None keeps the agent observation-only.
-    #[cfg(target_os = "linux")]
+    #[cfg(host_stack)]
     control: Option<source::desktop::ControlProfile>,
     /// Local playback-audio enable (`frd run --audio`); None keeps it off.
-    #[cfg(target_os = "linux")]
+    #[cfg(host_stack)]
     audio: Option<crate::media::shared_publisher::AudioProfile>,
 }
 
@@ -136,9 +136,9 @@ impl SessionAgent {
             revoked_flag.store(true, Ordering::Release);
         });
 
-        #[cfg(target_os = "linux")]
+        #[cfg(host_stack)]
         let sources = Arc::new(std::sync::Mutex::new(source::Sources::default()));
-        #[cfg(target_os = "linux")]
+        #[cfg(host_stack)]
         {
             let weak = Arc::downgrade(&sources);
             indicator.register_custom_revoker(move || {
@@ -152,11 +152,11 @@ impl SessionAgent {
         }
 
         Self {
-            #[cfg(target_os = "linux")]
+            #[cfg(host_stack)]
             sources,
-            #[cfg(target_os = "linux")]
+            #[cfg(host_stack)]
             control: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(host_stack)]
             audio: None,
             approval: ApprovalManager::new(approval_mode),
             indicator,

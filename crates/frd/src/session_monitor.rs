@@ -47,9 +47,14 @@ pub struct Configuration {
     pub selection: Selection,
 }
 
-/// Linux suspend-aware time shared by parent and child. No adjustable wall clock.
+/// Suspend-aware time shared by parent and child. No adjustable wall clock.
+/// macOS's monotonic clock, unlike Linux's, keeps counting during sleep.
 pub fn now_ns() -> Result<u64, Error> {
-    let t = rustix::time::clock_gettime(rustix::time::ClockId::Boottime);
+    #[cfg(target_os = "linux")]
+    let clock = rustix::time::ClockId::Boottime;
+    #[cfg(not(target_os = "linux"))]
+    let clock = rustix::time::ClockId::Monotonic;
+    let t = rustix::time::clock_gettime(clock);
     u64::try_from(t.tv_sec)
         .ok()
         .and_then(|s| s.checked_mul(1_000_000_000))

@@ -6,6 +6,9 @@ pub enum Encoder {
     SoftwareExplicit,
     Nvenc,
     Vaapi,
+    /// Apple's hardware HEVC encoder in the macOS capture worker.
+    #[cfg(target_os = "macos")]
+    VideoToolbox,
 }
 impl Encoder {
     /// Exact local names, never peer input or arbitrary `FFmpeg` codec names.
@@ -14,6 +17,8 @@ impl Encoder {
             "software" => Some(Self::SoftwareExplicit),
             "nvenc" => Some(Self::Nvenc),
             "vaapi" => Some(Self::Vaapi),
+            #[cfg(target_os = "macos")]
+            "videotoolbox" => Some(Self::VideoToolbox),
             _ => None,
         }
     }
@@ -22,6 +27,8 @@ impl Encoder {
             Self::SoftwareExplicit => "software",
             Self::Nvenc => "nvenc",
             Self::Vaapi => "vaapi",
+            #[cfg(target_os = "macos")]
+            Self::VideoToolbox => "videotoolbox",
         }
     }
     pub const fn is_hardware(self) -> bool {
@@ -104,7 +111,10 @@ pub(crate) fn resolve<E>(
     let candidates: &[Encoder] = match &selection {
         Selection::Exact(Encoder::SoftwareExplicit) => return Ok(Encoder::SoftwareExplicit),
         Selection::Exact(encoder) => std::slice::from_ref(encoder),
+        #[cfg(not(target_os = "macos"))]
         Selection::AutomaticHardware => &[Encoder::Nvenc, Encoder::Vaapi],
+        #[cfg(target_os = "macos")]
+        Selection::AutomaticHardware => &[Encoder::VideoToolbox],
     };
     let mut refused = Vec::with_capacity(candidates.len());
     for &encoder in candidates {

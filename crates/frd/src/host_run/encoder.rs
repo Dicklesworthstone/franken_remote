@@ -14,6 +14,8 @@ impl Encoder {
             Self::SoftwareExplicit => Backend::SoftwareExplicit,
             Self::Nvenc => Backend::Nvenc,
             Self::Vaapi => Backend::Vaapi,
+            #[cfg(target_os = "macos")]
+            Self::VideoToolbox => Backend::VideoToolbox,
         }
     }
 }
@@ -54,6 +56,7 @@ mod tests {
             "hardware",
             "h264",
             "libx265",
+            #[cfg(not(target_os = "macos"))]
             "videotoolbox",
             "NVENC",
             " vaapi",
@@ -65,6 +68,18 @@ mod tests {
         assert!(!Encoder::SoftwareExplicit.is_hardware());
         assert!(Encoder::Nvenc.is_hardware());
         assert!(Encoder::Vaapi.is_hardware());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn videotoolbox_is_the_macos_hardware_backend() {
+        assert_eq!(Encoder::parse("videotoolbox"), Some(Encoder::VideoToolbox));
+        assert_eq!(Encoder::VideoToolbox.as_str(), "videotoolbox");
+        assert_eq!(Encoder::VideoToolbox.backend(), Backend::VideoToolbox);
+        assert!(Encoder::VideoToolbox.is_hardware());
+        for value in ["VideoToolbox", "vt", "videotoolbox "] {
+            assert_eq!(Encoder::parse(value), None, "{value}");
+        }
     }
 
     #[test]

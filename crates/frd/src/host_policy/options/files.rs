@@ -14,8 +14,17 @@ impl RunOptions {
     /// daemon or infer control consent from a source path.
     pub fn validate_file_send(&self) -> Result<(), Error> {
         if let Some(target) = &self.send_control {
-            crate::native_files::local::validate_target(target)
-                .map_err(|_| Error::InvalidArgument)?;
+            // The local send-control endpoint is Linux-only (abstract socket).
+            #[cfg(target_os = "linux")]
+            let valid = crate::native_files::local::validate_target(target).is_ok();
+            #[cfg(not(target_os = "linux"))]
+            let valid = {
+                let _ = target;
+                false
+            };
+            if !valid {
+                return Err(Error::InvalidArgument);
+            }
             if !self.send.is_empty() || !self.once || self.input_agent.is_none() {
                 return Err(Error::InvalidArgument);
             }
