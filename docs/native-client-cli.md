@@ -134,10 +134,15 @@ reported cleanup/effect stages. A close click cannot hide a native cleanup
 failure or an adverse host report.
 
 `--fit WIDTHxHEIGHT` bounds the initial macOS content rectangle in **AppKit
-points**. It preserves aspect ratio, never enlarges the natural window, and
-still fits inside the available local screen. Rendering stays in Metal; input
-coordinates use the actual drawable picture after layout, including the local
-Retina scale. Without `--fit`, the remote logical size remains the default.
+points**. The picture preserves its aspect ratio and fits inside the available
+local screen. Rendering stays in Metal; input coordinates use the actual
+drawable picture after layout, including the local Retina scale. Without file
+controls, fitting never enlarges the natural window. With file controls, the
+same ceiling includes their reserved 44-point strip; the content needs at least
+246 points of width for one direction, 476 for both, and 108 points of height.
+Smaller explicit ceilings refuse before a connection. A narrow picture can
+have horizontal letterboxing to keep the cancel buttons accessible. Without
+`--fit`, the remote logical size remains the picture's default.
 
 The admitted native presenter runs on one bounded Asupersync blocking task.
 Decoder configuration, frame submission, cursor updates, idle repaint and the
@@ -181,8 +186,8 @@ transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
 `--choose-host`, `--display choose`, `--capture-system-shortcuts`,
-`--audio`, `--microphone`, file transfer (`--send`, `--file-drop`,
-`--file-commands`, `--receive`) and `fr robot session open`. The clipboard,
+`--audio`, `--microphone`, `--file-drop`, `--file-commands` and
+`fr robot session open`. The clipboard,
 on by default on Linux, is reported as `local_clipboard_unavailable`.
 Local status identifies the foreground invocation; optional quality and
 automation observations remain unavailable on macOS.
@@ -204,6 +209,67 @@ compilation of the unchanged pinned Asupersync dependency was killed by
 SIGKILL. Native AppKit event delivery, Metal repaint, the macOS pathname owner
 and a full live reconnect/close sequence still require execution on a Mac;
 Linux-side policy tests are not hardware qualification.
+
+### Explicit macOS file transfer
+
+The desktop build accepts explicit `--send` selections and a local
+`--receive` directory on a controlling connection. Both directions can be
+selected independently or together:
+
+```sh
+fr connect NODE_ID --control --experimental-native --display only \
+  --send /absolute/source.txt --send /absolute/source-directory \
+  --receive /absolute/private-destination --receive-conflict keep-both
+```
+
+Sources are classified and pinned before AppKit or network startup. The
+existing eight-selection bound, portable names, symlink/special-file refusals
+and original sender limits still apply. Receiving opens the explicit existing
+directory through the existing protected-directory checks; the peer never
+chooses the local destination. `--receive-max-file-bytes`,
+`--receive-max-session-bytes` and `--receive-conflict reject|keep-both` use the
+same native receive policy as Linux. The default conflict policy is reject;
+nothing here enables overwrite, automatic resume or general filesystem access.
+
+The original observer registers those selections once. Contents still need
+the actual host control grant and the matching negotiated file attachment.
+Unsupported optional directions produce typed absence results while ordinary
+desktop control can continue. Automatic reconnect and a later F8 request do
+not select the files again or reopen the original destination for a new
+transfer. A failed dial before observer configuration has started no file
+owner and can retain the pending choice for its normal bounded retry.
+
+A reserved strip above the Metal picture shows send and receive status with
+independent **Cancel** buttons. It does not cover the remote viewport or enter
+the remote pointer mapping. Cancel requests act on mouse-down, before another
+ordinary network/input turn, and affect only their original file direction.
+A request during setup still settles the already negotiated attachment before
+retirement. The window's close/escape and connection cleanup fence both file
+owners; successful native cleanup additionally requires their actual disk
+workers to be reaped. A stalled worker leaves cleanup unconfirmed.
+
+Progress is content-free and sampled at most ten times per second. Queued
+upload bytes and staged download bytes are not publication receipts. The
+completion report retains the original indexed outcomes, successful
+publication/durability evidence, missing or uncertain outcomes, cancellation
+requests and local cleanup status, even when a later viewing attempt fails.
+Cancellation does not undo files already published. Unknown publication or
+pending cleanup remains explicit; neither becomes “nothing sent.”
+
+The shared CLI report projection also preserves these distinctions on Linux.
+macOS drag-and-drop selection, the local file-command endpoint, clipboard,
+audio and microphone support remain separate unavailable features.
+
+**Verification limit for this extension (2026-11-09):** five portable sizing
+tests pass with the pinned compiler and strict standalone Clippy, including
+the new fitted-control bounds. Workspace formatting, documentation links and
+diff checks pass. Consent/profile, cancellation, indexed receipt projection
+and CLI refusal regressions are included in source, but remain unrun:
+`cargo check -p fr-native --features linux-desktop --all-targets --locked`
+was killed by SIGKILL while compiling the unchanged pinned Asupersync
+dependency, before it reached the new runtime integration. Native macOS
+builds and a real two-direction transfer/cancel/reconnect run remain required;
+the earlier viewer evidence above does not qualify this extension.
 
 ## Check local capture, encoding and input readiness
 

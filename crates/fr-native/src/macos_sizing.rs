@@ -44,9 +44,77 @@ pub(crate) fn points(
     ))
 }
 
+/// Reserve the file controls in the same optional content-point ceiling.
+/// The native strip is 44 points high, with one 230-point cell per direction
+/// and 16 points of outer padding. A small picture may have horizontal
+/// letterboxing so every selected direction retains its local cancel button.
+/// These dimensions never participate in remote input coordinates.
+pub(crate) fn sharing_points(
+    pixels: (u32, u32),
+    logical: (u32, u32),
+    fit: Option<(u32, u32)>,
+    directions: u32,
+) -> Result<(u32, u32), ()> {
+    if directions == 0 {
+        return points(pixels, logical, fit);
+    }
+    if directions > 2 {
+        return Err(());
+    }
+    let minimum_width = 16 + 230 * directions;
+    let picture_fit = match fit {
+        Some((width, height)) => {
+            let height = height.checked_sub(44).ok_or(())?;
+            if width < minimum_width || height < 64 {
+                return Err(());
+            }
+            Some((width, height))
+        }
+        None => None,
+    };
+    let (width, height) = points(pixels, logical, picture_fit)?;
+    Ok((width.max(minimum_width), height.max(64)))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::points;
+    use super::{points, sharing_points};
+
+    #[test]
+    fn file_controls_fit_inside_the_original_content_ceiling() {
+        for directions in [1, 2] {
+            let minimum_width = 16 + 230 * directions;
+            assert_eq!(
+                sharing_points(
+                    (1920, 1080),
+                    (1920, 1080),
+                    Some((minimum_width - 1, 600)),
+                    directions
+                ),
+                Err(())
+            );
+            assert_eq!(
+                sharing_points((1920, 1080), (1920, 1080), Some((800, 107)), directions),
+                Err(())
+            );
+            for pixels in [(1920, 1080), (1080, 1920), (64, 64)] {
+                for fit in [(minimum_width, 108), (800, 600), (1280, 720)] {
+                    let (width, height) =
+                        sharing_points(pixels, pixels, Some(fit), directions).unwrap();
+                    assert!(width >= minimum_width && width <= fit.0);
+                    assert!(height >= 64 && height + 44 <= fit.1);
+                }
+            }
+        }
+        assert_eq!(
+            sharing_points((1920, 1080), (1920, 1080), Some((800, 600)), 3),
+            Err(())
+        );
+        assert_eq!(
+            sharing_points((1920, 1080), (1920, 1080), Some((16, 16)), 0),
+            points((1920, 1080), (1920, 1080), Some((16, 16)))
+        );
+    }
 
     #[test]
     fn natural_size_preserves_retina_and_rounding_without_trusting_wrong_aspects() {

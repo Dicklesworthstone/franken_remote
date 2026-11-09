@@ -15,7 +15,7 @@
 //!
 //! Main thread only: `AppKit` owns the window and its event loop, which this
 //! session services between network turns of the same runtime.
-use super::{HevcDecoder, PicturePoint, Surface, Window, WindowEvent, event_time};
+use super::{HevcDecoder, PicturePoint, Surface, Window, WindowEvent, event_time, files, sharing};
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
 use asupersync::{
@@ -35,7 +35,10 @@ use fr_media::{
         Configuration as WorkerConfiguration, Error as WorkerError, overlay::Update as CursorUpdate,
     },
 };
-use fr_wire::display::{Catalog, Display};
+use fr_wire::{
+    display::{Catalog, Display},
+    negotiation::Offer,
+};
 use frd::{
     media::PresentationStage,
     native_connection::reconnect::{Application, CallbackError, Status},
@@ -47,7 +50,7 @@ use frd::{
     worker::{Deadline, Launch, LocalPresenter},
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::{Cell, Ref, RefCell},
     future::{Future, poll_fn},
     pin::{Pin, pin},
     rc::Rc,
@@ -383,6 +386,7 @@ pub struct Session {
     /// take `&mut self`, so `run`'s borrow has ended before cleanup starts.
     observer: Option<NativeObserver>,
     input: Rc<RefCell<Option<Input>>>,
+    files: Rc<RefCell<files::Files>>,
     report: Rc<RefCell<Report>>,
     closed: Rc<Cell<bool>>,
     intent: Rc<RefCell<Intent>>,
@@ -415,6 +419,7 @@ impl Session {
             window: Rc::default(),
             observer: None,
             input: Rc::default(),
+            files: Rc::default(),
             report: Rc::default(),
             closed: Rc::default(),
             intent: Rc::new(RefCell::new(Intent::new(control.is_some()))),
@@ -429,6 +434,17 @@ impl Session {
     pub fn with_fit_window(mut self, fit: Option<(u32, u32)>) -> Self {
         self.fit_window = fit;
         self
+    }
+    /// Explicit choices belong to this invocation's first configured observer.
+    /// Recovered viewing and a fresh F8 gesture never repeat the selection.
+    #[must_use]
+    pub fn with_files(mut self, files: files::Files) -> Self {
+        self.files = Rc::new(RefCell::new(files));
+        self
+    }
+    /// Bounded, content-free results of the original selected operations.
+    pub fn files(&self) -> Ref<'_, files::Files> {
+        self.files.borrow()
     }
     pub fn report(&self) -> Report {
         *self.report.borrow()
@@ -481,15 +497,17 @@ fn service(
     intent: &RefCell<Intent>,
     closed: &Cell<bool>,
     stop: &StreamingViewerControl,
+    files: &RefCell<files::Files>,
+    sharing: &mut sharing::Ui,
     events: &mut Vec<WindowEvent>,
 ) {
     let mut slot = window.borrow_mut();
-    let Some(window) = slot.as_mut() else {
+    let Some(opened) = slot.as_mut() else {
         return;
     };
     events.clear();
-    window.poll(Duration::ZERO, events);
-    let state = window.state().ok();
+    opened.poll(Duration::ZERO, events);
+    let state = opened.state().ok();
     drop(slot);
     let mut report = report.borrow_mut();
     let mut input = input.borrow_mut();
@@ -498,6 +516,7 @@ fn service(
         report.local_stop.get_or_insert(reason);
         // Dropping the source fences the granted session before another turn.
         *input = None;
+        files.borrow_mut().cancel();
         stop.stop();
     };
     // Validate the whole native batch and current window before forwarding any
@@ -517,6 +536,17 @@ fn service(
         closed.set(true);
         intent.invalidate();
         halt(LocalStop::LocalEscape, &mut input, &mut report);
+        return;
+    }
+    // Native file-only buttons act before ordinary input and network work.
+    // A missing local control surface fences its original owners too.
+    let sharing_ok = window
+        .borrow()
+        .as_ref()
+        .is_some_and(|window| sharing.turn(window, &mut files.borrow_mut()).is_ok());
+    if !sharing_ok {
+        intent.invalidate();
+        halt(LocalStop::NativeFailure, &mut input, &mut report);
         return;
     }
     if input
@@ -676,6 +706,31 @@ fn attach(
 
 impl Application for Session {
     type Output = ();
+    fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
+        let available = self.files.borrow().offer(false);
+        let keep = |name: &str| {
+            !matches!(
+                name,
+                fr_wire::attachment::FILES_CAPABILITY
+                    | fr_wire::files::CAPABILITY
+                    | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+                    | fr_wire::files::DOWNLOAD_CAPABILITY
+                    | fr_wire::files::DUPLEX_CAPABILITY
+            ) || available.capabilities.iter().any(|cap| cap.name == name)
+        };
+        if original
+            .capabilities
+            .iter()
+            .any(|cap| cap.required && !keep(&cap.name))
+        {
+            return Err(CallbackError);
+        }
+        // Remove only spent optional file choices. Never rebuild the original
+        // offer: its role, limits, required gates and other options stay exact.
+        let mut offer = original.clone();
+        offer.capabilities.retain(|cap| keep(&cap.name));
+        Ok(offer)
+    }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
         if self.started || self.native_started.get() || self.observer.is_some() {
@@ -687,6 +742,8 @@ impl Application for Session {
         let stop = viewer.control();
         let window = self.window.clone();
         let input = self.input.clone();
+        let files = self.files.clone();
+        let sharing_flags = sharing::flags(&files.borrow());
         let report = self.report.clone();
         let closed = self.closed.clone();
         let intent = self.intent.clone();
@@ -702,18 +759,21 @@ impl Application for Session {
         let native_started = self.native_started.clone();
         let opening = viewer.observe_with_renderer(
             move |display, _original| async move {
+                let points = crate::macos_sizing::sharing_points(
+                    (display.pixel_width, display.pixel_height),
+                    (display.logical_width, display.logical_height),
+                    fit_window,
+                    sharing_flags.count_ones(),
+                )?;
                 // From this point onward, losing the observer is not proof
                 // that AppKit, the renderer or its worker finished cleanup.
                 native_started.set(true);
-                let opened = Window::open(
+                let opened = Window::open_with_sharing(
                     display.pixel_width,
                     display.pixel_height,
-                    crate::macos_sizing::points(
-                        (display.pixel_width, display.pixel_height),
-                        (display.logical_width, display.logical_height),
-                        fit_window,
-                    )?,
+                    points,
                     &title,
+                    sharing_flags,
                 )
                 .map_err(|_| ())?;
                 let surface = opened.surface();
@@ -737,6 +797,7 @@ impl Application for Session {
             },
         );
         let mut events = Vec::with_capacity(64);
+        let mut sharing = sharing::Ui::default();
         let mut pump = || {
             service(
                 &window,
@@ -745,6 +806,8 @@ impl Application for Session {
                 &intent,
                 &closed,
                 &stop,
+                &files,
+                &mut sharing,
                 &mut events,
             );
         };
@@ -759,6 +822,7 @@ impl Application for Session {
         }
         let display = opened.display();
         let observer = self.observer.insert(opened);
+        files.borrow_mut().configure(observer);
         let count = report.clone();
         let frames = move |frame: Option<Presentation>| {
             if frame.is_some() {
@@ -866,6 +930,11 @@ impl Application for Session {
         // Fence at call time: no input outlives the attempt.
         self.input.borrow_mut().take();
         self.intent.borrow_mut().invalidate();
+        // A failed dial with no configured observer has not spent the local
+        // choices. Once configured, every cleanup fences their original owner.
+        if self.observer.is_some() {
+            self.files.borrow_mut().cancel();
+        }
         self.cleanup_confirmed = false;
         let window = self.window.clone();
         async move {
@@ -883,7 +952,8 @@ impl Application for Session {
                     observer.close();
                     let media = observer.reap_media(cx, deadline).await;
                     let input = observer.reap_input_capture(cx, deadline).await;
-                    media.is_ok() && input.is_ok()
+                    let files = observer.reap_files(cx, deadline).await;
+                    media.is_ok() && input.is_ok() && files.is_ok()
                 }
                 // Approval and display selection precede the deferred native
                 // factory. Their failures have no native owners to reap. Once
@@ -968,6 +1038,35 @@ fn reported_terminal(observer: &NativeObserver) -> Option<ObserverError> {
 mod tests {
     use super::*;
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
+
+    #[test]
+    fn spent_file_capabilities_are_only_omitted_from_the_original_offer() {
+        let mut session = failed_startup(false);
+        let original = fr_client::native::control_offer_with_duplex(true, true);
+        let filtered = session.offer(1, &original).unwrap();
+        let mut expected = original.clone();
+        expected.capabilities.retain(|cap| {
+            !matches!(
+                cap.name.as_str(),
+                fr_wire::attachment::FILES_CAPABILITY
+                    | fr_wire::files::CAPABILITY
+                    | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+                    | fr_wire::files::DOWNLOAD_CAPABILITY
+                    | fr_wire::files::DUPLEX_CAPABILITY
+            )
+        });
+        assert_eq!(filtered, expected);
+        assert_eq!(session.offer(2, &original).unwrap(), expected);
+
+        let mut required = original;
+        required
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == fr_wire::files::CAPABILITY)
+            .unwrap()
+            .required = true;
+        assert_eq!(session.offer(3, &required), Err(CallbackError));
+    }
 
     #[test]
     fn local_fences_run_before_even_immediately_ready_session_work() {

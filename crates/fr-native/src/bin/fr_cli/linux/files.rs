@@ -12,16 +12,24 @@
 #[path = "files/download.rs"]
 pub(super) mod download;
 use super::Failure;
+pub(super) use crate::file_reports::upload::Summary;
+use crate::file_reports::upload::absence_code;
 use fr_native::{
     desktop::{Desktop, Error as DesktopError},
     viewer_window::{DroppedBatchStatus, FileDropControl},
 };
+use frd::native_files::{Selection, SendControl, local};
+use std::path::PathBuf;
+
+#[cfg(test)]
+use crate::file_reports::upload::{refusal_reason, reported, summary};
+#[cfg(test)]
 use fr_wire::files::Reason;
-use frd::native_files::{
-    Absence, Publication, SelectReason, Selection, SendControl, SendPhase, SendStatus, local,
+#[cfg(test)]
+use frd::{
+    native_files::{Absence, Publication, SendPhase, SendStatus},
+    session_startup::{FileSendError, FileSendOutcome},
 };
-use frd::session_startup::{FileSendError, FileSendOutcome};
-use std::{fmt::Write as _, path::PathBuf};
 
 /// The control offer: `--send` adds the three OPTIONAL file boundaries, and
 /// with `--clipboard` too, the combined profile carries both optional families
@@ -93,37 +101,8 @@ pub(super) fn select(
             commands,
         }));
     }
-    let selection = Selection::select(paths).map_err(|refusal| {
-        let what = match refusal.reason {
-            SelectReason::TooMany => "is beyond the 8-selection limit",
-            SelectReason::Missing => "does not exist",
-            SelectReason::Symlink => {
-                "is a symbolic link; name the file or directory it points to explicitly"
-            }
-            SelectReason::Directory => "cannot be selected as a portable directory",
-            SelectReason::SpecialFile => {
-                "is a device, FIFO or socket; only regular files and directories are sent"
-            }
-            SelectReason::NotPortable => {
-                "has a file name that is not portable UTF-8 (no : \\ < > \" | ? * or control characters, no trailing dot or space, no reserved device name); rename it locally"
-            }
-            SelectReason::DuplicateName => {
-                "has the same file name as an earlier --send; the host keeps one name per selection"
-            }
-            SelectReason::Unreadable => "cannot be opened for reading",
-            SelectReason::Changed => "changed while it was being opened; select it again",
-        };
-        // One short-lived process reports one refusal; the text carries the
-        // position and the typed reason only, never the path or name.
-        let next: &'static str = Box::leak(
-            format!(
-                "--send #{} {what}. Nothing was sent and no connection was made.",
-                refusal.index + 1
-            )
-            .into_boxed_str(),
-        );
-        Failure::new(refusal.reason.code(), next, 2)
-    })?;
+    let selection =
+        crate::file_reports::upload::select(paths)?.expect("nonempty initial selection");
     let sizes = selection.sizes().collect();
     Ok(Some(Local {
         selection: Some(selection),
@@ -231,7 +210,10 @@ impl Local {
             Some(Attempt::Absent(code)) => (Err(*code), None),
             Some(Attempt::Configured { control, drops }) => (Ok(control.status()), drops.as_ref()),
         };
-        let mut out = summary(&self.sizes, status.as_ref().map_err(|code| *code));
+        let mut out = match &status {
+            Ok(status) => Summary::from_status(&self.sizes, status),
+            Err(code) => Summary::unavailable(&self.sizes, code),
+        };
         if let Some(drops) = drops {
             // The original owner bounds this to eight additional batches,
             // each with at most eight selections. No path is retained here.
@@ -241,8 +223,8 @@ impl Local {
         }
         if let Some(commands) = &self.commands {
             out.commands = Some(match &commands.outcome {
-                None => Err(local::Error::Unavailable),
-                Some(Err(error)) => Err(*error),
+                None => Err(crate::file_commands::local_failure(local::Error::Unavailable).code),
+                Some(Err(error)) => Err(crate::file_commands::local_failure(*error).code),
                 Some(Ok(results)) => {
                     for batch in results.batches() {
                         out.append_command(&batch);
@@ -257,136 +239,6 @@ impl Local {
         out
     }
 }
-fn absence_code(absence: Absence) -> &'static str {
-    match absence {
-        Absence::NotNegotiated => "host_files_unavailable",
-        Absence::WithClipboard => "files_with_clipboard_unsupported",
-        Absence::Unavailable => "files_unavailable",
-        Absence::Refused(_) => "files_refused_locally",
-        Absence::SetupFailed(_) => "files_setup_failed",
-        Absence::ReceiveFailed(_) => "files_receive_failed",
-    }
-}
-fn refusal_reason(outcome: FileSendOutcome) -> Option<&'static str> {
-    Some(match outcome {
-        FileSendOutcome::HostPublished { .. } | FileSendOutcome::ControllerPublished { .. } => {
-            return None;
-        }
-        FileSendOutcome::HostRefused(reason) => match reason {
-            Reason::Conflict => "host_conflict",
-            Reason::Resource => "host_limit",
-            Reason::Permission => "host_permission",
-            Reason::Expired => "host_expired",
-            Reason::Integrity => "host_integrity",
-            Reason::Invalid => "host_invalid",
-            Reason::UnknownEffect => "publication_unknown",
-            Reason::Cancelled | Reason::User => "host_cancelled",
-            Reason::None => "host_refused",
-        },
-        FileSendOutcome::ControllerRefused(reason) => match reason {
-            Reason::Conflict => "controller_conflict",
-            Reason::Resource => "controller_limit",
-            Reason::Permission => "controller_permission",
-            Reason::Expired => "controller_expired",
-            Reason::Integrity => "controller_integrity",
-            Reason::Invalid => "controller_invalid",
-            Reason::UnknownEffect => "publication_unknown",
-            Reason::Cancelled | Reason::User => "controller_cancelled",
-            Reason::None => "controller_refused",
-        },
-        FileSendOutcome::PublicationUnknown => "publication_unknown",
-        FileSendOutcome::InterruptedBeforePublication(error) => match error {
-            FileSendError::Expired
-            | FileSendError::Transport(
-                fr_transport::quic::Error::Expired
-                | fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
-            ) => "interrupted_expired",
-            FileSendError::Cancelled | FileSendError::Closed => "interrupted_cancelled",
-            FileSendError::SourceChanged | FileSendError::Source => "source_changed",
-            _ => "interrupted",
-        },
-    })
-}
-
-/// Content-free completion: every requested index appears exactly once.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub(super) struct Summary {
-    pub(super) requested: usize,
-    /// (index, host-reported published bytes, durable).
-    pub(super) sent: Vec<(usize, u64, bool)>,
-    /// (index, known local size, typed reason); unmeasured directory sizes are None.
-    pub(super) refused: Vec<(usize, Option<u64>, &'static str)>,
-    /// Why no batch produced a report; `None` once any batch has one.
-    pub(super) absence: Option<&'static str>,
-    /// Original local-command setup only, never present authority/readiness.
-    commands: Option<Result<(), local::Error>>,
-    /// Exact original request -> range in the combined per-file outcomes.
-    /// Drop/command batches can interleave; an aggregate index is not an ID.
-    command_requests: Vec<(u64, usize, usize)>,
-}
-fn summary(sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) -> Summary {
-    let mut out = Summary {
-        requested: sizes.len(),
-        ..Summary::default()
-    };
-    let report = match status {
-        Ok(SendStatus {
-            report: Some(report),
-            ..
-        }) => *report,
-        Ok(status) => {
-            let absence = match (status.absence, status.phase) {
-                (Some(absence), _) => absence_code(absence),
-                (None, SendPhase::WaitingForSelection | SendPhase::SelectionAccepted)
-                    if sizes.is_empty() =>
-                {
-                    "no_files_selected"
-                }
-                (None, SendPhase::WaitingForControl) => "control_not_granted",
-                (None, SendPhase::Negotiating) => "files_setup_incomplete",
-                (None, _) => "files_not_started",
-            };
-            out.absence = Some(absence);
-            out.refused = (0..sizes.len())
-                .map(|index| (index, sizes[index], "not_sent"))
-                .collect();
-            return out;
-        }
-        Err(absence) => {
-            out.absence = Some(absence);
-            out.refused = (0..sizes.len())
-                .map(|index| (index, sizes[index], "not_sent"))
-                .collect();
-            return out;
-        }
-    };
-    reported(sizes, report.receipts().map(|receipt| receipt.outcome))
-}
-fn reported(sizes: &[Option<u64>], mut outcomes: impl Iterator<Item = FileSendOutcome>) -> Summary {
-    let mut out = Summary {
-        requested: sizes.len(),
-        ..Summary::default()
-    };
-    for (index, &size) in sizes.iter().enumerate() {
-        match outcomes.next() {
-            Some(
-                FileSendOutcome::HostPublished { bytes, publication }
-                | FileSendOutcome::ControllerPublished { bytes, publication },
-            ) => {
-                out.sent
-                    .push((index, bytes, publication == Publication::Durable));
-            }
-            Some(outcome) => out.refused.push((
-                index,
-                size,
-                refusal_reason(outcome).unwrap_or("host_refused"),
-            )),
-            // Never started: an earlier file stopped the ordered selection.
-            None => out.refused.push((index, size, "not_started")),
-        }
-    }
-    out
-}
 impl Summary {
     fn append_command(&mut self, batch: &local::BatchStatus) {
         let first = self.requested;
@@ -396,140 +248,6 @@ impl Summary {
     }
     fn append_dropped(&mut self, batch: &DroppedBatchStatus) {
         self.append_later(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
-    }
-    fn append_later(&mut self, sizes: &[Option<u64>], status: Result<&SendStatus, &'static str>) {
-        let mut next = summary(sizes, status);
-        if let Some(reason) = next.absence {
-            // An admitted successor awaits its original controller turn; it
-            // does not request a new control grant. Preserve other typed local
-            // selection/refusal reasons per index even after an earlier send.
-            let reason = if reason == "control_not_granted" {
-                "files_queued"
-            } else {
-                reason
-            };
-            for (_, _, refusal) in &mut next.refused {
-                *refusal = reason;
-            }
-        }
-        self.append(next);
-    }
-    fn append(&mut self, next: Self) {
-        if next.absence.is_none() {
-            self.absence = None;
-        }
-        let offset = self.requested;
-        self.requested += next.requested;
-        self.sent.extend(
-            next.sent
-                .into_iter()
-                .map(|(index, bytes, durable)| (offset + index, bytes, durable)),
-        );
-        self.refused.extend(
-            next.refused
-                .into_iter()
-                .map(|(index, bytes, reason)| (offset + index, bytes, reason)),
-        );
-    }
-    pub(super) fn not_requested() -> Self {
-        Self {
-            absence: Some("not_requested"),
-            ..Self::default()
-        }
-    }
-    /// `,"files_requested":..` for the JSON completion object.
-    pub(super) fn json(&self) -> String {
-        let mut out = format!(",\"files_requested\":{},\"files_sent\":[", self.requested);
-        for (n, (index, bytes, durable)) in self.sent.iter().enumerate() {
-            let comma = if n == 0 { "" } else { "," };
-            let _ = write!(
-                out,
-                "{comma}{{\"index\":{index},\"bytes\":{bytes},\"durable\":{durable}}}"
-            );
-        }
-        out.push_str("],\"files_refused\":[");
-        for (n, (index, bytes, reason)) in self.refused.iter().enumerate() {
-            let bytes = bytes.map_or_else(|| "null".to_owned(), |n| n.to_string());
-            let comma = if n == 0 { "" } else { "," };
-            let _ = write!(
-                out,
-                "{comma}{{\"index\":{index},\"bytes\":{bytes},\"reason\":\"{reason}\"}}"
-            );
-        }
-        let _ = write!(
-            out,
-            "],\"files_absence\":{}",
-            self.absence
-                .map_or_else(|| "null".to_owned(), |a| format!("\"{a}\""))
-        );
-        if let Some(commands) = self.commands {
-            let absence = commands.err().map_or_else(
-                || "null".to_owned(),
-                |error| format!("\"{}\"", crate::file_commands::local_failure(error).code),
-            );
-            let _ = write!(
-                out,
-                ",\"files_commands\":{{\"originally_enabled\":{},\"absence\":{absence},\"requests\":[",
-                commands.is_ok()
-            );
-            for (index, (request, first, selected)) in self.command_requests.iter().enumerate() {
-                let comma = if index == 0 { "" } else { "," };
-                let _ = write!(
-                    out,
-                    "{comma}{{\"request\":{request},\"first_index\":{first},\"selected\":{selected}}}"
-                );
-            }
-            out.push_str("]}");
-        }
-        out
-    }
-    /// One sentence for the text completion.
-    pub(super) fn text(&self) -> String {
-        let mut text = self.transfer_text();
-        if let Some(commands) = self.commands {
-            match commands {
-                Ok(()) => {
-                    text.push_str(" Local file commands belonged to the original upload only.");
-                }
-                Err(error) => {
-                    let _ = write!(
-                        text,
-                        " Local file commands unavailable: {}.",
-                        crate::file_commands::local_failure(error).code
-                    );
-                }
-            }
-        }
-        for (request, first, selected) in &self.command_requests {
-            let _ = write!(
-                text,
-                " File request {request}: #{} through #{} in the combined outcomes.",
-                first + 1,
-                first + selected
-            );
-        }
-        text
-    }
-    fn transfer_text(&self) -> String {
-        if let Some(absence) = self.absence {
-            if absence == "not_requested" {
-                return String::new();
-            }
-            if absence == "no_files_selected" {
-                return " Files: no files selected.".to_owned();
-            }
-            return format!(" Files absent: {absence} (nothing sent).");
-        }
-        let mut text = format!(
-            " Files: {} of {} published by the host",
-            self.sent.len(),
-            self.requested
-        );
-        for (index, _, reason) in &self.refused {
-            let _ = write!(text, "; #{} {reason}", index + 1);
-        }
-        text.push('.');
-        text
     }
 }
 
@@ -677,6 +395,7 @@ mod tests {
             absence: None,
             commands: None,
             command_requests: Vec::new(),
+            ..Summary::default()
         }
         .text();
         assert_eq!(

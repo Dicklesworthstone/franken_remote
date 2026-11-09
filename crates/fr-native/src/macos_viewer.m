@@ -17,6 +17,7 @@
 #include <os/lock.h>
 #include <stdint.h>
 #include <string.h>
+#include <math.h>
 
 enum {
     FR_MAC_OK = 0,
@@ -400,7 +401,66 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
 
 // ------------------------------------------------------------------ window
 
+// Only explicit one-shot file operations have local chrome. Flags select it
+// before opening the window; action bits separately cancel the original owners.
+enum {
+    FR_MAC_SHARE_UPLOAD = 1,
+    FR_MAC_SHARE_DOWNLOAD = 2,
+    FR_MAC_SHARE_ALL = 3,
+};
+#define FR_MAC_SHARING_HEIGHT 44.0
+#define FR_MAC_SHARING_CELL 230.0
+
+static BOOL fr_sharing_status(uint32_t status) {
+    return status <= 5;
+}
+
+static NSString *fr_byte_count(uint64_t bytes) {
+    static NSString *const units[] = {@"B", @"KiB", @"MiB", @"GiB", @"TiB", @"PiB", @"EiB"};
+    double value = (double)bytes;
+    size_t unit = 0;
+    while (value >= 1024 && unit < 6) {
+        value /= 1024;
+        unit++;
+    }
+    return unit == 0 ? [NSString stringWithFormat:@"%llu B", (unsigned long long)bytes]
+                    : [NSString stringWithFormat:@"%.1f %@", value, units[unit]];
+}
+
+static NSString *fr_transfer_label(NSString *direction, uint32_t status,
+                                    uint64_t done, uint64_t total) {
+    switch (status) {
+        case 0: return [direction stringByAppendingString:@": Off"];
+        case 1: return [direction stringByAppendingString:@": Waiting"];
+        case 2:
+            return [NSString stringWithFormat:@"%@: %@ / %@", direction,
+                                               fr_byte_count(done), fr_byte_count(total)];
+        case 3: return [direction stringByAppendingString:@": Finished"];
+        case 4: return [direction stringByAppendingString:@": Cancelled"];
+        default: return [direction stringByAppendingString:@": Failed"];
+    }
+}
+
+static unsigned fr_sharing_cells(uint32_t flags) {
+    return ((flags & FR_MAC_SHARE_UPLOAD) != 0) + ((flags & FR_MAC_SHARE_DOWNLOAD) != 0);
+}
+
+
 @class FrWindowOwner;
+
+@interface FrContentView : NSView
+@property(nonatomic, weak) FrWindowOwner *owner;
+@end
+
+@interface FrSharingView : NSView
+@end
+
+// NSButton normally enters a tracking loop until mouse-up. These local stop
+// controls act on mouse-down and return immediately, so holding the button
+// cannot postpone Rust's cancellation/authority turn.
+@interface FrSharingButton : NSButton
+@end
+
 
 @interface FrMetalView : NSView
 @property(nonatomic, weak) FrWindowOwner *owner;
@@ -410,6 +470,13 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
   @public
     NSWindow *window;
     FrMetalView *view;
+    FrContentView *content;
+    FrSharingView *sharing;
+    NSTextField *uploadLabel, *downloadLabel;
+    FrSharingButton *uploadCancel, *downloadCancel;
+    uint32_t sharingFlags, sharingActions, uploadStatus, downloadStatus;
+    uint64_t uploadDone, uploadTotal, downloadDone, downloadTotal;
+    BOOL uploadCancelled, downloadCancelled, layoutInProgress;
     FrRenderer *renderer;
     FrMacEvent queue[FR_MAC_QUEUE];
     size_t head, count;
@@ -418,6 +485,10 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
 }
 - (void)push:(FrMacEvent)event;
 - (void)layout;
+- (void)buildSharing;
+- (void)layoutSharing;
+- (void)cancelUpload:(id)sender;
+- (void)cancelDownload:(id)sender;
 @end
 
 @implementation FrMetalView
@@ -458,7 +529,106 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
 }
 @end
 
+
+@implementation FrContentView
+- (BOOL)isFlipped { return YES; }
+- (void)setFrameSize:(NSSize)size {
+    [super setFrameSize:size];
+    [self.owner layout];
+}
+@end
+
+@implementation FrSharingView
+- (BOOL)isFlipped { return YES; }
+- (BOOL)isOpaque { return YES; }
+- (void)drawRect:(NSRect)dirty {
+    [NSColor.windowBackgroundColor setFill];
+    NSRectFill(dirty);
+    [NSColor.separatorColor setFill];
+    NSRectFill(NSMakeRect(0, NSHeight(self.bounds) - 1, NSWidth(self.bounds), 1));
+}
+@end
+
+@implementation FrSharingButton
+- (BOOL)acceptsFirstResponder { return NO; }
+- (void)mouseDown:(NSEvent *)event {
+    NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    if (self.enabled && NSPointInRect(p, self.bounds))
+        [NSApp sendAction:self.action to:self.target from:self];
+}
+- (void)mouseDragged:(NSEvent *)event { (void)event; }
+- (void)mouseUp:(NSEvent *)event { (void)event; }
+@end
+
+static NSTextField *fr_sharing_label(FrSharingView *parent, NSString *text) {
+    NSTextField *label = [NSTextField labelWithString:text];
+    label.font = [NSFont systemFontOfSize:11];
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
+    label.selectable = NO;
+    [parent addSubview:label];
+    return label;
+}
+
+static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title,
+                                          FrWindowOwner *owner, SEL action) {
+    FrSharingButton *button = [[FrSharingButton alloc] initWithFrame:NSZeroRect];
+    button.title = title;
+    button.bezelStyle = NSBezelStyleRounded;
+    button.controlSize = NSControlSizeSmall;
+    button.target = owner;
+    button.action = action;
+    button.font = [NSFont systemFontOfSize:11];
+    [parent addSubview:button];
+    return button;
+}
+
 @implementation FrWindowOwner
+
+- (void)buildSharing {
+    if (sharingFlags & FR_MAC_SHARE_UPLOAD) {
+        uploadStatus = 1;
+        uploadLabel = fr_sharing_label(sharing, @"Send: Waiting");
+        uploadCancel = fr_sharing_button(sharing, @"Cancel", self, @selector(cancelUpload:));
+        uploadCancel.accessibilityLabel = @"Cancel sending file";
+    }
+    if (sharingFlags & FR_MAC_SHARE_DOWNLOAD) {
+        downloadStatus = 1;
+        downloadLabel = fr_sharing_label(sharing, @"Receive: Waiting");
+        downloadCancel = fr_sharing_button(sharing, @"Cancel", self, @selector(cancelDownload:));
+        downloadCancel.accessibilityLabel = @"Cancel receiving file";
+    }
+}
+- (void)layoutSharing {
+    if (!sharing || !sharingFlags) return;
+    unsigned cells = fr_sharing_cells(sharingFlags);
+    double cell = (NSWidth(sharing.bounds) - 16) / cells;
+    unsigned index = 0;
+    NSTextField *labels[] = {uploadLabel, downloadLabel};
+    FrSharingButton *controls[] = {uploadCancel, downloadCancel};
+    for (unsigned i = 0; i < 2; i++) {
+        if (!labels[i]) continue;
+        double x = 8 + index++ * cell;
+        labels[i].frame = NSMakeRect(x + 4, 14, fmax(1, cell - 78), 17);
+        controls[i].frame = NSMakeRect(x + cell - 70, 8, 66, 28);
+    }
+}
+- (void)cancelUpload:(id)sender {
+    (void)sender;
+    if (!uploadCancel.enabled || uploadCancelled) return;
+    uploadCancelled = YES;
+    sharingActions |= FR_MAC_SHARE_UPLOAD;
+    uploadCancel.enabled = NO;
+    uploadLabel.stringValue = @"Send: Cancelling";
+}
+- (void)cancelDownload:(id)sender {
+    (void)sender;
+    if (!downloadCancel.enabled || downloadCancelled) return;
+    downloadCancelled = YES;
+    sharingActions |= FR_MAC_SHARE_DOWNLOAD;
+    downloadCancel.enabled = NO;
+    downloadLabel.stringValue = @"Receive: Cancelling";
+}
+
 - (void)push:(FrMacEvent)event {
     if (count == FR_MAC_QUEUE) {
         overflow = YES;
@@ -468,10 +638,18 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
     count++;
 }
 - (void)layout {
-    if (!view) return;
-    NSRect bounds = view.bounds;
+    if (!view || layoutInProgress) return;
+    layoutInProgress = YES;
+    if (content) {
+        NSRect bounds = content.bounds;
+        sharing.frame = NSMakeRect(0, 0, NSWidth(bounds), FR_MAC_SHARING_HEIGHT);
+        view.frame = NSMakeRect(0, FR_MAC_SHARING_HEIGHT, NSWidth(bounds),
+                                fmax(1, NSHeight(bounds) - FR_MAC_SHARING_HEIGHT));
+        [self layoutSharing];
+    }
     double scale = window ? window.backingScaleFactor : 1;
-    [renderer resizeTo:bounds.size scale:scale];
+    [renderer resizeTo:view.bounds.size scale:scale];
+    layoutInProgress = NO;
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     (void)sender;
@@ -594,30 +772,41 @@ double fr_mac_event_time(void) {
 }
 
 int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
-                      uint32_t point_height, const char *title, size_t title_len, void **out) {
+                      uint32_t point_height, uint32_t sharing_flags, const char *title,
+                      size_t title_len, void **out) {
     if (!out || width < 16 || height < 16 || point_width < 1 || point_height < 1 ||
-        (title_len && !title))
+        (sharing_flags & ~FR_MAC_SHARE_ALL) || (title_len && !title))
         return FR_MAC_INVALID;
     *out = NULL;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     @autoreleasepool {
+        NSRect visible = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame
+                                             : NSMakeRect(0, 0, 1280, 800);
+        if (sharing_flags &&
+            16 + FR_MAC_SHARING_CELL * fr_sharing_cells(sharing_flags) > visible.size.width)
+            return FR_MAC_GEOMETRY;
         int status = FR_MAC_OK;
         FrRenderer *renderer = renderer_new(width, height, &status);
         if (!renderer) return status;
         FrWindowOwner *owner = [FrWindowOwner new];
         owner->renderer = renderer;
+        owner->sharingFlags = sharing_flags;
         // Start at the remote display's logical size in points, so a 2x
         // remote lands 1:1 on a 2x screen and a 1x remote keeps its natural
         // size. Only a picture that does not fit the visible screen (below
         // the title bar) is shrunk, with a margin and the aspect ratio kept:
         // any shrink resamples, so a fitting picture keeps its exact size.
-        NSRect visible = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame
-                                             : NSMakeRect(0, 0, 1280, 800);
+        double chromeHeight = sharing_flags ? FR_MAC_SHARING_HEIGHT : 0;
+        double minimumWidth = sharing_flags
+                                  ? 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(sharing_flags)
+                                  : 1;
         double s = 1.0;
-        if (point_width > visible.size.width || point_height > visible.size.height - 28)
+        if (point_width > visible.size.width ||
+            point_height > visible.size.height - 28 - chromeHeight)
             s = fmin(visible.size.width * 0.9 / point_width,
-                     (visible.size.height * 0.9 - 28) / point_height);
-        NSRect frame = NSMakeRect(0, 0, floor(point_width * s), floor(point_height * s));
+                     fmax(1, visible.size.height * 0.9 - 28 - chromeHeight) / point_height);
+        NSRect frame = NSMakeRect(0, 0, fmax(minimumWidth, floor(point_width * s)),
+                                  fmax(1, floor(point_height * s)) + chromeHeight);
         NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
         NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
@@ -627,7 +816,10 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
         window.releasedWhenClosed = NO;
         window.acceptsMouseMovedEvents = YES;
         window.delegate = owner;
-        window.contentAspectRatio = NSMakeSize(width, height);
+        if (!sharing_flags) window.contentAspectRatio = NSMakeSize(width, height);
+        // The Metal view keeps its own picture aspect ratio. Native chrome has
+        // fixed point height and must not be folded into that pixel geometry.
+        if (sharing_flags) window.contentMinSize = NSMakeSize(minimumWidth, chromeHeight + 64);
         window.backgroundColor = NSColor.blackColor;
         NSString *name = title_len ? [[NSString alloc] initWithBytes:title
                                                               length:title_len
@@ -640,7 +832,19 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
         owner->view = view;
         view.layerContentsRedrawPolicy = NSViewLayerContentsRedrawDuringViewResize;
         view.wantsLayer = YES;
-        window.contentView = view;
+        if (sharing_flags) {
+            FrContentView *content = [[FrContentView alloc] initWithFrame:frame];
+            content.owner = owner;
+            owner->content = content;
+            owner->sharing = [[FrSharingView alloc] initWithFrame:NSZeroRect];
+            [content addSubview:view];
+            [content addSubview:owner->sharing];
+            [owner buildSharing];
+            window.contentView = content;
+        } else {
+            window.contentView = view;
+        }
+        [owner layout];
         [window makeFirstResponder:view];
         [window center];
         [window makeKeyAndOrderFront:nil];
@@ -658,6 +862,73 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
     return FR_MAC_OK;
 }
 
+
+// Content-free status only: paths, file names and file contents never enter
+// this chrome. Statuses: 0 off/absent, 1 waiting, 2 active, 3 finished,
+// 4 cancelled, 5 failed. Rust supplies actual publication/cleanup evidence;
+// the toolbar NEVER infers successful completion from staged byte counts.
+int fr_mac_window_sharing_update(void *handle,
+                                 uint32_t upload_status, uint64_t upload_done, uint64_t upload_total,
+                                 uint32_t download_status, uint64_t download_done, uint64_t download_total) {
+    if (!handle || !fr_sharing_status(upload_status) || !fr_sharing_status(download_status) ||
+        upload_done > upload_total || download_done > download_total)
+        return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if ((!(owner->sharingFlags & FR_MAC_SHARE_UPLOAD) &&
+         (upload_status || upload_done || upload_total)) ||
+        (!(owner->sharingFlags & FR_MAC_SHARE_DOWNLOAD) &&
+         (download_status || download_done || download_total)))
+        return FR_MAC_INVALID;
+    BOOL changed = owner->uploadStatus != upload_status || owner->uploadDone != upload_done ||
+                   owner->uploadTotal != upload_total || owner->downloadStatus != download_status ||
+                   owner->downloadDone != download_done || owner->downloadTotal != download_total;
+    if (!changed) return FR_MAC_OK;
+    @autoreleasepool {
+        owner->uploadStatus = upload_status;
+        owner->uploadDone = upload_done;
+        owner->uploadTotal = upload_total;
+        owner->downloadStatus = download_status;
+        owner->downloadDone = download_done;
+        owner->downloadTotal = download_total;
+        if (owner->uploadLabel) {
+            owner->uploadLabel.stringValue =
+                owner->uploadCancelled && (upload_status == 1 || upload_status == 2)
+                    ? @"Send: Cancelling"
+                    : fr_transfer_label(@"Send", upload_status, upload_done, upload_total);
+            owner->uploadCancel.enabled = !owner->uploadCancelled &&
+                                           (upload_status == 1 || upload_status == 2);
+        }
+        if (owner->downloadLabel) {
+            owner->downloadLabel.stringValue =
+                owner->downloadCancelled && (download_status == 1 || download_status == 2)
+                    ? @"Receive: Cancelling"
+                    : fr_transfer_label(@"Receive", download_status, download_done, download_total);
+            owner->downloadCancel.enabled = !owner->downloadCancelled &&
+                                             (download_status == 1 || download_status == 2);
+        }
+    }
+    return FR_MAC_OK;
+}
+
+// Drain local cancellation latches every pump. "Visible" means mapped and
+// unclipped AppKit chrome; it is not an unobscured privacy/UI heartbeat proof.
+// File ownership and cancellation remain with the original Rust session.
+int fr_mac_window_sharing_state(void *handle, uint32_t *actions, int *visible) {
+    if (!handle || !actions || !visible) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    *actions = owner->sharingActions;
+    owner->sharingActions = 0;
+    NSWindow *w = owner->window;
+    *visible = owner->sharingFlags && owner->sharing && !owner->sharing.hidden &&
+               w.isVisible && !w.isMiniaturized && w.isOnActiveSpace &&
+               (w.occlusionState & NSWindowOcclusionStateVisible) &&
+               NSContainsRect(owner->sharing.visibleRect, owner->sharing.bounds)
+                   ? 1 : 0;
+    return FR_MAC_OK;
+}
+
 // Waits up to `timeout` seconds for the first event, then drains one bounded
 // batch without waiting. Returns the number of translated events copied out.
 size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t capacity,
@@ -668,7 +939,8 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        while (owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS) {
+        while (!owner->sharingActions && owner->count < FR_MAC_QUEUE &&
+               dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until
                                                    inMode:NSDefaultRunLoopMode
@@ -680,7 +952,8 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
             if ([owner translate:event]) [NSApp sendEvent:event];
             until = [NSDate distantPast];
         }
-        [NSApp updateWindows];
+        // A local cancellation must reach Rust before any further UI drawing.
+        if (!owner->sharingActions) [NSApp updateWindows];
     }
     // At either ceiling, a queued close, focus change or emergency release
     // may remain uninspected. Fail closed before granting or exporting input.
@@ -859,8 +1132,11 @@ void fr_mac_window_free(void *handle) {
         [owner->window orderOut:nil];
         [owner->window close];
         owner->view.owner = nil;
+        owner->content.owner = nil;
         owner->window = nil;
         owner->view = nil;
+        owner->content = nil;
+        owner->sharing = nil;
     }
 }
 

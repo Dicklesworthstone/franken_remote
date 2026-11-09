@@ -3,10 +3,13 @@
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
-//! file transfer, audio, microphone, the native host/display pickers,
+//! interactive file drops/commands, audio, microphone, native host/display pickers,
 //! system-shortcut capture and the clipboard (whose default-on choice is
 //! reported as unavailable). Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
+//! Explicit --send/--receive choices use the original controlled file lanes.
+#[path = "macos_files.rs"]
+mod files;
 use super::{
     Failure, Shutdown, failure, lapse, read_roots, refusal, robot, session_control, tailnet,
 };
@@ -25,6 +28,33 @@ fn unsupported(option: &'static str) -> Failure {
 
 /// Refuse every option this path does not implement, before any network I/O.
 fn check(connection: &Connection) -> Result<(), Failure> {
+    if !connection.control && !connection.upload.paths.is_empty() {
+        return Err(Failure::new(
+            "send_requires_control",
+            "Files are sent only on your own control lease; pass --control with --send.",
+            2,
+        ));
+    }
+    if !connection.control && connection.receive.is_some() {
+        return Err(Failure::new(
+            "receive_requires_control",
+            "Files are received only on your own control lease; pass --control with --receive.",
+            2,
+        ));
+    }
+    let directions =
+        u32::from(!connection.upload.paths.is_empty()) + u32::from(connection.receive.is_some());
+    if directions != 0
+        && connection
+            .fit_window
+            .is_some_and(|(width, height)| width < 16 + 230 * directions || height < 108)
+    {
+        return Err(Failure::new(
+            "files_fit_too_small",
+            "--fit must leave room for the native file progress and Cancel controls: at least 246x108 points for one direction, or 476x108 points for both.",
+            2,
+        ));
+    }
     let refused = if connection.choose_host {
         Some("--choose-host is not implemented on macOS yet; name the host instead.")
     } else if connection.display == DisplayChoice::Choose {
@@ -37,13 +67,9 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         Some("--audio is not implemented on macOS yet.")
     } else if connection.microphone.is_some() {
         Some("--microphone is not implemented on macOS yet.")
-    } else if connection.receive.is_some()
-        || !connection.upload.paths.is_empty()
-        || connection.upload.file_drop
-        || connection.upload.file_commands
-    {
+    } else if connection.upload.file_drop || connection.upload.file_commands {
         Some(
-            "File transfer (--send, --file-drop, --file-commands, --receive) is not implemented on macOS yet.",
+            "--file-drop and --file-commands are not implemented on macOS yet; choose explicit --send paths and/or a --receive directory before connecting.",
         )
     } else {
         None
@@ -68,6 +94,37 @@ pub(super) fn connect(
         ));
     }
     check(connection)?;
+    // Pin the user's explicit sources and destination before AppKit, host
+    // lookup or network I/O. These choices belong to one original control.
+    let selected_files = files::select(connection)?;
+    let pending = files::Summary::capture(&selected_files);
+    connect_selected(
+        runtime,
+        cx,
+        shutdown,
+        stopped,
+        api,
+        connection,
+        json,
+        selected_files,
+    )
+    .map_err(|mut error| {
+        pending.preserve(&mut error);
+        error
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn connect_selected(
+    runtime: &Runtime,
+    cx: &Cx,
+    shutdown: &mut Shutdown,
+    stopped: &Cell<bool>,
+    api: LocalApi,
+    connection: &Connection,
+    json: bool,
+    selected_files: fr_native::macos::files::Files,
+) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
             "gui_unavailable",
@@ -96,7 +153,8 @@ pub(super) fn connect(
         epoch,
         format!("FrankenRemote: {}", selected.node),
     )
-    .with_fit_window(connection.fit_window);
+    .with_fit_window(connection.fit_window)
+    .with_files(selected_files);
     let cfg = Configuration {
         port: selected.port,
         family: if connection.target.ipv6 {
@@ -121,12 +179,15 @@ pub(super) fn connect(
         .map_err(robot::local_failure)?;
     let selector = selected.selector();
     let result = if connection.control {
+        // Drop the Ref before handing the mutable session to its supervisor.
+        // Clipboard remains unavailable; file choices never imply that consent.
+        let offer = session.files().offer(false);
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
             selector,
             cfg,
-            fr_client::native::control_offer(),
+            offer,
             policy,
             &mut session,
         );
@@ -155,14 +216,18 @@ pub(super) fn connect(
     // Losing a requester cannot undo cleanup or fabricate a reply. The caller
     // independently reports an unknown outcome if this response is lost.
     let _ = runtime.block_on(owner.complete(&local, cleanup));
-    finish(
-        &session.report(),
-        result,
-        stopped.get(),
-        connection.control && connection.clipboard,
+    let evidence = files::Summary::capture(&session.files());
+    evidence.finish(
+        finish(
+            &session.report(),
+            result,
+            stopped.get(),
+            connection.control && connection.clipboard,
+            json,
+            session.cleanup_confirmed(),
+            reconnect::Application::terminal_failure(&session),
+        ),
         json,
-        session.cleanup_confirmed(),
-        reconnect::Application::terminal_failure(&session),
     )
 }
 
@@ -366,4 +431,71 @@ fn finish_result(
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::options::{Command, Options};
+
+    fn connection(extra: &str) -> Connection {
+        let Options {
+            command: Command::Connect(connection),
+            ..
+        } = crate::options::parse(
+            &format!("connect n-host --control --experimental-native --display only {extra}")
+                .split_whitespace()
+                .map(str::to_owned)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+        else {
+            panic!("connection required")
+        };
+        connection
+    }
+
+    #[test]
+    fn explicit_file_directions_are_admitted_without_implicit_drop_or_clipboard_support() {
+        for flags in [
+            "--send /private/chosen",
+            "--receive /private/inbox",
+            "--send /private/chosen --receive /private/inbox",
+        ] {
+            let connection = connection(flags);
+            assert!(check(&connection).is_ok());
+            assert!(!connection.upload.file_drop && !connection.upload.file_commands);
+        }
+        for flags in ["--file-drop", "--file-commands"] {
+            assert_eq!(
+                check(&connection(flags)).err().unwrap().code,
+                "platform_unavailable"
+            );
+        }
+    }
+
+    #[test]
+    fn programmatic_file_requests_require_control_and_fit_keeps_cancel_controls_available() {
+        let mut upload = connection("--send /private/chosen");
+        upload.control = false;
+        assert_eq!(check(&upload).err().unwrap().code, "send_requires_control");
+        let mut download = connection("--receive /private/inbox");
+        download.control = false;
+        assert_eq!(
+            check(&download).err().unwrap().code,
+            "receive_requires_control"
+        );
+        for (flags, width, height) in [
+            ("--send /private/chosen", 245, 108),
+            ("--receive /private/inbox", 246, 107),
+            ("--send /private/chosen --receive /private/inbox", 475, 108),
+        ] {
+            let mut c = connection(flags);
+            c.fit_window = Some((width, height));
+            assert_eq!(check(&c).err().unwrap().code, "files_fit_too_small");
+        }
+        let mut c = connection("--send /private/chosen --receive /private/inbox");
+        c.fit_window = Some((476, 108));
+        assert!(check(&c).is_ok());
+    }
 }

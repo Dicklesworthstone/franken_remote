@@ -11,6 +11,12 @@ mod closure;
 mod discovery;
 #[path = "fr_cli/file_commands.rs"]
 mod file_commands;
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "fr_cli/file_reports.rs"]
+mod file_reports;
 #[path = "fr_cli/help.rs"]
 mod help;
 #[cfg(any(

@@ -70,7 +70,10 @@ impl ReceiveOptions {
 
     /// Resolve omitted limits from the actual native receiver, never copied CLI
     /// defaults. Invalid effective limits refuse before looking up the directory.
-    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     pub(crate) fn open(&self) -> Result<frd::native_files::Directory, Failure> {
         use frd::native_files::{ConflictPolicy, Directory, Limits};
         let defaults = Limits::default();
@@ -212,7 +215,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     fn effective_limits_refuse_before_path_access_including_programmatic_callers() {
         use frd::native_files::Limits;
         let defaults = Limits::default();
@@ -233,7 +239,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+    #[cfg(any(
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     fn explicit_policy_reaches_the_pinned_directory_without_weakening_path_checks() {
         use frd::native_files::Limits;
         use std::{
@@ -242,7 +251,10 @@ mod tests {
             sync::atomic::{AtomicU64, Ordering},
         };
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let root = std::env::temp_dir().join(format!(
+        // macOS's temporary directory can have a symlink prefix. Resolve only
+        // this test fixture root; production destinations retain no-follow checks.
+        let temporary = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let root = temporary.join(format!(
             "fr-download-options-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed),

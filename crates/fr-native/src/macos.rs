@@ -37,11 +37,13 @@ struct RawEvent {
 unsafe extern "C" {
     fn fr_mac_app_init() -> c_int;
     fn fr_mac_event_time() -> f64;
+    #[allow(clippy::too_many_arguments)]
     fn fr_mac_window_new(
         width: u32,
         height: u32,
         point_width: u32,
         point_height: u32,
+        sharing_flags: u32,
         title: *const c_char,
         title_len: usize,
         out: *mut *mut c_void,
@@ -54,6 +56,21 @@ unsafe extern "C" {
         overflow: *mut c_int,
     ) -> usize;
     fn fr_mac_window_number(window: *mut c_void) -> isize;
+    #[allow(clippy::too_many_arguments)]
+    fn fr_mac_window_sharing_update(
+        window: *mut c_void,
+        upload_status: u32,
+        upload_done: u64,
+        upload_total: u64,
+        download_status: u32,
+        download_done: u64,
+        download_total: u64,
+    ) -> c_int;
+    fn fr_mac_window_sharing_state(
+        window: *mut c_void,
+        actions: *mut u32,
+        visible: *mut c_int,
+    ) -> c_int;
     fn fr_mac_window_state(
         window: *mut c_void,
         width: *mut u32,
@@ -239,6 +256,16 @@ impl Window {
         points: (u32, u32),
         title: &str,
     ) -> Result<Self, NativeError> {
+        Self::open_with_sharing(width, height, points, title, 0)
+    }
+    /// Reserve requested native file controls before creating the viewport.
+    pub(crate) fn open_with_sharing(
+        width: u32,
+        height: u32,
+        points: (u32, u32),
+        title: &str,
+        sharing_flags: u32,
+    ) -> Result<Self, NativeError> {
         let mut raw = core::ptr::null_mut();
         // SAFETY: title bytes live for the call and the glue copies them; the
         // out pointer is writable. The glue refuses a non-main thread.
@@ -248,6 +275,7 @@ impl Window {
                 height,
                 points.0,
                 points.1,
+                sharing_flags,
                 title.as_ptr().cast(),
                 title.len(),
                 &raw mut raw,
@@ -260,6 +288,31 @@ impl Window {
             // any local control gesture is eligible.
             buffer: vec![RawEvent::default(); 1024],
             _main_thread: PhantomData,
+        })
+    }
+    pub(crate) fn sharing_update(&self, view: sharing::View) -> Result<(), NativeError> {
+        // SAFETY: live main-thread window, bounded status enums and scalar counts.
+        status(unsafe {
+            fr_mac_window_sharing_update(
+                self.raw.as_ptr(),
+                view.upload.state as u32,
+                view.upload.done,
+                view.upload.total,
+                view.download.state as u32,
+                view.download.done,
+                view.download.total,
+            )
+        })
+    }
+    pub(crate) fn sharing_state(&self) -> Result<sharing::Sample, NativeError> {
+        let (mut actions, mut visible) = (0, 0);
+        // SAFETY: live main-thread window; both out parameters are writable.
+        status(unsafe {
+            fr_mac_window_sharing_state(self.raw.as_ptr(), &raw mut actions, &raw mut visible)
+        })?;
+        Ok(sharing::Sample {
+            actions,
+            visible: visible != 0,
         })
     }
     /// Current picture size and input-relevant window state.
@@ -670,6 +723,11 @@ impl Drop for HevcDecoder {
         unsafe { fr_mac_decoder_free(self.raw.as_ptr()) };
     }
 }
+
+#[path = "macos/files.rs"]
+pub mod files;
+#[path = "macos/sharing.rs"]
+mod sharing;
 
 // The frd session on top of this window and decoder (needs the CLI's frd).
 #[cfg(feature = "cli")]
