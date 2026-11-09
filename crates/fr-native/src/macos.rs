@@ -38,6 +38,8 @@ unsafe extern "C" {
     fn fr_mac_window_new(
         width: u32,
         height: u32,
+        point_width: u32,
+        point_height: u32,
         title: *const c_char,
         title_len: usize,
         out: *mut *mut c_void,
@@ -200,8 +202,15 @@ pub struct Window {
     _main_thread: PhantomData<*mut ()>,
 }
 impl Window {
-    /// Opens a window for a `width` x `height` remote picture.
-    pub fn open(width: u32, height: u32, title: &str) -> Result<Self, NativeError> {
+    /// Opens a window for a `width` x `height` remote picture, sized at the
+    /// remote display's logical size `points` (shrunk to fit the screen). A
+    /// 2x remote then lands 1:1 on a 2x screen.
+    pub fn open(
+        width: u32,
+        height: u32,
+        points: (u32, u32),
+        title: &str,
+    ) -> Result<Self, NativeError> {
         let mut raw = core::ptr::null_mut();
         // SAFETY: title bytes live for the call and the glue copies them; the
         // out pointer is writable. The glue refuses a non-main thread.
@@ -209,6 +218,8 @@ impl Window {
             fr_mac_window_new(
                 width,
                 height,
+                points.0,
+                points.1,
                 title.as_ptr().cast(),
                 title.len(),
                 &raw mut raw,

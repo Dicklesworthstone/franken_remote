@@ -299,6 +299,25 @@ impl Hardware {
         }
     }
 }
+/// The window's starting size in points: the remote display's logical size,
+/// so a 2x remote lands 1:1 on a 2x screen and a 1x remote keeps its natural
+/// size. A logical size whose aspect ratio is off the picture's by more than a
+/// pixel falls back to the pixel size.
+fn natural_points(display: &Display) -> (u32, u32) {
+    let (pw, ph) = (
+        u64::from(display.pixel_width),
+        u64::from(display.pixel_height),
+    );
+    let (lw, lh) = (
+        u64::from(display.logical_width),
+        u64::from(display.logical_height),
+    );
+    if lw == 0 || lh == 0 || (lw * ph).abs_diff(lh * pw) > pw.max(ph) {
+        (display.pixel_width, display.pixel_height)
+    } else {
+        (display.logical_width, display.logical_height)
+    }
+}
 fn worker_error(error: NativeError) -> WorkerError {
     match error {
         NativeError::InvalidConfiguration | NativeError::UnsupportedBitstream => {
@@ -581,8 +600,13 @@ impl Application for Session {
         let approval_report = report.clone();
         let opening = viewer.observe_with_renderer(
             move |display, _original| async move {
-                let opened = Window::open(display.pixel_width, display.pixel_height, &title)
-                    .map_err(|_| ())?;
+                let opened = Window::open(
+                    display.pixel_width,
+                    display.pixel_height,
+                    natural_points(&display),
+                    &title,
+                )
+                .map_err(|_| ())?;
                 let surface = opened.surface();
                 *window_slot.borrow_mut() = Some(opened);
                 Launch::in_process(
@@ -732,5 +756,56 @@ impl Application for Session {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::natural_points;
+    use fr_core::ids::DisplayGeometryGeneration;
+    use fr_wire::display::Display;
+
+    fn display(pixels: (u32, u32), logical: (u32, u32)) -> Display {
+        Display {
+            handle: 1,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            x: 0,
+            y: 0,
+            pixel_width: pixels.0,
+            pixel_height: pixels.1,
+            logical_width: logical.0,
+            logical_height: logical.1,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
+        }
+    }
+
+    #[test]
+    fn windows_open_at_the_remote_logical_size() {
+        // A Retina Mac or a 200% Windows display: half the pixels in points.
+        assert_eq!(
+            natural_points(&display((5120, 2880), (2560, 1440))),
+            (2560, 1440)
+        );
+        assert_eq!(
+            natural_points(&display((3000, 2000), (1500, 1000))),
+            (1500, 1000)
+        );
+        // A 1x X11 display is unchanged; rounding within a pixel is accepted.
+        assert_eq!(
+            natural_points(&display((1920, 1080), (1920, 1080))),
+            (1920, 1080)
+        );
+        assert_eq!(
+            natural_points(&display((2880, 1800), (1919, 1200))),
+            (1919, 1200)
+        );
+        // A logical size of another shape falls back to the picture's pixels.
+        assert_eq!(
+            natural_points(&display((1920, 1080), (1080, 1920))),
+            (1920, 1080)
+        );
+        assert_eq!(natural_points(&display((1920, 1080), (0, 0))), (1920, 1080));
     }
 }

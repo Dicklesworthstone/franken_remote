@@ -5,7 +5,11 @@
 //! ```text
 //! cargo run -p fr-native --no-default-features --features macos-desktop \
 //!   --example macos_present -- FILE [--size 1920x1080] [--fps 30] [--seconds N]
+//!   [--scale N]
 //! ```
+//!
+//! `--scale 2` treats the picture as a 2x display's pixels, so the window
+//! opens at half the size in points and shows it 1:1 on a Retina screen.
 #[cfg(target_os = "macos")]
 mod mac {
     use fr_core::ids::{CodecConfigurationGeneration, RecoveryGeneration};
@@ -26,6 +30,7 @@ mod mac {
         height: u32,
         fps: u32,
         seconds: Option<f64>,
+        scale: u32,
     }
 
     fn options() -> Result<Options, String> {
@@ -36,6 +41,7 @@ mod mac {
             height: 1080,
             fps: 30,
             seconds: None,
+            scale: 1,
         };
         while let Some(arg) = args.next() {
             let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -48,6 +54,12 @@ mod mac {
                 }
                 "--fps" => o.fps = value()?.parse().map_err(|_| "--fps N")?,
                 "--seconds" => o.seconds = Some(value()?.parse().map_err(|_| "--seconds N")?),
+                "--scale" => {
+                    o.scale = value()?.parse().map_err(|_| "--scale N")?;
+                    if o.scale == 0 {
+                        return Err("--scale N".into());
+                    }
+                }
                 _ if o.path.is_empty() => o.path = arg,
                 _ => return Err(format!("unexpected argument {arg}")),
             }
@@ -101,8 +113,13 @@ mod mac {
         let record = guard.decoder_record().expect("record").bytes().to_vec();
 
         macos::initialize_application().expect("AppKit");
-        let mut window =
-            Window::open(o.width, o.height, "FrankenRemote macos_present").expect("window");
+        let mut window = Window::open(
+            o.width,
+            o.height,
+            (o.width / o.scale, o.height / o.scale),
+            "FrankenRemote macos_present",
+        )
+        .expect("window");
         println!("window {}", window.number());
         let surface = window.surface();
         let stop = Arc::new(AtomicBool::new(false));

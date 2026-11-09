@@ -67,9 +67,9 @@ static NSString *const kShader =
      "}\n"
      "fragment float4 fr_fragment(V in [[stage_in]], texture2d<float> luma [[texture(0)]],\n"
      "    texture2d<float> chroma [[texture(1)]], sampler s [[sampler(0)]],\n"
-     "    constant float4 &range [[buffer(0)]]) {\n"
+     "    sampler cs [[sampler(1)]], constant float4 &range [[buffer(0)]]) {\n"
      "  float y = (luma.sample(s, in.uv).r - range.x) * range.y;\n"
-     "  float2 c = (chroma.sample(s, in.uv).rg - range.z) * range.w;\n"
+     "  float2 c = (chroma.sample(cs, in.uv).rg - range.z) * range.w;\n"
      "  float3 rgb = float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x);\n"
      "  return float4(saturate(rgb), 1.0);\n"
      "}\n"
@@ -92,6 +92,7 @@ static NSString *const kShader =
     id<MTLCommandQueue> queue;
     id<MTLRenderPipelineState> pipeline;
     id<MTLSamplerState> sampler;
+    id<MTLSamplerState> nearest;
     CVMetalTextureCacheRef cache;
     CVPixelBufferRef last;   // retained: redrawn on resize or expose
     uint32_t sourceWidth;    // visible picture size
@@ -100,6 +101,7 @@ static NSString *const kShader =
     CGSize drawable;         // pixels
     double scale;            // pixels per point
     CGRect fit;              // drawable pixels, top-left origin
+    BOOL integerFit;         // each picture pixel covers exactly k x k drawable pixels
     uint64_t presented;
     // The single client-rendered remote cursor: straight-alpha RGBA8 shape,
     // hotspot position in picture pixels. The host capture excludes it.
@@ -130,6 +132,11 @@ static NSString *const kShader =
         return;
     }
     double s = fmin(dw / sw, dh / sh);
+    // Within a pixel of a whole scale (1:1, or a 1x remote on a 2x screen):
+    // use it exactly, so luma can be sampled nearest and text keeps its edges.
+    double k = floor(s + 1e-9);
+    integerFit = k >= 1 && fabs(sw * k - sw * s) < 1 && fabs(sh * k - sh * s) < 1;
+    if (integerFit) s = k;
     double w = round(sw * s), h = round(sh * s);
     fit = CGRectMake(floor((dw - w) / 2), floor((dh - h) / 2), w, h);
 }
@@ -165,7 +172,10 @@ static NSString *const kShader =
             [encoder setVertexBytes:extent length:sizeof(extent) atIndex:0];
             [encoder setFragmentTexture:CVMetalTextureGetTexture(luma) atIndex:0];
             [encoder setFragmentTexture:CVMetalTextureGetTexture(chroma) atIndex:1];
-            [encoder setFragmentSamplerState:sampler atIndex:0];
+            // Linear filtering smears a whole-scale picture; chroma is subsampled
+            // and stays linear.
+            [encoder setFragmentSamplerState:(integerFit ? nearest : sampler) atIndex:0];
+            [encoder setFragmentSamplerState:sampler atIndex:1];
             [encoder setFragmentBytes:range length:sizeof(range) atIndex:0];
             [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
             [self drawCursorLocked:encoder];
@@ -284,7 +294,10 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
     sd.sAddressMode = MTLSamplerAddressModeClampToEdge;
     sd.tAddressMode = MTLSamplerAddressModeClampToEdge;
     r->sampler = [r->device newSamplerStateWithDescriptor:sd];
-    if (!r->pipeline || !r->cursorPipeline || !r->sampler ||
+    sd.minFilter = MTLSamplerMinMagFilterNearest;
+    sd.magFilter = MTLSamplerMinMagFilterNearest;
+    r->nearest = [r->device newSamplerStateWithDescriptor:sd];
+    if (!r->pipeline || !r->cursorPipeline || !r->sampler || !r->nearest ||
         CVMetalTextureCacheCreate(NULL, NULL, r->device, NULL, &r->cache) != kCVReturnSuccess) {
         *status = FR_MAC_UNAVAILABLE;
         return nil;
@@ -496,9 +509,11 @@ int fr_mac_app_init(void) {
     return FR_MAC_OK;
 }
 
-int fr_mac_window_new(uint32_t width, uint32_t height, const char *title, size_t title_len,
-                      void **out) {
-    if (!out || width < 16 || height < 16 || (title_len && !title)) return FR_MAC_INVALID;
+int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
+                      uint32_t point_height, const char *title, size_t title_len, void **out) {
+    if (!out || width < 16 || height < 16 || point_width < 1 || point_height < 1 ||
+        (title_len && !title))
+        return FR_MAC_INVALID;
     *out = NULL;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     @autoreleasepool {
@@ -507,13 +522,18 @@ int fr_mac_window_new(uint32_t width, uint32_t height, const char *title, size_t
         if (!renderer) return status;
         FrWindowOwner *owner = [FrWindowOwner new];
         owner->renderer = renderer;
-        // Start at the remote size in points (as Screen Sharing does), shrunk
-        // to fit the visible screen with the picture's aspect ratio kept.
+        // Start at the remote display's logical size in points, so a 2x
+        // remote lands 1:1 on a 2x screen and a 1x remote keeps its natural
+        // size. Only a picture that does not fit the visible screen (below
+        // the title bar) is shrunk, with a margin and the aspect ratio kept:
+        // any shrink resamples, so a fitting picture keeps its exact size.
         NSRect visible = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame
                                              : NSMakeRect(0, 0, 1280, 800);
-        double s = fmin(1.0, fmin(visible.size.width * 0.9 / width,
-                                  (visible.size.height * 0.9 - 28) / height));
-        NSRect frame = NSMakeRect(0, 0, floor(width * s), floor(height * s));
+        double s = 1.0;
+        if (point_width > visible.size.width || point_height > visible.size.height - 28)
+            s = fmin(visible.size.width * 0.9 / point_width,
+                     (visible.size.height * 0.9 - 28) / point_height);
+        NSRect frame = NSMakeRect(0, 0, floor(point_width * s), floor(point_height * s));
         NSWindowStyleMask style = NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
                                   NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable;
         NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
