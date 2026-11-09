@@ -30,16 +30,16 @@ const fn gcd(a: u32, b: u32) -> u32 {
 /// The catalog entry for one display: pixels are the encoded size (the
 /// display's own when they fit the protocol), logical size its points.
 fn entry(d: &MacDisplay, limits: &ProtocolLimits) -> Option<Display> {
-    let (w, h) = d.encoded_size(limits)?;
+    // The input executor maps a grant back to this display with the same
+    // `desktop_bounds`, so the published origin and size come only from it.
+    let bounds = d.desktop_bounds(limits)?;
+    let (w, h) = (bounds.width(), bounds.height());
     let divisor = gcd(w, d.point_width).max(1);
-    let scale = |v: i32, encoded: u32, native: u32| {
-        i32::try_from(i64::from(v) * i64::from(encoded) / i64::from(native)).ok()
-    };
     let display = Display {
         handle: u128::from(d.id),
         geometry: DisplayGeometryGeneration::INITIAL,
-        x: scale(d.x, w, d.pixel_width)?,
-        y: scale(d.y, h, d.pixel_height)?,
+        x: bounds.origin().x,
+        y: bounds.origin().y,
         pixel_width: w,
         pixel_height: h,
         logical_width: d.point_width,

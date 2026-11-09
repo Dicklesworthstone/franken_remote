@@ -42,6 +42,12 @@ macos-media = ["media-worker"]
 # IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an
 # AppKit window. Objective-C glue compiled by build.rs; system frameworks only.
 macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer"]
+# The per-lease input executor binary `fr-input-agent`; each platform's input
+# feature enables it.
+input-agent = []
+# macOS host control (fr-macos-host-control-b14s): Quartz event injection and
+# the AppKit control indicator in `fr-input-agent`. System frameworks only.
+macos-input = ["input-agent"]
 linux-media = ["media-worker"]
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []
@@ -73,7 +79,7 @@ linux-microphone-playout = ["linux-pipewire-mic", "linux-audio-playout", "linux-
 linux-opus-process = ["linux-opus", "dep:fr-client"]
 linux-audio = ["linux-pulse-playback", "linux-opus-process"]
 linux-displays = ["linux-media"]
-linux-input = []
+linux-input = ["input-agent"]
 # Exact RandR monitor input targets, without the media/FFmpeg worker boundary.
 linux-input-monitors = ["linux-input"]
 linux-clipboard = []
@@ -125,11 +131,19 @@ name = "fr-session-monitor"
 path = "src/bin/session_monitor.rs"
 required-features = ["linux-session-monitor"]
 
-# Per-lease input injection executor launched by frd (frd never loads Xlib).
+# Per-lease input injection executor launched by frd (frd never loads Xlib
+# or posts Quartz events itself).
 [[bin]]
 name = "fr-input-agent"
 path = "src/bin/input_agent.rs"
-required-features = ["linux-input"]
+required-features = ["input-agent"]
+
+# Reads the macOS input owner's real events back through a per-process event
+# tap; its own main, since AppKit registration must run on the main thread.
+[[test]]
+name = "macos_input_events"
+harness = false
+required-features = ["macos-input"]
 
 # Read-only observation UI child; shares the indicator binding, not input authority.
 [[bin]]

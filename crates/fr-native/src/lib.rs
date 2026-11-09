@@ -51,8 +51,28 @@ pub mod macos;
 #[cfg(all(target_os = "macos", feature = "macos-media"))]
 pub mod macos_capture;
 // Pure keycode data: compiled for tests everywhere so ordinary CI checks it.
-#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+#[cfg(any(
+    test,
+    all(
+        target_os = "macos",
+        any(feature = "macos-desktop", feature = "macos-input")
+    )
+))]
 pub mod macos_keys;
+// Display geometry the capture catalog and the input executor share.
+#[cfg(any(
+    test,
+    all(
+        target_os = "macos",
+        any(feature = "macos-media", feature = "macos-input")
+    )
+))]
+pub mod macos_display;
+// macOS host input injection for the per-lease executor (never frd).
+#[cfg(all(target_os = "macos", feature = "macos-input"))]
+pub mod macos_input;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-input")))]
+pub mod macos_input_state;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_sizing;
 // Invocation consent and native key gestures are portable policy, not AppKit.
@@ -101,13 +121,16 @@ pub use parent::bind_worker_parent;
 ))]
 pub use parent::{ParentUnbound, bind_parent};
 
-#[cfg(all(
-    target_os = "linux",
-    any(
-        feature = "linux-input",
-        feature = "linux-microphone-process",
-        feature = "linux-microphone-playout"
-    )
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(
+            feature = "linux-input",
+            feature = "linux-microphone-process",
+            feature = "linux-microphone-playout"
+        )
+    ),
+    all(target_os = "macos", feature = "macos-input")
 ))]
 pub mod clock;
 

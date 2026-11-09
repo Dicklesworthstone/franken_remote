@@ -32,10 +32,14 @@
 //! (see `input_agent/clipboard.rs`; built with `linux-clipboard`, otherwise it
 //! refuses typed). The same locally installed image, launch validation and
 //! trust limit apply; the two roles never share a process or a channel.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
 mod linux {
+    use crate::channel::{
+        EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED, EXIT_USAGE, HELLO_TIMEOUT, command_channel,
+        drain_signals, receive, reply, send, signal_channel,
+    };
     use fr_core::input_submission::{
-        InputSink, Operation, PlatformError, Submission,
+        InputSink, Operation, PlatformError,
         process::{self, Reply, Request, Signal},
     };
     use fr_native::{
@@ -44,11 +48,7 @@ mod linux {
         sharing_indicator::{self, LocalIndicator, Status},
     };
     use std::{
-        io::{self, Read, Write},
-        os::{
-            fd::AsFd,
-            unix::net::{UnixDatagram, UnixStream},
-        },
+        os::unix::net::{UnixDatagram, UnixStream},
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -57,14 +57,8 @@ mod linux {
         time::{Duration, Instant},
     };
 
-    const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
     /// The indicator's own mapping deadline is 2s; this only bounds the poll.
     const INDICATOR_WAIT: Duration = Duration::from_millis(2_500);
-    const SIGNALS_PER_CHECK: usize = 8;
-    const EXIT_USAGE: i32 = 64;
-    pub(crate) const EXIT_PROTOCOL: i32 = 65;
-    pub(crate) const EXIT_REFUSED: i32 = 66;
-    pub(crate) const EXIT_CHANNEL: i32 = 67;
 
     pub fn run() -> i32 {
         let mut args = std::env::args().skip(1);
@@ -93,55 +87,6 @@ mod linux {
             Err(code) => code,
         }
     }
-    fn command_channel() -> io::Result<UnixStream> {
-        let stream = UnixStream::from(io::stdin().as_fd().try_clone_to_owned()?);
-        // Only a connected private socket is accepted, never a file or tty.
-        stream.peer_addr()?;
-        Ok(stream)
-    }
-    fn signal_channel() -> io::Result<UnixDatagram> {
-        let socket = UnixDatagram::from(io::stdout().as_fd().try_clone_to_owned()?);
-        socket.peer_addr()?;
-        socket.set_nonblocking(true)?;
-        Ok(socket)
-    }
-    fn send(command: &mut UnixStream, sequence: u64, reply: Reply) -> io::Result<()> {
-        let frame = process::encode_reply(sequence, reply)
-            .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
-        command.write_all(&frame)
-    }
-    fn receive(command: &mut UnixStream) -> io::Result<[u8; process::FRAME_BYTES]> {
-        let mut frame = [0; process::FRAME_BYTES];
-        command.read_exact(&mut frame)?;
-        Ok(frame)
-    }
-    fn reply(submission: Submission) -> Reply {
-        match submission {
-            Submission::Submitted => Reply::Submitted,
-            Submission::NotSubmitted(error) => Reply::NotSubmitted(error),
-            Submission::Unknown => Reply::Unknown,
-            Submission::Expired => Reply::Expired,
-            Submission::Fenced => Reply::Fenced,
-        }
-    }
-
-    /// Bounded, nonblocking negative authority. Split from the executor borrow
-    /// so the final check can run while its original native owner is borrowed.
-    fn drain_signals(signals: &UnixDatagram, fenced: &mut bool) {
-        let mut buffer = [0; process::SIGNAL_BYTES + 1];
-        for _ in 0..SIGNALS_PER_CHECK {
-            match signals.recv(&mut buffer) {
-                Ok(_) => *fenced = true,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => {
-                    *fenced = true;
-                    return;
-                }
-            }
-        }
-    }
-
     /// The indicator must be mapped before Ready. Its first stop sends exactly
     /// one datagram: `LocalRevoke` when the local user caused it, otherwise
     /// `IndicatorFailed` (frd names that a native failure, not a revoke).
@@ -409,13 +354,31 @@ mod linux {
 }
 
 // The clipboard owner role (`--clipboard`); no input or indicator in it.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "linux-input"))]
 #[path = "input_agent/clipboard.rs"]
 mod clipboard;
 
+// The private channels and frame helpers both executor roles share.
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-input"),
+    all(target_os = "macos", feature = "macos-input")
+))]
+#[path = "input_agent/channel.rs"]
+mod channel;
+
+// The macOS executor: Quartz events and an AppKit control indicator.
+#[cfg(all(target_os = "macos", feature = "macos-input"))]
+#[path = "input_agent/macos.rs"]
+mod macos;
+
 fn main() {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", feature = "linux-input"))]
     std::process::exit(linux::run());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "macos", feature = "macos-input"))]
+    std::process::exit(macos::run());
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "linux-input"),
+        all(target_os = "macos", feature = "macos-input")
+    )))]
     std::process::exit(2);
 }

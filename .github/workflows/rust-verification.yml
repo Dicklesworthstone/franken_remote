@@ -442,3 +442,26 @@ jobs:
           cargo test -p fr-native --lib --features macos-desktop --locked macos::session::tests::
           cargo test -p fr-native --bin fr --features macos-desktop --locked macos_completion::
           cargo test -p fr-native --bin fr --features macos-desktop --locked session_control:: -- --test-threads=1
+
+  # The native macOS host: the ScreenCaptureKit/VideoToolbox capture worker
+  # (fr-p1-host-macos-vif), the Quartz input agent with its control indicator
+  # (fr-macos-host-control-b14s) and frd's macos-host build. Nothing else
+  # compiles this code, so a Linux-side change could break it unseen. Source
+  # evidence only: the runner has neither Screen Recording nor Accessibility,
+  # so capture and injected input are qualified live, never here.
+  macos-native-host:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+      - name: Add build swap
+        uses: ./.github/actions/build-swap
+      - name: Install repository-pinned toolchain
+        run: rustup show active-toolchain
+      - name: Clippy capture worker and input agent (all targets, deny warnings)
+        run: cargo clippy -p fr-native --all-targets --no-default-features --features macos-media,macos-input --locked -- -D warnings
+      - name: Clippy frd macOS host (deny warnings)
+        run: cargo clippy -p frd --lib --bins --features macos-host --locked -- -D warnings
+      - name: Test display geometry, key mapping and held input state
+        run: cargo test -p fr-native --lib --no-default-features --features macos-media,macos-input --locked macos_

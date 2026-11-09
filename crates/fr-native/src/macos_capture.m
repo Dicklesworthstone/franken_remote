@@ -17,6 +17,7 @@
 #include <math.h>
 #include <mach/mach_time.h>
 #include "macos_capture_policy.h"
+#include "macos_display.h"
 #include <os/lock.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -37,15 +38,7 @@
 #define FR_CAP_CODEC -8
 #define FR_CAP_TOO_LARGE -9
 
-typedef struct {
-    uint32_t display_id;
-    int32_t x;
-    int32_t y;
-    uint32_t pixel_width;   // the display's own pixels
-    uint32_t pixel_height;
-    uint32_t point_width;   // its logical size
-    uint32_t point_height;
-} FrCapDisplay;
+typedef FrDisplay FrCapDisplay;
 
 static dispatch_time_t after_ms(uint32_t ms) {
     return dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * (int64_t)NSEC_PER_MSEC);
@@ -189,33 +182,17 @@ static int shareable(const FrCapOpenDeadline *deadline, FrCapSetupLease *lease,
     return result;
 }
 
-// The display's current mode and placement, from Core Graphics alone (no
-// capture-system round trip), so it is cheap enough for every input check.
+// The display's current mode and placement (macos_display.h).
 static int describe(CGDirectDisplayID id, FrCapDisplay *out) {
-    if (!CGDisplayIsActive(id)) return FR_CAP_GEOMETRY;
-    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(id);
-    if (!mode) return FR_CAP_GEOMETRY;
-    size_t pw = CGDisplayModeGetPixelWidth(mode), ph = CGDisplayModeGetPixelHeight(mode);
-    CGDisplayModeRelease(mode);
-    CGRect bounds = CGDisplayBounds(id);
-    if (pw == 0 || ph == 0 || bounds.size.width < 1 || bounds.size.height < 1 || pw > UINT32_MAX ||
-        ph > UINT32_MAX)
-        return FR_CAP_UNAVAILABLE;
-    double scale = (double)pw / bounds.size.width;
-    out->display_id = id;
-    out->x = (int32_t)lround(bounds.origin.x * scale);
-    out->y = (int32_t)lround(bounds.origin.y * scale);
-    out->pixel_width = (uint32_t)pw;
-    out->pixel_height = (uint32_t)ph;
-    out->point_width = (uint32_t)lround(bounds.size.width);
-    out->point_height = (uint32_t)lround(bounds.size.height);
-    return FR_CAP_OK;
+    switch (fr_display_describe(id, out, NULL)) {
+    case FR_DISPLAY_OK: return FR_CAP_OK;
+    case FR_DISPLAY_GONE: return FR_CAP_GEOMETRY;
+    default: return FR_CAP_UNAVAILABLE;
+    }
 }
 
 static BOOL same_display(const FrCapDisplay *a, const FrCapDisplay *b) {
-    return a->display_id == b->display_id && a->x == b->x && a->y == b->y &&
-           a->pixel_width == b->pixel_width && a->pixel_height == b->pixel_height &&
-           a->point_width == b->point_width && a->point_height == b->point_height;
+    return fr_display_same(a, b) ? YES : NO;
 }
 
 // Active displays from Core Graphics, without a capture-system round trip

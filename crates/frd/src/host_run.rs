@@ -475,9 +475,10 @@ fn select_encoder(
         )),
     }
 }
-/// The static host policy for this X11 slice: operations a controller may
-/// request if the local executor also has them. Discrete wheel input uses
-/// bounded `XTest` press/release pairs, not pixel-scroll emulation.
+/// The static host policy: operations a controller may request if the local
+/// executor also has them. Whole-line scrolling is bounded `XTest` wheel
+/// pairs on X11 and one Quartz line-scroll event on macOS; neither emulates
+/// pixel scrolling.
 fn control_capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -1288,6 +1289,15 @@ impl Share<'_> {
         agent
             .permissions_mut()
             .set_permission(PermissionKind::ScreenCapture, PermissionStatus::Granted);
+        // macOS input needs the Accessibility grant. The startup probe ran the
+        // executor's own check of it in this login session and refused
+        // control without it, so a probed executor IS that evidence.
+        if cfg!(target_os = "macos") && self.control.is_some() {
+            agent.permissions_mut().set_permission(
+                PermissionKind::AccessibilityInput,
+                PermissionStatus::Granted,
+            );
+        }
         if let (Some(input_agent), Some(capabilities)) = (&self.options.input_agent, self.control) {
             let profile = ControlProfile::new(
                 input_agent,

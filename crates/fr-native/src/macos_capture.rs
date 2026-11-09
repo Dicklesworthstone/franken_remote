@@ -79,18 +79,8 @@ fn status(code: c_int) -> Result<(), NativeError> {
     }
 }
 
-/// One display as the capture system sees it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MacDisplay {
-    pub id: u32,
-    /// Origin in the global desktop, in this display's pixels.
-    pub x: i32,
-    pub y: i32,
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    pub point_width: u32,
-    pub point_height: u32,
-}
+pub use crate::macos_display::MacDisplay;
+
 impl MacDisplay {
     const fn raw(&self) -> RawDisplay {
         RawDisplay {
@@ -110,26 +100,6 @@ impl MacDisplay {
         let raw = self.raw();
         // SAFETY: a readable description for the duration of the call.
         status(unsafe { fr_cap_display_check(&raw const raw) })
-    }
-
-    /// The size the host encodes. The display's own pixels when they fit
-    /// `limits`. Otherwise the largest of a few clean ratios that does: a
-    /// clean ratio keeps text crisp, and 6144x3456 becomes 5120x2880 (5/6).
-    /// `None` when even half the size does not fit.
-    #[must_use]
-    pub fn encoded_size(&self, limits: &ProtocolLimits) -> Option<(u32, u32)> {
-        const RATIOS: [(u32, u32); 6] = [(1, 1), (5, 6), (4, 5), (3, 4), (2, 3), (1, 2)];
-        RATIOS.iter().find_map(|&(n, d)| {
-            let (w, h) = (self.pixel_width * n, self.pixel_height * n);
-            if !w.is_multiple_of(d) || !h.is_multiple_of(d) {
-                return None;
-            }
-            let (w, h) = (w / d, h / d);
-            (w.is_multiple_of(2)
-                && h.is_multiple_of(2)
-                && limits.validate_coded_dimensions(w, h).is_ok())
-            .then_some((w, h))
-        })
     }
 }
 
@@ -390,47 +360,5 @@ impl Drop for MacCapture {
     fn drop(&mut self) {
         // SAFETY: the handle came from fr_cap_open and is freed exactly once.
         unsafe { fr_cap_free(self.raw.as_ptr()) };
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MacDisplay;
-    use fr_core::limits::ProtocolLimits;
-
-    fn display(w: u32, h: u32) -> MacDisplay {
-        MacDisplay {
-            id: 1,
-            x: 0,
-            y: 0,
-            pixel_width: w,
-            pixel_height: h,
-            point_width: w / 2,
-            point_height: h / 2,
-        }
-    }
-
-    #[test]
-    fn encoded_size_is_native_when_it_fits_else_a_clean_ratio() {
-        let limits = ProtocolLimits::ABSOLUTE;
-        // 6K Retina exceeds the 16.78 MP cap: 5/6 keeps it crisp.
-        assert_eq!(
-            display(6144, 3456).encoded_size(&limits),
-            Some((5120, 2880))
-        );
-        assert_eq!(
-            display(5120, 2880).encoded_size(&limits),
-            Some((5120, 2880))
-        );
-        assert_eq!(
-            display(3456, 2234).encoded_size(&limits),
-            Some((3456, 2234))
-        );
-        // 8K: 5/6, 4/5 and 3/4 all exceed the pixel cap; 2/3 fits.
-        assert_eq!(
-            display(7680, 4320).encoded_size(&limits),
-            Some((5120, 2880))
-        );
-        assert_eq!(display(16, 16).encoded_size(&limits), Some((16, 16)));
     }
 }

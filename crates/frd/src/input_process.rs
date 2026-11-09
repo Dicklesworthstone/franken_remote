@@ -53,7 +53,9 @@ pub struct InvalidLaunch;
 
 /// Locally selected package image and graphical-session context. Never build
 /// this from a peer path, argv or environment. The environment is cleared; the
-/// child gets only DISPLAY, optional XAUTHORITY and `--parent-pid`.
+/// child gets only DISPLAY, optional XAUTHORITY and `--parent-pid`. A macOS
+/// executor uses its login session's window server: it names no display and
+/// no X authority, and gets only `--parent-pid`.
 #[derive(Clone)]
 pub struct ProcessLaunch {
     pub(crate) image: PathBuf,
@@ -70,7 +72,7 @@ impl ProcessLaunch {
     ) -> Result<Self, InvalidLaunch> {
         if !image.is_absolute()
             || epoch == 0
-            || !local_display(display)
+            || !platform_display(display, xauthority)
             || xauthority.is_some_and(|p| !p.is_absolute())
         {
             return Err(InvalidLaunch);
@@ -87,6 +89,14 @@ impl fmt::Debug for ProcessLaunch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // No paths, display names or launch identity in diagnostics.
         f.write_str("ProcessLaunch")
+    }
+}
+/// Linux names one local `:N[.S]` X11 display; macOS names none.
+fn platform_display(name: &str, xauthority: Option<&Path>) -> bool {
+    if cfg!(target_os = "macos") {
+        name.is_empty() && xauthority.is_none()
+    } else {
+        local_display(name)
     }
 }
 fn local_display(name: &str) -> bool {
@@ -530,9 +540,12 @@ fn spawn(launch: &ProcessLaunch) -> Result<(Child, UnixStream, UnixDatagram), Pl
         .set_nonblocking(true)
         .map_err(|_| PlatformError::Unavailable)?;
     let mut spawn = Command::new(&launch.image);
+    spawn.env_clear();
+    // Only an X11 launch names a display (`ProcessLaunch::new`).
+    if !launch.display.is_empty() {
+        spawn.env("DISPLAY", &launch.display);
+    }
     spawn
-        .env_clear()
-        .env("DISPLAY", &launch.display)
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
         .stdin(Stdio::from(OwnedFd::from(child_command)))

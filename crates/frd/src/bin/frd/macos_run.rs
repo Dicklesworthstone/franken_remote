@@ -23,9 +23,9 @@ pub(super) fn supported(
             "macOS has no local approval prompt yet; share with your own devices using --approval none",
         ),
         (
-            options.input_agent.is_some(),
-            "input_agent_unavailable",
-            "remote control of a Mac is not implemented yet; omit --input-agent to share view-only",
+            options.clipboard,
+            "clipboard_unavailable",
+            "--clipboard has no macOS backend yet; control works without it",
         ),
         (
             options.audio,

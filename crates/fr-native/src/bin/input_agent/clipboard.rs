@@ -15,7 +15,7 @@
 //! frame before any allocation. On EOF, Stop or a protocol violation it erases
 //! its private copies and closes X11 without resetting another application's
 //! newer selection. It writes nothing but reply frames and never logs text.
-use crate::linux::{EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED};
+use crate::channel::{EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED};
 use fr_core::clipboard::process::{self, Reply, Request};
 use std::{
     io::{self, Read, Write},

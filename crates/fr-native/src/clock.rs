@@ -11,8 +11,12 @@ struct Timespec {
 unsafe extern "C" {
     fn clock_gettime(clock: c_int, now: *mut Timespec) -> c_int;
 }
-/// Linux UAPI `CLOCK_MONOTONIC`.
+/// `CLOCK_MONOTONIC`: the clock frd's deadline translation reads (Linux UAPI
+/// 1; Darwin `<time.h>` 6, which counts across sleep on both sides alike).
+#[cfg(target_os = "linux")]
 const CLOCK_MONOTONIC: c_int = 1;
+#[cfg(target_os = "macos")]
+const CLOCK_MONOTONIC: c_int = 6;
 
 /// Nanoseconds since an arbitrary per-boot origin. `None` never happens on a
 /// supported kernel; callers treat it as "deadline unknown", i.e. expired.

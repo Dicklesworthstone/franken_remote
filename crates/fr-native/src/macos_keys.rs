@@ -168,10 +168,45 @@ pub const fn usage(keycode: u16) -> Option<u16> {
     })
 }
 
+/// The macOS virtual keycode at a HID usage's physical position: the exact
+/// inverse of `usage`, for injecting a remote key on a Mac host.
+pub const fn keycode(usage: u16) -> Option<u16> {
+    let mut keycode = 0;
+    while keycode <= 0x7f {
+        if let Some(mapped) = self::usage(keycode)
+            && mapped == usage
+        {
+            return Some(keycode);
+        }
+        keycode += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fr_core::input::PhysicalKey;
+
+    #[test]
+    fn keycode_inverts_usage_for_every_mapped_key() {
+        let mut inverted = 0;
+        for keycode in 0..=0x7f_u16 {
+            if let Some(usage) = usage(keycode) {
+                assert_eq!(super::keycode(usage), Some(keycode), "{usage:#x}");
+                inverted += 1;
+            }
+        }
+        assert_eq!(inverted, 119);
+        // HID A, Return, left GUI and Keypad 0 by physical position.
+        assert_eq!(super::keycode(0x04), Some(0x00));
+        assert_eq!(super::keycode(0x28), Some(0x24));
+        assert_eq!(super::keycode(0xe3), Some(0x37));
+        assert_eq!(super::keycode(0x62), Some(0x52));
+        // Usages no Mac key sends have no keycode (Print Screen, Pause).
+        assert_eq!(super::keycode(0x46), None);
+        assert_eq!(super::keycode(0x48), None);
+    }
 
     #[test]
     fn every_mapped_usage_is_an_admitted_physical_key_and_unique() {

@@ -10,6 +10,7 @@ fn main() {
     build_host_picker();
     build_macos_viewer();
     build_macos_capture();
+    build_macos_input();
     link_clang_runtime();
     println!("cargo:rerun-if-changed=src/bridge.c");
     println!("cargo:rerun-if-changed=src/x11_image.c");
@@ -593,7 +594,8 @@ fn build_macos_viewer() {
 /// documents linking Clang's own runtime instead, which defines it strongly.
 fn link_clang_runtime() {
     let glue = env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_some()
-        || env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_some();
+        || env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_some()
+        || env::var_os("CARGO_FEATURE_MACOS_INPUT").is_some();
     if !glue || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
@@ -620,6 +622,7 @@ fn link_clang_runtime() {
 fn build_macos_capture() {
     println!("cargo:rerun-if-changed=src/macos_capture.m");
     println!("cargo:rerun-if-changed=src/macos_capture_policy.h");
+    println!("cargo:rerun-if-changed=src/macos_display.h");
     if env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {
@@ -683,6 +686,62 @@ fn build_macos_capture() {
         "ScreenCaptureKit",
         "VideoToolbox",
     ] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-lib=objc");
+}
+
+/// macOS host input glue (fr-macos-host-control-b14s): Quartz event posting
+/// and the `AppKit` control indicator, linked only into `fr-input-agent`'s
+/// macOS role.
+fn build_macos_input() {
+    println!("cargo:rerun-if-changed=src/macos_input.m");
+    println!("cargo:rerun-if-changed=src/macos_display.h");
+    if env::var_os("CARGO_FEATURE_MACOS_INPUT").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS input cross-builds require an explicit SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_input.m", "-o"])
+            .arg(out.join("macosinput.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "install the Xcode command line tools (xcode-select --install)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacosinput.a"))
+            .arg(out.join("macosinput.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacosinput");
+    for framework in ["AppKit", "CoreFoundation", "CoreGraphics", "Foundation"] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-lib=objc");

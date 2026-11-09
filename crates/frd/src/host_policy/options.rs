@@ -58,6 +58,8 @@ pub struct RunOptions {
     /// Let that controller's text clipboard follow its lease. CLI parsing
     /// enables this with `input_agent` unless `--no-clipboard` is selected;
     /// explicit `--clipboard` without an input agent is refused by the caller.
+    /// The clipboard owner is an X11 role, so macOS never enables it by
+    /// default; an explicit `--clipboard` there is refused by the caller.
     pub clipboard: bool,
     /// Local enable of host playback audio (off by default). Only an admitted
     /// observer that selected audio-down receives it; see `frd run --help`.
@@ -214,7 +216,8 @@ impl RunOptions {
                 _ => return Err(Error::InvalidArgument),
             }
         }
-        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some());
+        options.clipboard =
+            clipboard.unwrap_or(cfg!(not(target_os = "macos")) && options.input_agent.is_some());
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
         // Control retains its existing mandatory per-lease indicator. The two
@@ -390,7 +393,11 @@ mod tests {
     fn clipboard_defaults_to_control_and_accepts_one_explicit_choice() {
         assert!(!parse(&["--software-explicit"]).unwrap().clipboard);
         assert!(!parse(&["--no-clipboard"]).unwrap().clipboard);
-        assert!(parse(&["--input-agent", "/a"]).unwrap().clipboard);
+        // Control brings the clipboard along where its X11 owner exists.
+        assert_eq!(
+            parse(&["--input-agent", "/a"]).unwrap().clipboard,
+            cfg!(not(target_os = "macos"))
+        );
         assert!(
             parse(&["--input-agent", "/a", "--clipboard"])
                 .unwrap()
