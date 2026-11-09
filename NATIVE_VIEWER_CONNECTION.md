@@ -16,8 +16,10 @@ session Cx**, a `PeerSelector`, `Configuration`, the actual local capability
 
 The connector validates bounds before discovery, resolves exact node-owned
 addresses, and delegates TLS/QUIC to the already-published native dialer. The
-default address policy prefers a verified IPv4 pair and retains one verified
-IPv6 alternative. If the preferred socket cannot bind, its local UDP send or
+default address policy prefers a verified IPv6 pair and retains one verified
+IPv4 alternative. Both cross the same tailnet tunnel; IPv6 goes first because a
+macOS host with IPv4 forwarding on can enforce tunnel-only ingress for IPv6
+alone (see `crates/frd/src/ingress/strong_host.rs`). If the preferred socket cannot bind, its local UDP send or
 receive fails, or its handshake times out, the alternate family gets a fresh
 handshake within the same original timeout. The first attempt receives half that timeout when both families are
 available; the alternative receives only the remaining time. One shared dial

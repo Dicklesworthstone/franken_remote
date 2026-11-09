@@ -40,8 +40,11 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AddressFamily {
-    /// Prefer a verified IPv4 pair, with one verified IPv6 alternative before
-    /// application startup. Explicit family choices never fall back.
+    /// Prefer a verified IPv6 pair, with one verified IPv4 alternative before
+    /// application startup. Explicit family choices never fall back. Both
+    /// families cross the same tailnet tunnel; IPv6 goes first because a macOS
+    /// host with IPv4 forwarding on can enforce tunnel-only ingress for IPv6
+    /// alone, and the preferred attempt holds half the startup timeout.
     Automatic,
     Ipv4,
     Ipv6,
@@ -130,7 +133,7 @@ fn select_routes(
         },
     )
     .ok();
-    match (ipv4, ipv6) {
+    match (ipv6, ipv4) {
         (Some(primary), alternate) => Ok((primary, alternate)),
         (None, Some(primary)) => Ok((primary, None)),
         (None, None) => Err(Error::AddressFamilyUnavailable),
