@@ -1,0 +1,418 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXContainerItemProxy section */
+		5AECF55C0CA3B50A587578CA /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 6DB449E5634B2DE1E2BC2ECC /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B4373D08E2DE4BB483420528;
+			remoteInfo = FrankenRemote;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		DF608A9BF1067A643701AF67 /* FrankenRemote.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FrankenRemote.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA75FD0875C90C290C86D159 /* FrankenRemoteTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FrankenRemoteTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		9618A6BC0B91B5AAD16D0897 /* App */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = App;
+			sourceTree = "<group>";
+		};
+		7C7BB3C749019659ACF8D4F0 /* Core */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Core;
+			sourceTree = "<group>";
+		};
+		0B447BC5F7D2B1BAF4E38040 /* Session */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Session;
+			sourceTree = "<group>";
+		};
+		6636CB93ACB13AA619BA6734 /* Views */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Views;
+			sourceTree = "<group>";
+		};
+		96ECF486F1CD141BC69BE25C /* Tests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = Tests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		73949CD62EFA19B75CF9EEBF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		8B43AFE1207C2B4E86901310 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		F790CDCD0CF23F9A5873009E = {
+			isa = PBXGroup;
+			children = (
+				9618A6BC0B91B5AAD16D0897 /* App */,
+				7C7BB3C749019659ACF8D4F0 /* Core */,
+				0B447BC5F7D2B1BAF4E38040 /* Session */,
+				6636CB93ACB13AA619BA6734 /* Views */,
+				96ECF486F1CD141BC69BE25C /* Tests */,
+				6F694C35228F928F40927292 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		6F694C35228F928F40927292 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				DF608A9BF1067A643701AF67 /* FrankenRemote.app */,
+				AA75FD0875C90C290C86D159 /* FrankenRemoteTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		B4373D08E2DE4BB483420528 /* FrankenRemote */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 48B926DC6E24653000490738 /* Build configuration list for PBXNativeTarget "FrankenRemote" */;
+			buildPhases = (
+				4FCA07990F44456A75FDEA8C /* Build Rust core */,
+				B2BCF5F696275757E34BA92F /* Sources */,
+				73949CD62EFA19B75CF9EEBF /* Frameworks */,
+				9DB58C77DCAD1700D9841026 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				9618A6BC0B91B5AAD16D0897 /* App */,
+				7C7BB3C749019659ACF8D4F0 /* Core */,
+				0B447BC5F7D2B1BAF4E38040 /* Session */,
+				6636CB93ACB13AA619BA6734 /* Views */,
+			);
+			name = FrankenRemote;
+			productName = FrankenRemote;
+			productReference = DF608A9BF1067A643701AF67 /* FrankenRemote.app */;
+			productType = "com.apple.product-type.application";
+		};
+		EB3E4B9293EFFA7E8FCC5647 /* FrankenRemoteTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 156A36916EBA4D350383FE6C /* Build configuration list for PBXNativeTarget "FrankenRemoteTests" */;
+			buildPhases = (
+				B8D817818B9D3A51C05AB21F /* Sources */,
+				8B43AFE1207C2B4E86901310 /* Frameworks */,
+				732196CD277F6F7576D5CC64 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D659EA1BD54DA0747A5C411C /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				96ECF486F1CD141BC69BE25C /* Tests */,
+			);
+			name = FrankenRemoteTests;
+			productName = FrankenRemoteTests;
+			productReference = AA75FD0875C90C290C86D159 /* FrankenRemoteTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		6DB449E5634B2DE1E2BC2ECC /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2700;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					B4373D08E2DE4BB483420528 = {
+						CreatedOnToolsVersion = 27.1;
+					};
+					EB3E4B9293EFFA7E8FCC5647 = {
+						CreatedOnToolsVersion = 27.1;
+						TestTargetID = B4373D08E2DE4BB483420528;
+					};
+				};
+			};
+			buildConfigurationList = CA072C18520444EE8C9E3165 /* Build configuration list for PBXProject "FrankenRemote" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = F790CDCD0CF23F9A5873009E;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 6F694C35228F928F40927292 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B4373D08E2DE4BB483420528 /* FrankenRemote */,
+				EB3E4B9293EFFA7E8FCC5647 /* FrankenRemoteTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		9DB58C77DCAD1700D9841026 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		732196CD277F6F7576D5CC64 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		4FCA07990F44456A75FDEA8C /* Build Rust core */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust core";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+				"$(TARGET_TEMP_DIR)/fr-rust/libfr_mobile_ffi.a",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "exec \"$SRCROOT/../scripts/build-rust.sh\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		B2BCF5F696275757E34BA92F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B8D817818B9D3A51C05AB21F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D659EA1BD54DA0747A5C411C /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B4373D08E2DE4BB483420528 /* FrankenRemote */;
+			targetProxy = 5AECF55C0CA3B50A587578CA /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		820EE864E01A2271C5C20731 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../crates/fr-mobile-ffi/include";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		576858578307E12E46B3FA6A /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				HEADER_SEARCH_PATHS = "$(SRCROOT)/../../../crates/fr-mobile-ffi/include";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		4C54177739AB047F6DB6E60C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = FrankenRemote;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				LIBRARY_SEARCH_PATHS = "$(TARGET_TEMP_DIR)/fr-rust";
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = ("-lfr_mobile_ffi", "-framework", VideoToolbox, "-framework", CoreMedia, "-framework", CoreVideo, "-framework", Security, "-framework", SystemConfiguration);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.frankenremote.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "App/FrankenRemote-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		B72B9023142C2751FFFA0DF3 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = FrankenRemote;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
+				LIBRARY_SEARCH_PATHS = "$(TARGET_TEMP_DIR)/fr-rust";
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = ("-lfr_mobile_ffi", "-framework", VideoToolbox, "-framework", CoreMedia, "-framework", CoreVideo, "-framework", Security, "-framework", SystemConfiguration);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.frankenremote.ios;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "App/FrankenRemote-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		41E164909FD80B21723577BA /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.frankenremote.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "App/FrankenRemote-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FrankenRemote.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FrankenRemote";
+			};
+			name = Debug;
+		};
+		CB38B1B12213A9F524458FE7 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.frankenremote.ios.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "App/FrankenRemote-Bridging-Header.h";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/FrankenRemote.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/FrankenRemote";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		CA072C18520444EE8C9E3165 /* Build configuration list for PBXProject "FrankenRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				820EE864E01A2271C5C20731 /* Debug */,
+				576858578307E12E46B3FA6A /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		48B926DC6E24653000490738 /* Build configuration list for PBXNativeTarget "FrankenRemote" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				4C54177739AB047F6DB6E60C /* Debug */,
+				B72B9023142C2751FFFA0DF3 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		156A36916EBA4D350383FE6C /* Build configuration list for PBXNativeTarget "FrankenRemoteTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				41E164909FD80B21723577BA /* Debug */,
+				CB38B1B12213A9F524458FE7 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 6DB449E5634B2DE1E2BC2ECC /* Project object */;
+}
