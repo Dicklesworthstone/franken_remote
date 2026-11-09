@@ -62,6 +62,10 @@ fn a_crashed_pathname_owner_is_reclaimed_under_the_same_lock_inode() {
         let lock_path = address.with_extension("lock");
         let before = std::fs::symlink_metadata(&lock_path).unwrap();
         drop(first);
+        // An orderly drop unlinks the listener's own socket (asupersync's
+        // UnixListener cleans up its inode). A crash leaves the socket file
+        // behind with no listener: recreate exactly that residue.
+        drop(std::os::unix::net::UnixListener::bind(&address).unwrap());
         assert!(
             std::fs::symlink_metadata(&address)
                 .unwrap()

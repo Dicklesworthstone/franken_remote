@@ -196,7 +196,11 @@ impl Operation {
         }
     }
     /// Both endpoints of the single bounded drag, in signed desktop pixels.
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub fn drag_points(
         self,
     ) -> Option<(fr_core::input::DesktopPoint, fr_core::input::DesktopPoint)> {
@@ -225,7 +229,11 @@ impl Operation {
         }
     }
     /// Check the entire gesture before its first action can press a modifier.
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub fn within_bounds(self, bounds: fr_core::input::InputBounds) -> bool {
         if let Some((from, to)) = self.drag_points() {
             return bounds.contains(from) && bounds.contains(to);
@@ -243,7 +251,11 @@ impl Operation {
     }
     /// Preflight all capabilities, including the position barrier of each
     /// button/scroll action. A supported modifier alone cannot admit a gesture.
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub fn supported(self, capabilities: fr_core::input_submission::Capabilities) -> bool {
         use fr_core::input_submission::{Capabilities, Capability};
         let required = match self {
@@ -462,7 +474,11 @@ pub(crate) struct InputSupport {
     test
 ))]
 impl InputSupport {
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub fn from_grant(
         bounds: fr_core::input::InputBounds,
         capabilities: fr_core::input_submission::Capabilities,

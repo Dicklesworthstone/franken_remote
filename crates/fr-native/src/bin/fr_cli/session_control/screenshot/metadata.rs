@@ -15,7 +15,11 @@ pub(crate) struct Metadata {
     pub control: Option<crate::robot_input::Snapshot>,
 }
 impl Metadata {
-    #[cfg(any(feature = "linux-desktop", test))]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop"),
+        test
+    ))]
     pub(crate) fn new(
         observation: Observation,
         image: &Snapshot,

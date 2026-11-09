@@ -425,6 +425,7 @@ impl Session {
         }
     }
     /// An optional logical point bound for the fitted viewer content.
+    #[must_use]
     pub fn with_fit_window(mut self, fit: Option<(u32, u32)>) -> Self {
         self.fit_window = fit;
         self
@@ -745,7 +746,7 @@ impl Application for Session {
                 &closed,
                 &stop,
                 &mut events,
-            )
+            );
         };
         let opened = pumped(opening, &mut pump).await?;
         {

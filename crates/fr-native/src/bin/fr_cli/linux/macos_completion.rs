@@ -204,7 +204,7 @@ mod tests {
             (Reason::ClientRequested, CleanupStage::Failed),
         ] {
             let report = Observer::Streaming(Streaming::Control(Control::LeaseRevoked(Revoked {
-                lease: fr_core::ids::InputLeaseId::new(7),
+                lease: fr_core::ids::InputLeaseId::from_raw(7),
                 reason,
                 cleanup,
                 effects: EffectStage::ReceiptsPending,

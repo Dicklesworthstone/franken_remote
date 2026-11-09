@@ -178,6 +178,8 @@ const fn stop_name(stop: LocalStop) -> &'static str {
     }
 }
 
+// Four independent observed facts, passed unchanged to one projection.
+#[allow(clippy::fn_params_excessive_bools)]
 fn finish(
     report: &Report,
     result: Result<(), reconnect::Failure>,
@@ -208,7 +210,7 @@ fn finish(
 }
 
 // Keep the ordered failure precedence beside its single completion projection.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
 fn finish_result(
     report: &Report,
     result: Result<(), reconnect::Failure>,
@@ -326,7 +328,7 @@ fn finish_result(
             report.input_results,
             clipboard,
             ended,
-            close.map_or_else(|| "null".to_owned(), |value| value.json()),
+            close.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
             crate::terminal::lease_json(report.lease_revocation),
         );
     } else {
@@ -353,7 +355,7 @@ fn finish_result(
         }
         let _ = writeln!(out, "{}", close.map_or_else(
             || "No host closing exchange was collected; remote cleanup and effects are unknown.".to_owned(),
-            |value| value.text(),
+            crate::closure::Report::text,
         ));
         if let Some(revocation) = report.lease_revocation {
             let _ = writeln!(
