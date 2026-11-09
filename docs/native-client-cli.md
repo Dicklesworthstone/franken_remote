@@ -92,13 +92,52 @@ CLI returns, so cleanup can take longer than the lookup's work deadline.
 
 macOS `--socket` refuses with `localapi_endpoint_unsupported` before starting
 a runtime. This bridge grants no session authority and does not loosen Linux's
-credential-checked Unix socket adapter. `connect`, remote `--probe` and hosting
-remain `platform_unavailable` on macOS.
+credential-checked Unix socket adapter. In a default build every other command
+answers `platform_unavailable`; `fr connect` needs the desktop build below.
+Remote `--probe` and hosting are not available on macOS.
 
-**Evidence:** this is a consumed source implementation. The macOS build,
-signature-refusal/reap regression and a real installed-app snapshot still need
-to run. In particular, success with either app installation variant is not yet
-qualified. Desktop decoding, rendering and input are outside this slice.
+**Evidence (2026-11-08, macOS 27, Tailscale 1.104.1, `io.tailscale.ipn.macsys`):**
+`fr hosts --json` listed the tailnet's peers through the bridge, and the
+suspended-child signature refusal/reap regression passed. The App Store variant
+(`io.tailscale.ipn.macos`) has not been exercised.
+
+## macOS desktop client
+
+```sh
+cargo build -p fr-native --bin fr --features macos-desktop --locked
+./target/debug/fr connect NODE_ID --control --experimental-native --display only
+```
+
+The `macos-desktop` feature builds a native viewer from system frameworks only.
+VideoToolbox decodes the host's HEVC stream into IOSurface-backed buffers, and
+Metal draws them, with the client-rendered remote cursor, into a
+`CAMetalLayer` in an AppKit window. AppKit keyboard, pointer and wheel events
+enter the same `frd` input path as the Linux viewer. As on Linux, losing focus,
+hiding the window or a change of picture size stops local input and ends
+control; closing the window ends the session.
+
+The client's tailnet lookups (the peer target before dialing, and its renewals
+during a session) use the signed bridge above: every read is a fresh,
+signature-checked `status --json` child (`--peers=false` for the local node).
+The app's loopback LocalAPI token is never used. On the development Mac one read
+took about 5 ms to verify and 45 ms to run, using 60-80 ms of CPU. A session
+renews once a second with two reads, about 12-16% of one core; a cheaper
+transport is still to come.
+
+Not implemented on macOS yet, and refused by name before any network I/O:
+`--choose-host`, `--display choose`, `--fit`, `--capture-system-shortcuts`,
+`--audio`, `--microphone`, file transfer (`--send`, `--file-drop`,
+`--file-commands`, `--receive`) and `fr robot session open`. The clipboard,
+on by default on Linux, is reported as `local_clipboard_unavailable`. This path
+does not bind the local session-control socket, so `fr status` and
+`fr disconnect` cannot reach a running macOS viewer.
+
+**Evidence (2026-11-08):** from the owner's Mac to a Linux NVENC host (ts2), the
+window showed the host's live desktop and typed keys reached the host (over the
+app's LocalAPI, before the bridge replaced it; the bridge build has shown the
+live desktop). Pointer, wheel and click delivery and the window-close outcome
+have not been confirmed live. fr-native's macOS tests decode a real HEVC stream through VideoToolbox
+into the Metal surface.
 
 ## Check local capture, encoding and input readiness
 

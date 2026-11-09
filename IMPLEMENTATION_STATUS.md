@@ -1,6 +1,26 @@
 # Implementation status
 
-## macOS installed-app discovery (2026-11-08; native qualification pending)
+## macOS desktop client (2026-11-08; live, partly qualified)
+
+With `--features macos-desktop`, `fr connect` runs natively on macOS. The host
+stream is decoded by VideoToolbox into IOSurfaces and drawn by Metal into a
+`CAMetalLayer`, the remote cursor is a blended Metal quad, and AppKit input
+reaches `frd`'s input path. `frd`'s `Worker` presents through an in-process
+`LocalPresenter` rather than a child process. The tailnet lookups run through
+the signed installed-app bridge described below, which now also answers
+fr-tailnet's fixed status reads (`LocalQuery`); whois and certificate reads
+refuse on macOS until a macOS host exists. Options not implemented here are
+refused by name ([details](docs/native-client-cli.md#macos-desktop-client)).
+
+Live on 2026-11-08 from the owner's Mac (macOS 27, Tailscale 1.104.1) to ts2
+(Linux, NVENC): over the app's LocalAPI (since replaced), the window showed
+ts2's live desktop with control granted, and typed keys reached ts2. The
+signed-bridge build has since shown ts2's live desktop in a `--control`
+session. Not yet confirmed live: input through the bridge build, pointer,
+wheel and click delivery, and the window-close outcome. A session's identity renewals start two
+bridge children a second (60-80 ms CPU each).
+
+## macOS installed-app discovery (2026-11-08)
 
 The public `fr hosts [--json]` command now has a macOS implementation through
 the installed Tailscale app's machine-readable CLI. The snapshot-only
@@ -20,13 +40,11 @@ actual reap, including the one-shot CLI's cancellation drain. Cleanup may outlas
 the lookup deadline; that does not permit late execution or publish stale data.
 Concurrent/retried lookups cannot take the single slot before cleanup retires.
 
-This is the first consumed platform slice for `fr-5a4w`, not a macOS remote
-desktop claim. macOS `connect`, capability probes and hosting still return
-`platform_unavailable`. A custom `--socket` returns
-`localapi_endpoint_unsupported` before runtime creation. Discovery returns no
-target lease, observation grant or input authority, and Linux's root UID/PID
-checks remain intact. VideoToolbox/Metal presentation, AppKit input and a
-qualified continuing macOS identity transport remain outstanding.
+This was the first platform slice for `fr-5a4w`; the desktop client above
+builds on it. Capability probes and hosting still return `platform_unavailable`
+on macOS. A custom `--socket` returns `localapi_endpoint_unsupported` before
+runtime creation. Discovery returns no target lease, observation grant or input
+authority, and Linux's root UID/PID checks remain intact.
 
 Added regressions cover shared status projection, exclusions, malformed and
 oversized JSON, cancellation/deadline/clock refusals, public command routing and
@@ -39,7 +57,9 @@ the recorded edits and immutable GitHub originals; fresh formatting, full Cargo
 checks/tests, the macOS native regression and installed-Tailscale execution
 remain pending. The recovered blobs also total 499,923 Rust lines and 17,948 glue lines under
 the unchanged counting rules. The interrupted parser check did not produce
-passing evidence.
+passing evidence. Since then (2026-11-08) the workspace builds, lints and
+tests on macOS 27, the signature regression passed there, and `fr hosts` read
+a real `io.tailscale.ipn.macsys` installation.
 The broader macOS bead remains open.
 
 See [the command and trust boundary](docs/native-client-cli.md#macos-discovery).
