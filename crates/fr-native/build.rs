@@ -9,6 +9,7 @@ fn main() {
     build_viewer_window();
     build_host_picker();
     build_macos_viewer();
+    build_macos_capture();
     println!("cargo:rerun-if-changed=src/bridge.c");
     println!("cargo:rerun-if-changed=src/x11_image.c");
     println!("cargo:rerun-if-changed=src/x11_image.h");
@@ -571,6 +572,78 @@ fn build_macos_viewer() {
         "Foundation",
         "Metal",
         "QuartzCore",
+        "VideoToolbox",
+    ] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-lib=objc");
+}
+
+/// macOS host capture glue (fr-p1-host-macos-vif): `ScreenCaptureKit` into
+/// `VideoToolbox` HEVC. `ReferenceBufferCount` needs macOS 13.
+fn build_macos_capture() {
+    println!("cargo:rerun-if-changed=src/macos_capture.m");
+    if env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS capture cross-builds require an explicit SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let requested = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default();
+    let major = requested
+        .split('.')
+        .next()
+        .and_then(|m| m.parse::<u32>().ok())
+        .unwrap_or(0);
+    let minimum = if major >= 13 {
+        requested
+    } else {
+        "13.0".into()
+    };
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_capture.m", "-o"])
+            .arg(out.join("macoscapture.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "install the Xcode command line tools (xcode-select --install)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacoscapture.a"))
+            .arg(out.join("macoscapture.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacoscapture");
+    for framework in [
+        "CoreFoundation",
+        "CoreGraphics",
+        "CoreMedia",
+        "CoreVideo",
+        "Foundation",
+        "ScreenCaptureKit",
         "VideoToolbox",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");

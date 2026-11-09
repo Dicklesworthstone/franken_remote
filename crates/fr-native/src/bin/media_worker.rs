@@ -4,6 +4,9 @@
 #[cfg(target_os = "linux")]
 #[path = "media_worker/cursor.rs"]
 mod cursor;
+#[cfg(all(target_os = "macos", feature = "macos-media"))]
+#[path = "media_worker/macos.rs"]
+mod macos;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -979,7 +982,12 @@ fn main() {
         eprintln!("media_worker_refused={error}");
         std::process::exit(2);
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "macos", feature = "macos-media"))]
+    if let Err(error) = macos::run() {
+        eprintln!("media_worker_refused={error}");
+        std::process::exit(2);
+    }
+    #[cfg(not(any(target_os = "linux", all(target_os = "macos", feature = "macos-media"))))]
     {
         eprintln!("media_worker_refused=UnsupportedPlatform");
         std::process::exit(2);

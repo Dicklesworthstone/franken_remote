@@ -27,7 +27,10 @@ pub use linux::*;
         target_os = "linux",
         any(feature = "linux-media", feature = "linux-input-monitors")
     ),
-    all(target_os = "macos", feature = "macos-desktop")
+    all(
+        target_os = "macos",
+        any(feature = "macos-desktop", feature = "macos-media")
+    )
 ))]
 mod error;
 #[cfg(any(
@@ -35,13 +38,18 @@ mod error;
         target_os = "linux",
         any(feature = "linux-media", feature = "linux-input-monitors")
     ),
-    all(target_os = "macos", feature = "macos-desktop")
+    all(
+        target_os = "macos",
+        any(feature = "macos-desktop", feature = "macos-media")
+    )
 ))]
 pub use error::NativeError;
 
 // macOS client presentation and input capture (fr-5a4w).
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 pub mod macos;
+#[cfg(all(target_os = "macos", feature = "macos-media"))]
+pub mod macos_capture;
 // Pure keycode data: compiled for tests everywhere so ordinary CI checks it.
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 pub mod macos_keys;
