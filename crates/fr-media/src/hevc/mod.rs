@@ -182,6 +182,24 @@ impl HevcGuard {
             declared_idr,
         )
     }
+    /// Normalize a HOST encoder's four-byte-length NALs and admit the result.
+    /// Removes only prefix/suffix SEI and the trailing zero padding previously
+    /// normalized through Annex B. The original input and every NAL are bounded
+    /// before allocation. The complete retained payload, parameters and picture
+    /// references pass the same strict guard as ordinary canonical input.
+    ///
+    /// This is not a viewer-input API: untrusted peer metadata must still pass
+    /// ordinary admission without host-side stripping. Allocation or validation
+    /// failure never commits parameter sets or advances reference history.
+    pub fn normalize_encoder_length_prefixed(
+        &mut self,
+        bytes: &[u8],
+        declared_idr: bool,
+    ) -> Result<Vec<u8>, HevcError> {
+        let normalized = framing::encoder_sample(bytes, self.limits)?;
+        self.validate_length_prefixed(&normalized, declared_idr)?;
+        Ok(normalized)
+    }
     fn validate_units(
         &mut self,
         mut units: Units<'_>,

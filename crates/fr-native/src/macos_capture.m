@@ -381,9 +381,12 @@ static int verify_source(FrCapture *c, dispatch_time_t deadline, uint64_t deadli
 }
 
 static BOOL append_nal(NSMutableData *unit, const uint8_t *nal, size_t len, size_t limit) {
-    static const uint8_t start[4] = {0, 0, 0, 1};
     if (!nal || !fr_cap_nal_fits(unit.length, len, limit)) return NO;
-    [unit appendBytes:start length:4];
+    uint32_t length = (uint32_t)len; // checked by fr_cap_nal_fits before conversion
+    const uint8_t prefix[4] = {
+        (uint8_t)(length >> 24), (uint8_t)(length >> 16), (uint8_t)(length >> 8), (uint8_t)length,
+    };
+    [unit appendBytes:prefix length:sizeof prefix];
     [unit appendBytes:nal length:len];
     return YES;
 }
@@ -409,14 +412,19 @@ static void encoded(void *refcon, void *frame, OSStatus status, VTEncodeInfoFlag
             }
             NSMutableData *unit = [NSMutableData data];
             if (!unit) c->result = -1;
+            CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
+            size_t sets = 0;
+            int prefix_bytes = 0;
+            // Retain the native length framing; refuse a different prefix size
+            // before parsing or exporting a picture under the canonical ABI.
+            if (c->result == noErr &&
+                (!format ||
+                 CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                     format, 0, NULL, NULL, &sets, &prefix_bytes) != noErr ||
+                 prefix_bytes != 4))
+                c->result = -1;
             if (sync && c->result == noErr) {
-                CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
-                size_t sets = 0;
-                if (!format ||
-                    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-                        format, 0, NULL, NULL, &sets, NULL) != noErr ||
-                    sets != 3)
-                    c->result = -1;
+                if (sets != 3) c->result = -1;
                 for (size_t i = 0; c->result == noErr && i < sets; i++) {
                     const uint8_t *p = NULL;
                     size_t len = 0;
@@ -452,10 +460,7 @@ static void encoded(void *refcon, void *frame, OSStatus status, VTEncodeInfoFlag
                 size_t prefix = unit.length;
                 [unit increaseLengthBy:4 + (size_t)len];
                 uint8_t *destination = unit.mutableBytes;
-                destination[prefix] = 0;
-                destination[prefix + 1] = 0;
-                destination[prefix + 2] = 0;
-                destination[prefix + 3] = 1;
+                memcpy(destination + prefix, size, sizeof size);
                 if (CMBlockBufferCopyDataBytes(block, off, len, destination + prefix + 4) !=
                     kCMBlockBufferNoErr) {
                     c->result = -1;

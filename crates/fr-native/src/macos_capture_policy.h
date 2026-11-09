@@ -101,9 +101,10 @@ static inline void fr_cap_one_shot_close(FrCapOneShot *request) {
     request->accepting = false;
 }
 
-// Annex-B growth is checked before allocation/copy, including every start code.
+// Canonical NAL growth is checked before allocation/copy, including every
+// four-byte length. A payload must be representable in that wire prefix.
 static inline bool fr_cap_nal_fits(size_t current, size_t payload, size_t capacity) {
-    return payload != 0 && current <= capacity && capacity - current >= 4 &&
+    return payload != 0 && payload <= UINT32_MAX && current <= capacity && capacity - current >= 4 &&
            payload <= capacity - current - 4;
 }
 

@@ -15,6 +15,18 @@ impl<'a> LengthPrefixed<'a> {
         Self { bytes, count: 0 }
     }
     pub fn next(&mut self) -> Result<Option<Nal<'a>>, HevcError> {
+        let nal = self.next_framed()?;
+        if let Some(nal) = nal {
+            // Inspect the complete escaped payload, including CABAC bytes.
+            // Conversion must not expose a hidden start code to the decoder.
+            Bits::new(&nal.bytes[2..]).validate_escaping()?;
+        }
+        Ok(nal)
+    }
+    // Framing only, used exclusively while normalizing a HOST encoder result.
+    // The public guard checks the entire retained payload after normalization;
+    // viewer input and ordinary framing conversion always use `next` above.
+    fn next_framed(&mut self) -> Result<Option<Nal<'a>>, HevcError> {
         if self.bytes.is_empty() {
             return Ok(None);
         }
@@ -31,9 +43,6 @@ impl<'a> LengthPrefixed<'a> {
         let tail = &self.bytes[4..];
         let data = tail.get(..length).ok_or(HevcError::Truncated)?;
         let nal = Nal::new(data)?;
-        // Inspect the complete escaped payload, including CABAC bytes. Otherwise
-        // conversion to Annex B could expose a hidden start code to the decoder.
-        Bits::new(&data[2..]).validate_escaping()?;
         self.bytes = &tail[length..];
         self.count += 1;
         Ok(Some(nal))
@@ -89,6 +98,42 @@ pub(super) fn hvc1_sample(bytes: &[u8], limits: ProtocolLimits) -> Result<Vec<u8
         true,
     )
 }
+
+// Preserve the host's previous Annex-B normalization without manufacturing
+// delimiters and scanning the whole compressed picture to find them again.
+// Only the guard's normalization/admission method exposes this output.
+pub(super) fn encoder_sample(bytes: &[u8], limits: ProtocolLimits) -> Result<Vec<u8>, HevcError> {
+    limits
+        .validate_access_unit_len(bytes.len())
+        .map_err(|_| HevcError::Limit)?;
+    let mut units = LengthPrefixed::new(bytes);
+    let mut retained = [&[][..]; MAX_NALS];
+    let mut count = 0;
+    let mut size = 0_usize;
+    while let Some(nal) = units.next_framed()? {
+        // AnnexB::next treated trailing zero bytes as delimiter/padding, not
+        // picture data. Retain that normalization, including its truncation
+        // check, so existing qualified native outputs keep identical bytes.
+        let mut data = nal.bytes;
+        while data.last() == Some(&0) {
+            data = &data[..data.len() - 1];
+        }
+        let nal = Nal::new(data)?;
+        if matches!(nal.kind, 39 | 40) {
+            continue;
+        }
+        size = size
+            .checked_add(nal.bytes.len())
+            .and_then(|n| n.checked_add(4))
+            .ok_or(HevcError::Limit)?;
+        limits
+            .validate_access_unit_len(size)
+            .map_err(|_| HevcError::Limit)?;
+        retained[count] = nal.bytes;
+        count += 1;
+    }
+    pack(&retained[..count], size, false)
+}
 fn repack(
     mut units: Units<'_>,
     limits: ProtocolLimits,
@@ -112,6 +157,10 @@ fn repack(
             .validate_access_unit_len(size)
             .map_err(|_| HevcError::Limit)?;
     }
+    pack(&retained[..count], size, annex_b)
+}
+
+fn pack(retained: &[&[u8]], size: usize, annex_b: bool) -> Result<Vec<u8>, HevcError> {
     if size == 0 {
         return Err(HevcError::Framing);
     }
@@ -119,7 +168,7 @@ fn repack(
     output
         .try_reserve_exact(size)
         .map_err(|_| HevcError::Allocation)?;
-    for nal in &retained[..count] {
+    for nal in retained {
         let prefix = if annex_b {
             [0, 0, 0, 1]
         } else {

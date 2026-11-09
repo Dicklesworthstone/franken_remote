@@ -163,6 +163,9 @@ static void encoded_allocation_is_bounded_before_append(void) {
     assert(fr_cap_nal_fits(0, 4, 8));
     assert(!fr_cap_nal_fits(0, 5, 8));
     assert(!fr_cap_nal_fits(0, 0, 8));
+    if (SIZE_MAX > UINT32_MAX) {
+        assert(!fr_cap_nal_fits(0, (size_t)UINT32_MAX + 1, SIZE_MAX));
+    }
     assert(!fr_cap_nal_fits(9, 1, 8));
     assert(!fr_cap_nal_fits(SIZE_MAX, 1, SIZE_MAX));
     assert(!fr_cap_nal_fits(SIZE_MAX - 3, 1, SIZE_MAX));

@@ -85,18 +85,37 @@ and the original worker emits one content-free teardown line on stderr. FRW0
 stdout remains protocol-only. These counters do not measure driver copies,
 GPU time or process-family memory.
 
-Encoded Annex-B growth is checked against the caller's exact output capacity
-before every parameter-set or picture-NAL append. Fragmented `CMBlockBuffer`
-storage is copied through `CMBlockBufferCopyDataBytes`, without assuming its
-first backing allocation covers the complete access unit. The Rust boundary
-rejects empty or out-of-range output lengths, strips encoder SEI, and admits the
-result through the existing HEVC guard.
+Encoded NAL growth is checked against the caller's exact output capacity
+before every parameter-set or picture-NAL append, including the four-byte
+length prefix. Fragmented `CMBlockBuffer` storage is copied through
+`CMBlockBufferCopyDataBytes`, without assuming its first backing allocation
+covers the complete access unit. The native boundary verifies the format's
+NAL-prefix width and exports canonical four-byte lengths directly.
+
+The Rust boundary rejects empty or out-of-range output lengths. Its host-only
+`HevcGuard::normalize_encoder_length_prefixed` method removes prefix/suffix SEI
+and preserves the previous trailing-zero padding normalization, then admits the
+entire retained payload through the same strict HEVC guard. The original input,
+NAL count and output allocation are bounded before metadata removal. All other
+NALs remain subject to parameter, layer, escaping and reference checks; failed
+normalization or admission cannot advance reference history.
+
+This removes the native length-framing → Annex B → length-framing round trip.
+The previous worker stripped metadata into one complete access-unit allocation,
+validated its Annex B representation, then allocated another complete unit for
+wire framing. Normalization now allocates the canonical result once and checks
+its complete escaped payload once. The independent broker/viewer admission
+checks remain. Fewer full-unit allocations/copies and delimiter scans are source
+properties, not a measured Mac startup speedup. This change does not establish
+the cause of the reported private host-branch timeout or extend either of its
+two-second preparation/bootstrap budgets.
 
 ## Evidence and remaining qualification
 
 | Check | Status and scope |
 | --- | --- |
 | Production policy tests | **Passed**, 2026-11-09, GCC 14.2.0 on Linux; 11 tests using the exact production C header. |
+| Canonical-output software tests | **Passed**, 2026-11-09, pinned Rust nightly on Linux; all `fr-media` library/integration/doc tests, including six new normalization tests using the retained real VideoToolbox IDR/P fixtures and adversarial inputs. |
 | Objective-C SDK build | **Not tested** for this change in this Linux session. |
 | ScreenCaptureKit / screenshot / VideoToolbox hardware path | **Not tested** for this change. |
 | macOS host video preparation inside its original 2 s budget | **Not tested** for this change; this work does not claim to resolve the reported preparation timeout. |

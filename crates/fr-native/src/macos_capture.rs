@@ -17,7 +17,7 @@ use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     config::{CodecConfiguration, ColorInfo},
-    hevc::{HevcGuard, framing::annex_b_to_length_prefixed, strip_encoder_sei},
+    hevc::HevcGuard,
     worker::UnchangedCapture,
 };
 
@@ -316,11 +316,9 @@ impl MacCapture {
             .get(..length)
             .filter(|bytes| !bytes.is_empty())
             .ok_or(NativeError::UnsupportedBitstream)?;
-        let annex_b = strip_encoder_sei(encoded).map_err(|_| NativeError::UnsupportedBitstream)?;
-        self.admission
-            .validate_annex_b(&annex_b, idr)
-            .map_err(|_| NativeError::UnsupportedBitstream)?;
-        let bytes = annex_b_to_length_prefixed(&annex_b, self.limits)
+        let bytes = self
+            .admission
+            .normalize_encoder_length_prefixed(encoded, idr)
             .map_err(|_| NativeError::UnsupportedBitstream)?;
         let kind = if idr {
             FrameKind::Idr {
