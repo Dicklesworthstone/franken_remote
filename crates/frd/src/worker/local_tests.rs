@@ -253,9 +253,12 @@ fn unsupported_and_malformed_requests_are_refused_without_native_calls() {
         let mut worker = start(&cx, recorder(&calls)).await.unwrap();
         let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
         // A pixel snapshot is a presenter request this owner cannot answer.
+        // Its well-formed request carries one stamp; an empty body would be
+        // refused earlier as a malformed record (ResourceLimit).
+        let stamp = vec![0; fr_media::worker::presentation_snapshot::STAMP_BYTES];
         assert_eq!(
             worker
-                .request(&cx, Kind::ReadPresentation, Vec::new(), deadline)
+                .request(&cx, Kind::ReadPresentation, stamp, deadline)
                 .await
                 .err(),
             Some(Error::WorkerRefused(worker::Error::Unsupported))
