@@ -11,6 +11,11 @@
 //!
 //! A broker without `CAP_NET_ADMIN` asks the root [`helper`] instead; its rule
 //! lives exactly as long as the helper connection, which every lease retains.
+//!
+//! On macOS no rule is installed: [`Enforcement::StrongHost`] requires the
+//! kernel's strong destination-address check for the address's family and
+//! rechecks it, with the utun interface, on the same refresh schedule
+//! ([`strong_host`]).
 use super::{LocalApi, NodeIdentity, bounded};
 use crate::Error as IdentityError;
 use asupersync::{
@@ -32,6 +37,8 @@ use std::{
     time::Duration,
 };
 pub mod helper;
+#[cfg(target_os = "macos")]
+pub mod strong_host;
 const COMMAND_LIMIT: usize = 16 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -57,6 +64,9 @@ pub enum Error {
     HelperUnavailable,
     /// The helper answered with this typed refusal; no rule is held for it.
     HelperRefused(helper::Refusal),
+    /// macOS: the kernel does not enforce the strong destination-address
+    /// check for this family (`check_interface` off or forwarding on).
+    StrongHostOff,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -112,6 +122,10 @@ pub enum Enforcement {
     /// The root `frd ingress-helper` at this protected socket owns the rule for
     /// exactly the lifetime of the connection this process keeps open.
     Helper(PathBuf),
+    /// macOS: no rule; the kernel's strong destination-address check, which
+    /// must be in force for the family and stay so (see [`strong_host`]).
+    #[cfg(target_os = "macos")]
+    StrongHost,
 }
 impl Enforcement {
     /// Direct when this process holds effective `CAP_NET_ADMIN`; otherwise the
@@ -368,6 +382,10 @@ fn address_assigned(
     }))
 }
 async fn qualified_interface(cx: &Cx, config: &Configuration) -> Result<u32, Error> {
+    #[cfg(target_os = "macos")]
+    if config.enforcement == Enforcement::StrongHost {
+        return strong_host::qualified(cx, &config.interface, config.address.ip()).await;
+    }
     let (index, bytes) = observe(cx, &config.ip, &config.interface).await?;
     if !address_assigned(&bytes, index, &config.interface, config.address.ip())?
         || interface_index(&config.interface)? != index
@@ -533,6 +551,8 @@ struct State {
 enum Backend {
     Direct,
     Helper(helper::Link),
+    #[cfg(target_os = "macos")]
+    StrongHost,
 }
 enum Refresh {
     Installation,
@@ -651,6 +671,8 @@ impl Boundary {
                     Some(keepalive),
                 )
             }
+            #[cfg(target_os = "macos")]
+            Enforcement::StrongHost => (String::new(), Backend::StrongHost, None),
         };
         let mut owner = Self {
             lease: Lease {
@@ -756,6 +778,15 @@ impl Boundary {
                         &owner.config.interface,
                     )?;
                 }
+                // Installation included: the boundary IS this kernel state.
+                #[cfg(target_os = "macos")]
+                Backend::StrongHost => {
+                    if !strong_host::enforced(&owner.lease.cx, owner.config.address.is_ipv6())
+                        .await?
+                    {
+                        return Err(Error::StrongHostOff);
+                    }
+                }
             }
             owner.lease.check(owner.address())?;
             owner.lease.api.check_node(&owner.lease.cx, &node)?;
@@ -844,6 +875,9 @@ impl Boundary {
                         state.keepalive = None;
                     }
                 }
+                // Nothing was installed; the fence above is the whole stop.
+                #[cfg(target_os = "macos")]
+                Backend::StrongHost => {}
             }
             self.cleaned = true;
             Ok(())
