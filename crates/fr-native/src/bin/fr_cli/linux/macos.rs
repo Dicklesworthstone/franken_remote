@@ -7,7 +7,7 @@
 //! system-shortcut capture and the clipboard (whose default-on choice is
 //! reported as unavailable). The local session-control socket (`fr status`,
 //! `fr disconnect` against a running viewer) is not bound by this path.
-use super::{Failure, Shutdown, failure, lapse, read_roots, refusal};
+use super::{Failure, Shutdown, failure, lapse, read_roots, refusal, tailnet};
 use crate::options::{Connection, DisplayChoice};
 use asupersync::{cx::Cx, runtime::Runtime};
 use fr_native::macos::session::{ControlPolicy, LocalStop, Report, Session};
@@ -188,7 +188,16 @@ fn finish(
                 ),
                 _ => refusal::reconnect(error)
                     .or_else(|| lapse::reconnect(error))
+                    .or_else(|| match error {
+                        reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(
+                            e,
+                        )) => Some(tailnet(e)),
+                        _ => None,
+                    })
                     .unwrap_or_else(|| {
+                        // The typed chain is content-free (no addresses, names or
+                        // payloads), so an unnamed end stays diagnosable on stderr.
+                        eprintln!("fr: session ended without a named reason: {error:?}");
                         failure(
                             "native_session_failed",
                             "The native session ended with a failure; check fr hosts and that frd run is serving on the host, then reconnect.",
