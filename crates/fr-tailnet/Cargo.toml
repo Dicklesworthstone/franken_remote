@@ -11,12 +11,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
 # The trust-root reader is platform neutral. Installed outbound identity uses
-# the Linux LocalAPI or the authenticated macOS app; host admission stays Linux.
+# the Linux LocalAPI socket or the macOS app's loopback LocalAPI; host
+# admission stays Linux.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 asupersync = { workspace = true, features = ["tls"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-fr-tailnet-platform.workspace = true
 
 [lints]
 workspace = true

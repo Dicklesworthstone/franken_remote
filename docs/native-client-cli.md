@@ -67,39 +67,19 @@ cargo build -p fr-native --bin fr --locked
 
 `hosts` and `peers` take one informational snapshot. `peers` is a snapshot-only alias;
 it rejects saved-host operations and remote probes. The Linux `hosts` behavior
-above remains unchanged. macOS supports the standard installed
-`/Applications/Tailscale.app/Contents/MacOS/Tailscale` bridge, selected exactly
-with `status --json` and `TAILSCALE_BE_CLI=1` as documented by
-[Tailscale](https://tailscale.com/docs/reference/tailscale-cli?tab=macos).
-No executable is selected from the caller's `PATH`, and no shell is used.
-
-The child starts suspended in its own process group. Before it executes,
-Apple's dynamic `SecCode` check must establish an Apple signing anchor,
-[Tailscale Team ID](https://tailscale.com/docs/integrations/mdm/mac)
-`W5364U7YZB`, and either `io.tailscale.ipn.macsys` or `io.tailscale.ipn.macos`,
-the [official GUI variant identifiers](https://github.com/tailscale/tailscale/blob/v1.104.2/version/prop.go).
-The parent's cancellation and deadline are rechecked after verification and
-before resuming that same child. This validates the actual spawned image,
-including when a pathname is replaced during setup. The native boundary uses
-[Apple's suspended-spawn contract](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/posix_spawnattr_getflags.3.html);
-the selected user, installed Tailscale authority and host OS remain trusted.
-
-The environment is cleared, then supplies only CLI mode, system utility paths,
-the C locale and the home directory from the OS user record. The child receives
-no inherited application descriptors or stdin. Raw stderr is not exposed.
-Stdout is bounded to 1 MiB and parsed by the existing status projection; no
-human-oriented output becomes identity evidence. Missing or untrusted apps,
-nonzero exits, malformed output, cancellation and timeout produce typed errors.
-The single one-second lookup budget starts before blocking-pool admission.
-Cancellation cleanup retains and reaps the original child before this one-shot
-CLI returns, so cleanup can take longer than the lookup's work deadline.
+above remains unchanged. macOS reads the installed Tailscale app's loopback
+`LocalAPI`, as Tailscale's own CLI does; [native discovery](native-discovery.md#macos-installed-app-identity-and-outbound-connections)
+says what that trusts and what it does not check. Status is bounded to 1 MiB
+and parsed by the existing status projection. A missing or untrusted endpoint,
+a refusal, malformed output, cancellation and timeout produce typed errors
+within one one-second lookup budget.
 
 The default build also supports `inspect NODE_ID`, or a full canonical name
-with `--by-name`, through a fresh signed status/WhoIs/status sequence. Every
-child must have the same verified signed-image identity. The selected node,
+with `--by-name`, through a fresh status/WhoIs/status sequence. All three
+reads must come from the same daemon run. The selected node,
 key, user, tags and exact node-owned addresses must agree; routed subnets and
-conflicting identities refuse. All commands and parses share the original
-one-second budget, and original children retire before output. The result
+conflicting identities refuse. All reads and parses share the original
+one-second budget. The result
 carries the verified stable ID even when selected by name. It cannot select a
 replacement from a name prefix or accept caller-supplied identity JSON.
 
@@ -115,20 +95,16 @@ For default-build `hosts` and `inspect`, `--socket` refuses with
 `localapi_endpoint_unsupported` before starting a runtime. Default-build
 inspection also rejects `--saved`/`--hosts-file` with `saved_hosts_unsupported`
 and remote `--probe` with `platform_unavailable` before runtime or process
-creation; it never downgrades those requests to an ordinary lookup. This bridge
+creation; it never downgrades those requests to an ordinary lookup. This lookup
 grants no session authority and does not loosen Linux's credential-checked Unix
 socket adapter. Other commands need the desktop build below; its existing
 command dispatch and feature choices remain separate. Hosting is not enabled.
 
-The new default-build inspection sequence still needs an installed-app run on
-macOS. Portable helper/metadata tests and Rust-only cross-target checks do not
-establish that platform result.
-
-**Earlier bridge evidence (2026-11-08, macOS 27, Tailscale 1.104.1, `io.tailscale.ipn.macsys`):**
-`fr hosts --json` listed the tailnet's peers through the bridge, and the
-suspended-child signature refusal/reap regression passed. The App Store variant
-(`io.tailscale.ipn.macos`) has not been exercised. These results predate the
-strengthened status/WhoIs/status backend and do not qualify that new sequence.
+**Evidence (2026-11-08, macOS 27, Tailscale 1.104.1, `io.tailscale.ipn.macsys`):**
+`fr hosts --json` listed the tailnet's peers, and `fr inspect NODE_ID --json`
+reported `identity_checked` for a live peer in the default build. Twenty
+inspections took 0.23 s of CPU in all, process start included, or about 12 ms
+each. The App Store variant (`io.tailscale.ipn.macos`) is not supported.
 
 ## macOS desktop client
 
@@ -145,15 +121,10 @@ enter the same `frd` input path as the Linux viewer. As on Linux, losing focus,
 hiding the window or a change of picture size stops local input and ends
 control; closing the window ends the session.
 
-The client's tailnet lookups (the peer target before dialing, and its renewals
-during a session) use the signed status/WhoIs/status sequence above. Every child
-is authenticated, and all three responses must agree on the selected identity
-and signed-image identity. The app's loopback LocalAPI token is never used.
-The development Mac measured about 5 ms to verify and 45 ms to run one status
-query, using 60-80 ms of CPU. Those measurements belong to the previous
-status-only bridge, which used two reads per renewal (about 12-16% of one core
-when renewing once a second). The new three-read sequence has not been measured
-on that Mac; a cheaper authenticated transport remains follow-up work.
+The client's tailnet lookups (the peer target before dialing, and its renewal
+once a second during a session) use the status/WhoIs/status sequence above over
+the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
+transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
 `--choose-host`, `--display choose`, `--fit`, `--capture-system-shortcuts`,
@@ -164,10 +135,13 @@ does not bind the local session-control socket, so `fr status` and
 `fr disconnect` cannot reach a running macOS viewer.
 
 **Evidence (2026-11-08):** from the owner's Mac to a Linux NVENC host (ts2), the
-window showed the host's live desktop and typed keys reached the host (over the
-app's LocalAPI, before the bridge replaced it; the bridge build has shown the
-live desktop). Pointer, wheel and click delivery and the window-close outcome
-have not been confirmed live. fr-native's macOS tests decode a real HEVC stream through VideoToolbox
+window showed the host's live desktop and typed keys reached the host. A build
+whose lookups used the signed CLI also showed the live desktop with control
+granted. With the current lookups, `--control` sessions opened their window and
+ran for about a minute until ts2, under heavy memory pressure, ended them
+(`Renewal(Transport(Expired))`); no frame was captured from that build.
+Pointer, wheel and click delivery and the window-close outcome have not been
+confirmed live. fr-native's macOS tests decode a real HEVC stream through VideoToolbox
 into the Metal surface.
 
 ## Check local capture, encoding and input readiness

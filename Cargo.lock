@@ -635,7 +635,6 @@ name = "fr-tailnet"
 version = "0.1.0"
 dependencies = [
  "asupersync",
- "fr-tailnet-platform",
  "serde",
  "serde_json",
 ]

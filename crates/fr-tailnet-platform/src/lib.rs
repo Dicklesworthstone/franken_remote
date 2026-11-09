@@ -1,8 +1,9 @@
 //! Authenticated installed-application process boundary, without session policy.
 //!
-//! macOS uses the installed Tailscale application's signed CLI, never a caller's
-//! executable, shell, HTTP proxy or loopback bearer token. Only fixed status and
-//! numeric-address `WhoIs` queries exist. Callers must own every child on a drained
+//! Runs the installed Tailscale application's signed CLI, never a caller's
+//! executable, shell or HTTP proxy. Only fixed status and numeric-address
+//! `WhoIs` queries exist. `fr-tailnet` no longer uses it: since 2026-11-08 it
+//! reads the app's loopback `LocalAPI`, which this CLI itself connects to. Callers must own every child on a drained
 //! blocking operation and check their original deadline before resuming it.
 //! This crate neither parses metadata nor grants observation or input authority.
 use std::{fmt, net::IpAddr};

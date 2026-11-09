@@ -1,31 +1,45 @@
-//! Signed installed-app metadata reads for the native macOS client.
+//! Installed-app metadata reads for the native macOS client.
 //!
-//! A whole lookup owns one drained blocking task, one original deadline and
-//! the global lookup slot through actual child retirement. Only the fixed
-//! platform command enum can cross the FFI boundary. Host-shaped APIs in the
-//! parent module always refuse; this backend provides outbound identity only.
-use super::{LocalApi, Lookup, lookup_budget::Clock, now, target::VerifiedTarget, wall_now};
+//! Reads go to the standalone Tailscale app's loopback `LocalAPI`, the same
+//! server its own CLI uses (`endpoint.rs` says what is trusted). The owner
+//! chose this on 2026-11-08 over starting a signed CLI child per read: the
+//! child itself connects to this port with this token, so it authenticated
+//! only our own client binary, at 60-80 ms of CPU per read and three reads per
+//! renewal. A whole lookup owns one original deadline and the global lookup
+//! slot. Host-shaped APIs in the parent module still refuse; this backend
+//! provides outbound identity only.
+mod endpoint;
+
+use super::{LocalApi, Lookup, SourceIdentity, bounded, checked, lookup_budget::Clock, now};
+use super::{target::VerifiedTarget, wall_now};
 use crate::{Discovery, Error, PeerSelector, PeerTarget, metadata};
-use asupersync::{cx::Cx, time::timeout_at, types::Time};
-use fr_tailnet_platform::{Command, Read, Snapshot, SourceIdentity};
+use asupersync::{
+    cx::Cx,
+    http::h1::{Http1Client, Request},
+    net::TcpStream,
+};
 use std::{
-    future::{Future, poll_fn},
-    net::IpAddr,
-    pin::pin,
+    net::{IpAddr, SocketAddr},
+    path::Path,
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    task::Poll,
     time::{Duration, Instant},
 };
 
 static LOOKUP_BUSY: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+const LOOKUP: Duration = Duration::from_secs(1);
 
-#[derive(Clone)]
+/// The fixed read vocabulary; there is no caller-supplied URI.
+#[derive(Clone, Copy)]
+enum Query {
+    Status,
+    WhoIs(IpAddr),
+}
+
 struct Operation {
     owner: Cx,
-    child: Option<Cx>,
     clock: Clock,
     started: Instant,
 }
@@ -34,85 +48,58 @@ impl Operation {
         let started = Instant::now();
         Ok(Self {
             owner: cx.clone(),
-            child: None,
             clock: Clock::new(now(cx)?, wall_now()?)?,
             started,
         })
     }
     fn check(&mut self) -> Result<u64, Error> {
-        if let Some(child) = &self.child {
-            child.checkpoint().map_err(|_| Error::Cancelled)?;
-        }
         let current = now(&self.owner)?;
         self.clock.check(current, wall_now()?)?;
-        if self.started.elapsed() >= Duration::from_secs(1) {
+        if self.started.elapsed() >= LOOKUP {
             return Err(Error::Timeout);
         }
         Ok(current)
     }
 
-    fn read(&mut self, command: Command) -> Result<(Vec<u8>, SourceIdentity), Error> {
+    async fn read(&mut self, query: Query) -> Result<(Vec<u8>, SourceIdentity), Error> {
         self.check()?;
-        let maximum = match command {
-            Command::Status => metadata::STATUS_BYTES,
-            Command::WhoIs(_) => metadata::WHOIS_BYTES,
+        let (uri, maximum) = match query {
+            Query::Status => (
+                "/localapi/v0/status?peers=true".to_owned(),
+                metadata::STATUS_BYTES,
+            ),
+            Query::WhoIs(ip) => (
+                Request::get("/localapi/v0/whois")
+                    .query([("addr", ip.to_string())])
+                    .build()
+                    .uri,
+                metadata::WHOIS_BYTES,
+            ),
         };
-        let mut snapshot = Snapshot::start(command).map_err(native_error)?;
-        // Dynamic signature verification may block. It never receives a new
-        // budget, and this child cannot run if the original lookup has ended.
+        let endpoint = endpoint::endpoint(Path::new(endpoint::INSTALLED))?;
+        let socket = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], endpoint.port)))
+            .await
+            .map_err(|_| Error::LocalApiUnavailable)?;
+        let request = Request::get(&uri)
+            .header("Host", "local-tailscaled.sock")
+            .header("Connection", "close")
+            .header("Accept", "application/json")
+            .header("Authorization", endpoint.authorization())
+            .build();
+        let (response, _socket, withheld) =
+            Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
+                .await
+                .map_err(|_| Error::Http)?;
+        let body = checked(response, withheld, "application/json")?;
         self.check()?;
-        let source = snapshot.source_identity();
-        snapshot.resume().map_err(native_error)?;
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(maximum)
-            .map_err(|_| Error::MalformedMetadata)?;
-        let mut buffer = [0; 8192];
-        let mut eof = false;
-        loop {
-            self.check()?;
-            let progress = match snapshot.read(&mut buffer).map_err(native_error)? {
-                Read::Bytes(count) => {
-                    if count > maximum - bytes.len() {
-                        return Err(Error::MalformedMetadata);
-                    }
-                    bytes.extend_from_slice(&buffer[..count]);
-                    true
-                }
-                Read::Eof => {
-                    eof = true;
-                    false
-                }
-                Read::Pending => false,
-            };
-            match snapshot.try_wait().map_err(native_error)? {
-                Some(false) => return Err(Error::LocalApiDenied),
-                Some(true) if eof => break,
-                _ => {}
-            }
-            if !progress {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        }
-        // The complete original process group is retired before its metadata
-        // can publish or the next command can claim the platform process slot.
-        drop(snapshot);
-        self.check()?;
-        Ok((bytes, source))
+        // The daemon run that published this endpoint stands in for Linux's
+        // daemon PID: a restart between reads breaks the lookup's snapshot.
+        Ok((body, endpoint.instance))
     }
 }
 
-fn native_error(error: fr_tailnet_platform::Error) -> Error {
-    match error {
-        fr_tailnet_platform::Error::Unavailable => Error::LocalApiUnavailable,
-        fr_tailnet_platform::Error::Untrusted => Error::UntrustedLocalApi,
-        fr_tailnet_platform::Error::Busy => Error::Busy,
-        fr_tailnet_platform::Error::InvalidEndpoint => Error::InvalidEndpoint,
-    }
-}
-
-// The blocking task must own the bounded selector; no borrowed caller data or
-// arbitrary process argument survives into a native operation.
+// The lookup owns the bounded selector; no borrowed caller data survives into
+// a read.
 enum Selector {
     StableId(String),
     Pinned(String, String),
@@ -146,7 +133,7 @@ impl Selector {
 }
 
 impl LocalApi {
-    /// Use only the fixed, dynamically authenticated installed Tailscale app.
+    /// Use only the installed Tailscale app's root-published endpoint.
     /// Distinct API owners share the same one-lookup admission bound while
     /// retaining distinct origin identities for their outbound targets.
     pub fn installed() -> Self {
@@ -159,73 +146,35 @@ impl LocalApi {
         }
     }
 
-    async fn lookup<T: Send + 'static>(
+    async fn lookup<T>(
         &self,
         cx: &Cx,
-        operation: impl FnOnce(&mut Operation) -> Result<T, Error> + Send + 'static,
+        operation: impl AsyncFnOnce(&mut Operation) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let mut lookup = Operation::new(cx)?;
-        let end = Time::from_nanos(
-            lookup
-                .clock
-                .end_us()
-                .checked_mul(1000)
-                .ok_or(Error::Clock)?,
-        );
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
-        let permit = Lookup(self.busy.clone());
-        let mut native = lookup.clone();
-        let mut task = cx
-            .spawn_blocking_drained(move |child| {
-                // The slot is released only after operation's native owners
-                // have dropped and actually reaped their original children.
-                let _permit = permit;
-                let _ambient = child.clone().set_current_restricted();
-                native.child = Some(child);
-                native.check()?;
-                let value = operation(&mut native)?;
-                native.check()?;
+        let _permit = Lookup(self.busy.clone());
+        // Dropping the work on timeout or cancellation drops its socket. Its
+        // three HTTP exchanges live on the heap, not in every caller's future.
+        bounded(
+            cx,
+            LOOKUP,
+            Box::pin(async {
+                let value = operation(&mut lookup).await?;
+                lookup.check()?;
                 Ok(value)
-            })
-            .map_err(|_| Error::MissingRuntime)?;
-        let result = {
-            let mut cancelled = pin!(cx.cancelled());
-            let mut joined = pin!(timeout_at(end, task.join()));
-            poll_fn(|context| {
-                lookup.check()?;
-                if cancelled.as_mut().poll(context).is_ready() {
-                    return Poll::Ready(Err(Error::Cancelled));
-                }
-                let result = joined.as_mut().poll(context);
-                lookup.check()?;
-                match result {
-                    Poll::Ready(Ok(Ok(value))) => Poll::Ready(value),
-                    Poll::Ready(Ok(Err(asupersync::runtime::JoinError::Cancelled(_)))) => {
-                        Poll::Ready(Err(Error::Cancelled))
-                    }
-                    Poll::Ready(Ok(Err(_))) => Poll::Ready(Err(Error::LocalApiUnavailable)),
-                    Poll::Ready(Err(_)) => Poll::Ready(Err(Error::Timeout)),
-                    Poll::Pending => Poll::Pending,
-                }
-            })
-            .await
-        };
-        if result.is_err() && !task.is_finished() {
-            // Cleanup may outlast the work deadline. It cannot renew metadata,
-            // allow a late child to resume, or release the lookup slot early.
-            task.abort();
-            let _ = task.join().await;
-        }
-        result
+            }),
+        )
+        .await
     }
 
-    /// Informational candidates from one signed, bounded status query.
+    /// Informational candidates from one bounded status read.
     /// No discovery value grants observation, input or native dial authority.
     pub async fn discover(&self, cx: &Cx) -> Result<Discovery, Error> {
-        self.lookup(cx, |lookup| {
-            let (bytes, _) = lookup.read(Command::Status)?;
+        self.lookup(cx, async |lookup| {
+            let (bytes, _) = lookup.read(Query::Status).await?;
             Discovery::from_status_json(
                 &bytes,
                 lookup.clock.issued_us,
@@ -236,9 +185,9 @@ impl LocalApi {
         .await
     }
 
-    /// Pin the destination through a signed status/WhoIs/status sequence under
-    /// one original second. Each child must have the same complete verified
-    /// code identity. This is outbound identity only, never host admission.
+    /// Pin the destination through a status/WhoIs/status sequence under one
+    /// original second. Every read must come from the same daemon run. This
+    /// is outbound identity only, never host admission.
     pub async fn peer_target(
         &self,
         cx: &Cx,
@@ -246,8 +195,8 @@ impl LocalApi {
     ) -> Result<PeerTarget, Error> {
         let selector = Selector::new(selector)?;
         let verified = self
-            .lookup(cx, move |lookup| {
-                let (first, source_identity) = lookup.read(Command::Status)?;
+            .lookup(cx, async move |lookup| {
+                let (first, source_identity) = lookup.read(Query::Status).await?;
                 let first = metadata::outbound::resolve(
                     &metadata::Status::parse(&first)?,
                     selector.borrowed(),
@@ -256,7 +205,7 @@ impl LocalApi {
                     Selector::Address(ip) => *ip,
                     _ => first.peer.ips.0[0], // resolve requires a nonempty node-owned set.
                 };
-                let (whois, whois_source) = lookup.read(Command::WhoIs(queried_address))?;
+                let (whois, whois_source) = lookup.read(Query::WhoIs(queried_address)).await?;
                 if source_identity != whois_source {
                     return Err(Error::UntrustedLocalApi);
                 }
@@ -265,7 +214,7 @@ impl LocalApi {
                     queried_address,
                     &metadata::WhoIs::parse(&whois)?,
                 )?;
-                let (last, last_source) = lookup.read(Command::Status)?;
+                let (last, last_source) = lookup.read(Query::Status).await?;
                 if source_identity != last_source {
                     return Err(Error::UntrustedLocalApi);
                 }

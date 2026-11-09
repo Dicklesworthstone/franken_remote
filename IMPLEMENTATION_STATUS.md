@@ -1,32 +1,34 @@
 # Implementation status
 
-## macOS authenticated outbound identity (2026-11-08; native qualification pending)
+## macOS outbound identity (2026-11-08; live on the installed app)
 
-`fr-tailnet` now provides the ordinary private `PeerTarget`, `NativeClient`,
-`TargetOwner` and `TargetLease` path on macOS through the signed installed
-Tailscale application. The existing `fr hosts` implementation consumes this
-backend for discovery. Resolving a destination performs fixed status, numeric
-WhoIs and status commands under one original deadline and compares both node
-identity and the complete verified app code identity. Exact address ownership,
-key expiry, cancellation, clock rollback and system-sleep ceilings are enforced;
-the admission slot remains held through actual child cleanup. The platform
-boundary has no protocol or desktop dependencies, and no public JSON constructor
-can create a dialable target. Linux's daemon UID/PID checks remain unchanged.
+`fr-tailnet` provides the ordinary private `PeerTarget`, `NativeClient`,
+`TargetOwner` and `TargetLease` path on macOS. It reads the standalone
+Tailscale app's loopback `LocalAPI` with the root-published port and
+admin-readable token, as Tailscale's own CLI does; `fr hosts` uses it for
+discovery. Resolving a destination reads status, numeric WhoIs and status
+under one original deadline. All three must come from the same daemon run and
+agree on node identity. Exact address ownership, key expiry, cancellation,
+clock rollback and system-sleep ceilings are enforced. No public JSON
+constructor can create a dialable target, and Linux's daemon UID/PID checks are
+unchanged.
 
-This strengthens the installed-app identity dependency of `fr-5a4w`, including
-the native macOS viewer that landed on main during this work. The viewer's
-VideoToolbox/Metal/AppKit implementation and its existing live evidence are
-preserved below. The public replaceable JSON bridge and fabricated daemon PID
-are replaced by a closed authenticated platform boundary. Host-shaped APIs
-needed by shared client code remain available, but macOS host operations still
-refuse; no host authority is manufactured. Destination identity does not confer
-observation or input authority or establish desktop/codec readiness.
+The owner chose this transport on 2026-11-08 over a signed CLI child per read
+(`fr-tailnet-platform`, now unused). That CLI connects to the same loopback
+port with the same token, so its signature check authenticated only our own
+client binary, at 60-80 ms of CPU per read and three reads per renewal. A whole
+`fr inspect` (three reads, process start included) now takes about 12 ms of
+CPU. Neither transport can check which process accepted the connection: if
+Tailscale is not listening, a local process that binds the port would receive
+the token and could answer with false metadata. macOS host operations
+(admission, certificates) still refuse until a macOS host exists. Destination
+identity does not confer observation or input authority or establish
+desktop/codec readiness.
 
-The portable platform command tests pass. Regression sources additionally cover
-exact WhoIs/status binding, malformed and routed responses, refusal flags,
-lookup/target expiry, and native signed-image rejection/reap. Full native macOS
-and installed-Tailscale execution are pending; source or cross-target Rust checks
-must not be presented as those results. See
+Live on the owner's Mac (macOS 27, Tailscale 1.104.1, `io.tailscale.ipn.macsys`):
+`fr hosts`, `fr inspect` in both builds (`identity_checked`), and desktop
+sessions to ts2. macOS tests cover the endpoint reader. Portable tests cover the
+WhoIs/status binding, malformed and routed responses, and lookup/target expiry. See
 [the identity and lifetime boundary](docs/native-discovery.md#macos-installed-app-identity-and-outbound-connections).
 Tracking: `fr-1yxy`; the broader macOS client bead remains open.
 
@@ -36,41 +38,29 @@ With `--features macos-desktop`, `fr connect` runs natively on macOS. The host
 stream is decoded by VideoToolbox into IOSurfaces and drawn by Metal into a
 `CAMetalLayer`, the remote cursor is a blended Metal quad, and AppKit input
 reaches `frd`'s input path. `frd`'s `Worker` presents through an in-process
-`LocalPresenter` rather than a child process. The tailnet lookups run through
-the signed installed-app backend described above. Outbound lookups validate
-status/WhoIs/status; host admission and certificate operations still refuse
-on macOS until a macOS host exists. Options not implemented here are
+`LocalPresenter` rather than a child process. The tailnet lookups use the
+loopback `LocalAPI` backend described above (status/WhoIs/status); host
+admission and certificate operations still refuse on macOS until a macOS host
+exists. Options not implemented here are
 refused by name ([details](docs/native-client-cli.md#macos-desktop-client)).
 
 Live on 2026-11-08 from the owner's Mac (macOS 27, Tailscale 1.104.1) to ts2
-(Linux, NVENC): over the app's LocalAPI (since replaced), the window showed
-ts2's live desktop with control granted, and typed keys reached ts2. The
-signed-bridge build has since shown ts2's live desktop in a `--control`
-session. Not yet confirmed live: input through the bridge build, pointer,
-wheel and click delivery, and the window-close outcome. The initial bridge build used two
-status children per renewal (60-80 ms CPU each). The strengthened identity
-backend adds the numeric WhoIs read; its native cost and live session behavior
-remain to be measured.
+(Linux, NVENC): the window showed ts2's live desktop with control granted,
+and typed keys reached ts2. A build using the signed CLI for lookups also showed
+the live desktop. With the current loopback lookups, sessions opened and ran for
+about a minute until ts2, under heavy memory pressure, ended them; no frame was
+captured from that build. Not yet confirmed live: pointer, wheel and click
+delivery, and the window-close outcome.
 
 ## macOS installed-app discovery (2026-11-08)
 
-The public `fr hosts [--json]` command now has a macOS implementation through
-the installed Tailscale app's machine-readable CLI. The snapshot-only
-`fr peers` alias shares that implementation and the Linux discovery path.
-The native bridge starts the exact app executable suspended, verifies the
-actual child's Apple signing identity against Tailscale's team and the two
-official GUI app identifiers, and checks the original lookup budget again
-before allowing execution. It never accepts a caller-supplied executable,
-shell command, proxy, LocalAPI token or inherited environment.
-
-One original one-second deadline includes blocking-pool queueing, native
-signature verification, execution, reading and projection. Status is capped at
-1 MiB and uses the same parser, candidate exclusions and output format as Linux.
-A timeout, cancellation or invalid result cannot become an empty successful
-snapshot. The original child stays owned through process-group/leader kill and
-actual reap, including the one-shot CLI's cancellation drain. Cleanup may outlast
-the lookup deadline; that does not permit late execution or publish stale data.
-Concurrent/retried lookups cannot take the single slot before cleanup retires.
+The public `fr hosts [--json]` command has a macOS implementation through the
+installed Tailscale app's loopback `LocalAPI` (above). The snapshot-only
+`fr peers` alias shares that implementation and the Linux discovery path. One
+original one-second deadline covers the read and projection. Status is capped
+at 1 MiB and uses the same parser, candidate exclusions and output format as
+Linux. A timeout, cancellation or invalid result cannot become an empty
+successful snapshot.
 
 This was the first platform slice for `fr-5a4w`; the desktop client above
 builds on it. Capability probes and hosting still return `platform_unavailable`

@@ -1,9 +1,8 @@
-//! Installed local identity: credential-checked Linux Unix sockets or a fixed,
-//! signed macOS app CLI. No TCP fallback, proxy, redirect or public listener.
+//! Installed local identity: credential-checked Linux Unix sockets, or on
+//! macOS the standalone Tailscale app's root-published loopback `LocalAPI`
+//! (`macos/endpoint.rs`). No proxy, redirect or public listener.
 //! Host-shaped APIs remain available for shared session signatures; their
-//! underlying reads always refuse on macOS. They cannot use the signed outbound
-//! bridge, a caller-provided reader, fabricated process credentials or a socket
-//! fallback to manufacture host admission or certificate authority.
+//! underlying reads still refuse on macOS until a macOS host exists.
 use crate::{
     AdmissionProfile, Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
@@ -26,10 +25,9 @@ use std::{
     time::Duration,
 };
 
-#[cfg(target_os = "linux")]
+/// The daemon that answered: its PID on Linux (kernel credentials), its
+/// published endpoint's run identity on macOS. Reads of one lookup must agree.
 type SourceIdentity = i32;
-#[cfg(target_os = "macos")]
-type SourceIdentity = fr_tailnet_platform::SourceIdentity;
 
 /// One fixed installed-daemon status read. This does not register a reader or
 /// grant trust to caller-supplied metadata. Host reads refuse on macOS.
@@ -293,21 +291,7 @@ impl LocalApi {
             Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
                 .await
                 .map_err(|_| Error::Http)?;
-        if response.status != 200 {
-            return Err(Error::LocalApiDenied);
-        }
-        if withheld
-            || !response.trailers.is_empty()
-            || response.header_value("Content-Encoding").is_some()
-            || !response.header_value("Content-Type").is_some_and(|v| {
-                v.split(';')
-                    .next()
-                    .is_some_and(|m| m.trim().eq_ignore_ascii_case(content_type))
-            })
-        {
-            return Err(Error::Http);
-        }
-        Ok((response.body, credentials))
+        checked(response, withheld, content_type).map(|body| (body, credentials))
     }
     #[cfg(target_os = "macos")]
     #[allow(clippy::unused_self)] // The Linux transport needs the same receiver.
@@ -321,6 +305,28 @@ impl LocalApi {
         // operations must not reuse outbound identity or invent socket UCred.
         std::future::ready(Err(Error::LocalApiUnavailable))
     }
+}
+/// Accept only a complete, uncompressed 200 response of the expected type.
+fn checked(
+    response: asupersync::http::h1::Response,
+    withheld: bool,
+    content_type: &str,
+) -> Result<Vec<u8>, Error> {
+    if response.status != 200 {
+        return Err(Error::LocalApiDenied);
+    }
+    if withheld
+        || !response.trailers.is_empty()
+        || response.header_value("Content-Encoding").is_some()
+        || !response.header_value("Content-Type").is_some_and(|v| {
+            v.split(';')
+                .next()
+                .is_some_and(|m| m.trim().eq_ignore_ascii_case(content_type))
+        })
+    {
+        return Err(Error::Http);
+    }
+    Ok(response.body)
 }
 pub(crate) fn now(cx: &Cx) -> Result<u64, Error> {
     cx.checkpoint().map_err(|_| Error::Cancelled)?;

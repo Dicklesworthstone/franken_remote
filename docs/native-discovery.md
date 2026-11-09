@@ -29,29 +29,34 @@ tailnet/desktop availability evidence.
 
 ## macOS installed-app identity and outbound connections
 
-The native macOS client uses the installed
-`/Applications/Tailscale.app/Contents/MacOS/Tailscale` executable. The narrow
-`fr-tailnet-platform` crate owns the existing C/process boundary; the safe
-`fr-tailnet` crate owns parsing, destination identity and renewal. The original
-native source paths remain in `fr-native/src/tailnet_macos*`, compiled only by
-the platform crate. This avoids a dependency from identity policy into the
-desktop/media/host crate family and retains one bridge implementation.
+The native macOS client reads the standalone Tailscale app's `LocalAPI`, the
+same server Tailscale's own CLI uses. The app's network extension serves it as
+HTTP on a loopback port. On every start root publishes that port as the
+symlink `/Library/Tailscale/ipnport`, and a per-run token in
+`sameuserproof-PORT` (root:admin, 0640). `fr-tailnet` refuses the endpoint
+unless the directory and both files are root-owned and not group- or
+world-writable. It sends the token as Basic credentials and accepts only a
+complete, uncompressed `200 application/json` response. Reading the token
+requires an administrator account. The App Store variant publishes no such
+endpoint and is not supported.
 
-`LocalApi::installed().discover` runs the fixed `status --json` command.
-`LocalApi::peer_target` runs `status --json`, `whois --json NUMERIC_IP`, then
-`status --json` under one original one-second deadline, including task queueing,
-signature checks, reads and parsing. The address comes from the selected node's
-checked address set; no caller-supplied command text, executable, environment,
-proxy, loopback secret or DNS lookup is accepted. Status is bounded to 1 MiB;
-WhoIs is bounded to 64 KiB. The [Tailscale CLI contract](https://tailscale.com/docs/reference/tailscale-cli)
-requires `--json` before the numeric WhoIs argument.
+`LocalApi::installed().discover` makes one status read.
+`LocalApi::peer_target` reads status, WhoIs for one numeric address, then
+status, under one original one-second deadline that includes queueing and
+parsing. The address comes from the selected node's checked address set; no
+caller-supplied URI, proxy or DNS lookup is accepted. Status is bounded to
+1 MiB and WhoIs to 64 KiB. All three reads must come from the same daemon run,
+identified by the published port, token and publication time, so a daemon
+restart between reads refuses.
 
-Every exact child starts suspended. Apple's dynamic code validation must accept
-Tailscale's published team and one of its official application identifiers before
-the original deadline permits resume. The complete bounded code-directory
-identifier is retained and compared across all three reads and later renewals.
-Each CLI query has a different PID; those transient PIDs are not presented as
-daemon continuity. An app replacement/update requires a fresh connection.
+What this does not check is which process accepted the connection. A client
+cannot learn that, because the kernel's socket list shows an unprivileged caller
+only its own sockets, and Tailscale's CLI does not check it either. If Tailscale
+is not listening, a local process that binds the port would receive the token
+and could answer with false metadata. The signed-CLI transport that preceded
+this (`fr-tailnet-platform`) did not close that gap: the CLI itself connects to
+this port with this token. It cost 60-80 ms of CPU per read, three reads per
+renewal, and the owner chose the direct read on 2026-11-08.
 
 Both status snapshots must resolve to the same exact local and remote identity.
 WhoIs must match the selected stable ID, node ID, key, user, tags and complete
@@ -62,9 +67,8 @@ not change destination identity. This establishes an outbound destination;
 the remote host independently decides membership, sharing scope, local approval,
 observation and control.
 
-The whole lookup and its global admission slot belong to one drained blocking
-task. Cancellation or a dropped caller cannot reopen that slot before the old
-child has been killed and reaped. Lookup and target lifetimes retain their
+The whole lookup holds one global admission slot. Cancellation or a timeout
+drops its socket and releases the slot. Lookup and target lifetimes retain their
 original deadlines; wall elapsed time also caps them so a paused monotonic clock
 cannot preserve a pre-sleep target. Both status and WhoIs key expiry cap the
 three-second destination lifetime. Expired identities cannot be renewed.
@@ -75,13 +79,15 @@ roots, hostname verification, required native ALPN, disabled early data and
 same-identity renewal. No public JSON constructor can manufacture these tokens.
 Custom Unix sockets, host admission, certificate provisioning and host ingress
 remain unavailable on macOS. Host-shaped types are retained only for shared
-client signatures; their macOS transport refuses without fabricating evidence. A signed CLI is trusted installed software, not an OS sandbox
-or proof that the selected host runs a usable desktop.
+client signatures; their macOS transport refuses without fabricating evidence. The
+installed app is trusted software; its answer does not prove that the selected
+host runs a usable desktop.
 
 Tracking: `fr-1yxy` supplies the trusted identity dependency for `fr-5a4w`.
-Portable tests cover numeric command bounds, identity mismatches, routed/shared
-responses, expiry and clock rollback. Native macOS negative tests reject and
-reap an actual Apple-signed image without Tailscale's identity for status and both
-address families. Those native tests require macOS; Linux execution or Rust-only
+Portable tests cover identity mismatches, routed/shared responses, expiry and
+clock rollback. macOS tests cover the endpoint reader's ownership, port and
+token checks. On 2026-11-08 (macOS 27, Tailscale 1.104.1) `fr hosts`,
+`fr inspect` and desktop sessions ran against the installed app. Those native
+results require macOS; Linux execution or Rust-only
 cross-target checking is not evidence of Apple Security validation, live
 Tailscale access, Metal presentation or a complete macOS desktop connection.
