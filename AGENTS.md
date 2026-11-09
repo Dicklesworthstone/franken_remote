@@ -67,7 +67,7 @@ If these disagree, stop and surface the contradiction. Do not implement the most
 
 - All project-owned protocol, policy, admission, scheduling, and session code uses `#![forbid(unsafe_code)]`.
 - Unsafe code is confined to named platform/media boundary crates (`fr-ffi`, per-OS adapters) with narrow safe interfaces, documented ownership, callback lifetimes/threading, pointer provenance, buffer padding, and shutdown order.
-- On macOS, `fr-tailnet` reads the installed Tailscale app's loopback `LocalAPI` and remains safe Rust (owner decision, 2026-11-08). `fr-tailnet-platform`, the earlier signed-CLI process boundary (native sources under `fr-native/src/tailnet_macos*`), has no consumer.
+- On macOS, `fr-tailnet` reads the installed Tailscale app's loopback `LocalAPI` and remains safe Rust (owner decision, 2026-11-08). The earlier signed-CLI process boundary (`fr-tailnet-platform`) was removed with the owner's approval.
 - Media work is isolated from input authority: a hostile or hung codec must never retain an input lease, hold certificate keys, reach the approval endpoint, or take down the broker.
 - FFmpeg types never cross into session or wire layers. The wrapper implements the real send/receive state machine (drain output, retain reference-counted inputs, distinguish backpressure/EOF/device-loss/fatal), keeps configure/encode/decode off the authority thread, and treats capture buffers as borrowed until the platform's documented release point.
 - A worker process is crash/hang isolation, not a security sandbox; where a real OS sandbox is not enforced, record the remaining trust explicitly instead of claiming isolation.

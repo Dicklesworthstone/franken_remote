@@ -54,9 +54,9 @@ cannot learn that, because the kernel's socket list shows an unprivileged caller
 only its own sockets, and Tailscale's CLI does not check it either. If Tailscale
 is not listening, a local process that binds the port would receive the token
 and could answer with false metadata. The signed-CLI transport that preceded
-this (`fr-tailnet-platform`) did not close that gap: the CLI itself connects to
-this port with this token. It cost 60-80 ms of CPU per read, three reads per
-renewal, and the owner chose the direct read on 2026-11-08.
+this (`fr-tailnet-platform`, since removed) did not close that gap: the CLI
+itself connects to this port with this token. It cost 60-80 ms of CPU per read,
+three reads per renewal, and the owner chose the direct read on 2026-11-08.
 
 Both status snapshots must resolve to the same exact local and remote identity.
 WhoIs must match the selected stable ID, node ID, key, user, tags and complete

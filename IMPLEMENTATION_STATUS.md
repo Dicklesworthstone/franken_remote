@@ -14,7 +14,7 @@ constructor can create a dialable target, and Linux's daemon UID/PID checks are
 unchanged.
 
 The owner chose this transport on 2026-11-08 over a signed CLI child per read
-(`fr-tailnet-platform`, now unused). That CLI connects to the same loopback
+(`fr-tailnet-platform`, since removed). That CLI connects to the same loopback
 port with the same token, so its signature check authenticated only our own
 client binary, at 60-80 ms of CPU per read and three reads per renewal. A whole
 `fr inspect` (three reads, process start included) now takes about 12 ms of
