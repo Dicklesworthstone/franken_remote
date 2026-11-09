@@ -63,13 +63,19 @@ const MAX_STREAMS: usize = 64;
 const MAX_DATAGRAMS: usize = 4;
 const TURN_RECORDS: usize = 16;
 /// Outgoing datagram records that may wait in the native queue for the next
-/// `drive` flush: one turn's records, as for incoming records. Senders refill
-/// this queue only between drives, and each drive then waits for ingress, so a
-/// smaller bound spreads one multi-fragment picture over one receive wait per
-/// few fragments (4 let 23 fragments take ~40 ms and miss the receiver's 50 ms
-/// display budget, which starts at the first fragment). Congestion credit still
-/// gates every admission.
-const MAX_QUEUED_DATAGRAMS: usize = TURN_RECORDS;
+/// `drive` flush. Senders refill this queue only between drives, and each drive
+/// then waits for ingress, so this is also a per-turn send ceiling: at most this
+/// many records leave per turn, whatever the congestion window allows. Too
+/// small a bound spreads one picture over one receive wait per few fragments (4
+/// let 23 fragments take ~40 ms and miss the receiver's 50 ms display budget,
+/// which starts at the first fragment). One turn's records (16) held a
+/// 5120x2880 share from a loaded Mac host (18-41 ms turns) to 16 x 1150 B per
+/// turn, ~4.9 Mbit/s at 30 ms and below its own 8 Mbit/s encoder target, while
+/// cwnd was 0.3-1 MB with nothing in flight and no loss. 128 is ~147 KB per
+/// turn (~29 Mbit/s at 40 ms turns, ~118 Mbit/s at 10 ms). It stays at half
+/// Asupersync's outbound queue (256), past which `send_datagram` silently drops
+/// the oldest queued record. Congestion credit still gates every admission.
+const MAX_QUEUED_DATAGRAMS: usize = 128;
 /// Keep a turn bounded while allowing queued bulk records to use available
 /// congestion credit without one idle receive timeout per 900-byte prefix.
 const TURN_SEND_PREFIXES: usize = 8;

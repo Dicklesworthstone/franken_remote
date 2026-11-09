@@ -478,8 +478,9 @@ fn a_multi_fragment_picture_is_admitted_within_two_sender_turns() {
         recv.decoder_configured(clock(&cx)).unwrap();
         let mut out = [0; 1150];
         // Frames 0 and 1 open the congestion window as a live session's first
-        // pictures do; frame 2 (24 000 bytes, 23 fragments) is measured.
-        for (frame, size) in [(0_u64, 4000_usize), (1, 64_000), (2, 24_000)] {
+        // pictures do; frame 2 (24 000 bytes, 23 fragments) is measured, and
+        // frame 3 (120 000 bytes, 112 fragments) is a large 5120x2880 P picture.
+        for (frame, size) in [(0_u64, 4000_usize), (1, 64_000), (2, 24_000), (3, 120_000)] {
             let data: Vec<_> = (0_u8..=255).cycle().take(size).collect();
             let now = clock(&cx);
             let mode = if frame == 0 {
@@ -520,10 +521,15 @@ fn a_multi_fragment_picture_is_admitted_within_two_sender_turns() {
                 delivered && pending.is_none(),
                 "frame {frame} not delivered"
             );
-            // Local queueing stays bounded: at most one turn's records wait.
-            assert!(most_datagrams <= 16, "{most_datagrams} datagrams queued");
+            // Local queueing stays bounded by the native queue cap (128).
+            assert!(most_datagrams <= 128, "{most_datagrams} datagrams queued");
             if frame == 2 {
                 assert!(turns <= 2, "a 23-fragment picture took {turns} turns");
+            }
+            eprintln!("frame {frame}: {turns} turns, at most {most_datagrams} datagrams queued");
+            if frame == 3 {
+                // Sixteen records per turn took seven turns here.
+                assert!(turns <= 3, "a 112-fragment picture took {turns} turns");
             }
             // Let acknowledgements reach the sender before the next picture.
             for _ in 0..20 {
