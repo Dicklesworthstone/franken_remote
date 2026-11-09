@@ -367,7 +367,7 @@ fn a_queued_launch_services_renewals_before_the_pool_can_claim_it() {
         let control = observation(&rt, 313);
         let mut pool = worker_pool::HeldPool::new(&clock).await;
         let original_until = near_expiry(&clock, &control).await;
-        let (result, responses) = with_renewals(
+        let (result, responses) = Box::pin(with_renewals(
             &clock,
             &control,
             during_pending(
@@ -376,7 +376,7 @@ fn a_queued_launch_services_renewals_before_the_pool_can_claim_it() {
                 start_source(&control, "direct"),
                 || pool.release(),
             ),
-        )
+        ))
         .await;
         let mut source = result.unwrap();
         assert!(responses >= 2);
