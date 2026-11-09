@@ -96,9 +96,6 @@ impl Failure {
 }
 #[allow(clippy::too_many_lines)]
 fn main() -> ExitCode {
-    // Installed-daemon reads on macOS go through the signed Tailscale app bridge.
-    #[cfg(target_os = "macos")]
-    fr_native::tailnet_macos::register();
     let mut args = Vec::new();
     let mut json = false;
     for arg in std::env::args_os().skip(1) {

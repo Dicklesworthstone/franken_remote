@@ -635,9 +635,14 @@ name = "fr-tailnet"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fr-tailnet-platform",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "fr-tailnet-platform"
+version = "0.1.0"
 
 [[package]]
 name = "fr-transport"

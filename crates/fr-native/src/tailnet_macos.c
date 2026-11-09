@@ -1,4 +1,4 @@
-/* The installed Tailscale CLI is the macOS discovery bridge (plan 6.2).
+/* The installed Tailscale CLI is the macOS metadata bridge (plan 6.2).
  * Spawn directly and suspended: no unverified image executes user-space code.
  * Apple documents dynamic SecCode validation as resistant to image replacement.
  * The unreaped child pins its PID through verification, reads and group cleanup.
@@ -7,6 +7,7 @@
 #define _DARWIN_C_SOURCE 1
 #include <CoreFoundation/CoreFoundation.h>
 #include <Security/Security.h>
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -16,6 +17,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -49,7 +51,7 @@ static int above_stdio(int fd) {
     return moved;
 }
 
-static int trusted_child(pid_t pid) {
+static int trusted_child(pid_t pid, uint8_t identity[64], size_t *identity_length) {
     /* Team and app IDs are published by Tailscale's MDM documentation and
      * version/prop.go. This accepts either official GUI installation variant,
      * never an arbitrary Apple-signed binary or a similarly named executable.
@@ -66,12 +68,37 @@ static int trusted_child(pid_t pid) {
         &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
     SecCodeRef code = NULL;
     SecRequirementRef requirement = NULL;
+    CFDictionaryRef information = NULL;
     int trusted = attributes != NULL
         && SecCodeCopyGuestWithAttributes(NULL, attributes, kSecCSDefaultFlags,
                                          &code) == errSecSuccess
         && SecRequirementCreateWithString(text, kSecCSDefaultFlags,
                                           &requirement) == errSecSuccess
         && SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement) == errSecSuccess;
+    if (trusted) {
+        /* This API accepts the same dynamic code object via SecStaticCodeRef.
+         * It does not validate code itself, so validation above and below is
+         * mandatory. Keep the child suspended and unreaped throughout.
+         * Preserve the complete bounded identifier: Apple's digest algorithm
+         * and length may change. Never use the short-lived child PID as the
+         * installed authority's identity across status/WhoIs invocations.
+         */
+        trusted = SecCodeCopySigningInformation((SecStaticCodeRef)code,
+            kSecCSSigningInformation, &information) == errSecSuccess;
+        CFTypeRef unique = trusted && information != NULL
+            ? CFDictionaryGetValue(information, kSecCodeInfoUnique) : NULL;
+        trusted = unique != NULL && CFGetTypeID(unique) == CFDataGetTypeID();
+        if (trusted) {
+            CFIndex length = CFDataGetLength((CFDataRef)unique);
+            trusted = length > 0 && length <= 64
+                && SecCodeCheckValidity(code, kSecCSDefaultFlags, requirement) == errSecSuccess;
+            if (trusted) {
+                memcpy(identity, CFDataGetBytePtr((CFDataRef)unique), (size_t)length);
+                *identity_length = (size_t)length;
+            }
+        }
+    }
+    if (information != NULL) CFRelease(information);
     if (requirement != NULL) CFRelease(requirement);
     if (code != NULL) CFRelease(code);
     if (attributes != NULL) CFRelease(attributes);
@@ -82,16 +109,25 @@ static int trusted_child(pid_t pid) {
 /* The safe Rust entry point supplies only the fixed installed app path. The
  * image argument also permits a macOS-only negative test of actual suspended
  * Apple-signed code; neither caller-controlled argv nor environment is accepted.
- * `peers` selects one of two fixed argument lists: the full status snapshot,
- * or the same snapshot without its peer map (`--peers=false`).
  * Return 1 for unavailable OS resources, 2 for a refused signature, 0 on success.
  * Success deliberately leaves the child suspended until the original caller's
  * cancellation/deadline check authorizes resume. No local budget is restarted.
  */
-int fr_tailnet_macos_start(const char *image, int peers,
-                          struct fr_tailnet_snapshot **out, pid_t *started) {
+int fr_tailnet_macos_start(const char *image, uint8_t operation,
+                          const uint8_t address[16], struct fr_tailnet_snapshot **out,
+                          pid_t *started, uint8_t identity[64], size_t *identity_length) {
     *out = NULL;
     if (started != NULL) *started = 0;
+    *identity_length = 0;
+    memset(identity, 0, 64);
+    /* The Rust command is typed; validate the tag before allocating or spawning.
+     * Format numeric bytes rather than accepting argv text, names or a zone ID.
+     */
+    char peer[INET6_ADDRSTRLEN];
+    if (operation != 0 && operation != 4 && operation != 6) return 1;
+    if (operation != 0
+        && inet_ntop(operation == 4 ? AF_INET : AF_INET6, address, peer, sizeof(peer)) == NULL)
+        return 1;
     struct fr_tailnet_snapshot *snapshot = calloc(1, sizeof(*snapshot));
     if (snapshot == NULL) return 1;
     snapshot->output = -1;
@@ -106,9 +142,9 @@ int fr_tailnet_macos_start(const char *image, int peers,
         || found == NULL || user.pw_dir == NULL || user.pw_dir[0] != '/') goto done;
     int home_length = snprintf(home, sizeof(home), "HOME=%s", user.pw_dir);
     if (home_length < 0 || (size_t)home_length >= sizeof(home)) goto done;
-    char *const with_peers[] = {(char *)image, "status", "--json", NULL};
-    char *const without_peers[] = {(char *)image, "status", "--json", "--peers=false", NULL};
-    char *const *argv = peers ? with_peers : without_peers;
+    char *const status_argv[] = {(char *)image, "status", "--json", NULL};
+    char *const whois_argv[] = {(char *)image, "whois", "--json", peer, NULL};
+    char *const *argv = operation == 0 ? status_argv : whois_argv;
     char *const environment[] = {"TAILSCALE_BE_CLI=1", home,
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", NULL};
     if (pipe(pipefd) < 0) goto done;
@@ -142,13 +178,12 @@ int fr_tailnet_macos_start(const char *image, int peers,
         || posix_spawnattr_setsigmask(&attributes, &mask) != 0
         || posix_spawnattr_setsigdefault(&attributes, &defaults) != 0) goto done;
     pid_t spawned = 0;
-    if (posix_spawn(&spawned, image, &actions, &attributes, (char *const *)argv,
-                    environment) != 0)
+    if (posix_spawn(&spawned, image, &actions, &attributes, argv, environment) != 0)
         goto done; /* A failed call's unspecified PID output is never owned. */
     snapshot->pid = spawned;
     if (started != NULL) *started = snapshot->pid;
     snapshot->suspended = 1;
-    if (!trusted_child(snapshot->pid)) {
+    if (!trusted_child(snapshot->pid, identity, identity_length)) {
         result = 2;
         goto done;
     }

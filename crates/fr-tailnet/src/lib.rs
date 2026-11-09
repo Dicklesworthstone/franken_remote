@@ -1,7 +1,6 @@
 #![forbid(unsafe_code)]
-// Linux reads the installed daemon over its root-owned Unix socket. macOS
-// reads the installed app through a registered, signature-checked native
-// bridge (`InstalledBridge`); its host-side lookups are not implemented yet.
+// macOS outbound identity uses the signed installed-app bridge. Host-shaped
+// types support shared session code, but macOS host operations always refuse.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
 //! The Linux adapter implements exact installed-daemon membership admission and
@@ -35,14 +34,13 @@ pub use endpoint::{
     honest_quic_endpoint,
 };
 mod metadata;
-#[cfg(target_os = "macos")]
-pub use local::{BridgeFuture, InstalledBridge, register_installed_bridge};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local::{
-    CertificateEvent, CertificateEventKind, CertificatePolicy, ConnectedPeer, CredentialStatus,
-    DialRoute, LocalApi, LocalQuery, NativeClient, NativeServerIdentity, NodeIdentity, PeerTarget,
-    ingress,
+    CertificateEvent, CertificateEventKind, CertificatePolicy, CredentialStatus,
+    LocalQuery, NativeServerIdentity, NodeIdentity, ingress,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use local::{ConnectedPeer, DialRoute, LocalApi, NativeClient, PeerTarget};
 
 use std::{fmt, net::SocketAddr, time::Duration};
 

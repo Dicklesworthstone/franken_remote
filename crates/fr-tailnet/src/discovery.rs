@@ -144,21 +144,7 @@ impl Discovery {
             .map_err(|_| Error::MalformedMetadata)?;
         let mut excluded = DiscoveryExclusions::default();
         for peer in status.peers.values() {
-            // `CurAddr` is the direct endpoint in use; `Relay` is only the
-            // peer's home DERP region and is set for nearly every peer.
-            // Traffic is relayed only when the path is active without a
-            // direct endpoint.
-            let transport_path = match (&peer.cur_addr, &peer.relay) {
-                (Some(cur), _) if !cur.0.is_empty() => PeerTransportPath::Direct {
-                    cur_addr: cur.0.clone(),
-                },
-                (_, Some(relay)) if peer.active && !relay.0.is_empty() => {
-                    PeerTransportPath::DerpRelayed {
-                        relay: relay.0.clone(),
-                    }
-                }
-                _ => PeerTransportPath::Unknown,
-            };
+            let transport_path = transport_path(peer);
 
             let result = metadata::outbound::resolve(&status, PeerSelector::StableId(&peer.id.0))
                 .and_then(|target| {
@@ -191,6 +177,21 @@ impl Discovery {
             started_us,
             completed_us,
         })
+    }
+}
+/// `CurAddr` is the direct endpoint in use; `Relay` alone names the peer's
+/// home DERP region. A relay is the sampled route only when the peer is active
+/// without a direct endpoint. Discovery and authenticated targets use this
+/// same projection, without claiming a live FR connection.
+pub(crate) fn transport_path(peer: &metadata::Peer) -> PeerTransportPath {
+    match (&peer.cur_addr, &peer.relay) {
+        (Some(cur), _) if !cur.0.is_empty() => PeerTransportPath::Direct {
+            cur_addr: cur.0.clone(),
+        },
+        (_, Some(relay)) if peer.active && !relay.0.is_empty() => PeerTransportPath::DerpRelayed {
+            relay: relay.0.clone(),
+        },
+        _ => PeerTransportPath::Unknown,
     }
 }
 fn check_expiry(value: Option<&str>, wall: u64) -> Result<(), Error> {

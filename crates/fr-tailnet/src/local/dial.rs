@@ -430,7 +430,6 @@ pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
     Ok(bytes)
 }
 
-// The fake LocalAPI daemon proves itself with Linux SO_PEERCRED (uid and pid).
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
 

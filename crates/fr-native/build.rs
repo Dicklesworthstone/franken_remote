@@ -1,6 +1,5 @@
 use std::{env, path::PathBuf, process::Command};
 fn main() {
-    build_tailnet_macos();
     build_pipewire_microphone();
     build_opus_process();
     build_keyboard();
@@ -513,59 +512,6 @@ fn build_opus_process() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=fropussandbox");
-}
-
-fn build_tailnet_macos() {
-    println!("cargo:rerun-if-changed=src/tailnet_macos.c");
-    if env::var_os("CARGO_FEATURE_CLI").is_none()
-        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
-    {
-        return;
-    }
-    assert_eq!(
-        env::var("HOST").unwrap(),
-        env::var("TARGET").unwrap(),
-        "Tailscale discovery requires a native Apple SDK"
-    );
-    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    // Compile for the deployment target rustc links for (11.0 by default on
-    // Apple silicon), not the build host's OS: on a newer host, clang would
-    // otherwise flag APIs deprecated after that target and -Werror stops.
-    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
-    let target = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
-    assert!(
-        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
-            .arg(format!("-mmacosx-version-min={target}"))
-            .args([
-                "-std=c11",
-                "-O2",
-                "-fPIC",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-                "-c",
-                "src/tailnet_macos.c",
-                "-o",
-            ])
-            .arg(out.join("tailnet_macos.o"))
-            .status()
-            .expect("native Apple C compiler")
-            .success(),
-        "Tailscale discovery bridge compilation failed"
-    );
-    assert!(
-        Command::new("ar")
-            .arg("crs")
-            .arg(out.join("libfrtailnetmacos.a"))
-            .arg(out.join("tailnet_macos.o"))
-            .status()
-            .unwrap()
-            .success()
-    );
-    println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=frtailnetmacos");
-    println!("cargo:rustc-link-lib=framework=CoreFoundation");
-    println!("cargo:rustc-link-lib=framework=Security");
 }
 
 /// macOS viewer glue (fr-5a4w): `AppKit` window, `VideoToolbox` decode and `Metal`

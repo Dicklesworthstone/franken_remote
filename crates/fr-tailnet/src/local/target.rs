@@ -1,13 +1,12 @@
 //! An outbound destination pinned to fresh installed-daemon metadata.
-use super::{LocalApi, Lookup, bounded, now, wall_now};
+use super::{LocalApi, SourceIdentity, now, wall_now};
+#[cfg(target_os = "linux")]
+use super::{Lookup, bounded};
 use crate::{Error, metadata};
 use asupersync::cx::Cx;
-use std::{
-    fmt,
-    net::IpAddr,
-    sync::{Arc, atomic::Ordering},
-    time::Duration,
-};
+use std::{fmt, net::IpAddr, sync::Arc};
+#[cfg(target_os = "linux")]
+use std::{sync::atomic::Ordering, time::Duration};
 
 pub use crate::PeerSelector;
 
@@ -17,7 +16,9 @@ pub use crate::PeerSelector;
 pub struct PeerTarget {
     pub(super) identity: metadata::outbound::Target,
     origin: Arc<()>,
-    daemon_pid: i32,
+    // Linux: kernel-authenticated daemon PID. macOS: the complete code
+    // identity of the signed app, never an individual query child's PID.
+    source_identity: SourceIdentity,
     issued_us: u64,
     pub(super) expires_us: u64,
     wall_issued_us: u64,
@@ -43,6 +44,11 @@ impl PeerTarget {
     pub fn local_addresses(&self) -> &[IpAddr] {
         &self.identity.host.host.ips.0
     }
+    /// The route reported by the selected status snapshot. This is local
+    /// metadata, not evidence of a successful connection or protocol probe.
+    pub fn transport_path(&self) -> crate::PeerTransportPath {
+        crate::discovery::transport_path(&self.identity.peer)
+    }
     pub const fn expires_us(&self) -> u64 {
         self.expires_us
     }
@@ -51,7 +57,7 @@ impl PeerTarget {
     }
     pub fn same_identity(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.origin, &other.origin)
-            && self.daemon_pid == other.daemon_pid
+            && self.source_identity == other.source_identity
             && self.identity == other.identity
     }
     fn check_at(&self, current: u64, wall: u64) -> Result<(), Error> {
@@ -64,6 +70,15 @@ impl PeerTarget {
         if self.key_expires_us.is_some_and(|expiry| wall >= expiry) {
             return Err(Error::KeyExpired);
         }
+        // Darwin's runtime monotonic clock can pause across system sleep.
+        // Wall-clock rollback refuses above; forward elapsed time may only
+        // shorten this original metadata lifetime, never extend it.
+        #[cfg(target_os = "macos")]
+        super::lookup_budget::check_wall_lifetime(
+            self.wall_issued_us,
+            wall,
+            self.expires_us - self.issued_us,
+        )?;
         Ok(())
     }
 }
@@ -71,6 +86,7 @@ impl LocalApi {
     /// Two complete, bounded status reads select the same exact local/remote
     /// identity. Unrelated peer churn is ignored; absent/conflicting targets
     /// refuse. The deadline starts before I/O and both key expiries cap it.
+    #[cfg(target_os = "linux")]
     pub async fn peer_target(
         &self,
         cx: &Cx,
@@ -97,29 +113,25 @@ impl LocalApi {
             Ok((b, cb))
         }))
         .await?;
-        let mut expires_us = issued_us.checked_add(3_000_000).ok_or(Error::Clock)?;
-        let mut key_expires_us: Option<u64> = None;
-        for value in [&identity.host.host.expiry, &identity.peer.expiry]
-            .into_iter()
-            .flatten()
-        {
-            if let Some(expiry) = crate::expiry::unix_micros(&value.0)? {
-                let remaining = expiry
-                    .checked_sub(wall_issued_us)
-                    .ok_or(Error::KeyExpired)?;
-                expires_us = expires_us.min(issued_us.checked_add(remaining).ok_or(Error::Clock)?);
-                key_expires_us = Some(key_expires_us.map_or(expiry, |old| old.min(expiry)));
-            }
-        }
-        let target = PeerTarget {
-            identity,
-            origin: self.origin.clone(),
-            daemon_pid: process.pid.ok_or(Error::UntrustedLocalApi)?,
-            issued_us,
-            expires_us,
-            wall_issued_us,
-            key_expires_us,
-        };
+        self.verified_target(
+            cx,
+            VerifiedTarget {
+                identity,
+                source_identity: process.pid.ok_or(Error::UntrustedLocalApi)?,
+                issued_us,
+                wall_issued_us,
+                whois_expiry: None,
+            },
+        )
+    }
+    /// Private publication after the selected platform authenticated its whole
+    /// lookup. No caller-supplied bytes or trust assertions enter this boundary.
+    pub(super) fn verified_target(
+        &self,
+        cx: &Cx,
+        verified: VerifiedTarget,
+    ) -> Result<PeerTarget, Error> {
+        let target = verified.finish(self.origin.clone())?;
         self.check_peer_target(cx, &target)?;
         Ok(target)
     }
@@ -131,7 +143,7 @@ impl LocalApi {
     }
     /// Refresh by stable node identity, NEVER by an alias that might have been
     /// reassigned. Old authority must still be live at completion. Changed
-    /// address sets, node keys, names, daemon or tailnet require a new connection.
+    /// address sets, node keys, names, local source or tailnet require a new connection.
     pub async fn revalidate_peer_target(
         &self,
         cx: &Cx,
@@ -148,3 +160,59 @@ impl LocalApi {
         Ok(new)
     }
 }
+
+pub(super) struct VerifiedTarget {
+    pub(super) identity: metadata::outbound::Target,
+    pub(super) source_identity: SourceIdentity,
+    pub(super) issued_us: u64,
+    pub(super) wall_issued_us: u64,
+    pub(super) whois_expiry: Option<String>,
+}
+impl VerifiedTarget {
+    /// Build under the original trusted read's clocks. Publication still needs
+    /// the caller's cancellation, live-clock and owner checks above.
+    fn finish(self, origin: Arc<()>) -> Result<PeerTarget, Error> {
+        let Self {
+            identity,
+            source_identity,
+            issued_us,
+            wall_issued_us,
+            whois_expiry,
+        } = self;
+        let mut expires_us = issued_us.checked_add(3_000_000).ok_or(Error::Clock)?;
+        let mut key_expires_us: Option<u64> = None;
+        for value in [
+            identity
+                .host
+                .host
+                .expiry
+                .as_ref()
+                .map(|value| value.0.as_str()),
+            identity.peer.expiry.as_ref().map(|value| value.0.as_str()),
+            whois_expiry.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if let Some(expiry) = crate::expiry::unix_micros(value)? {
+                let remaining = expiry
+                    .checked_sub(wall_issued_us)
+                    .ok_or(Error::KeyExpired)?;
+                expires_us = expires_us.min(issued_us.checked_add(remaining).ok_or(Error::Clock)?);
+                key_expires_us = Some(key_expires_us.map_or(expiry, |old| old.min(expiry)));
+            }
+        }
+        Ok(PeerTarget {
+            identity,
+            origin,
+            source_identity,
+            issued_us,
+            expires_us,
+            wall_issued_us,
+            key_expires_us,
+        })
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests;

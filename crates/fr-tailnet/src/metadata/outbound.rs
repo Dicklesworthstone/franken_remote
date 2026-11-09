@@ -88,3 +88,59 @@ pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Tar
         certificate_name: name.to_owned(),
     })
 }
+
+/// Bind the fixed installed-app WhoIs query to the exact status-selected node.
+/// This verifies destination identity only. Missing machine-approval evidence
+/// cannot grant host observation or control, and no remote sharing scope is
+/// guessed from the client's local user identity.
+#[cfg(any(target_os = "macos", test))]
+pub(crate) fn verify_whois(
+    target: &Target,
+    queried_address: std::net::IpAddr,
+    who: &super::WhoIs,
+) -> Result<Option<String>, Error> {
+    let peer = &target.peer;
+    let node = &who.node;
+    if !peer.ips.0.contains(&queried_address) {
+        return Err(Error::AddressMismatch);
+    }
+    if node.expired {
+        return Err(Error::KeyExpired);
+    }
+    if node.sharer != 0 {
+        return Err(Error::SharedPeer);
+    }
+    if node.authorized == Some(false) {
+        return Err(Error::MachineNotAuthorized);
+    }
+    if node.jailed || node.peer_api_only {
+        return Err(Error::CapabilityDenied);
+    }
+    if node.stable_id != peer.id
+        || node.id != peer.node_id
+        || node.key != peer.key
+        || node.user != peer.user
+        || !super::same_tags(node.tags.as_ref(), peer.tags.as_ref())
+    {
+        return Err(Error::IdentityMismatch);
+    }
+    let mut own_ips = Vec::with_capacity(node.addresses.0.len());
+    for address in &node.addresses.0 {
+        let (ip, bits) = address.0.split_once('/').ok_or(Error::MalformedMetadata)?;
+        let ip: std::net::IpAddr = ip.parse().map_err(|_| Error::MalformedMetadata)?;
+        if bits != if ip.is_ipv4() { "32" } else { "128" } || own_ips.contains(&ip) {
+            return Err(Error::AddressMismatch);
+        }
+        own_ips.push(ip);
+    }
+    if !own_ips.contains(&queried_address)
+        || own_ips.len() != peer.ips.0.len()
+        || !own_ips.iter().all(|ip| peer.ips.0.contains(ip))
+    {
+        return Err(Error::AddressMismatch);
+    }
+    Ok(node.expiry.as_ref().map(|expiry| expiry.0.clone()))
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,5 +1,35 @@
 # Implementation status
 
+## macOS authenticated outbound identity (2026-11-08; native qualification pending)
+
+`fr-tailnet` now provides the ordinary private `PeerTarget`, `NativeClient`,
+`TargetOwner` and `TargetLease` path on macOS through the signed installed
+Tailscale application. The existing `fr hosts` implementation consumes this
+backend for discovery. Resolving a destination performs fixed status, numeric
+WhoIs and status commands under one original deadline and compares both node
+identity and the complete verified app code identity. Exact address ownership,
+key expiry, cancellation, clock rollback and system-sleep ceilings are enforced;
+the admission slot remains held through actual child cleanup. The platform
+boundary has no protocol or desktop dependencies, and no public JSON constructor
+can create a dialable target. Linux's daemon UID/PID checks remain unchanged.
+
+This strengthens the installed-app identity dependency of `fr-5a4w`, including
+the native macOS viewer that landed on main during this work. The viewer's
+VideoToolbox/Metal/AppKit implementation and its existing live evidence are
+preserved below. The public replaceable JSON bridge and fabricated daemon PID
+are replaced by a closed authenticated platform boundary. Host-shaped APIs
+needed by shared client code remain available, but macOS host operations still
+refuse; no host authority is manufactured. Destination identity does not confer
+observation or input authority or establish desktop/codec readiness.
+
+The portable platform command tests pass. Regression sources additionally cover
+exact WhoIs/status binding, malformed and routed responses, refusal flags,
+lookup/target expiry, and native signed-image rejection/reap. Full native macOS
+and installed-Tailscale execution are pending; source or cross-target Rust checks
+must not be presented as those results. See
+[the identity and lifetime boundary](docs/native-discovery.md#macos-installed-app-identity-and-outbound-connections).
+Tracking: `fr-1yxy`; the broader macOS client bead remains open.
+
 ## macOS desktop client (2026-11-08; live, partly qualified)
 
 With `--features macos-desktop`, `fr connect` runs natively on macOS. The host
@@ -7,9 +37,9 @@ stream is decoded by VideoToolbox into IOSurfaces and drawn by Metal into a
 `CAMetalLayer`, the remote cursor is a blended Metal quad, and AppKit input
 reaches `frd`'s input path. `frd`'s `Worker` presents through an in-process
 `LocalPresenter` rather than a child process. The tailnet lookups run through
-the signed installed-app bridge described below, which now also answers
-fr-tailnet's fixed status reads (`LocalQuery`); whois and certificate reads
-refuse on macOS until a macOS host exists. Options not implemented here are
+the signed installed-app backend described above. Outbound lookups validate
+status/WhoIs/status; host admission and certificate operations still refuse
+on macOS until a macOS host exists. Options not implemented here are
 refused by name ([details](docs/native-client-cli.md#macos-desktop-client)).
 
 Live on 2026-11-08 from the owner's Mac (macOS 27, Tailscale 1.104.1) to ts2
@@ -17,8 +47,10 @@ Live on 2026-11-08 from the owner's Mac (macOS 27, Tailscale 1.104.1) to ts2
 ts2's live desktop with control granted, and typed keys reached ts2. The
 signed-bridge build has since shown ts2's live desktop in a `--control`
 session. Not yet confirmed live: input through the bridge build, pointer,
-wheel and click delivery, and the window-close outcome. A session's identity renewals start two
-bridge children a second (60-80 ms CPU each).
+wheel and click delivery, and the window-close outcome. The initial bridge build used two
+status children per renewal (60-80 ms CPU each). The strengthened identity
+backend adds the numeric WhoIs read; its native cost and live session behavior
+remain to be measured.
 
 ## macOS installed-app discovery (2026-11-08)
 
