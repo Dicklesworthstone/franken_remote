@@ -13,6 +13,7 @@ use asupersync::{
 use fr_core::limits::ProtocolLimits;
 use fr_media::worker::{self, Configuration, HEADER_BYTES, Header, Identity, Kind, Record, Role};
 mod launch;
+mod launcher;
 #[cfg(test)]
 mod live_deadline_tests;
 mod readiness;

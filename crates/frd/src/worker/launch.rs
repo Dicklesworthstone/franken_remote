@@ -29,7 +29,14 @@ impl Worker {
                     child.checkpoint().map_err(|_| Error::Cancelled.into())
                 };
                 check()?;
-                let worker = Self::spawn(launch, limits)?;
+                // The fork itself runs on the process-lifetime launcher thread:
+                // this pool thread may retire, and a Linux worker's parent-death
+                // signal follows the thread that forked it (launcher.rs).
+                let ambient = child.clone();
+                let worker = super::launcher::run(move || {
+                    let _ambient = ambient.set_current_restricted();
+                    Self::spawn(launch, limits)
+                })??;
                 // Cancellation cannot interrupt fork/exec. A late result must
                 // kill and transfer its child before it can leave this closure.
                 check()?;
