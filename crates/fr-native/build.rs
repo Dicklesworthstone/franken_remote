@@ -10,6 +10,7 @@ fn main() {
     build_host_picker();
     build_macos_viewer();
     build_macos_capture();
+    link_clang_runtime();
     println!("cargo:rerun-if-changed=src/bridge.c");
     println!("cargo:rerun-if-changed=src/x11_image.c");
     println!("cargo:rerun-if-changed=src/x11_image.h");
@@ -584,6 +585,33 @@ fn build_macos_viewer() {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-lib=objc");
+}
+
+/// The macOS glue's `@available` checks call `__isPlatformVersionAtLeast`.
+/// Rust's std defines it only weakly and no Rust code calls it, so LTO (the
+/// release profile) drops it and the link fails with an undefined symbol; std
+/// documents linking Clang's own runtime instead, which defines it strongly.
+fn link_clang_runtime() {
+    let glue = env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_some()
+        || env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_some();
+    if !glue || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    println!("cargo:rerun-if-env-changed=CC");
+    let output = Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+        .arg("-print-resource-dir")
+        .output()
+        .expect("native Objective-C compiler");
+    assert!(output.status.success(), "cc -print-resource-dir failed");
+    let resource = String::from_utf8(output.stdout).expect("UTF-8 resource dir");
+    let runtime = PathBuf::from(resource.trim()).join("lib/darwin");
+    assert!(
+        runtime.join("libclang_rt.osx.a").is_file(),
+        "Clang's macOS runtime is missing from {}; install the Xcode command line tools",
+        runtime.display()
+    );
+    println!("cargo:rustc-link-search=native={}", runtime.display());
+    println!("cargo:rustc-link-lib=static:-bundle=clang_rt.osx");
 }
 
 /// macOS host capture glue (fr-p1-host-macos-vif): `ScreenCaptureKit` into
