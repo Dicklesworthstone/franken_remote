@@ -613,6 +613,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-mobile-ffi"
+version = "0.1.0"
+dependencies = [
+ "asupersync",
+ "fr-client",
+ "fr-core",
+ "fr-media",
+ "fr-tailnet",
+ "fr-transport",
+ "fr-wire",
+ "frd",
+]
+
+[[package]]
 name = "fr-native"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,51 @@
+[package]
+name = "fr-mobile-ffi"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+build = "build.rs"
+
+# The iOS app links the static library; tests and other Rust use the rlib.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+# Everything here is Apple-only. Other platforms compile an empty crate.
+[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+asupersync = { workspace = true, features = ["tls"] }
+fr-client.workspace = true
+fr-core.workspace = true
+fr-media.workspace = true
+fr-tailnet.workspace = true
+fr-wire.workspace = true
+
+[dependencies]
+# The session (frd's viewer stack): the iOS build passes `--features session`
+# (see mobile/ios/scripts/build-rust.sh). On macOS, `macos-session` also turns
+# on frd's viewer half so the session compiles for host tests; it stays off by
+# default so the workspace build's frd features are unchanged.
+frd = { workspace = true, optional = true }
+fr-transport = { workspace = true, optional = true }
+
+[features]
+default = []
+session = ["dep:frd", "dep:fr-transport"]
+macos-session = ["session", "frd/macos-viewer"]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# fr-mobile-ffi is a named FFI boundary crate (AGENTS.md 3.2): it exports the
+# hand-written C ABI in include/fr_mobile.h to Swift and calls the
+# VideoToolbox/CoreVideo glue in src/vt_decode.c, so it opts out of the
+# workspace's `unsafe_code = "forbid"` explicitly. Every unsafe block states
+# its invariant (lint below). Session, input and policy code is safe Rust.
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
