@@ -279,8 +279,8 @@ fn discovery(command_name: &str, stall_and_signal: bool) -> (Output, bool) {
         "--socket",
         socket_path.to_str().unwrap(),
     ])
-        .spawn()
-        .unwrap();
+    .spawn()
+    .unwrap();
     let requested = rx.recv_timeout(Duration::from_secs(3)).unwrap();
     if requested && stall_and_signal {
         assert!(
