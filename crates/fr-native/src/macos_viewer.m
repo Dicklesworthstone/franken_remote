@@ -407,11 +407,16 @@ enum {
     FR_MAC_SHARE_UPLOAD = 1,
     FR_MAC_SHARE_DOWNLOAD = 2,
     FR_MAC_CHANGE_DISPLAY = 4,
-    FR_MAC_SHARE_ALL = 7,
+    FR_MAC_CLIPBOARD = 8,
+    FR_MAC_SHARE_ALL = 15,
 };
 #define FR_MAC_SHARING_HEIGHT 44.0
 #define FR_MAC_SHARING_CELL 230.0
 #define FR_MAC_CHANGE_WIDTH 136.0
+#define FR_MAC_CLIPBOARD_WIDTH 184.0
+
+typedef void (*FrClipboardStop)(void *, int);
+typedef void (*FrClipboardRelease)(void *);
 
 static BOOL fr_sharing_status(uint32_t status) {
     return status <= 5;
@@ -449,7 +454,8 @@ static unsigned fr_sharing_cells(uint32_t flags) {
 
 static double fr_sharing_width(uint32_t flags) {
     return 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(flags) +
-           ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0);
+           ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0) +
+           ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0);
 }
 
 
@@ -480,7 +486,13 @@ static double fr_sharing_width(uint32_t flags) {
     FrContentView *content;
     FrSharingView *sharing;
     NSTextField *uploadLabel, *downloadLabel;
+    NSTextField *clipboardLabel;
     FrSharingButton *uploadCancel, *downloadCancel, *changeDisplay;
+    FrSharingButton *clipboardOff;
+    void *clipboardContext;
+    FrClipboardStop clipboardStop;
+    FrClipboardRelease clipboardRelease;
+    BOOL clipboardStopped, clipboardUserOff;
     uint32_t sharingFlags, sharingActions, uploadStatus, downloadStatus;
     uint64_t uploadDone, uploadTotal, downloadDone, downloadTotal;
     BOOL uploadCancelled, downloadCancelled, layoutInProgress;
@@ -499,6 +511,8 @@ static double fr_sharing_width(uint32_t flags) {
 - (void)cancelUpload:(id)sender;
 - (void)cancelDownload:(id)sender;
 - (void)changeDisplay:(id)sender;
+- (void)stopClipboard:(BOOL)userOff;
+- (void)disableClipboard:(id)sender;
 @end
 
 @implementation FrMetalView
@@ -601,6 +615,11 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         changeDisplay.accessibilityLabel = @"Choose another remote display";
         changeDisplay.enabled = NO; // Rust arms only an eligible original mode.
     }
+    if (sharingFlags & FR_MAC_CLIPBOARD) {
+        clipboardLabel = fr_sharing_label(sharing, @"Clipboard: Waiting");
+        clipboardOff = fr_sharing_button(sharing, @"Turn Off", self, @selector(disableClipboard:));
+        clipboardOff.accessibilityLabel = @"Turn off shared text clipboard";
+    }
     if (sharingFlags & FR_MAC_SHARE_UPLOAD) {
         uploadStatus = 1;
         uploadLabel = fr_sharing_label(sharing, @"Send: Waiting");
@@ -619,6 +638,11 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     unsigned cells = fr_sharing_cells(sharingFlags);
     double offset = changeDisplay ? FR_MAC_CHANGE_WIDTH : 0;
     if (changeDisplay) changeDisplay.frame = NSMakeRect(8, 8, FR_MAC_CHANGE_WIDTH - 8, 28);
+    if (clipboardOff) {
+        clipboardLabel.frame = NSMakeRect(8 + offset, 14, 108, 17);
+        clipboardOff.frame = NSMakeRect(8 + offset + 112, 8, 68, 28);
+        offset += FR_MAC_CLIPBOARD_WIDTH;
+    }
     double cell = cells ? (NSWidth(sharing.bounds) - 16 - offset) / cells : 0;
     unsigned index = 0;
     NSTextField *labels[] = {uploadLabel, downloadLabel};
@@ -655,14 +679,31 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         !isfinite(event.timestamp) || event.timestamp <= 0 || now < event.timestamp ||
         now - event.timestamp >= 0.250) return;
     displayChangeUsed = YES;
+    [self stopClipboard:NO];
     displayChangeAt = event.timestamp;
     changeDisplay.enabled = NO;
     changeDisplay.title = @"Changing Display";
 }
 
+- (void)stopClipboard:(BOOL)userOff {
+    if (!(sharingFlags & FR_MAC_CLIPBOARD)) return;
+    clipboardStopped = YES;
+    clipboardUserOff |= userOff;
+    // Fence the original Rust owner before drawing or cleanup can block.
+    if (clipboardContext && clipboardStop) clipboardStop(clipboardContext, userOff ? 1 : 0);
+    clipboardOff.enabled = NO;
+    clipboardLabel.stringValue = @"Clipboard: Off";
+}
+- (void)disableClipboard:(id)sender {
+    (void)sender;
+    if (!clipboardOff.enabled) return;
+    [self stopClipboard:YES];
+}
+
 - (void)push:(FrMacEvent)event {
     if (count == FR_MAC_QUEUE) {
         overflow = YES;
+        [self stopClipboard:NO];
         return;
     }
     queue[(head + count) % FR_MAC_QUEUE] = event;
@@ -684,6 +725,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     (void)sender;
+    [self stopClipboard:NO];
     FrMacEvent e = {0};
     e.kind = FR_MAC_CLOSE;
     [self push:e];
@@ -691,6 +733,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 }
 - (void)windowDidResignKey:(NSNotification *)note {
     (void)note;
+    [self stopClipboard:NO];
     buttons = 0;  // the session releases everything it holds remotely
     FrMacEvent e = {0};
     e.kind = FR_MAC_FOCUS_LOST;
@@ -705,6 +748,15 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 - (void)windowDidChangeBackingProperties:(NSNotification *)note {
     (void)note;
     [self layout];
+}
+- (void)windowWillMiniaturize:(NSNotification *)note {
+    (void)note;
+    [self stopClipboard:NO];
+}
+- (void)windowDidChangeOcclusionState:(NSNotification *)note {
+    (void)note;
+    if (!window.isVisible || window.isMiniaturized || !window.isOnActiveSpace ||
+        !(window.occlusionState & NSWindowOcclusionStateVisible)) [self stopClipboard:NO];
 }
 
 // Returns YES when AppKit should still receive the event.
@@ -983,6 +1035,45 @@ int fr_mac_window_take_display_change(void *handle, double *captured) {
     return FR_MAC_OK;
 }
 
+// Adopt exactly once, only after all validation. Failure retains nothing.
+int fr_mac_window_clipboard_bind(void *handle, void *context, FrClipboardStop stop,
+                                  FrClipboardRelease release) {
+    if (!handle || !context || !stop || !release) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->clipboardOff || owner->clipboardContext) return FR_MAC_INVALID;
+    owner->clipboardContext = context;
+    owner->clipboardStop = stop;
+    owner->clipboardRelease = release;
+    if (owner->clipboardStopped) stop(context, owner->clipboardUserOff ? 1 : 0);
+    return FR_MAC_OK;
+}
+
+int fr_mac_window_clipboard_update(void *handle, uint32_t state) {
+    if (!handle || state > 4) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->clipboardOff) return FR_MAC_INVALID;
+    static NSString *const labels[] = {@"Clipboard: Waiting", @"Clipboard: On",
+        @"Clipboard: Off", @"Clipboard: N/A", @"Clipboard: Ended"};
+    owner->clipboardLabel.stringValue = owner->clipboardStopped ? labels[2] : labels[state];
+    owner->clipboardOff.enabled = !owner->clipboardStopped && state < 2;
+    return FR_MAC_OK;
+}
+
+int fr_mac_window_clipboard_visible(void *handle, int *visible) {
+    if (!handle || !visible) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    NSWindow *w = owner->window;
+    *visible = owner->clipboardOff && !owner->clipboardStopped &&
+               !owner->sharing.hidden && !owner->clipboardOff.hidden &&
+               w.isKeyWindow && w.isVisible && !w.isMiniaturized && w.isOnActiveSpace &&
+               (w.occlusionState & NSWindowOcclusionStateVisible) &&
+               NSContainsRect(owner->sharing.visibleRect, owner->clipboardOff.frame) ? 1 : 0;
+    return FR_MAC_OK;
+}
+
 // Waits up to `timeout` seconds for the first event, then drains one bounded
 // batch without waiting. Returns the number of translated events copied out.
 size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t capacity,
@@ -1018,6 +1109,7 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     // treated as incomplete too; checking that would require another poll.
     if (owner->count == FR_MAC_QUEUE || dequeued == FR_MAC_PUMP_EVENTS) {
         owner->overflow = YES;
+        [owner stopClipboard:NO];
     }
     size_t n = 0;
     while (n < capacity && owner->count) {
@@ -1185,6 +1277,14 @@ void fr_mac_window_free(void *handle) {
     if (!handle) return;
     @autoreleasepool {
         FrWindowOwner *owner = (__bridge_transfer FrWindowOwner *)handle;
+        [owner stopClipboard:NO];
+        // Clear callbacks before releasing the unique Rust owner.
+        void *context = owner->clipboardContext;
+        FrClipboardRelease release = owner->clipboardRelease;
+        owner->clipboardContext = NULL;
+        owner->clipboardStop = NULL;
+        owner->clipboardRelease = NULL;
+        if (context && release) release(context);
         owner->window.delegate = nil;
         [owner->window orderOut:nil];
         [owner->window close];

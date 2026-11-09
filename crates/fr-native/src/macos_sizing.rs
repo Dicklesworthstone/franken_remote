@@ -46,7 +46,7 @@ pub(crate) fn points(
 
 /// Reserve display choice and file controls in the original content ceiling.
 /// The native strip is 44 points high, with 136 points for Change Display,
-/// one 230-point cell per file direction and 16 points of outer padding.
+/// one 230-point cell per file direction, 184 for clipboard and 16 outer padding.
 /// A small picture may have horizontal
 /// letterboxing so every selected direction retains its local cancel button.
 /// These dimensions never participate in remote input coordinates.
@@ -55,11 +55,12 @@ pub(crate) fn sharing_points(
     logical: (u32, u32),
     fit: Option<(u32, u32)>,
     directions: u32,
+    clipboard: bool,
 ) -> Result<(u32, u32), ()> {
     if directions > 2 {
         return Err(());
     }
-    let minimum_width = 152 + 230 * directions;
+    let minimum_width = 152 + 230 * directions + u32::from(clipboard) * 184;
     let picture_fit = match fit {
         Some((width, height)) => {
             let height = height.checked_sub(44).ok_or(())?;
@@ -87,31 +88,68 @@ mod tests {
                     (1920, 1080),
                     (1920, 1080),
                     Some((minimum_width - 1, 600)),
-                    directions
+                    directions,
+                    false
                 ),
                 Err(())
             );
             assert_eq!(
-                sharing_points((1920, 1080), (1920, 1080), Some((800, 107)), directions),
+                sharing_points(
+                    (1920, 1080),
+                    (1920, 1080),
+                    Some((800, 107)),
+                    directions,
+                    false
+                ),
                 Err(())
             );
             for pixels in [(1920, 1080), (1080, 1920), (64, 64)] {
                 for fit in [(minimum_width, 108), (800, 600), (1280, 720)] {
                     let (width, height) =
-                        sharing_points(pixels, pixels, Some(fit), directions).unwrap();
+                        sharing_points(pixels, pixels, Some(fit), directions, false).unwrap();
                     assert!(width >= minimum_width && width <= fit.0);
                     assert!(height >= 64 && height + 44 <= fit.1);
                 }
             }
         }
         assert_eq!(
-            sharing_points((1920, 1080), (1920, 1080), Some((800, 600)), 3),
+            sharing_points((1920, 1080), (1920, 1080), Some((800, 600)), 3, false),
             Err(())
         );
         assert_eq!(
-            sharing_points((1920, 1080), (1920, 1080), Some((16, 16)), 0),
+            sharing_points((1920, 1080), (1920, 1080), Some((16, 16)), 0, false),
             Err(())
         );
+    }
+
+    #[test]
+    fn clipboard_off_has_its_own_space_with_every_file_combination() {
+        for directions in [0, 1, 2] {
+            let minimum = 152 + 230 * directions + 184;
+            assert_eq!(
+                sharing_points(
+                    (64, 64),
+                    (64, 64),
+                    Some((minimum - 1, 108)),
+                    directions,
+                    true
+                ),
+                Err(())
+            );
+            assert_eq!(
+                sharing_points((64, 64), (64, 64), Some((minimum, 108)), directions, true),
+                Ok((minimum, 64))
+            );
+            let fitted = sharing_points(
+                (1920, 1080),
+                (1920, 1080),
+                Some((800, 600)),
+                directions,
+                true,
+            )
+            .unwrap();
+            assert!(fitted.0 >= minimum && fitted.0 <= 800 && fitted.1 + 44 <= 600);
+        }
     }
 
     #[test]

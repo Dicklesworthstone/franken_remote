@@ -11,41 +11,71 @@ use fr_wire::{
 };
 
 #[test]
-fn explicit_mac_pixel_scroll_fits_all_current_file_profiles_and_keeps_legacy_control() {
+fn explicit_mac_pixel_scroll_fits_all_current_clipboard_file_profiles_and_keeps_legacy_control() {
     use fr_client::native::{
-        control_offer_with_download, control_offer_with_duplex, control_offer_with_files,
+        control_offer_with_auxiliary, control_offer_with_download, control_offer_with_duplex,
     };
     use fr_core::input_submission::Capability;
-    for original in [
-        control_offer(),
-        control_offer_with_files(),
-        control_offer_with_download(false, false),
-        control_offer_with_duplex(false, false),
-    ] {
-        assert!(
-            !original
+    for clipboard in [false, true] {
+        for original in [
+            control_offer_with_auxiliary(clipboard, false, false),
+            control_offer_with_auxiliary(clipboard, true, false),
+            control_offer_with_download(clipboard, false),
+            control_offer_with_duplex(clipboard, false),
+        ] {
+            assert!(
+                !original
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == control::PIXEL_SCROLL_CAPABILITY)
+            );
+            let precise = control::with_pixel_scroll(original.clone()).unwrap();
+            precise.validate().unwrap();
+            assert!(precise.capabilities.len() <= negotiation::MAX_CAPABILITIES);
+            assert_eq!(precise.limits, original.limits);
+            for cap in &original.capabilities {
+                // Clipboard plus both file directions reaches the original
+                // ceiling. Only the documented optional fallbacks may yield;
+                // input, clipboard and file boundaries remain exact.
+                let may_yield = !cap.required
+                    && [
+                        quality_decision::CAPABILITY,
+                        attachment::BULK_RECORD_CAPABILITY,
+                        attachment::credit::CAPABILITY,
+                    ]
+                    .contains(&cap.name.as_str());
+                assert!(may_yield || precise.capabilities.contains(cap));
+            }
+            assert_eq!(
+                precise
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == attachment::CLIPBOARD_CAPABILITY),
+                clipboard
+            );
+            let bytes = bytes(&Message::ClientHello(precise.clone()));
+            assert_eq!(
+                negotiation::decode(&bytes, negotiation::MAX_RECORD, 0).unwrap(),
+                Message::ClientHello(precise.clone())
+            );
+            let expected_legacy: Vec<_> = precise
                 .capabilities
                 .iter()
-                .any(|cap| cap.name == control::PIXEL_SCROLL_CAPABILITY)
-        );
-        let precise = control::with_pixel_scroll(original.clone()).unwrap();
-        precise.validate().unwrap();
-        assert!(precise.capabilities.len() <= negotiation::MAX_CAPABILITIES);
-        assert_eq!(precise.limits, original.limits);
-        for cap in &original.capabilities {
-            assert!(precise.capabilities.contains(cap));
+                .filter(|cap| cap.name != control::PIXEL_SCROLL_CAPABILITY)
+                .cloned()
+                .collect();
+            for legacy in [
+                original.intersect(&precise).unwrap(),
+                precise.intersect(&original).unwrap(),
+            ] {
+                assert_eq!(legacy.capabilities, expected_legacy);
+                let requestable = control::requestable(&legacy.capabilities);
+                assert!(!requestable.contains(Capability::PixelScroll));
+                assert!(requestable.contains(Capability::LineScroll));
+            }
+            let selected = precise.intersect(&precise).unwrap();
+            assert!(control::requestable(&selected.capabilities).contains(Capability::PixelScroll));
         }
-        let bytes = bytes(&Message::ClientHello(precise.clone()));
-        assert_eq!(
-            negotiation::decode(&bytes, negotiation::MAX_RECORD, 0).unwrap(),
-            Message::ClientHello(precise.clone())
-        );
-        let legacy = original.intersect(&precise).unwrap();
-        assert_eq!(legacy.capabilities, original.capabilities);
-        assert!(!control::requestable(&legacy.capabilities).contains(Capability::PixelScroll));
-        assert!(control::requestable(&legacy.capabilities).contains(Capability::LineScroll));
-        let selected = precise.intersect(&precise).unwrap();
-        assert!(control::requestable(&selected.capabilities).contains(Capability::PixelScroll));
     }
     assert!(control::with_pixel_scroll(observation_offer()).is_err());
 }

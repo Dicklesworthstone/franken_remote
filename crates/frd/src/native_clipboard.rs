@@ -2,7 +2,7 @@
 //! publisher/observer; its service starts negotiation only after control exists.
 //! Factories run on the clipboard thread, never inside UI or QUIC callbacks.
 use crate::{
-    clipboard_quic::{Error, WorkerSeed, WorkerTask},
+    clipboard_quic::{Error, NativeAccess, WorkerSeed, WorkerTask},
     session_startup::{ControlledHost, ControlledViewer},
     worker::Deadline,
 };
@@ -61,6 +61,28 @@ impl Configuration {
         F: FnOnce(Control) -> Result<N, PlatformError> + Send + 'static,
         I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
     {
+        Self::new_with_guard(
+            consent,
+            timeout,
+            move |control, _access| factory(control),
+            new_id,
+        )
+    }
+
+    /// Supply the original worker's qualified clock and authority checks to a
+    /// platform whose publication takes multiple native calls. This guard adds
+    /// no consent and cannot extend an item's deadline or revive a closed lane.
+    pub fn new_with_guard<N, F, I>(
+        consent: bool,
+        timeout: Duration,
+        factory: F,
+        new_id: I,
+    ) -> Result<Self, Error>
+    where
+        N: NativeClipboard + 'static,
+        F: FnOnce(Control, NativeAccess) -> Result<N, PlatformError> + Send + 'static,
+        I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
+    {
         if timeout.is_zero() || timeout > Duration::from_secs(2) || timeout.as_micros() == 0 {
             return Err(Error::Limit);
         }
@@ -68,6 +90,7 @@ impl Configuration {
             timeout,
             consent,
             launch: Some(Box::new(move |seed, control, before| {
+                let access = seed.native_access();
                 seed.spawn(
                     move || {
                         if let Some(before) = before {
@@ -76,7 +99,7 @@ impl Configuration {
                         if !control.status().enabled {
                             return Err(PlatformError::Unavailable);
                         }
-                        factory(control)
+                        factory(control, access)
                     },
                     new_id,
                 )

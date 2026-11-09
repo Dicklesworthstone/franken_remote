@@ -179,9 +179,11 @@ failure or an adverse host report.
 points**. The picture preserves its aspect ratio and fits inside the available
 local screen. Rendering stays in Metal; input coordinates use the actual
 drawable picture after layout, including the local Retina scale. The same
-ceiling includes the reserved 44-point toolbar for Change Display and any file
-controls. The content needs at least 152 points of width, 382 with one file
-direction, 612 with both, and 108 points of height. Smaller explicit ceilings
+ceiling includes the reserved 44-point toolbar for Change Display and sharing
+controls. The content needs at least 152 points of width, plus 230 per file
+direction and 184 for the default-on controlling clipboard, and 108 points of
+height. Both file directions with clipboard need 796x108 points. With
+`--no-clipboard`, the previous file-only widths are 382 or 612 points. Smaller explicit ceilings
 refuse before a connection. A narrow picture can have horizontal letterboxing
 to keep the local controls accessible. Without
 `--fit`, the remote logical size remains the picture's default.
@@ -229,8 +231,9 @@ transport it replaced used 60-80 ms of CPU per read.
 Not implemented on macOS yet, and refused by name before any network I/O:
 `--capture-system-shortcuts`, `--audio`, `--microphone`,
 `--file-drop` and
-`fr robot session open`. The clipboard,
-on by default on Linux, is reported as `local_clipboard_unavailable`.
+`fr robot session open`. The Mac client offers the controlling text clipboard
+by default; the host must independently enable it. A Mac host still has no
+clipboard backend and returns a typed absence without disabling control.
 Local status identifies the foreground invocation; optional quality and
 automation observations remain unavailable on macOS.
 
@@ -357,7 +360,7 @@ Cancellation does not undo files already published. Unknown publication or
 pending cleanup remains explicit; neither becomes “nothing sent.”
 
 The shared CLI report projection also preserves these distinctions on Linux.
-macOS drag-and-drop selection, clipboard, audio and microphone support remain
+macOS drag-and-drop selection, audio and microphone support remain
 separate unavailable features. Explicit local file commands are described below.
 
 **Verification limit for this extension (2026-11-09):** five portable sizing
@@ -435,6 +438,69 @@ consent/profile/cancellation tests, shared indexed command/cleanup projection
 regressions, and macOS preflight checks for control consent and toolbar space.
 Native macOS builds and a live repeated-send/pause/resume/cancel/reconnect run
 remain required; portable source review does not establish native qualification.
+
+### macOS text clipboard
+
+The Mac client shares UTF-8 text in both directions on its original controlling
+connection. It uses the existing clipboard protocol and host implementation;
+the Linux host must enable its clipboard alongside `--input-agent`. A host
+without the optional clipboard profile leaves desktop control available and
+reports `host_clipboard_unavailable`. Mac hosting still has no clipboard backend.
+
+```sh
+# Clipboard is on by default with --control in a macos-desktop build.
+fr connect NODE_ID --control --experimental-native --display only --json
+
+# Decline clipboard before connecting; file choices remain independent.
+fr connect NODE_ID --control --experimental-native --display only --no-clipboard
+```
+
+The viewer reserves a visible **Clipboard / Turn Off** control. Turn Off fences
+the original clipboard immediately. Once its attachment is established, that
+lane can retire while input, viewing and independent file transfers continue.
+Cancellation during incomplete attachment can still require closing the original
+connection. Hiding or closing the viewer, losing focus, changing
+displays or ending the original control also stops clipboard admission. The
+native worker requires both the original grant and a responsive local privacy
+control. A viewing reconnect or later F8 control request does not re-enable
+the initial clipboard choice. Start a new explicitly controlled connection to
+select sharing again.
+
+No text is read before the original grant, bilateral readiness and local privacy
+checks. The adapter observes pasteboard revision metadata and reads only a new
+eligible text selection. It validates complete UTF-8 within the negotiated
+one-MiB ceiling; it does not transfer images, HTML, files or arbitrary pasteboard
+types, open URLs, or synthesize a paste. Exact local publication revisions and
+protocol stamps suppress echoes; identical text copied later by the user remains
+a new selection. Routine metadata polling is throttled, while publication forces
+a fresh revision check.
+
+Replacement uses prepared bounded bytes and the original item's deadline. Each
+native mutation rechecks the original controller, both privacy switches and
+their generations. Turning a switch off and back on cannot revive a prepared
+item. If a native call blocks and a prior mutation may already have happened,
+the result remains an unknown publication effect. Closing the owner clears
+private buffers and waits for actual worker cleanup; it never clears the system
+pasteboard or overwrites another application's newer selection. Native OS calls
+and pasteboard providers may block or allocate internally; the application does
+not claim to preempt or bound those external implementations.
+
+Completion retains the original clipboard evidence even if another lane or a
+later viewing attempt fails:
+
+| Field | Observed meaning |
+| --- | --- |
+| `clipboard_requested`, `clipboard_configured` | The initial local choice and whether it reached the original observer's configuration. Neither proves native readiness. |
+| `clipboard_active` | The original native worker actually started after setup. |
+| `clipboard_received` | Host text items submitted to the local pasteboard; not proof that an application pasted them. |
+| `clipboard_received_unknown`, `clipboard_received_refused` | Uncertain OS effects and refused incoming commits, retained separately from successful submissions. |
+| `clipboard_disabled` | The local Off control was used. |
+| `clipboard_absence`, `clipboard_ended` | Typed setup absence or the reason an active lane retired. |
+| `clipboard_cleanup` | `not_started`, `unknown`, `pending`, `finished` or `failed`, from the original worker. |
+
+The new native backend and toolbar require macOS SDK/runtime qualification.
+Portable policy checks, source review and authored native tests are separate
+evidence; they do not establish a live Mac clipboard or tailnet result.
 
 ## Check local capture, encoding and input readiness
 

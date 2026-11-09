@@ -16,7 +16,8 @@
 //! Main thread only: `AppKit` owns the window and its event loop, which this
 //! session services between network turns of the same runtime.
 use super::{
-    HevcDecoder, PicturePoint, Surface, Window, WindowEvent, event_time, files, picker, sharing,
+    HevcDecoder, PicturePoint, Surface, Window, WindowEvent, clipboard, event_time, files, picker,
+    sharing,
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
@@ -68,6 +69,7 @@ use std::{
 
 /// How often `AppKit` is serviced while the network is idle.
 const PUMP: Duration = Duration::from_millis(4);
+pub use super::clipboard::Report as ClipboardReport;
 /// The control request this session makes. Each scroll mode is requested only
 /// when both peers selected its optional capability; a legacy host still grants
 /// the supported remainder of this profile.
@@ -110,6 +112,7 @@ pub enum LocalStop {
 /// Content-free tallies for the CLI's completion line.
 #[derive(Debug, Default, Clone)]
 pub struct Report {
+    pub clipboard: ClipboardReport,
     pub attempts: u8,
     pub opened: u32,
     pub presented: u64,
@@ -446,6 +449,7 @@ pub struct Session {
     observer: Option<NativeObserver>,
     input: Rc<RefCell<Option<Input>>>,
     files: Rc<RefCell<files::Files>>,
+    clipboard: Rc<RefCell<clipboard::Clipboard>>,
     report: Rc<RefCell<Report>>,
     closed: Rc<Cell<bool>>,
     intent: Rc<RefCell<Intent>>,
@@ -485,6 +489,7 @@ impl Session {
             observer: None,
             input: Rc::default(),
             files: Rc::default(),
+            clipboard: Rc::default(),
             report: Rc::default(),
             closed: Rc::default(),
             intent: Rc::new(RefCell::new(Intent::new(control.is_some()))),
@@ -495,6 +500,14 @@ impl Session {
             cleanup_confirmed: false,
             terminal: None,
         }
+    }
+    /// Opt into the initial controlling attempt's shared text clipboard.
+    #[must_use]
+    pub fn clipboard(self, enabled: bool) -> Self {
+        self.clipboard
+            .borrow_mut()
+            .request(enabled && self.control.is_some());
+        self
     }
     /// An optional logical point bound for the fitted viewer content.
     #[must_use]
@@ -539,7 +552,11 @@ impl Session {
         self.files.borrow_mut().command_connection(connection)
     }
     pub fn report(&self) -> Report {
-        self.report.borrow().clone()
+        let mut report = self.report.borrow().clone();
+        let mut clipboard = self.clipboard.borrow_mut();
+        clipboard.collect();
+        report.clipboard = clipboard.report();
+        report
     }
     /// The user closed the window: no further attempt should start.
     pub fn user_closed(&self) -> bool {
@@ -599,6 +616,26 @@ async fn reap_file_commands(files: &RefCell<files::Files>, cx: &Cx, deadline: De
     }
 }
 
+async fn reap_clipboard_watchdog(
+    clipboard: &RefCell<clipboard::Clipboard>,
+    cx: &Cx,
+    deadline: Deadline,
+) -> bool {
+    loop {
+        if clipboard.borrow_mut().finished() {
+            return true;
+        }
+        let Some(timer) = cx.timer_driver() else {
+            return false;
+        };
+        let now = timer.now();
+        if cx.checkpoint().is_err() || now >= deadline.time() {
+            return false;
+        }
+        sleep(now, Duration::from_millis(1)).await;
+    }
+}
+
 /// Drain the window's events, deliver them to a granted session, and stop
 /// control (or the session) on the local conditions frd requires.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -611,6 +648,7 @@ fn service(
     closed: &Cell<bool>,
     stop: &StreamingViewerControl,
     files: &RefCell<files::Files>,
+    clipboard: &RefCell<clipboard::Clipboard>,
     sharing: &mut sharing::Ui,
     events: &mut Vec<WindowEvent>,
 ) {
@@ -625,6 +663,7 @@ fn service(
     opened.poll(Duration::ZERO, events);
     let state = opened.state().ok();
     let display_action = opened.take_display_change();
+    clipboard.borrow_mut().turn(Some(opened));
     drop(slot);
     let mut report = report.borrow_mut();
     let mut input = input.borrow_mut();
@@ -635,6 +674,7 @@ fn service(
         // Dropping the source fences the granted session before another turn.
         *input = None;
         files.borrow_mut().cancel();
+        clipboard.borrow_mut().stop(window.borrow().as_ref());
         stop.stop();
     };
     // Validate the whole native batch and current window before forwarding any
@@ -727,6 +767,7 @@ fn service(
         // No new event enters it after this turn, including the click itself.
         intent.retire_initial();
         files.borrow_mut().cancel();
+        clipboard.borrow_mut().stop(window.borrow().as_ref());
     }
     let pending = display_intent.borrow().pending();
     let expired = display_intent.borrow().expired(now);
@@ -865,7 +906,10 @@ fn attach(
 impl Application for Session {
     type Output = ();
     fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
-        let available = self.files.borrow().offer(false);
+        let available = self
+            .files
+            .borrow()
+            .offer(self.clipboard.borrow().available());
         let keep = |name: &str| {
             !matches!(
                 name,
@@ -874,6 +918,9 @@ impl Application for Session {
                     | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
                     | fr_wire::files::DOWNLOAD_CAPABILITY
                     | fr_wire::files::DUPLEX_CAPABILITY
+                    | fr_wire::attachment::CLIPBOARD_CAPABILITY
+                    | fr_wire::clipboard::CAPABILITY
+                    | fr_wire::clipboard::startup::CAPABILITY
             ) || available.capabilities.iter().any(|cap| cap.name == name)
         };
         if original
@@ -883,8 +930,8 @@ impl Application for Session {
         {
             return Err(CallbackError);
         }
-        // Remove only spent optional file choices. Never rebuild the original
-        // offer: its role, limits, required gates and other options stay exact.
+        // Remove only unavailable optional file/clipboard choices. Keep the
+        // original role, limits, required gates and other options exact.
         let mut offer = original.clone();
         offer.capabilities.retain(|cap| keep(&cap.name));
         if self
@@ -909,8 +956,11 @@ impl Application for Session {
         let window = self.window.clone();
         let input = self.input.clone();
         let files = self.files.clone();
+        let clipboard = self.clipboard.clone();
+        let clipboard_requested = clipboard.borrow().available();
         let file_directions = sharing::flags(&files.borrow()).count_ones();
-        let sharing_flags = sharing::flags(&files.borrow()) | 4;
+        let sharing_flags =
+            sharing::flags(&files.borrow()) | 4 | (u32::from(clipboard_requested) << 3);
         let report = self.report.clone();
         let closed = self.closed.clone();
         let intent = self.intent.clone();
@@ -939,6 +989,7 @@ impl Application for Session {
         let picker = self.picker.clone();
         let picker_error = self.picker_error.clone();
         let window_slot = window.clone();
+        let clipboard_ui = clipboard.clone();
         let decoder_hardware = hardware.clone();
         let approval_report = report.clone();
         let native_started = self.native_started.clone();
@@ -949,6 +1000,7 @@ impl Application for Session {
                     (display.logical_width, display.logical_height),
                     fit_window,
                     file_directions,
+                    clipboard_requested,
                 )?;
                 // From this point onward, losing the observer is not proof
                 // that AppKit, the renderer or its worker finished cleanup.
@@ -961,6 +1013,7 @@ impl Application for Session {
                     sharing_flags,
                 )
                 .map_err(|_| ())?;
+                clipboard_ui.borrow_mut().install(&opened).map_err(|_| ())?;
                 let surface = opened.surface();
                 *window_slot.borrow_mut() = Some(opened);
                 Launch::in_process(
@@ -1008,6 +1061,7 @@ impl Application for Session {
                 &closed,
                 &stop,
                 &files,
+                &clipboard,
                 &mut sharing,
                 &mut events,
             );
@@ -1024,6 +1078,11 @@ impl Application for Session {
         let display = opened.display();
         let observer = self.observer.insert(opened);
         files.borrow_mut().configure(observer);
+        clipboard.borrow_mut().configure(
+            observer,
+            window.borrow().as_ref(),
+            self.close_cx.clone().or_else(Cx::current),
+        );
         let count = report.clone();
         let frames = move |frame: Option<Presentation>| {
             if frame.is_some() {
@@ -1207,6 +1266,9 @@ impl Application for Session {
         // Fence at call time: no input outlives the attempt.
         self.input.borrow_mut().take();
         self.intent.borrow_mut().invalidate();
+        self.clipboard
+            .borrow_mut()
+            .stop(self.window.borrow().as_ref());
         // A failed dial with no configured observer has not spent the local
         // choices. Once configured, every cleanup fences their original owner.
         if self.observer.is_some() {
@@ -1245,7 +1307,17 @@ impl Application for Session {
                     let media = observer.reap_media(cx, deadline).await;
                     let input = observer.reap_input_capture(cx, deadline).await;
                     let files = observer.reap_files(cx, deadline).await;
-                    media.is_ok() && input.is_ok() && files.is_ok()
+                    let clipboard = observer.reap_clipboard(cx, deadline).await;
+                    for _ in 0..2 {
+                        let _ = observer.collect_clipboard();
+                        self.clipboard.borrow_mut().collect();
+                    }
+                    let clipboard = matches!(
+                        clipboard,
+                        Ok(frd::native_clipboard::Cleanup::NotStarted
+                            | frd::native_clipboard::Cleanup::Finished(_))
+                    );
+                    media.is_ok() && input.is_ok() && files.is_ok() && clipboard
                 }
                 // Approval and display selection precede the deferred native
                 // factory. Their failures have no native owners to reap. Once
@@ -1253,7 +1325,8 @@ impl Application for Session {
                 None => !self.native_started.get(),
             };
             let commands = reap_file_commands(&self.files, cx, deadline).await;
-            if !result || !picker_closed || !commands {
+            let clipboard = reap_clipboard_watchdog(&self.clipboard, cx, deadline).await;
+            if !result || !picker_closed || !commands || !clipboard {
                 return Err(CallbackError);
             }
             self.observer = None;
@@ -1273,6 +1346,7 @@ impl Application for Session {
                     || self.observer.is_some()
                     || self.picker.borrow().is_some()
                     || !self.files.borrow().commands_complete()
+                    || !self.clipboard.borrow_mut().finished()
                 {
                     return Err(CallbackError);
                 }
@@ -1529,7 +1603,7 @@ mod tests {
     }
 
     #[test]
-    fn spent_file_capabilities_are_only_omitted_from_the_original_offer() {
+    fn unavailable_file_and_clipboard_capabilities_only_omit_from_the_original_offer() {
         let mut session = failed_startup(false);
         let original = fr_client::native::control_offer_with_duplex(true, true);
         let filtered = session.offer(1, &original).unwrap();
@@ -1542,6 +1616,9 @@ mod tests {
                     | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
                     | fr_wire::files::DOWNLOAD_CAPABILITY
                     | fr_wire::files::DUPLEX_CAPABILITY
+                    | fr_wire::attachment::CLIPBOARD_CAPABILITY
+                    | fr_wire::clipboard::CAPABILITY
+                    | fr_wire::clipboard::startup::CAPABILITY
             )
         });
         assert_eq!(filtered, expected);

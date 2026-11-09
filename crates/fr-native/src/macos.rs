@@ -73,6 +73,14 @@ unsafe extern "C" {
     ) -> c_int;
     fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
     fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
+    fn fr_mac_window_clipboard_bind(
+        window: *mut c_void,
+        context: *mut c_void,
+        stop: unsafe extern "C" fn(*mut c_void, c_int),
+        release: unsafe extern "C" fn(*mut c_void),
+    ) -> c_int;
+    fn fr_mac_window_clipboard_update(window: *mut c_void, state: u32) -> c_int;
+    fn fr_mac_window_clipboard_visible(window: *mut c_void, visible: *mut c_int) -> c_int;
     fn fr_mac_window_state(
         window: *mut c_void,
         width: *mut u32,
@@ -336,6 +344,35 @@ impl Window {
             .map(Some)
             .map_err(|_| NativeError::Unavailable)
     }
+    /// Bind the original local Off owner before any clipboard setup can run.
+    pub(crate) fn clipboard_bind(&self, privacy: clipboard::Privacy) -> Result<(), NativeError> {
+        let context = Box::into_raw(Box::new(ClipboardSwitch(privacy)));
+        // SAFETY: the main-thread window adopts this unique Box only on success;
+        // callbacks are main-thread only and are cleared before freeing it.
+        let result = status(unsafe {
+            fr_mac_window_clipboard_bind(
+                self.raw.as_ptr(),
+                context.cast(),
+                clipboard_stop,
+                clipboard_release,
+            )
+        });
+        if result.is_err() {
+            // SAFETY: failed binding did not adopt or retain the unique Box.
+            drop(unsafe { Box::from_raw(context) });
+        }
+        result
+    }
+    pub(crate) fn clipboard_update(&self, state: u32) -> Result<(), NativeError> {
+        // SAFETY: live window on its owning main thread; glue validates the enum.
+        status(unsafe { fr_mac_window_clipboard_update(self.raw.as_ptr(), state) })
+    }
+    pub(crate) fn clipboard_visible(&self) -> Result<bool, NativeError> {
+        let mut visible = 0;
+        // SAFETY: live main-thread window and one writable scalar output.
+        status(unsafe { fr_mac_window_clipboard_visible(self.raw.as_ptr(), &raw mut visible) })?;
+        Ok(visible != 0)
+    }
     /// Current picture size and input-relevant window state.
     pub fn state(&self) -> Result<WindowState, NativeError> {
         let (mut width, mut height, mut key, mut visible, mut geometry_current) = (0, 0, 0, 0, 0);
@@ -455,6 +492,31 @@ impl Drop for Window {
         // SAFETY: unique owner of the +1 window reference, on the main thread.
         unsafe { fr_mac_window_free(self.raw.as_ptr()) };
     }
+}
+
+/// The native Off button borrows this exact original privacy owner. It never
+/// calls into the session future or waits for clipboard/native cleanup.
+struct ClipboardSwitch(clipboard::Privacy);
+impl Drop for ClipboardSwitch {
+    fn drop(&mut self) {
+        self.0.stop(false);
+    }
+}
+unsafe extern "C" fn clipboard_stop(context: *mut c_void, user_off: c_int) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: glue retains the Box until it clears both callbacks on the same
+    // main thread; this callback only borrows it and performs no native work.
+    let switch = unsafe { &*context.cast::<ClipboardSwitch>() };
+    switch.0.stop(user_off != 0);
+}
+unsafe extern "C" fn clipboard_release(context: *mut c_void) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: exactly once after the glue has cleared its context/callbacks.
+    drop(unsafe { Box::from_raw(context.cast::<ClipboardSwitch>()) });
 }
 
 /// Held modifier keys, for turning `FlagsChanged` into presses and releases.
@@ -746,6 +808,7 @@ impl Drop for HevcDecoder {
     }
 }
 
+mod clipboard;
 #[path = "macos/files.rs"]
 pub mod files;
 #[path = "macos/picker.rs"]

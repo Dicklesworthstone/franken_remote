@@ -4,6 +4,8 @@ use super::{
     Error, HostInstant, IdentifierFailure, NativeClipboard, PlatformError, Received, Synchronizer,
     shared,
 };
+use fr_core::clipboard::ClipboardSwitch;
+use fr_wire::clipboard::session::egress::Transport;
 use fr_wire::clipboard::session::synchronize::SyncError;
 use shared::{Clock, Shared, Sink, Turn};
 use std::{
@@ -22,6 +24,49 @@ pub struct WorkerSeed {
     pub(super) shared: Arc<Shared>,
     pub(super) clock: Clock,
     pub(super) cx: Cx,
+}
+
+/// Read-only checks for a multi-step native clipboard operation. This retains
+/// the original worker's authority and clock projection, never a new grant or
+/// deadline. A native adapter must check immediately before each OS mutation;
+/// a refusal after an earlier mutation means an unknown external effect.
+///
+/// Use only on the original native worker. No native work or caller callback
+/// runs inside these checks, and no authority lock is held after they return.
+pub struct NativeAccess {
+    gate: Transport,
+    clock: Clock,
+    cx: Cx,
+    switches: (ClipboardSwitch, ClipboardSwitch),
+    generations: (u64, u64),
+}
+
+impl std::fmt::Debug for NativeAccess {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NativeClipboardAccess([original worker])")
+    }
+}
+
+impl NativeAccess {
+    fn live(&self) -> bool {
+        self.gate.is_open()
+            && self.switches.0.is_enabled()
+            && self.switches.1.is_enabled()
+            && self.generations == (self.switches.0.state(), self.switches.1.state())
+    }
+
+    /// Recheck the original controller, privacy-switch generations and optional
+    /// immutable item deadline. `None` is for native metadata/read access;
+    /// publication must supply its original `ClipboardSink` host-clock bound.
+    pub fn check(&self, until: Option<HostInstant>) -> bool {
+        if !self.live() {
+            return false;
+        }
+        let Ok((_, now)) = self.clock.sample(&self.cx) else {
+            return false;
+        };
+        until.is_none_or(|deadline| now < deadline) && self.live()
+    }
 }
 impl Drop for WorkerSeed {
     fn drop(&mut self) {
@@ -50,6 +95,20 @@ impl WorkerSeed {
     pub fn control(&self) -> WorkerControl {
         WorkerControl {
             shared: self.shared.clone(),
+        }
+    }
+
+    /// Capture only the original worker's read-only native boundary. An off/on
+    /// switch cycle cannot revive this guard or a retained prepared item.
+    pub fn native_access(&self) -> NativeAccess {
+        let switches = self.shared.gate.switches();
+        let generations = (switches.0.state(), switches.1.state());
+        NativeAccess {
+            gate: self.shared.gate.clone(),
+            clock: self.clock.clone(),
+            cx: self.cx.clone(),
+            switches,
+            generations,
         }
     }
 

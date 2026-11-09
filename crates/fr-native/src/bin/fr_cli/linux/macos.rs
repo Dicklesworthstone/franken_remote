@@ -4,11 +4,12 @@
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
 //! interactive file drops, audio, microphone,
-//! system-shortcut capture and the clipboard (whose default-on choice is
-//! reported as unavailable). Local inspection and disconnect address the same
+//! and system-shortcut capture. Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
 //! Explicit --send/--receive choices and opt-in local upload commands use the
 //! original controlled file lanes.
+#[path = "macos_clipboard.rs"]
+mod clipboard;
 #[path = "macos_files.rs"]
 mod files;
 #[path = "macos_history.rs"]
@@ -20,7 +21,7 @@ use super::{
 };
 use crate::options::{Connection, DisplayChoice};
 use asupersync::{cx::Cx, runtime::Runtime, types::Budget};
-use fr_native::macos::session::{ControlPolicy, LocalStop, Report, Session};
+use fr_native::macos::session::{ClipboardReport, ControlPolicy, LocalStop, Report, Session};
 use frd::{
     native_connection::{AddressFamily, Client, Configuration, LocalApi, reconnect},
     session_startup::ObserverPolicy,
@@ -57,13 +58,13 @@ fn check(connection: &Connection) -> Result<(), Failure> {
     let directions =
         u32::from(!connection.upload.paths.is_empty() || connection.upload.file_commands)
             + u32::from(connection.receive.is_some());
-    if connection
-        .fit_window
-        .is_some_and(|(width, height)| width < 152 + 230 * directions || height < 108)
-    {
+    let clipboard = u32::from(connection.control && connection.clipboard);
+    if connection.fit_window.is_some_and(|(width, height)| {
+        width < 152 + 230 * directions + 184 * clipboard || height < 108
+    }) {
         return Err(Failure::new(
             "viewer_fit_too_small",
-            "--fit must leave room for Change Display and any file controls: at least 152x108 points, 382x108 with one file direction, or 612x108 with both.",
+            "--fit must leave room for Change Display and visible sharing controls. Minimum height is 108 points; width is 152 plus 230 per file direction and 184 for the default-on clipboard. Both file directions with clipboard need at least 796x108; --no-clipboard removes only the clipboard strip.",
             2,
         ));
     }
@@ -104,6 +105,10 @@ pub(super) fn connect(
     // lookup or network I/O. These choices belong to one original control.
     let selected_files = files::select(connection)?;
     let pending = files::Summary::capture(&selected_files);
+    let pending_clipboard = ClipboardReport {
+        requested: connection.control && connection.clipboard,
+        ..ClipboardReport::default()
+    };
     connect_selected(
         runtime,
         cx,
@@ -116,6 +121,7 @@ pub(super) fn connect(
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
+        clipboard::preserve(&pending_clipboard, &mut error);
         error
     })
 }
@@ -164,7 +170,8 @@ fn connect_selected(
         format!("FrankenRemote: {}", selected.node),
     )
     .with_fit_window(connection.fit_window)
-    .with_files(selected_files);
+    .with_files(selected_files)
+    .clipboard(connection.control && connection.clipboard);
     if display == DisplayChoice::Choose {
         session = session.with_display_picker();
     }
@@ -197,8 +204,8 @@ fn connect_selected(
     let selector = selected.selector();
     let result = if connection.control {
         // Drop the Ref before handing the mutable session to its supervisor.
-        // Clipboard remains unavailable; file choices never imply that consent.
-        let offer = session.files().offer(false);
+        // Clipboard and file consent are independent original choices.
+        let offer = session.files().offer(connection.clipboard);
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
@@ -239,7 +246,6 @@ fn connect_selected(
             &session.report(),
             result,
             stopped.get(),
-            connection.control && connection.clipboard,
             json,
             session.cleanup_confirmed(),
             reconnect::Application::terminal_failure(&session),
@@ -267,7 +273,6 @@ fn finish(
     report: &Report,
     result: Result<(), reconnect::Failure>,
     stopped: bool,
-    clipboard_requested: bool,
     json: bool,
     cleanup_confirmed: bool,
     terminal: Option<frd::session_startup::ObserverError>,
@@ -278,7 +283,6 @@ fn finish(
             report,
             result,
             stopped,
-            clipboard_requested,
             json,
             cleanup_confirmed,
             terminal,
@@ -292,7 +296,11 @@ fn finish(
         }
         error
     });
-    history::finish(report, result, json)
+    clipboard::finish(
+        &report.clipboard,
+        history::finish(report, result, json),
+        json,
+    )
 }
 
 // Keep the ordered failure precedence beside its single completion projection.
@@ -305,7 +313,6 @@ fn finish_result(
     report: &Report,
     result: Result<(), reconnect::Failure>,
     stopped: bool,
-    clipboard_requested: bool,
     json: bool,
     cleanup_confirmed: bool,
     terminal: Option<frd::session_startup::ObserverError>,
@@ -397,17 +404,12 @@ fn finish_result(
     let hardware = report
         .hardware_decode
         .map_or("unknown", |h| if h { "true" } else { "false" });
-    let clipboard = if clipboard_requested {
-        "local_clipboard_unavailable"
-    } else {
-        "not_requested"
-    };
     let close = report.close_exchange.map(crate::closure::Report::from);
     let mut out = String::new();
     if json {
         let _ = writeln!(
             out,
-            "{{\"outcome\":\"success\",\"platform\":\"macos\",\"attempts\":{},\"viewing_reconnects\":{},\"opened\":{},\"presented\":{},\"hardware_decode\":{},\"approval_requested\":{},\"control\":{{\"requested\":{},\"requests\":{},\"granted\":{},\"keys\":{},\"pointer\":{},\"buttons\":{},\"scrolls\":{},\"results\":{}}},\"clipboard\":\"{}\",\"ended\":\"{}\",\"local_cleanup_confirmed\":true,\"close_exchange\":{},\"lease_revocation\":{}}}",
+            "{{\"outcome\":\"success\",\"platform\":\"macos\",\"attempts\":{},\"viewing_reconnects\":{},\"opened\":{},\"presented\":{},\"hardware_decode\":{},\"approval_requested\":{},\"control\":{{\"requested\":{},\"requests\":{},\"granted\":{},\"keys\":{},\"pointer\":{},\"buttons\":{},\"scrolls\":{},\"results\":{}}},\"ended\":\"{}\",\"local_cleanup_confirmed\":true,\"close_exchange\":{},\"lease_revocation\":{}}}",
             report.attempts,
             report.viewing_reconnects,
             report.opened,
@@ -424,7 +426,6 @@ fn finish_result(
             report.buttons,
             report.scrolls,
             report.input_results,
-            clipboard,
             ended,
             close.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
             crate::terminal::lease_json(report.lease_revocation),
@@ -438,7 +439,7 @@ fn finish_result(
         if report.control_requested {
             let _ = writeln!(
                 out,
-                "Control: {}; sent keys {}, pointer moves {}, buttons {}, scrolls {}; host results {}. Clipboard: {clipboard}.",
+                "Control: {}; sent keys {}, pointer moves {}, buttons {}, scrolls {}; host results {}.",
                 if report.control_granted {
                     "granted"
                 } else {
@@ -576,9 +577,30 @@ mod tests {
             c.fit_window = Some((width, height));
             assert_eq!(check(&c).err().unwrap().code, "viewer_fit_too_small");
         }
-        let mut c = connection("--send /private/chosen --receive /private/inbox");
+        let mut c = connection("--no-clipboard --send /private/chosen --receive /private/inbox");
         c.fit_window = Some((612, 108));
         assert!(check(&c).is_ok());
+    }
+
+    #[test]
+    fn clipboard_privacy_control_has_space_independently_of_file_controls() {
+        for (flags, minimum) in [
+            ("", 336),
+            ("--file-commands", 566),
+            ("--receive /private/inbox", 566),
+            ("--file-commands --receive /private/inbox", 796),
+            ("--no-clipboard", 152),
+        ] {
+            let mut c = connection(flags);
+            c.fit_window = Some((minimum - 1, 108));
+            assert_eq!(check(&c).err().unwrap().code, "viewer_fit_too_small");
+            c.fit_window = Some((minimum, 108));
+            assert!(check(&c).is_ok());
+        }
+        let mut viewing = connection("");
+        viewing.control = false;
+        viewing.fit_window = Some((152, 108));
+        assert!(check(&viewing).is_ok());
     }
 
     #[test]

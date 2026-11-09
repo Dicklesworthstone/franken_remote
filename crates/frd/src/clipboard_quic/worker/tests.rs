@@ -174,6 +174,7 @@ struct Fixture {
     permission: Arc<Permission>,
     os: Arc<Mutex<Os>>,
     shared: Arc<Shared>,
+    native_access: NativeAccess,
     worker: Worker<Recording>,
     _runtime: Runtime,
 }
@@ -214,6 +215,7 @@ impl Fixture {
         let os = Arc::new(Mutex::new(Os::default()));
         permission.paused.store(paused, Ordering::Release);
         let native = os.clone();
+        let native_access = seed.native_access();
         let worker = seed
             .open(move || {
                 native.lock().unwrap().opens += 1;
@@ -229,6 +231,7 @@ impl Fixture {
             permission,
             os,
             shared,
+            native_access,
             worker,
             _runtime: runtime,
         }
@@ -615,3 +618,4 @@ fn expired_unsent_cancel_remains_terminal() {
 }
 
 mod expiry;
+mod native_access;

@@ -105,10 +105,13 @@ Without it shortcuts stay local; unavailable capture ends control with
 system_shortcuts_unavailable. Reserved X-server shortcuts remain limited.
 
 Clipboard:
---control defaults to UTF-8 sharing with linux-clipboard in both builds:
+--control defaults to UTF-8 sharing with linux-clipboard on Linux, or with
+macos-desktop on the Mac client:
 1 MiB/item, after control and visible privacy controls. --no-clipboard disables;
---clipboard selects the default. Turn off/close either Clipboard sharing window
-to end sharing. Missing permission/support is typed absence; desktop continues.
+--clipboard selects the default. Use Turn Off in the Mac viewer toolbar or
+turn off/close either Linux Clipboard sharing window to end sharing. Missing
+permission/support is typed absence; desktop continues. Mac hosting does not
+offer a clipboard backend yet.
 An incomplete transfer unable to stop independently closes the connection.
 View-only never accesses clipboard.
 

@@ -22,6 +22,7 @@
 //! to the local CLIPBOARD, or the typed reason it never became active.
 #[path = "control/renewal.rs"]
 mod renewal;
+use crate::clipboard_reasons::{absence, ended};
 use fr_client::input::{self, ResultEvent, viewport::SurfaceRect};
 use fr_core::{
     input::{DesktopPoint, InputBounds},
@@ -104,36 +105,6 @@ impl ClipboardCounters {
     /// The typed reason reported when the lane never became active.
     pub(super) fn absence(&self) -> Option<&'static str> {
         (!self.active).then(|| self.absence.unwrap_or("clipboard_not_started"))
-    }
-}
-/// Typed code for an active clipboard that retired mid-session.
-fn ended(reason: Option<frd::clipboard_quic::Error>) -> &'static str {
-    use fr_core::clipboard::Error as Item;
-    use fr_wire::clipboard::session::SessionError;
-    use frd::clipboard_quic::Error;
-    match reason {
-        Some(Error::ReceiveExpired) => "clipboard_receive_expired",
-        Some(Error::HandoffExpired | Error::Session(SessionError::Clipboard(Item::Expired))) => {
-            "clipboard_item_expired"
-        }
-        Some(Error::SwitchChanged | Error::Session(SessionError::Clipboard(Item::Disabled))) => {
-            "clipboard_disabled"
-        }
-        Some(
-            Error::Controller(_) | Error::Session(SessionError::Clipboard(Item::Authority(_))),
-        ) => "clipboard_authority_ended",
-        _ => "clipboard_ended",
-    }
-}
-/// Typed absence code for a clipboard that ended without becoming active.
-fn absence(reason: Option<frd::clipboard_quic::Error>) -> &'static str {
-    use frd::clipboard_quic::Error;
-    match reason {
-        Some(Error::ReceiveExpired) => "clipboard_receive_expired",
-        Some(Error::NotNegotiated) => "host_clipboard_unavailable",
-        Some(Error::ConsentRequired) => "host_clipboard_refused",
-        Some(Error::NativeSetup(_)) => "local_clipboard_unavailable",
-        _ => "clipboard_ended",
     }
 }
 #[cfg(feature = "linux-clipboard")]

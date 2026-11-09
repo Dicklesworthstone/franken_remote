@@ -4,6 +4,12 @@
 // authenticated local close owner; robot automation and screenshots stay Linux-only.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "fr_cli/clipboard_reasons.rs"]
+mod clipboard_reasons;
 #[path = "fr_cli/closure.rs"]
 mod closure;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
