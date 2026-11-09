@@ -337,10 +337,13 @@ impl Members {
                         // reference horizon (250 ms) expires it before a slow
                         // first decode (~330 ms for a 5K IDR in software) and
                         // fails the viewer. Its slot and credit still count, so
-                        // a healthy cohort retains it as before.
+                        // a healthy cohort retains it as before. A recovering
+                        // viewer is demand only until its recovery IDR is
+                        // captured; then it is decoding it, the same wait.
                         healthy_credit |= credit
                             && entry.starting.is_none()
-                            && (entry.join.is_none() || entry.recovery.is_some());
+                            && (entry.join.is_none()
+                                || entry.recovery.is_some() && entry.waiting());
                         if credit && entry.waiting() {
                             let until = entry.join.as_ref().expect("waiting").until;
                             join_until = Some(join_until.map_or(until, |old| old.min(until)));

@@ -207,6 +207,15 @@ async fn recover_loss(rt: &Runtime, keep_healthy: bool) {
     if keep_healthy {
         Box::pin(deliver(&mut cohort.peers[0], &cx, 2)).await;
         assert_eq!(cohort.peers[0].media.binding(), healthy_view);
+    } else {
+        // The sole viewer now holds its recovery IDR but has not decoded it:
+        // it cannot receive the next reference, so it is not capture demand.
+        let decoding = cohort.publisher.physical_usage();
+        assert_eq!(
+            cohort.publisher.capture_next().await.unwrap_err(),
+            PublishError::Media(frd::media::Error::Backpressure)
+        );
+        assert_eq!(cohort.publisher.physical_usage(), decoding);
     }
     let bytes = loop {
         assert!(clock(&cx) < original_until);
