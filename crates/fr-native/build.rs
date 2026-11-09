@@ -580,9 +580,11 @@ fn build_macos_viewer() {
 }
 
 /// macOS host capture glue (fr-p1-host-macos-vif): `ScreenCaptureKit` into
-/// `VideoToolbox` HEVC. `ReferenceBufferCount` needs macOS 13.
+/// `VideoToolbox` HEVC. The binary may target macOS 13; capture explicitly
+/// requires macOS 14 for the independent `SCScreenshotManager` verification.
 fn build_macos_capture() {
     println!("cargo:rerun-if-changed=src/macos_capture.m");
+    println!("cargo:rerun-if-changed=src/macos_capture_policy.h");
     if env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {

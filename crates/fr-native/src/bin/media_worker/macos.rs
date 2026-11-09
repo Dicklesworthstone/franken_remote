@@ -12,7 +12,7 @@ use fr_native::{
     macos_capture::{self, Captured, MacCapture, MacDisplay},
 };
 use fr_wire::display::{Catalog, Display};
-use std::{fs::File, io, os::fd::AsFd};
+use std::{fs::File, io, io::Write as _, os::fd::AsFd};
 
 fn native(e: NativeError) -> Error {
     match e {
@@ -75,6 +75,21 @@ fn check_all(displays: &[MacDisplay]) -> Result<(), Error> {
 struct Share {
     capture: MacCapture,
     display: MacDisplay,
+}
+impl Drop for Share {
+    fn drop(&mut self) {
+        if let Ok(stats) = self.capture.statistics() {
+            // One content-free line per native owner. Stdout remains FRW0.
+            // Counters describe work, not measured copies or GPU time.
+            let _ = writeln!(
+                io::stderr().lock(),
+                "capture_verification_requests={} capture_verification_encoded={} verification_wait_ms={}",
+                stats.verification_requests,
+                stats.verification_encoded,
+                stats.verification_wait_ms
+            );
+        }
+    }
 }
 impl Share {
     fn handle(
@@ -212,7 +227,9 @@ fn refuse(
 
 /// `--probe-encoder videotoolbox`: one forced IDR of the main display at the
 /// size a share would use, through SEI stripping and admission.
-fn probe_encoder(backend: &str) -> Result<(u32, u32, usize), Error> {
+fn probe_encoder(
+    backend: &str,
+) -> Result<(u32, u32, usize, macos_capture::CaptureStatistics), Error> {
     if backend != "videotoolbox" {
         return Err(Error::Malformed);
     }
@@ -250,7 +267,12 @@ fn probe_encoder(backend: &str) -> Result<(u32, u32, usize), Error> {
         .capture(fr_media::access_unit::FrameId::from_raw(1), 1, true, false)
         .map_err(native)?
     {
-        Captured::Unit(unit) => Ok((entry.pixel_width, entry.pixel_height, unit.bytes().len())),
+        Captured::Unit(unit) => Ok((
+            entry.pixel_width,
+            entry.pixel_height,
+            unit.bytes().len(),
+            capture.statistics().map_err(native)?,
+        )),
         Captured::Unchanged(_) => Err(Error::WrongState),
     }
 }
@@ -278,9 +300,12 @@ pub fn run() -> Result<(), Error> {
             let backend = args.next().ok_or(Error::Malformed)?;
             parent(&mut args)?;
             return match probe_encoder(&backend) {
-                Ok((width, height, bytes)) => {
+                Ok((width, height, bytes, stats)) => {
                     println!(
-                        "encoder_probe=admitted width={width} height={height} idr_bytes={bytes}"
+                        "encoder_probe=admitted width={width} height={height} idr_bytes={bytes} verification_requests={} verification_encoded={} verification_wait_ms={}",
+                        stats.verification_requests,
+                        stats.verification_encoded,
+                        stats.verification_wait_ms
                     );
                     Ok(())
                 }

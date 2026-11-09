@@ -1,12 +1,15 @@
 //! macOS host capture (fr-p1-host-macos-vif): `ScreenCaptureKit` frames go
-//! straight into a `VideoToolbox` HEVC session (`macos_capture.m`), with no CPU
-//! copy of the picture. Every access unit is stripped of encoder SEI,
-//! admitted by the same strict `HevcGuard` as the Linux encoders, and leaves
-//! as canonical four-byte-length NALs.
+//! straight into a `VideoToolbox` HEVC session (`macos_capture.m`), without an
+//! application-side full-frame CPU copy. Every access unit is stripped of
+//! encoder SEI, admitted by the same strict `HevcGuard` as the Linux encoders,
+//! and leaves as canonical four-byte-length NALs.
 //!
-//! Change detection is the capture system's own: a frame counts as changed
-//! when `ScreenCaptureKit` delivered a new complete frame since the last
-//! encode. Its idle frames (nothing on screen changed) never reach the encoder.
+//! Source evidence is the capture system's own: only a post-request Complete
+//! or Idle event can justify the broker's pre-request timestamp. Silence and
+//! cached pixels never become fresh evidence. When no such event arrives,
+//! macOS 14+ performs a bounded real screenshot through the original filter
+//! and configuration, then encodes that verification refresh. Fresh Idle events
+//! can suppress encoding; verification captures have an explicit counted cost.
 use crate::NativeError;
 use core::ffi::{c_int, c_void};
 use core::ptr::NonNull;
@@ -52,6 +55,12 @@ unsafe extern "C" {
     ) -> c_int;
     fn fr_cap_set_bitrate(handle: *mut c_void, bitrate: u32) -> c_int;
     fn fr_cap_check(handle: *mut c_void) -> c_int;
+    fn fr_cap_statistics(
+        handle: *mut c_void,
+        requests: *mut u64,
+        encoded_refreshes: *mut u64,
+        verification_wait_ms: *mut u32,
+    ) -> c_int;
     fn fr_cap_free(handle: *mut c_void);
     fn fr_cap_display_check(expected: *const RawDisplay) -> c_int;
     fn fr_cap_bind_parent(expected: i32) -> c_int;
@@ -160,7 +169,20 @@ pub enum Captured {
     Unchanged(UnchangedCapture),
 }
 
+/// Content-free work counters for the original capture owner. These are API
+/// requests and encoded units, not measured GPU time or zero-copy evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureStatistics {
+    /// Real screenshot API requests, including ones that later fail or expire.
+    pub verification_requests: u64,
+    /// Encoded units whose retained pixels came from verification capture.
+    pub verification_encoded: u64,
+    /// Silence before requesting verification, also bounding its request rate.
+    pub verification_wait_ms: u32,
+}
+
 /// Capture and encode of one display. Single owner, single thread.
+/// Requires macOS 14+ for real source verification during stream silence.
 pub struct MacCapture {
     raw: NonNull<c_void>,
     config: CodecConfiguration,
@@ -228,10 +250,11 @@ impl MacCapture {
         self.bitrate
     }
 
-    /// Encodes the newest frame as `frame`, stamped with `observed_micros`.
-    /// With `only_if_changed` and nothing new on screen since the last unit,
-    /// returns `Unchanged` evidence naming that unit instead. A failure
-    /// closes the capture: no later request can splice a broken chain.
+    /// Captures source evidence after this request and encodes it as `frame`.
+    /// `observed_micros` is the parent's pre-request lower bound, never reply
+    /// arrival time. Only a fresh OS Idle observation of the encoded picture
+    /// may return `Unchanged`; silence causes real verification capture.
+    /// A failure closes the capture: no later request can splice a broken chain.
     pub fn capture(
         &mut self,
         frame: FrameId,
@@ -288,8 +311,12 @@ impl MacCapture {
         if force_idr && !idr {
             return Err(NativeError::UnsupportedBitstream);
         }
-        let annex_b = strip_encoder_sei(&self.buffer[..length.min(self.buffer.len())])
-            .map_err(|_| NativeError::UnsupportedBitstream)?;
+        let encoded = self
+            .buffer
+            .get(..length)
+            .filter(|bytes| !bytes.is_empty())
+            .ok_or(NativeError::UnsupportedBitstream)?;
+        let annex_b = strip_encoder_sei(encoded).map_err(|_| NativeError::UnsupportedBitstream)?;
         self.admission
             .validate_annex_b(&annex_b, idr)
             .map_err(|_| NativeError::UnsupportedBitstream)?;
@@ -315,6 +342,26 @@ impl MacCapture {
         .map_err(|_| NativeError::Codec)?;
         self.last_output = Some(frame);
         Ok(Captured::Unit(unit))
+    }
+
+    /// Cumulative native verification work, without reading pixels or creating
+    /// source evidence. Available even after a refused request for diagnostics.
+    pub fn statistics(&self) -> Result<CaptureStatistics, NativeError> {
+        let (mut requests, mut encoded_refreshes, mut verification_wait_ms) = (0, 0, 0);
+        // SAFETY: live thread-confined owner and writable scalar outputs.
+        status(unsafe {
+            fr_cap_statistics(
+                self.raw.as_ptr(),
+                &raw mut requests,
+                &raw mut encoded_refreshes,
+                &raw mut verification_wait_ms,
+            )
+        })?;
+        Ok(CaptureStatistics {
+            verification_requests: requests,
+            verification_encoded: encoded_refreshes,
+            verification_wait_ms,
+        })
     }
 
     /// Changes the encoder's average bitrate for later pictures.

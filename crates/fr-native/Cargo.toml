@@ -36,7 +36,7 @@ default = ["cli"]
 # The fr-media-worker binary; each platform feature below enables it.
 media-worker = []
 # macOS host capture (fr-p1-host-macos-vif): ScreenCaptureKit into
-# VideoToolbox HEVC in the capture worker. System frameworks, macOS 13+.
+# VideoToolbox HEVC in the capture worker. System frameworks, macOS 14+ at runtime.
 macos-media = ["media-worker"]
 # macOS client presentation (fr-5a4w): VideoToolbox HEVC decode into
 # IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an

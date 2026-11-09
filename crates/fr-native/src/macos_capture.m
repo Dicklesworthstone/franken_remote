@@ -1,7 +1,7 @@
 // macOS host capture (fr-p1-host-macos-vif): ScreenCaptureKit display capture
 // straight into a VideoToolbox HEVC session. The captured IOSurface-backed
-// NV12 buffer goes to the encoder without a CPU copy; only the encoded access
-// unit is copied out. Settings are the ones the Phase 0 spike measured to
+// NV12 buffer goes to the encoder without an application-side full-frame CPU
+// copy; the encoded access unit is copied out. Settings are the ones the Phase 0 spike measured to
 // pass admission (spikes/media-macos/README.md): RealTime, low-latency rate
 // control, no frame reordering, one reference picture. Rust strips SEI and
 // admits every unit with HevcGuard before it leaves the worker.
@@ -15,6 +15,8 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <math.h>
+#include <mach/mach_time.h>
+#include "macos_capture_policy.h"
 #include <os/lock.h>
 #include <unistd.h>
 #include <stdint.h>
@@ -182,8 +184,13 @@ int fr_cap_bind_parent(int32_t expected) {
   @public
     os_unfair_lock lock;
     CVPixelBufferRef latest;   // newest complete frame, retained
-    uint64_t arrived;          // complete frames received
-    uint64_t encoded;          // value of `arrived` at the last encode
+    FrCapSource source;        // positive source evidence, protected by lock
+    uint64_t encoded;          // source.picture at the last successful encode
+    SCContentFilter *filter;
+    SCStreamConfiguration *configuration;
+    uint64_t verification_requests;
+    uint64_t verification_encoded;
+    size_t unit_limit;         // original caller's encoded-byte ceiling
     BOOL stopped;              // the stream ended (display gone, permission revoked)
     FrCapDisplay display;      // the display's mode and placement at open
     SCStream *stream;
@@ -204,101 +211,265 @@ int fr_cap_bind_parent(int32_t expected) {
 }
 @end
 
+static CVPixelBufferRef sample_picture(CMSampleBufferRef sample, uint32_t width, uint32_t height) {
+    if (!sample || !CMSampleBufferIsValid(sample) || !CMSampleBufferDataIsReady(sample)) return NULL;
+    CVPixelBufferRef pixels = CMSampleBufferGetImageBuffer(sample);
+    if (!pixels || CVPixelBufferGetWidth(pixels) != width ||
+        CVPixelBufferGetHeight(pixels) != height ||
+        CVPixelBufferGetPixelFormatType(pixels) != kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange)
+        return NULL;
+    return pixels; // borrowed until the sample callback returns
+}
+
+// Only metadata identifies source progress. Callback receipt time never does.
+// The SDK specifies SCStreamFrameInfoDisplayTime in mach absolute ticks.
+static enum FrCapSourceEvent sample_event(CMSampleBufferRef sample, uint32_t width,
+                                          uint32_t height, uint64_t *displayed,
+                                          CVPixelBufferRef *picture) {
+    *displayed = 0;
+    *picture = NULL;
+    if (!sample || !CMSampleBufferIsValid(sample)) return FR_CAP_SOURCE_INVALID;
+    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
+    if (!attachments || CFArrayGetCount(attachments) != 1) return FR_CAP_SOURCE_INVALID;
+    CFTypeRef attachment = CFArrayGetValueAtIndex(attachments, 0);
+    if (!attachment || CFGetTypeID(attachment) != CFDictionaryGetTypeID())
+        return FR_CAP_SOURCE_INVALID;
+    NSDictionary *info = (__bridge NSDictionary *)attachment;
+    NSNumber *status = info[SCStreamFrameInfoStatus];
+    NSNumber *time = info[SCStreamFrameInfoDisplayTime];
+    if (![status isKindOfClass:[NSNumber class]] || ![time isKindOfClass:[NSNumber class]])
+        return FR_CAP_SOURCE_INVALID;
+    *displayed = time.unsignedLongLongValue;
+    if (status.integerValue == SCFrameStatusIdle) return FR_CAP_SOURCE_IDLE;
+    if (status.integerValue != SCFrameStatusComplete) return FR_CAP_SOURCE_INVALID;
+    *picture = sample_picture(sample, width, height);
+    return *picture ? FR_CAP_SOURCE_COMPLETE : FR_CAP_SOURCE_INVALID;
+}
+
+// Takes no ownership of picture. Retaining a selected surface before the
+// callback returns keeps its backing pool slot alive; there is one latest
+// slot and, while VT runs, one separately retained submitted surface.
+static void observe(FrCapture *c, enum FrCapSourceEvent event, uint64_t displayed,
+                    uint64_t received, CVPixelBufferRef picture) {
+    CVPixelBufferRef previous = NULL;
+    os_unfair_lock_lock(&c->lock);
+    enum FrCapSourceUpdate update =
+        fr_cap_source_observe(&c->source, event, displayed, received);
+    if (update == FR_CAP_SOURCE_REPLACED) {
+        previous = c->latest;
+        c->latest = CVPixelBufferRetain(picture);
+    } else if (update == FR_CAP_SOURCE_INVALIDATED) {
+        previous = c->latest;
+        c->latest = NULL;
+    }
+    os_unfair_lock_unlock(&c->lock);
+    if (previous) CVPixelBufferRelease(previous);
+}
+
 @implementation FrCapture
-- (void)stream:(SCStream *)s didOutputSampleBuffer:(CMSampleBufferRef)sample ofType:(SCStreamOutputType)type {
+- (void)stream:(SCStream *)s didOutputSampleBuffer:(CMSampleBufferRef)sample
+        ofType:(SCStreamOutputType)type {
     (void)s;
     if (type != SCStreamOutputTypeScreen) return;
-    CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
-    if (!attachments || CFArrayGetCount(attachments) == 0) return;
-    NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(attachments, 0);
-    NSNumber *status = info[SCStreamFrameInfoStatus];
-    // Idle frames repeat the previous picture: no new content, no new buffer.
-    if (!status || status.integerValue != SCFrameStatusComplete) return;
-    CVPixelBufferRef picture = CMSampleBufferGetImageBuffer(sample);
-    if (!picture || CVPixelBufferGetWidth(picture) != width || CVPixelBufferGetHeight(picture) != height)
-        return;
-    CVPixelBufferRetain(picture);
-    os_unfair_lock_lock(&lock);
-    CVPixelBufferRef previous = latest;
-    latest = picture;
-    arrived++;
-    os_unfair_lock_unlock(&lock);
-    if (previous) CVPixelBufferRelease(previous);
+    uint64_t displayed = 0;
+    CVPixelBufferRef picture = NULL;
+    enum FrCapSourceEvent event = sample_event(sample, width, height, &displayed, &picture);
+    observe(self, event, displayed, mach_absolute_time(), picture);
 }
 - (void)stream:(SCStream *)s didStopWithError:(NSError *)error {
     (void)s;
     (void)error;
     os_unfair_lock_lock(&lock);
     stopped = YES;
+    fr_cap_source_invalidate(&source, mach_absolute_time());
+    CVPixelBufferRef previous = latest;
+    latest = NULL;
     os_unfair_lock_unlock(&lock);
+    if (previous) CVPixelBufferRelease(previous);
 }
 @end
 
-static void append_nal(NSMutableData *unit, const uint8_t *nal, size_t len) {
+// A screenshot callback owns only this one-result box, never FrCapture or the
+// next request. An expired caller closes admission before dropping its owner;
+// a late callback releases its own surface without publishing it anywhere.
+@interface FrCapVerification : NSObject {
+  @public
+    os_unfair_lock lock;
+    FrCapOneShot request;
+    CVPixelBufferRef picture;
+    int result;
+    dispatch_semaphore_t done;
+    SCContentFilter *filter;
+    SCStreamConfiguration *configuration;
+}
+@end
+@implementation FrCapVerification
+- (void)dealloc {
+    if (picture) CVPixelBufferRelease(picture);
+}
+@end
+
+// No stream callback within this window is UNKNOWN, not unchanged. On macOS
+// 14+ a real screenshot verifies current source pixels. This is a deliberate
+// bounded refresh cost (at most 20 requests/s under an eager caller), not a
+// claim of zero idle encoding. The broker's original deadline remains in force.
+#define FR_CAP_VERIFY_WAIT_MS 50
+
+static int verify_source(FrCapture *c, dispatch_time_t deadline, uint64_t deadline_ns,
+                          CVPixelBufferRef *out, uint64_t *source_epoch) {
+    *out = NULL;
+    if (@available(macOS 14.0, *)) {
+        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) return FR_CAP_TIMEOUT;
+        if (c->verification_requests == UINT64_MAX) return FR_CAP_UNAVAILABLE;
+        FrCapVerification *verification = [FrCapVerification new];
+        verification->lock = OS_UNFAIR_LOCK_INIT;
+        verification->request.accepting = true;
+        verification->result = FR_CAP_UNAVAILABLE;
+        verification->done = dispatch_semaphore_create(0);
+        verification->filter = c->filter;
+        verification->configuration = c->configuration;
+        uint32_t width = c->width, height = c->height;
+        // An earlier gap may be repaired by this new capture. Any invalidation
+        // after this exact operation starts fences its eventual result, even
+        // if the stream subsequently supplies a new complete picture.
+        os_unfair_lock_lock(&c->lock);
+        BOOL stopped = c->stopped || c->source.exhausted;
+        *source_epoch = c->source.invalidation;
+        os_unfair_lock_unlock(&c->lock);
+        if (stopped) return FR_CAP_GEOMETRY;
+        if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) return FR_CAP_TIMEOUT;
+        c->verification_requests++;
+        // Apple documents a distinct one-shot capture, not an SCStream poll.
+        // Its sample is NOT guaranteed to contain SCStreamFrameInfo. Success
+        // is a serviced post-request capture of this exact filter/configuration.
+        // The timestamp stays the broker's pre-request lower bound; callback
+        // arrival is never recorded as a source/display timestamp.
+        [SCScreenshotManager captureSampleBufferWithFilter:verification->filter
+                                            configuration:verification->configuration
+                                        completionHandler:^(CMSampleBufferRef sample, NSError *error) {
+          @autoreleasepool {
+              CVPixelBufferRef picture = error ? NULL : sample_picture(sample, width, height);
+              if (picture) CVPixelBufferRetain(picture);
+              os_unfair_lock_lock(&verification->lock);
+              BOOL accepted = fr_cap_one_shot_complete(&verification->request);
+              if (accepted) {
+                  verification->result = picture ? FR_CAP_OK : FR_CAP_UNAVAILABLE;
+                  verification->picture = picture;
+                  picture = NULL;
+              }
+              os_unfair_lock_unlock(&verification->lock);
+              if (picture) CVPixelBufferRelease(picture);
+              if (accepted) dispatch_semaphore_signal(verification->done);
+          }
+        }];
+        BOOL timely = dispatch_semaphore_wait(verification->done, deadline) == 0 &&
+                      clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline_ns;
+        os_unfair_lock_lock(&verification->lock);
+        fr_cap_one_shot_close(&verification->request);
+        int result = timely ? verification->result : FR_CAP_TIMEOUT;
+        CVPixelBufferRef picture = verification->picture;
+        verification->picture = NULL;
+        os_unfair_lock_unlock(&verification->lock);
+        if (result == FR_CAP_OK && picture) {
+            *out = picture;
+        } else if (picture) {
+            CVPixelBufferRelease(picture);
+        }
+        return result;
+    }
+    return FR_CAP_UNAVAILABLE;
+}
+
+static BOOL append_nal(NSMutableData *unit, const uint8_t *nal, size_t len, size_t limit) {
     static const uint8_t start[4] = {0, 0, 0, 1};
+    if (!nal || !fr_cap_nal_fits(unit.length, len, limit)) return NO;
     [unit appendBytes:start length:4];
     [unit appendBytes:nal length:len];
+    return YES;
 }
 
 static void encoded(void *refcon, void *frame, OSStatus status, VTEncodeInfoFlags flags,
                     CMSampleBufferRef sample) {
     (void)frame;
-    FrCapture *c = (__bridge FrCapture *)refcon;
-    c->unit = nil;
-    c->result = status;
-    c->dropped = status == noErr && (flags & kVTEncodeInfo_FrameDropped);
-    if (status == noErr && (!sample || c->dropped)) c->result = -1;
-    if (c->result == noErr) {
-        BOOL sync = YES;
-        CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
-        if (attachments && CFArrayGetCount(attachments) > 0) {
-            CFDictionaryRef a = CFArrayGetValueAtIndex(attachments, 0);
-            CFBooleanRef not_sync = CFDictionaryGetValue(a, kCMSampleAttachmentKey_NotSync);
-            sync = !(not_sync && CFBooleanGetValue(not_sync));
-        }
-        NSMutableData *unit = [NSMutableData data];
-        if (sync) {
-            CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
-            size_t sets = 0;
-            if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, 0, NULL, NULL, &sets, NULL))
-                c->result = -1;
-            for (size_t i = 0; c->result == noErr && i < sets; i++) {
-                const uint8_t *p = NULL;
-                size_t len = 0;
-                if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(format, i, &p, &len, NULL, NULL))
-                    c->result = -1;
-                else
-                    append_nal(unit, p, len);
-            }
-        }
-        CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
-        size_t total = 0;
-        char *data = NULL;
-        if (c->result == noErr &&
-            (!block || CMBlockBufferGetDataPointer(block, 0, NULL, &total, &data) != kCMBlockBufferNoErr))
+    @autoreleasepool {
+        FrCapture *c = (__bridge FrCapture *)refcon;
+        c->unit = nil;
+        c->result = status;
+        c->dropped = status == noErr && (flags & kVTEncodeInfo_FrameDropped);
+        if (status == noErr && (!sample || !CMSampleBufferIsValid(sample) ||
+                              !CMSampleBufferDataIsReady(sample) || c->dropped))
             c->result = -1;
-        // VideoToolbox writes four-byte big-endian NAL lengths.
-        for (size_t off = 0; c->result == noErr && off < total;) {
-            if (total - off < 4) {
-                c->result = -1;
-                break;
-            }
-            uint32_t len = ((uint32_t)(uint8_t)data[off] << 24) | ((uint32_t)(uint8_t)data[off + 1] << 16) |
-                           ((uint32_t)(uint8_t)data[off + 2] << 8) | (uint32_t)(uint8_t)data[off + 3];
-            off += 4;
-            if (len == 0 || len > total - off) {
-                c->result = -1;
-                break;
-            }
-            append_nal(unit, (const uint8_t *)data + off, len);
-            off += len;
-        }
         if (c->result == noErr) {
-            c->unit = unit;
-            c->keyframe = sync;
+            BOOL sync = YES;
+            CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
+            if (attachments && CFArrayGetCount(attachments) > 0) {
+                CFDictionaryRef a = CFArrayGetValueAtIndex(attachments, 0);
+                CFBooleanRef not_sync = CFDictionaryGetValue(a, kCMSampleAttachmentKey_NotSync);
+                sync = !(not_sync && CFBooleanGetValue(not_sync));
+            }
+            NSMutableData *unit = [NSMutableData data];
+            if (!unit) c->result = -1;
+            if (sync && c->result == noErr) {
+                CMFormatDescriptionRef format = CMSampleBufferGetFormatDescription(sample);
+                size_t sets = 0;
+                if (!format ||
+                    CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                        format, 0, NULL, NULL, &sets, NULL) != noErr ||
+                    sets != 3)
+                    c->result = -1;
+                for (size_t i = 0; c->result == noErr && i < sets; i++) {
+                    const uint8_t *p = NULL;
+                    size_t len = 0;
+                    if (CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+                            format, i, &p, &len, NULL, NULL) != noErr ||
+                        !append_nal(unit, p, len, c->unit_limit))
+                        c->result = -1;
+                }
+            }
+            CMBlockBufferRef block = CMSampleBufferGetDataBuffer(sample);
+            size_t total = block ? CMBlockBufferGetDataLength(block) : 0;
+            if (c->result == noErr &&
+                (total == 0 || unit.length > c->unit_limit ||
+                 total > c->unit_limit - unit.length))
+                c->result = -1;
+            // CMBlockBuffer offsets are contiguous; its underlying memory need
+            // not be. CopyDataBytes handles fragmented buffers without reading
+            // past the first memory block or allocating an unbounded scratch.
+            for (size_t off = 0; c->result == noErr && off < total;) {
+                uint8_t size[4];
+                if (total - off < sizeof size ||
+                    CMBlockBufferCopyDataBytes(block, off, sizeof size, size) != kCMBlockBufferNoErr) {
+                    c->result = -1;
+                    break;
+                }
+                uint32_t len = ((uint32_t)size[0] << 24) | ((uint32_t)size[1] << 16) |
+                               ((uint32_t)size[2] << 8) | (uint32_t)size[3];
+                off += sizeof size;
+                if (len > total - off || !fr_cap_nal_fits(unit.length, len, c->unit_limit)) {
+                    c->result = -1;
+                    break;
+                }
+                size_t prefix = unit.length;
+                [unit increaseLengthBy:4 + (size_t)len];
+                uint8_t *destination = unit.mutableBytes;
+                destination[prefix] = 0;
+                destination[prefix + 1] = 0;
+                destination[prefix + 2] = 0;
+                destination[prefix + 3] = 1;
+                if (CMBlockBufferCopyDataBytes(block, off, len, destination + prefix + 4) !=
+                    kCMBlockBufferNoErr) {
+                    c->result = -1;
+                    break;
+                }
+                off += len;
+            }
+            if (c->result == noErr) {
+                c->unit = unit;
+                c->keyframe = sync;
+            }
         }
+        dispatch_semaphore_signal(c->output);
     }
-    dispatch_semaphore_signal(c->output);
 }
 
 static BOOL set(VTCompressionSessionRef s, CFStringRef key, CFTypeRef value) {
@@ -377,6 +548,8 @@ static int open_capture(uint32_t display_id, uint32_t width, uint32_t height, ui
         // cursor is captured separately (ReadCursor reports Unsupported).
         config.showsCursor = YES;
         c->queue = dispatch_queue_create("fr.capture", DISPATCH_QUEUE_SERIAL);
+        c->filter = filter;
+        c->configuration = config;
         c->stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:c];
         NSError *error = nil;
         if (![c->stream addStreamOutput:c type:SCStreamOutputTypeScreen sampleHandlerQueue:c->queue
@@ -416,6 +589,12 @@ int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t f
         bitrate == 0)
         return FR_CAP_INVALID;
     *out = NULL;
+    // A live static source needs the bounded verification path. Never claim
+    // that an older runtime can prove freshness by retaining the last pixels.
+    if (@available(macOS 14.0, *)) {
+    } else {
+        return FR_CAP_UNAVAILABLE;
+    }
     int lock = setup_lock(2000);
     int status = open_capture(display_id, width, height, fps, bitrate, out);
     setup_unlock(lock);
@@ -427,55 +606,128 @@ int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t f
 // later releases one frame's budget; past this many the request fails.
 #define FR_CAP_RESUBMITS 8
 
-// Encode the newest complete frame. With `only_if_changed`, a request that
-// finds no frame newer than the last encode returns FR_CAP_UNCHANGED
-// (a forced IDR always encodes). Waits up to `timeout_ms` for the first frame
-// and for the encoder. On success `buffer` holds an Annex B access unit with
-// VPS/SPS/PPS before an IDR.
+static int capture_live(FrCapture *c) {
+    os_unfair_lock_lock(&c->lock);
+    BOOL stopped = c->stopped || c->source.exhausted;
+    os_unfair_lock_unlock(&c->lock);
+    if (stopped) return FR_CAP_GEOMETRY;
+    if (!CGPreflightScreenCaptureAccess()) return FR_CAP_PERMISSION;
+    return fr_cap_display_check(&c->display);
+}
+
+static BOOL source_current(FrCapture *c, uint64_t source_epoch) {
+    os_unfair_lock_lock(&c->lock);
+    BOOL current = !c->stopped && fr_cap_source_current(&c->source, source_epoch);
+    os_unfair_lock_unlock(&c->lock);
+    return current;
+}
+
+// A reply may use the broker's pre-request timestamp only after positive
+// post-request source evidence. Cached pixels and stream silence cannot mint
+// Unchanged or a fresh IDR. One absolute deadline includes source verification,
+// native encoding and all bounded rate-control resubmissions.
 int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t timeout_ms, uint8_t *buffer,
                   size_t capacity, size_t *length, int *idr) {
-    if (!handle || !buffer || !length || !idr) return FR_CAP_INVALID;
+    if (!handle || !buffer || !length || !idr || capacity == 0 || timeout_ms == 0)
+        return FR_CAP_INVALID;
+    uint64_t requested = mach_absolute_time();
+    uint64_t entered_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+    uint64_t timeout_ns = (uint64_t)timeout_ms * NSEC_PER_MSEC;
+    if (entered_ns > UINT64_MAX - timeout_ns) return FR_CAP_INVALID;
+    uint64_t deadline_ns = entered_ns + timeout_ns;
+    dispatch_time_t deadline = after_ms(timeout_ms);
     FrCapture *c = (__bridge FrCapture *)handle;
     *length = 0;
     *idr = 0;
     if (!c->session) return FR_CAP_CLOSED;
+    int live = capture_live(c);
+    if (live) return live;
     @autoreleasepool {
         CVPixelBufferRef picture = NULL;
-        uint64_t arrived = 0;
-        dispatch_time_t deadline = after_ms(timeout_ms);
+        uint64_t selected = 0;
+        uint64_t source_epoch = 0;
+        BOOL verification = NO;
         for (;;) {
+            uint64_t now_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+            if (now_ns < entered_ns || now_ns >= deadline_ns) return FR_CAP_TIMEOUT;
             os_unfair_lock_lock(&c->lock);
-            BOOL stopped = c->stopped;
-            arrived = c->arrived;
-            if (c->latest && !stopped) picture = CVPixelBufferRetain(c->latest);
+            BOOL stopped = c->stopped || c->source.exhausted;
+            if (!stopped && c->latest && fr_cap_source_ready(&c->source, requested)) {
+                picture = CVPixelBufferRetain(c->latest);
+                selected = c->source.picture;
+                source_epoch = c->source.invalidation;
+            }
             os_unfair_lock_unlock(&c->lock);
             if (stopped) return FR_CAP_GEOMETRY;
             if (picture) break;
-            if (dispatch_time(DISPATCH_TIME_NOW, 0) >= deadline) return FR_CAP_TIMEOUT;
+            if (now_ns - entered_ns >= (uint64_t)FR_CAP_VERIFY_WAIT_MS * NSEC_PER_MSEC) {
+                live = capture_live(c);
+                if (live) return live;
+                int result = verify_source(c, deadline, deadline_ns, &picture, &source_epoch);
+                if (result) return result;
+                if (!picture) return FR_CAP_UNAVAILABLE;
+                verification = YES;
+                // This image is not the stream's last complete picture.
+                // Never use a later stream Idle event as an unchanged proof
+                // of this different capture. A stream image must first encode.
+                selected = 0;
+                break;
+            }
             usleep(1000);
         }
-        if (only_if_changed && !force_idr && arrived == c->encoded) {
+        live = capture_live(c);
+        if (!live && !source_current(c, source_epoch)) live = FR_CAP_UNAVAILABLE;
+        if (live || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) {
             CVPixelBufferRelease(picture);
-            return FR_CAP_UNCHANGED;
+            return live ? live : FR_CAP_TIMEOUT;
+        }
+        if (!verification && only_if_changed && !force_idr && selected == c->encoded) {
+            CVPixelBufferRelease(picture);
+            os_unfair_lock_lock(&c->lock);
+            BOOL current = !c->stopped && fr_cap_source_current(&c->source, source_epoch);
+            BOOL timely = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline_ns;
+            int result = !current ? FR_CAP_UNAVAILABLE
+                                 : timely ? FR_CAP_UNCHANGED : FR_CAP_TIMEOUT;
+            os_unfair_lock_unlock(&c->lock);
+            return result;
+        }
+        if (verification && c->verification_encoded == UINT64_MAX) {
+            CVPixelBufferRelease(picture);
+            return FR_CAP_UNAVAILABLE;
         }
         NSDictionary *options =
             force_idr ? @{(__bridge NSString *)kVTEncodeFrameOptionKey_ForceKeyFrame : @YES} : nil;
         int64_t now = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000);
+        if (c->last_pts != INT64_MIN && c->last_pts > INT64_MAX - c->interval) {
+            CVPixelBufferRelease(picture);
+            return FR_CAP_CODEC;
+        }
         int64_t pts = c->last_pts == INT64_MIN || now > c->last_pts + c->interval
                           ? now
                           : c->last_pts + c->interval;
+        c->unit_limit = capacity;
         for (int attempt = 0;; attempt++) {
+            if (!source_current(c, source_epoch)) {
+                CVPixelBufferRelease(picture);
+                return FR_CAP_UNAVAILABLE;
+            }
+            if (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) {
+                CVPixelBufferRelease(picture);
+                return FR_CAP_TIMEOUT;
+            }
             c->unit = nil;
             c->dropped = NO;
             OSStatus submitted =
-                VTCompressionSessionEncodeFrame(c->session, picture, CMTimeMake(pts, 1000000), kCMTimeInvalid,
-                                                (__bridge CFDictionaryRef)options, NULL, NULL);
+                VTCompressionSessionEncodeFrame(c->session, picture, CMTimeMake(pts, 1000000),
+                                                kCMTimeInvalid, (__bridge CFDictionaryRef)options,
+                                                NULL, NULL);
             if (submitted != noErr) {
                 CVPixelBufferRelease(picture);
                 return FR_CAP_CODEC;
             }
             if (dispatch_semaphore_wait(c->output, deadline)) {
-                // The callback will still signal; drain it before the next encode.
+                // The original worker supervisor can kill a hung native drain.
+                // Releasing the submitted surface before this callback is unsafe.
                 VTCompressionSessionCompleteFrames(c->session, kCMTimeInvalid);
                 dispatch_semaphore_wait(c->output, DISPATCH_TIME_FOREVER);
                 CVPixelBufferRelease(picture);
@@ -483,17 +735,51 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
             }
             c->last_pts = pts;
             if (!c->dropped || attempt == FR_CAP_RESUBMITS) break;
+            if (pts > INT64_MAX - c->interval) {
+                CVPixelBufferRelease(picture);
+                return FR_CAP_CODEC;
+            }
             pts += c->interval;
         }
         CVPixelBufferRelease(picture);
         if (c->result != noErr || !c->unit) return FR_CAP_CODEC;
+        live = capture_live(c);
+        if (!live && !source_current(c, source_epoch)) live = FR_CAP_UNAVAILABLE;
+        if (live || clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) {
+            c->unit = nil;
+            return live ? live : FR_CAP_TIMEOUT;
+        }
         if (c->unit.length > capacity) return FR_CAP_TOO_LARGE;
         memcpy(buffer, c->unit.bytes, c->unit.length);
-        *length = c->unit.length;
-        *idr = c->keyframe ? 1 : 0;
+        // Publication shares the invalidation lock, so an invalid->complete
+        // transition during native encoding/copy cannot revive these pixels.
+        os_unfair_lock_lock(&c->lock);
+        BOOL current = !c->stopped && fr_cap_source_current(&c->source, source_epoch);
+        BOOL timely = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline_ns;
+        if (current && timely) {
+            *length = c->unit.length;
+            *idr = c->keyframe ? 1 : 0;
+            c->encoded = selected;
+            if (verification) c->verification_encoded++;
+        }
+        os_unfair_lock_unlock(&c->lock);
         c->unit = nil;
-        c->encoded = arrived;
+        if (!current) return FR_CAP_UNAVAILABLE;
+        if (!timely) return FR_CAP_TIMEOUT;
     }
+    return FR_CAP_OK;
+}
+
+// Content-free, cumulative work counters for the original native owner. These
+// count API requests and encoded refreshes, not measured GPU time or copies.
+int fr_cap_statistics(void *handle, uint64_t *requests, uint64_t *encoded_refreshes,
+                       uint32_t *verification_wait_ms) {
+    if (!handle || !requests || !encoded_refreshes || !verification_wait_ms)
+        return FR_CAP_INVALID;
+    FrCapture *c = (__bridge FrCapture *)handle;
+    *requests = c->verification_requests;
+    *encoded_refreshes = c->verification_encoded;
+    *verification_wait_ms = FR_CAP_VERIFY_WAIT_MS;
     return FR_CAP_OK;
 }
 
@@ -512,10 +798,7 @@ int fr_cap_set_bitrate(void *handle, uint32_t bitrate) {
 int fr_cap_check(void *handle) {
     if (!handle) return FR_CAP_INVALID;
     FrCapture *c = (__bridge FrCapture *)handle;
-    os_unfair_lock_lock(&c->lock);
-    BOOL stopped = c->stopped;
-    os_unfair_lock_unlock(&c->lock);
-    return stopped ? FR_CAP_GEOMETRY : fr_cap_display_check(&c->display);
+    return capture_live(c);
 }
 
 void fr_cap_free(void *handle) {
