@@ -86,3 +86,61 @@ capture/codec path. Supersede this row when a stable signed helper and the full
 capture-to-presentation experiment qualify the exact device/OS profile; retain
 historical evidence unless the repository owner authorizes removal. The Phase 0
 task and downstream gates remain open.
+
+## Result: Apple M5 Ultra, macOS 27.0.1 (2026-11-08)
+
+`sck_vt_probe.m` performs live ScreenCaptureKit capture of the main display
+(3072x1728 points, 6144x3456 pixels). Its header has the build and run
+commands. The capture is NV12 BT.709 video range, without the cursor. It is
+encoded with VideoToolbox HEVC Main using the settings the macOS worker
+needs:
+- RealTime
+- `EnableLowLatencyRateControl`
+- `AllowFrameReordering` = false
+- **`ReferenceBufferCount` = 1**
+
+Results:
+- Readback shows ReferenceBufferCount 1 and no reordering. The software
+  encoder fallback is disabled.
+- **Bitstream.** The DPB is 2, with one short-term set that references the
+  previous picture only. Every picture has temporal ID 0, although the
+  VPS/SPS declare two sub-layers. Admission accepts this since cd64bb9f.
+- **Admission.** 240 of 240 access units were admitted, including a forced
+  second IDR.
+- **Decode.** FFmpeg decoded every frame with `-err_detect explode`, both in
+  software and with `-hwaccel videotoolbox`.
+- **Presentation.** The output plays through `macos_present` (VideoToolbox
+  decode, Metal). 5120x2880 at `--scale 2` is shown exactly 1:1, at 60 fps
+  (707 frames in 12 s). Decode+present p50 is 4.5 ms, p99 9.0 ms.
+- **Settings that are refused.**
+  - Without ReferenceBufferCount=1, low-latency mode fails admission with
+    DpbLimit.
+  - The default (not low-latency) mode refuses ReferenceBufferCount, and
+    its DPB of 5 with four reference sets fails with DpbLimit.
+  - `PrioritizeEncodingSpeedOverQuality` is refused in low-latency mode.
+    `MaximizePowerEfficiency=false` changes nothing measurable.
+
+Encode latency (submit to output callback) and drops, with 300 frames
+submitted at 60 Hz:
+
+| Coded size | Avg / max ms | Dropped | Note |
+|---|---|---|---|
+| 1920x1080 | 6.0 / 40 | 0 | Codec PSNR 44.4 dB Y, but a 3.2x downscale of this display |
+| 3072x1728 | 10.4 / 58 | 0 | Exact 2:1 of the display |
+| 3840x2160 | 15.4 / 57 | 0 | |
+| 5120x2880 | 26.2 / 70 | 1-3 | Largest 16:9 size within the 16,777,216-pixel protocol cap |
+
+Cost is linear in pixels, about 1.8 ns per pixel. Two conclusions follow:
+- Encoding at the client's displayed size, rather than always at native, is
+  the way to keep both clarity (1:1 at the client) and smoothness.
+- Native 6144x3456 exceeds `ProtocolLimits::ABSOLUTE`.
+
+Time to first packet after `startCapture` was 185 ms to 1.9 s, dominated
+by ScreenCaptureKit start.
+
+Not tested here:
+- Copy counts.
+- Reconfiguration latency.
+- Long idle.
+- The signed-helper attribution of Screen Recording. This probe ran from a
+  terminal that already had the grant.
