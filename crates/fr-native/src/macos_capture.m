@@ -51,6 +51,33 @@ static dispatch_time_t after_ms(uint32_t ms) {
     return dispatch_time(DISPATCH_TIME_NOW, (int64_t)ms * (int64_t)NSEC_PER_MSEC);
 }
 
+// This is one native-open budget, not a fresh allowance for each framework
+// call. The broker's earlier preparation deadline remains the outer bound.
+// Native synchronous calls cannot be preempted here; late returns are refused
+// and the original worker process remains the hard hang-containment boundary.
+#define FR_CAP_OPEN_MS 2000
+typedef struct {
+    FrCapDeadline clock;
+    dispatch_time_t wait;
+} FrCapOpenDeadline;
+
+static BOOL open_live(const FrCapOpenDeadline *deadline) {
+    return fr_cap_deadline_live(&deadline->clock, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+}
+
+// A pending discovery or failed start retains this exact lease. Its descriptor
+// is not closed merely because the calling request stopped accepting results.
+@interface FrCapSetupLease : NSObject {
+  @public
+    int descriptor;
+}
+@end
+@implementation FrCapSetupLease
+- (void)dealloc {
+    if (descriptor >= 0) close(descriptor);
+}
+@end
+
 // Capture-system setup is serialized across this user's processes. On macOS
 // 27.0.1 a stream start hangs (well past any timeout) while another live
 // process of the same user has queried shareable content but not yet started
@@ -58,45 +85,108 @@ static dispatch_time_t after_ms(uint32_t ms) {
 // touches the capture system (Core Graphics only), and opening queries the
 // content and starts the stream under this lock, as one step. The lock is
 // advisory, in the user's private temporary directory, and the kernel drops
-// it if the holder dies. Best effort: without it, setup proceeds anyway.
-static int setup_lock(uint32_t timeout_ms) {
+// it if the holder dies. Failure to acquire it refuses setup; starting another
+// query after its entire budget expired would bypass that serialization.
+static int setup_lock(const FrCapOpenDeadline *deadline, FrCapSetupLease *__strong *out) {
+    *out = nil;
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
     char dir[PATH_MAX], path[PATH_MAX];
     size_t n = confstr(_CS_DARWIN_USER_TEMP_DIR, dir, sizeof dir);
-    if (n == 0 || n > sizeof dir) return -1;
-    if (snprintf(path, sizeof path, "%sfr-capture-setup.lock", dir) >= (int)sizeof path) return -1;
+    if (n == 0 || n > sizeof dir) return FR_CAP_UNAVAILABLE;
+    if (snprintf(path, sizeof path, "%sfr-capture-setup.lock", dir) >= (int)sizeof path)
+        return FR_CAP_UNAVAILABLE;
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
-    if (fd < 0) return -1;
-    dispatch_time_t deadline = after_ms(timeout_ms);
-    while (flock(fd, LOCK_EX | LOCK_NB)) {
-        if (errno != EWOULDBLOCK || dispatch_time(DISPATCH_TIME_NOW, 0) >= deadline) {
+    if (fd < 0) return open_live(deadline) ? FR_CAP_UNAVAILABLE : FR_CAP_TIMEOUT;
+    for (;;) {
+        if (!open_live(deadline)) {
             close(fd);
-            return -1;
+            return FR_CAP_TIMEOUT;
         }
-        usleep(2000);
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) break;
+        if (errno != EWOULDBLOCK && errno != EINTR) {
+            close(fd);
+            return open_live(deadline) ? FR_CAP_UNAVAILABLE : FR_CAP_TIMEOUT;
+        }
+        uint64_t remaining = fr_cap_deadline_remaining(
+            &deadline->clock, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+        if (remaining > 2 * NSEC_PER_MSEC) remaining = 2 * NSEC_PER_MSEC;
+        struct timespec pause = {.tv_sec = 0, .tv_nsec = (long)remaining};
+        nanosleep(&pause, NULL);
     }
-    return fd;
+    if (!open_live(deadline)) {
+        close(fd);
+        return FR_CAP_TIMEOUT;
+    }
+    FrCapSetupLease *lease = [FrCapSetupLease new];
+    if (!lease) {
+        close(fd);
+        return FR_CAP_ALLOCATION;
+    }
+    lease->descriptor = fd;
+    *out = lease;
+    return FR_CAP_OK;
 }
 
-// Closing the descriptor releases the lock.
-static void setup_unlock(int fd) {
-    if (fd >= 0) close(fd);
+@interface FrCapDiscovery : NSObject {
+  @public
+    os_unfair_lock lock;
+    FrCapOneShot request;
+    FrCapSetupLease *lease;
+    SCShareableContent *content;
+    int result;
+    dispatch_semaphore_t done;
 }
+@end
+@implementation FrCapDiscovery
+@end
 
 // Shareable content needs the Screen Recording grant; never prompt from here.
-static int shareable(uint32_t timeout_ms, SCShareableContent **out) {
-    if (!CGPreflightScreenCaptureAccess()) return FR_CAP_PERMISSION;
-    __block SCShareableContent *content = nil;
-    __block BOOL failed = NO;
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+// A late callback only retires its original query/lease, never starts a stream.
+static int shareable(const FrCapOpenDeadline *deadline, FrCapSetupLease *lease,
+                      SCShareableContent *__strong *out) {
+    *out = nil;
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+    BOOL permission = CGPreflightScreenCaptureAccess();
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+    if (!permission) return FR_CAP_PERMISSION;
+    FrCapDiscovery *discovery = [FrCapDiscovery new];
+    if (!discovery) return FR_CAP_ALLOCATION;
+    discovery->lock = OS_UNFAIR_LOCK_INIT;
+    discovery->request.accepting = true;
+    discovery->lease = lease;
+    discovery->result = FR_CAP_PERMISSION;
+    discovery->done = dispatch_semaphore_create(0);
+    if (!discovery->done) return FR_CAP_ALLOCATION;
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
     [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *c, NSError *e) {
-      content = c;
-      failed = e != nil;
-      dispatch_semaphore_signal(done);
+      @autoreleasepool {
+          // Keep the lease through this callback even if an expired caller
+          // has already returned. The ordinary caller retains it across the
+          // subsequent configure/start operation when this result is timely.
+          __attribute__((objc_precise_lifetime)) FrCapSetupLease *completed_lease = nil;
+          os_unfair_lock_lock(&discovery->lock);
+          BOOL accepted = fr_cap_one_shot_complete(&discovery->request);
+          if (accepted) {
+              discovery->content = c;
+              discovery->result = !e && c ? FR_CAP_OK : FR_CAP_PERMISSION;
+          }
+          completed_lease = discovery->lease;
+          discovery->lease = nil;
+          os_unfair_lock_unlock(&discovery->lock);
+          if (accepted) dispatch_semaphore_signal(discovery->done);
+          (void)completed_lease;
+      }
     }];
-    if (dispatch_semaphore_wait(done, after_ms(timeout_ms))) return FR_CAP_TIMEOUT;
-    if (failed || !content) return FR_CAP_PERMISSION;
-    *out = content;
-    return FR_CAP_OK;
+    BOOL timely = dispatch_semaphore_wait(discovery->done, deadline->wait) == 0 && open_live(deadline);
+    os_unfair_lock_lock(&discovery->lock);
+    fr_cap_one_shot_close(&discovery->request);
+    int result = timely ? discovery->result : FR_CAP_TIMEOUT;
+    SCShareableContent *content = discovery->content;
+    discovery->content = nil;
+    os_unfair_lock_unlock(&discovery->lock);
+    if (result == FR_CAP_OK) *out = content;
+    return result;
 }
 
 // The display's current mode and placement, from Core Graphics alone (no
@@ -253,6 +343,10 @@ static void observe(FrCapture *c, enum FrCapSourceEvent event, uint64_t displaye
                     uint64_t received, CVPixelBufferRef picture) {
     CVPixelBufferRef previous = NULL;
     os_unfair_lock_lock(&c->lock);
+    if (c->stopped) {
+        os_unfair_lock_unlock(&c->lock);
+        return;
+    }
     enum FrCapSourceUpdate update =
         fr_cap_source_observe(&c->source, event, displayed, received);
     if (update == FR_CAP_SOURCE_REPLACED) {
@@ -488,60 +582,187 @@ static void close_session(FrCapture *c) {
     c->session = NULL;
 }
 
+// This owner exists before the stream can call back. Its deliberate retained
+// self-reference is released only by successful transfer or positive native
+// retirement, not by the caller's timeout. A stuck stop/removal/encoder keeps
+// this one capture and setup lease owned until the worker process is reaped.
+@interface FrCapOpening : NSObject {
+  @public
+    os_unfair_lock lock;
+    FrCapOpeningPolicy policy;
+    FrCapture *capture;
+    FrCapSetupLease *lease;
+    FrCapOpening *retention;
+    dispatch_semaphore_t done;
+    BOOL output_registered;
+}
+@end
+@implementation FrCapOpening
+@end
+
+static void opening_release(FrCapOpening *opening) {
+    os_unfair_lock_lock(&opening->lock);
+    BOOL release = fr_cap_opening_release(&opening->policy);
+    os_unfair_lock_unlock(&opening->lock);
+    if (release) {
+        // Exactly one actor may clear these fields, and no native operation
+        // still needs them after both retirement acknowledgements. Destruction
+        // and descriptor close happen outside the policy lock.
+        opening->capture = nil;
+        opening->lease = nil;
+        opening->retention = nil;
+    }
+}
+
+static void opening_retired(FrCapOpening *opening, BOOL codec) {
+    os_unfair_lock_lock(&opening->lock);
+    if (codec)
+        opening->policy.codec_retired = true;
+    else
+        opening->policy.stream_retired = true;
+    os_unfair_lock_unlock(&opening->lock);
+    opening_release(opening);
+}
+
+static void opening_remove_output(FrCapOpening *opening) {
+    FrCapture *c = opening->capture;
+    if (opening->output_registered) {
+        NSError *error = nil;
+        if (![c->stream removeStreamOutput:c type:SCStreamOutputTypeScreen error:&error])
+            return; // Removal was not confirmed: retain the original owner.
+        opening->output_registered = NO;
+    }
+    // Removal prevents further delivery to this output. The marker runs after
+    // already queued callbacks on the ORIGINAL serial sample queue; none can
+    // repopulate pixels because failed-open admission was fenced first.
+    dispatch_async(c->queue, ^{
+      @autoreleasepool {
+          opening_retired(opening, NO);
+      }
+    });
+}
+
+// Called by the unique actor that claimed retirement under opening->lock.
+// VT remains caller-owned; asynchronous SCK cleanup never accesses session.
+static void opening_retire(FrCapOpening *opening) {
+    if (opening->policy.started) {
+        [opening->capture->stream stopCaptureWithCompletionHandler:^(NSError *error) {
+          @autoreleasepool {
+              if (!error) opening_remove_output(opening);
+              // Error or no completion is not drained. Keep the setup lease
+              // and capture owned for the existing process supervisor.
+          }
+        }];
+    } else {
+        opening_remove_output(opening);
+    }
+}
+
+static int opening_abandon(FrCapOpening *opening, const FrCapOpenDeadline *deadline, int status) {
+    FrCapture *c = opening->capture;
+    os_unfair_lock_lock(&c->lock);
+    c->stopped = YES;
+    fr_cap_source_invalidate(&c->source, mach_absolute_time());
+    CVPixelBufferRef previous = c->latest;
+    c->latest = NULL;
+    os_unfair_lock_unlock(&c->lock);
+    if (previous) CVPixelBufferRelease(previous);
+
+    os_unfair_lock_lock(&opening->lock);
+    fr_cap_opening_close(&opening->policy);
+    BOOL retire = fr_cap_opening_retire(&opening->policy);
+    os_unfair_lock_unlock(&opening->lock);
+    if (retire) opening_retire(opening);
+    // No frames have been submitted to VT during open. Invalidation may still
+    // block in the framework: retaining ownership and the outer process bound
+    // are required; a timeout is never reported as native drain completion.
+    close_session(c);
+    opening_retired(opening, YES);
+    return open_live(deadline) ? status : FR_CAP_TIMEOUT;
+}
+
+static BOOL set_open(VTCompressionSessionRef session, CFStringRef key, CFTypeRef value,
+                     const FrCapOpenDeadline *deadline) {
+    if (!open_live(deadline)) return NO;
+    BOOL accepted = set(session, key, value);
+    return open_live(deadline) && accepted;
+}
+
 // Hardware only, low-latency rate control: a two-picture DPB with one
 // previous reference. The default mode keeps four references.
-static int open_session(FrCapture *c, uint32_t fps, uint32_t bitrate) {
+static int open_session(FrCapture *c, uint32_t fps, uint32_t bitrate,
+                         const FrCapOpenDeadline *deadline) {
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
     NSDictionary *spec = @{
         (__bridge NSString *)kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder : @YES,
         (__bridge NSString *)kVTVideoEncoderSpecification_EnableLowLatencyRateControl : @YES,
     };
     VTCompressionSessionRef session = NULL;
-    if (VTCompressionSessionCreate(NULL, (int32_t)c->width, (int32_t)c->height, kCMVideoCodecType_HEVC,
-                                   (__bridge CFDictionaryRef)spec, NULL, NULL, encoded,
-                                   (__bridge void *)c, &session) != noErr)
-        return FR_CAP_UNAVAILABLE;
+    OSStatus created = VTCompressionSessionCreate(
+        NULL, (int32_t)c->width, (int32_t)c->height, kCMVideoCodecType_HEVC,
+        (__bridge CFDictionaryRef)spec, NULL, NULL, encoded, (__bridge void *)c, &session);
+    // Even a late/error return must leave any native allocation with its
+    // original owner. opening_abandon performs and records its retirement.
     c->session = session;
-    if (!set(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue) ||
-        !set(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse) ||
-        !set(session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel) ||
-        !set(session, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFTypeRef) @(fps)) ||
-        !set(session, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFTypeRef) @(bitrate)) ||
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+    if (created != noErr || !session) return FR_CAP_UNAVAILABLE;
+    if (!set_open(session, kVTCompressionPropertyKey_RealTime, kCFBooleanTrue, deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse, deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_HEVC_Main_AutoLevel,
+                  deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_ExpectedFrameRate, (__bridge CFTypeRef) @(fps),
+                  deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFTypeRef) @(bitrate),
+                  deadline) ||
         // IDRs come only on request (start, recovery).
-        !set(session, kVTCompressionPropertyKey_MaxKeyFrameInterval, (__bridge CFTypeRef) @(INT32_MAX)) ||
-        !set(session, kVTCompressionPropertyKey_ColorPrimaries, kCVImageBufferColorPrimaries_ITU_R_709_2) ||
-        !set(session, kVTCompressionPropertyKey_TransferFunction, kCVImageBufferTransferFunction_ITU_R_709_2) ||
-        !set(session, kVTCompressionPropertyKey_YCbCrMatrix, kCVImageBufferYCbCrMatrix_ITU_R_709_2) ||
-        !set(session, kVTCompressionPropertyKey_ReferenceBufferCount, (__bridge CFTypeRef) @1) ||
-        VTCompressionSessionPrepareToEncodeFrames(session) != noErr) {
-        close_session(c);
-        return FR_CAP_UNAVAILABLE;
-    }
+        !set_open(session, kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                  (__bridge CFTypeRef) @(INT32_MAX), deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_ColorPrimaries,
+                  kCVImageBufferColorPrimaries_ITU_R_709_2, deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_TransferFunction,
+                  kCVImageBufferTransferFunction_ITU_R_709_2, deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_YCbCrMatrix,
+                  kCVImageBufferYCbCrMatrix_ITU_R_709_2, deadline) ||
+        !set_open(session, kVTCompressionPropertyKey_ReferenceBufferCount, (__bridge CFTypeRef) @1,
+                  deadline))
+        return open_live(deadline) ? FR_CAP_UNAVAILABLE : FR_CAP_TIMEOUT;
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+    OSStatus prepared = VTCompressionSessionPrepareToEncodeFrames(session);
+    if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+    if (prepared != noErr) return FR_CAP_UNAVAILABLE;
     return FR_CAP_OK;
 }
 
 static int open_capture(uint32_t display_id, uint32_t width, uint32_t height, uint32_t fps,
-                        uint32_t bitrate, void **out) {
+                        uint32_t bitrate, const FrCapOpenDeadline *deadline,
+                        FrCapSetupLease *lease, void **out) {
     @autoreleasepool {
         SCShareableContent *content = nil;
-        int status = shareable(1500, &content);
+        int status = shareable(deadline, lease, &content);
         if (status) return status;
         SCDisplay *display = nil;
         for (SCDisplay *d in content.displays)
             if (d.displayID == display_id) display = d;
+        if (!open_live(deadline)) return FR_CAP_TIMEOUT;
         if (!display) return FR_CAP_GEOMETRY;
 
         FrCapture *c = [FrCapture new];
+        if (!c) return FR_CAP_ALLOCATION;
         c->lock = OS_UNFAIR_LOCK_INIT;
         status = describe(display_id, &c->display);
+        if (!open_live(deadline)) return FR_CAP_TIMEOUT;
         if (status) return status;
         c->width = width;
         c->height = height;
         c->output = dispatch_semaphore_create(0);
+        if (!c->output) return FR_CAP_ALLOCATION;
         c->interval = 1000000 / (int64_t)fps;
         c->last_pts = INT64_MIN;
 
         SCContentFilter *filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
         SCStreamConfiguration *config = [SCStreamConfiguration new];
+        if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+        if (!filter || !config) return FR_CAP_ALLOCATION;
         config.width = width;
         config.height = height;
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
@@ -553,37 +774,70 @@ static int open_capture(uint32_t display_id, uint32_t width, uint32_t height, ui
         // cursor is captured separately (ReadCursor reports Unsupported).
         config.showsCursor = YES;
         c->queue = dispatch_queue_create("fr.capture", DISPATCH_QUEUE_SERIAL);
+        if (!open_live(deadline)) return FR_CAP_TIMEOUT;
+        if (!c->queue) return FR_CAP_ALLOCATION;
         c->filter = filter;
         c->configuration = config;
+
+        FrCapOpening *opening = [FrCapOpening new];
+        if (!opening) return FR_CAP_ALLOCATION;
+        opening->lock = OS_UNFAIR_LOCK_INIT;
+        opening->policy.accepting = true;
+        opening->capture = c;
+        opening->lease = lease;
+        opening->done = dispatch_semaphore_create(0);
+        if (!opening->done) return FR_CAP_ALLOCATION;
+        opening->retention = opening; // Deliberate original-operation ownership.
+        if (!open_live(deadline)) return opening_abandon(opening, deadline, FR_CAP_TIMEOUT);
         c->stream = [[SCStream alloc] initWithFilter:filter configuration:config delegate:c];
+        if (!open_live(deadline)) return opening_abandon(opening, deadline, FR_CAP_TIMEOUT);
+        if (!c->stream) return opening_abandon(opening, deadline, FR_CAP_UNAVAILABLE);
         NSError *error = nil;
-        if (![c->stream addStreamOutput:c type:SCStreamOutputTypeScreen sampleHandlerQueue:c->queue
-                                  error:&error])
-            return FR_CAP_UNAVAILABLE;
+        opening->output_registered =
+            [c->stream addStreamOutput:c type:SCStreamOutputTypeScreen sampleHandlerQueue:c->queue
+                                 error:&error];
+        if (!open_live(deadline)) return opening_abandon(opening, deadline, FR_CAP_TIMEOUT);
+        if (!opening->output_registered)
+            return opening_abandon(opening, deadline, FR_CAP_UNAVAILABLE);
         // Start capturing first and set up the encoder while the capture
-        // system starts: the two are independent until the first encode.
-        __block BOOL started = NO;
-        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        // system starts: the two are independent until the first encode, and
+        // both spend the same original setup budget.
+        os_unfair_lock_lock(&opening->lock);
+        BOOL requested = open_live(deadline) && fr_cap_opening_request(&opening->policy);
+        os_unfair_lock_unlock(&opening->lock);
+        if (!requested) return opening_abandon(opening, deadline, FR_CAP_TIMEOUT);
         [c->stream startCaptureWithCompletionHandler:^(NSError *e) {
-          started = e == nil;
-          dispatch_semaphore_signal(done);
+          @autoreleasepool {
+              os_unfair_lock_lock(&opening->lock);
+              BOOL completed = fr_cap_opening_complete(&opening->policy, e == nil);
+              BOOL retire = completed && fr_cap_opening_retire(&opening->policy);
+              os_unfair_lock_unlock(&opening->lock);
+              if (completed) dispatch_semaphore_signal(opening->done);
+              if (retire) opening_retire(opening);
+          }
         }];
-        status = open_session(c, fps, bitrate);
-        BOOL waited = dispatch_semaphore_wait(done, after_ms(1500)) == 0;
-        if (status || !waited || !started) {
-            if (waited && started) {
-                dispatch_semaphore_t stopped = dispatch_semaphore_create(0);
-                [c->stream stopCaptureWithCompletionHandler:^(NSError *e) {
-                  (void)e;
-                  dispatch_semaphore_signal(stopped);
-                }];
-                dispatch_semaphore_wait(stopped, after_ms(1000));
-            }
-            close_session(c);
-            if (status) return status;
-            return waited ? FR_CAP_PERMISSION : FR_CAP_TIMEOUT;
-        }
-        *out = (__bridge_retained void *)c;
+        status = open_session(c, fps, bitrate, deadline);
+        if (status) return opening_abandon(opening, deadline, status);
+        BOOL timely = dispatch_semaphore_wait(opening->done, deadline->wait) == 0 &&
+                      open_live(deadline);
+        if (!timely) return opening_abandon(opening, deadline, FR_CAP_TIMEOUT);
+        // A successful start callback is not proof the stream stayed live
+        // while the encoder configured. Fence final publication against the
+        // same stopped/exhausted state used by native source callbacks.
+        // This is the only nested lock site: capture, then opening.
+        os_unfair_lock_lock(&c->lock);
+        BOOL live = !c->stopped && !c->source.exhausted;
+        os_unfair_lock_lock(&opening->lock);
+        BOOL started = opening->policy.started;
+        BOOL published = live && fr_cap_opening_publish(
+            &opening->policy, &deadline->clock, clock_gettime_nsec_np(CLOCK_UPTIME_RAW));
+        if (published) *out = (__bridge_retained void *)c;
+        os_unfair_lock_unlock(&opening->lock);
+        os_unfair_lock_unlock(&c->lock);
+        if (!published)
+            return opening_abandon(opening, deadline,
+                                   !live ? FR_CAP_GEOMETRY : started ? FR_CAP_TIMEOUT : FR_CAP_PERMISSION);
+        opening_release(opening);
     }
     return FR_CAP_OK;
 }
@@ -594,16 +848,21 @@ int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t f
         bitrate == 0)
         return FR_CAP_INVALID;
     *out = NULL;
+    FrCapOpenDeadline deadline;
+    if (!fr_cap_deadline_init(&deadline.clock, clock_gettime_nsec_np(CLOCK_UPTIME_RAW),
+                              (uint64_t)FR_CAP_OPEN_MS * NSEC_PER_MSEC))
+        return FR_CAP_TIMEOUT;
+    deadline.wait = after_ms(FR_CAP_OPEN_MS);
     // A live static source needs the bounded verification path. Never claim
     // that an older runtime can prove freshness by retaining the last pixels.
     if (@available(macOS 14.0, *)) {
     } else {
         return FR_CAP_UNAVAILABLE;
     }
-    int lock = setup_lock(2000);
-    int status = open_capture(display_id, width, height, fps, bitrate, out);
-    setup_unlock(lock);
-    return status;
+    FrCapSetupLease *lease = nil;
+    int status = setup_lock(&deadline, &lease);
+    if (status) return status;
+    return open_capture(display_id, width, height, fps, bitrate, &deadline, lease, out);
 }
 
 // Low-latency rate control skips a picture that would overrun its budget,

@@ -4,6 +4,165 @@
 #include <assert.h>
 #include <stdio.h>
 
+static void deadline_has_exact_monotonic_boundaries(void) {
+    FrCapDeadline deadline;
+    assert(fr_cap_deadline_init(&deadline, 100, 2000));
+    assert(!fr_cap_deadline_live(&deadline, 99));
+    assert(fr_cap_deadline_remaining(&deadline, 99) == 0);
+    assert(fr_cap_deadline_live(&deadline, 100));
+    assert(fr_cap_deadline_remaining(&deadline, 100) == 2000);
+    assert(fr_cap_deadline_live(&deadline, 2099));
+    assert(fr_cap_deadline_remaining(&deadline, 2099) == 1);
+    assert(!fr_cap_deadline_live(&deadline, 2100));
+    assert(fr_cap_deadline_remaining(&deadline, 2100) == 0);
+    assert(!fr_cap_deadline_live(&deadline, UINT64_MAX));
+}
+
+static void deadline_refuses_zero_and_overflow_without_wrapping(void) {
+    FrCapDeadline deadline = {0};
+    assert(!fr_cap_deadline_init(&deadline, 42, 0));
+    assert(!fr_cap_deadline_live(&deadline, 42));
+    assert(!fr_cap_deadline_init(&deadline, UINT64_MAX - 1, 2));
+    assert(!fr_cap_deadline_live(&deadline, UINT64_MAX - 1));
+    assert(!fr_cap_deadline_live(&deadline, 0));
+    assert(fr_cap_deadline_init(&deadline, UINT64_MAX - 1, 1));
+    assert(fr_cap_deadline_remaining(&deadline, UINT64_MAX - 1) == 1);
+    assert(!fr_cap_deadline_live(&deadline, UINT64_MAX));
+}
+
+static void every_setup_stage_spends_the_same_original_budget(void) {
+    FrCapDeadline deadline;
+    assert(fr_cap_deadline_init(&deadline, 100, 2000));
+    // These are policy clock inputs, not simulated native completion claims.
+    assert(fr_cap_deadline_remaining(&deadline, 500) == 1600);
+    assert(fr_cap_deadline_remaining(&deadline, 1700) == 400);
+    assert(fr_cap_deadline_remaining(&deadline, 2099) == 1);
+    FrCapOpeningPolicy opening = {.accepting = true};
+    assert(fr_cap_opening_request(&opening));
+    assert(fr_cap_opening_complete(&opening, true));
+    assert(!fr_cap_opening_publish(&opening, &deadline, 2100));
+    assert(deadline.began == 100 && deadline.until == 2100);
+    assert(fr_cap_deadline_remaining(&deadline, 2200) == 0);
+}
+
+static void only_an_actual_timely_start_transfers_ownership_once(void) {
+    FrCapDeadline deadline;
+    assert(fr_cap_deadline_init(&deadline, 100, 2000));
+    FrCapOpeningPolicy opening = {.accepting = true};
+    assert(!fr_cap_opening_complete(&opening, true));
+    assert(!fr_cap_opening_publish(&opening, &deadline, 100));
+    assert(!fr_cap_opening_release(&opening));
+    assert(fr_cap_opening_request(&opening));
+    assert(!fr_cap_opening_request(&opening));
+    assert(!fr_cap_opening_publish(&opening, &deadline, 100));
+    assert(fr_cap_opening_complete(&opening, true));
+    assert(!fr_cap_opening_complete(&opening, false));
+    assert(!fr_cap_opening_publish(&opening, &deadline, 99));
+    assert(fr_cap_opening_publish(&opening, &deadline, 2099));
+    assert(!fr_cap_opening_publish(&opening, &deadline, 2099));
+    assert(!fr_cap_opening_request(&opening));
+    assert(!fr_cap_opening_retire(&opening));
+    assert(fr_cap_opening_release(&opening));
+    assert(!fr_cap_opening_release(&opening));
+    assert(!fr_cap_opening_complete(&opening, true));
+}
+
+static void a_completed_start_cannot_publish_after_expiry_or_close(void) {
+    FrCapDeadline deadline;
+    assert(fr_cap_deadline_init(&deadline, 100, 2000));
+    FrCapOpeningPolicy expired = {.accepting = true};
+    assert(fr_cap_opening_request(&expired));
+    assert(fr_cap_opening_complete(&expired, true));
+    assert(!fr_cap_opening_publish(&expired, &deadline, 2100));
+    assert(!fr_cap_opening_release(&expired));
+    fr_cap_opening_close(&expired);
+    assert(fr_cap_opening_retire(&expired));
+    assert(!fr_cap_opening_publish(&expired, &deadline, 2099));
+
+    FrCapOpeningPolicy closed = {.accepting = true};
+    assert(fr_cap_opening_request(&closed));
+    assert(fr_cap_opening_complete(&closed, true));
+    fr_cap_opening_close(&closed);
+    assert(!fr_cap_opening_publish(&closed, &deadline, 101));
+    assert(fr_cap_opening_retire(&closed));
+}
+
+static void close_before_start_retires_without_fabricating_a_callback(void) {
+    FrCapOpeningPolicy opening = {.accepting = true};
+    fr_cap_opening_close(&opening);
+    assert(!fr_cap_opening_request(&opening));
+    assert(!fr_cap_opening_complete(&opening, true));
+    assert(fr_cap_opening_retire(&opening));
+    assert(!fr_cap_opening_retire(&opening));
+    assert(!opening.requested && !opening.completed && !opening.started);
+    assert(!fr_cap_opening_release(&opening));
+    opening.codec_retired = true;
+    assert(!fr_cap_opening_release(&opening));
+    opening.stream_retired = true;
+    assert(fr_cap_opening_release(&opening));
+}
+
+static void late_start_success_or_failure_keeps_its_original_retirement_owner(void) {
+    FrCapDeadline deadline;
+    assert(fr_cap_deadline_init(&deadline, 100, 2000));
+    for (int success = 0; success <= 1; success++) {
+        FrCapOpeningPolicy opening = {.accepting = true};
+        assert(fr_cap_opening_request(&opening));
+        fr_cap_opening_close(&opening);
+        // Closing the encoder while start is pending cannot release the lease.
+        opening.codec_retired = true;
+        assert(!fr_cap_opening_retire(&opening));
+        assert(!fr_cap_opening_release(&opening));
+        assert(fr_cap_opening_complete(&opening, success != 0));
+        assert(opening.started == (success != 0));
+        assert(!fr_cap_opening_complete(&opening, success == 0));
+        assert(!fr_cap_opening_publish(&opening, &deadline, 101));
+        assert(fr_cap_opening_retire(&opening));
+        assert(!fr_cap_opening_retire(&opening));
+        assert(!fr_cap_opening_release(&opening));
+        opening.stream_retired = true;
+        assert(fr_cap_opening_release(&opening));
+        assert(!fr_cap_opening_release(&opening));
+    }
+}
+
+static void either_cleanup_order_requires_both_positive_acknowledgements(void) {
+    for (int codec_first = 0; codec_first <= 1; codec_first++) {
+        FrCapOpeningPolicy opening = {.accepting = true};
+        assert(fr_cap_opening_request(&opening));
+        assert(fr_cap_opening_complete(&opening, true));
+        fr_cap_opening_close(&opening);
+        assert(fr_cap_opening_retire(&opening));
+        assert(!fr_cap_opening_release(&opening));
+        if (codec_first)
+            opening.codec_retired = true;
+        else
+            opening.stream_retired = true;
+        // A hanging or failed other branch must retain the same owner/lease.
+        assert(!fr_cap_opening_release(&opening));
+        assert(!fr_cap_opening_request(&opening));
+        assert(!fr_cap_opening_retire(&opening));
+        opening.codec_retired = true;
+        opening.stream_retired = true;
+        assert(fr_cap_opening_release(&opening));
+        assert(!fr_cap_opening_release(&opening));
+    }
+}
+
+static void start_failure_cannot_be_replaced_by_a_second_success_callback(void) {
+    FrCapDeadline deadline;
+    assert(fr_cap_deadline_init(&deadline, 100, 2000));
+    FrCapOpeningPolicy opening = {.accepting = true};
+    assert(fr_cap_opening_request(&opening));
+    assert(fr_cap_opening_complete(&opening, false));
+    assert(!fr_cap_opening_complete(&opening, true));
+    assert(!opening.started);
+    assert(!fr_cap_opening_publish(&opening, &deadline, 101));
+    fr_cap_opening_close(&opening);
+    assert(fr_cap_opening_retire(&opening));
+    assert(!fr_cap_opening_release(&opening));
+}
+
 static void silence_never_renews_source_evidence(void) {
     FrCapSource source = {0};
     assert(!fr_cap_source_ready(&source, 1));
@@ -173,6 +332,15 @@ static void encoded_allocation_is_bounded_before_append(void) {
 }
 
 int main(void) {
+    deadline_has_exact_monotonic_boundaries();
+    deadline_refuses_zero_and_overflow_without_wrapping();
+    every_setup_stage_spends_the_same_original_budget();
+    only_an_actual_timely_start_transfers_ownership_once();
+    a_completed_start_cannot_publish_after_expiry_or_close();
+    close_before_start_retires_without_fabricating_a_callback();
+    late_start_success_or_failure_keeps_its_original_retirement_owner();
+    either_cleanup_order_requires_both_positive_acknowledgements();
+    start_failure_cannot_be_replaced_by_a_second_success_callback();
     silence_never_renews_source_evidence();
     actual_idle_verifies_only_its_original_picture();
     queued_and_future_events_cannot_fabricate_freshness();
@@ -184,6 +352,6 @@ int main(void) {
     exhausted_invalidation_identity_never_restarts();
     each_verification_has_one_cancellable_result();
     encoded_allocation_is_bounded_before_append();
-    puts("11 macOS capture policy tests passed");
+    puts("20 macOS capture policy tests passed");
     return 0;
 }

@@ -10,6 +10,50 @@ claim. The capture runtime requires **macOS 14 or later** and an SDK containing
 The binary's deployment floor may remain macOS 13 so it can make that refusal.
 Screen Recording permission and a logged-in, capturable desktop are required.
 
+## Opening spends one budget and retains late native work
+
+Native open records one **2,000 ms absolute deadline before acquiring the
+setup lock**. Lock acquisition, shareable-content discovery, VideoToolbox
+configuration, stream start and final handle publication all spend that same
+interval. VideoToolbox configuration still overlaps stream startup, but a
+completed configuration no longer starts another 1,500 ms stream wait. Lock
+failure or expiry refuses opening instead of proceeding without serialization.
+The broker's earlier two-second preparation deadline and separate bootstrap
+deadline remain unchanged; neither is extended by the native interval.
+
+The deadline bounds admission, semaphore waits and publication. It cannot
+preempt a synchronous call inside Apple's frameworks. A framework call that
+returns after expiry cannot publish a capture or begin the next setup stage.
+Final publication also checks the source's stopped/exhausted state under its
+lock, so a stream that failed while the encoder configured is refused.
+
+Timeout closes publication without discarding the original native owner:
+
+| Pending operation | Ownership after the caller stops accepting results |
+| --- | --- |
+| Shareable-content query | Its one-result callback retains the setup-lock lease until that original callback completes. A late result cannot start a stream. |
+| Stream start | The original opening owner retains the capture and setup lease until the actual start result is known. Late successful start triggers cleanup of that same stream. |
+| Failed-open cleanup | Release requires encoder invalidation to return and the stream branch to finish: successful stop when start succeeded, output removal, then a marker on the original serial sample queue. |
+| Missing or unsuccessful cleanup completion | The fenced original owner and setup lease remain retained. Another open cannot bypass them by timing out on the lock. |
+
+Failed-open admission clears retained pixels, and later sample callbacks cannot
+repopulate them. Stop/removal callbacks never access the caller-owned encoder.
+The setup lease uses explicit strong output parameters, so successful release
+does not depend on an autorelease pool in the calling Rust thread.
+
+The worker's existing `discover`/`run` path returns after its first failed
+`ConfigureMonitor`; it does not accept another configuration and accumulate
+late starts in that process. For a direct caller that keeps its process alive,
+an unconfirmed native cleanup deliberately continues to hold the setup lease.
+The original process supervisor remains the containment mechanism for native
+hangs. Returning an error, dropping a Rust value or reaching the deadline is
+not evidence that native cleanup completed, and this change does not qualify
+ordinary established-session teardown or GPU resource reclamation.
+
+This removes concrete renewed-budget and lost-owner paths found in source.
+It does not establish the cause of the reported private host-branch startup
+timeout or claim a measured preparation-time improvement.
+
 ## Source observation is separate from retained pixels
 
 A retained pixel buffer proves that memory remains owned. It does not prove
@@ -114,18 +158,22 @@ two-second preparation/bootstrap budgets.
 
 | Check | Status and scope |
 | --- | --- |
-| Production policy tests | **Passed**, 2026-11-09, GCC 14.2.0 on Linux; 11 tests using the exact production C header. |
+| Production policy tests | **Passed**, 2026-11-09, GCC 14.2.0 on Linux; 20 tests using the exact production C header. |
 | Canonical-output software tests | **Passed**, 2026-11-09, pinned Rust nightly on Linux; all `fr-media` library/integration/doc tests, including six new normalization tests using the retained real VideoToolbox IDR/P fixtures and adversarial inputs. |
 | Objective-C SDK build | **Not tested** for this change in this Linux session. |
+| Late discovery/start, lock contention and failed-open native cleanup | **Not tested** against macOS frameworks; deadline and ownership transitions have portable policy coverage only. |
 | ScreenCaptureKit / screenshot / VideoToolbox hardware path | **Not tested** for this change. |
 | macOS host video preparation inside its original 2 s budget | **Not tested** for this change; this work does not claim to resolve the reported preparation timeout. |
 | Static-screen cost, moving-screen latency and recovery behavior | **Not tested** on hardware. |
 
-The portable tests cover source silence, genuine metadata transitions, delayed
-and future events, invalidation during in-flight work, repair after an earlier
-gap, counter exhaustion, one-shot late/duplicate admission, and bounded output
-arithmetic. They exercise software policy; they are not simulated hardware
-qualification.
+The portable tests cover exact deadline boundaries, overflow and clock
+regression, cumulative setup-budget consumption, late successful/failed start,
+duplicate completion, single ownership transfer, cancellation before start,
+and both cleanup completion orders. They also cover source silence, genuine
+metadata transitions, delayed and future events, invalidation during in-flight
+work, repair after an earlier gap, counter exhaustion, one-shot late/duplicate
+admission, and bounded output arithmetic. They exercise software policy;
+they are not simulated hardware qualification.
 
 Run from the repository root:
 
@@ -146,6 +194,10 @@ failure, not a skipped success. Hardware qualification should additionally
 cover a static desktop, stream stalls, blank/suspended sources, permission
 revocation, display replacement and timed-out screenshot completion, while
 recording verification counters and the original deadlines.
+Opening qualification must additionally contend the setup lock, delay
+shareable-content/start completion past the original deadline, fail or hang
+native stop/removal, and verify that no late handle is returned or replacement
+query begins while the original setup lease remains owned.
 
 ## Platform references
 
@@ -156,3 +208,8 @@ recording verification counters and the original deadlines.
   for the independent one-shot capture contract.
 - Apple: [CMBlockBuffer API](https://developer.apple.com/documentation/coremedia/cmblockbuffer-api)
   for buffers whose logical offsets span separate backing allocations.
+- Apple: [SCStream](https://developer.apple.com/documentation/screencapturekit/scstream?language=objc),
+  including `startCaptureWithCompletionHandler`, `stopCaptureWithCompletionHandler`
+  and `removeStreamOutput:type:error:`, for actual start/stop results and output removal.
+- Clang: [ARC indirect parameters](https://clang.llvm.org/docs/AutomaticReferenceCounting.html#indirect-parameters)
+  for explicit strong ownership at the setup-lease output boundary.

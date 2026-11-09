@@ -7,6 +7,91 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// All native-open stages share this original monotonic interval. A stage may
+// consume its remainder; neither a successful callback nor a retry renews it.
+typedef struct {
+    uint64_t began;
+    uint64_t until;
+} FrCapDeadline;
+
+static inline bool fr_cap_deadline_init(FrCapDeadline *deadline, uint64_t now,
+                                         uint64_t budget) {
+    deadline->began = now;
+    deadline->until = now;
+    if (budget == 0 || budget > UINT64_MAX - now) return false;
+    deadline->until = now + budget;
+    return true;
+}
+
+static inline bool fr_cap_deadline_live(const FrCapDeadline *deadline, uint64_t now) {
+    return now >= deadline->began && now < deadline->until;
+}
+
+static inline uint64_t fr_cap_deadline_remaining(const FrCapDeadline *deadline, uint64_t now) {
+    return fr_cap_deadline_live(deadline, now) ? deadline->until - now : 0;
+}
+
+// A start completion can outlive its caller. Closing admission keeps that
+// original operation owned until its actual start result is known, then until
+// BOTH the stream/output path and the encoder have positively retired. Only
+// one caller may claim native retirement or release the owner's resources.
+typedef struct {
+    bool accepting;
+    bool requested;
+    bool completed;
+    bool started;
+    bool retiring;
+    bool codec_retired;
+    bool stream_retired;
+    bool published;
+    bool released;
+} FrCapOpeningPolicy;
+
+static inline bool fr_cap_opening_request(FrCapOpeningPolicy *opening) {
+    if (!opening->accepting || opening->requested || opening->retiring || opening->published)
+        return false;
+    opening->requested = true;
+    return true;
+}
+
+static inline bool fr_cap_opening_complete(FrCapOpeningPolicy *opening, bool started) {
+    if (!opening->requested || opening->completed || opening->published) return false;
+    opening->completed = true;
+    opening->started = started;
+    return true;
+}
+
+static inline void fr_cap_opening_close(FrCapOpeningPolicy *opening) {
+    opening->accepting = false;
+}
+
+static inline bool fr_cap_opening_retire(FrCapOpeningPolicy *opening) {
+    if (opening->accepting || opening->published || opening->retiring ||
+        (opening->requested && !opening->completed))
+        return false;
+    opening->retiring = true;
+    return true;
+}
+
+static inline bool fr_cap_opening_publish(FrCapOpeningPolicy *opening,
+                                          const FrCapDeadline *deadline, uint64_t now) {
+    if (!fr_cap_deadline_live(deadline, now) || !opening->accepting || !opening->requested ||
+        !opening->completed || !opening->started || opening->retiring || opening->published)
+        return false;
+    opening->accepting = false;
+    opening->published = true;
+    return true;
+}
+
+static inline bool fr_cap_opening_release(FrCapOpeningPolicy *opening) {
+    if (opening->released ||
+        (!opening->published &&
+         !(opening->retiring && opening->codec_retired && opening->stream_retired)))
+        return false;
+    opening->released = true;
+    return true;
+}
+
 enum FrCapSourceEvent {
     FR_CAP_SOURCE_INVALID = 0,
     FR_CAP_SOURCE_COMPLETE = 1,
