@@ -355,7 +355,8 @@ jobs:
         id: docs
         continue-on-error: true
         run: ./scripts/verify.sh docs
-      # The owner raised the hard stop to 500k on 2026-09-24; the count gates again.
+      # The owner lifted the Rust hard stop on 2026-11-08: the count reports Rust
+      # size and still gates the 20k non-Rust glue allowance.
       - name: Size discipline count
         id: count
         continue-on-error: true

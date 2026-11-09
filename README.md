@@ -44,7 +44,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 
 Not available: text, pixel-scroll and relative-pointer input (discrete wheel scrolling is forwarded and covered by the control e2e), observers alongside a controller or observer-to-controller handoff, resumed/synchronized transfers, image clipboard and any clipboard for observers, Wayland, macOS, Windows, browser and mobile clients. Wired but not exercised live: explicit client microphone forwarding (the source and qualification limits are in the table above), `frd run --approval local` desktop consent (docs/desktop-approval.md; namespace e2e with the real consent child: an XTest ALLOW is ignored, an ALLOW attributed to Xvfb's pointer admits, close denies, no answer ends `host_approval_unanswered`; no physical-device consent yet), directory sends with `--send DIR` (fr-files real-QUIC tests only), and `--encoder vaapi` (only its startup refusal ran live, on an NVIDIA host without VA-API; no VA-API encode has run). `--encoder nvenc` ran live on 2026-10-13: a 5-minute session from a GTX 1070 host stayed within 0.13-0.19% of the host's pixels with an active encoder session. A hardware encoder is probed once at startup (one admitted IDR at the display's size); one that cannot open refuses `frd run` with `encoder_unavailable` before anything is bound. Earlier documents that marked GNOME/KDE/Hyprland, Windows GPU rows or Windows/macOS worker sandboxes as passed or enforced were withdrawn on 2026-09-24: no evidence existed.
 
-**Size gate:** the owner raised the hard stop from 250,000 to 500,000 handwritten Rust lines on 2026-09-24 and approved deleting the clearly fake modules (about 15k lines removed). The fixed counter (`./scripts/verify.sh count`) reported about 312,800 handwritten Rust lines on 2026-09-27 (302,562 on 2026-09-26): over the 240,000 planned maximum, within the 500,000 hard stop.
+**Size gate:** the owner lifted the handwritten-Rust hard stop on 2026-11-08 (it had been raised from 250,000 to 500,000 on 2026-09-24); `./scripts/verify.sh count` still reports the size and gates the 20k non-Rust glue allowance. On 2026-09-24 the owner also approved deleting the clearly fake modules (about 15k lines removed). The fixed counter (`./scripts/verify.sh count`) reported about 312,800 handwritten Rust lines on 2026-09-27 (302,562 on 2026-09-26): over the 240,000 planned maximum, within the 500,000 hard stop.
 
 The engineering thesis, from the plan:
 
@@ -213,7 +213,7 @@ Condensed from plan §1; each row is a settled decision, not an open question.
 | Browser transport | Actual HTTP/3 WebTransport interoperability, qualified early. Bounded secure-WebSocket channels are the explicit degraded fallback. |
 | Safety | Safe Rust (`#![forbid(unsafe_code)]`) in protocol and authority code; a small audited unsafe/foreign boundary for OS and media APIs, with media work isolated from input authority. |
 | Product scope | Selected full displays of an existing interactive desktop. No window-isolation promise, independent remote login, preboot access, USB/printer forwarding, or public-internet brokering. |
-| Size discipline | ~194,000 handwritten Rust lines including tests; 240,000 planned ceiling; hard stop below 500,000 (raised from 250,000 by the owner on 2026-09-24). |
+| Size discipline | ~194,000 handwritten Rust lines including tests as the original target; 240,000 planned ceiling; no hard stop since the owner lifted the 500,000 stop on 2026-11-08. |
 
 Four assumptions the plan makes explicit rather than burying: HEVC is not x265; HEVC-only does not imply every browser (the supported set comes from a real decode-and-present probe); high bitrate does not repair 4:2:0 chroma subsampling; and a daemon cannot erase OS consent boundaries.
 
@@ -322,7 +322,7 @@ frankenremote/
   xtask/              repository-owned verification/release commands
 ```
 
-Budget: **194k handwritten Rust lines** (tests and project-induced upstream work included) as the target, **240k planned maximum**, hard stop below 500k (raised from 250k by the owner on 2026-09-24), plus a separate ≤20k allowance for JS/Swift/Kotlin/build glue — raised in v1.4 because the mobile apps deliberately carry first-class native UIs. One fixed counting command in the repository; the counting method does not get redefined near the end.
+Budget: **194k handwritten Rust lines** (tests and project-induced upstream work included) as the target, **240k planned maximum**, no hard stop (the owner lifted the 500k stop on 2026-11-08), plus a separate ≤20k allowance for JS/Swift/Kotlin/build glue — raised in v1.4 because the mobile apps deliberately carry first-class native UIs. One fixed counting command in the repository; the counting method does not get redefined near the end.
 
 ## Implementation sequence
 

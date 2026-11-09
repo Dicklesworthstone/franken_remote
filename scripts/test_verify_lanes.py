@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -37,22 +38,26 @@ def test_baseline() -> None:
 
 
 def test_planted_over_budget_rust() -> None:
-    print("[3/8] Testing planted over-budget Rust fixture (>500,000 lines)...")
+    # The owner lifted the 500k hard stop on 2026-11-08. A tree past the old
+    # stop must still be counted exactly and must no longer be refused.
+    print("[3/8] Testing a Rust fixture past the lifted 500,000 stop...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         crates_dir = tmp_path / "crates" / "fake-crate" / "src"
         crates_dir.mkdir(parents=True)
-        # Write 500,005 lines of dummy Rust code (just over the hard stop)
         with open(crates_dir / "lib.rs", "w", encoding="utf-8") as fp:
             fp.write("#![forbid(unsafe_code)]\n")
             fp.write("// padding\n" * 500_005)
 
         rc, stdout, stderr = run_cmd([
-            sys.executable, "scripts/count.py", "--fixture", str(tmp_path)
+            sys.executable, "scripts/count.py", "--fixture", str(tmp_path), "--json"
         ])
-        assert rc == 1, f"Expected count.py to refuse over-budget Rust, but got rc={rc}"
-        assert "OVER_BUDGET_REFUSAL" in stderr or "OVER_BUDGET_REFUSAL" in stdout
-        print("  ✓ Planted over-budget Rust correctly refused with exit 1.")
+        assert rc == 0, f"Expected no Rust hard stop, but got rc={rc}: {stderr}"
+        assert "OVER_BUDGET_REFUSAL" not in stderr + stdout
+        stats = json.loads(stdout)
+        assert stats["rust_handwritten"]["total"] == 500_006, stats["rust_handwritten"]
+        assert stats["rust_handwritten"]["hard_stop"] is None
+        print("  ✓ 500,006 Rust lines counted exactly and not refused.")
 
 
 def test_planted_over_budget_glue() -> None:

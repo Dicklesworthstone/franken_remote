@@ -99,8 +99,8 @@ If these disagree, stop and surface the contradiction. Do not implement the most
 
 ### 3.7 Size discipline
 
-- **194k target / 240k planned maximum / hard stop below 500k** handwritten Rust lines (the owner raised the hard stop from 250k to 500k on 2026-09-24), tests and project-induced upstream work included. Separate allowance of at most 20k for JS/Swift/Kotlin/build glue (the mobile apps deliberately carry first-class native SwiftUI/Compose UIs); protocol, session, media, and input logic does not migrate there to evade the limit.
-- One fixed counting command lives in the repository once code exists; handwritten Rust, generated bindings, non-Rust glue, vendored source, and upstream changes are reported separately. The counting method is never redefined near the end. When core delivery approaches the ceiling, optional scope is cut first — never security or qualification tests.
+- **No hard stop on handwritten Rust.** On 2026-11-08 the owner lifted the 500k stop: "forget the 500k limit!! we just want it to be good and to work super well on mac and windows natively" (it had been raised from 250k on 2026-09-24). The 194k target and 240k planned maximum remain reference points only, tests and project-induced upstream work included. Separate allowance of at most 20k for JS/Swift/Kotlin/build glue (the mobile apps deliberately carry first-class native SwiftUI/Compose UIs); protocol, session, media, and input logic does not migrate there to evade the limit.
+- One fixed counting command lives in the repository once code exists; handwritten Rust, generated bindings, non-Rust glue, vendored source, and upstream changes are reported separately. The counting method is never redefined near the end. Size never justifies cutting security or qualification tests.
 
 ## 4. Authority, session, and input rules
 

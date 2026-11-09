@@ -4,7 +4,8 @@
 Enforces size discipline per AGENTS.md Section 3.7 and Plan Section 22.2:
 - 194,000 target handwritten Rust lines
 - 240,000 planned maximum
-- 500,000 hard stop (refusal; raised from 250,000 by the owner on 2026-09-24)
+- no hard stop (the owner lifted the 500,000 stop on 2026-11-08; it was raised
+  from 250,000 on 2026-09-24)
 - 20,000 separate allowance for non-Rust glue (JS/Swift/Kotlin/C/Python/shell)
 
 Reports handwritten Rust, generated bindings, non-Rust glue, vendored source,
@@ -22,9 +23,15 @@ from pathlib import Path
 # Budget thresholds
 RUST_TARGET_LINES = 194_000
 RUST_PLANNED_MAX_LINES = 240_000
-# Owner decision 2026-09-24: "lift the hard stop to 500k lines".
-RUST_HARD_STOP_LINES = 500_000
+# Owner decision 2026-11-08: "forget the 500k limit!! we just want it to be good
+# and to work super well on mac and windows natively". None means no stop: the
+# count still reports, and a stop can be set again here.
+RUST_HARD_STOP_LINES: int | None = None
 GLUE_ALLOWANCE_LINES = 20_000
+
+
+def rust_over_stop(total: int) -> bool:
+    return RUST_HARD_STOP_LINES is not None and total > RUST_HARD_STOP_LINES
 
 # File classifications
 RUST_EXTS = {".rs"}
@@ -181,7 +188,9 @@ def format_report(stats: dict) -> str:
         f"  Total Handwritten Rust    : {rust_total:>8,} lines",
         f"  Target Budget             : {RUST_TARGET_LINES:>8,} lines",
         f"  Planned Maximum           : {RUST_PLANNED_MAX_LINES:>8,} lines",
-        f"  Hard Stop Ceiling         : {RUST_HARD_STOP_LINES:>8,} lines",
+        (f"  Hard Stop Ceiling         : {RUST_HARD_STOP_LINES:>8,} lines"
+         if RUST_HARD_STOP_LINES is not None
+         else "  Hard Stop Ceiling         :     none (lifted by the owner 2026-11-08)"),
         "",
         "2. NON-RUST GLUE BREAKDOWN (JS / Swift / Kotlin / C / Python / Shell):",
         "--------------------------------------------------------------------------------",
@@ -204,7 +213,7 @@ def format_report(stats: dict) -> str:
     ])
 
     # Status verdicts
-    rust_ok = rust_total <= RUST_HARD_STOP_LINES
+    rust_ok = not rust_over_stop(rust_total)
     glue_ok = glue_total <= GLUE_ALLOWANCE_LINES
 
     if not rust_ok:
@@ -215,6 +224,9 @@ def format_report(stats: dict) -> str:
     elif rust_total > RUST_PLANNED_MAX_LINES:
         lines.append(
             f"VERDICT: WARNING - Handwritten Rust ({rust_total:,}) exceeds "
+            f"planned maximum ({RUST_PLANNED_MAX_LINES:,}); no hard stop applies."
+            if RUST_HARD_STOP_LINES is None
+            else f"VERDICT: WARNING - Handwritten Rust ({rust_total:,}) exceeds "
             f"planned maximum ({RUST_PLANNED_MAX_LINES:,}) but remains within hard stop."
         )
     elif rust_total > RUST_TARGET_LINES:
@@ -266,16 +278,16 @@ def main() -> int:
 
     if args.json:
         stats["verdict"] = {
-            "rust_passed": rust_total <= RUST_HARD_STOP_LINES,
+            "rust_passed": not rust_over_stop(rust_total),
             "glue_passed": glue_total <= GLUE_ALLOWANCE_LINES,
-            "overall_passed": (rust_total <= RUST_HARD_STOP_LINES) and (glue_total <= GLUE_ALLOWANCE_LINES),
+            "overall_passed": not rust_over_stop(rust_total) and glue_total <= GLUE_ALLOWANCE_LINES,
         }
         print(json.dumps(stats, indent=2))
     else:
         print(format_report(stats))
 
     if args.check:
-        if rust_total > RUST_HARD_STOP_LINES:
+        if rust_over_stop(rust_total):
             sys.stderr.write(
                 f"\nOVER_BUDGET_REFUSAL: Handwritten Rust lines ({rust_total:,}) "
                 f"exceed hard stop of {RUST_HARD_STOP_LINES:,} lines.\n"
