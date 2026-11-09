@@ -476,9 +476,8 @@ fn select_encoder(
     }
 }
 /// The static host policy: operations a controller may request if the local
-/// executor also has them. Whole-line scrolling is bounded `XTest` wheel
-/// pairs on X11 and one Quartz line-scroll event on macOS; neither emulates
-/// pixel scrolling.
+/// executor also has them. X11 offers bounded whole-line wheel pairs; macOS
+/// also offers native continuous scroll events. Neither converts units.
 fn control_capabilities() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -486,6 +485,7 @@ fn control_capabilities() -> Capabilities {
         .with(Capability::Absolute)
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
+        .with(Capability::PixelScroll)
 }
 
 fn selected_offer(
@@ -522,6 +522,13 @@ fn selected_offer(
     };
     let offer = if microphone {
         fr_wire::audio_up::with_microphone(offer).map_err(|_| serial::Error::Configuration)?
+    } else {
+        offer
+    };
+    // Last: optional diagnostics cannot be restored after yielding their slot
+    // to a real, probed input operation at the unchanged capability ceiling.
+    let offer = if control.is_some_and(|c| c.contains(Capability::PixelScroll)) {
+        fr_wire::control::with_pixel_scroll(offer).map_err(|_| serial::Error::Configuration)?
     } else {
         offer
     };
@@ -1872,16 +1879,69 @@ mod tests {
             Capability::Absolute,
             Capability::Buttons,
             Capability::LineScroll,
+            Capability::PixelScroll,
         ] {
             assert!(control_capabilities().contains(allowed));
         }
-        for absent in [
-            Capability::Text,
-            Capability::PixelScroll,
-            Capability::Relative,
-        ] {
+        for absent in [Capability::Text, Capability::Relative] {
             assert!(!control_capabilities().contains(absent));
         }
+    }
+
+    #[test]
+    fn pixel_scroll_is_offered_only_after_a_positive_executor_probe() {
+        use fr_wire::control::{PIXEL_SCROLL_CAPABILITY, requestable, with_pixel_scroll};
+        let client = with_pixel_scroll(fr_client::native::control_offer()).unwrap();
+        for files in [false, true] {
+            for download in [false, true] {
+                for pixels in [false, true] {
+                    let mut probed = core().with(Capability::LineScroll);
+                    if pixels {
+                        probed = probed.with(Capability::PixelScroll);
+                    }
+                    let granted = grantable(probed).unwrap();
+                    for adaptive in [false, true] {
+                        let host = selected_offer(
+                            (Some(granted), false, files, download, false),
+                            false,
+                            adaptive,
+                        )
+                        .unwrap();
+                        assert!(host.validate().is_ok());
+                        assert_eq!(
+                            host.capabilities
+                                .iter()
+                                .any(|c| c.name == PIXEL_SCROLL_CAPABILITY),
+                            pixels
+                        );
+                        let selected = host.intersect(&client).unwrap();
+                        assert_eq!(
+                            requestable(&selected.capabilities).contains(Capability::PixelScroll),
+                            pixels
+                        );
+                        assert!(
+                            requestable(&selected.capabilities).contains(Capability::LineScroll)
+                        );
+                    }
+                }
+            }
+        }
+        let observe = selected_offer((None, false, false, false, false), false, false).unwrap();
+        assert!(
+            !observe
+                .capabilities
+                .iter()
+                .any(|c| c.name == PIXEL_SCROLL_CAPABILITY)
+        );
+        // An old client omits precise scrolling without losing ordinary control.
+        let host = selected_offer(
+            (Some(control_capabilities()), false, false, false, false),
+            false,
+            false,
+        )
+        .unwrap();
+        let selected = host.intersect(&fr_client::native::control_offer()).unwrap();
+        assert!(!requestable(&selected.capabilities).contains(Capability::PixelScroll));
     }
 
     #[test]

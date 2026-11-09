@@ -1,8 +1,12 @@
-//! Retain the original close/effect reports across explicit display changes.
+//! Retain original close/effect reports and local scroll refusals across attempts.
 //! A later picker cancellation, dial failure or successful session cannot erase
 //! what the preceding host actually reported about cleanup and input effects.
 use super::{Failure, Report};
 use std::fmt::Write as _;
+
+fn refused_scroll(report: &Report) -> bool {
+    report.scroll_unsupported != 0 || report.scroll_expired != 0 || report.scroll_invalid != 0
+}
 
 fn history(report: &Report) -> crate::ControlHistory {
     let mut entries = String::new();
@@ -36,13 +40,23 @@ fn history(report: &Report) -> crate::ControlHistory {
             );
         }
     }
-    crate::ControlHistory {
-        json: format!(
-            ",\"display_changes\":{},\"display_change_closes\":[{entries}]",
-            report.display_changes,
-        ),
-        text,
+    let mut json = format!(
+        ",\"display_changes\":{},\"display_change_closes\":[{entries}]",
+        report.display_changes,
+    );
+    if refused_scroll(report) {
+        let _ = write!(
+            json,
+            ",\"native_scroll_refusals\":{{\"unsupported\":{},\"expired\":{},\"invalid\":{}}}",
+            report.scroll_unsupported, report.scroll_expired, report.scroll_invalid,
+        );
+        let _ = write!(
+            text,
+            " Native scroll input refused locally: {} unsupported, {} expired, {} invalid. These events queued no remote input.",
+            report.scroll_unsupported, report.scroll_expired, report.scroll_invalid,
+        );
     }
+    crate::ControlHistory { json, text }
 }
 
 fn preserve(history: &crate::ControlHistory, failure: &mut Failure) {
@@ -60,7 +74,7 @@ pub(super) fn finish(
     result: Result<String, Failure>,
     json: bool,
 ) -> Result<String, Failure> {
-    if report.display_change_closes.is_empty() {
+    if report.display_change_closes.is_empty() && !refused_scroll(report) {
         return result;
     }
     let history = history(report);
@@ -73,7 +87,7 @@ pub(super) fn finish(
             let Some(prefix) = text.trim_end().strip_suffix('}') else {
                 let mut failure = Failure::new(
                     "native_output_invalid",
-                    "The session completion could not be formatted; earlier display-change cleanup and effect reports remain available in this error.",
+                    "The session completion could not be formatted; retained display-change reports and native input refusals remain available in this error.",
                     1,
                 );
                 preserve(&history, &mut failure);
@@ -139,5 +153,35 @@ mod tests {
         assert_eq!(value["outcome"], "success");
         assert_eq!(value["display_changes"], 1);
         assert!(value["display_change_closes"][0]["lease_report"].is_null());
+    }
+
+    #[test]
+    fn local_scroll_refusals_survive_success_or_failure_without_a_display_change() {
+        let report = Report {
+            scroll_unsupported: 3,
+            scroll_expired: 2,
+            scroll_invalid: 1,
+            ..Report::default()
+        };
+        let text = finish(&report, Ok("{\"outcome\":\"success\"}\n".to_owned()), true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["native_scroll_refusals"]["unsupported"], 3);
+        assert_eq!(value["native_scroll_refusals"]["expired"], 2);
+        assert_eq!(value["native_scroll_refusals"]["invalid"], 1);
+        let mut failure = Failure::new("native_cleanup_incomplete", "Cleanup pending.", 1);
+        failure.control_history = Some(Box::leak(Box::new(crate::ControlHistory {
+            json: ",\"files_requested\":2".to_owned(),
+            text: " Earlier file evidence.".to_owned(),
+        })));
+        let retained = finish(&report, Err(failure), true).unwrap_err();
+        assert_eq!(retained.code, failure.code);
+        assert_eq!(retained.exit, failure.exit);
+        let history = retained.control_history.unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&format!("{{\"outcome\":\"error\"{}}}", history.json)).unwrap();
+        assert_eq!(value["files_requested"], 2);
+        assert_eq!(value["native_scroll_refusals"]["unsupported"], 3);
+        assert!(history.text.contains("queued no remote input"));
+        assert!(history.text.contains("Earlier file evidence"));
     }
 }

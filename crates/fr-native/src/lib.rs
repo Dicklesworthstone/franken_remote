@@ -79,6 +79,8 @@ mod macos_sizing;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_control;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+mod macos_scroll;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_switch;
 // File selection/one-use consent uses the real portable frd owners. Exercise
 // it in Linux CI as well as in the native Mac desktop build.

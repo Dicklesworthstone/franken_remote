@@ -3,16 +3,19 @@
 //! This module contains no `AppKit` or alternate transfer loop. The original
 //! `NativeObserver` owns the existing ATP lanes, disk workers, authority checks
 //! and publication receipts. This owner hands it each preselected request once
-//! and retains only the bounded status/control handles after that handoff.
+//! and retains the bounded status/control handles after that handoff. An
+//! explicitly enabled local command endpoint owns only selection admission
+//! into that same original lane, never another connection or transfer loop.
 //! A reconnect or a later control gesture never repeats the file choices.
 use fr_wire::negotiation::Offer;
 use frd::{
     native_files::{
         Absence, Directory, ReceiveControl, ReceiveRequest, ReceiveStatus, SelectRefusal,
-        Selection, SendControl, SendRequest, SendSnapshot,
+        Selection, SendControl, SendRequest, SendSnapshot, local,
     },
     session_startup::{FileSendError, NativeObserver},
 };
+use std::fmt;
 
 /// The original local setup, separate from the transfer's current progress.
 /// `Configured` does not mean that control was granted or a disk owner started.
@@ -88,14 +91,115 @@ impl<Request, Control> Direction<Request, Control> {
     }
 }
 
+#[derive(Debug)]
+enum Upload {
+    Selected(SendRequest),
+    Deferred,
+}
+
+#[derive(Default)]
+struct Commands {
+    connection: Option<String>,
+    outcome: Option<Result<local::Results, local::Error>>,
+    owner: Option<local::Owner>,
+    cancelled: bool,
+}
+impl fmt::Debug for Commands {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Commands")
+            .field("connection_selected", &self.connection.is_some())
+            .field("configured", &self.outcome.is_some())
+            .field("owner_retained", &self.owner.is_some())
+            .field("cancelled", &self.cancelled)
+            .finish()
+    }
+}
+impl Commands {
+    fn set_connection(&mut self, connection: &str) -> Result<(), local::Error> {
+        if self.connection.is_some() || self.outcome.is_some() || self.cancelled {
+            return Err(local::Error::Closed);
+        }
+        // This is the exact original foreground owner's public comparison ID,
+        // not a host label, path or credential. The IPC repeats this check.
+        if connection.len() != 32 || !connection.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(local::Error::InvalidTarget);
+        }
+        self.connection = Some(connection.to_owned());
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        self.cancelled = true;
+        if let Some(owner) = &self.owner {
+            // Fences queued selections and each admitted batch synchronously.
+            // The owner and read-only results remain retained until cleanup.
+            owner.stop();
+        }
+        if self.outcome.is_none() {
+            self.outcome = Some(Err(local::Error::Closed));
+        }
+    }
+
+    fn configure(
+        &mut self,
+        observer: &mut NativeObserver,
+        request: Upload,
+        cancelled: bool,
+    ) -> Result<SendControl, Absence> {
+        let deferred = matches!(request, Upload::Deferred);
+        let result = match request {
+            Upload::Selected(request) => observer.configure_file_send_with_intake(request),
+            Upload::Deferred => observer.configure_file_drop(),
+        };
+        let (control, intake) = match result {
+            Ok(configured) => configured,
+            Err(absence) => {
+                if self.outcome.is_none() {
+                    self.outcome = Some(Err(local::Error::Unavailable));
+                }
+                return Err(absence);
+            }
+        };
+        if cancelled || self.cancelled {
+            // Settle the original negotiated attachment without admitting a
+            // local command or starting a previously selected source.
+            control.cancel();
+            self.stop();
+            return Ok(control);
+        }
+        let owner = self
+            .connection
+            .take()
+            .ok_or(local::Error::Unavailable)
+            .and_then(|connection| local::Owner::bind_upload(&connection, intake));
+        match owner {
+            Ok(owner) => {
+                self.outcome = Some(Ok(owner.results()));
+                self.owner = Some(owner);
+            }
+            Err(error) => {
+                self.outcome = Some(Err(error));
+                // An explicit initial selection remains usable if the optional
+                // endpoint fails. An empty lane has no possible selector.
+                if deferred {
+                    control.cancel();
+                    return Err(Absence::Unavailable);
+                }
+            }
+        }
+        Ok(control)
+    }
+}
+
 /// Locally selected upload and download, with independent consent and results.
 /// Construct before network startup; configure on the first opened observer,
 /// before its interactive service. No source contents are read by this owner.
 #[derive(Debug, Default)]
 pub struct Files {
-    upload: Option<Direction<SendRequest, SendControl>>,
+    upload: Option<Direction<Upload, SendControl>>,
     sizes: Vec<Option<u64>>,
     download: Option<Direction<ReceiveRequest, ReceiveControl>>,
+    commands: Option<Commands>,
 }
 impl Files {
     /// Duplicate the selected source descriptors and retain the pinned local
@@ -106,7 +210,10 @@ impl Files {
     ) -> Result<Self, SelectRefusal> {
         let (upload, sizes) = if let Some(selection) = upload {
             let sizes = selection.sizes().collect();
-            (Some(Direction::new(selection.request()?)), sizes)
+            (
+                Some(Direction::new(Upload::Selected(selection.request()?))),
+                sizes,
+            )
         } else {
             (None, Vec::new())
         };
@@ -114,7 +221,27 @@ impl Files {
             upload,
             sizes,
             download: download.map(|directory| Direction::new(ReceiveRequest::new(&directory))),
+            commands: None,
         })
+    }
+
+    /// Opt in to later explicit selections on the first configured upload.
+    /// With no initial sources, negotiate an empty lane whose contents remain
+    /// absent until a same-user command names a new bounded selection.
+    #[must_use]
+    pub fn with_commands(mut self) -> Self {
+        self.commands.get_or_insert_with(Commands::default);
+        self.upload
+            .get_or_insert_with(|| Direction::new(Upload::Deferred));
+        self
+    }
+
+    /// Bind command consent to the original foreground connection exactly once,
+    /// before observer configuration. Reconnects cannot change that identity.
+    pub fn command_connection(&mut self, connection: &str) -> Result<(), local::Error> {
+        self.commands
+            .as_mut()
+            .map_or(Ok(()), |commands| commands.set_connection(connection))
     }
 
     /// Offer only directions whose explicit local request is still unspent.
@@ -142,7 +269,15 @@ impl Files {
         if let Some(upload) = &mut self.upload
             && let Some(request) = upload.pending.take()
         {
-            upload.configured(observer.configure_file_send(request), SendControl::cancel);
+            let configured = if let Some(commands) = &mut self.commands {
+                commands.configure(observer, request, upload.pending_cancelled)
+            } else {
+                match request {
+                    Upload::Selected(request) => observer.configure_file_send(request),
+                    Upload::Deferred => Err(Absence::Unavailable),
+                }
+            };
+            upload.configured(configured, SendControl::cancel);
         }
         if let Some(download) = &mut self.download
             && let Some(request) = download.pending.take()
@@ -168,6 +303,9 @@ impl Files {
     /// Fence only the original upload, including before configuration.
     /// The independent download choice and its receipts are unchanged.
     pub fn cancel_upload(&mut self) {
+        if let Some(commands) = &mut self.commands {
+            commands.stop();
+        }
         if let Some(upload) = &mut self.upload {
             upload.cancel_pending();
             if let Some(control) = upload.control() {
@@ -217,6 +355,38 @@ impl Files {
         self.upload
             .as_ref()
             .map(|lane| lane.status(SendControl::snapshot))
+    }
+
+    /// Read-only original command history. Pending setup is unavailable, never
+    /// evidence that the optional endpoint or a remote file lane opened.
+    pub fn command_results(&self) -> Option<Result<local::Results, local::Error>> {
+        self.commands.as_ref().map(|commands| {
+            commands
+                .outcome
+                .clone()
+                .unwrap_or(Err(local::Error::Unavailable))
+        })
+    }
+
+    /// Latest admitted batch for native progress. Its independent control and
+    /// receipts never replace the initial selection's completion evidence.
+    pub fn command_snapshot(&self) -> Option<SendSnapshot> {
+        self.commands
+            .as_ref()?
+            .outcome
+            .as_ref()?
+            .as_ref()
+            .ok()?
+            .latest_snapshot()
+    }
+
+    /// Actual retirement of the original local socket and selection workers.
+    /// A cancellation request alone cannot allow another native attempt.
+    pub fn commands_complete(&self) -> bool {
+        self.commands
+            .as_ref()
+            .and_then(|commands| commands.owner.as_ref())
+            .is_none_or(local::Owner::is_complete)
     }
 
     /// `None` means no destination was selected. Retained results distinguish
@@ -297,6 +467,125 @@ mod tests {
                 clipboard
             );
         }
+    }
+
+    #[test]
+    fn command_consent_opens_no_source_and_uses_the_original_upload_profile() {
+        let fixture = Fixture::new();
+        for download in [false, true] {
+            let files = Files::new(None, download.then(|| fixture.download()))
+                .unwrap()
+                .with_commands();
+            assert!(files.has_upload());
+            assert_eq!(files.has_download(), download);
+            assert!(files.upload_sizes().is_empty());
+            assert_eq!(files.upload_status(), Some(Status::NotStarted));
+            assert!(files.upload_control().is_none());
+            assert!(files.command_snapshot().is_none());
+            assert!(files.commands_complete());
+            assert!(matches!(
+                files.command_results(),
+                Some(Err(local::Error::Unavailable))
+            ));
+            let offer = files.offer(false);
+            assert!(has(&offer, fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+            assert_eq!(has(&offer, fr_wire::files::DOWNLOAD_CAPABILITY), download);
+            assert_eq!(has(&offer, fr_wire::files::DUPLEX_CAPABILITY), download);
+            assert!(!has(&offer, fr_wire::attachment::CLIPBOARD_CAPABILITY));
+        }
+    }
+
+    #[test]
+    fn command_connection_is_exact_and_cannot_be_replaced_or_reused_after_cancellation() {
+        let mut files = Files::default().with_commands();
+        for invalid in [
+            "n-host",
+            "../endpoint",
+            "",
+            "gggggggggggggggggggggggggggggggg",
+        ] {
+            assert_eq!(
+                files.command_connection(invalid),
+                Err(local::Error::InvalidTarget)
+            );
+        }
+        let original = "a".repeat(32);
+        files.command_connection(&original).unwrap();
+        assert_eq!(
+            files.command_connection(&"b".repeat(32)),
+            Err(local::Error::Closed)
+        );
+        assert_eq!(
+            files.commands.as_ref().unwrap().connection.as_deref(),
+            Some(original.as_str())
+        );
+        files.cancel_upload();
+        let mut files = files.with_commands();
+        assert_eq!(
+            files.command_connection(&original),
+            Err(local::Error::Closed)
+        );
+        assert!(matches!(
+            files.command_results(),
+            Some(Err(local::Error::Closed))
+        ));
+        assert!(!has(
+            &files.offer(false),
+            fr_wire::attachment::FILES_CAPABILITY
+        ));
+    }
+
+    #[test]
+    fn spent_command_consent_never_reoffers_but_keeps_independent_download() {
+        let fixture = Fixture::new();
+        let mut files = Files::new(None, Some(fixture.download()))
+            .unwrap()
+            .with_commands();
+        files.command_connection(&"a".repeat(32)).unwrap();
+        // The same one-use move as configure: no platform endpoint, control
+        // grant, source contents or remote publication is simulated here.
+        assert!(matches!(
+            files.upload.as_mut().unwrap().pending.take(),
+            Some(Upload::Deferred)
+        ));
+        files.commands.as_mut().unwrap().outcome = Some(Err(local::Error::Unavailable));
+        let mut files = files.with_commands();
+        assert_eq!(
+            files.command_connection(&"b".repeat(32)),
+            Err(local::Error::Closed)
+        );
+        let offer = files.offer(false);
+        assert!(!has(&offer, fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+        assert!(has(&offer, fr_wire::files::DOWNLOAD_CAPABILITY));
+        assert!(!has(&offer, fr_wire::files::DUPLEX_CAPABILITY));
+        assert!(files.upload.as_ref().unwrap().pending.is_none());
+        assert_eq!(files.download_status(), Some(Status::NotStarted));
+    }
+
+    #[test]
+    fn upload_cancel_retires_commands_without_cancelling_the_original_destination() {
+        let fixture = Fixture::new();
+        let mut files = Files::new(Some(fixture.upload()), Some(fixture.download()))
+            .unwrap()
+            .with_commands();
+        files.cancel_upload();
+        files.cancel_upload();
+        assert_eq!(files.upload_sizes(), [Some(8)]);
+        assert_eq!(
+            files.upload_status(),
+            Some(Status::Unavailable(Absence::Refused(
+                FileSendError::Cancelled
+            )))
+        );
+        assert_eq!(files.download_status(), Some(Status::NotStarted));
+        assert!(matches!(
+            files.command_results(),
+            Some(Err(local::Error::Closed))
+        ));
+        assert!(files.commands_complete());
+        let offer = files.offer(false);
+        assert!(!has(&offer, fr_wire::files::CHANNEL_SCOPE_CAPABILITY));
+        assert!(has(&offer, fr_wire::files::DOWNLOAD_CAPABILITY));
     }
 
     #[test]

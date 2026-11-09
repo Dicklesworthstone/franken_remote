@@ -14,7 +14,12 @@ pub(super) fn select(connection: &Connection) -> Result<Files, Failure> {
         .as_ref()
         .map(crate::options::ReceiveOptions::open)
         .transpose()?;
-    Files::new(upload, download).map_err(upload::selection_failure)
+    let files = Files::new(upload, download).map_err(upload::selection_failure)?;
+    Ok(if connection.upload.file_commands {
+        files.with_commands()
+    } else {
+        files
+    })
 }
 
 /// Copied once from the original owners after their cleanup turn. A fallback
@@ -27,7 +32,7 @@ pub(super) struct Summary {
 impl Summary {
     pub(super) fn capture(files: &Files) -> Self {
         let sizes = files.upload_sizes();
-        let upload = match files.upload_status() {
+        let mut upload = match files.upload_status() {
             None => upload::Summary::not_requested(),
             Some(Status::NotStarted) => upload::Summary::unavailable(sizes, "files_not_started"),
             Some(Status::Unavailable(absence)) => {
@@ -35,6 +40,18 @@ impl Summary {
             }
             Some(Status::Configured(snapshot)) => upload::Summary::from_snapshot(sizes, &snapshot),
         };
+        upload.commands = files.command_results().map(|result| match result {
+            Err(error) => Err(crate::file_commands::local_failure(error).code),
+            Ok(results) => {
+                for batch in results.batches() {
+                    upload.append_command(&batch);
+                }
+                Ok(())
+            }
+        });
+        if upload.requested != 0 && upload.absence == Some("no_files_selected") {
+            upload.absence = None;
+        }
         let download = match files.download_status() {
             None => download::Summary::not_requested(),
             Some(Status::NotStarted) => download::Summary::unavailable("files_receive_not_started"),

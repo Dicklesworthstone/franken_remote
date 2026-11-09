@@ -256,7 +256,9 @@ fn line_scroll_is_requestable_only_when_both_peers_selected_it() {
     }
     let with = requestable(&[cap(GRANT_CAPABILITY, 1), cap(LINE_SCROLL_CAPABILITY, 1)]);
     assert_eq!(wanted.meet(with), wanted);
-    // Selection only removes line scrolling; every other operation stays
+    assert!(!without.contains(Capability::PixelScroll));
+    assert!(!with.contains(Capability::PixelScroll));
+    // Selection only removes unselected scroll modes; every other operation stays
     // whatever the controller wanted (the host still decides the grant).
     for c in [
         Capability::Keys,
@@ -264,9 +266,106 @@ fn line_scroll_is_requestable_only_when_both_peers_selected_it() {
         Capability::Absolute,
         Capability::Buttons,
         Capability::Relative,
-        Capability::PixelScroll,
         Capability::Text,
     ] {
         assert!(without.contains(c) && with.contains(c), "{c:?}");
     }
+}
+
+#[test]
+fn pixel_scroll_requires_its_exact_optional_selection_independently_of_lines() {
+    use fr_wire::negotiation::Capability as Negotiated;
+    let cap = |name: &str, version| Negotiated {
+        name: name.into(),
+        version,
+        required: false,
+    };
+    let wanted = Capabilities::default()
+        .with(Capability::Absolute)
+        .with(Capability::LineScroll)
+        .with(Capability::PixelScroll);
+    assert_eq!(
+        wanted.meet(requestable(&[])),
+        Capabilities::default().with(Capability::Absolute)
+    );
+    for (name, version) in [
+        (PIXEL_SCROLL_CAPABILITY, 2),
+        ("native-input-pixel-scrolls", 1),
+        (LINE_SCROLL_CAPABILITY, 1),
+    ] {
+        assert!(!requestable(&[cap(name, version)]).contains(Capability::PixelScroll));
+    }
+    let pixels = requestable(&[cap(PIXEL_SCROLL_CAPABILITY, PIXEL_SCROLL_VERSION)]);
+    assert!(pixels.contains(Capability::PixelScroll));
+    assert!(!pixels.contains(Capability::LineScroll));
+    let both = requestable(&[
+        cap(PIXEL_SCROLL_CAPABILITY, 1),
+        cap(LINE_SCROLL_CAPABILITY, 1),
+    ]);
+    assert_eq!(wanted.meet(both), wanted);
+}
+
+#[test]
+fn explicit_pixel_offer_preserves_required_boundaries_and_capability_ceiling() {
+    use fr_wire::negotiation::{
+        Capability as Negotiated, Error, MAX_CAPABILITIES, NATIVE_PROFILE, Offer, PROFILE_VERSION,
+        Role,
+    };
+    let cap = |name: &str, required| Negotiated {
+        name: name.into(),
+        version: 1,
+        required,
+    };
+    let base = Offer {
+        versions: vec![0],
+        profile: NATIVE_PROFILE,
+        profile_version: PROFILE_VERSION,
+        role: Role::RequestControl,
+        limits: L,
+        capabilities: vec![cap(GRANT_CAPABILITY, true)],
+    };
+    let explicit = with_pixel_scroll(base.clone()).unwrap();
+    assert_eq!(explicit.capabilities.len(), 2);
+    assert!(
+        explicit
+            .capabilities
+            .iter()
+            .any(|c| c.name == PIXEL_SCROLL_CAPABILITY && !c.required)
+    );
+    assert_eq!(with_pixel_scroll(explicit.clone()), Ok(explicit));
+    let mut fullest = base.clone();
+    for index in 0..MAX_CAPABILITIES - 2 {
+        fullest
+            .capabilities
+            .push(cap(&format!("required-{index:02}"), true));
+    }
+    fullest
+        .capabilities
+        .push(cap(fr_wire::quality_decision::CAPABILITY, false));
+    fullest.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    let bounded = with_pixel_scroll(fullest.clone()).unwrap();
+    assert_eq!(bounded.capabilities.len(), MAX_CAPABILITIES);
+    assert_eq!(bounded.role, fullest.role);
+    assert_eq!(bounded.limits, fullest.limits);
+    for required in fullest.capabilities.iter().filter(|c| c.required) {
+        assert!(bounded.capabilities.contains(required));
+    }
+    fullest
+        .capabilities
+        .iter_mut()
+        .find(|c| c.name == fr_wire::quality_decision::CAPABILITY)
+        .unwrap()
+        .required = true;
+    assert_eq!(with_pixel_scroll(fullest), Err(Error::Invalid));
+    let mut wrong = base.clone();
+    wrong.capabilities.push(Negotiated {
+        name: PIXEL_SCROLL_CAPABILITY.into(),
+        version: 2,
+        required: false,
+    });
+    wrong.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(with_pixel_scroll(wrong), Err(Error::RequiredCapability));
+    let mut observing = base;
+    observing.capabilities.clear();
+    assert_eq!(with_pixel_scroll(observing), Err(Error::RequiredCapability));
 }

@@ -1,5 +1,5 @@
 
-Later client file selections (Linux):
+Later client file selections (Linux or macOS desktop build):
 fr connect NODE_ID --control --file-commands [native connect options]
 fr send NODE_ID --connection-id ID --status [--json]
 fr send NODE_ID --connection-id ID --lease HANDLE --send /absolute/path... [--json]
@@ -8,7 +8,8 @@ fr send NODE_ID --connection-id ID --lease HANDLE --cancel N [--json]
 fr send NODE_ID --connection-id ID --lease HANDLE --pause N [--json]
 fr send NODE_ID --connection-id ID --lease HANDLE --resume N [--json]
 
-Start with explicit --file-commands, alone or with initial --send / --file-drop.
+Start with explicit --file-commands, alone or with initial --send. Linux also
+supports --file-drop; macOS requires a build with --features macos-desktop.
 Host approval, control and frd --files DIR are still required. Find connection_id
 with fr robot session status NODE_ID; fr send --status then reports its separate
 file lease. Both handles compare original local owners; neither is a bearer ticket.
@@ -20,7 +21,9 @@ Finish the previous transfer before another selection; an earlier paused batch
 still holds the intake and original cumulative limits remain in force. Inspect
 command batches with --status --request N. --pause N / --resume N change only that
 batch's original pacing intent; --cancel N requests its cancellation. The original
-panel/hotkeys keep their original selection.
+Linux panel/hotkeys keep their original selection. On macOS, the native upload
+Cancel button retires local command intake and cancels all admitted upload batches;
+the download Cancel button remains independent.
 Pause gates new source/record admission; already admitted bytes and preparation
 may finish. Original expiry, authority checks, receipts and cleanup keep running.
 pause_requested is local intent; paused is the sender's last gate observation,

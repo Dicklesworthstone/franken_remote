@@ -27,16 +27,81 @@ pub const GRANT_CAPABILITY: &str = "native-control-grant";
 /// unavailable and control still works. The host never clamps a request.
 pub const LINE_SCROLL_CAPABILITY: &str = "native-input-line-scroll";
 pub const LINE_SCROLL_VERSION: u16 = 1;
+/// Optional precise scroll boundary. Signed 16.16 distances retain native
+/// logical scroll units; selecting this never implies display-pixel scaling
+/// or permission to convert a pixel event into a line event.
+pub const PIXEL_SCROLL_CAPABILITY: &str = "native-input-pixel-scroll";
+pub const PIXEL_SCROLL_VERSION: u16 = 1;
 /// What a controller may ask for under this selection: every operation the
-/// grant exchange carries, line scrolling only with [`LINE_SCROLL_CAPABILITY`].
+/// grant exchange carries, each scroll mode only with its own boundary.
 /// A controller requests `wanted.meet(requestable(selection))`.
 pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities {
     let line_scroll = selection
         .iter()
         .any(|c| c.name == LINE_SCROLL_CAPABILITY && c.version == LINE_SCROLL_VERSION);
+    let pixel_scroll = selection
+        .iter()
+        .any(|c| c.name == PIXEL_SCROLL_CAPABILITY && c.version == PIXEL_SCROLL_VERSION);
     CAPS.iter()
         .filter(|&&c| line_scroll || c != Capability::LineScroll)
+        .filter(|&&c| pixel_scroll || c != Capability::PixelScroll)
         .fold(Capabilities::default(), |set, &c| set.with(c))
+}
+
+/// Explicit opt-in by a precise-scroll producer or a positively probed native
+/// executor. Legacy profiles do not call this. At the existing offer ceiling,
+/// optional diagnostics yield first, then optional bulk sizing/credit (whose
+/// bounded legacy paths remain available). Required capabilities never yield.
+pub fn with_pixel_scroll(
+    mut offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    use crate::negotiation::{Capability as Negotiated, Error, MAX_CAPABILITIES};
+    offer.validate()?;
+    if !offer
+        .capabilities
+        .iter()
+        .any(|cap| cap.name == GRANT_CAPABILITY && cap.version == 1)
+    {
+        return Err(Error::RequiredCapability);
+    }
+    if let Some(cap) = offer
+        .capabilities
+        .iter()
+        .find(|cap| cap.name == PIXEL_SCROLL_CAPABILITY)
+    {
+        return if cap.version == PIXEL_SCROLL_VERSION && !cap.required {
+            Ok(offer)
+        } else {
+            Err(Error::RequiredCapability)
+        };
+    }
+    for optional in [
+        crate::quality_decision::CAPABILITY,
+        crate::attachment::BULK_RECORD_CAPABILITY,
+        crate::attachment::credit::CAPABILITY,
+    ] {
+        if offer.capabilities.len() < MAX_CAPABILITIES {
+            break;
+        }
+        offer
+            .capabilities
+            .retain(|cap| cap.name != optional || cap.required);
+    }
+    if offer.capabilities.len() >= MAX_CAPABILITIES {
+        return Err(Error::Invalid);
+    }
+    offer
+        .capabilities
+        .try_reserve_exact(1)
+        .map_err(|_| Error::Allocation)?;
+    offer.capabilities.push(Negotiated {
+        name: PIXEL_SCROLL_CAPABILITY.into(),
+        version: PIXEL_SCROLL_VERSION,
+        required: false,
+    });
+    offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    offer.validate()?;
+    Ok(offer)
 }
 pub const REQUEST_BYTES: usize = HEADER_BYTES + 109;
 pub const GRANTED_BYTES: usize = REQUEST_BYTES + 76;

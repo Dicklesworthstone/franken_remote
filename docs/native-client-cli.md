@@ -123,6 +123,48 @@ control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
 stops the original session locally before any other input from that native
 batch can be forwarded.
 
+The Mac client offers precise trackpad scrolling through the independent
+optional `native-input-pixel-scroll` v1 capability. A Mac host offers it only
+after its actual input-agent probe reports `PixelScroll`; existing Linux and
+older hosts retain their ordinary control grant. Precise AppKit deltas keep
+their logical native distance, both axes and signed 16.16 fractions through
+the wire and Quartz continuous-scroll fields. Neither the viewer's Retina
+scale nor `--fit` changes scroll distance. Wheel events whose native unit is
+lines continue to use the separate line-scroll capability.
+
+There is no guessed trackpad-to-wheel conversion. If the host did not grant
+precise scrolling, a precise event is refused locally and counted in
+`native_scroll_refusals.unsupported` in completion JSON; keyboard, pointer,
+buttons and native line scrolling remain available. The same object's
+`expired` and `invalid` fields count aged and invalid/out-of-range native
+scroll events; it is omitted when all three counts are zero. Nonprecise scrolls obey the host's
+32-line combined-axis action bound; oversized events are refused, not clamped.
+Fractional carry is less than one wire quantum per pixel axis or one line per
+line axis, expires within the original 100 ms local capture budget, and never
+crosses another input action or a new grant. All native input events now retain
+their original AppKit capture time through a fixed client-clock correlation;
+draining a delayed UI queue cannot refresh their action deadlines.
+
+The new precise-scroll path has portable production-policy and negotiation
+regressions. Native tests extend the existing process-local Quartz event tap
+to check continuous mode, both fractional fields, integer point fields,
+modifier flags and position, plus final-authority refusal and cancellation.
+These tests route events to their own process, not the owner's desktop. The
+new Objective-C path, SDK build and native event readback are **not tested in
+this Linux session**; smoothness and target-application behavior still require
+Mac qualification. The relevant native targets are:
+
+```sh
+cargo test -p fr-native --no-default-features --features macos-input --test macos_input_events
+cargo test -p fr-native --no-default-features --features macos-input --test macos_input_agent
+```
+
+The unit contract follows Apple's [`scrollingDeltaY`](https://developer.apple.com/documentation/appkit/nsevent/scrollingdeltay),
+[`CGScrollEventUnit`](https://developer.apple.com/documentation/coregraphics/cgscrolleventunit)
+and [fixed-point scroll-field](https://developer.apple.com/documentation/coregraphics/cgeventfield/scrollwheeleventfixedptdeltaaxis1)
+documentation. Fixed-point event-field retention is distinct from proving that
+every target application consumes subpixel fractions.
+
 The initial `--control` request is consumed once for the whole invocation.
 Automatic reconnects obtain fresh viewing only; after the recovered window is
 visible, focused and fresh, press and release **F8** to request new control.
@@ -186,7 +228,7 @@ transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
 `--capture-system-shortcuts`, `--audio`, `--microphone`,
-`--file-drop`, `--file-commands` and
+`--file-drop` and
 `fr robot session open`. The clipboard,
 on by default on Linux, is reported as `local_clipboard_unavailable`.
 Local status identifies the foreground invocation; optional quality and
@@ -315,8 +357,8 @@ Cancellation does not undo files already published. Unknown publication or
 pending cleanup remains explicit; neither becomes “nothing sent.”
 
 The shared CLI report projection also preserves these distinctions on Linux.
-macOS drag-and-drop selection, the local file-command endpoint, clipboard,
-audio and microphone support remain separate unavailable features.
+macOS drag-and-drop selection, clipboard, audio and microphone support remain
+separate unavailable features. Explicit local file commands are described below.
 
 **Verification limit for this extension (2026-11-09):** five portable sizing
 tests pass with the pinned compiler and strict standalone Clippy, including
@@ -328,6 +370,71 @@ was killed by SIGKILL while compiling the unchanged pinned Asupersync
 dependency, before it reached the new runtime integration. Native macOS
 builds and a real two-direction transfer/cancel/reconnect run remain required;
 the earlier viewer evidence above does not qualify this extension.
+
+### Later macOS file selections on the original connection
+
+`--file-commands` enables later explicit uploads without restarting the desktop.
+It may be used alone, alongside initial `--send` selections, or alongside the
+independent `--receive` destination. An empty initial upload opens no source
+and reads no file contents. The original host still needs to approve control
+and enable the receiving file directory.
+
+```sh
+fr connect NODE_ID --control --experimental-native --display only --file-commands
+
+# Read connection_id from the original foreground session, then its file lease.
+fr robot session status NODE_ID --json
+fr send NODE_ID --connection-id CONNECTION_ID --status --json
+
+# Use the exact connection_id and lease returned by those status calls.
+fr send NODE_ID --connection-id CONNECTION_ID --lease FILE_LEASE \
+  --send /absolute/source.txt --send /absolute/source-directory --json
+fr send NODE_ID --connection-id CONNECTION_ID --lease FILE_LEASE \
+  --status --request 1 --json
+fr send NODE_ID --connection-id CONNECTION_ID --lease FILE_LEASE --pause 1 --json
+fr send NODE_ID --connection-id CONNECTION_ID --lease FILE_LEASE --resume 1 --json
+fr send NODE_ID --connection-id CONNECTION_ID --lease FILE_LEASE --cancel 1 --json
+```
+
+The command first authenticates the same-user foreground owner and its exact
+node and connection identity, then addresses that original upload's separate
+file instance. It opens no new remote connection. macOS uses a private,
+owner-checked Unix socket path; the peer credentials are checked at both ends.
+The original fixed selection worker pins at most eight explicitly named files
+or directories per command, and retains at most 64 admitted command results.
+File paths and contents never enter the native progress view or completion
+history. Selection and admission share the existing two-second file-command
+budget; an uncertain reply requires inspection of the same instance, not an
+automatic retry.
+
+Finish the current batch before sending another; a paused batch still owns
+the lane. Pause gates new source and record admission while the original
+deadline, authority checks, receipts and cleanup continue. Resume changes
+that same batch's pacing and cannot restart cancelled or expired work. Cancelling
+one request cannot cancel a later batch. Each `--status --request N` reports the
+original request's own publication, uncertainty, pacing and cleanup evidence.
+
+The native upload strip follows the latest admitted batch and samples its actual
+progress and cleanup. Its **Cancel** button retires command intake and cancels
+all admitted upload batches; the independent receive direction stays available.
+Window close, escape, display change and connection cleanup also fence the
+endpoint synchronously. A later viewing retry or fresh F8 control never reopens
+that consent or resubmits a selection. Cleanup must confirm the original socket
+and selection workers as well as the file workers before another native attempt
+can begin; a blocked local filesystem operation leaves cleanup unconfirmed.
+
+Completion combines the initial selection and later command outcomes with stable
+indices. `files_commands.requests` maps each original command number to its
+`first_index` and `selected` range, preserving publication receipts even when
+a later batch or viewing attempt fails. The initial source's cleanup evidence
+cannot certify later independent batches. Original receipt history remains
+readable after the endpoint has retired.
+
+**Verification boundary (2026-11-09):** this extension adds production-owner
+consent/profile/cancellation tests, shared indexed command/cleanup projection
+regressions, and macOS preflight checks for control consent and toolbar space.
+Native macOS builds and a live repeated-send/pause/resume/cancel/reconnect run
+remain required; portable source review does not establish native qualification.
 
 ## Check local capture, encoding and input readiness
 

@@ -9,12 +9,12 @@
 //! revalidated before every positive operation, refusal instead of clamping,
 //! a press only of what it does not hold, a release only of what it holds,
 //! and a pessimistic held set recorded for the last-resort release. Quartz
-//! has standalone key repeat and line scrolling, so neither is split into
+//! has standalone key repeat and scrolling, so neither is split into
 //! pairs. `CGEventPost` returns nothing: `Submitted` means the event was
 //! created and handed to the window server, never that an application saw it.
 use crate::{
     macos_display::{self, MacDisplay},
-    macos_input_state::{Clicks, Held, button_index, scroll_lines},
+    macos_input_state::{Clicks, Held, button_index, scroll_lines, scroll_pixels},
     macos_keys,
 };
 use core::{
@@ -78,6 +78,14 @@ unsafe extern "C" {
         source: *mut c_void,
         lines_y: i32,
         lines_x: i32,
+        x: f64,
+        y: f64,
+        flags: u64,
+    ) -> c_int;
+    fn fr_in_pixel_scroll(
+        source: *mut c_void,
+        fixed_y: i32,
+        fixed_x: i32,
         x: f64,
         y: f64,
         flags: u64,
@@ -168,8 +176,7 @@ pub fn display_bounds() -> Result<Vec<(u32, InputBounds)>, PlatformError> {
         .collect())
 }
 
-/// What this executor implements. Pixel scrolling, relative motion and text
-/// have no host policy offering them yet, so they are not claimed.
+/// What this executor implements. Relative motion and text remain unsupported.
 fn implemented() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -177,6 +184,7 @@ fn implemented() -> Capabilities {
         .with(Capability::Absolute)
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
+        .with(Capability::PixelScroll)
 }
 
 /// frd's startup probe: the capabilities a lease executor would advertise,
@@ -383,6 +391,14 @@ impl MacPointer {
                 scroll_lines(x, y).ok_or(PlatformError::Unsupported)?;
                 self.action_point().map(drop)
             }
+            Operation::Scroll {
+                x,
+                y,
+                unit: ScrollUnit::Pixels,
+            } => {
+                scroll_pixels(x, y).ok_or(PlatformError::Unsupported)?;
+                self.action_point().map(drop)
+            }
             _ => Err(PlatformError::Unsupported),
         }
     }
@@ -467,24 +483,44 @@ impl MacPointer {
                 }
                 result
             }
-            Operation::Scroll { x, y, .. } => {
-                let Some((vertical, horizontal)) = scroll_lines(x, y) else {
-                    return Submission::NotSubmitted(PlatformError::Unsupported);
-                };
-                let (px, py) = match self.action_point() {
-                    Ok(point) => point,
-                    Err(error) => return Submission::NotSubmitted(error),
-                };
-                // SAFETY: the owned live source; scalar arguments.
-                status(unsafe {
-                    fr_in_scroll(source, vertical, horizontal, px, py, self.held.flags())
-                })
-            }
+            Operation::Scroll { x, y, unit } => return self.submit_scroll(x, y, unit),
             _ => return Submission::NotSubmitted(PlatformError::Unsupported),
         };
         match result {
             Ok(()) => Submission::Submitted,
             // The glue refused before creating an event: nothing was posted.
+            Err(PlatformError::Unsupported) => Submission::NotSubmitted(PlatformError::Unsupported),
+            Err(_) => Submission::Unknown,
+        }
+    }
+
+    fn submit_scroll(&self, x: i32, y: i32, unit: ScrollUnit) -> Submission {
+        let delta = match unit {
+            ScrollUnit::Lines => scroll_lines(x, y),
+            ScrollUnit::Pixels => scroll_pixels(x, y),
+        };
+        let Some((vertical, horizontal)) = delta else {
+            return Submission::NotSubmitted(PlatformError::Unsupported);
+        };
+        let (px, py) = match self.action_point() {
+            Ok(point) => point,
+            Err(error) => return Submission::NotSubmitted(error),
+        };
+        let source = self.source.as_ptr();
+        // SAFETY: the owned live source; scalar arguments. The caller consumed
+        // this operation's preparation and original final authority check.
+        let result = status(unsafe {
+            match unit {
+                ScrollUnit::Lines => {
+                    fr_in_scroll(source, vertical, horizontal, px, py, self.held.flags())
+                }
+                ScrollUnit::Pixels => {
+                    fr_in_pixel_scroll(source, vertical, horizontal, px, py, self.held.flags())
+                }
+            }
+        });
+        match result {
+            Ok(()) => Submission::Submitted,
             Err(PlatformError::Unsupported) => Submission::NotSubmitted(PlatformError::Unsupported),
             Err(_) => Submission::Unknown,
         }

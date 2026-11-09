@@ -109,6 +109,7 @@ fn implemented() -> Capabilities {
         .with(Capability::Absolute)
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
+        .with(Capability::PixelScroll)
 }
 
 fn require_access() {

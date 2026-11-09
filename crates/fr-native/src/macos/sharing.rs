@@ -55,7 +55,13 @@ pub(crate) struct Sample {
 
 fn upload(files: &files::Files) -> Progress {
     use files::Status;
-    let status = match files.upload_status() {
+    // Later admitted batches have independent progress and cleanup. Sampling
+    // their retained handle never replaces the initial selection's receipts.
+    let status = match files
+        .command_snapshot()
+        .map(Status::Configured)
+        .or_else(|| files.upload_status())
+    {
         None => return Progress::default(),
         Some(Status::NotStarted) => return Progress::state(State::Waiting),
         Some(Status::Unavailable(absence)) => {

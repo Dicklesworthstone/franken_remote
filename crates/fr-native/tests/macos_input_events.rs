@@ -66,6 +66,10 @@ mod quartz {
     const AXIS_2: u32 = 12;
     const USER_DATA: u32 = 42;
     const CONTINUOUS: u32 = 88;
+    const FIXED_AXIS_1: u32 = 93;
+    const FIXED_AXIS_2: u32 = 94;
+    const POINT_AXIS_1: u32 = 96;
+    const POINT_AXIS_2: u32 = 97;
 
     const SHIFT: u64 = 1 << 17;
     const LEFT_SHIFT_DEVICE: u64 = 0x2;
@@ -144,6 +148,8 @@ mod quartz {
         click: i64,
         button: i64,
         axis: (i64, i64),
+        fixed: (i64, i64),
+        points: (i64, i64),
         continuous: i64,
         at: (f64, f64),
     }
@@ -173,6 +179,8 @@ mod quartz {
             click: field(CLICK_STATE),
             button: field(BUTTON_NUMBER),
             axis: (field(AXIS_1), field(AXIS_2)),
+            fixed: (field(FIXED_AXIS_1), field(FIXED_AXIS_2)),
+            points: (field(POINT_AXIS_1), field(POINT_AXIS_2)),
             continuous: field(CONTINUOUS),
             at: (at.x, at.y),
         };
@@ -282,6 +290,7 @@ mod quartz {
             .with(Capability::Absolute)
             .with(Capability::Buttons)
             .with(Capability::LineScroll)
+            .with(Capability::PixelScroll)
     }
 
     fn key(usage: u16, transition: KeyTransition) -> Operation {
@@ -466,8 +475,57 @@ mod quartz {
             "{e:?}"
         );
         assert_at("scroll", e, center_points);
+        precise_scroll_preserves_native_distance_and_authority(p, tap, center_points);
         drop(pointer);
         tap.quiet("nothing held when the owner closed");
+    }
+
+    fn precise_scroll_preserves_native_distance_and_authority(
+        p: &mut MacPointer,
+        tap: &Tap,
+        center_points: (f64, f64),
+    ) {
+        // Native continuous scroll retains signed 16.16 fractions; its logical
+        // distance is independent of this display's Retina backing scale.
+        post(p, "scroll shift down", key(0xe1, KeyTransition::Press));
+        assert_eq!(tap.next("scroll shift down").kind, FLAGS_CHANGED);
+        let precise = Operation::Scroll {
+            x: 3 * LINE / 2,
+            y: -9 * LINE / 4,
+            unit: ScrollUnit::Pixels,
+        };
+        post(p, "precise scroll", precise);
+        let e = tap.next("precise scroll");
+        assert_eq!((e.kind, e.continuous), (SCROLL, 1), "{e:?}");
+        assert_eq!(
+            e.fixed,
+            (i64::from(9 * LINE / 4), i64::from(-3 * LINE / 2)),
+            "{e:?}"
+        );
+        assert_eq!(e.points, (2, -1), "{e:?}");
+        assert_ne!(e.flags & SHIFT, 0, "{e:?}");
+        assert_at("precise scroll", e, center_points);
+        post(p, "scroll shift up", key(0xe1, KeyTransition::Release));
+        assert_eq!(tap.next("scroll shift up").kind, FLAGS_CHANGED);
+
+        // A final authority refusal consumes preparation. No fresh ticket,
+        // repeated call or cancellation can turn it into a later event.
+        p.prepare(precise).unwrap();
+        assert_eq!(
+            p.submit_checked(precise, |_| Err("expired")),
+            Err("expired")
+        );
+        assert_eq!(
+            p.submit(precise),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        p.prepare(precise).unwrap();
+        p.cancel_prepared();
+        assert_eq!(
+            p.submit(precise),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        tap.quiet("expired and cancelled precise scrolls");
     }
 
     fn refusals_post_nothing(tap: &Tap, bounds: InputBounds) {
@@ -485,6 +543,22 @@ mod quartz {
             (key(0x04, KeyTransition::Repeat), PlatformError::Unsupported),
             (
                 button(PointerButton::Primary, false),
+                PlatformError::Unsupported,
+            ),
+            (
+                Operation::Scroll {
+                    x: i32::MIN,
+                    y: 0,
+                    unit: ScrollUnit::Pixels,
+                },
+                PlatformError::Unsupported,
+            ),
+            (
+                Operation::Scroll {
+                    x: 0,
+                    y: i32::MIN,
+                    unit: ScrollUnit::Pixels,
+                },
                 PlatformError::Unsupported,
             ),
         ];

@@ -10,6 +10,46 @@ use fr_wire::{
     presented, quality_decision, receiver_metrics, recovery_request,
 };
 
+#[test]
+fn explicit_mac_pixel_scroll_fits_all_current_file_profiles_and_keeps_legacy_control() {
+    use fr_client::native::{
+        control_offer_with_download, control_offer_with_duplex, control_offer_with_files,
+    };
+    use fr_core::input_submission::Capability;
+    for original in [
+        control_offer(),
+        control_offer_with_files(),
+        control_offer_with_download(false, false),
+        control_offer_with_duplex(false, false),
+    ] {
+        assert!(
+            !original
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == control::PIXEL_SCROLL_CAPABILITY)
+        );
+        let precise = control::with_pixel_scroll(original.clone()).unwrap();
+        precise.validate().unwrap();
+        assert!(precise.capabilities.len() <= negotiation::MAX_CAPABILITIES);
+        assert_eq!(precise.limits, original.limits);
+        for cap in &original.capabilities {
+            assert!(precise.capabilities.contains(cap));
+        }
+        let bytes = bytes(&Message::ClientHello(precise.clone()));
+        assert_eq!(
+            negotiation::decode(&bytes, negotiation::MAX_RECORD, 0).unwrap(),
+            Message::ClientHello(precise.clone())
+        );
+        let legacy = original.intersect(&precise).unwrap();
+        assert_eq!(legacy.capabilities, original.capabilities);
+        assert!(!control::requestable(&legacy.capabilities).contains(Capability::PixelScroll));
+        assert!(control::requestable(&legacy.capabilities).contains(Capability::LineScroll));
+        let selected = precise.intersect(&precise).unwrap();
+        assert!(control::requestable(&selected.capabilities).contains(Capability::PixelScroll));
+    }
+    assert!(control::with_pixel_scroll(observation_offer()).is_err());
+}
+
 fn bytes(message: &Message) -> Vec<u8> {
     let mut bytes = vec![0; negotiation::MAX_RECORD];
     let n = negotiation::encode(message, negotiation::MAX_RECORD, &mut bytes).unwrap();

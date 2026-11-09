@@ -420,8 +420,28 @@ before it asks whether the host's input executor can inject discrete line
 scrolling, as measured when the host started. A host offers it only then; a
 controller requests line scrolling only when both peers selected it and
 otherwise requests the rest of its operations, so the wheel alone is
-unavailable. A host whose executor lacks a core operation (keys, repeat,
-absolute pointer, buttons) does not offer control at all.
+unavailable. The independent optional `native-input-pixel-scroll` v1 boundary
+does the same for precise scrolling. It must be selected by both peers before
+a controller requests `PixelScroll`; adding precise scrolling to a new client
+must not make its entire control request fail against an older or line-only
+host. A host whose executor lacks a core operation (keys, repeat, absolute
+pointer, buttons) does not offer control at all.
+
+Precise scrolling preserves signed 16.16 logical native scroll distances. A
+display's backing scale and the fitted video rectangle do not scale these
+distances. macOS maps AppKit's precise `scrollingDeltaX/Y` directly to this
+mode and the Quartz pixel-unit event, with the axis/sign change only; it does
+not guess a line height or reinterpret these distances as physical screen
+pixels. A source without a selected precise mode refuses that input locally
+while keeping other granted operations usable. Whole-line and precise scroll
+capabilities are independent; neither authorizes emulation through the other.
+
+A native producer may retain only a bounded sub-unit fraction until its next
+scroll. A combined event keeps the oldest contribution's capture time and
+original action-age budget. Unit changes, intervening actions, expiry and
+producer retirement discard this fractional state; it never crosses a lease
+or reconnect. Whole events, tickets and submitted action identities are never
+retained for a later fresh attempt.
 
 ### Clipboard, audio, and files
 

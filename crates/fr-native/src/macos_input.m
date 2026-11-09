@@ -213,6 +213,21 @@ int fr_in_scroll(void *source, int32_t lines_y, int32_t lines_x, double x, doubl
     return post(event, flags);
 }
 
+// Logical native scroll distance, signed 16.16. The constructor takes whole
+// pixels; the documented fixed-point fields retain the fractional component.
+// Neither the source's line scale nor the display backing scale is applied.
+int fr_in_pixel_scroll(void *source, int32_t fixed_y, int32_t fixed_x, double x, double y,
+                       uint64_t flags) {
+    if (!source) return FR_IN_INVALID;
+    CGEventRef event = CGEventCreateScrollWheelEvent2((CGEventSourceRef)source,
+        kCGScrollEventUnitPixel, 2, fixed_y / 65536, fixed_x / 65536, 0);
+    if (!event) return FR_IN_UNAVAILABLE;
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis1, fixed_y);
+    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis2, fixed_x);
+    CGEventSetLocation(event, CGPointMake(x, y));
+    return post(event, flags);
+}
+
 double fr_in_double_click_interval(void) { return [NSEvent doubleClickInterval]; }
 
 // ---- Last-resort release --------------------------------------------------

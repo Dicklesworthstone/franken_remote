@@ -2,6 +2,7 @@
 //! reserves the OS share-session's Seat before minting authority, initializes the
 //! native owner outside the authority path, and publishes only after it is ready.
 mod recovery;
+mod selection;
 use super::{NegotiatedInput, QuicInput, Routes, ticket::TICKET_CADENCE_US, ticket_bytes};
 use crate::{
     input_agent::{self, AdmissionGate, Driver, Phase, Seat},
@@ -98,6 +99,7 @@ pub struct GrantBroker {
     control_routes: ControlRoutes,
     input_routes: Routes,
     negotiated: Option<NegotiatedInput>,
+    selected: selection::Selected,
     limits: ProtocolLimits,
     ticket_profile: Profile,
     seat: Seat,
@@ -221,6 +223,7 @@ impl GrantBroker {
             control_routes: scope.control,
             input_routes,
             negotiated: None,
+            selected: selection::Selected::new(scope.selection),
             limits,
             ticket_profile,
             seat,
@@ -426,14 +429,13 @@ impl GrantBroker {
         if self.waiting.is_some() {
             return Err(Error::RequestPending);
         }
-        let request = control::decode_request(
-            bytes,
-            self.parent,
-            &self.limits,
-            InputDirection::ViewerToHost,
-            InputDelivery::Reliable,
-        )
-        .map_err(Error::Wire)?;
+        let request = self
+            .selected
+            .decode(bytes, self.parent, &self.limits)
+            .map_err(|error| match error {
+                selection::Error::Wire(error) => Error::Wire(error),
+                selection::Error::NotNegotiated => Error::NotNegotiated,
+            })?;
         if self
             .negotiated
             .as_ref()

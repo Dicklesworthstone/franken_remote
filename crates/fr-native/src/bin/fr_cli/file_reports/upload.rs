@@ -237,7 +237,26 @@ pub(crate) fn reported(
     out
 }
 impl Summary {
-    #[cfg(any(test, all(target_os = "linux", feature = "linux-desktop")))]
+    /// Preserve each original command number and its indices in the combined
+    /// completion without mixing its independent sender/cleanup with a prior
+    /// selection. The same projection is used by Linux and macOS.
+    #[cfg(any(
+        test,
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
+    pub(crate) fn append_command(&mut self, batch: &frd::native_files::local::BatchStatus) {
+        let first = self.requested;
+        self.append_later(&batch.sizes, Ok(&batch.status));
+        self.command_requests
+            .push((batch.sequence, first, batch.sizes.len()));
+    }
+
+    #[cfg(any(
+        test,
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     pub(crate) fn append_later(
         &mut self,
         sizes: &[Option<u64>],
@@ -261,7 +280,11 @@ impl Summary {
         }
         self.append(next);
     }
-    #[cfg(any(test, all(target_os = "linux", feature = "linux-desktop")))]
+    #[cfg(any(
+        test,
+        all(target_os = "linux", feature = "linux-desktop"),
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     pub(crate) fn append(&mut self, next: Self) {
         // A single source's cleanup cannot certify later independent batches.
         self.evidence = None;
@@ -661,6 +684,45 @@ mod tests {
             ]
         );
         assert!(summary.absence.is_none());
+    }
+
+    #[test]
+    fn later_command_keeps_original_indices_without_reusing_prior_cleanup_evidence() {
+        let snapshot = SendSnapshot {
+            status: SendStatus {
+                phase: SendPhase::Ended,
+                absence: None,
+                report: None,
+            },
+            stage: Some(fr_files::sender::Stage::Closed),
+            current: None,
+            cancel_requested: false,
+            pause_requested: false,
+            paused: None,
+            cleanup: Some(Ok(())),
+        };
+        let mut summary = Summary::from_snapshot(&[Some(7)], &snapshot);
+        assert_eq!(json(&summary)["files_upload_cleanup"], "finished");
+        summary.commands = Some(Ok(()));
+        summary.append_command(&frd::native_files::local::BatchStatus {
+            sequence: 1,
+            sizes: vec![Some(11), None],
+            status: SendStatus {
+                phase: SendPhase::WaitingForControl,
+                absence: None,
+                report: None,
+            },
+        });
+        let output = json(&summary);
+        assert_eq!(summary.requested, 3);
+        assert!(output.get("files_upload_cleanup").is_none());
+        assert_eq!(output["files_commands"]["requests"][0]["request"], 1);
+        assert_eq!(output["files_commands"]["requests"][0]["first_index"], 1);
+        assert_eq!(output["files_commands"]["requests"][0]["selected"], 2);
+        assert_eq!(output["files_refused"][0]["reason"], "publication_unknown");
+        assert_eq!(output["files_refused"][1]["reason"], "files_queued");
+        assert_eq!(output["files_refused"][2]["reason"], "files_queued");
+        assert!(!summary.text().contains("nothing sent"));
     }
 
     #[test]

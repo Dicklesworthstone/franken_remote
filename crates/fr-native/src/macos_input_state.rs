@@ -1,6 +1,6 @@
 //! The macOS input executor's pure bookkeeping (fr-macos-host-control-b14s):
 //! the keys and buttons it holds, the modifier flags its events carry, a
-//! press's click count and the Quartz form of a line scroll. No Quartz call
+//! press's click count and the Quartz form of scroll distances. No Quartz call
 //! here, so ordinary CI tests it on every target.
 #![forbid(unsafe_code)]
 
@@ -150,9 +150,34 @@ pub fn scroll_lines(x: i32, y: i32) -> Option<(i32, i32)> {
     Some((-(y / LINE), -(x / LINE)))
 }
 
+/// Protocol logical pixel distances as Quartz signed 16.16 distances,
+/// `(vertical, horizontal)`. No line conversion or display backing scale.
+/// The one unrepresentable sign inversion is refused before any OS call.
+pub const fn scroll_pixels(x: i32, y: i32) -> Option<(i32, i32)> {
+    match (y.checked_neg(), x.checked_neg()) {
+        (Some(vertical), Some(horizontal)) => Some((vertical, horizontal)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pixel_distances_keep_fractional_units_and_refuse_overflow() {
+        assert_eq!(
+            scroll_pixels(3 * LINE / 2, -9 * LINE / 4),
+            Some((9 * LINE / 4, -3 * LINE / 2))
+        );
+        assert_eq!(scroll_pixels(1, -1), Some((1, -1)));
+        assert_eq!(
+            scroll_pixels(i32::MAX, -i32::MAX),
+            Some((i32::MAX, -i32::MAX))
+        );
+        assert_eq!(scroll_pixels(i32::MIN, 0), None);
+        assert_eq!(scroll_pixels(0, i32::MIN), None);
+    }
 
     #[test]
     fn modifier_flags_follow_the_held_keys() {

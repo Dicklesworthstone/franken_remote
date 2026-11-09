@@ -3,11 +3,12 @@
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
-//! interactive file drops/commands, audio, microphone,
+//! interactive file drops, audio, microphone,
 //! system-shortcut capture and the clipboard (whose default-on choice is
 //! reported as unavailable). Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
-//! Explicit --send/--receive choices use the original controlled file lanes.
+//! Explicit --send/--receive choices and opt-in local upload commands use the
+//! original controlled file lanes.
 #[path = "macos_files.rs"]
 mod files;
 #[path = "macos_history.rs"]
@@ -46,8 +47,16 @@ fn check(connection: &Connection) -> Result<(), Failure> {
             2,
         ));
     }
+    if !connection.control && connection.upload.file_commands {
+        return Err(Failure::new(
+            "file_commands_require_control",
+            "Local file commands use the original upload control lease; pass --control with --file-commands. A viewing reconnect never re-enables them.",
+            2,
+        ));
+    }
     let directions =
-        u32::from(!connection.upload.paths.is_empty()) + u32::from(connection.receive.is_some());
+        u32::from(!connection.upload.paths.is_empty() || connection.upload.file_commands)
+            + u32::from(connection.receive.is_some());
     if connection
         .fit_window
         .is_some_and(|(width, height)| width < 152 + 230 * directions || height < 108)
@@ -64,9 +73,9 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         Some("--audio is not implemented on macOS yet.")
     } else if connection.microphone.is_some() {
         Some("--microphone is not implemented on macOS yet.")
-    } else if connection.upload.file_drop || connection.upload.file_commands {
+    } else if connection.upload.file_drop {
         Some(
-            "--file-drop and --file-commands are not implemented on macOS yet; choose explicit --send paths and/or a --receive directory before connecting.",
+            "--file-drop is not implemented on macOS yet; use --file-commands for later explicit selections, or choose --send paths and/or a --receive directory before connecting.",
         )
     } else {
         None
@@ -182,6 +191,9 @@ fn connect_selected(
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
+    session
+        .file_command_connection(&owner.info().instance)
+        .map_err(crate::file_commands::local_failure)?;
     let selector = selected.selector();
     let result = if connection.control {
         // Drop the Ref before handing the mutable session to its supervisor.
@@ -518,11 +530,19 @@ mod tests {
             assert!(check(&connection).is_ok());
             assert!(!connection.upload.file_drop && !connection.upload.file_commands);
         }
-        for flags in ["--file-drop", "--file-commands"] {
-            assert_eq!(
-                check(&connection(flags)).err().unwrap().code,
-                "platform_unavailable"
-            );
+        assert_eq!(
+            check(&connection("--file-drop")).err().unwrap().code,
+            "platform_unavailable"
+        );
+        for flags in [
+            "--file-commands",
+            "--file-commands --send /private/chosen",
+            "--file-commands --receive /private/inbox",
+            "--file-commands --send /private/chosen --receive /private/inbox",
+        ] {
+            let connection = connection(flags);
+            assert!(check(&connection).is_ok());
+            assert!(connection.upload.file_commands && !connection.upload.file_drop);
         }
     }
 
@@ -537,12 +557,20 @@ mod tests {
             check(&download).err().unwrap().code,
             "receive_requires_control"
         );
+        let mut commands = connection("--file-commands");
+        commands.control = false;
+        assert_eq!(
+            check(&commands).err().unwrap().code,
+            "file_commands_require_control"
+        );
         for (flags, width, height) in [
             ("", 151, 108),
             ("", 152, 107),
             ("--send /private/chosen", 381, 108),
+            ("--file-commands", 381, 108),
             ("--receive /private/inbox", 382, 107),
             ("--send /private/chosen --receive /private/inbox", 611, 108),
+            ("--file-commands --receive /private/inbox", 611, 108),
         ] {
             let mut c = connection(flags);
             c.fit_window = Some((width, height));

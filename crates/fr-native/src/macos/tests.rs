@@ -284,7 +284,12 @@ fn modifier_changes_become_one_press_and_one_release() {
 
 #[test]
 fn picture_points_map_to_clamped_remote_pixels() {
-    let p = |x, y| PicturePoint { x, y, inside: true };
+    let p = |x, y| PicturePoint {
+        x,
+        y,
+        inside: true,
+        captured: None,
+    };
     assert_eq!(p(0.0, 0.0).pixel(1920, 1080), (0, 0));
     assert_eq!(p(0.5, 0.5).pixel(1920, 1080), (960, 540));
     assert_eq!(p(0.999_999, 0.999_999).pixel(1920, 1080), (1919, 1079));

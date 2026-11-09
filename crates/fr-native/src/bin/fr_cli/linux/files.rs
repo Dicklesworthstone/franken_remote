@@ -240,12 +240,6 @@ impl Local {
     }
 }
 impl Summary {
-    fn append_command(&mut self, batch: &local::BatchStatus) {
-        let first = self.requested;
-        self.append_later(&batch.sizes, Ok(&batch.status));
-        self.command_requests
-            .push((batch.sequence, first, batch.sizes.len()));
-    }
     fn append_dropped(&mut self, batch: &DroppedBatchStatus) {
         self.append_later(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
     }

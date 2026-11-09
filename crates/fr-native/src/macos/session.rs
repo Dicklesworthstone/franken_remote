@@ -20,15 +20,14 @@ use super::{
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
+use crate::macos_scroll::{CaptureClock, Refusal as ScrollRefusal, Scroll};
 use crate::macos_switch::{Intent as DisplayIntent, Mode as DisplayMode};
 use asupersync::{
     cx::Cx,
     time::{Sleep, sleep},
 };
-use fr_client::input::viewport::SurfaceRect;
-use fr_core::input::{
-    DesktopPoint, InputBounds, KeyTransition, PhysicalKey, PointerButton, ScrollUnit,
-};
+use fr_client::input::{ClientInstant, viewport::SurfaceRect};
+use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, PointerButton};
 use fr_core::input_submission::{Capabilities, Capability};
 use fr_media::{
     access_unit::EncodedAccessUnit,
@@ -48,7 +47,9 @@ use frd::{
     session_startup::{
         ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
         Presentation, StreamingViewerControl, Viewer,
-        viewer_events::{Event, Layout, LocalPoint, NativeCapture, PositionedAction, Source},
+        viewer_events::{
+            Event, Layout, LocalPoint, MAX_EVENT_AGE_US, NativeCapture, PositionedAction, Source,
+        },
     },
     worker::{Deadline, Launch, LocalPresenter},
 };
@@ -67,13 +68,9 @@ use std::{
 
 /// How often `AppKit` is serviced while the network is idle.
 const PUMP: Duration = Duration::from_millis(4);
-/// A wheel notch is one line; precise (trackpad) deltas are pixels.
-const PIXELS_PER_LINE: f64 = 12.0;
-/// The protocol's 16.16 fixed-point line.
-const LINE: i32 = 1 << 16;
-
-/// The control request this session makes: the same grant profile as the
-/// Linux viewer (keys, repeat, absolute pointer, buttons, line scroll).
+/// The control request this session makes. Each scroll mode is requested only
+/// when both peers selected its optional capability; a legacy host still grants
+/// the supported remainder of this profile.
 #[derive(Debug, Clone, Copy)]
 pub struct ControlPolicy {
     pub sequence: u64,
@@ -90,7 +87,8 @@ impl Default for ControlPolicy {
                 .with(Capability::Repeat)
                 .with(Capability::Absolute)
                 .with(Capability::Buttons)
-                .with(Capability::LineScroll),
+                .with(Capability::LineScroll)
+                .with(Capability::PixelScroll),
             input: fr_client::input::Policy::default(),
             clock: ClockPolicy::default(),
         }
@@ -127,6 +125,10 @@ pub struct Report {
     pub pointer: u64,
     pub buttons: u64,
     pub scrolls: u64,
+    /// Native scroll events refused locally before any action was queued.
+    pub scroll_unsupported: u64,
+    pub scroll_expired: u64,
+    pub scroll_invalid: u64,
     pub input_results: u64,
     pub local_stop: Option<LocalStop>,
     /// Actual host exchange stages; absence never confirms remote cleanup.
@@ -173,7 +175,8 @@ struct Input {
     released: Arc<AtomicBool>,
     keys: [bool; 256],
     buttons: [bool; 5],
-    scroll: (f64, f64),
+    scroll: Scroll,
+    capture_clock: CaptureClock,
 }
 impl Drop for Input {
     fn drop(&mut self) {
@@ -200,7 +203,19 @@ impl Input {
     /// One window event to the granted session. Err means stop control.
     fn deliver(&mut self, event: &WindowEvent, report: &mut Report) -> Result<(), ()> {
         let caps = self.source.capabilities();
-        let sampled = self.source.clock().map_err(|_| ())?;
+        let now = self.source.clock().map_err(|_| ())?;
+        let captured = match *event {
+            WindowEvent::Key { captured, .. } => captured,
+            WindowEvent::Pointer(at)
+            | WindowEvent::Button { at, .. }
+            | WindowEvent::Scroll { at, .. } => at.captured,
+            _ => return Ok(()),
+        };
+        let mut sampled = ClientInstant(self.capture_clock.map(captured.ok_or(())?).ok_or(())?);
+        if !matches!(event, WindowEvent::Scroll { .. }) {
+            // A fractional scroll never crosses a key, move or button action.
+            self.scroll.reset();
+        }
         let event = match *event {
             WindowEvent::Key {
                 usage,
@@ -262,39 +277,63 @@ impl Input {
                 precise,
                 at,
             } => {
-                if !caps.contains(Capability::LineScroll) || !at.inside {
+                let Some((event, original)) =
+                    self.scroll_event((dx, dy), precise, at, (sampled, now), report)
+                else {
                     return Ok(());
-                }
-                let per_line = if precise { PIXELS_PER_LINE } else { 1.0 };
-                self.scroll.0 += dx / per_line;
-                self.scroll.1 += dy / per_line;
-                // Whole lines only, like a wheel notch. AppKit's positive
-                // delta scrolls up (or left): the protocol's negative.
-                let whole = |acc: &mut f64| {
-                    let lines = acc.trunc();
-                    *acc -= lines;
-                    // Bounded by the per-event delta AppKit reports.
-                    #[allow(clippy::cast_possible_truncation)]
-                    let lines = lines.clamp(-64.0, 64.0) as i32;
-                    -lines * LINE
                 };
-                let (x, y) = (whole(&mut self.scroll.0), whole(&mut self.scroll.1));
-                if x == 0 && y == 0 {
-                    return Ok(());
-                }
-                report.scrolls += 1;
-                Event::Positioned {
-                    location: self.layout.at(self.local(at)),
-                    action: PositionedAction::Scroll {
-                        x,
-                        y,
-                        unit: ScrollUnit::Lines,
-                    },
-                }
+                sampled = original;
+                event
             }
             _ => return Ok(()),
         };
         self.source.push(event, sampled).map_err(|_| ())
+    }
+
+    fn scroll_event(
+        &mut self,
+        distance: (f64, f64),
+        precise: bool,
+        at: PicturePoint,
+        (sampled, now): (ClientInstant, ClientInstant),
+        report: &mut Report,
+    ) -> Option<(Event, ClientInstant)> {
+        if !at.inside {
+            self.scroll.reset();
+            return None;
+        }
+        let delta = match self.scroll.push(
+            distance,
+            precise,
+            self.source.capabilities(),
+            sampled.0,
+            now.0,
+        ) {
+            Ok(Some(delta)) => delta,
+            Ok(None) => return None,
+            Err(ScrollRefusal::Unsupported) => {
+                report.scroll_unsupported += 1;
+                return None;
+            }
+            Err(ScrollRefusal::Expired) => {
+                report.scroll_expired += 1;
+                return None;
+            }
+            Err(ScrollRefusal::Invalid | ScrollRefusal::OutOfRange) => {
+                report.scroll_invalid += 1;
+                return None;
+            }
+        };
+        report.scrolls += 1;
+        let event = Event::Positioned {
+            location: self.layout.at(self.local(at)),
+            action: PositionedAction::Scroll {
+                x: delta.x,
+                y: delta.y,
+                unit: delta.unit,
+            },
+        };
+        Some((event, ClientInstant(delta.sampled)))
     }
 }
 
@@ -491,6 +530,14 @@ impl Session {
     pub fn files(&self) -> Ref<'_, files::Files> {
         self.files.borrow()
     }
+    /// Select the original foreground owner's comparison identity before file
+    /// setup. An already configured or cancelled endpoint cannot be rebound.
+    pub fn file_command_connection(
+        &mut self,
+        connection: &str,
+    ) -> Result<(), frd::native_files::local::Error> {
+        self.files.borrow_mut().command_connection(connection)
+    }
     pub fn report(&self) -> Report {
         self.report.borrow().clone()
     }
@@ -530,6 +577,26 @@ async fn pumped<T>(work: impl Future<Output = T>, mut turn: impl FnMut()) -> T {
         }
     })
     .await
+}
+
+/// The original local endpoint's selection worker may still be inside a
+/// filesystem call after intake is fenced. Keep its owner and block another
+/// attempt until both fixed workers exit, under the same cleanup deadline.
+async fn reap_file_commands(files: &RefCell<files::Files>, cx: &Cx, deadline: Deadline) -> bool {
+    loop {
+        if files.borrow().commands_complete() {
+            return true;
+        }
+        let Some(timer) = cx.timer_driver() else {
+            return false;
+        };
+        let now = timer.now();
+        if cx.checkpoint().is_err() || now >= deadline.time() {
+            return false;
+        }
+        let remaining = Duration::from_nanos(deadline.time().as_nanos() - now.as_nanos());
+        sleep(now, PUMP.min(remaining)).await;
+    }
 }
 
 /// Drain the window's events, deliver them to a granted session, and stop
@@ -776,6 +843,8 @@ fn attach(
     };
     viewer
         .capture_input_owned(&layout.clone(), |source| {
+            let sampled = source.clock().map_err(|_| ())?;
+            let capture_clock = CaptureClock::new(event_time().ok_or(())?, sampled.0);
             *slot.borrow_mut() = Some(Input {
                 source,
                 layout,
@@ -784,7 +853,8 @@ fn attach(
                 released,
                 keys: [false; 256],
                 buttons: [false; 5],
-                scroll: (0.0, 0.0),
+                scroll: Scroll::new(MAX_EVENT_AGE_US),
+                capture_clock,
             });
             Ok::<_, ()>(capture)
         })
@@ -817,6 +887,13 @@ impl Application for Session {
         // offer: its role, limits, required gates and other options stay exact.
         let mut offer = original.clone();
         offer.capabilities.retain(|cap| keep(&cap.name));
+        if self
+            .control
+            .is_some_and(|policy| policy.capabilities.contains(Capability::PixelScroll))
+            && offer.role == fr_wire::negotiation::Role::RequestControl
+        {
+            offer = fr_wire::control::with_pixel_scroll(offer).map_err(|_| CallbackError)?;
+        }
         Ok(offer)
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
@@ -1175,7 +1252,8 @@ impl Application for Session {
                 // that factory starts, dropping its future proves no cleanup.
                 None => !self.native_started.get(),
             };
-            if !result || !picker_closed {
+            let commands = reap_file_commands(&self.files, cx, deadline).await;
+            if !result || !picker_closed || !commands {
                 return Err(CallbackError);
             }
             self.observer = None;
@@ -1194,6 +1272,7 @@ impl Application for Session {
                     || self.native_started.get()
                     || self.observer.is_some()
                     || self.picker.borrow().is_some()
+                    || !self.files.borrow().commands_complete()
                 {
                     return Err(CallbackError);
                 }

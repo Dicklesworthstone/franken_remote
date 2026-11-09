@@ -159,6 +159,8 @@ pub struct PicturePoint {
     pub x: f64,
     pub y: f64,
     pub inside: bool,
+    /// Original native event time; never refreshed when the UI queue drains.
+    pub captured: Option<Duration>,
 }
 impl PicturePoint {
     /// The remote pixel under this point, clamped to the picture.
@@ -400,6 +402,7 @@ impl Window {
             x: e.x,
             y: e.y,
             inside: e.flags & 1 != 0,
+            captured: Duration::try_from_secs_f64(e.timestamp).ok(),
         };
         let keycode = u16::try_from(e.code).unwrap_or(u16::MAX);
         match e.kind {
