@@ -3,6 +3,9 @@
 //! with the `macos-viewer` feature (fr-5a4w). One name keeps each gate short;
 //! host-only code stays `target_os = "linux"`.
 //!
+//! iOS always compiles the viewer stack (`native_stack`, for fr-mobile-ffi)
+//! and never the host half.
+//!
 //! `cfg(host_stack)`: the host half (`frd run`, its policy and lifecycle) is
 //! compiled. That is Linux, or macOS with `macos-host` (fr-p1-host-macos-vif).
 fn main() {
@@ -12,7 +15,7 @@ fn main() {
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let viewer = std::env::var_os("CARGO_FEATURE_MACOS_VIEWER").is_some();
     let host = std::env::var_os("CARGO_FEATURE_MACOS_HOST").is_some();
-    if os == "linux" || (os == "macos" && (viewer || host)) {
+    if os == "linux" || os == "ios" || (os == "macos" && (viewer || host)) {
         println!("cargo::rustc-cfg=native_stack");
     }
     if os == "linux" || (os == "macos" && host) {

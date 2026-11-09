@@ -24,7 +24,9 @@ macos-viewer = []
 # macOS capture worker (fr-native macos-media). Off by default.
 macos-host = []
 
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+# iOS compiles only the viewer half (`native_stack`, see build.rs) for
+# fr-mobile-ffi; it has no host and no installed tailnet daemon.
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))'.dependencies]
 fr-client.workspace = true
 fr-transport.workspace = true
 fr-tailnet.workspace = true

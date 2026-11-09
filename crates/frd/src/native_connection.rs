@@ -1,5 +1,7 @@
 //! Installed-tailnet connection kept under renewal through native viewer service.
 //! Reuses fr-tailnet's canonical TLS dialer, not another connection implementation.
+//! A client without an installed `LocalAPI` (iOS) dials one exact `MagicDNS`
+//! name with fr-tailnet's named dialer on the same TLS/QUIC profile instead.
 #[cfg(host_stack)]
 pub mod host;
 pub mod reconnect;
@@ -8,8 +10,8 @@ use crate::session_startup::Viewer;
 use asupersync::{
     cx::Cx, net::quic_native::NativeQuicUdpConnection, tls::Certificate, types::CancelKind,
 };
-use fr_tailnet::{DialRoute, NativeClient};
-pub use fr_tailnet::{Discovery, Error as TailnetError, LocalApi, PeerSelector};
+use fr_tailnet::{DialRoute, NamedClient, NativeClient};
+pub use fr_tailnet::{Discovery, Error as TailnetError, HostName, HostPin, LocalApi, PeerSelector};
 use fr_transport::quic::Policy;
 use fr_wire::negotiation::Offer;
 use std::{
@@ -17,7 +19,7 @@ use std::{
     future::{Future, poll_fn},
     net::{IpAddr, SocketAddr},
     pin::{Pin, pin},
-    sync::Arc,
+    sync::{Arc, Mutex},
     task::{Context, Poll},
     time::Duration,
 };
@@ -143,12 +145,52 @@ fn select_routes(
 /// Roots come from local platform/package trust, never the contacted peer. The
 /// exclusive borrow bounds concurrent application sessions through this owner.
 pub struct Client {
-    api: LocalApi,
-    native: NativeClient,
+    route: Route,
+}
+/// How the destination is chosen and authenticated.
+enum Route {
+    /// The installed daemon's `LocalAPI` selects, pins and renews the exact
+    /// destination node (Linux, macOS).
+    Installed { api: LocalApi, native: NativeClient },
+    /// No installed daemon (iOS): one exact `MagicDNS` name under strict
+    /// `WebPKI`, plus the address pin (`HostPin`) that every later attempt of
+    /// this client must match. The pin is the caller's, or on first connect
+    /// the one observed; it is readable through [`Client::pin`].
+    Named {
+        client: NamedClient,
+        pin: Arc<Mutex<Option<HostPin>>>,
+    },
+}
+/// Read-only access to a named client's pin (see [`Client::pin_watch`]).
+#[derive(Clone)]
+pub struct PinWatch(Arc<Mutex<Option<HostPin>>>);
+impl fmt::Debug for PinWatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PinWatch([redacted])")
+    }
+}
+impl PinWatch {
+    pub fn get(&self) -> Option<HostPin> {
+        self.0.lock().ok().and_then(|pin| pin.clone())
+    }
+}
+/// What a run asks for: an installed-daemon selector, or the named route's
+/// one fixed destination.
+#[derive(Clone, Copy)]
+enum Destination<'a> {
+    Selected(PeerSelector<'a>),
+    Named,
 }
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("NativeViewerClient([installed tailnet and local trust])")
+        match self.route {
+            Route::Installed { .. } => {
+                f.write_str("NativeViewerClient([installed tailnet and local trust])")
+            }
+            Route::Named { .. } => {
+                f.write_str("NativeViewerClient([named destination and local trust])")
+            }
+        }
     }
 }
 impl Client {
@@ -159,7 +201,47 @@ impl Client {
     ) -> Result<Self, Error> {
         let native =
             NativeClient::new(api.clone(), roots, handshake_timeout).map_err(Error::Tailnet)?;
-        Ok(Self { api, native })
+        Ok(Self {
+            route: Route::Installed { api, native },
+        })
+    }
+    /// A client with no installed `LocalAPI`: `destination` is one exact
+    /// `MagicDNS` name, `pin` the addresses it was first trusted at (None on a
+    /// first connect, which then pins what it observes). A pin for another
+    /// name is refused. There is no destination lease to renew: the host's
+    /// own admission and the session's transport checks bound the session.
+    pub fn named(
+        destination: HostName,
+        pin: Option<HostPin>,
+        roots: Vec<Certificate>,
+        handshake_timeout: Duration,
+    ) -> Result<Self, Error> {
+        if pin.as_ref().is_some_and(|pin| pin.name() != &destination) {
+            return Err(Error::InvalidConfiguration);
+        }
+        let client =
+            NamedClient::new(destination, roots, handshake_timeout).map_err(Error::Tailnet)?;
+        Ok(Self {
+            route: Route::Named {
+                client,
+                pin: Arc::new(Mutex::new(pin)),
+            },
+        })
+    }
+    /// The named route's current pin: the caller's, or the one the first
+    /// successful handshake observed. None for an installed-daemon client or
+    /// before any named handshake succeeded without a pin.
+    pub fn pin(&self) -> Option<HostPin> {
+        self.pin_watch().and_then(|watch| watch.get())
+    }
+    /// A read-only view of the named route's pin that stays readable while a
+    /// run holds this client (an app persists the first observed pin as soon
+    /// as the attempt is authenticated). None for an installed-daemon client.
+    pub fn pin_watch(&self) -> Option<PinWatch> {
+        match &self.route {
+            Route::Installed { .. } => None,
+            Route::Named { pin, .. } => Some(PinWatch(pin.clone())),
+        }
     }
     /// Discover, authenticate and run ONE viewer in a dedicated session Cx.
     /// The application receives the existing Viewer only after the canonical
@@ -183,7 +265,15 @@ impl Client {
         F: Future<Output = T> + 'a,
         A: FnOnce(Viewer) -> F + 'a,
     {
-        self.run_checked(cx.clone(), cx, selector, cfg, offer, None, application)
+        self.run_checked(
+            cx.clone(),
+            cx,
+            Destination::Selected(selector),
+            cfg,
+            offer,
+            None,
+            application,
+        )
     }
     // A reconnect pin is comparison-only metadata. Every attempt still performs
     // fresh LocalAPI, TLS and post-handshake checks before exposing a Viewer.
@@ -198,7 +288,7 @@ impl Client {
         &'a mut self,
         cx: Cx,
         application_cx: Cx,
-        selector: PeerSelector<'a>,
+        destination: Destination<'a>,
         cfg: Configuration,
         offer: Offer,
         expected: Option<&'a fr_tailnet::PeerTarget>,
@@ -214,51 +304,101 @@ impl Client {
             inner: Box::pin(async move {
                 cfg.validate()?;
                 offer.validate().map_err(|_| Error::InvalidConfiguration)?;
-                let target = self
-                    .api
-                    .peer_target(&cx, selector)
-                    .await
-                    .map_err(Error::Tailnet)?;
-                if expected.is_some_and(|old| !old.same_identity(&target)) {
-                    return Err(Error::Tailnet(fr_tailnet::Error::IdentityChanged));
+                match (&self.route, destination) {
+                    (Route::Installed { api, native }, Destination::Selected(selector)) => {
+                        let target = api
+                            .peer_target(&cx, selector)
+                            .await
+                            .map_err(Error::Tailnet)?;
+                        if expected.is_some_and(|old| !old.same_identity(&target)) {
+                            return Err(Error::Tailnet(fr_tailnet::Error::IdentityChanged));
+                        }
+                        let (route, alternate) =
+                            select_routes(target.local_addresses(), target.addresses(), cfg)?;
+                        let connected = native
+                            .dial_with_fallback(&cx, target, route, alternate)
+                            .map_err(Error::Tailnet)?
+                            .await
+                            .map_err(Error::Tailnet)?;
+                        let (native, mut owner) = connected
+                            .into_owned_connection(cx.clone())
+                            .map_err(Error::Tailnet)?;
+                        let lease = owner.lease();
+                        let (viewer, abort) = start_viewer(
+                            &cx,
+                            &application_cx,
+                            native,
+                            Arc::new(move || lease.check().is_ok()),
+                            offer,
+                            cfg,
+                        )?;
+                        // Finish INSIDE the supervised application future: the
+                        // ready boundary below cancels the connection and its
+                        // destination lease. Renewal keeps progressing during
+                        // this bounded attempt. The original application
+                        // result is never replaced by the best-effort socket
+                        // write or mistaken for remote cleanup.
+                        run_application(
+                            &cx,
+                            owner.serve(),
+                            finish_application(application(viewer), abort),
+                        )
+                        .await
+                    }
+                    (Route::Named { client, pin }, Destination::Named) => {
+                        // Named destinations prefer IPv6 then IPv4 like the
+                        // installed route's Automatic; no explicit family.
+                        if cfg.family != AddressFamily::Automatic {
+                            return Err(Error::InvalidConfiguration);
+                        }
+                        let current = pin.lock().map_err(|_| Error::InvalidConfiguration)?.clone();
+                        let connected = client
+                            .dial(&cx, cfg.port, current.as_ref())
+                            .map_err(Error::Tailnet)?
+                            .await
+                            .map_err(Error::Tailnet)?;
+                        let (observed, native) = connected.into_parts();
+                        // Every later attempt of this client must match it.
+                        *pin.lock().map_err(|_| Error::InvalidConfiguration)? = Some(observed);
+                        // No installed metadata exists to lease or renew; the
+                        // TLS identity is fixed for this connection's life.
+                        let (viewer, abort) = start_viewer(
+                            &cx,
+                            &application_cx,
+                            native,
+                            Arc::new(|| true),
+                            offer,
+                            cfg,
+                        )?;
+                        run_application(
+                            &cx,
+                            std::future::pending(),
+                            finish_application(application(viewer), abort),
+                        )
+                        .await
+                    }
+                    _ => Err(Error::InvalidConfiguration),
                 }
-                let (route, alternate) =
-                    select_routes(target.local_addresses(), target.addresses(), cfg)?;
-                let connected = self
-                    .native
-                    .dial_with_fallback(&cx, target, route, alternate)
-                    .map_err(Error::Tailnet)?
-                    .await
-                    .map_err(Error::Tailnet)?;
-                let (native, mut owner) = connected
-                    .into_owned_connection(cx.clone())
-                    .map_err(Error::Tailnet)?;
-                let lease = owner.lease();
-                let mut viewer = join_viewer(
-                    &application_cx,
-                    native,
-                    Arc::new(move || lease.check().is_ok()),
-                    offer,
-                    cfg,
-                )?;
-                let abort = fr_transport::quic::ClientAbortReport::default();
-                viewer
-                    .arm_client_abort(&cx, abort.registration())
-                    .map_err(Error::Session)?;
-                // Finish INSIDE the supervised application future: the ready
-                // boundary below cancels the connection and its destination
-                // lease. Renewal keeps progressing during this bounded attempt.
-                // The original application result is never replaced by the
-                // best-effort socket write or mistaken for remote cleanup.
-                run_application(
-                    &cx,
-                    owner.serve(),
-                    finish_application(application(viewer), abort),
-                )
-                .await
             }),
         }
     }
+}
+/// The authenticated connection becomes a `Viewer` with its connection check
+/// and an armed client-abort report.
+fn start_viewer(
+    cx: &Cx,
+    application_cx: &Cx,
+    native: NativeQuicUdpConnection,
+    check: Arc<dyn Fn() -> bool + Send + Sync>,
+    offer: Offer,
+    cfg: Configuration,
+) -> Result<(Viewer, fr_transport::quic::ClientAbortReport), Error> {
+    let mut viewer = join_viewer(application_cx, native, check, offer, cfg)?;
+    let abort = fr_transport::quic::ClientAbortReport::default();
+    viewer
+        .arm_client_abort(cx, abort.registration())
+        .map_err(Error::Session)?;
+    Ok((viewer, abort))
 }
 async fn finish_application<T>(
     application: impl Future<Output = T>,

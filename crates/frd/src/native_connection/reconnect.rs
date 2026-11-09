@@ -4,7 +4,7 @@ mod native;
 mod offer;
 pub use native::{native_control_view, native_control_view_with_setup, native_view};
 
-use super::{Client, Configuration, Error as ConnectionError};
+use super::{Client, Configuration, Destination, Error as ConnectionError, Route};
 use crate::session_startup::{ObserverError, StreamingViewerError, Viewer};
 use crate::worker::Deadline;
 use asupersync::{
@@ -246,7 +246,7 @@ impl Client {
         self.run_reconnecting(
             cx,
             runtime,
-            selector,
+            Destination::Selected(selector),
             cfg,
             offer,
             policy,
@@ -277,7 +277,7 @@ impl Client {
         self.run_reconnecting(
             cx,
             runtime,
-            selector,
+            Destination::Selected(selector),
             cfg,
             offer,
             policy,
@@ -287,12 +287,60 @@ impl Client {
         )
     }
 
+    /// [`Self::run_control_capable`] for a [`Client::named`] client: the one
+    /// configured name, under the client's pin (the first attempt's observed
+    /// pin binds every retry). An installed-daemon client refuses.
+    pub fn run_named_control_capable<'a, A: Application + 'a>(
+        &'a mut self,
+        cx: Cx,
+        runtime: RuntimeHandle,
+        cfg: Configuration,
+        offer: Offer,
+        policy: Policy,
+        application: &'a mut A,
+    ) -> impl Future<Output = Result<A::Output, Failure>> + 'a {
+        self.run_reconnecting(
+            cx,
+            runtime,
+            Destination::Named,
+            cfg,
+            offer,
+            policy,
+            Role::RequestControl,
+            Failure::ControlCapableOnly,
+            application,
+        )
+    }
+
+    /// [`Self::run_observing`] for a [`Client::named`] client.
+    pub fn run_named_observing<'a, A: Application + 'a>(
+        &'a mut self,
+        cx: Cx,
+        runtime: RuntimeHandle,
+        cfg: Configuration,
+        offer: Offer,
+        policy: Policy,
+        application: &'a mut A,
+    ) -> impl Future<Output = Result<A::Output, Failure>> + 'a {
+        self.run_reconnecting(
+            cx,
+            runtime,
+            Destination::Named,
+            cfg,
+            offer,
+            policy,
+            Role::Observe,
+            Failure::ObservationOnly,
+            application,
+        )
+    }
+
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn run_reconnecting<'a, A: Application + 'a>(
         &'a mut self,
         cx: Cx,
         runtime: RuntimeHandle,
-        selector: PeerSelector<'a>,
+        destination: Destination<'a>,
         cfg: Configuration,
         offer: Offer,
         policy: Policy,
@@ -336,17 +384,24 @@ impl Client {
                                 let selected_offer = offer::prepare(application, attempt, &offer)?;
                                 cx.checkpoint().map_err(|_| Failure::Cancelled)?;
                                 session.checkpoint().map_err(|_| Failure::Cancelled)?;
-                                if identity.is_none() {
-                                    identity = Some(
-                                        self.api.peer_target(&session, selector).await.map_err(
+                                // The named route pins inside the client
+                                // (`Client::pin`); only the installed route
+                                // pins a fresh LocalAPI snapshot here.
+                                if identity.is_none()
+                                    && let (
+                                        Route::Installed { api, .. },
+                                        Destination::Selected(selector),
+                                    ) = (&self.route, destination)
+                                {
+                                    identity =
+                                        Some(api.peer_target(&session, selector).await.map_err(
                                             |e| Failure::Connection(ConnectionError::Tailnet(e)),
-                                        )?,
-                                    );
+                                        )?);
                                 }
                                 self.run_checked(
                                     session.clone(),
                                     viewing.clone(),
-                                    selector,
+                                    destination,
                                     cfg,
                                     selected_offer,
                                     identity.as_ref(),

@@ -4,10 +4,15 @@
 // Linux-only host run until the macOS host lands (fr-p1-host-macos-vif).
 // The macos-host build compiles that run while it is being wired: Linux-only
 // paths it does not reach yet (Xvfb provisioning, X11 indicators) stay quiet.
+// iOS compiles the same shared modules for its viewer (fr-mobile-ffi) and
+// never reaches their host half.
 #![cfg_attr(
-    all(
-        target_os = "macos",
-        any(feature = "macos-viewer", feature = "macos-host")
+    any(
+        target_os = "ios",
+        all(
+            target_os = "macos",
+            any(feature = "macos-viewer", feature = "macos-host")
+        )
     ),
     allow(dead_code, unused_imports, unused_variables)
 )]

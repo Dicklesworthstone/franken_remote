@@ -11,7 +11,7 @@ use asupersync::{
     net::{
         quic_core::{ConnectionId, LongPacketType, ProtectedHeaderPrefix},
         quic_native::{
-            NativeQuicUdpConnection, QuicUdpEndpoint,
+            NativeQuicUdpConnection, NativeQuicUdpConnectionError, QuicTlsError, QuicUdpEndpoint,
             handshake_driver::{QuicHandshakeDriver, server_config},
         },
     },
@@ -126,6 +126,8 @@ fn fallback_never_retries_identity_trust_protocol_or_authority_refusals() {
         Error::Expired,
         Error::IdentityChanged,
         Error::Revoked,
+        Error::NameUnresolved,
+        Error::OutsideTailnet,
     ] {
         assert!(
             !may_try_alternate(refusal),

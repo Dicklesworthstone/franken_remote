@@ -1,32 +1,34 @@
 #![forbid(unsafe_code)]
 // macOS reads the installed app's loopback LocalAPI or the open-source
 // daemon's root Unix socket (local.rs); Linux-only paths such as the nftables
-// ingress helper stay compiled but unused there.
+// ingress helper stay compiled but unused there. iOS has no installed daemon
+// to read: its `LocalApi` type exists only so shared session code compiles,
+// has no constructor that succeeds, and the client dials by name (named.rs).
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
 //! The Linux adapter implements exact installed-daemon membership admission and
 //! an explicit app-capability alternative. It never infers membership from names,
 //! routed prefixes, reachability, or missing authority evidence.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod discovery;
 mod expiry;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod selector;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 pub use selector::PeerSelector;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod outbound;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 pub use outbound::{TargetLease, TargetOwner};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod lease;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 pub use lease::{Admission, Lease};
 #[path = "local/endpoint.rs"]
 pub mod endpoint;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod local;
 pub mod trust;
 pub use endpoint::{
@@ -35,13 +37,24 @@ pub use endpoint::{
     honest_quic_endpoint,
 };
 mod metadata;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 pub use local::{
     CertificateEvent, CertificateEventKind, CertificatePolicy, CredentialStatus, LocalQuery,
-    NativeServerIdentity, NodeIdentity, ingress,
+    NativeServerIdentity, NodeIdentity,
 };
+// Host ingress enforcement: no iOS host.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use local::ingress;
+// The one dial profile (TLS, ALPN, transport limits) both dialers share.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+mod profile;
+// A LocalAPI-less client's dialer: an exact MagicDNS name under strict WebPKI.
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+mod named;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 pub use local::{ConnectedPeer, DialRoute, LocalApi, NativeClient, PeerTarget};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+pub use named::{HostName, HostPin, NamedClient, NamedConnection};
 
 use std::{fmt, net::SocketAddr, time::Duration};
 
@@ -96,6 +109,12 @@ pub enum Error {
     Expired,
     IdentityChanged,
     Revoked,
+    /// The system resolver returned no address for a named destination in
+    /// time (on iOS, typically: the Tailscale VPN is not connected).
+    NameUnresolved,
+    /// A named destination resolved to an address outside Tailscale's
+    /// ranges, or a pin held one. Nothing is sent to such an address.
+    OutsideTailnet,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

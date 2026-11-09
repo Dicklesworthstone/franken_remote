@@ -2,18 +2,17 @@
 //! TLS authenticates the destination; this is neither a host listener nor a
 //! desktop grant. An optional second address family uses the same identity,
 //! shared dial slot and original timeout, before any application I/O exists.
-//! There is no DNS, redirect or alternate transport.
+//! There is no DNS, redirect or alternate transport. The TLS/QUIC profile is
+//! shared with the named-destination dialer (`crate::profile`).
 use super::{LocalApi, Lookup, PeerTarget, bounded, now};
 use crate::Error;
+// Re-exported for this module's tests and the certificate tests' fixtures.
+use crate::profile::{ALPN, connection_ids, handshake_error, may_try_alternate};
+pub(super) use crate::profile::{connection_config, endpoint_config, transport_parameters};
 use asupersync::{
     cx::Cx,
-    net::{
-        quic_core::{ConnectionId, TransportParameters},
-        quic_native::{
-            NativeQuicConnectionConfig, NativeQuicUdpConnection, NativeQuicUdpConnectionError,
-            QuicTlsError, QuicUdpEndpoint, QuicUdpEndpointConfig,
-            handshake_driver::QuicHandshakeDriver,
-        },
+    net::quic_native::{
+        NativeQuicUdpConnection, QuicUdpEndpoint, handshake_driver::QuicHandshakeDriver,
     },
     time::sleep,
     tls::{Certificate, TlsConnector},
@@ -21,7 +20,6 @@ use asupersync::{
 use std::{
     fmt,
     future::{Future, poll_fn},
-    io::Read,
     net::{IpAddr, SocketAddr},
     pin::pin,
     sync::{
@@ -32,10 +30,7 @@ use std::{
     time::Duration,
 };
 
-const ALPN: &[u8] = b"fr-remote/0";
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-const MAX_ROOTS: usize = 256;
-const MAX_ROOT_BYTES: usize = 1024 * 1024;
 
 /// Exactly one address pair chosen locally from the current node-owned sets.
 /// Each attempt keeps this pair; a selected alternative is a separate handshake
@@ -82,31 +77,7 @@ impl fmt::Debug for NativeClient {
 }
 impl NativeClient {
     pub fn new(api: LocalApi, roots: Vec<Certificate>, timeout: Duration) -> Result<Self, Error> {
-        if timeout < Duration::from_millis(100) || timeout > Duration::from_secs(30) {
-            return Err(Error::InvalidPolicy);
-        }
-        if roots.is_empty() || roots.len() > MAX_ROOTS {
-            return Err(Error::InvalidTrustStore);
-        }
-        let bytes = roots.iter().try_fold(0usize, |total, cert| {
-            total
-                .checked_add(cert.as_der().len())
-                .filter(|n| *n <= MAX_ROOT_BYTES)
-        });
-        if bytes.is_none() {
-            return Err(Error::InvalidTrustStore);
-        }
-        // Do not use the upstream convenience client_config: its exact-leaf
-        // fallback is intentionally unnecessary for this WebPKI-only path.
-        let tls = TlsConnector::builder()
-            .with_strict_ca_validation()
-            .add_root_certificates(roots)
-            .alpn_protocols_required(vec![ALPN.to_vec()])
-            .min_protocol_version(0x0304u16.into())
-            .max_protocol_version(0x0304u16.into())
-            .enable_early_data(false)
-            .build()
-            .map_err(|_| Error::InvalidTrustStore)?;
+        let tls = crate::profile::connector(roots, timeout)?;
         Ok(Self {
             api,
             tls,
@@ -299,13 +270,6 @@ impl NativeClient {
     }
 }
 
-fn may_try_alternate(error: Error) -> bool {
-    matches!(
-        error,
-        Error::NativeBind | Error::NativeRouteIo | Error::HandshakeTimeout
-    )
-}
-
 /// A completed real TLS/UDP connection still tied to its fresh target snapshot.
 /// No application bytes are sent by dialing. The host must independently admit
 /// this client and perform optional consent before observation or control.
@@ -351,135 +315,5 @@ impl ConnectedPeer {
     }
 }
 
-/// Keep certificate rejection and the pinned stack's local UDP I/O failures
-/// distinct. Only its typed, redaction-safe provider/code pair is read, never
-/// an OS diagnostic or peer error string. All other TLS/protocol errors remain
-/// terminal `NativeHandshake` failures.
-fn handshake_error(error: &NativeQuicUdpConnectionError) -> Error {
-    match error {
-        NativeQuicUdpConnectionError::Handshake(
-            QuicTlsError::ServerCertificateRejected { .. }
-            | QuicTlsError::ServerCertificateChainEmpty
-            | QuicTlsError::ServerCertificateUnverified,
-        ) => Error::PeerCertificateRejected,
-        NativeQuicUdpConnectionError::Handshake(QuicTlsError::CryptoProviderFailure {
-            provider: "rustls-quic-handshake",
-            code: "udp_send" | "udp_recv",
-        }) => Error::NativeRouteIo,
-        _ => Error::NativeHandshake,
-    }
-}
-
-fn connection_ids() -> Result<(ConnectionId, ConnectionId), Error> {
-    let mut bytes = [0u8; 32];
-    // Kernel entropy, no deterministic runtime seed and no peer-controlled path.
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .map_err(|_| Error::EntropyUnavailable)?;
-    let a = ConnectionId::new(&bytes[..16]).map_err(|_| Error::EntropyUnavailable)?;
-    let b = ConnectionId::new(&bytes[16..]).map_err(|_| Error::EntropyUnavailable)?;
-    if a == b {
-        return Err(Error::EntropyUnavailable);
-    }
-    Ok((a, b))
-}
-/// QUIC minimum datagram, below the tailnet MTU (1280) on IPv4 and IPv6.
-const DATAGRAM_BYTES: usize = 1200;
-pub(super) fn endpoint_config() -> QuicUdpEndpointConfig {
-    QuicUdpEndpointConfig {
-        max_packet_size: DATAGRAM_BYTES,
-        max_batch_size: 16,
-        ..Default::default()
-    }
-}
-pub(super) fn connection_config() -> NativeQuicConnectionConfig {
-    NativeQuicConnectionConfig {
-        max_local_bidi: 0,
-        max_local_uni: 32,
-        send_window: 65_536,
-        recv_window: 65_536,
-        connection_send_limit: 524_288,
-        connection_recv_limit: 524_288,
-        max_datagram_frame_size: 1200,
-        ..Default::default()
-    }
-}
-pub(super) fn transport_parameters() -> Result<Vec<u8>, Error> {
-    let cfg = connection_config();
-    let mut bytes = Vec::new();
-    TransportParameters {
-        initial_max_data: Some(cfg.connection_recv_limit),
-        // The pinned native connection retains one conservative stream window,
-        // taking the minimum of all three negotiated classes. Advertise equal
-        // byte bounds; max_streams_bidi remains zero, so no bidi stream is admitted.
-        initial_max_stream_data_bidi_local: Some(cfg.recv_window),
-        initial_max_stream_data_bidi_remote: Some(cfg.recv_window),
-        initial_max_stream_data_uni: Some(cfg.recv_window),
-        initial_max_streams_bidi: Some(0),
-        // fr-transport's MAX_STREAMS is twice this: lifetime unidirectional
-        // credit, sized for repeated reference recoveries (each takes 3 pairs).
-        initial_max_streams_uni: Some(32),
-        max_datagram_frame_size: Some(1200),
-        // The endpoint receives at most this many bytes per datagram
-        // (`endpoint_config`); a peer must not send larger ones.
-        max_udp_payload_size: Some(DATAGRAM_BYTES as u64),
-        ..Default::default()
-    }
-    .encode(&mut bytes)
-    .map_err(|_| Error::InvalidPolicy)?;
-    Ok(bytes)
-}
-
 #[cfg(all(test, target_os = "linux"))]
 mod tests;
-
-#[cfg(test)]
-#[test]
-fn certificate_rejection_is_distinct_from_other_tls_failures() {
-    for rejected in [
-        QuicTlsError::ServerCertificateRejected {
-            code: "server_certificate_invalid",
-        },
-        QuicTlsError::ServerCertificateChainEmpty,
-        QuicTlsError::ServerCertificateUnverified,
-    ] {
-        assert_eq!(
-            handshake_error(&NativeQuicUdpConnectionError::Handshake(rejected)),
-            Error::PeerCertificateRejected
-        );
-    }
-    for other in [
-        NativeQuicUdpConnectionError::Cancelled,
-        NativeQuicUdpConnectionError::Handshake(QuicTlsError::InvalidServerName),
-        NativeQuicUdpConnectionError::Handshake(QuicTlsError::ServerIdentityRootStoreEmpty),
-        NativeQuicUdpConnectionError::HandshakeIncomplete("keys"),
-        NativeQuicUdpConnectionError::AlpnMismatch {
-            expected: b"fr-remote/0".to_vec(),
-            negotiated: None,
-        },
-    ] {
-        assert_eq!(handshake_error(&other), Error::NativeHandshake);
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn native_application_credit_is_nonzero_without_admitting_bidirectional_streams() {
-    let parameters = TransportParameters::decode(&transport_parameters().unwrap()).unwrap();
-    let bounds = [
-        parameters.initial_max_stream_data_bidi_local.unwrap_or(0),
-        parameters.initial_max_stream_data_bidi_remote.unwrap_or(0),
-        parameters.initial_max_stream_data_uni.unwrap_or(0),
-    ];
-    assert_eq!(bounds, [connection_config().recv_window; 3]);
-    assert_eq!(bounds.into_iter().min(), Some(65_536));
-    assert_eq!(parameters.initial_max_streams_bidi, Some(0));
-    assert_eq!(connection_config().max_local_bidi, 0);
-    assert_eq!(parameters.initial_max_data, Some(524_288));
-    // A peer is told the exact datagram size this endpoint can receive.
-    assert_eq!(
-        parameters.max_udp_payload_size,
-        Some(endpoint_config().max_packet_size as u64)
-    );
-    assert!(endpoint_config().max_packet_size <= 1280 - 40 - 8);
-}

@@ -24,16 +24,23 @@ use crate::{
     AdmissionProfile, Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
 };
-use asupersync::{cx::Cx, http::h1::Request, time::sleep, types::Time};
+use asupersync::{cx::Cx, http::h1::Request};
 use std::{
     fmt,
-    future::{Future, poll_fn},
     path::{Path, PathBuf},
-    pin::pin,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+};
+// The fixtures below (`tests`) import these through `super::*`; the clock
+// and pulse that used them moved to `crate::profile`.
+#[cfg(test)]
+use asupersync::{time::sleep, types::Time};
+#[cfg(test)]
+use std::{
+    future::{Future, poll_fn},
+    pin::pin,
     task::Poll,
     time::Duration,
 };
@@ -83,9 +90,16 @@ impl LocalApi {
     pub fn installed() -> Self {
         Self::new("/var/run/tailscale/tailscaled.sock").expect("fixed protected socket")
     }
+    /// iOS has no installed daemon and no readable `LocalAPI`: every
+    /// endpoint is refused, so no read on iOS ever reaches a transport.
+    #[cfg(target_os = "ios")]
+    pub fn new(_path: impl AsRef<Path>) -> Result<Self, Error> {
+        Err(Error::LocalApiUnavailable)
+    }
     /// A locally configured absolute Unix-socket path (macOS: never the app
     /// endpoint). The kernel-reported server UID must be root even at a custom
     /// path. The selected host OS/root remain trusted.
+    #[cfg(not(target_os = "ios"))]
     pub fn new(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
         if !socket::valid_path(path) {
@@ -276,6 +290,7 @@ impl LocalApi {
     /// One read over the selected transport (module docs). On macOS the app's
     /// endpoint is chosen afresh for every read, as its files are; a read that
     /// changes transport mid-lookup cannot share the other's identity.
+    #[cfg(not(target_os = "ios"))]
     async fn get_typed(
         &self,
         uri: &str,
@@ -289,6 +304,18 @@ impl LocalApi {
             return Ok(read);
         }
         socket::get(&self.path, self.daemon_uid, uri, maximum, content_type).await
+    }
+    /// iOS: no transport exists. Unreachable in practice (no iOS constructor
+    /// succeeds); refused with a type anyway.
+    #[cfg(target_os = "ios")]
+    #[allow(clippy::unused_self)] // The Linux/macOS transports need the receiver.
+    fn get_typed(
+        &self,
+        _uri: &str,
+        _maximum: usize,
+        _content_type: &str,
+    ) -> std::future::Ready<Result<(Vec<u8>, SourceIdentity), Error>> {
+        std::future::ready(Err(Error::LocalApiUnavailable))
     }
 }
 /// Accept only a complete, uncompressed 200 response of the expected type.
@@ -313,78 +340,9 @@ fn checked(
     }
     Ok(response.body)
 }
-pub(crate) fn now(cx: &Cx) -> Result<u64, Error> {
-    cx.checkpoint().map_err(|_| Error::Cancelled)?;
-    Ok(cx
-        .timer_driver()
-        .ok_or(Error::MissingRuntime)?
-        .now()
-        .as_nanos()
-        / 1000)
-}
+// The shared monotonic clock and bounded-operation pulse (crate::profile).
 use crate::discovery::wall_now;
-/// Pulse cancellation independently of a stalled HTTP read without restarting
-/// that read or accumulating timers. Dropping this future drops its owned socket.
-async fn bounded<T>(
-    cx: &Cx,
-    duration: Duration,
-    operation: impl Future<Output = Result<T, Error>>,
-) -> Result<T, Error> {
-    let start = now(cx)?;
-    let end = start
-        .checked_add(u64::try_from(duration.as_micros()).map_err(|_| Error::InvalidPolicy)?)
-        .ok_or(Error::Clock)?;
-    let mut last = start;
-    let mut pulse = Box::pin(sleep(
-        Time::from_nanos(start.checked_mul(1000).ok_or(Error::Clock)?),
-        Duration::from_millis(10).min(duration),
-    ));
-    let mut operation = pin!(operation);
-    poll_fn(|task| {
-        let current = match now(cx) {
-            Ok(v) => v,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        if current < last {
-            return Poll::Ready(Err(Error::Clock));
-        }
-        last = current;
-        if current >= end {
-            return Poll::Ready(Err(Error::Timeout));
-        }
-        let result = operation.as_mut().poll(task);
-        // A poll can finish after the deadline or observe cancellation while
-        // parsing a response. Check again before accepting output or waiting.
-        let current = match now(cx) {
-            Ok(v) => v,
-            Err(e) => return Poll::Ready(Err(e)),
-        };
-        if current < last {
-            return Poll::Ready(Err(Error::Clock));
-        }
-        last = current;
-        if current >= end {
-            return Poll::Ready(Err(Error::Timeout));
-        }
-        if let Poll::Ready(result) = result {
-            return Poll::Ready(result);
-        }
-        if pulse.as_mut().poll(task).is_ready() {
-            pulse = Box::pin(sleep(
-                Time::from_nanos(current * 1000),
-                Duration::from_micros((end - current).min(10_000)),
-            ));
-            // Time may have advanced during the operation poll, so this new
-            // pulse can already be ready. Poll it on the next turn, where its
-            // result is handled, rather than discarding Ready and repolling a
-            // completed Sleep. The wake also ensures registration is not lost.
-            task.waker().wake_by_ref();
-        }
-        Poll::Pending
-    })
-    .await
-}
-
+pub(crate) use crate::profile::{bounded, now};
 mod node;
 pub use node::NodeIdentity;
 
@@ -407,11 +365,13 @@ pub use dial::{ConnectedPeer, DialRoute, NativeClient};
 
 #[cfg(target_os = "linux")]
 mod discovery;
+#[cfg(not(target_os = "ios"))]
 mod socket;
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
 mod lookup_budget;
 #[cfg(target_os = "macos")]
 mod macos;
 
+#[cfg(not(target_os = "ios"))]
 pub mod ingress;

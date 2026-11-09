@@ -73,7 +73,7 @@ impl PeerTarget {
         // Darwin's runtime monotonic clock can pause across system sleep.
         // Wall-clock rollback refuses above; forward elapsed time may only
         // shorten this original metadata lifetime, never extend it.
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "ios"))]
         super::lookup_budget::check_wall_lifetime(
             self.wall_issued_us,
             wall,
@@ -83,6 +83,17 @@ impl PeerTarget {
     }
 }
 impl LocalApi {
+    /// iOS has no installed daemon to select a destination from (and no
+    /// `LocalApi` constructor succeeds there); the named dialer is its path.
+    #[cfg(target_os = "ios")]
+    #[allow(clippy::unused_self)] // The Linux/macOS lookups need the receiver.
+    pub fn peer_target(
+        &self,
+        _cx: &Cx,
+        selector: PeerSelector<'_>,
+    ) -> std::future::Ready<Result<PeerTarget, Error>> {
+        std::future::ready(selector.validate().and(Err(Error::LocalApiUnavailable)))
+    }
     /// Two complete, bounded status reads select the same exact local/remote
     /// identity. Unrelated peer churn is ignored; absent/conflicting targets
     /// refuse. The deadline starts before I/O and both key expiries cap it.
