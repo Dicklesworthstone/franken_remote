@@ -60,12 +60,14 @@ unsafe extern "C" {
         height: *mut u32,
         key: *mut c_int,
         visible: *mut c_int,
+        geometry_current: *mut c_int,
     ) -> c_int;
     fn fr_mac_window_set_resizable(window: *mut c_void, resizable: c_int) -> c_int;
     fn fr_mac_window_renderer(window: *mut c_void) -> *mut c_void;
     fn fr_mac_surface_offscreen(width: u32, height: u32, out: *mut *mut c_void) -> c_int;
     fn fr_mac_window_free(window: *mut c_void);
     fn fr_mac_renderer_presented(renderer: *mut c_void) -> u64;
+    fn fr_mac_renderer_refresh(renderer: *mut c_void) -> c_int;
     #[allow(clippy::too_many_arguments)]
     fn fr_mac_renderer_cursor(
         renderer: *mut c_void,
@@ -205,6 +207,19 @@ pub struct WindowState {
     pub key: bool,
     /// Some of the window is on screen: not hidden, minimized or occluded.
     pub visible: bool,
+    /// A real picture was submitted at the current drawable geometry. False
+    /// until the media owner repaints a changed layout; never a fresh frame
+    /// receipt or proof that the compositor finished displaying the picture.
+    pub geometry_current: bool,
+}
+impl WindowState {
+    pub(crate) const fn input_ready(self) -> bool {
+        self.key
+            && self.visible
+            && self.geometry_current
+            && self.picture.0 > 0
+            && self.picture.1 > 0
+    }
 }
 
 /// The viewer window. Main thread only.
@@ -249,7 +264,7 @@ impl Window {
     }
     /// Current picture size and input-relevant window state.
     pub fn state(&self) -> Result<WindowState, NativeError> {
-        let (mut width, mut height, mut key, mut visible) = (0, 0, 0, 0);
+        let (mut width, mut height, mut key, mut visible, mut geometry_current) = (0, 0, 0, 0, 0);
         // SAFETY: live handle on its owning thread; all out pointers writable.
         status(unsafe {
             fr_mac_window_state(
@@ -258,12 +273,14 @@ impl Window {
                 &raw mut height,
                 &raw mut key,
                 &raw mut visible,
+                &raw mut geometry_current,
             )
         })?;
         Ok(WindowState {
             picture: (width, height),
             key: key != 0,
             visible: visible != 0,
+            geometry_current: geometry_current != 0,
         })
     }
     /// Fix (false) or free (true) the window's size.
@@ -422,8 +439,9 @@ impl Modifiers {
 pub struct Surface {
     raw: NonNull<c_void>,
 }
-// SAFETY: the renderer serializes every access behind its own lock and holds
-// no thread-affine AppKit state; CAMetalLayer drawables are thread-safe.
+// SAFETY: the renderer serializes native media calls on its render lock and
+// publishes only plain geometry/counters through a separate short lock. It
+// holds no thread-affine AppKit state; CAMetalLayer drawables are thread-safe.
 unsafe impl Send for Surface {}
 impl Surface {
     /// A presenter with no window, drawing into a detached layer of
@@ -442,10 +460,18 @@ impl Surface {
         // SAFETY: live renderer reference.
         unsafe { fr_mac_renderer_presented(self.raw.as_ptr()) }
     }
+    /// Repaint a pending resize or expose on the owning media thread. This
+    /// submits the retained picture without creating a new frame receipt or
+    /// increasing `presented`. The main thread only publishes redraw intent.
+    pub fn refresh(&self) -> Result<(), NativeError> {
+        // SAFETY: live renderer reference; the glue serializes media calls.
+        status(unsafe { fr_mac_renderer_refresh(self.raw.as_ptr()) })
+    }
     /// Install the single client-rendered remote cursor (hotspot in decoded
     /// picture pixels; the host capture excludes the pointer) and redraw the
     /// retained picture with it. `Move` needs an earlier `Shape`; `Hidden`
-    /// keeps the shape. A refused update changes nothing. This is not a
+    /// keeps the shape. Invalid input changes nothing; a native draw failure
+    /// ends the media operation without confirming display. This is not a
     /// decode, presentation receipt or visibility proof.
     pub fn cursor(&self, update: &CursorUpdate<'_>) -> Result<(), NativeError> {
         let (kind, x, y, shape) = match *update {

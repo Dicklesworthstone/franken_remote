@@ -357,6 +357,14 @@ impl LocalPresenter for Presenter {
         };
         surface.cursor(update).map_err(worker_error)
     }
+    fn refresh(&mut self) -> Result<(), WorkerError> {
+        self.decoder
+            .as_ref()
+            .ok_or(WorkerError::WrongState)?
+            .surface()
+            .refresh()
+            .map_err(worker_error)
+    }
 }
 
 /// This attempt's window, kept until mandatory cleanup. The pump and the
@@ -443,10 +451,12 @@ async fn pumped<T>(work: impl Future<Output = T>, mut turn: impl FnMut()) -> T {
     let mut tick: Option<Pin<Box<Sleep>>> = None;
     poll_fn(move |task| {
         loop {
+            // A ready network/media future must not outrun a queued local
+            // close, escape, focus change or geometry fence on this turn.
+            turn();
             if let Poll::Ready(out) = work.as_mut().poll(task) {
                 return Poll::Ready(out);
             }
-            turn();
             let Some(timer) = &timer else {
                 return Poll::Pending;
             };
@@ -497,6 +507,17 @@ fn service(
         halt(LocalStop::WindowClosed, &mut input, &mut report);
         return;
     }
+    // Resizing or a stuck media call must never suppress local escape. It
+    // revokes work, so it needs no valid viewport, clock or remote evidence.
+    if events.iter().any(|event| {
+        matches!(*event, WindowEvent::Key { usage, pressed, modifiers, .. }
+            if crate::macos_control::emergency_escape(usage, pressed, modifiers))
+    }) {
+        closed.set(true);
+        intent.invalidate();
+        halt(LocalStop::LocalEscape, &mut input, &mut report);
+        return;
+    }
     if input
         .as_ref()
         .is_some_and(|input| input.stop.load(Ordering::SeqCst))
@@ -514,6 +535,7 @@ fn service(
             None => Some(LocalStop::NativeFailure),
             Some(s) if !s.visible => Some(LocalStop::WindowHidden),
             Some(s) if !s.key => Some(LocalStop::FocusLost),
+            Some(s) if !s.geometry_current => Some(LocalStop::PictureChanged),
             Some(s)
                 if input
                     .as_ref()
@@ -594,7 +616,7 @@ fn shown(window: &RefCell<Option<Window>>, frame: Option<Presentation>) -> Optio
         .borrow()
         .as_ref()
         .and_then(|w| w.state().ok())
-        .is_some_and(|s| s.visible);
+        .is_some_and(|s| s.visible && s.geometry_current);
     visible.then_some(frame.frame.as_raw())
 }
 
@@ -610,8 +632,8 @@ fn attach(
     let window = window.as_ref().ok_or(())?;
     let state = window.state().map_err(|_| ())?;
     let (width, height) = state.picture;
-    if width == 0 || height == 0 || !state.key || !state.visible {
-        return Ok(false); // wait for a laid-out, focused, visible window
+    if !state.input_ready() {
+        return Ok(false); // wait for a submitted, current, focused picture
     }
     let source = InputBounds::new(
         DesktopPoint {
@@ -793,7 +815,7 @@ impl Application for Session {
                                     .borrow()
                                     .as_ref()
                                     .and_then(|window| window.state().ok())
-                                    .is_some_and(|state| state.key && state.visible);
+                                    .is_some_and(super::WindowState::input_ready);
                                 if ui_intent.borrow_mut().take_request(
                                     local_ready && view.evidence().is_ok(),
                                     event_time(),
@@ -945,6 +967,18 @@ fn reported_terminal(observer: &NativeObserver) -> Option<ObserverError> {
 mod tests {
     use super::*;
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
+
+    #[test]
+    fn local_fences_run_before_even_immediately_ready_session_work() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let fenced = Cell::new(false);
+        runtime.block_on(pumped(
+            async {
+                assert!(fenced.get(), "ready work must observe the local fence");
+            },
+            || fenced.set(true),
+        ));
+    }
 
     fn failed_startup(native_started: bool) -> Session {
         let mut session = Session::new(

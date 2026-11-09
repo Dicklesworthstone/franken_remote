@@ -139,6 +139,27 @@ still fits inside the available local screen. Rendering stays in Metal; input
 coordinates use the actual drawable picture after layout, including the local
 Retina scale. Without `--fit`, the remote logical size remains the default.
 
+The admitted native presenter runs on one bounded Asupersync blocking task.
+Decoder configuration, frame submission, cursor updates, idle repaint and the
+configured presenter's destructor do not run inside the UI/session future.
+There is one queued operation and one reply. Cancellation fences further work
+and rejects late replies; a native call that remains blocked leaves cleanup
+pending until that exact task retires. It does not permit a replacement decoder
+or an automatic control retry.
+
+AppKit publishes resize/expose requests through a short geometry snapshot; it
+does not wait for the media render lock or acquire a Metal drawable. The media
+owner repaints the retained picture, including when no new frame arrives.
+Changed geometry cannot authorize input until that repaint is submitted.
+Repaint alone creates no new frame receipt or visibility freshness. Escape and
+local close still work while the geometry is pending. Missing Metal resources
+fail the media operation instead of counting a black or unsubmitted frame.
+
+AppKit window creation and final window retirement still run on the main
+thread. Final window-owned renderer releases can therefore delay that native
+boundary after input has been fenced; this change does not claim a hard
+deadline for arbitrary OS or driver calls.
+
 The original foreground connection also answers local commands:
 
 ```sh
@@ -176,10 +197,13 @@ Pointer, wheel and click delivery and the window-close outcome have not been
 confirmed live. fr-native's macOS tests decode a real HEVC stream through VideoToolbox
 into the Metal surface.
 
-The reconnect-consent, emergency-release, fitted-window and local-owner changes
-have portable regression coverage. Native AppKit event delivery, the macOS
-pathname owner and a full live reconnect/close sequence still require execution
-on a Mac; Linux-side policy tests are not hardware qualification.
+The reconnect-consent, emergency-release and fitted-window policies pass
+portable tests. Real runtime regressions for the local owner, completion and
+stalled media-task cleanup are included but have not run in this environment:
+compilation of the unchanged pinned Asupersync dependency was killed by
+SIGKILL. Native AppKit event delivery, Metal repaint, the macOS pathname owner
+and a full live reconnect/close sequence still require execution on a Mac;
+Linux-side policy tests are not hardware qualification.
 
 ## Check local capture, encoding and input readiness
 

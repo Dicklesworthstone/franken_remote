@@ -430,9 +430,10 @@ fn live_deadline<E: From<Error>>(
     Ok((current, until))
 }
 
-/// One child, two private pipes, one outstanding operation. No live owner is
-/// cloneable. Canceled/dropped exchanges kill the process group before releasing
-/// their borrow; the owning session must drive `reap` during its drain phase.
+/// One media owner and one outstanding operation. No live owner is cloneable.
+/// Canceled/dropped exchanges kill the child process group or fence the local
+/// blocking task before releasing their borrow. The owning session must drive
+/// `reap` until the exact child or native task retires.
 pub struct Worker {
     child: Option<Child>,
     retirement: Option<retirement::Registration>,
@@ -444,8 +445,8 @@ pub struct Worker {
     state: State,
     exit: Option<ExitStatus>,
     selected: Option<fr_wire::display::Display>,
-    /// In-process presentation (no child). Dropped on stop, abort or reap.
-    local: Option<Box<dyn LocalPresenter>>,
+    /// In-process presentation, retained until its exact blocking task retires.
+    local: Option<local::Owner>,
     in_process: bool,
 }
 impl fmt::Debug for Worker {
@@ -538,7 +539,7 @@ impl Worker {
             return Err(Error::Protocol(worker::Error::WrongRole));
         }
         if launch.local.is_some() {
-            return Self::start_local(cx, launch, configuration, record, deadline);
+            return Self::start_local(cx, launch, configuration, record, deadline).await;
         }
         let (kind, body) = match launch.target {
             Some(target) if launch.fit_target => (
@@ -695,7 +696,9 @@ impl Worker {
             return;
         }
         self.state = State::Poisoned;
-        self.local = None;
+        if let Some(local) = &mut self.local {
+            local.abort();
+        }
         if let Some(child) = &mut self.child {
             let _ = child.start_kill();
         }
@@ -789,7 +792,9 @@ impl Worker {
         live: impl FnMut() -> Result<Time, E>,
     ) -> Result<Record, E> {
         if self.in_process {
-            return self.exchange_local(cx, kind, body, deadline, live);
+            return self
+                .exchange_local(cx, kind, body, maximum_capacity, deadline, live)
+                .await;
         }
         runtime_ready(cx)?;
         let identity = self.identity;
@@ -859,8 +864,8 @@ impl Worker {
         Ok(response)
     }
     /// Bounded drain independent of the operation's canceled Cx. Expiration
-    /// returns `ReapPending` and RETAINS the child owner; it never reports a live
-    /// process as reaped. Keep this owner in the bounded closing-worker slot.
+    /// returns `ReapPending` and RETAINS the child or local task owner; it never
+    /// reports live native work as reaped. Keep the bounded closing-worker slot.
     pub async fn reap(&mut self, cx: &Cx, deadline: Deadline) -> Result<ExitStatus, Error> {
         if let Some(status) = self.exit {
             return Ok(status);
@@ -869,7 +874,7 @@ impl Worker {
             return Err(Error::Unavailable);
         }
         if self.in_process {
-            return Ok(self.reap_local());
+            return self.reap_local(cx, deadline).await;
         }
         let mut previous = now(cx)?;
         loop {

@@ -13,6 +13,12 @@ const CONTROL: u64 = 1 << 18;
 const OPTION: u64 = 1 << 19;
 const COMMAND: u64 = 1 << 20;
 
+/// A terminal local escape needs no usable picture, clock or remote grant.
+/// The shell checks it before any readiness gate can discard the event batch.
+pub(crate) const fn emergency_escape(usage: u16, pressed: bool, modifiers: u64) -> bool {
+    usage == ESCAPE && pressed && modifiers & (SHIFT | CONTROL | OPTION) == SHIFT | CONTROL | OPTION
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Key {
     pub(crate) usage: u16,
@@ -134,10 +140,7 @@ impl Intent {
             return Route::Remote;
         }
         let was_held = std::mem::replace(&mut self.held[usage], key.pressed);
-        if usage == usize::from(ESCAPE)
-            && key.pressed
-            && key.modifiers & (SHIFT | CONTROL | OPTION) == SHIFT | CONTROL | OPTION
-        {
+        if emergency_escape(key.usage, key.pressed, key.modifiers) {
             self.invalidate();
             return Route::Escape;
         }

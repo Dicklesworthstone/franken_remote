@@ -5,8 +5,9 @@
 // byte reaches VideoToolbox; this file only binds the OS frameworks.
 //
 // Threads: window creation, event polling and freeing run on the main thread.
-// Decoder creation, decode and present run on ONE caller thread at a time
-// (the media thread). The renderer is shared and takes its own lock.
+// Decoder creation, decode, repaint and present run on the media owner.
+// The renderer's native lock is never taken by the window/event thread.
+// Main-thread geometry shares only a short lock over plain numeric state.
 #import <AppKit/AppKit.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
@@ -86,9 +87,47 @@ static NSString *const kShader =
 
 // ---------------------------------------------------------------- renderer
 
+typedef struct {
+    uint32_t sourceWidth;
+    uint32_t sourceHeight;
+    CGSize drawable;       // pixels
+    double scale;          // pixels per point
+    CGRect fit;            // drawable pixels, top-left origin
+    BOOL integerFit;
+    uint64_t revision;     // changes only when source/window geometry changes
+    uint64_t redraw;       // also changes for an expose of unchanged geometry
+} FrGeometry;
+
+// Pure geometry only. No Objective-C, driver call or retained object belongs
+// under the short geometry lock shared with the window/event thread.
+static void fr_refit(FrGeometry *g) {
+    double sw = g->sourceWidth, sh = g->sourceHeight;
+    double dw = g->drawable.width, dh = g->drawable.height;
+    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
+        g->fit = CGRectZero;
+        g->integerFit = NO;
+        return;
+    }
+    double s = fmin(dw / sw, dh / sh);
+    // Preserve exact whole-pixel scaling rather than smearing sharp text.
+    double k = floor(s + 1e-9);
+    g->integerFit = k >= 1 && fabs(sw * k - sw * s) < 1 && fabs(sh * k - sh * s) < 1;
+    if (g->integerFit) s = k;
+    double w = round(sw * s), h = round(sh * s);
+    g->fit = CGRectMake(floor((dw - w) / 2), floor((dh - h) / 2), w, h);
+}
+
 @interface FrRenderer : NSObject {
   @public
-    os_unfair_lock lock;
+    os_unfair_lock lock;          // media/native work only
+    os_unfair_lock geometryLock;  // plain state only; never waits on native work
+    FrGeometry geometry;
+    uint64_t submittedRevision;
+    BOOL submittedPicture;
+    BOOL redrawPending;
+    uint64_t presented;           // read under geometryLock, not the native lock
+    CGSize appliedDrawable;      // layer properties, under the media/native lock
+    double appliedScale;
     CAMetalLayer *layer;
     id<MTLDevice> device;
     id<MTLCommandQueue> queue;
@@ -97,14 +136,7 @@ static NSString *const kShader =
     id<MTLSamplerState> nearest;
     CVMetalTextureCacheRef cache;
     CVPixelBufferRef last;   // retained: redrawn on resize or expose
-    uint32_t sourceWidth;    // visible picture size
-    uint32_t sourceHeight;
     BOOL fullRange;
-    CGSize drawable;         // pixels
-    double scale;            // pixels per point
-    CGRect fit;              // drawable pixels, top-left origin
-    BOOL integerFit;         // each picture pixel covers exactly k x k drawable pixels
-    uint64_t presented;
     // The single client-rendered remote cursor: straight-alpha RGBA8 shape,
     // hotspot position in picture pixels. The host capture excludes it.
     id<MTLRenderPipelineState> cursorPipeline;
@@ -125,64 +157,80 @@ static NSString *const kShader =
     if (cache) CFRelease(cache);
 }
 
-// Caller holds the lock.
-- (void)refit {
-    double sw = sourceWidth, sh = sourceHeight;
-    double dw = drawable.width, dh = drawable.height;
-    if (sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) {
-        fit = CGRectZero;
-        return;
-    }
-    double s = fmin(dw / sw, dh / sh);
-    // Within a pixel of a whole scale (1:1, or a 1x remote on a 2x screen):
-    // use it exactly, so luma can be sampled nearest and text keeps its edges.
-    double k = floor(s + 1e-9);
-    integerFit = k >= 1 && fabs(sw * k - sw * s) < 1 && fabs(sh * k - sh * s) < 1;
-    if (integerFit) s = k;
-    double w = round(sw * s), h = round(sh * s);
-    fit = CGRectMake(floor((dw - w) / 2), floor((dh - h) / 2), w, h);
-}
-
-// Caller holds the lock. Draws `last` (or black) into a fresh drawable.
+// Caller holds the media lock. The geometry snapshot is released before ANY
+// driver work; a stalled drawable/texture/command never holds up local input.
+// Success means command submission of the retained picture, not GPU completion.
 - (int)drawLocked {
-    if (drawable.width < 1 || drawable.height < 1) return FR_MAC_OK;
+    os_unfair_lock_lock(&geometryLock);
+    FrGeometry g = geometry;
+    os_unfair_lock_unlock(&geometryLock);
+    if (!last) return FR_MAC_UNAVAILABLE;
+    if (g.drawable.width < 1 || g.drawable.height < 1 ||
+        g.fit.size.width < 1 || g.fit.size.height < 1)
+        return FR_MAC_GEOMETRY;
+    if (appliedScale != g.scale) {
+        layer.contentsScale = g.scale;
+        appliedScale = g.scale;
+    }
+    if (!CGSizeEqualToSize(appliedDrawable, g.drawable)) {
+        layer.drawableSize = g.drawable;
+        appliedDrawable = g.drawable;
+    }
     id<CAMetalDrawable> target = [layer nextDrawable];
     if (!target) return FR_MAC_UNAVAILABLE;
+    id<MTLTexture> targetTexture = target.texture;
+    if (!targetTexture) return FR_MAC_ALLOCATION;
+    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    if (!commands) return FR_MAC_ALLOCATION;
+    if (CVPixelBufferGetPlaneCount(last) != 2) return FR_MAC_CODEC;
+    size_t w0 = CVPixelBufferGetWidthOfPlane(last, 0), h0 = CVPixelBufferGetHeightOfPlane(last, 0);
+    size_t w1 = CVPixelBufferGetWidthOfPlane(last, 1), h1 = CVPixelBufferGetHeightOfPlane(last, 1);
+    if (!w0 || !h0 || !w1 || !h1 || w0 < g.sourceWidth || h0 < g.sourceHeight)
+        return FR_MAC_GEOMETRY;
+    CVMetalTextureRef luma = NULL, chroma = NULL;
+    if (CVMetalTextureCacheCreateTextureFromImage(NULL, cache, last, NULL, MTLPixelFormatR8Unorm,
+                                                  w0, h0, 0, &luma) != kCVReturnSuccess ||
+        !luma || !CVMetalTextureGetTexture(luma) ||
+        CVMetalTextureCacheCreateTextureFromImage(NULL, cache, last, NULL, MTLPixelFormatRG8Unorm,
+                                                  w1, h1, 1, &chroma) != kCVReturnSuccess ||
+        !chroma || !CVMetalTextureGetTexture(chroma)) {
+        if (luma) CFRelease(luma);
+        if (chroma) CFRelease(chroma);
+        return FR_MAC_CODEC;
+    }
     MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
-    pass.colorAttachments[0].texture = target.texture;
+    if (!pass) {
+        CFRelease(luma);
+        CFRelease(chroma);
+        return FR_MAC_ALLOCATION;
+    }
+    pass.colorAttachments[0].texture = targetTexture;
     pass.colorAttachments[0].loadAction = MTLLoadActionClear;
     pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
     pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-    id<MTLCommandBuffer> commands = [queue commandBuffer];
     id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
-    CVMetalTextureRef luma = NULL, chroma = NULL;
-    if (last && fit.size.width >= 1 && fit.size.height >= 1) {
-        size_t w0 = CVPixelBufferGetWidthOfPlane(last, 0), h0 = CVPixelBufferGetHeightOfPlane(last, 0);
-        size_t w1 = CVPixelBufferGetWidthOfPlane(last, 1), h1 = CVPixelBufferGetHeightOfPlane(last, 1);
-        if (CVMetalTextureCacheCreateTextureFromImage(NULL, cache, last, NULL, MTLPixelFormatR8Unorm,
-                                                      w0, h0, 0, &luma) == kCVReturnSuccess &&
-            CVMetalTextureCacheCreateTextureFromImage(NULL, cache, last, NULL, MTLPixelFormatRG8Unorm,
-                                                      w1, h1, 1, &chroma) == kCVReturnSuccess) {
-            // Sample only the visible picture if the decoder kept coded padding.
-            float extent[2] = {(float)fmin(1.0, (double)sourceWidth / (double)w0),
-                               (float)fmin(1.0, (double)sourceHeight / (double)h0)};
-            float range[4] = {fullRange ? 0.0f : 16.0f / 255.0f, fullRange ? 1.0f : 255.0f / 219.0f,
-                              128.0f / 255.0f, fullRange ? 1.0f : 255.0f / 224.0f};
-            MTLViewport viewport = {fit.origin.x, fit.origin.y, fit.size.width, fit.size.height, 0, 1};
-            [encoder setViewport:viewport];
-            [encoder setRenderPipelineState:pipeline];
-            [encoder setVertexBytes:extent length:sizeof(extent) atIndex:0];
-            [encoder setFragmentTexture:CVMetalTextureGetTexture(luma) atIndex:0];
-            [encoder setFragmentTexture:CVMetalTextureGetTexture(chroma) atIndex:1];
-            // Linear filtering smears a whole-scale picture; chroma is subsampled
-            // and stays linear.
-            [encoder setFragmentSamplerState:(integerFit ? nearest : sampler) atIndex:0];
-            [encoder setFragmentSamplerState:sampler atIndex:1];
-            [encoder setFragmentBytes:range length:sizeof(range) atIndex:0];
-            [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
-            [self drawCursorLocked:encoder];
-        }
+    if (!encoder) {
+        CFRelease(luma);
+        CFRelease(chroma);
+        return FR_MAC_ALLOCATION;
     }
+    // Sample only the visible picture if the decoder kept coded padding.
+    float extent[2] = {(float)fmin(1.0, (double)g.sourceWidth / (double)w0),
+                       (float)fmin(1.0, (double)g.sourceHeight / (double)h0)};
+    float range[4] = {fullRange ? 0.0f : 16.0f / 255.0f, fullRange ? 1.0f : 255.0f / 219.0f,
+                      128.0f / 255.0f, fullRange ? 1.0f : 255.0f / 224.0f};
+    MTLViewport viewport = {g.fit.origin.x, g.fit.origin.y, g.fit.size.width, g.fit.size.height, 0, 1};
+    [encoder setViewport:viewport];
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setVertexBytes:extent length:sizeof(extent) atIndex:0];
+    [encoder setFragmentTexture:CVMetalTextureGetTexture(luma) atIndex:0];
+    [encoder setFragmentTexture:CVMetalTextureGetTexture(chroma) atIndex:1];
+    // Chroma remains linear; whole-pixel luma keeps its edges.
+    [encoder setFragmentSamplerState:(g.integerFit ? nearest : sampler) atIndex:0];
+    [encoder setFragmentSamplerState:sampler atIndex:1];
+    [encoder setFragmentBytes:range length:sizeof(range) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    [self drawCursorLocked:encoder geometry:&g];
     [encoder endEncoding];
     // The Metal textures keep the IOSurface alive until the GPU finishes.
     CVMetalTextureRef keepLuma = luma, keepChroma = chroma;
@@ -193,22 +241,34 @@ static NSString *const kShader =
     }];
     [commands presentDrawable:target];
     [commands commit];
+    MTLCommandBufferStatus state = commands.status;
+    if (state != MTLCommandBufferStatusCommitted && state != MTLCommandBufferStatusScheduled &&
+        state != MTLCommandBufferStatusCompleted)
+        return FR_MAC_CODEC;
+    os_unfair_lock_lock(&geometryLock);
+    submittedPicture = YES;
+    submittedRevision = g.revision;
+    // A resize or expose may have arrived while the driver was busy. It still
+    // needs its own draw; an older submission cannot clear that newer request.
+    if (geometry.redraw == g.redraw) redrawPending = NO;
+    os_unfair_lock_unlock(&geometryLock);
     return FR_MAC_OK;
 }
 
 // Caller holds the lock: the cursor quad over the fitted picture, scaled with
 // it and clipped to it, blended with straight alpha.
-- (void)drawCursorLocked:(id<MTLRenderCommandEncoder>)encoder {
-    if (!cursorShown || !cursorShape || sourceWidth == 0 || sourceHeight == 0) return;
-    double dw = drawable.width, dh = drawable.height;
-    double kx = fit.size.width / sourceWidth, ky = fit.size.height / sourceHeight;
-    double left = fit.origin.x + (double)cursorLeft * kx, top = fit.origin.y + (double)cursorTop * ky;
+- (void)drawCursorLocked:(id<MTLRenderCommandEncoder>)encoder geometry:(const FrGeometry *)g {
+    if (!cursorShown || !cursorShape || g->sourceWidth == 0 || g->sourceHeight == 0) return;
+    double dw = g->drawable.width, dh = g->drawable.height;
+    double kx = g->fit.size.width / g->sourceWidth, ky = g->fit.size.height / g->sourceHeight;
+    double left = g->fit.origin.x + (double)cursorLeft * kx;
+    double top = g->fit.origin.y + (double)cursorTop * ky;
     double right = left + cursorWidth * kx, bottom = top + cursorHeight * ky;
     float rect[4] = {(float)(left / dw * 2 - 1), (float)(1 - top / dh * 2), (float)(right / dw * 2 - 1),
                      (float)(1 - bottom / dh * 2)};
     MTLViewport whole = {0, 0, dw, dh, 0, 1};
-    MTLScissorRect clip = {(NSUInteger)fit.origin.x, (NSUInteger)fit.origin.y, (NSUInteger)fit.size.width,
-                           (NSUInteger)fit.size.height};
+    MTLScissorRect clip = {(NSUInteger)g->fit.origin.x, (NSUInteger)g->fit.origin.y,
+                           (NSUInteger)g->fit.size.width, (NSUInteger)g->fit.size.height};
     [encoder setViewport:whole];
     [encoder setScissorRect:clip];
     [encoder setRenderPipelineState:cursorPipeline];
@@ -223,29 +283,40 @@ static NSString *const kShader =
     if (last) CVPixelBufferRelease(last);
     last = CVPixelBufferRetain(picture);
     int status = [self drawLocked];
-    if (status == FR_MAC_OK) presented++;
+    if (status == FR_MAC_OK) {
+        os_unfair_lock_lock(&geometryLock);
+        presented++;
+        os_unfair_lock_unlock(&geometryLock);
+    }
     os_unfair_lock_unlock(&lock);
     return status;
 }
 
-// Main thread: the view's pixel size or scale changed.
+// Main thread: publish geometry or an expose request, without rendering or
+// touching a native lock held by decode/nextDrawable/Metal. Expose alone keeps
+// existing geometry evidence valid until a real geometry change occurs.
 - (void)resizeTo:(CGSize)points scale:(double)pixelsPerPoint {
-    os_unfair_lock_lock(&lock);
-    scale = pixelsPerPoint > 0 ? pixelsPerPoint : 1;
-    drawable = CGSizeMake(fmax(1, round(points.width * scale)), fmax(1, round(points.height * scale)));
-    layer.contentsScale = scale;
-    layer.drawableSize = drawable;
-    [self refit];
-    [self drawLocked];
-    os_unfair_lock_unlock(&lock);
+    double scale = pixelsPerPoint > 0 ? pixelsPerPoint : 1;
+    CGSize drawable = CGSizeMake(fmax(1, round(points.width * scale)),
+                                  fmax(1, round(points.height * scale)));
+    os_unfair_lock_lock(&geometryLock);
+    if (geometry.scale != scale || !CGSizeEqualToSize(geometry.drawable, drawable)) {
+        geometry.scale = scale;
+        geometry.drawable = drawable;
+        geometry.revision++;
+        fr_refit(&geometry);
+    }
+    geometry.redraw++;
+    redrawPending = YES;
+    os_unfair_lock_unlock(&geometryLock);
 }
 
 // Main thread: normalize a view point (top-left origin) against the last fit.
 - (void)normalize:(NSPoint)point x:(double *)x y:(double *)y inside:(BOOL *)inside {
-    os_unfair_lock_lock(&lock);
-    CGRect f = fit;
-    double s = scale;
-    os_unfair_lock_unlock(&lock);
+    os_unfair_lock_lock(&geometryLock);
+    CGRect f = geometry.fit;
+    double s = geometry.scale;
+    os_unfair_lock_unlock(&geometryLock);
     if (f.size.width < 1 || f.size.height < 1) {
         *x = *y = -1;
         *inside = NO;
@@ -260,6 +331,13 @@ static NSString *const kShader =
 static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
     FrRenderer *r = [FrRenderer new];
     r->lock = OS_UNFAIR_LOCK_INIT;
+    r->geometryLock = OS_UNFAIR_LOCK_INIT;
+    r->geometry.sourceWidth = width;
+    r->geometry.sourceHeight = height;
+    r->geometry.scale = 1;
+    r->geometry.revision = 1;
+    r->geometry.redraw = 1;
+    r->redrawPending = YES;
     r->device = MTLCreateSystemDefaultDevice();
     if (!r->device) {
         *status = FR_MAC_UNAVAILABLE;
@@ -316,9 +394,6 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
     layer.backgroundColor = black;
     CGColorRelease(black);
     r->layer = layer;
-    r->sourceWidth = width;
-    r->sourceHeight = height;
-    r->scale = 1;
     *status = FR_MAC_OK;
     return r;
 }
@@ -633,17 +708,19 @@ intptr_t fr_mac_window_number(void *handle) {
     return owner->window.windowNumber;
 }
 
-// The picture's current size in drawable pixels, whether the window is key,
-// and whether any of it is on screen (not hidden, minimized or occluded).
+// Desired picture size, window visibility, and whether a real retained picture
+// was submitted at that exact geometry. No main-thread wait on native work.
 int fr_mac_window_state(void *handle, uint32_t *width, uint32_t *height, int *key,
-                        int *visible) {
-    if (!handle || !width || !height || !key || !visible) return FR_MAC_INVALID;
+                        int *visible, int *geometry_current) {
+    if (!handle || !width || !height || !key || !visible || !geometry_current)
+        return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     FrRenderer *r = owner->renderer;
-    os_unfair_lock_lock(&r->lock);
-    CGRect f = r->fit;
-    os_unfair_lock_unlock(&r->lock);
+    os_unfair_lock_lock(&r->geometryLock);
+    CGRect f = r->geometry.fit;
+    *geometry_current = r->submittedPicture && r->submittedRevision == r->geometry.revision;
+    os_unfair_lock_unlock(&r->geometryLock);
     *width = f.size.width >= 1 ? (uint32_t)f.size.width : 0;
     *height = f.size.height >= 1 ? (uint32_t)f.size.height : 0;
     NSWindow *w = owner->window;
@@ -691,62 +768,82 @@ void *fr_mac_window_renderer(void *handle) {
 // The remote cursor: kind 0 hides it (the shape is kept), 1 moves the hotspot
 // of the existing shape, 2 replaces the shape (≤ 256×256 RGBA8, straight
 // alpha) and shows it. Redraws the retained picture with the new cursor when
-// one has been presented; a refused update changes nothing.
+// one has been presented. Invalid updates change nothing; a native draw failure
+// ends the original media owner without pretending the cursor was displayed.
 int fr_mac_renderer_cursor(void *handle, int kind, int32_t x, int32_t y, uint32_t width,
                            uint32_t height, uint32_t hotspot_x, uint32_t hotspot_y,
                            const uint8_t *rgba, size_t len) {
     if (!handle) return FR_MAC_INVALID;
-    FrRenderer *r = (__bridge FrRenderer *)handle;
-    id<MTLTexture> shape = nil;
-    if (kind == 2) {
-        if (!rgba || width == 0 || height == 0 || width > 256 || height > 256 ||
-            hotspot_x >= width || hotspot_y >= height || len != (size_t)width * height * 4) {
+    @autoreleasepool {
+        FrRenderer *r = (__bridge FrRenderer *)handle;
+        id<MTLTexture> shape = nil;
+        if (kind == 2) {
+            if (!rgba || width == 0 || height == 0 || width > 256 || height > 256 ||
+                hotspot_x >= width || hotspot_y >= height || len != (size_t)width * height * 4) {
+                return FR_MAC_INVALID;
+            }
+            MTLTextureDescriptor *td =
+                [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                   width:width
+                                                                  height:height
+                                                               mipmapped:NO];
+            td.usage = MTLTextureUsageShaderRead;
+            shape = [r->device newTextureWithDescriptor:td];
+            if (!shape) return FR_MAC_ALLOCATION;
+            [shape replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                     mipmapLevel:0
+                       withBytes:rgba
+                     bytesPerRow:(NSUInteger)width * 4];
+        } else if (kind != 0 && kind != 1) {
             return FR_MAC_INVALID;
         }
-        MTLTextureDescriptor *td =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
-                                                               width:width
-                                                              height:height
-                                                           mipmapped:NO];
-        td.usage = MTLTextureUsageShaderRead;
-        shape = [r->device newTextureWithDescriptor:td];
-        if (!shape) return FR_MAC_ALLOCATION;
-        [shape replaceRegion:MTLRegionMake2D(0, 0, width, height)
-                 mipmapLevel:0
-                   withBytes:rgba
-                 bytesPerRow:(NSUInteger)width * 4];
-    } else if (kind != 0 && kind != 1) {
-        return FR_MAC_INVALID;
-    }
-    os_unfair_lock_lock(&r->lock);
-    int status = FR_MAC_OK;
-    if (kind == 1 && !r->cursorShape) {
-        status = FR_MAC_INVALID;
-    } else {
-        if (kind == 2) {
-            r->cursorShape = shape;
-            r->cursorWidth = width;
-            r->cursorHeight = height;
-            r->cursorHotX = hotspot_x;
-            r->cursorHotY = hotspot_y;
+        os_unfair_lock_lock(&r->lock);
+        int status = FR_MAC_OK;
+        if (kind == 1 && !r->cursorShape) {
+            status = FR_MAC_INVALID;
+        } else {
+            if (kind == 2) {
+                r->cursorShape = shape;
+                r->cursorWidth = width;
+                r->cursorHeight = height;
+                r->cursorHotX = hotspot_x;
+                r->cursorHotY = hotspot_y;
+            }
+            r->cursorShown = kind != 0;
+            if (kind != 0) {
+                r->cursorLeft = (int64_t)x - r->cursorHotX;
+                r->cursorTop = (int64_t)y - r->cursorHotY;
+            }
+            if (r->last) status = [r drawLocked];
         }
-        r->cursorShown = kind != 0;
-        if (kind != 0) {
-            r->cursorLeft = (int64_t)x - r->cursorHotX;
-            r->cursorTop = (int64_t)y - r->cursorHotY;
-        }
-        if (r->last) status = [r drawLocked];
+        os_unfair_lock_unlock(&r->lock);
+        return status;
     }
-    os_unfair_lock_unlock(&r->lock);
-    return status;
+}
+
+// The original media owner calls this between requests. Repaint only retained
+// real pixels; an empty/black surface cannot establish geometry readiness.
+// A repaint neither increments `presented` nor creates frame/freshness evidence.
+int fr_mac_renderer_refresh(void *handle) {
+    if (!handle) return FR_MAC_INVALID;
+    @autoreleasepool {
+        FrRenderer *r = (__bridge FrRenderer *)handle;
+        os_unfair_lock_lock(&r->lock);
+        os_unfair_lock_lock(&r->geometryLock);
+        BOOL dirty = r->redrawPending;
+        os_unfair_lock_unlock(&r->geometryLock);
+        int status = dirty && r->last ? [r drawLocked] : FR_MAC_OK;
+        os_unfair_lock_unlock(&r->lock);
+        return status;
+    }
 }
 
 uint64_t fr_mac_renderer_presented(void *handle) {
     if (!handle) return 0;
     FrRenderer *r = (__bridge FrRenderer *)handle;
-    os_unfair_lock_lock(&r->lock);
+    os_unfair_lock_lock(&r->geometryLock);
     uint64_t n = r->presented;
-    os_unfair_lock_unlock(&r->lock);
+    os_unfair_lock_unlock(&r->geometryLock);
     return n;
 }
 
@@ -836,10 +933,27 @@ int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len
             return FR_MAC_UNAVAILABLE;
         VTSessionSetProperty(d->session, kVTDecompressionPropertyKey_RealTime, kCFBooleanTrue);
         os_unfair_lock_lock(&d->renderer->lock);
-        d->renderer->sourceWidth = width;
-        d->renderer->sourceHeight = height;
         d->renderer->fullRange = full_range ? YES : NO;
-        [d->renderer refit];
+        os_unfair_lock_lock(&d->renderer->geometryLock);
+        FrGeometry *g = &d->renderer->geometry;
+        BOOL sourceChanged = g->sourceWidth != width || g->sourceHeight != height;
+        if (sourceChanged) {
+            g->sourceWidth = width;
+            g->sourceHeight = height;
+            g->revision++;
+            fr_refit(g);
+            d->renderer->submittedPicture = NO;
+        }
+        g->redraw++;
+        d->renderer->redrawPending = YES;
+        os_unfair_lock_unlock(&d->renderer->geometryLock);
+        // A changed source needs its own decoded picture. A resize of the
+        // window may refit retained pixels; a new source may not crop/relabel
+        // the previous decoder's pixels as if they belonged to its geometry.
+        if (sourceChanged && d->renderer->last) {
+            CVPixelBufferRelease(d->renderer->last);
+            d->renderer->last = NULL;
+        }
         os_unfair_lock_unlock(&d->renderer->lock);
         *out = (__bridge_retained void *)d;
     }

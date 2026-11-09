@@ -1,5 +1,34 @@
 # Implementation status
 
+## Native media scheduling and macOS repaint isolation (2026-11-09)
+
+An admitted in-process presenter now lives on one Asupersync drained blocking
+task. Configuration, decode/present, cursor updates, idle repaint and configured
+presenter destruction run there. A single bounded command slot and one reply
+preserve operation sequencing and retained-byte checks. The session continues
+checking its original deadline, cancellation and live authority while waiting;
+dropped or expired waits poison the owner and discard late responses. Reaping
+retains the exact native task and reports pending until its destructor actually
+returns, including after cancellation. A finished channel is not cleanup proof.
+
+The macOS UI reads and publishes plain geometry/counters under a separate short
+lock. Metal drawables, textures and commands stay on the media side. Resize and
+expose work is coalesced and serviced during idle media turns, so a static
+desktop still repaints. Changed geometry cannot enable control until a real
+retained picture is submitted at that revision. Redraws do not count as new
+frames or fresh visibility. Missing Metal resources refuse the operation instead
+of acknowledging a black or unsubmitted frame. Local escape is handled before
+geometry/readiness checks, even while repaint is blocked.
+
+Eleven real local-worker regressions cover sequencing, validation, deadlines,
+live-authority loss, cancellation and blocked configuration, decode, cursor,
+refresh and destruction. They are source additions, not a passed test claim:
+the pinned Asupersync build was killed by SIGKILL before application tests could
+execute. Native macOS compilation and Metal/event execution remain pending.
+AppKit creation and final window/renderer release still run on the main thread;
+they remain native trust boundaries rather than hard-bounded OS calls.
+Tracking: `fr-5a4w`, `fr-55k1`; broader macOS qualification remains open.
+
 ## macOS reconnect consent and local session control (2026-11-08)
 
 The native macOS client consumes its initial control request once per invocation.
