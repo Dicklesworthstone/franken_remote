@@ -166,7 +166,7 @@ static void start_failure_cannot_be_replaced_by_a_second_success_callback(void) 
 static void silence_never_renews_source_evidence(void) {
     FrCapSource source = {0};
     assert(!fr_cap_source_ready(&source, 1));
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11, 0) ==
            FR_CAP_SOURCE_REPLACED);
     assert(fr_cap_source_ready(&source, 10));
     assert(!fr_cap_source_ready(&source, 12));
@@ -176,92 +176,110 @@ static void silence_never_renews_source_evidence(void) {
 
 static void actual_idle_verifies_only_its_original_picture(void) {
     FrCapSource source = {0};
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 10, 11) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 10, 11, 0) ==
            FR_CAP_SOURCE_IGNORED);
     assert(!fr_cap_source_ready(&source, 10));
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 12, 13) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 12, 13, 0) ==
            FR_CAP_SOURCE_REPLACED);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 20, 21) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 20, 21, 0) ==
            FR_CAP_SOURCE_VERIFIED);
     assert(source.picture == 1);
     assert(fr_cap_source_ready(&source, 20));
     assert(!fr_cap_source_ready(&source, 22));
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 20, 100) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 20, 100, 0) ==
            FR_CAP_SOURCE_IGNORED);
     assert(!fr_cap_source_ready(&source, 99));
 }
 
 static void queued_and_future_events_cannot_fabricate_freshness(void) {
     FrCapSource source = {0};
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 100) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 100, 0) ==
            FR_CAP_SOURCE_REPLACED);
     assert(!fr_cap_source_ready(&source, 90));
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 101, 100) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 101, 100, 0) ==
            FR_CAP_SOURCE_INVALIDATED);
     assert(!source.available);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 102, 103) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 102, 103, 0) ==
            FR_CAP_SOURCE_IGNORED);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 104, 105) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 104, 105, 0) ==
            FR_CAP_SOURCE_REPLACED);
     assert(source.picture == 2);
     assert(fr_cap_source_ready(&source, 104));
 }
 
+static void scheduled_display_times_are_current_within_their_lead(void) {
+    FrCapSource source = {0};
+    // Delivered at 100 for display at 105: a scheduled frame, not a forgery.
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 105, 100, 10) ==
+           FR_CAP_SOURCE_REPLACED);
+    assert(fr_cap_source_ready(&source, 100));
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 110, 100, 10) ==
+           FR_CAP_SOURCE_VERIFIED);
+    // Beyond the lead it is invalid metadata and fences the picture.
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 121, 110, 10) ==
+           FR_CAP_SOURCE_INVALIDATED);
+    assert(!source.available);
+    // The bound saturates rather than wrapping at the end of the clock.
+    FrCapSource late = {0};
+    assert(fr_cap_source_observe(&late, FR_CAP_SOURCE_COMPLETE, UINT64_MAX, UINT64_MAX - 1,
+                                 10) == FR_CAP_SOURCE_REPLACED);
+}
+
 static void source_gaps_require_a_new_complete_picture(void) {
     FrCapSource source = {0};
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11, 0) ==
            FR_CAP_SOURCE_REPLACED);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_INVALID, 0, 20) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_INVALID, 0, 20, 0) ==
            FR_CAP_SOURCE_INVALIDATED);
     // A pre-gap frame arriving late cannot restore the old pixels.
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 19, 30) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 19, 30, 0) ==
            FR_CAP_SOURCE_IGNORED);
     assert(!fr_cap_source_ready(&source, 18));
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 31, 32) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 31, 32, 0) ==
            FR_CAP_SOURCE_IGNORED);
     assert(!source.available);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 33, 34) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 33, 34, 0) ==
            FR_CAP_SOURCE_REPLACED);
     assert(fr_cap_source_ready(&source, 33));
 }
 
 static void replacement_preserves_the_encoded_reference_identity(void) {
     FrCapSource source = {0};
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11, 0) ==
            FR_CAP_SOURCE_REPLACED);
     uint64_t encoded = source.picture;
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 20, 21) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 20, 21, 0) ==
            FR_CAP_SOURCE_REPLACED);
     assert(source.picture != encoded);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 30, 31) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 30, 31, 0) ==
            FR_CAP_SOURCE_VERIFIED);
     assert(source.picture != encoded);
     encoded = source.picture;
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 40, 41) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_IDLE, 40, 41, 0) ==
            FR_CAP_SOURCE_VERIFIED);
     assert(source.picture == encoded);
 }
 
 static void exhausted_identity_never_restarts(void) {
     FrCapSource source = {.picture = UINT64_MAX};
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11, 0) ==
            FR_CAP_SOURCE_INVALIDATED);
     assert(source.exhausted);
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 12, 13) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 12, 13, 0) ==
            FR_CAP_SOURCE_INVALIDATED);
     assert(!fr_cap_source_ready(&source, 1));
 }
 
 static void invalidation_fences_inflight_completion_even_after_recovery(void) {
     FrCapSource source = {0};
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 10, 11, 0) ==
            FR_CAP_SOURCE_REPLACED);
     uint64_t selected = source.invalidation;
     assert(fr_cap_source_current(&source, selected));
     fr_cap_source_invalidate(&source, 20);
     assert(!fr_cap_source_current(&source, selected));
     // A new complete picture cannot authorize the old retained/encoded image.
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 30, 31) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 30, 31, 0) ==
            FR_CAP_SOURCE_REPLACED);
     assert(fr_cap_source_ready(&source, 30));
     assert(!fr_cap_source_current(&source, selected));
@@ -296,7 +314,7 @@ static void exhausted_invalidation_identity_never_restarts(void) {
     assert(source.invalidation == UINT64_MAX);
     assert(source.exhausted);
     assert(!fr_cap_source_current(&source, UINT64_MAX));
-    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 30, 31) ==
+    assert(fr_cap_source_observe(&source, FR_CAP_SOURCE_COMPLETE, 30, 31, 0) ==
            FR_CAP_SOURCE_INVALIDATED);
     assert(!fr_cap_source_ready(&source, 30));
 }
@@ -344,6 +362,7 @@ int main(void) {
     silence_never_renews_source_evidence();
     actual_idle_verifies_only_its_original_picture();
     queued_and_future_events_cannot_fabricate_freshness();
+    scheduled_display_times_are_current_within_their_lead();
     source_gaps_require_a_new_complete_picture();
     replacement_preserves_the_encoded_reference_identity();
     exhausted_identity_never_restarts();
@@ -352,6 +371,6 @@ int main(void) {
     exhausted_invalidation_identity_never_restarts();
     each_verification_has_one_cancellable_result();
     encoded_allocation_is_bounded_before_append();
-    puts("20 macOS capture policy tests passed");
+    puts("21 macOS capture policy tests passed");
     return 0;
 }

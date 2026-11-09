@@ -336,6 +336,22 @@ static enum FrCapSourceEvent sample_event(CMSampleBufferRef sample, uint32_t wid
     return *picture ? FR_CAP_SOURCE_COMPLETE : FR_CAP_SOURCE_INVALID;
 }
 
+// How far a frame's scheduled display time may be ahead of its delivery: a few
+// refresh intervals of compositor schedule, in mach absolute ticks.
+#define FR_CAP_DISPLAY_LEAD_MS 50
+static uint64_t display_lead_ticks(void) {
+    static uint64_t ticks;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+      mach_timebase_info_data_t base;
+      uint64_t ns = (uint64_t)FR_CAP_DISPLAY_LEAD_MS * NSEC_PER_MSEC;
+      ticks = mach_timebase_info(&base) == KERN_SUCCESS && base.numer != 0
+                  ? ns * base.denom / base.numer
+                  : 0;
+    });
+    return ticks;
+}
+
 // Takes no ownership of picture. Retaining a selected surface before the
 // callback returns keeps its backing pool slot alive; there is one latest
 // slot and, while VT runs, one separately retained submitted surface.
@@ -348,7 +364,7 @@ static void observe(FrCapture *c, enum FrCapSourceEvent event, uint64_t displaye
         return;
     }
     enum FrCapSourceUpdate update =
-        fr_cap_source_observe(&c->source, event, displayed, received);
+        fr_cap_source_observe(&c->source, event, displayed, received, display_lead_ticks());
     if (update == FR_CAP_SOURCE_REPLACED) {
         previous = c->latest;
         c->latest = CVPixelBufferRetain(picture);

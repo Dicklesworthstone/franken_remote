@@ -130,10 +130,18 @@ static inline void fr_cap_source_invalidate(FrCapSource *source, uint64_t receiv
 // Display times and received are both mach absolute ticks. A delayed sample
 // cannot become current merely because its callback finally ran. Idle verifies
 // an existing complete picture; it never creates a picture after a gap.
-static inline enum FrCapSourceUpdate fr_cap_source_observe(
-    FrCapSource *source, enum FrCapSourceEvent event, uint64_t displayed, uint64_t received) {
+//
+// A display time is the frame's scheduled presentation, so ScreenCaptureKit
+// delivers a completed frame BEFORE it: on a 60 Hz 5K display (macOS 27) every
+// Complete frame arrived 0.07-7.5 ms ahead of its display time. `lead` bounds
+// that schedule; a time further ahead of receipt is invalid metadata.
+static inline enum FrCapSourceUpdate fr_cap_source_observe(FrCapSource *source,
+                                                           enum FrCapSourceEvent event,
+                                                           uint64_t displayed, uint64_t received,
+                                                           uint64_t lead) {
     if (source->exhausted) return FR_CAP_SOURCE_INVALIDATED;
-    if (event == FR_CAP_SOURCE_INVALID || displayed == 0 || displayed > received) {
+    uint64_t latest = received > UINT64_MAX - lead ? UINT64_MAX : received + lead;
+    if (event == FR_CAP_SOURCE_INVALID || displayed == 0 || displayed > latest) {
         fr_cap_source_invalidate(source, received);
         return FR_CAP_SOURCE_INVALIDATED;
     }

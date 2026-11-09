@@ -68,8 +68,10 @@ evidence produced after that native request began:
 | Blank, suspended, started, stopped, invalid sample, or invalid metadata | Discard stream picture evidence and advance its invalidation generation. |
 
 Stream display times use `SCStreamFrameInfoDisplayTime` in mach absolute ticks.
+That time is the frame's scheduled presentation, so a completed frame arrives
+before it: measured 0.07-7.5 ms ahead on a 60 Hz 5K display under macOS 27.
 Queued observations from before the request, repeated observations, and times
-later than callback receipt cannot renew freshness. Callback arrival is never
+more than 50 ms later than callback receipt cannot renew freshness. Callback arrival is never
 used as a display timestamp. A complete frame must have a valid, ready image
 buffer with the configured dimensions and NV12 video-range format.
 
