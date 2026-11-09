@@ -659,7 +659,9 @@ fn probe_host_generates_valid_report_envelope() {
 }
 
 #[test]
-#[cfg(target_os = "linux")] // Linux LocalAPI / host runtime behavior.
+// The host runtime's LocalAPI preflight: Linux, and macOS where an explicit
+// --socket selects the open-source tailscaled's Unix socket.
+#[cfg(any(target_os = "linux", all(target_os = "macos", feature = "macos-host")))]
 fn frd_run_cli_absent_tailscale_reports_typed_refusal() {
     let missing = std::env::temp_dir().join(format!("frd-missing-{}.sock", std::process::id()));
     let output = wait_for_child(

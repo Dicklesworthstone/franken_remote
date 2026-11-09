@@ -89,6 +89,9 @@ impl Http {
                     }
                     Err(error) => panic!("fixture accept: {error}"),
                 };
+                // BSD accept() inherits the listener's O_NONBLOCK (Linux's does
+                // not); handlers read with blocking timeouts.
+                socket.set_nonblocking(false).unwrap();
                 if let Some(request) = handle(socket, stopped.clone()) {
                     requests.push(request);
                 }
@@ -120,9 +123,12 @@ pub(crate) fn request(
     read_timeout: Duration,
     write_timeout: Option<Duration>,
 ) -> Option<String> {
-    socket.set_read_timeout(Some(read_timeout)).unwrap();
+    // XNU refuses socket options (EINVAL) once a client has closed both
+    // directions, as a credential refusal does; reads then cannot block, so
+    // any bytes it did send are still read below. Linux never fails here.
+    let _ = socket.set_read_timeout(Some(read_timeout));
     if let Some(timeout) = write_timeout {
-        socket.set_write_timeout(Some(timeout)).unwrap();
+        let _ = socket.set_write_timeout(Some(timeout));
     }
     let mut request = Vec::new();
     let mut byte = [0];

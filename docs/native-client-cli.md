@@ -91,9 +91,11 @@ FrankenRemote reachability or verify a remote TLS connection. `--port` defaults
 to 8443 and is reported as configuration; no connection is made to it. This is
 a snapshot, not a reusable authority handle or desktop readiness result.
 
-For default-build `hosts` and `inspect`, `--socket` refuses with
-`localapi_endpoint_unsupported` before starting a runtime. Default-build
-inspection also rejects `--saved`/`--hosts-file` with `saved_hosts_unsupported`
+On macOS, `--socket PATH` reads only that root `tailscaled` Unix socket (the
+open-source daemon); without it, the app's endpoint or else
+`/var/run/tailscaled.socket` is used ([native discovery](native-discovery.md#macos-installed-app-identity-and-outbound-connections)).
+A missing socket is `tailscale_unavailable`, one this user's process serves is
+`untrusted_localapi`. Default-build inspection also rejects `--saved`/`--hosts-file` with `saved_hosts_unsupported`
 and remote `--probe` with `platform_unavailable` before runtime or process
 creation; it never downgrades those requests to an ordinary lookup. This lookup
 grants no session authority and does not loosen Linux's credential-checked Unix

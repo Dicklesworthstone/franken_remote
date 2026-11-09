@@ -10,14 +10,6 @@ use fr_tailnet::{Discovery, Error as TailnetError};
 use std::cell::Cell;
 
 pub(super) fn run(options: &Options) -> Result<String, Failure> {
-    #[cfg(target_os = "macos")]
-    if options.socket.is_some() {
-        return Err(Failure::new(
-            "localapi_endpoint_unsupported",
-            "macOS discovery uses the protected installed Tailscale app. Omit --socket; custom Unix sockets are supported on Linux only.",
-            2,
-        ));
-    }
     let mut shutdown = Shutdown::new()?;
     let (runtime, cx) = runtime::create()?;
     let stopped = Cell::new(false);
@@ -26,20 +18,14 @@ pub(super) fn run(options: &Options) -> Result<String, Failure> {
         .map_err(tailnet)?;
     Ok(output::hosts(&snapshot, options.json))
 }
+/// `--socket` names one root tailscaled socket on Linux and macOS; otherwise
+/// the installed Tailscale (on macOS the app, or the open-source daemon's).
 async fn lookup(options: &Options, cx: &Cx) -> Result<Discovery, TailnetError> {
-    #[cfg(target_os = "linux")]
-    {
-        let api = match &options.socket {
-            Some(path) => fr_tailnet::LocalApi::new(path)?,
-            None => fr_tailnet::LocalApi::installed(),
-        };
-        api.discover(cx).await
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let _ = options;
-        fr_native::tailnet_macos::discover(cx).await
-    }
+    let api = match &options.socket {
+        Some(path) => fr_tailnet::LocalApi::new(path)?,
+        None => fr_tailnet::LocalApi::installed(),
+    };
+    api.discover(cx).await
 }
 fn failure(code: &'static str, next: &'static str) -> Failure {
     Failure::new(code, next, 1)
@@ -54,7 +40,7 @@ pub(super) fn tailnet(error: TailnetError) -> Failure {
         TailnetError::LocalApiUnavailable => failure(
             "tailscale_unavailable",
             if cfg!(target_os = "macos") {
-                "Start the installed Tailscale app and check its protected command-line bridge."
+                "Start the installed Tailscale app, or tailscaled for /var/run/tailscaled.socket or your --socket path."
             } else {
                 "Start installed Tailscale and check the protected LocalAPI socket."
             },
@@ -66,7 +52,7 @@ pub(super) fn tailnet(error: TailnetError) -> Failure {
         TailnetError::UntrustedLocalApi => failure(
             "untrusted_localapi",
             if cfg!(target_os = "macos") {
-                "Use the protected installed Tailscale app; do not substitute a user-owned executable or proxy."
+                "Use the protected installed Tailscale app or the root tailscaled socket; do not substitute a user-owned socket or proxy."
             } else {
                 "Use the root-owned installed tailscaled endpoint; do not substitute a user-owned proxy."
             },

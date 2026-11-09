@@ -33,14 +33,18 @@ fn selectors_preserve_exact_identity_and_configured_port() {
 }
 
 #[test]
-fn unsupported_modes_refuse_in_the_pure_preflight() {
+fn a_configured_socket_is_not_a_preflight_refusal() {
+    // The open-source tailscaled's socket: read and credential-checked at run
+    // time by fr-tailnet, never refused or ignored here.
     let mut custom = options("n-2", false, 8443);
-    custom.socket = Some(PathBuf::from("/tmp/tailscale.sock"));
-    assert_eq!(
-        prepare(&custom).unwrap_err().code,
-        "localapi_endpoint_unsupported"
-    );
+    custom.socket = Some(PathBuf::from("/var/run/tailscaled.socket"));
+    let request = prepare(&custom).unwrap();
+    assert!(matches!(request.selector, PeerSelector::StableId("n-2")));
+    assert_eq!(request.port, 8443);
+}
 
+#[test]
+fn unsupported_modes_refuse_in_the_pure_preflight() {
     let mut saved = options("workstation", false, 8443);
     let Command::Inspect(inspect) = &mut saved.command else {
         unreachable!()

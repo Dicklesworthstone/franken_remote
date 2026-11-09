@@ -16,7 +16,7 @@ pub(super) fn supported(
     approval: Approval,
     json: bool,
 ) -> Result<(), ExitCode> {
-    let refusals: [(bool, &str, &str); 8] = [
+    let refusals: [(bool, &str, &str); 7] = [
         (
             approval == Approval::Local,
             "local_approval_unavailable",
@@ -51,11 +51,6 @@ pub(super) fn supported(
             options.headless || options.display.is_some(),
             "no_display",
             "macOS shares the logged-in user's display; --headless and --display are X11 options",
-        ),
-        (
-            options.socket.is_some(),
-            "tailscale_unavailable",
-            "macOS reads the installed Tailscale app's LocalAPI; --socket is Linux-only",
         ),
     ];
     match refusals.iter().find(|(refused, _, _)| *refused) {

@@ -10,11 +10,18 @@ publish = false
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
-# The trust-root reader is platform neutral. Installed outbound identity uses
-# the Linux LocalAPI socket or the macOS app's loopback LocalAPI; host
-# admission stays Linux.
+# The trust-root reader is platform neutral. Installed identity uses the
+# daemon's Unix-socket LocalAPI (Linux; macOS open-source tailscaled) or the
+# macOS standalone app's loopback LocalAPI.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 asupersync = { workspace = true, features = ["tls"] }
+
+# macOS only: the safe LOCAL_PEERPID getsockopt binding, the Unix-socket
+# daemon's kernel-reported PID (Asupersync's getpeereid carries no PID). The
+# exact version and a subset of the features Asupersync already builds on
+# this target, so no crate or feature enters the graph.
+[target.'cfg(target_os = "macos")'.dependencies]
+nix = { version = "=0.31.3", default-features = false, features = ["socket"] }
 
 [lints]
 workspace = true

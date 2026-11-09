@@ -98,6 +98,30 @@ WhoIs/status binding, malformed and routed responses, and lookup/target expiry. 
 [the identity and lifetime boundary](docs/native-discovery.md#macos-installed-app-identity-and-outbound-connections).
 Tracking: `fr-1yxy`; the broader macOS client bead remains open.
 
+## macOS open-source `tailscaled` socket (2026-11-09; live reads, host run blocked)
+
+Without the standalone app, macOS reads the open-source daemon's root Unix
+socket `/var/run/tailscaled.socket` (or `--socket PATH` for `frd run` and
+`fr`), through the same transport as Linux. The kernel must report the server
+as root (`getpeereid`). Its `LOCAL_PEERPID` is the daemon identity all reads
+of one lookup must share. The selection order and what is trusted are in
+[native discovery](docs/native-discovery.md#macos-installed-app-identity-and-outbound-connections).
+macOS now runs the shared Linux socket tests (admission, node, certificate)
+and a socket suite. That suite includes a test-user server the production
+client refuses before writing a request, and the kernel-reported PID.
+
+Live on 2026-11-09 on an M4 Mac mini (macOS 26.5, Homebrew `tailscaled` 1.102.1
+as a root LaunchDaemon, no app), from a test binary built on another Mac:
+status, own-address WhoIs, `installed()` discovery and status/WhoIs/status
+resolution chose the socket by themselves; the certificate pair for the
+node's `ts.net` name was fetched and verified against the system roots. Every
+read reported the daemon's launchd PID. `frd run --socket
+/var/run/tailscaled.socket` there stopped earlier, at the encoder's capture
+probe: Screen Recording is not granted under ssh (TCC preflight attributed to
+`sshd-keygen-wrapper`), and that probe precedes the host's `LocalAPI` and
+certificate stage. So `frd`'s own host stage and viewer admission over the
+socket are not yet live-tested.
+
 ## macOS desktop client (2026-11-08; live, partly qualified)
 
 With `--features macos-desktop`, `fr connect` runs natively on macOS. The host
@@ -130,9 +154,10 @@ successful snapshot.
 
 This was the first platform slice for `fr-5a4w`; the desktop client above
 builds on it. Capability probes and hosting still return `platform_unavailable`
-on macOS. A custom `--socket` returns `localapi_endpoint_unsupported` before
-runtime creation. Discovery returns no target lease, observation grant or input
-authority, and Linux's root UID/PID checks remain intact.
+on macOS. A custom `--socket` reads only that root `tailscaled` socket (below;
+until 2026-11-09 it returned `localapi_endpoint_unsupported`). Discovery
+returns no target lease, observation grant or input authority, and Linux's root
+UID/PID checks remain intact.
 
 Added regressions cover shared status projection, exclusions, malformed and
 oversized JSON, cancellation/deadline/clock refusals, public command routing and

@@ -1,21 +1,34 @@
-//! Installed local identity: credential-checked Linux Unix sockets, or on
-//! macOS the standalone Tailscale app's root-published loopback `LocalAPI`
-//! (`macos/endpoint.rs`). No proxy, redirect or public listener.
-//! Host-shaped APIs remain available for shared session signatures; their
-//! underlying reads still refuse on macOS until a macOS host exists.
+//! Installed local identity: the daemon's credential-checked Unix socket
+//! (`socket.rs`), or on macOS the standalone Tailscale app's root-published
+//! loopback `LocalAPI` (`macos/endpoint.rs`). No proxy, redirect or public
+//! listener. Host and client reads share whichever transport is selected.
+//!
+//! Linux: [`LocalApi::installed`] is `/var/run/tailscale/tailscaled.sock`;
+//! [`LocalApi::new`] is one configured socket.
+//!
+//! macOS selection, in this order:
+//! 1. [`LocalApi::new`] (`--socket PATH`): only that Unix socket.
+//! 2. [`LocalApi::installed`], decided again on every read: the standalone
+//!    app's endpoint when it has published one in `/Library/Tailscale`;
+//!    otherwise, when that directory or its `ipnport` link is absent or the
+//!    directory is root-only (the open-source daemon keeps its state there),
+//!    the open-source daemon's fixed socket `/var/run/tailscaled.socket`.
+//!    Tailscale's own CLI uses the same order.
+//!
+//! Every socket server must be the root daemon by kernel credentials. An
+//! untrusted or denied app publication, or a refused or untrusted socket, is a
+//! typed refusal and never falls back to the other transport. The App Store
+//! variant (sandboxed group container) is not supported and reports
+//! `LocalApiUnavailable`, as before.
 use crate::{
     AdmissionProfile, Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
 };
 use asupersync::{cx::Cx, http::h1::Request, time::sleep, types::Time};
-#[cfg(target_os = "linux")]
-use asupersync::{http::h1::Http1Client, net::unix::UnixStream};
-#[cfg(target_os = "linux")]
-use std::path::PathBuf;
 use std::{
     fmt,
     future::{Future, poll_fn},
-    path::Path,
+    path::{Path, PathBuf},
     pin::pin,
     sync::{
         Arc,
@@ -25,8 +38,9 @@ use std::{
     time::Duration,
 };
 
-/// The daemon that answered: its PID on Linux (kernel credentials), its
-/// published endpoint's run identity on macOS. Reads of one lookup must agree.
+/// The daemon that answered: a Unix-socket server's kernel-reported PID, or
+/// the macOS app endpoint's published run identity. Reads of one lookup must
+/// agree.
 type SourceIdentity = i32;
 
 /// One fixed installed-daemon status read. This does not register a reader or
@@ -40,12 +54,16 @@ pub enum LocalQuery {
 
 #[derive(Clone)]
 pub struct LocalApi {
-    #[cfg(target_os = "linux")]
+    /// The Unix socket (on macOS `installed()`, read only while the app has
+    /// published no endpoint).
     path: Arc<PathBuf>,
+    /// macOS `installed()`: the standalone app's state directory, read first
+    /// on every request. `None` for a configured socket.
+    #[cfg(target_os = "macos")]
+    app: Option<Arc<PathBuf>>,
     origin: Arc<()>,
     busy: Arc<AtomicBool>,
     certificate_busy: Arc<AtomicBool>,
-    #[cfg(target_os = "linux")]
     daemon_uid: u32,
 }
 impl fmt::Debug for LocalApi {
@@ -65,35 +83,23 @@ impl LocalApi {
     pub fn installed() -> Self {
         Self::new("/var/run/tailscale/tailscaled.sock").expect("fixed protected socket")
     }
-    /// A locally configured absolute path. The kernel-reported server UID must
-    /// be root even at a custom path. The selected host OS/root remain trusted.
-    #[cfg(target_os = "linux")]
+    /// A locally configured absolute Unix-socket path (macOS: never the app
+    /// endpoint). The kernel-reported server UID must be root even at a custom
+    /// path. The selected host OS/root remain trusted.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, Error> {
-        use std::os::unix::ffi::OsStrExt;
         let path = path.as_ref();
-        let bytes = path.as_os_str().as_bytes();
-        if !path.is_absolute()
-            || bytes.len() >= 108
-            || bytes.contains(&0)
-            || path
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
+        if !socket::valid_path(path) {
             return Err(Error::InvalidEndpoint);
         }
         Ok(Self {
             path: Arc::new(path.to_path_buf()),
+            #[cfg(target_os = "macos")]
+            app: None,
             origin: Arc::new(()),
             busy: Arc::new(AtomicBool::new(false)),
             certificate_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
         })
-    }
-    /// Custom socket endpoints are not an authenticated macOS app transport.
-    /// This signature remains available to shared clients but always refuses.
-    #[cfg(target_os = "macos")]
-    pub fn new(_path: impl AsRef<Path>) -> Result<Self, Error> {
-        Err(Error::InvalidEndpoint)
     }
     /// Exact endpoint tuple MUST originate at a TUN-restricted, established
     /// transport. This proves identity/grants, not the listener's ingress path.
@@ -267,44 +273,22 @@ impl LocalApi {
     async fn get(&self, uri: &str, maximum: usize) -> Result<(Vec<u8>, SourceIdentity), Error> {
         self.get_typed(uri, maximum, "application/json").await
     }
-    #[cfg(target_os = "linux")]
+    /// One read over the selected transport (module docs). On macOS the app's
+    /// endpoint is chosen afresh for every read, as its files are; a read that
+    /// changes transport mid-lookup cannot share the other's identity.
     async fn get_typed(
         &self,
         uri: &str,
         maximum: usize,
         content_type: &str,
     ) -> Result<(Vec<u8>, SourceIdentity), Error> {
-        let socket = UnixStream::connect(&*self.path)
-            .await
-            .map_err(|_| Error::LocalApiUnavailable)?;
-        let credentials = socket.peer_cred().map_err(|_| Error::UntrustedLocalApi)?;
-        if credentials.uid != self.daemon_uid || credentials.pid.is_none_or(|pid| pid <= 0) {
-            return Err(Error::UntrustedLocalApi);
+        #[cfg(target_os = "macos")]
+        if let Some(app) = &self.app
+            && let Some(read) = macos::get(app, uri, maximum, content_type).await?
+        {
+            return Ok(read);
         }
-        let pid = credentials.pid.ok_or(Error::UntrustedLocalApi)?;
-        let request = Request::get(uri)
-            .header("Host", "local-tailscaled.sock")
-            .header("Connection", "close")
-            .header("Accept", content_type)
-            .build();
-        let (response, _socket, withheld) =
-            Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
-                .await
-                .map_err(|_| Error::Http)?;
-        checked(response, withheld, content_type).map(|body| (body, pid))
-    }
-    /// The installed app's loopback `LocalAPI` (see `macos::endpoint` for what
-    /// is trusted). The daemon run that published the endpoint stands in for
-    /// Linux's kernel-verified PID; no socket credential is invented.
-    #[cfg(target_os = "macos")]
-    #[allow(clippy::unused_self)] // The Linux transport needs the same receiver.
-    async fn get_typed(
-        &self,
-        uri: &str,
-        maximum: usize,
-        content_type: &str,
-    ) -> Result<(Vec<u8>, SourceIdentity), Error> {
-        macos::get(uri, maximum, content_type).await
+        socket::get(&self.path, self.daemon_uid, uri, maximum, content_type).await
     }
 }
 /// Accept only a complete, uncompressed 200 response of the expected type.
@@ -404,7 +388,9 @@ async fn bounded<T>(
 mod node;
 pub use node::NodeIdentity;
 
-#[cfg(all(test, target_os = "linux"))]
+// The fake daemons prove themselves with kernel peer credentials: Linux
+// SO_PEERCRED, macOS getpeereid and LOCAL_PEERPID.
+#[cfg(test)]
 mod tests;
 
 mod certificate;
@@ -421,6 +407,7 @@ pub use dial::{ConnectedPeer, DialRoute, NativeClient};
 
 #[cfg(target_os = "linux")]
 mod discovery;
+mod socket;
 
 #[cfg(any(target_os = "macos", test))]
 mod lookup_budget;

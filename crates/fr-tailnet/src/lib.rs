@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
-// macOS outbound identity uses the signed installed-app bridge. Host-shaped
-// types support shared session code, but macOS host operations always refuse.
+// macOS reads the installed app's loopback LocalAPI or the open-source
+// daemon's root Unix socket (local.rs); Linux-only paths such as the nftables
+// ingress helper stay compiled but unused there.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
 //! The Linux adapter implements exact installed-daemon membership admission and

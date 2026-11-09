@@ -1,17 +1,22 @@
-//! Installed-app metadata reads for the native macOS client.
+//! Installed metadata reads for the native macOS client and host.
 //!
-//! Reads go to the standalone Tailscale app's loopback `LocalAPI`, the same
-//! server its own CLI uses (`endpoint.rs` says what is trusted). The owner
-//! chose this on 2026-11-08 over starting a signed CLI child per read: the
-//! child itself connects to this port with this token, so it authenticated
-//! only our own client binary, at 60-80 ms of CPU per read and three reads per
-//! renewal. A whole lookup owns one original deadline and the global lookup
-//! slot. The host's reads (status, whois, certificate pair) use the same
-//! endpoint through [`get`], under the parent module's own bounds and slots.
+//! The standalone Tailscale app serves `LocalAPI` on loopback, the server its
+//! own CLI uses (`endpoint.rs` says what is trusted). The owner chose this on
+//! 2026-11-08 over starting a signed CLI child per read: the child itself
+//! connects to this port with this token, so it authenticated only our own
+//! client binary, at 60-80 ms of CPU per read and three reads per renewal.
+//! Without the app, the open-source daemon's root Unix socket serves the same
+//! reads (`../socket.rs`; the parent module documents the selection order).
+//!
+//! Client lookups here own one original deadline and the lookup slot (global
+//! for `installed()`, per configured socket as on Linux) whichever transport
+//! answers. The host's reads (status, whois, certificate pair) use the same
+//! transports through `LocalApi::get_typed`, under the parent module's bounds
+//! and slots.
 mod endpoint;
 
 use super::{LocalApi, Lookup, SourceIdentity, bounded, checked, lookup_budget::Clock, now};
-use super::{target::VerifiedTarget, wall_now};
+use super::{socket::MACOS_INSTALLED, target::VerifiedTarget, wall_now};
 use crate::{Discovery, Error, PeerSelector, PeerTarget, metadata};
 use asupersync::{
     cx::Cx,
@@ -20,7 +25,7 @@ use asupersync::{
 };
 use std::{
     net::{IpAddr, SocketAddr},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
@@ -39,14 +44,16 @@ enum Query {
 }
 
 struct Operation {
+    api: LocalApi,
     owner: Cx,
     clock: Clock,
     started: Instant,
 }
 impl Operation {
-    fn new(cx: &Cx) -> Result<Self, Error> {
+    fn new(api: &LocalApi, cx: &Cx) -> Result<Self, Error> {
         let started = Instant::now();
         Ok(Self {
+            api: api.clone(),
             owner: cx.clone(),
             clock: Clock::new(now(cx)?, wall_now()?)?,
             started,
@@ -76,22 +83,30 @@ impl Operation {
                 metadata::WHOIS_BYTES,
             ),
         };
-        let read = get(&uri, maximum, "application/json").await?;
+        let read = self
+            .api
+            .get_typed(&uri, maximum, "application/json")
+            .await?;
         self.check()?;
         Ok(read)
     }
 }
 
-/// One read of an exact local URI over the installed app's loopback endpoint,
-/// accepting only a complete 200 response of `content_type` within `maximum`.
-/// The daemon run that published this endpoint stands in for Linux's daemon
-/// PID: a restart between reads breaks a lookup's snapshot.
+/// One read of an exact local URI over the app endpoint published in
+/// `directory`, accepting only a complete 200 response of `content_type`
+/// within `maximum`; `None`, with nothing sent, when the app has published no
+/// endpoint for this user ([`endpoint::published`]). The daemon run that
+/// published the endpoint stands in for Linux's daemon PID: a restart between
+/// reads breaks a lookup's snapshot.
 pub(super) async fn get(
+    directory: &Path,
     uri: &str,
     maximum: usize,
     content_type: &str,
-) -> Result<(Vec<u8>, SourceIdentity), Error> {
-    let endpoint = endpoint::endpoint(Path::new(endpoint::INSTALLED))?;
+) -> Result<Option<(Vec<u8>, SourceIdentity)>, Error> {
+    let Some(endpoint) = endpoint::published(directory)? else {
+        return Ok(None);
+    };
     let socket = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], endpoint.port)))
         .await
         .map_err(|_| Error::LocalApiUnavailable)?;
@@ -106,7 +121,7 @@ pub(super) async fn get(
             .await
             .map_err(|_| Error::Http)?;
     let body = checked(response, withheld, content_type)?;
-    Ok((body, endpoint.instance))
+    Ok(Some((body, endpoint.instance)))
 }
 
 // The lookup owns the bounded selector; no borrowed caller data survives into
@@ -144,16 +159,21 @@ impl Selector {
 }
 
 impl LocalApi {
-    /// Use only the installed Tailscale app's root-published endpoint.
-    /// Distinct API owners share the same one-lookup admission bound while
-    /// retaining distinct origin identities for their outbound targets.
+    /// The installed Tailscale: the standalone app's root-published endpoint,
+    /// or while it has published none, the open-source daemon's root socket
+    /// (parent module docs). Distinct API owners share the same one-lookup
+    /// admission bound while retaining distinct origin identities for their
+    /// outbound targets.
     pub fn installed() -> Self {
         Self {
+            path: Arc::new(PathBuf::from(MACOS_INSTALLED)),
+            app: Some(Arc::new(PathBuf::from(endpoint::INSTALLED))),
             origin: Arc::new(()),
             busy: LOOKUP_BUSY
                 .get_or_init(|| Arc::new(AtomicBool::new(false)))
                 .clone(),
             certificate_busy: Arc::new(AtomicBool::new(false)),
+            daemon_uid: 0,
         }
     }
 
@@ -162,7 +182,7 @@ impl LocalApi {
         cx: &Cx,
         operation: impl AsyncFnOnce(&mut Operation) -> Result<T, Error>,
     ) -> Result<T, Error> {
-        let mut lookup = Operation::new(cx)?;
+        let mut lookup = Operation::new(self, cx)?;
         self.busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;

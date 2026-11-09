@@ -54,8 +54,9 @@ Help reads no local service or desktop and accepts no target or operational opti
 
 Discovery and connection:
 hosts/peers read one local machine snapshot; peers never probes remote services.
-On macOS these commands use the protected installed Tailscale app. Custom
---socket paths and native connection/desktop commands remain Linux-only.
+On macOS these commands read the installed Tailscale app, or without it the
+open-source tailscaled's /var/run/tailscaled.socket; --socket PATH selects one
+root tailscaled socket. Native connection/desktop commands need macos-desktop.
 Doctor diagnoses installed Tailscale status, service port collisions, and certificate lifecycle.
 Doctor --probe-native separately captures one local root-display picture and tries
 the explicitly selected HEVC encoder; --input-agent adds capability discovery with

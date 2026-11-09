@@ -22,13 +22,6 @@ fn prepare(options: &Options) -> Result<Request<'_>, Failure> {
             2,
         ));
     };
-    if options.socket.is_some() {
-        return Err(Failure::new(
-            "localapi_endpoint_unsupported",
-            "macOS inspection uses the protected installed Tailscale app. Omit --socket; custom Unix sockets are supported on Linux only.",
-            2,
-        ));
-    }
     if inspect.saved.is_some() {
         return Err(Failure::new(
             "saved_hosts_unsupported",
@@ -67,7 +60,11 @@ pub(super) fn run(options: &Options) -> Result<String, Failure> {
     let mut shutdown = Shutdown::new()?;
     let (runtime, cx) = runtime::create()?;
     let stopped = Cell::new(false);
-    let api = fr_tailnet::LocalApi::installed();
+    // --socket names one root tailscaled socket, as on Linux.
+    let api = match &options.socket {
+        Some(path) => fr_tailnet::LocalApi::new(path).map_err(tailnet)?,
+        None => fr_tailnet::LocalApi::installed(),
+    };
     let target = runtime
         .block_on(shutdown.run(&cx, &stopped, api.peer_target(&cx, request.selector)))
         .map_err(tailnet)?;

@@ -40,6 +40,22 @@ complete, uncompressed `200 application/json` response. Reading the token
 requires an administrator account. The App Store variant publishes no such
 endpoint and is not supported.
 
+Without the app, the open-source `tailscaled` (for example Homebrew's root
+LaunchDaemon) serves the same `LocalAPI` on the Unix socket
+`/var/run/tailscaled.socket`. `LocalApi::installed()` picks the transport
+again for every read, in Tailscale's own CLI order: the app's endpoint when
+it has published one; otherwise, when `/Library/Tailscale` or its `ipnport`
+link is absent, or the directory is root-only (the open-source daemon keeps
+its 0700 state there), that fixed socket. `LocalApi::new(path)` (`--socket`)
+reads only the named socket (absolute, no `..` or NUL, under 104 bytes). Either
+way the kernel must report the connected server as root (`getpeereid`), so a
+socket an unprivileged process bound is refused before any request is
+written, and the server's `LOCAL_PEERPID` replaces the app's run identity: a
+daemon restart between the reads of one lookup refuses. An untrusted or denied
+app publication, or a refused socket, never falls back to the other
+transport. Bounds, response checks, the lookup slot and the one-second budget
+are the same on both transports.
+
 `LocalApi::installed().discover` makes one status read.
 `LocalApi::peer_target` reads status, WhoIs for one numeric address, then
 status, under one original one-second deadline that includes queueing and

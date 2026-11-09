@@ -808,8 +808,9 @@ fn parse_x509_not_after(der: &[u8]) -> Result<u64, Error> {
     }
 }
 
-// The fake LocalAPI daemon proves itself with Linux SO_PEERCRED (uid and pid).
-#[cfg(all(test, target_os = "linux"))]
+// The fake LocalAPI daemon proves itself with kernel peer credentials (Linux
+// SO_PEERCRED; macOS getpeereid and LOCAL_PEERPID).
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]

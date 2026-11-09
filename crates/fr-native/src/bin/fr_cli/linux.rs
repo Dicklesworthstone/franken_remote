@@ -284,14 +284,7 @@ fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
         }
         _ => {}
     }
-    #[cfg(target_os = "macos")]
-    if options.socket.is_some() {
-        return Err(Failure::new(
-            "localapi_endpoint_unsupported",
-            "macOS uses the protected installed Tailscale app. Omit --socket; custom Unix sockets are supported on Linux only.",
-            2,
-        ));
-    }
+    // macOS too: --socket names one root tailscaled socket (fr-tailnet).
     let api = match &options.socket {
         Some(path) => LocalApi::new(path).map_err(tailnet)?,
         None => LocalApi::installed(),

@@ -638,6 +638,22 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             );
         }
     }
+    // macOS: an explicit --socket (the open-source tailscaled) must exist, as
+    // on Linux. Without one, fr-tailnet reads the standalone app's endpoint,
+    // or while it has published none `/var/run/tailscaled.socket`, at startup.
+    #[cfg(target_os = "macos")]
+    if options
+        .socket
+        .as_ref()
+        .is_some_and(|socket| !socket.exists())
+    {
+        return run_refusal(
+            json,
+            "tailscale_unavailable",
+            "the --socket Tailscale LocalAPI socket is missing; start tailscaled",
+            1,
+        );
+    }
     #[cfg(target_os = "macos")]
     if let Err(code) = macos_run::supported(&options, effective.approval, json) {
         return code;

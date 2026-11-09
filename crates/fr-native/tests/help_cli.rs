@@ -82,12 +82,14 @@ fn peer_alias_help_is_local_and_remote_probe_options_are_refused() {
 // The default macOS build; with `macos-desktop`, `connect` is supported.
 #[cfg(all(target_os = "macos", not(feature = "macos-desktop")))]
 #[test]
-fn macos_snapshot_does_not_enable_custom_endpoints_or_remote_operations() {
+fn macos_snapshot_reads_only_the_named_socket_and_refuses_remote_operations() {
+    // --socket names exactly one root tailscaled socket: an absent one is
+    // unavailable, never a fallback to the app or to another socket.
     for name in ["hosts", "peers"] {
         let output = run(&[name, "--socket", "/private/not-an-authority.sock", "--json"]);
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(1));
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["error"]["code"], "localapi_endpoint_unsupported");
+        assert_eq!(value["error"]["code"], "tailscale_unavailable");
         assert!(value.get("peers").is_none());
         assert!(!String::from_utf8_lossy(&output.stdout).contains("not-an-authority"));
     }
