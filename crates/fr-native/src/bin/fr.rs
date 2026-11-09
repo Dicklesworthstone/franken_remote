@@ -20,6 +20,12 @@ mod file_reports;
 #[path = "fr_cli/help.rs"]
 mod help;
 #[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "fr_cli/host_choice.rs"]
+mod host_choice;
+#[cfg(any(
     target_os = "linux",
     all(target_os = "macos", feature = "macos-desktop")
 ))]

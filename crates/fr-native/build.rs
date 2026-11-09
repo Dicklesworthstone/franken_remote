@@ -519,6 +519,7 @@ fn build_opus_process() {
 /// presentation. System frameworks only; nothing is downloaded or bundled.
 fn build_macos_viewer() {
     println!("cargo:rerun-if-changed=src/macos_viewer.m");
+    println!("cargo:rerun-if-changed=src/macos_picker.m");
     if env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {
@@ -532,31 +533,37 @@ fn build_macos_viewer() {
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    assert!(
-        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
-            .args([
-                "-x",
-                "objective-c",
-                "-fobjc-arc",
-                "-O2",
-                "-fPIC",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-            ])
-            .arg(format!("-mmacosx-version-min={minimum}"))
-            .args(["-c", "src/macos_viewer.m", "-o"])
-            .arg(out.join("macosviewer.o"))
-            .status()
-            .expect("native Objective-C compiler")
-            .success(),
-        "install the Xcode command line tools (xcode-select --install)"
-    );
+    for (source, object) in [
+        ("src/macos_viewer.m", "macosviewer.o"),
+        ("src/macos_picker.m", "macospicker.o"),
+    ] {
+        assert!(
+            Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+                .args([
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-O2",
+                    "-fPIC",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                ])
+                .arg(format!("-mmacosx-version-min={minimum}"))
+                .args(["-c", source, "-o"])
+                .arg(out.join(object))
+                .status()
+                .expect("native Objective-C compiler")
+                .success(),
+            "install the Xcode command line tools (xcode-select --install)"
+        );
+    }
     assert!(
         Command::new("ar")
             .arg("crs")
             .arg(out.join("libfrmacosviewer.a"))
             .arg(out.join("macosviewer.o"))
+            .arg(out.join("macospicker.o"))
             .status()
             .unwrap()
             .success()

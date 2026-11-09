@@ -44,9 +44,10 @@ pub(crate) fn points(
     ))
 }
 
-/// Reserve the file controls in the same optional content-point ceiling.
-/// The native strip is 44 points high, with one 230-point cell per direction
-/// and 16 points of outer padding. A small picture may have horizontal
+/// Reserve display choice and file controls in the original content ceiling.
+/// The native strip is 44 points high, with 136 points for Change Display,
+/// one 230-point cell per file direction and 16 points of outer padding.
+/// A small picture may have horizontal
 /// letterboxing so every selected direction retains its local cancel button.
 /// These dimensions never participate in remote input coordinates.
 pub(crate) fn sharing_points(
@@ -55,13 +56,10 @@ pub(crate) fn sharing_points(
     fit: Option<(u32, u32)>,
     directions: u32,
 ) -> Result<(u32, u32), ()> {
-    if directions == 0 {
-        return points(pixels, logical, fit);
-    }
     if directions > 2 {
         return Err(());
     }
-    let minimum_width = 16 + 230 * directions;
+    let minimum_width = 152 + 230 * directions;
     let picture_fit = match fit {
         Some((width, height)) => {
             let height = height.checked_sub(44).ok_or(())?;
@@ -81,9 +79,9 @@ mod tests {
     use super::{points, sharing_points};
 
     #[test]
-    fn file_controls_fit_inside_the_original_content_ceiling() {
-        for directions in [1, 2] {
-            let minimum_width = 16 + 230 * directions;
+    fn display_and_file_controls_fit_inside_the_original_content_ceiling() {
+        for directions in [0, 1, 2] {
+            let minimum_width = 152 + 230 * directions;
             assert_eq!(
                 sharing_points(
                     (1920, 1080),
@@ -112,7 +110,7 @@ mod tests {
         );
         assert_eq!(
             sharing_points((1920, 1080), (1920, 1080), Some((16, 16)), 0),
-            points((1920, 1080), (1920, 1080), Some((16, 16)))
+            Err(())
         );
     }
 

@@ -58,6 +58,8 @@ mod macos_sizing;
 // Invocation consent and native key gestures are portable policy, not AppKit.
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_control;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+mod macos_switch;
 // File selection/one-use consent uses the real portable frd owners. Exercise
 // it in Linux CI as well as in the native Mac desktop build.
 #[cfg(all(test, target_os = "linux", feature = "linux-desktop"))]

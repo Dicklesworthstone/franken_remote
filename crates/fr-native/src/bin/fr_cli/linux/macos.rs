@@ -3,13 +3,17 @@
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
-//! interactive file drops/commands, audio, microphone, native host/display pickers,
+//! interactive file drops/commands, audio, microphone,
 //! system-shortcut capture and the clipboard (whose default-on choice is
 //! reported as unavailable). Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
 //! Explicit --send/--receive choices use the original controlled file lanes.
 #[path = "macos_files.rs"]
 mod files;
+#[path = "macos_history.rs"]
+mod history;
+#[path = "macos_host_choice.rs"]
+mod host_choice;
 use super::{
     Failure, Shutdown, failure, lapse, read_roots, refusal, robot, session_control, tailnet,
 };
@@ -44,24 +48,17 @@ fn check(connection: &Connection) -> Result<(), Failure> {
     }
     let directions =
         u32::from(!connection.upload.paths.is_empty()) + u32::from(connection.receive.is_some());
-    if directions != 0
-        && connection
-            .fit_window
-            .is_some_and(|(width, height)| width < 16 + 230 * directions || height < 108)
+    if connection
+        .fit_window
+        .is_some_and(|(width, height)| width < 152 + 230 * directions || height < 108)
     {
         return Err(Failure::new(
-            "files_fit_too_small",
-            "--fit must leave room for the native file progress and Cancel controls: at least 246x108 points for one direction, or 476x108 points for both.",
+            "viewer_fit_too_small",
+            "--fit must leave room for Change Display and any file controls: at least 152x108 points, 382x108 with one file direction, or 612x108 with both.",
             2,
         ));
     }
-    let refused = if connection.choose_host {
-        Some("--choose-host is not implemented on macOS yet; name the host instead.")
-    } else if connection.display == DisplayChoice::Choose {
-        Some(
-            "--display choose is not implemented on macOS yet; use --display only or a handle from fr displays.",
-        )
-    } else if connection.capture_system_shortcuts {
+    let refused = if connection.capture_system_shortcuts {
         Some("--capture-system-shortcuts is not implemented on macOS yet.")
     } else if connection.audio.is_some() {
         Some("--audio is not implemented on macOS yet.")
@@ -131,7 +128,11 @@ fn connect_selected(
             "macOS refused to start the application (run fr from a logged-in graphical session, on the main thread).",
         )
     })?;
-    let selected = crate::saved_hosts::select(&connection.target)?;
+    let selected = if connection.choose_host {
+        host_choice::select(runtime, cx, shutdown, stopped, &api, connection, json)?
+    } else {
+        crate::saved_hosts::select(&connection.target)?
+    };
     let roots = read_roots(&connection.target.roots)?;
     let mut client = Client::new(api, roots, Duration::from_secs(5)).map_err(|_| {
         failure(
@@ -155,6 +156,9 @@ fn connect_selected(
     )
     .with_fit_window(connection.fit_window)
     .with_files(selected_files);
+    if display == DisplayChoice::Choose {
+        session = session.with_display_picker();
+    }
     let cfg = Configuration {
         port: selected.port,
         family: if connection.target.ipv6 {
@@ -174,6 +178,7 @@ fn connect_selected(
         .handle()
         .try_request_cx_with_budget(Budget::INFINITE)
         .map_err(|_| failure("runtime_unavailable", "Check local runtime resources."))?;
+    session = session.with_cleanup_context(local.clone());
     let mut owner = runtime
         .block_on(session_control::Owner::bind(&local, &selected.node))
         .map_err(robot::local_failure)?;
@@ -226,6 +231,7 @@ fn connect_selected(
             json,
             session.cleanup_confirmed(),
             reconnect::Application::terminal_failure(&session),
+            session.picker_error(),
         ),
         json,
     )
@@ -244,7 +250,7 @@ const fn stop_name(stop: LocalStop) -> &'static str {
 }
 
 // Four independent observed facts, passed unchanged to one projection.
-#[allow(clippy::fn_params_excessive_bools)]
+#[allow(clippy::fn_params_excessive_bools, clippy::too_many_arguments)]
 fn finish(
     report: &Report,
     result: Result<(), reconnect::Failure>,
@@ -253,8 +259,9 @@ fn finish(
     json: bool,
     cleanup_confirmed: bool,
     terminal: Option<frd::session_startup::ObserverError>,
+    picker_error: Option<fr_native::macos::picker::Error>,
 ) -> Result<String, Failure> {
-    crate::closure::preserve(
+    let result = crate::closure::preserve(
         finish_result(
             report,
             result,
@@ -263,6 +270,7 @@ fn finish(
             json,
             cleanup_confirmed,
             terminal,
+            picker_error,
         ),
         report.close_exchange,
     )
@@ -271,11 +279,16 @@ fn finish(
             error.revocation = crate::terminal::failure(revocation).revocation;
         }
         error
-    })
+    });
+    history::finish(report, result, json)
 }
 
 // Keep the ordered failure precedence beside its single completion projection.
-#[allow(clippy::too_many_lines, clippy::fn_params_excessive_bools)]
+#[allow(
+    clippy::too_many_lines,
+    clippy::fn_params_excessive_bools,
+    clippy::too_many_arguments
+)]
 fn finish_result(
     report: &Report,
     result: Result<(), reconnect::Failure>,
@@ -284,6 +297,7 @@ fn finish_result(
     json: bool,
     cleanup_confirmed: bool,
     terminal: Option<frd::session_startup::ObserverError>,
+    picker_error: Option<fr_native::macos::picker::Error>,
 ) -> Result<String, Failure> {
     let closed = matches!(
         report.local_stop,
@@ -322,6 +336,13 @@ fn finish_result(
                 "The session was interrupted locally; no actions were replayed.",
                 130,
             ));
+        }
+        if matches!(
+            error,
+            reconnect::Failure::Observation(frd::session_startup::ObserverError::Application)
+        ) && let Some(error) = picker_error
+        {
+            return Err(display_choice_failure(error));
         }
         return Err(match report.local_stop {
                 Some(LocalStop::FocusLost) => failure(
@@ -433,6 +454,37 @@ fn finish_result(
     Ok(out)
 }
 
+fn display_choice_failure(error: fr_native::macos::picker::Error) -> Failure {
+    use fr_native::macos::picker::Error;
+    match error {
+        Error::Cancelled => Failure::new(
+            "display_choice_cancelled",
+            "Display selection was cancelled locally and local cleanup completed; earlier host cleanup and file receipts remain in this result.",
+            130,
+        ),
+        Error::ChoiceTimeout => failure(
+            "display_choice_expired",
+            "The original display-choice deadline expired. Reconnect to obtain a fresh approved display catalog.",
+        ),
+        Error::CatalogChanged => failure(
+            "display_catalog_changed",
+            "The approved display catalog changed while choosing. The old choice was discarded; reconnect for a fresh catalog.",
+        ),
+        Error::EmptyCatalog => failure(
+            "display_choice_empty",
+            "The approved host catalog has no selectable display. Check the host's interactive session and display permissions.",
+        ),
+        Error::EventFlood => failure(
+            "display_choice_event_overflow",
+            "The local picker could not finish its bounded event batch. No queued selection was accepted; make a fresh connection and choice.",
+        ),
+        _ => failure(
+            "display_picker_unavailable",
+            "The native display picker could not complete a valid selection. Run from the logged-in graphical session and reconnect.",
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,16 +538,28 @@ mod tests {
             "receive_requires_control"
         );
         for (flags, width, height) in [
-            ("--send /private/chosen", 245, 108),
-            ("--receive /private/inbox", 246, 107),
-            ("--send /private/chosen --receive /private/inbox", 475, 108),
+            ("", 151, 108),
+            ("", 152, 107),
+            ("--send /private/chosen", 381, 108),
+            ("--receive /private/inbox", 382, 107),
+            ("--send /private/chosen --receive /private/inbox", 611, 108),
         ] {
             let mut c = connection(flags);
             c.fit_window = Some((width, height));
-            assert_eq!(check(&c).err().unwrap().code, "files_fit_too_small");
+            assert_eq!(check(&c).err().unwrap().code, "viewer_fit_too_small");
         }
         let mut c = connection("--send /private/chosen --receive /private/inbox");
-        c.fit_window = Some((476, 108));
+        c.fit_window = Some((612, 108));
+        assert!(check(&c).is_ok());
+    }
+
+    #[test]
+    fn native_host_and_display_choices_pass_platform_preflight() {
+        let mut c = connection("");
+        c.display = DisplayChoice::Choose;
+        assert!(check(&c).is_ok());
+        c.choose_host = true;
+        c.target.node.clear();
         assert!(check(&c).is_ok());
     }
 }

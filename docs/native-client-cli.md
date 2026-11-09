@@ -136,12 +136,12 @@ failure or an adverse host report.
 `--fit WIDTHxHEIGHT` bounds the initial macOS content rectangle in **AppKit
 points**. The picture preserves its aspect ratio and fits inside the available
 local screen. Rendering stays in Metal; input coordinates use the actual
-drawable picture after layout, including the local Retina scale. Without file
-controls, fitting never enlarges the natural window. With file controls, the
-same ceiling includes their reserved 44-point strip; the content needs at least
-246 points of width for one direction, 476 for both, and 108 points of height.
-Smaller explicit ceilings refuse before a connection. A narrow picture can
-have horizontal letterboxing to keep the cancel buttons accessible. Without
+drawable picture after layout, including the local Retina scale. The same
+ceiling includes the reserved 44-point toolbar for Change Display and any file
+controls. The content needs at least 152 points of width, 382 with one file
+direction, 612 with both, and 108 points of height. Smaller explicit ceilings
+refuse before a connection. A narrow picture can have horizontal letterboxing
+to keep the local controls accessible. Without
 `--fit`, the remote logical size remains the picture's default.
 
 The admitted native presenter runs on one bounded Asupersync blocking task.
@@ -185,8 +185,8 @@ the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
-`--choose-host`, `--display choose`, `--capture-system-shortcuts`,
-`--audio`, `--microphone`, `--file-drop`, `--file-commands` and
+`--capture-system-shortcuts`, `--audio`, `--microphone`,
+`--file-drop`, `--file-commands` and
 `fr robot session open`. The clipboard,
 on by default on Linux, is reported as `local_clipboard_unavailable`.
 Local status identifies the foreground invocation; optional quality and
@@ -209,6 +209,64 @@ compilation of the unchanged pinned Asupersync dependency was killed by
 SIGKILL. Native AppKit event delivery, Metal repaint, the macOS pathname owner
 and a full live reconnect/close sequence still require execution on a Mac;
 Linux-side policy tests are not hardware qualification.
+
+### Native macOS host and display selection
+
+```sh
+fr connect --choose-host --control --experimental-native --display choose
+```
+
+The first AppKit window lists a bounded snapshot from the installed Tailscale
+app: canonical certificate name, stable node ID and an informational network
+path hint. A selection retains the exact name/ID pair shown in that original
+snapshot. The ordinary connector freshly resolves and authenticates that pair
+before dialing; a renamed or reassigned peer refuses. The picker never carries
+a cached network address, readiness assertion or input grant.
+
+The display picker opens only when the original authenticated session supplies
+its approved catalog. It shows the current pixel/logical dimensions, desktop
+origin, scale and rotation. An empty or changed catalog cannot reinterpret a
+queued row. `--display only` and explicit handles retain their existing policies.
+
+Pickers have no initially selected row. Select a row with the mouse or arrow
+keys, then use the confirmation button or Return; a double click also confirms.
+Home/End and Page Up/Down navigate the list. Horizontal scrolling or Left/Right
+reveals long names without replacing their identity text. Escape, Cancel,
+window close or Ctrl-C cancels. The native event pump is bounded and nonmodal;
+the original choice budget is at most 120 seconds, and an earlier session
+deadline still wins. Native cleanup precedes returning a selected identity or
+display handle. All of this is a local choice, separate from host approval and
+control consent.
+
+The running viewer's **Change Display** button ends the original observation
+through its own close path. It parks new input immediately and fences the
+original file choices. A replacement opens only after confirmed local input,
+file, decoder and window cleanup, with no adverse host terminal result. It then
+performs the existing fresh connection, identity/admission checks and any host
+approval, and asks for a selection from the new catalog. Old display aliases,
+input mapping and control consent are never carried into the replacement.
+The new viewer starts without control; release and press F8 to request it.
+Previously selected files are not offered again.
+
+Explicit changes share the connector's existing attempt/owner bounds. Closing
+the window, the emergency escape, an input/native failure or failed cleanup
+takes precedence over a pending change. Completion retains each original
+display-change close and lease report even if a later choice is cancelled or
+a reconnect fails; unknown host cleanup remains unknown. The Change Display
+button is unavailable while a control request is pending. Its reserved toolbar
+area cannot produce remote pointer coordinates.
+
+**Verification (2026-11-09):** six display-switch, nine control-consent and five
+sizing tests pass with the pinned compiler and strict standalone Clippy. Four
+tests of the exact picker Rust boundary also pass against the real shared
+client/wire/core crates, with strict Clippy; they do not execute AppKit.
+Workspace formatting, documentation links and diff checks pass. Session and
+CLI integration regressions are included but remain unrun: the pinned
+Asupersync dependency previously exceeded this executor's memory, and no
+matching compiled dependency is available. These extensions still require a
+native Mac build and a live picker/change/close run. Portable policy and source
+tests do not establish AppKit event delivery, native cleanup or a successful
+remote display change.
 
 ### Explicit macOS file transfer
 
@@ -312,6 +370,10 @@ probe mode. `--worker`, `--encoder` and `--x-display` are required, while
 desktop capture is inferred from the environment.
 
 ## Choose a machine in the native window
+
+The behavior below describes the Linux X11 picker. See
+[native macOS host and display selection](#native-macos-host-and-display-selection)
+for the AppKit shell using the same identity snapshot and connection policy.
 
 ```sh
 ./target/debug/fr connect --choose-host \

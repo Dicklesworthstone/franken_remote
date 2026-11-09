@@ -1,8 +1,13 @@
 //! A local machine choice before any remote connection or source selection.
 //! The immutable displayed identity is re-resolved by the existing connector.
 use super::{Cell, Connection, Cx, Failure, LocalApi, Runtime, Shutdown, failure, tailnet};
-use crate::saved_hosts::Selection;
-use fr_client::discovery::picker::{Candidate, Catalog, PathHint};
+use crate::{
+    host_choice::{cancelled, catalog, invalid_snapshot, selected_report, validate},
+    saved_hosts::Selection,
+};
+#[cfg(test)]
+use fr_client::discovery::picker::Candidate;
+use fr_client::discovery::picker::{Catalog, PathHint};
 use fr_native::host_picker::{self, HostPicker};
 use std::{
     thread,
@@ -22,17 +27,7 @@ pub(super) fn select(
     connection: &Connection,
     json: bool,
 ) -> Result<Selection, Failure> {
-    if !connection.target.node.is_empty()
-        || connection.target.saved.is_some()
-        || connection.target.by_name
-        || connection.target.port == 0
-    {
-        return Err(Failure::new(
-            "invalid_host_choice",
-            "Use --choose-host in place of the positional host, without --saved or --by-name.",
-            2,
-        ));
-    }
+    validate(&connection.target)?;
     let display = super::x_display(connection)?;
     let snapshot = runtime
         .block_on(shutdown.run(cx, stopped, api.discover(cx)))
@@ -66,31 +61,6 @@ pub(super) fn select(
     let selected = Selection::from_candidate(candidate, connection.target.port);
     print!("{}", selected_report(candidate, selected.port, json));
     Ok(selected)
-}
-
-fn catalog(snapshot: &fr_tailnet::Discovery) -> Result<Catalog, Failure> {
-    // Discovery owns its canonical bounds. The model independently checks its
-    // immutable projection, including identity ambiguity; no address is copied.
-    if snapshot.peers().len() > fr_client::discovery::picker::MAX_CANDIDATES {
-        return Err(invalid_snapshot());
-    }
-    let candidates = snapshot
-        .peers()
-        .iter()
-        .map(|peer| {
-            Candidate::new(
-                peer.stable_id().to_owned(),
-                peer.certificate_name().to_owned(),
-                match peer.transport_path() {
-                    fr_tailnet::PeerTransportPath::Direct { .. } => PathHint::Direct,
-                    fr_tailnet::PeerTransportPath::DerpRelayed { .. } => PathHint::Relayed,
-                    fr_tailnet::PeerTransportPath::Unknown => PathHint::Unknown,
-                },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| invalid_snapshot())?;
-    Catalog::new(candidates).map_err(|_| invalid_snapshot())
 }
 
 fn rows(catalog: &Catalog) -> Result<Vec<host_picker::Row>, Failure> {
@@ -141,47 +111,12 @@ fn finish(picker: &HostPicker) -> bool {
     }
     picker.is_complete()
 }
-fn cancelled() -> Failure {
-    Failure::new(
-        "host_choice_cancelled",
-        "Host selection was cancelled. No remote connection or input request was opened.",
-        130,
-    )
-}
 fn unavailable() -> Failure {
     failure(
         "host_picker_unavailable",
         "Check the local X11 display, authorization, window focus and keyboard mapping, then make a new explicit selection. No remote connection was opened.",
     )
 }
-fn invalid_snapshot() -> Failure {
-    failure(
-        "host_choice_invalid_snapshot",
-        "The discovery snapshot contains an invalid, ambiguous or out-of-bounds peer identity. Refresh installed Tailscale metadata before choosing again; no remote connection was opened.",
-    )
-}
-
-fn selected_report(candidate: &Candidate, port: u16, json: bool) -> String {
-    if json {
-        format!(
-            "{}\n",
-            serde_json::json!({
-                "schema_version": 1, "event": "host_selected",
-                "node_id": candidate.stable_id(),
-                "certificate_name": candidate.certificate_name(), "port": port,
-                "selection_only": true, "fresh_lookup_required": true,
-                "remote_session_started": false, "input_requested": false
-            })
-        )
-    } else {
-        format!(
-            "Selected {} ({}), port {port}. Rechecking identity and host admission.\n",
-            candidate.certificate_name(),
-            candidate.stable_id()
-        )
-    }
-}
-
 #[cfg(test)]
 #[path = "host_choice/tests.rs"]
 mod tests;

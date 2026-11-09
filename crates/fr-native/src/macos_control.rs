@@ -76,6 +76,13 @@ impl Intent {
         !self.initial
     }
 
+    /// A new explicitly selected display cannot spend even unused invocation
+    /// consent. It starts viewing and requires a new current F8 gesture.
+    pub(crate) fn retire_initial(&mut self) {
+        self.initial = false;
+        self.invalidate();
+    }
+
     /// Focus, geometry, visibility or evidence loss discards an unfinished
     /// gesture. Re-entering viewing creates a new timestamp boundary.
     pub(crate) fn invalidate(&mut self) {
@@ -263,6 +270,17 @@ mod tests {
         assert!(!intent.take_request(true, at(17)));
         assert_eq!(intent.key(key(F8, false, 18), at(19)), Route::Remote);
         assert!(!intent.take_request(true, at(20)));
+    }
+
+    #[test]
+    fn changing_display_retires_even_unused_initial_control_consent() {
+        let mut intent = Intent::new(true);
+        intent.retire_initial();
+        intent.begin_attempt();
+        assert!(intent.needs_explicit_request());
+        assert!(!intent.take_request(true, at(10)));
+        tap(&mut intent, 11, 12, 13);
+        assert!(intent.take_request(true, at(14)));
     }
 
     #[test]

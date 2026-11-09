@@ -401,15 +401,17 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
 
 // ------------------------------------------------------------------ window
 
-// Only explicit one-shot file operations have local chrome. Flags select it
-// before opening the window; action bits separately cancel the original owners.
+// Local display choice and explicit file operations have reserved chrome.
+// None of these controls participates in the remote input viewport.
 enum {
     FR_MAC_SHARE_UPLOAD = 1,
     FR_MAC_SHARE_DOWNLOAD = 2,
-    FR_MAC_SHARE_ALL = 3,
+    FR_MAC_CHANGE_DISPLAY = 4,
+    FR_MAC_SHARE_ALL = 7,
 };
 #define FR_MAC_SHARING_HEIGHT 44.0
 #define FR_MAC_SHARING_CELL 230.0
+#define FR_MAC_CHANGE_WIDTH 136.0
 
 static BOOL fr_sharing_status(uint32_t status) {
     return status <= 5;
@@ -445,6 +447,11 @@ static unsigned fr_sharing_cells(uint32_t flags) {
     return ((flags & FR_MAC_SHARE_UPLOAD) != 0) + ((flags & FR_MAC_SHARE_DOWNLOAD) != 0);
 }
 
+static double fr_sharing_width(uint32_t flags) {
+    return 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(flags) +
+           ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0);
+}
+
 
 @class FrWindowOwner;
 
@@ -473,10 +480,12 @@ static unsigned fr_sharing_cells(uint32_t flags) {
     FrContentView *content;
     FrSharingView *sharing;
     NSTextField *uploadLabel, *downloadLabel;
-    FrSharingButton *uploadCancel, *downloadCancel;
+    FrSharingButton *uploadCancel, *downloadCancel, *changeDisplay;
     uint32_t sharingFlags, sharingActions, uploadStatus, downloadStatus;
     uint64_t uploadDone, uploadTotal, downloadDone, downloadTotal;
     BOOL uploadCancelled, downloadCancelled, layoutInProgress;
+    BOOL displayChangeUsed;
+    double displayChangeAt;
     FrRenderer *renderer;
     FrMacEvent queue[FR_MAC_QUEUE];
     size_t head, count;
@@ -489,6 +498,7 @@ static unsigned fr_sharing_cells(uint32_t flags) {
 - (void)layoutSharing;
 - (void)cancelUpload:(id)sender;
 - (void)cancelDownload:(id)sender;
+- (void)changeDisplay:(id)sender;
 @end
 
 @implementation FrMetalView
@@ -585,6 +595,12 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 @implementation FrWindowOwner
 
 - (void)buildSharing {
+    if (sharingFlags & FR_MAC_CHANGE_DISPLAY) {
+        changeDisplay = fr_sharing_button(sharing, @"Change Display", self,
+                                         @selector(changeDisplay:));
+        changeDisplay.accessibilityLabel = @"Choose another remote display";
+        changeDisplay.enabled = NO; // Rust arms only an eligible original mode.
+    }
     if (sharingFlags & FR_MAC_SHARE_UPLOAD) {
         uploadStatus = 1;
         uploadLabel = fr_sharing_label(sharing, @"Send: Waiting");
@@ -601,13 +617,15 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 - (void)layoutSharing {
     if (!sharing || !sharingFlags) return;
     unsigned cells = fr_sharing_cells(sharingFlags);
-    double cell = (NSWidth(sharing.bounds) - 16) / cells;
+    double offset = changeDisplay ? FR_MAC_CHANGE_WIDTH : 0;
+    if (changeDisplay) changeDisplay.frame = NSMakeRect(8, 8, FR_MAC_CHANGE_WIDTH - 8, 28);
+    double cell = cells ? (NSWidth(sharing.bounds) - 16 - offset) / cells : 0;
     unsigned index = 0;
     NSTextField *labels[] = {uploadLabel, downloadLabel};
     FrSharingButton *controls[] = {uploadCancel, downloadCancel};
     for (unsigned i = 0; i < 2; i++) {
         if (!labels[i]) continue;
-        double x = 8 + index++ * cell;
+        double x = 8 + offset + index++ * cell;
         labels[i].frame = NSMakeRect(x + 4, 14, fmax(1, cell - 78), 17);
         controls[i].frame = NSMakeRect(x + cell - 70, 8, 66, 28);
     }
@@ -627,6 +645,19 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     sharingActions |= FR_MAC_SHARE_DOWNLOAD;
     downloadCancel.enabled = NO;
     downloadLabel.stringValue = @"Receive: Cancelling";
+}
+- (void)changeDisplay:(id)sender {
+    (void)sender;
+    NSEvent *event = NSApp.currentEvent;
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!changeDisplay.enabled || displayChangeUsed || !window.isKeyWindow ||
+        !event || event.type != NSEventTypeLeftMouseDown || event.window != window ||
+        !isfinite(event.timestamp) || event.timestamp <= 0 || now < event.timestamp ||
+        now - event.timestamp >= 0.250) return;
+    displayChangeUsed = YES;
+    displayChangeAt = event.timestamp;
+    changeDisplay.enabled = NO;
+    changeDisplay.title = @"Changing Display";
 }
 
 - (void)push:(FrMacEvent)event {
@@ -783,7 +814,7 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
         NSRect visible = NSScreen.mainScreen ? NSScreen.mainScreen.visibleFrame
                                              : NSMakeRect(0, 0, 1280, 800);
         if (sharing_flags &&
-            16 + FR_MAC_SHARING_CELL * fr_sharing_cells(sharing_flags) > visible.size.width)
+            fr_sharing_width(sharing_flags) > visible.size.width)
             return FR_MAC_GEOMETRY;
         int status = FR_MAC_OK;
         FrRenderer *renderer = renderer_new(width, height, &status);
@@ -798,7 +829,7 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
         // any shrink resamples, so a fitting picture keeps its exact size.
         double chromeHeight = sharing_flags ? FR_MAC_SHARING_HEIGHT : 0;
         double minimumWidth = sharing_flags
-                                  ? 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(sharing_flags)
+                                  ? fr_sharing_width(sharing_flags)
                                   : 1;
         double s = 1.0;
         if (point_width > visible.size.width ||
@@ -929,6 +960,29 @@ int fr_mac_window_sharing_state(void *handle, uint32_t *actions, int *visible) {
     return FR_MAC_OK;
 }
 
+int fr_mac_window_display_change_enabled(void *handle, int enabled) {
+    if (!handle || (enabled != 0 && enabled != 1)) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->changeDisplay) return FR_MAC_INVALID;
+    if (enabled && owner->displayChangeUsed && owner->displayChangeAt == 0) {
+        owner->displayChangeUsed = NO;
+        owner->changeDisplay.title = @"Change Display";
+    }
+    BOOL allowed = enabled && !owner->displayChangeUsed;
+    if (owner->changeDisplay.enabled != allowed) owner->changeDisplay.enabled = allowed;
+    return FR_MAC_OK;
+}
+
+int fr_mac_window_take_display_change(void *handle, double *captured) {
+    if (!handle || !captured) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    *captured = owner->displayChangeAt;
+    owner->displayChangeAt = 0;
+    return FR_MAC_OK;
+}
+
 // Waits up to `timeout` seconds for the first event, then drains one bounded
 // batch without waiting. Returns the number of translated events copied out.
 size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t capacity,
@@ -939,7 +993,10 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        while (!owner->sharingActions && owner->count < FR_MAC_QUEUE &&
+        // A display change must inspect the full bounded batch so a queued
+        // close, escape or focus loss can veto reopening. File-only cancel
+        // still reaches Rust immediately when no display choice is pending.
+        while ((!owner->sharingActions || owner->displayChangeAt > 0) && owner->count < FR_MAC_QUEUE &&
                dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until

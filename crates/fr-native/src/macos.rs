@@ -71,6 +71,8 @@ unsafe extern "C" {
         actions: *mut u32,
         visible: *mut c_int,
     ) -> c_int;
+    fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
+    fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
     fn fr_mac_window_state(
         window: *mut c_void,
         width: *mut u32,
@@ -314,6 +316,23 @@ impl Window {
             actions,
             visible: visible != 0,
         })
+    }
+    pub(crate) fn display_change_enabled(&self, enabled: bool) -> Result<(), NativeError> {
+        // SAFETY: live window on its owning main thread; a bounded local flag.
+        status(unsafe {
+            fr_mac_window_display_change_enabled(self.raw.as_ptr(), c_int::from(enabled))
+        })
+    }
+    pub(crate) fn take_display_change(&self) -> Result<Option<Duration>, NativeError> {
+        let mut captured = 0.0;
+        // SAFETY: live main-thread window and one writable scalar output.
+        status(unsafe { fr_mac_window_take_display_change(self.raw.as_ptr(), &raw mut captured) })?;
+        if captured == 0.0 {
+            return Ok(None);
+        }
+        Duration::try_from_secs_f64(captured)
+            .map(Some)
+            .map_err(|_| NativeError::Unavailable)
     }
     /// Current picture size and input-relevant window state.
     pub fn state(&self) -> Result<WindowState, NativeError> {
@@ -726,6 +745,8 @@ impl Drop for HevcDecoder {
 
 #[path = "macos/files.rs"]
 pub mod files;
+#[path = "macos/picker.rs"]
+pub mod picker;
 #[path = "macos/sharing.rs"]
 mod sharing;
 
