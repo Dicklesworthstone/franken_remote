@@ -12,7 +12,21 @@ use fr_core::limits::ProtocolLimits;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Profile(pub [u8; 12]);
-fn profile(b: &mut Bits<'_>) -> Result<Profile, HevcError> {
+/// `max_sub_layers_minus1` and the temporal-ID nesting flag. An encoder may
+/// declare temporal sub-layers it never uses: `VideoToolbox`'s low-latency
+/// HEVC declares two and puts every picture in the base layer. Declaring them
+/// grants nothing. `Nal::new` refuses every NAL whose temporal ID is not zero,
+/// an upper sub-layer may signal no profile, level or HRD of its own, and every
+/// signalled ordering set obeys the same limits.
+fn sub_layers(b: &mut Bits<'_>) -> Result<u32, HevcError> {
+    let minus1 = b.read(3)?;
+    b.expect(1, 1)?; // Nested, as a single layer must be.
+    if minus1 > 6 {
+        return Err(HevcError::UnsupportedSyntax); // Seven is reserved.
+    }
+    Ok(minus1)
+}
+fn profile(b: &mut Bits<'_>, sub_layers_minus1: u32) -> Result<Profile, HevcError> {
     let mut bytes = [0; 12];
     for byte in &mut bytes {
         *byte = u8::try_from(b.read(8)?).map_err(|_| HevcError::Limit)?;
@@ -21,16 +35,27 @@ fn profile(b: &mut Bits<'_>) -> Result<Profile, HevcError> {
     if bytes[0] & 0xdf != 1 || bytes[5] & 0x40 != 0 || bytes[11] == 0 {
         return Err(HevcError::UnsupportedSyntax);
     }
+    // Two clear presence flags per upper sub-layer, then reserved zero pairs
+    // up to eight: sixteen zero bits whenever a sub-layer is declared.
+    if sub_layers_minus1 > 0 {
+        b.expect(16, 0)?;
+    }
     Ok(Profile(bytes))
 }
-fn ordering(b: &mut Bits<'_>, max_dpb: u8) -> Result<u8, HevcError> {
-    b.flag()?; // One temporal layer: the presence flag cannot change the loop count.
-    let dpb = b.ue(15)? + 1;
-    if dpb > u32::from(max_dpb) || b.ue(15)? != 0 {
-        return Err(HevcError::DpbLimit);
+/// Every signalled sub-layer set must fit the budget and never reorder; the
+/// largest governs decoding.
+fn ordering(b: &mut Bits<'_>, max_dpb: u8, sub_layers_minus1: u32) -> Result<u8, HevcError> {
+    let sets = if b.flag()? { sub_layers_minus1 + 1 } else { 1 };
+    let mut largest = 0;
+    for _ in 0..sets {
+        let dpb = b.ue(15)? + 1;
+        if dpb > u32::from(max_dpb) || b.ue(15)? != 0 {
+            return Err(HevcError::DpbLimit);
+        }
+        b.ue(u32::MAX - 1)?;
+        largest = largest.max(dpb);
     }
-    b.ue(u32::MAX - 1)?;
-    u8::try_from(dpb).map_err(|_| HevcError::DpbLimit)
+    u8::try_from(largest).map_err(|_| HevcError::DpbLimit)
 }
 /// At most this many SPS short-term reference-picture sets are admitted.
 const MAX_SPS_RPS: usize = 4;
@@ -98,7 +123,7 @@ fn hrd(b: &mut Bits<'_>) -> Result<(), HevcError> {
         }
         b.read(15)?; // three delay lengths
     }
-    // One temporal sub-layer (sps_max_sub_layers_minus1 == 0 is enforced).
+    // One temporal sub-layer: `vui` refuses HRD when more are declared.
     let within_cvs = b.flag()? || b.flag()?;
     let low_delay = if within_cvs {
         b.ue(2047)?;
@@ -136,17 +161,17 @@ pub(super) struct Vps {
     pub id: u32,
     pub profile: Profile,
     pub dpb: u8,
+    pub sub_layers_minus1: u32,
 }
 pub(super) fn vps(nal: Nal<'_>, max_dpb: u8) -> Result<Vps, HevcError> {
     let mut b = nal.bits()?;
     let id = b.read(4)?;
     b.expect(2, 3)?; // Base layer internal and available.
     b.expect(6, 0)?;
-    b.expect(3, 0)?;
-    b.expect(1, 1)?;
+    let sub_layers_minus1 = sub_layers(&mut b)?;
     b.expect(16, 0xffff)?;
-    let profile = profile(&mut b)?;
-    let dpb = ordering(&mut b, max_dpb)?;
+    let profile = profile(&mut b, sub_layers_minus1)?;
+    let dpb = ordering(&mut b, max_dpb, sub_layers_minus1)?;
     b.expect(6, 0)?;
     b.ue(0)?; // No additional layers or layer sets.
     if b.flag()? {
@@ -155,7 +180,12 @@ pub(super) fn vps(nal: Nal<'_>, max_dpb: u8) -> Result<Vps, HevcError> {
     } // HRD is not in this low-delay subset.
     b.expect(1, 0)?;
     b.end()?;
-    Ok(Vps { id, profile, dpb })
+    Ok(Vps {
+        id,
+        profile,
+        dpb,
+        sub_layers_minus1,
+    })
 }
 #[derive(Clone, Copy)]
 pub(super) struct Sps {
@@ -181,9 +211,11 @@ pub(super) fn sps(
     if b.read(4)? != vps.id {
         return Err(HevcError::ParameterSetReference);
     }
-    b.expect(3, 0)?;
-    b.expect(1, 1)?;
-    let profile = profile(&mut b)?;
+    let sub_layers_minus1 = sub_layers(&mut b)?;
+    if sub_layers_minus1 > vps.sub_layers_minus1 {
+        return Err(HevcError::ParameterSetReference);
+    }
+    let profile = profile(&mut b, sub_layers_minus1)?;
     if profile != vps.profile {
         return Err(HevcError::ParameterSetReference);
     }
@@ -217,7 +249,7 @@ pub(super) fn sps(
     b.ue(0)?;
     b.ue(0)?; // Eight-bit luma and chroma only.
     let poc_bits = u8::try_from(b.ue(12)? + 4).map_err(|_| HevcError::Limit)?;
-    let dpb = ordering(&mut b, max_dpb)?;
+    let dpb = ordering(&mut b, max_dpb, sub_layers_minus1)?;
     if dpb > vps.dpb {
         return Err(HevcError::DpbLimit);
     }
@@ -259,7 +291,7 @@ pub(super) fn sps(
     if !b.flag()? {
         return Err(HevcError::ColorMismatch);
     }
-    vui(&mut b, config)?;
+    vui(&mut b, config, sub_layers_minus1)?;
     b.expect(1, 0)?; // No range, multiview, 3D, SCC or unknown extensions.
     b.end()?;
     Ok(Sps {
@@ -275,7 +307,11 @@ pub(super) fn sps(
         rps,
     })
 }
-fn vui(b: &mut Bits<'_>, config: CodecConfiguration) -> Result<(), HevcError> {
+fn vui(
+    b: &mut Bits<'_>,
+    config: CodecConfiguration,
+    sub_layers_minus1: u32,
+) -> Result<(), HevcError> {
     if b.flag()? {
         match b.read(8)? {
             0 | 1 => {}
@@ -334,6 +370,10 @@ fn vui(b: &mut Bits<'_>, config: CodecConfiguration) -> Result<(), HevcError> {
     if b.flag()? {
         timing(b)?;
         if b.flag()? {
+            // HRD timing per declared sub-layer is not parsed; refuse it.
+            if sub_layers_minus1 != 0 {
+                return Err(HevcError::UnsupportedSyntax);
+            }
             hrd(b)?;
         }
     }

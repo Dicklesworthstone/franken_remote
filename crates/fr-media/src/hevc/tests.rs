@@ -487,3 +487,204 @@ fn real_nvenc_sps_rps_tables_and_vui_hrd_are_admitted_under_the_same_rules() {
         HevcError::ReferenceMismatch
     );
 }
+
+// Real VideoToolbox HEVC Main (macOS 27.0.1, Apple M5 Ultra) from a
+// ScreenCaptureKit 1920x1080 NV12 BT.709 capture: RealTime, low-latency rate
+// control, no frame reordering, ReferenceBufferCount 1. It declares two
+// temporal sub-layers and puts every picture in the base layer. The slices
+// are whole pictures of synthetic input (flat mid-gray with a small moving
+// square, so no screen content); the same session settings produce
+// byte-identical parameter sets from a live capture.
+const VT_VPS: &str = "40010c03ffff016000000300b0000003000003007b00002c09";
+const VT_SPS: &str =
+    "420103016000000300b0000003000003007b0000a003c0801107cb882ee4524ba9a80808081fc20104";
+const VT_PPS: &str = "4401c072f05b24";
+const VT_IDR: &str = concat!(
+    "2801af156088cd30c2eb2aa269228a281e7c68ac69c71c71c71c71c71c71c740eedfa5f24f474b7800000300",
+    "000300000300000300000300001810a8fabb639c22000003000003000003000003000003000008689bdba5bc",
+    "0000030000030000030000030000030000030061408f6244000003000003000003000003000003000003008c",
+    "8009500000030000030000030000030000030000030067400000030000030000030000030000030000030000",
+    "2da0000003000003000003000003000003000003000b4800000300000300000300000300000300000301a700",
+    "000300000300000300000300000300001f9000000300000300000300000300000300017d0000030000030000",
+    "03000003000003000f18000003000003000003000003000003005a4000000300000300000300000300000302",
+    "1a000003000003000003000003000008f800000300000300000300000300001e7000000300000302407fc2ba",
+    "de5a4e8565703f6cc28b30de018ae3620000030000030033a0000003000009537c80e4fc0000030000222000",
+    "0003000014b78ae4108d0e0d7addc000000300008980000003000010b00000030000ef800000030000030000",
+    "0300000300075c000003000003000003000003000d080000030000030000030000030014b000000300000300",
+    "0003000003001e70000003000003000003000003002b60000003000003000003000003003860000003000003",
+    "0000030000030047c00000030000030000030000030056c00000030000030000030000030066c00000030000",
+    "030000030000030075c0000003000003000003000003007f80000003000003000003000003008c8000000300",
+    "0003000003000003009280000003000003000003000003009880f5bd80000003000003000003000003000003",
+    "0000030000030000030000030000030000030000030000030000030000030000030000030000030000030000",
+    "0300000300000300000300000300000300000300000300000300000300000300000300000300000300000300",
+    "0003000003000003000003000003000003000003000003000003000003000bc8",
+);
+const VT_P1: &str = concat!(
+    "0201d001b11582223bab2aaa1999911721911111111110888cf758e2c000001670c2eb00000300ad80b4c000",
+    "000a2887000003009a80000003000684000003001db0000003009680000003036200000ab8000020a0000059",
+    "c00000e1800001f50003aa000724011fec8cc5d28bffa0f5ff6e63822601a55091cb01152de00029e0003820",
+    "0049c0005d40007340008b80009f8000b68000c78000d88000ef8000ff011501270133f849c0000003000003",
+    "00006740",
+);
+const VT_P2: &str = concat!(
+    "0201d002b10f608890ceccaaa86666456b2444444444444443f3995ba00000030212be66c000000eb8b16800",
+    "000300e28087000003000fc80000030000fb8000000300070400000300276000000300b680000003031e0000",
+    "0b6800002120000059400000d6800001f900038200a91e90396a21f5d8572143010b3bca0dda019454547506",
+    "8032c2700151880025600031e00044400053c00067c0007cc0008c8000a38000b68000c78000dc8000ea8000",
+    "fd800111f8220000030000030000030159",
+);
+fn vt_config() -> CodecConfiguration {
+    CodecConfiguration::new_baseline(
+        CodecConfigurationGeneration::INITIAL,
+        CodedGeometry::from_visible(&ProtocolLimits::ABSOLUTE, 1920, 1080, 16).unwrap(),
+        ColorInfo::sdr_bt709(),
+        GopPolicy::baseline_for_frame_rate(60).unwrap(),
+    )
+    .unwrap()
+}
+fn vt_startup(vps: &[u8], sps: &[u8]) -> Result<PictureInfo, HevcError> {
+    HevcGuard::new(vt_config(), ProtocolLimits::ABSOLUTE, 4)
+        .unwrap()
+        .validate_annex_b(&au(&[vps, sps, &hex(VT_PPS), &hex(VT_IDR)]), true)
+}
+/// Rewrites a parameter set's RBSP. Positions count from the NAL header, as
+/// `FFmpeg`'s `trace_headers` prints them; the stop bit is re-appended.
+fn planted(nal: &str, edit: impl FnOnce(&mut Vec<bool>)) -> Vec<u8> {
+    let mut rbsp = Vec::new();
+    let mut zeros = 0;
+    for b in hex(nal) {
+        if zeros >= 2 && b == 3 {
+            zeros = 0;
+            continue;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        rbsp.push(b);
+    }
+    let mut bits: Vec<bool> = rbsp
+        .iter()
+        .flat_map(|b| (0..8).rev().map(move |i| b >> i & 1 == 1))
+        .collect();
+    while bits.pop() == Some(false) {}
+    edit(&mut bits);
+    bits.push(true);
+    while !bits.len().is_multiple_of(8) {
+        bits.push(false);
+    }
+    let mut out = Vec::new();
+    let mut zeros = 0;
+    for chunk in bits.chunks(8) {
+        let b = chunk.iter().fold(0_u8, |v, bit| v << 1 | u8::from(*bit));
+        if zeros >= 2 && b <= 3 {
+            out.push(3);
+            zeros = 0;
+        }
+        zeros = if b == 0 { zeros + 1 } else { 0 };
+        out.push(b);
+    }
+    out
+}
+fn insert(bits: &mut Vec<bool>, at: usize, text: &str) {
+    for (i, c) in text.chars().filter(|c| *c != ' ').enumerate() {
+        bits.insert(at + i, c == '1');
+    }
+}
+
+/// Phase 0 (fr-p0-media-macos-4mj): `VideoToolbox`'s low-latency HEVC was
+/// refused only because it declares an unused second temporal sub-layer.
+#[test]
+fn real_videotoolbox_low_latency_stream_is_admitted_and_its_sub_layer_stays_empty() {
+    let idr = au(&[&hex(VT_VPS), &hex(VT_SPS), &hex(VT_PPS), &hex(VT_IDR)]);
+    let mut g = HevcGuard::new(vt_config(), ProtocolLimits::ABSOLUTE, 4).unwrap();
+    let info = g.validate_annex_b(&idr, true).unwrap();
+    assert!(info.idr);
+    assert_eq!((info.decoded_pictures, info.level_idc), (2, 123));
+    for (p, poc) in [(VT_P1, 1), (VT_P2, 2)] {
+        assert_eq!(
+            g.validate_annex_b(&au(&[&hex(p)]), false).unwrap().poc_lsb,
+            poc
+        );
+    }
+    // The declared sub-layer can carry no picture.
+    let mut upper = hex(VT_P1);
+    upper[1] = 2;
+    let mut g = HevcGuard::new(vt_config(), ProtocolLimits::ABSOLUTE, 4).unwrap();
+    g.validate_annex_b(&idr, true).unwrap();
+    assert_eq!(
+        g.validate_annex_b(&au(&[&upper]), false),
+        Err(HevcError::UnsupportedLayer)
+    );
+    // A client admits the same sets from the record the host derives.
+    let record = g.decoder_record().unwrap();
+    let mut client =
+        HevcGuard::from_decoder_record(vt_config(), ProtocolLimits::ABSOLUTE, 4, record.bytes())
+            .unwrap();
+    assert!(client.validate_annex_b(&idr, true).unwrap().idr);
+    assert_eq!(
+        client
+            .validate_annex_b(&au(&[&hex(VT_P1)]), false)
+            .unwrap()
+            .poc_lsb,
+        1
+    );
+}
+#[test]
+fn declared_sub_layers_grant_no_profile_level_hrd_or_reordering() {
+    let (vps, sps) = (hex(VT_VPS), hex(VT_SPS));
+    assert!(vt_startup(&vps, &sps).is_ok());
+    let set = |nal: &str, at: usize| planted(nal, |b| b[at] = true);
+    // Sub-layer profile, level or reserved bits (VPS 144.., SPS 120..).
+    for at in [144, 145, 146, 159] {
+        assert_eq!(
+            vt_startup(&set(VT_VPS, at), &sps),
+            Err(HevcError::UnsupportedSyntax)
+        );
+    }
+    for at in [120, 121, 122, 135] {
+        assert_eq!(
+            vt_startup(&vps, &set(VT_SPS, at)),
+            Err(HevcError::UnsupportedSyntax)
+        );
+    }
+    // Not nested; the reserved count seven; more SPS sub-layers than the VPS.
+    let clear = |nal: &str, at: usize| planted(nal, |b| b[at] = false);
+    assert_eq!(
+        vt_startup(&clear(VT_VPS, 31), &sps),
+        Err(HevcError::UnsupportedSyntax)
+    );
+    assert_eq!(
+        vt_startup(&vps, &clear(VT_SPS, 23)),
+        Err(HevcError::UnsupportedSyntax)
+    );
+    let seven = planted(VT_VPS, |b| b[28..31].fill(true));
+    assert_eq!(vt_startup(&seven, &sps), Err(HevcError::UnsupportedSyntax));
+    let two = planted(VT_SPS, |b| b[20..23].copy_from_slice(&[false, true, false]));
+    assert_eq!(
+        vt_startup(&vps, &two),
+        Err(HevcError::ParameterSetReference)
+    );
+    // Per-sub-layer ordering (present flag at VPS 160, SPS 200): every set is
+    // read; a legal lower set is admitted, a reordering one is refused.
+    for (nal, at) in [(VT_VPS, 160), (VT_SPS, 200)] {
+        for (lower, expected) in [("010 1 1", Ok(())), ("010 010 1", Err(HevcError::DpbLimit))] {
+            let edited = planted(nal, |b| {
+                b[at] = true;
+                insert(b, at + 1, lower);
+            });
+            let (v, s) = if nal == VT_VPS {
+                (edited, sps.clone())
+            } else {
+                (vps.clone(), edited)
+            };
+            assert_eq!(vt_startup(&v, &s).map(|_| ()), expected, "{nal} {lower}");
+        }
+    }
+    // VUI timing (flag at SPS 274) is admitted; HRD under it is refused.
+    let tick = format!("{:032b} {:032b} 0", 1, 60);
+    for (hrd, expected) in [("0", Ok(())), ("1", Err(HevcError::UnsupportedSyntax))] {
+        let timed = planted(VT_SPS, |b| {
+            b[274] = true;
+            insert(b, 275, &format!("{tick} {hrd}"));
+        });
+        assert_eq!(vt_startup(&vps, &timed).map(|_| ()), expected, "hrd {hrd}");
+    }
+}
