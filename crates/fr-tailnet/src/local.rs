@@ -7,7 +7,7 @@ use crate::{
     AdmissionProfile, Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
 };
-use asupersync::{cx::Cx, http::h1::Request, net::unix::UCred, time::sleep, types::Time};
+use asupersync::{cx::Cx, http::h1::Request, time::sleep, types::Time};
 #[cfg(target_os = "linux")]
 use asupersync::{http::h1::Http1Client, net::unix::UnixStream};
 #[cfg(target_os = "linux")]
@@ -30,7 +30,8 @@ use std::{
 type SourceIdentity = i32;
 
 /// One fixed installed-daemon status read. This does not register a reader or
-/// grant trust to caller-supplied metadata. Host reads refuse on macOS.
+/// grant trust to caller-supplied metadata. On macOS host reads go to the
+/// installed app's loopback `LocalAPI`, like the client's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum LocalQuery {
@@ -162,12 +163,7 @@ impl LocalApi {
                             metadata::evaluate(&last, &who, addresses, policy)?
                         }
                     };
-                    return Ok((
-                        identity,
-                        permissions,
-                        expiries,
-                        last_process.pid.ok_or(Error::UntrustedLocalApi)?,
-                    ));
+                    return Ok((identity, permissions, expiries, last_process));
                 }
                 Err(Error::SnapshotChanged)
             }))
@@ -236,7 +232,7 @@ impl LocalApi {
         }
         Ok(permission)
     }
-    async fn status(&self, cx: &Cx) -> Result<(Status, UCred), Error> {
+    async fn status(&self, cx: &Cx) -> Result<(Status, SourceIdentity), Error> {
         let (body, process) = self
             .query(
                 cx,
@@ -251,21 +247,24 @@ impl LocalApi {
         _cx: &Cx,
         query: LocalQuery,
         maximum: usize,
-    ) -> Result<(Vec<u8>, UCred), Error> {
+    ) -> Result<(Vec<u8>, SourceIdentity), Error> {
         let uri = match query {
             LocalQuery::Status { peers: true } => "/localapi/v0/status?peers=true",
             LocalQuery::Status { peers: false } => "/localapi/v0/status?peers=false",
         };
         self.get(uri, maximum).await
     }
-    async fn whois(&self, addresses: ConnectionAddresses) -> Result<(WhoIs, UCred), Error> {
+    async fn whois(
+        &self,
+        addresses: ConnectionAddresses,
+    ) -> Result<(WhoIs, SourceIdentity), Error> {
         let request = Request::get("/localapi/v0/whois")
             .query([("addr", addresses.peer.to_string())])
             .build();
         let (body, process) = self.get(&request.uri, metadata::WHOIS_BYTES).await?;
         Ok((WhoIs::parse(&body)?, process))
     }
-    async fn get(&self, uri: &str, maximum: usize) -> Result<(Vec<u8>, UCred), Error> {
+    async fn get(&self, uri: &str, maximum: usize) -> Result<(Vec<u8>, SourceIdentity), Error> {
         self.get_typed(uri, maximum, "application/json").await
     }
     #[cfg(target_os = "linux")]
@@ -274,7 +273,7 @@ impl LocalApi {
         uri: &str,
         maximum: usize,
         content_type: &str,
-    ) -> Result<(Vec<u8>, UCred), Error> {
+    ) -> Result<(Vec<u8>, SourceIdentity), Error> {
         let socket = UnixStream::connect(&*self.path)
             .await
             .map_err(|_| Error::LocalApiUnavailable)?;
@@ -282,6 +281,7 @@ impl LocalApi {
         if credentials.uid != self.daemon_uid || credentials.pid.is_none_or(|pid| pid <= 0) {
             return Err(Error::UntrustedLocalApi);
         }
+        let pid = credentials.pid.ok_or(Error::UntrustedLocalApi)?;
         let request = Request::get(uri)
             .header("Host", "local-tailscaled.sock")
             .header("Connection", "close")
@@ -291,19 +291,20 @@ impl LocalApi {
             Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
                 .await
                 .map_err(|_| Error::Http)?;
-        checked(response, withheld, content_type).map(|body| (body, credentials))
+        checked(response, withheld, content_type).map(|body| (body, pid))
     }
+    /// The installed app's loopback `LocalAPI` (see `macos::endpoint` for what
+    /// is trusted). The daemon run that published the endpoint stands in for
+    /// Linux's kernel-verified PID; no socket credential is invented.
     #[cfg(target_os = "macos")]
     #[allow(clippy::unused_self)] // The Linux transport needs the same receiver.
-    fn get_typed(
+    async fn get_typed(
         &self,
-        _uri: &str,
-        _maximum: usize,
-        _content_type: &str,
-    ) -> std::future::Ready<Result<(Vec<u8>, UCred), Error>> {
-        // Only macos::{discover, peer_target} can read the signed app. Host
-        // operations must not reuse outbound identity or invent socket UCred.
-        std::future::ready(Err(Error::LocalApiUnavailable))
+        uri: &str,
+        maximum: usize,
+        content_type: &str,
+    ) -> Result<(Vec<u8>, SourceIdentity), Error> {
+        macos::get(uri, maximum, content_type).await
     }
 }
 /// Accept only a complete, uncompressed 200 response of the expected type.

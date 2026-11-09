@@ -137,7 +137,7 @@ impl LocalApi {
         let node = NodeIdentity {
             identity,
             origin: self.origin.clone(),
-            daemon_pid: credential.pid.ok_or(Error::UntrustedLocalApi)?,
+            daemon_pid: credential,
             issued_us,
             expires_us,
             wall_issued_us,

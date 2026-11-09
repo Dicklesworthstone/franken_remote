@@ -344,7 +344,7 @@ impl LocalApi {
             );
             let (bytes, process) = self.get_typed(&uri, PAIR_LIMIT, "text/plain").await?;
             let bytes = Secret(bytes);
-            if !before.matches_process(process.pid) {
+            if !before.matches_process(Some(process)) {
                 return Err(Error::UntrustedLocalApi);
             }
             let after = self.node_identity(cx).await?;

@@ -6,8 +6,8 @@
 //! child itself connects to this port with this token, so it authenticated
 //! only our own client binary, at 60-80 ms of CPU per read and three reads per
 //! renewal. A whole lookup owns one original deadline and the global lookup
-//! slot. Host-shaped APIs in the parent module still refuse; this backend
-//! provides outbound identity only.
+//! slot. The host's reads (status, whois, certificate pair) use the same
+//! endpoint through [`get`], under the parent module's own bounds and slots.
 mod endpoint;
 
 use super::{LocalApi, Lookup, SourceIdentity, bounded, checked, lookup_budget::Clock, now};
@@ -76,26 +76,37 @@ impl Operation {
                 metadata::WHOIS_BYTES,
             ),
         };
-        let endpoint = endpoint::endpoint(Path::new(endpoint::INSTALLED))?;
-        let socket = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], endpoint.port)))
-            .await
-            .map_err(|_| Error::LocalApiUnavailable)?;
-        let request = Request::get(&uri)
-            .header("Host", "local-tailscaled.sock")
-            .header("Connection", "close")
-            .header("Accept", "application/json")
-            .header("Authorization", endpoint.authorization())
-            .build();
-        let (response, _socket, withheld) =
-            Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
-                .await
-                .map_err(|_| Error::Http)?;
-        let body = checked(response, withheld, "application/json")?;
+        let read = get(&uri, maximum, "application/json").await?;
         self.check()?;
-        // The daemon run that published this endpoint stands in for Linux's
-        // daemon PID: a restart between reads breaks the lookup's snapshot.
-        Ok((body, endpoint.instance))
+        Ok(read)
     }
+}
+
+/// One read of an exact local URI over the installed app's loopback endpoint,
+/// accepting only a complete 200 response of `content_type` within `maximum`.
+/// The daemon run that published this endpoint stands in for Linux's daemon
+/// PID: a restart between reads breaks a lookup's snapshot.
+pub(super) async fn get(
+    uri: &str,
+    maximum: usize,
+    content_type: &str,
+) -> Result<(Vec<u8>, SourceIdentity), Error> {
+    let endpoint = endpoint::endpoint(Path::new(endpoint::INSTALLED))?;
+    let socket = TcpStream::connect(SocketAddr::from(([127, 0, 0, 1], endpoint.port)))
+        .await
+        .map_err(|_| Error::LocalApiUnavailable)?;
+    let request = Request::get(uri)
+        .header("Host", "local-tailscaled.sock")
+        .header("Connection", "close")
+        .header("Accept", content_type)
+        .header("Authorization", endpoint.authorization())
+        .build();
+    let (response, _socket, withheld) =
+        Http1Client::request_with_io_and_max_body_size(socket, request, maximum)
+            .await
+            .map_err(|_| Error::Http)?;
+    let body = checked(response, withheld, content_type)?;
+    Ok((body, endpoint.instance))
 }
 
 // The lookup owns the bounded selector; no borrowed caller data survives into

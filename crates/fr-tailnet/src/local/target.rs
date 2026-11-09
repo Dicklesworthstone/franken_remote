@@ -117,7 +117,7 @@ impl LocalApi {
             cx,
             VerifiedTarget {
                 identity,
-                source_identity: process.pid.ok_or(Error::UntrustedLocalApi)?,
+                source_identity: process,
                 issued_us,
                 wall_issued_us,
                 whois_expiry: None,
