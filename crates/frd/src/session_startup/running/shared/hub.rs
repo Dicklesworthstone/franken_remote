@@ -90,6 +90,9 @@ pub struct Statistics {
     pub failed: u64,
 }
 
+// One gate per hub. Its observation variant passes clippy's size threshold
+// only on macOS (the macOS desktop client builds this module too).
+#[cfg_attr(target_os = "macos", allow(clippy::large_enum_variant))]
 enum Gate {
     Opening { cx: Cx, until: u64 },
     Observing(ObservationControl),
