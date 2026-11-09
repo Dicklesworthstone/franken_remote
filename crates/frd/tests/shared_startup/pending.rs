@@ -315,11 +315,22 @@ fn pending_viewers_finish_independently_on_one_source_and_only_then_receive_depe
         let mut b = Box::pin(configure(&mut group.peers[1], &cx)).await;
         Box::pin(decode_without_ack(&mut group.peers[0], &mut a, &cx)).await;
         Box::pin(decode_without_ack(&mut group.peers[1], &mut b, &cx)).await;
-        // The next real reference can occupy the original bounded send caches,
-        // but neither peer can receive it until its own FirstDecoded arrives.
+        // Decoding but unacknowledged peers are not capture demand either: no
+        // one could receive the next reference before its own FirstDecoded.
+        let decoding = group.publisher.physical_usage();
+        assert_eq!(
+            group.publisher.capture_next().await.unwrap_err(),
+            PublishError::Media(frd::media::Error::Backpressure)
+        );
+        assert_eq!(group.publisher.physical_usage(), decoding);
+        let (mut ap, mut ar) = Box::pin(acknowledge(&mut group.peers[0], a, &cx)).await;
+        // The next real reference also occupies the still-pending peer's
+        // bounded send cache, but it cannot receive it before FirstDecoded.
         let update = group.publisher.capture_next().await.unwrap();
         assert_eq!((update.frame, update.delivered, update.refused), (1, 2, 0));
-        for peer in &mut group.peers {
+        Box::pin(receive_frame(&mut group.peers[0], &mut ap, &mut ar, 1, &cx)).await;
+        {
+            let peer = &mut group.peers[1];
             for _ in 0..3 {
                 assert_eq!(peer.service(&cx).unwrap().accepted, 0);
                 peer.link.drive(&cx).await;
@@ -338,8 +349,6 @@ fn pending_viewers_finish_independently_on_one_source_and_only_then_receive_depe
                 assert_eq!(delivered, 0, "dependent frame crossed FirstDecoded gate");
             }
         }
-        let (mut ap, mut ar) = Box::pin(acknowledge(&mut group.peers[0], a, &cx)).await;
-        Box::pin(receive_frame(&mut group.peers[0], &mut ap, &mut ar, 1, &cx)).await;
         assert!(!group.peers[1].complete().unwrap());
         let (mut bp, mut br) = Box::pin(acknowledge(&mut group.peers[1], b, &cx)).await;
         Box::pin(receive_frame(&mut group.peers[1], &mut bp, &mut br, 1, &cx)).await;

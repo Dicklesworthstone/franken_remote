@@ -331,8 +331,16 @@ impl Members {
                 match credit {
                     Ok(credit) => {
                         *ready = credit;
-                        healthy_credit |=
-                            credit && (entry.join.is_none() || entry.recovery.is_some());
+                        // A pending viewer awaiting its own FirstDecoded cannot
+                        // receive a dependent picture yet. Capturing for it alone
+                        // only parks that picture in its cache, where the
+                        // reference horizon (250 ms) expires it before a slow
+                        // first decode (~330 ms for a 5K IDR in software) and
+                        // fails the viewer. Its slot and credit still count, so
+                        // a healthy cohort retains it as before.
+                        healthy_credit |= credit
+                            && entry.starting.is_none()
+                            && (entry.join.is_none() || entry.recovery.is_some());
                         if credit && entry.waiting() {
                             let until = entry.join.as_ref().expect("waiting").until;
                             join_until = Some(join_until.map_or(until, |old| old.min(until)));
