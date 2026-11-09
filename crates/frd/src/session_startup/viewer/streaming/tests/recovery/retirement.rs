@@ -280,11 +280,13 @@ fn unsolicited_media_retirement_still_ends_a_healthy_controlled_viewer() {
                 ))
                 .await;
                 if let Err(error) = delivery {
+                    // Input records name the media configuration channel, so
+                    // a healthy grant checks that channel too, before the
+                    // media check runs: its unsolicited reset ends the grant
+                    // as closed input. Only a recovering grant skips it.
                     assert_eq!(
                         error,
-                        Error::Control(controlled::Error::Media(
-                            crate::media_quic::Error::InvalidRoutes
-                        ))
+                        Error::Control(controlled::Error::Input(crate::input_quic::Error::Closed))
                     );
                     break;
                 }
