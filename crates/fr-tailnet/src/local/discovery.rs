@@ -1,5 +1,5 @@
-//! One authenticated Linux `LocalAPI` query, projected through the shared parser.
-use super::{LocalApi, Lookup, bounded, now, wall_now};
+//! One authenticated installed-daemon query, projected through the shared parser.
+use super::{LocalApi, LocalQuery, Lookup, bounded, now, wall_now};
 use crate::{Discovery, Error, metadata};
 use asupersync::cx::Cx;
 use std::{sync::atomic::Ordering, time::Duration};
@@ -18,7 +18,11 @@ impl LocalApi {
         let _lookup = Lookup(self.busy.clone());
         Box::pin(bounded(cx, Duration::from_secs(1), async {
             let (bytes, _) = self
-                .get("/localapi/v0/status?peers=true", metadata::STATUS_BYTES)
+                .query(
+                    cx,
+                    LocalQuery::Status { peers: true },
+                    metadata::STATUS_BYTES,
+                )
                 .await?;
             Discovery::from_status_json(&bytes, started_us, started_wall, || now(cx))
         }))
@@ -26,6 +30,7 @@ impl LocalApi {
     }
 }
 
-#[cfg(test)]
+// The fake LocalAPI daemon proves itself with Linux SO_PEERCRED (uid and pid).
+#[cfg(all(test, target_os = "linux"))]
 #[path = "tests/discovery.rs"]
 mod tests;

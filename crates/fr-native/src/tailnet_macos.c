@@ -82,12 +82,14 @@ static int trusted_child(pid_t pid) {
 /* The safe Rust entry point supplies only the fixed installed app path. The
  * image argument also permits a macOS-only negative test of actual suspended
  * Apple-signed code; neither caller-controlled argv nor environment is accepted.
+ * `peers` selects one of two fixed argument lists: the full status snapshot,
+ * or the same snapshot without its peer map (`--peers=false`).
  * Return 1 for unavailable OS resources, 2 for a refused signature, 0 on success.
  * Success deliberately leaves the child suspended until the original caller's
  * cancellation/deadline check authorizes resume. No local budget is restarted.
  */
-int fr_tailnet_macos_start(const char *image, struct fr_tailnet_snapshot **out,
-                          pid_t *started) {
+int fr_tailnet_macos_start(const char *image, int peers,
+                          struct fr_tailnet_snapshot **out, pid_t *started) {
     *out = NULL;
     if (started != NULL) *started = 0;
     struct fr_tailnet_snapshot *snapshot = calloc(1, sizeof(*snapshot));
@@ -104,7 +106,9 @@ int fr_tailnet_macos_start(const char *image, struct fr_tailnet_snapshot **out,
         || found == NULL || user.pw_dir == NULL || user.pw_dir[0] != '/') goto done;
     int home_length = snprintf(home, sizeof(home), "HOME=%s", user.pw_dir);
     if (home_length < 0 || (size_t)home_length >= sizeof(home)) goto done;
-    char *const argv[] = {(char *)image, "status", "--json", NULL};
+    char *const with_peers[] = {(char *)image, "status", "--json", NULL};
+    char *const without_peers[] = {(char *)image, "status", "--json", "--peers=false", NULL};
+    char *const *argv = peers ? with_peers : without_peers;
     char *const environment[] = {"TAILSCALE_BE_CLI=1", home,
         "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LANG=C", NULL};
     if (pipe(pipefd) < 0) goto done;
@@ -138,7 +142,8 @@ int fr_tailnet_macos_start(const char *image, struct fr_tailnet_snapshot **out,
         || posix_spawnattr_setsigmask(&attributes, &mask) != 0
         || posix_spawnattr_setsigdefault(&attributes, &defaults) != 0) goto done;
     pid_t spawned = 0;
-    if (posix_spawn(&spawned, image, &actions, &attributes, argv, environment) != 0)
+    if (posix_spawn(&spawned, image, &actions, &attributes, (char *const *)argv,
+                    environment) != 0)
         goto done; /* A failed call's unspecified PID output is never owned. */
     snapshot->pid = spawned;
     if (started != NULL) *started = snapshot->pid;

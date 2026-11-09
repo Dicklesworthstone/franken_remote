@@ -6,6 +6,7 @@ use std::{ffi::c_void, ptr::NonNull};
 unsafe extern "C" {
     fn fr_tailnet_macos_start(
         image: *const std::ffi::c_char,
+        peers: i32,
         out: *mut *mut c_void,
         started: *mut i32,
     ) -> i32;
@@ -27,13 +28,15 @@ pub(super) enum Read {
 }
 pub(super) struct Snapshot(NonNull<c_void>);
 impl Snapshot {
-    pub(super) fn start() -> Result<Self, Error> {
+    /// `peers` selects the full snapshot or the one without its peer map.
+    pub(super) fn start(peers: bool) -> Result<Self, Error> {
         let mut owner = std::ptr::null_mut();
         // SAFETY: fixed terminated path and valid output slot. C returns sole
         // ownership only after authenticating the still-suspended original child.
         let result = unsafe {
             fr_tailnet_macos_start(
                 c"/Applications/Tailscale.app/Contents/MacOS/Tailscale".as_ptr(),
+                i32::from(peers),
                 &raw mut owner,
                 std::ptr::null_mut(),
             )
@@ -105,8 +108,9 @@ mod tests {
         let mut pid = 0;
         // SAFETY: fixed actual system image and valid outputs. The same production
         // signature gate runs while suspended; there is no test bypass.
-        let result =
-            unsafe { fr_tailnet_macos_start(c"/bin/echo".as_ptr(), &raw mut owner, &raw mut pid) };
+        let result = unsafe {
+            fr_tailnet_macos_start(c"/bin/echo".as_ptr(), 1, &raw mut owner, &raw mut pid)
+        };
         if !owner.is_null() {
             // SAFETY: even an unexpected successful negative owns a real child.
             unsafe { fr_tailnet_macos_destroy(owner) };

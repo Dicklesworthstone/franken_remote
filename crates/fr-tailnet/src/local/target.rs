@@ -84,9 +84,9 @@ impl LocalApi {
             .map_err(|_| Error::Busy)?;
         let _lookup = Lookup(self.busy.clone());
         let (identity, process) = Box::pin(bounded(cx, Duration::from_secs(1), async {
-            let (a, ca) = self.status().await?;
+            let (a, ca) = self.status(cx).await?;
             let a = metadata::outbound::resolve(&a, selector)?;
-            let (b, cb) = self.status().await?;
+            let (b, cb) = self.status(cx).await?;
             let b = metadata::outbound::resolve(&b, selector)?;
             if ca != cb {
                 return Err(Error::UntrustedLocalApi);

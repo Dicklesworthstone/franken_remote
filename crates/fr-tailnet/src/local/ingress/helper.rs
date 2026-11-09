@@ -57,5 +57,6 @@ pub(super) fn socket_path_valid(path: &Path) -> bool {
             .any(|c| matches!(c, std::path::Component::ParentDir))
 }
 
-#[cfg(test)]
+// Linux nftables/TUN ingress only.
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

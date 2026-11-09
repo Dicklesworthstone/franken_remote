@@ -808,7 +808,8 @@ fn parse_x509_not_after(der: &[u8]) -> Result<u64, Error> {
     }
 }
 
-#[cfg(test)]
+// The fake LocalAPI daemon proves itself with Linux SO_PEERCRED (uid and pid).
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
 #[cfg(test)]

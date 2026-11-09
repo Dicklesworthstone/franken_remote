@@ -1,31 +1,32 @@
 #![forbid(unsafe_code)]
-// Authenticated LocalAPI authority remains Linux-only. macOS also consumes
-// the bounded informational discovery parser through its signed native bridge.
+// Linux reads the installed daemon over its root-owned Unix socket. macOS
+// reads the installed app through a registered, signature-checked native
+// bridge (`InstalledBridge`); its host-side lookups are not implemented yet.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code))]
 //! Installed Tailscale authority, not a VPN, identity database, or proxy.
 //! The Linux adapter implements exact installed-daemon membership admission and
 //! an explicit app-capability alternative. It never infers membership from names,
 //! routed prefixes, reachability, or missing authority evidence.
-mod expiry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod discovery;
+mod expiry;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod selector;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use selector::PeerSelector;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod outbound;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use outbound::{TargetLease, TargetOwner};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod lease;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use lease::{Admission, Lease};
 #[path = "local/endpoint.rs"]
 pub mod endpoint;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod local;
 pub mod trust;
 pub use endpoint::{
@@ -34,10 +35,13 @@ pub use endpoint::{
     honest_quic_endpoint,
 };
 mod metadata;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "macos")]
+pub use local::{BridgeFuture, InstalledBridge, register_installed_bridge};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local::{
     CertificateEvent, CertificateEventKind, CertificatePolicy, ConnectedPeer, CredentialStatus,
-    DialRoute, LocalApi, NativeClient, NativeServerIdentity, NodeIdentity, PeerTarget, ingress,
+    DialRoute, LocalApi, LocalQuery, NativeClient, NativeServerIdentity, NodeIdentity, PeerTarget,
+    ingress,
 };
 
 use std::{fmt, net::SocketAddr, time::Duration};

@@ -13,7 +13,12 @@ use std::{
 /// Debian/Ubuntu/Arch/Fedora-compatible distribution bundle location. It is a
 /// regular file on Debian/Ubuntu and a symlink into the extracted trust store
 /// on Fedora/RHEL and Arch; see [`resolve_protected`].
+#[cfg(not(target_os = "macos"))]
 pub const SYSTEM_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+/// The PEM bundle macOS ships for `LibreSSL` (root-owned, under the
+/// root-owned `/etc` link to `/private/etc`).
+#[cfg(target_os = "macos")]
+pub const SYSTEM_BUNDLE: &str = "/etc/ssl/cert.pem";
 const MAX_BYTES: u64 = 1 << 20;
 const MAX_CERTIFICATES: usize = 512;
 const MAX_LINK_HOPS: usize = 8;

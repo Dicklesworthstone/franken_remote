@@ -1,6 +1,12 @@
 //! Linux `LocalAPI` over authenticated Unix sockets. No TCP fallback, subprocess,
 //! ambient HTTP proxy, redirect, or public listener. Certificate provisioning is
 //! an explicit local opt-in; identity queries never issue certificates.
+//!
+//! macOS has no root-owned daemon socket: the installed app answers fixed
+//! [`LocalQuery`] reads through a bridge the native crate registers, which
+//! checks the app's signing identity on every query. This crate stays free of
+//! unsafe code and subprocesses. Host-side reads (whois, certificates) refuse
+//! there until the macOS host lands.
 use crate::{
     AdmissionProfile, Authorization, ConnectionAddresses, Error, GrantPolicy, expiry,
     metadata::{self, Status, WhoIs},
@@ -12,6 +18,8 @@ use asupersync::{
     time::sleep,
     types::Time,
 };
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::{
     fmt,
     future::{Future, poll_fn},
@@ -25,6 +33,47 @@ use std::{
     time::Duration,
 };
 
+/// One fixed read of the installed daemon. There is no URI, path or argument
+/// passthrough: a bridge maps each variant to one fixed command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LocalQuery {
+    /// The status snapshot, with or without the peer map.
+    Status { peers: bool },
+}
+
+/// The bridge's boxed reply: the complete JSON body, at most the requested size.
+#[cfg(target_os = "macos")]
+pub type BridgeFuture<'a> =
+    std::pin::Pin<Box<dyn Future<Output = Result<Vec<u8>, Error>> + Send + 'a>>;
+
+/// How the installed macOS app answers [`LocalQuery`] reads. The
+/// implementation must authenticate the answering code itself on every query
+/// (fr-native checks the Tailscale app's signing identity) and must honour
+/// cancellation of `cx`; this crate only bounds and parses the reply.
+#[cfg(target_os = "macos")]
+pub trait InstalledBridge: Send + Sync + 'static {
+    fn query<'a>(&'a self, cx: &'a Cx, query: LocalQuery, maximum: usize) -> BridgeFuture<'a>;
+}
+#[cfg(target_os = "macos")]
+static BRIDGE: OnceLock<Arc<dyn InstalledBridge>> = OnceLock::new();
+/// Register the process's installed-app bridge once, before the first
+/// [`LocalApi::installed`]. Returns false (and keeps the first) if one exists.
+#[cfg(target_os = "macos")]
+pub fn register_installed_bridge(bridge: Arc<dyn InstalledBridge>) -> bool {
+    BRIDGE.set(bridge).is_ok()
+}
+/// A bridged reply has no socket peer to credit. Its trust is the signing
+/// check the bridge makes per query, so one constant stands in for the daemon
+/// process: the same-daemon comparisons then hold trivially, and consistency
+/// rests on the snapshot comparisons every lookup already makes.
+#[cfg(target_os = "macos")]
+const BRIDGED: UCred = UCred {
+    uid: 0,
+    gid: 0,
+    pid: Some(1),
+};
+
 #[derive(Clone)]
 pub struct LocalApi {
     path: Arc<PathBuf>,
@@ -32,6 +81,8 @@ pub struct LocalApi {
     busy: Arc<AtomicBool>,
     certificate_busy: Arc<AtomicBool>,
     daemon_uid: u32,
+    #[cfg(target_os = "macos")]
+    bridge: Option<Arc<dyn InstalledBridge>>,
 }
 impl fmt::Debug for LocalApi {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -46,8 +97,17 @@ impl Drop for Lookup {
 }
 
 impl LocalApi {
+    /// The installed daemon. On macOS this is the registered app bridge; with
+    /// none registered, reads fail as the missing socket does.
     pub fn installed() -> Self {
-        Self::new("/var/run/tailscale/tailscaled.sock").expect("fixed protected socket")
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+        let mut api =
+            Self::new("/var/run/tailscale/tailscaled.sock").expect("fixed protected socket");
+        #[cfg(target_os = "macos")]
+        {
+            api.bridge = BRIDGE.get().cloned();
+        }
+        api
     }
     /// A locally configured absolute path. The kernel-reported server UID must
     /// be root even at a custom path. The selected host OS/root remain trusted.
@@ -70,6 +130,8 @@ impl LocalApi {
             busy: Arc::new(AtomicBool::new(false)),
             certificate_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
+            #[cfg(target_os = "macos")]
+            bridge: None,
         })
     }
     /// Exact endpoint tuple MUST originate at a TUN-restricted, established
@@ -125,10 +187,10 @@ impl LocalApi {
         let (identity, permissions, expiries, daemon_pid) =
             Box::pin(bounded(cx, policy.lookup_timeout, async {
                 for _ in 0..2 {
-                    let (first, process) = self.status().await?;
+                    let (first, process) = self.status(cx).await?;
                     first.validate(addresses)?;
                     let (who, who_process) = self.whois(addresses).await?;
-                    let (last, last_process) = self.status().await?;
+                    let (last, last_process) = self.status(cx).await?;
                     if first != last || process != who_process || process != last_process {
                         continue;
                     }
@@ -214,11 +276,37 @@ impl LocalApi {
         }
         Ok(permission)
     }
-    async fn status(&self) -> Result<(Status, UCred), Error> {
+    async fn status(&self, cx: &Cx) -> Result<(Status, UCred), Error> {
         let (body, process) = self
-            .get("/localapi/v0/status?peers=true", metadata::STATUS_BYTES)
+            .query(
+                cx,
+                LocalQuery::Status { peers: true },
+                metadata::STATUS_BYTES,
+            )
             .await?;
         Ok((Status::parse(&body)?, process))
+    }
+    /// One fixed read: the registered bridge on macOS, else the daemon socket.
+    async fn query(
+        &self,
+        cx: &Cx,
+        query: LocalQuery,
+        maximum: usize,
+    ) -> Result<(Vec<u8>, UCred), Error> {
+        #[cfg(target_os = "macos")]
+        if let Some(bridge) = &self.bridge {
+            let body = bridge.query(cx, query, maximum).await?;
+            if body.len() > maximum {
+                return Err(Error::MalformedMetadata);
+            }
+            return Ok((body, BRIDGED));
+        }
+        let _ = cx;
+        let uri = match query {
+            LocalQuery::Status { peers: true } => "/localapi/v0/status?peers=true",
+            LocalQuery::Status { peers: false } => "/localapi/v0/status?peers=false",
+        };
+        self.get(uri, maximum).await
     }
     async fn whois(&self, addresses: ConnectionAddresses) -> Result<(WhoIs, UCred), Error> {
         let request = Request::get("/localapi/v0/whois")
@@ -236,6 +324,12 @@ impl LocalApi {
         maximum: usize,
         content_type: &str,
     ) -> Result<(Vec<u8>, UCred), Error> {
+        // The macOS bridge answers only fixed `LocalQuery` reads; whois and
+        // certificate requests (host side) refuse rather than reach a socket.
+        #[cfg(target_os = "macos")]
+        if self.bridge.is_some() {
+            return Err(Error::LocalApiUnavailable);
+        }
         let socket = UnixStream::connect(&*self.path)
             .await
             .map_err(|_| Error::LocalApiUnavailable)?;
@@ -344,7 +438,8 @@ async fn bounded<T>(
 mod node;
 pub use node::NodeIdentity;
 
-#[cfg(test)]
+// The fake LocalAPI daemon proves itself with Linux SO_PEERCRED (uid and pid).
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
 mod certificate;

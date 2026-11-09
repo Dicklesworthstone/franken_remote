@@ -911,5 +911,6 @@ fn table_exists(bytes: &[u8], table: &str) -> Result<bool, Error> {
         .iter()
         .any(|row| row["table"]["name"].as_str() == Some(table)))
 }
-#[cfg(test)]
+// Linux nftables/TUN ingress only.
+#[cfg(all(test, target_os = "linux"))]
 mod tests;

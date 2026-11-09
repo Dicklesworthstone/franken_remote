@@ -1,5 +1,5 @@
 //! Installed host identity for binding a listener, not permission for a peer.
-use super::{LocalApi, Lookup, bounded, now, wall_now};
+use super::{LocalApi, LocalQuery, Lookup, bounded, now, wall_now};
 use crate::{Error, metadata};
 use asupersync::cx::Cx;
 use std::time::Duration;
@@ -92,10 +92,10 @@ impl LocalApi {
             Duration::from_micros(lookup_end.checked_sub(now(cx)?).ok_or(Error::Timeout)?),
             async {
                 let (a, ca) = self
-                    .get("/localapi/v0/status?peers=false", STATUS_LIMIT)
+                    .query(cx, LocalQuery::Status { peers: false }, STATUS_LIMIT)
                     .await?;
                 let (b, cb) = self
-                    .get("/localapi/v0/status?peers=false", STATUS_LIMIT)
+                    .query(cx, LocalQuery::Status { peers: false }, STATUS_LIMIT)
                     .await?;
                 if ca != cb {
                     return Err(Error::UntrustedLocalApi);
@@ -190,5 +190,6 @@ impl LocalApi {
     }
 }
 
-#[cfg(test)]
+// The fake LocalAPI daemon proves itself with Linux SO_PEERCRED (uid and pid).
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
