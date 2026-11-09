@@ -4,6 +4,10 @@
 //! Only the original foreground supervisor can confirm its native cleanup.
 #![forbid(unsafe_code)]
 
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+#[path = "session_control/pathname.rs"]
+mod pathname;
+
 #[path = "session_control/input.rs"]
 pub(super) mod input;
 #[path = "session_control/observation.rs"]
@@ -12,7 +16,11 @@ pub(super) mod observation;
 pub(super) mod quality;
 #[path = "session_control/screenshot.rs"]
 pub(super) mod screenshot;
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use asupersync::net::unix::UnixListener;
 use asupersync::{
     cx::Cx,
@@ -21,7 +29,11 @@ use asupersync::{
     time::{TimerDriverHandle, TimerHandle},
     types::Time,
 };
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use std::pin::Pin;
 use std::{
     fmt::{self, Write as _},
@@ -33,7 +45,11 @@ use std::{
 };
 
 const MAX_TARGET: usize = 253;
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 const MAX_PEERS: usize = 4;
 const HANDSHAKE: Duration = Duration::from_secs(2);
 const COMPLETION: Duration = Duration::from_secs(30);
@@ -46,7 +62,14 @@ const FINISHED: [u8; 8] = *b"FRSC1FN\0";
 pub(super) enum Error {
     InvalidTarget,
     InvalidInstance,
-    #[cfg_attr(not(any(feature = "linux-desktop", test)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(
+            feature = "linux-desktop",
+            all(target_os = "macos", feature = "macos-desktop"),
+            test
+        )),
+        allow(dead_code)
+    )]
     AlreadyRunning,
     NoSession,
     Unavailable,
@@ -83,13 +106,21 @@ pub(super) struct Stopped {
     pub completion: Completion,
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 type Peer = Pin<Box<dyn Future<Output = Result<Option<UnixStream>, Error>> + Send>>;
 
 /// Four bounded pending handshakes and one stop requester; no unbounded queue.
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 pub(super) struct Owner {
-    listener: UnixListener,
+    listener: Listener,
     uid: u32,
     target: String,
     instance: [u8; 16],
@@ -100,26 +131,30 @@ pub(super) struct Owner {
     automation: Option<input::Shared>,
     quality: quality::Publisher,
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Owner {
     pub async fn bind(cx: &Cx, target: &str) -> Result<Self, Error> {
         check_target(target)?;
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let uid = own_uid()?;
         let address = name(uid, target);
-        let listener = match listen(&address, uid).await {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                // Public socket occupancy is not proof of a same-user owner.
-                bounded(cx, Deadline::new(cx, HANDSHAKE)?, async {
+        let listener = bounded(cx, Deadline::new(cx, HANDSHAKE)?, async {
+            match listen(&address, uid).await {
+                Ok(listener) => Ok(listener),
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
+                    // Public socket occupancy is not proof of a same-user owner.
                     let stream = dial(&address).await.map_err(|_| Error::Unavailable)?;
-                    check_peer(&stream, uid)
-                })
-                .await?;
-                return Err(Error::AlreadyRunning);
+                    check_peer(&stream, uid)?;
+                    Err(Error::AlreadyRunning)
+                }
+                Err(_) => Err(Error::Unavailable),
             }
-            Err(_) => return Err(Error::Unavailable),
-        };
+        })
+        .await?;
         let mut instance = [0; 16];
         cx.random_bytes(&mut instance);
         Ok(Self {
@@ -365,7 +400,11 @@ async fn identified(cx: &Cx, target: &str) -> Result<(UnixStream, Info, [u8; 16]
     })
     .await
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 async fn peer(
     mut stream: UnixStream,
     identity: Vec<u8>,
@@ -449,10 +488,14 @@ fn check_peer(stream: &UnixStream, uid: u32) -> Result<(), Error> {
 /// this user.
 #[cfg(target_os = "linux")]
 type Address = Vec<u8>;
+#[cfg(all(target_os = "linux", any(feature = "linux-desktop", test)))]
+type Listener = UnixListener;
 /// macOS has no abstract namespace: a socket file inside a directory that
 /// only this user owns and can enter, plus the same `check_peer`.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 type Address = std::path::PathBuf;
+#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+type Listener = pathname::Listener;
 #[cfg(target_os = "linux")]
 fn name(uid: u32, target: &str) -> Address {
     let digest = fr_client::robot::sha256::sha256_hex(target.as_bytes());
@@ -469,55 +512,21 @@ async fn dial(address: &Address) -> io::Result<UnixStream> {
     UnixStream::connect_abstract(address).await
 }
 #[cfg(target_os = "linux")]
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 async fn listen(address: &Address, _uid: u32) -> io::Result<UnixListener> {
     UnixListener::bind_abstract(address).await
 }
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 async fn dial(address: &Address) -> io::Result<UnixStream> {
-    private_directory(address, None)?;
-    UnixStream::connect(address).await
+    pathname::dial(address).await
 }
-/// A crashed owner leaves its socket file behind. Only a refused connection
-/// proves that nobody listens there; a live owner still yields `AddrInUse`.
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-#[cfg(any(feature = "linux-desktop", test))]
-async fn listen(address: &Address, uid: u32) -> io::Result<UnixListener> {
-    private_directory(address, Some(uid))?;
-    match UnixListener::bind(address).await {
-        Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-            match UnixStream::connect(address).await {
-                Err(probe) if probe.kind() == io::ErrorKind::ConnectionRefused => {
-                    std::fs::remove_file(address)?;
-                    UnixListener::bind(address).await
-                }
-                _ => Err(error),
-            }
-        }
-        other => other,
-    }
-}
-/// The parent directory must be a real directory owned by this user with no
-/// group or other access; `create` makes it (mode 0700) when absent.
-#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
-fn private_directory(address: &std::path::Path, create: Option<u32>) -> io::Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let directory = address.parent().ok_or(io::ErrorKind::InvalidInput)?;
-    if create.is_some() {
-        match std::fs::DirBuilder::new().mode(0o700).create(directory) {
-            Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error),
-            _ => {}
-        }
-    }
-    let metadata = std::fs::symlink_metadata(directory)?;
-    let uid = match create {
-        Some(uid) => uid,
-        None => UnixStream::pair()?.0.peer_cred()?.uid,
-    };
-    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-        return Err(io::ErrorKind::PermissionDenied.into());
-    }
-    Ok(())
+async fn listen(address: &Address, uid: u32) -> io::Result<Listener> {
+    pathname::bind(address, uid).await
 }
 fn hex(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(bytes.len() * 2);
@@ -526,7 +535,11 @@ fn hex(bytes: &[u8]) -> String {
     }
     text
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 fn identity_record(target: &str, instance: [u8; 16]) -> Vec<u8> {
     let mut record = Vec::with_capacity(26 + target.len());
     record.extend_from_slice(&IDENTITY);

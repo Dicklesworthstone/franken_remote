@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 // Other platforms retain shared grammar/output; only implemented paths dispatch.
-// The macOS desktop client (fr-5a4w) runs hosts, status and connect; robot
-// automation, screenshots and the session-control server stay Linux-only.
+// The macOS desktop client (fr-5a4w) runs hosts, status, connect and the
+// authenticated local close owner; robot automation and screenshots stay Linux-only.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
 #[path = "fr_cli/closure.rs"]

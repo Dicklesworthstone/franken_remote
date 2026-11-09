@@ -52,9 +52,11 @@ typedef struct {
     double dy;
     uint32_t flags;
     uint32_t reserved;
+    double timestamp;
 } FrMacEvent;
 
 #define FR_MAC_QUEUE 1024
+#define FR_MAC_PUMP_EVENTS 256
 
 static NSString *const kShader =
     @"#include <metal_stdlib>\n"
@@ -426,6 +428,7 @@ static FrRenderer *renderer_new(uint32_t width, uint32_t height, int *status) {
     if (event.window != window) return YES;
     FrMacEvent e = {0};
     e.modifiers = event.modifierFlags;
+    e.timestamp = event.timestamp;
     switch (event.type) {
         case NSEventTypeKeyDown:
         case NSEventTypeKeyUp:
@@ -509,6 +512,12 @@ int fr_mac_app_init(void) {
     return FR_MAC_OK;
 }
 
+// NSEvent timestamps and systemUptime use the same monotonic boot-time domain.
+// Return the current value separately so a queued key retains its original age.
+double fr_mac_event_time(void) {
+    return NSProcessInfo.processInfo.systemUptime;
+}
+
 int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
                       uint32_t point_height, const char *title, size_t title_len, void **out) {
     if (!out || width < 16 || height < 16 || point_width < 1 || point_height < 1 ||
@@ -574,25 +583,36 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
     return FR_MAC_OK;
 }
 
-// Waits up to `timeout` seconds for the first event, then drains without
-// waiting. Returns the number of translated events copied out.
+// Waits up to `timeout` seconds for the first event, then drains one bounded
+// batch without waiting. Returns the number of translated events copied out.
 size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t capacity,
                           int *overflow) {
     if (!handle || ![NSThread isMainThread]) return 0;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    size_t dequeued = 0;
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        while (owner->count < FR_MAC_QUEUE) {
+        while (owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until
                                                    inMode:NSDefaultRunLoopMode
                                                   dequeue:YES];
             if (!event) break;
+            // Count every AppKit event, including ignored events and events
+            // for other windows: all of them consume this owner's pump turn.
+            dequeued++;
             if ([owner translate:event]) [NSApp sendEvent:event];
             until = [NSDate distantPast];
         }
         [NSApp updateWindows];
+    }
+    // At either ceiling, a queued close, focus change or emergency release
+    // may remain uninspected. Fail closed before granting or exporting input.
+    // An exactly-full batch with an empty AppKit queue is conservatively
+    // treated as incomplete too; checking that would require another poll.
+    if (owner->count == FR_MAC_QUEUE || dequeued == FR_MAC_PUMP_EVENTS) {
+        owner->overflow = YES;
     }
     size_t n = 0;
     while (n < capacity && owner->count) {
@@ -601,7 +621,7 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
         owner->count--;
     }
     if (overflow) {
-        *overflow = owner->overflow ? 1 : 0;
+        *overflow = owner->overflow || owner->count ? 1 : 0;
         owner->overflow = NO;
     }
     return n;

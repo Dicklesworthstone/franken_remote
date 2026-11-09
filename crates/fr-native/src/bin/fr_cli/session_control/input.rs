@@ -3,7 +3,11 @@ use super::{Cx, Deadline, Error, UnixStream, bounded, identified};
 use crate::robot_input::{Request, Response};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use std::time::{Duration, Instant};
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use {
     crate::robot_input::{Refusal, Snapshot},
     fr_client::robot::input::native::{self, Admission, Ledger, RequestKey, Scope},
@@ -179,7 +183,11 @@ pub(super) fn clear_snapshot(snapshot: &mut crate::robot_input::Snapshot) {
     snapshot.input_support = None;
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Clone, Copy)]
 struct Candidate {
     view: InputView,
@@ -188,7 +196,11 @@ struct Candidate {
     sample: fr_wire::presented::Sample,
     at: Instant,
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Candidate {
     fn support(self) -> crate::robot_input::InputSupport {
         crate::robot_input::InputSupport::from_grant(self.bounds, self.capabilities)
@@ -204,14 +216,22 @@ impl Candidate {
         )
     }
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 struct Pending {
     request: Request,
     key: RequestKey,
     original: Candidate,
     encoded: u8,
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 struct State {
     created: Instant,
     scope: Scope,
@@ -227,7 +247,11 @@ struct State {
     stopped: bool,
     waiters: [Option<Waker>; 4],
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl State {
     fn now(&self, at: Instant) -> Result<u64, Refusal> {
         u64::try_from(
@@ -432,7 +456,11 @@ impl State {
         }
     }
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 fn ledger_error(error: native::Error) -> Refusal {
     match error {
         native::Error::RequestChanged => Refusal::RequestChanged,
@@ -442,10 +470,18 @@ fn ledger_error(error: native::Error) -> Refusal {
         _ => Refusal::InvalidRequest,
     }
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Clone)]
 pub(crate) struct Shared(Arc<Mutex<State>>);
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Shared {
     pub fn new(connection: [u8; 16], lease: [u8; 16]) -> Result<Self, Error> {
         let scope = Scope {
@@ -549,13 +585,21 @@ impl Shared {
 }
 /// Dropping a timed-out local peer cannot leave an unfinished request live on
 /// the original owner. Completed receipts remain available for exact-ID reads.
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 struct Waiting {
     shared: Shared,
     key: RequestKey,
     armed: bool,
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Drop for Waiting {
     fn drop(&mut self) {
         if self.armed {
@@ -566,7 +610,11 @@ impl Drop for Waiting {
         }
     }
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 pub(super) async fn respond(
     stream: &mut UnixStream,
     instance: [u8; 16],
@@ -633,6 +681,10 @@ mod live;
 #[path = "input/tests.rs"]
 mod tests;
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[path = "input/screenshot.rs"]
 mod screenshot;

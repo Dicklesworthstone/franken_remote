@@ -31,6 +31,9 @@ mod lapse;
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 #[path = "linux/macos.rs"]
 mod macos;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+#[path = "linux/macos_completion.rs"]
+mod macos_completion;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/microphone.rs"]
 mod microphone;
@@ -45,7 +48,11 @@ mod robot;
 mod session_control;
 #[cfg(feature = "linux-desktop")]
 use super::options::DisplayChoice;
-#[cfg(any(test, feature = "linux-desktop"))]
+#[cfg(any(
+    test,
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 use super::runtime::await_shutdown;
 use super::{
     Failure,
@@ -83,7 +90,11 @@ use frd::{
 use std::{cell::Cell, path::Path, time::Duration};
 #[cfg(feature = "linux-desktop")]
 use std::{cell::RefCell, rc::Rc};
-#[cfg(any(test, feature = "linux-desktop"))]
+#[cfg(any(
+    test,
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 use std::{
     future::{Future, poll_fn},
     pin::pin,
@@ -176,7 +187,10 @@ fn input_attach_stopped(error: fr_native::desktop::Error) -> Option<Failure> {
     input_stopped(reason)
 }
 impl Shutdown {
-    #[cfg(feature = "linux-desktop")]
+    #[cfg(any(
+        feature = "linux-desktop",
+        all(target_os = "macos", feature = "macos-desktop")
+    ))]
     async fn run_connection<T>(
         &mut self,
         cx: &Cx,
@@ -196,7 +210,11 @@ impl Shutdown {
 }
 /// A listener failure is not an authenticated stop request. Keep ordinary
 /// signal handling alive, without polling a failed local service again.
-#[cfg(any(test, feature = "linux-desktop"))]
+#[cfg(any(
+    test,
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 async fn local_or_signal<E>(
     local: impl Future<Output = Result<(), E>>,
     signal: impl Future<Output = ()>,

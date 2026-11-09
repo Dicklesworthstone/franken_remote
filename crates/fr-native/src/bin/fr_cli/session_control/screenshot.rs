@@ -5,7 +5,11 @@ use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fr_media::worker::presentation_snapshot::{self, Snapshot};
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use {
     super::{UnixStream, input, observation},
     fr_client::robot::snapshot::Image,
@@ -170,7 +174,11 @@ fn reply_lengths(header: &[u8; HEADER_BYTES], instance: [u8; 16]) -> Result<(usi
     }
     Ok((metadata, pixels))
 }
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 fn header(instance: [u8; 16], metadata: usize, pixels: usize) -> Result<[u8; HEADER_BYTES], Error> {
     let mut result = [0; HEADER_BYTES];
     result[..8].copy_from_slice(&RESPONSE);
@@ -189,7 +197,11 @@ fn header(instance: [u8; 16], metadata: usize, pixels: usize) -> Result<[u8; HEA
     Ok(result)
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 pub(super) async fn respond(
     stream: &mut UnixStream,
     instance: [u8; 16],
@@ -259,7 +271,11 @@ pub(super) async fn respond(
 }
 /// Recheck before EVERY write poll, including a seal that became socket-blocked.
 /// Revocation/recovery or a changed input pin cannot slip through a resumed await.
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 async fn checked_write(
     stream: &mut UnixStream,
     bytes: &[u8],

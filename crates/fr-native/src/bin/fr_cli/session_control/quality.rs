@@ -3,7 +3,11 @@
 use super::{Cx, Deadline, Error, HANDSHAKE, Info, bounded, identified};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fr_wire::quality_decision::{Decision, Mode, Reason};
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use std::sync::{Arc, Mutex};
 
 pub(super) const REQUEST: [u8; 8] = *b"FRSC1QY\0";
@@ -99,10 +103,18 @@ pub(crate) struct Status {
     pub quality: Option<Report>,
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Clone, Default)]
 pub(crate) struct Publisher(Arc<Mutex<Option<frd::session_startup::ViewerQualityHandle>>>);
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Publisher {
     /// Install once per attempt. Readers hold this lock only while cloning a
     /// weak handle, never during snapshot work or I/O; installation cannot be
@@ -181,7 +193,11 @@ fn reply_length(header: [u8; 26], instance: [u8; 16]) -> Result<usize, Error> {
     Ok(length)
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 pub(super) async fn respond(
     stream: &mut super::UnixStream,
     instance: [u8; 16],

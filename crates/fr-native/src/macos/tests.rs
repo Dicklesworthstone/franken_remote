@@ -251,12 +251,12 @@ fn modifier_changes_become_one_press_and_one_release() {
     let mut m = Modifiers::default();
     let mut events = Vec::new();
     // Left shift down (device bit 0x02 + shift flag), duplicate, then up.
-    m.change(0x38, (1 << 17) | 0x02, &mut events);
-    m.change(0x38, (1 << 17) | 0x02, &mut events);
+    m.change(0x38, (1 << 17) | 0x02, Some(Duration::ZERO), &mut events);
+    m.change(0x38, (1 << 17) | 0x02, Some(Duration::ZERO), &mut events);
     // Right shift down while left is held, then left up while right is held.
-    m.change(0x3c, (1 << 17) | 0x06, &mut events);
-    m.change(0x38, (1 << 17) | 0x04, &mut events);
-    m.change(0x3c, 0, &mut events);
+    m.change(0x3c, (1 << 17) | 0x06, Some(Duration::ZERO), &mut events);
+    m.change(0x38, (1 << 17) | 0x04, Some(Duration::ZERO), &mut events);
+    m.change(0x3c, 0, Some(Duration::ZERO), &mut events);
     let keys: Vec<_> = events
         .iter()
         .map(|e| match *e {
@@ -270,15 +270,15 @@ fn modifier_changes_become_one_press_and_one_release() {
     );
     // A keyboard with no device bits falls back to the shared flag.
     events.clear();
-    m.change(0x3b, 1 << 18, &mut events);
-    m.change(0x3b, 0, &mut events);
+    m.change(0x3b, 1 << 18, Some(Duration::ZERO), &mut events);
+    m.change(0x3b, 0, Some(Duration::ZERO), &mut events);
     assert_eq!(events.len(), 2);
     // Caps Lock reports a toggle; each change is one tap.
     events.clear();
-    m.change(0x39, 1 << 16, &mut events);
+    m.change(0x39, 1 << 16, Some(Duration::ZERO), &mut events);
     assert_eq!(events.len(), 2);
     events.clear();
-    m.change(0x3f, 1 << 23, &mut events);
+    m.change(0x3f, 1 << 23, Some(Duration::ZERO), &mut events);
     assert_eq!(events, [WindowEvent::UnmappedKey { keycode: 0x3f }]);
 }
 

@@ -31,10 +31,12 @@ struct RawEvent {
     dy: f64,
     flags: u32,
     reserved: u32,
+    timestamp: f64,
 }
 
 unsafe extern "C" {
     fn fr_mac_app_init() -> c_int;
+    fn fr_mac_event_time() -> f64;
     fn fr_mac_window_new(
         width: u32,
         height: u32,
@@ -121,6 +123,13 @@ pub fn initialize_application() -> Result<(), NativeError> {
     status(unsafe { fr_mac_app_init() })
 }
 
+/// Native uptime in the same domain as the original `NSEvent.timestamp`.
+/// Sampling this when an event is consumed cannot refresh its capture time.
+pub(crate) fn event_time() -> Option<Duration> {
+    // SAFETY: no arguments, no retained data or thread-affine state.
+    Duration::try_from_secs_f64(unsafe { fr_mac_event_time() }).ok()
+}
+
 /// A pointer position relative to the presented picture: (0, 0) is its
 /// top-left corner and (1, 1) its bottom-right. Outside the picture (the
 /// letterbox bars or beyond the window while dragging) `inside` is false.
@@ -154,6 +163,10 @@ pub enum WindowEvent {
         usage: u16,
         pressed: bool,
         repeat: bool,
+        /// Original native event time; invalid timestamps confer no intent.
+        captured: Option<Duration>,
+        /// `AppKit`'s device-independent modifier flags at capture time.
+        modifiers: u64,
     },
     /// A key with no HID keyboard usage (Fn, vendor keys). Never forwarded.
     UnmappedKey {
@@ -228,7 +241,9 @@ impl Window {
         Ok(Self {
             raw: NonNull::new(raw).ok_or(NativeError::Allocation)?,
             modifiers: Modifiers::default(),
-            buffer: vec![RawEvent::default(); 256],
+            // Drain the glue's entire bounded batch before deciding whether
+            // any local control gesture is eligible.
+            buffer: vec![RawEvent::default(); 1024],
             _main_thread: PhantomData,
         })
     }
@@ -304,10 +319,17 @@ impl Window {
                     usage,
                     pressed: e.kind == 1,
                     repeat: e.kind == 1 && e.flags & 1 != 0,
+                    captured: Duration::try_from_secs_f64(e.timestamp).ok(),
+                    modifiers: e.modifiers,
                 },
                 None => WindowEvent::UnmappedKey { keycode },
             }),
-            3 => self.modifiers.change(keycode, e.modifiers, events),
+            3 => self.modifiers.change(
+                keycode,
+                e.modifiers,
+                Duration::try_from_secs_f64(e.timestamp).ok(),
+                events,
+            ),
             4 => events.push(WindowEvent::Pointer(at)),
             5 | 6 => {
                 if let Ok(button) = u8::try_from(e.code) {
@@ -352,7 +374,13 @@ impl Modifiers {
     /// `FlagsChanged` names the key but not the direction: read it from the
     /// side-specific device bit, falling back to the shared flag for
     /// keyboards that report no device bits. Duplicates are dropped.
-    fn change(&mut self, keycode: u16, flags: u64, events: &mut Vec<WindowEvent>) {
+    fn change(
+        &mut self,
+        keycode: u16,
+        flags: u64,
+        captured: Option<Duration>,
+        events: &mut Vec<WindowEvent>,
+    ) {
         if keycode == macos_keys::CAPS_LOCK {
             // Each change is one press of a toggling key.
             for pressed in [true, false] {
@@ -360,6 +388,8 @@ impl Modifiers {
                     usage: 0x39,
                     pressed,
                     repeat: false,
+                    captured,
+                    modifiers: flags,
                 });
             }
             return;
@@ -382,6 +412,8 @@ impl Modifiers {
             usage: m.usage,
             pressed,
             repeat: false,
+            captured,
+            modifiers: flags,
         });
     }
 }

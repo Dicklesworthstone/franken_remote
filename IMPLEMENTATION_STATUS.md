@@ -1,5 +1,42 @@
 # Implementation status
 
+## macOS reconnect consent and local session control (2026-11-08)
+
+The native macOS client consumes its initial control request once per invocation.
+Automatic retries reopen viewing; a new, focused and fresh F8 press/release is
+required before another control request. Original native event timestamps fence
+stale gestures, and Ctrl+Alt+Shift+Escape stops the original session before any
+ordinary input from the same batch is sent. Focus loss, incomplete event batches
+and geometry changes fence input before dispatch. Host terminal reports survive
+cleanup; a window close cannot turn failed cleanup or a host refusal into success.
+Completion separately retains host cleanup/effect reports and local cleanup proof.
+
+The macOS connection now binds its original authenticated local owner. `fr robot
+session status`, `fr disconnect` and instance-qualified `fr robot session close`
+reach that invocation without waiting for a new Tailscale lookup. A private
+pathname endpoint and lifetime file lock serialize duplicate startup and stale
+socket reclamation; same-user kernel peer credentials and exact instance/target
+checks remain required. Optional automation and quality data remain unavailable.
+
+`--fit` now bounds the macOS window in AppKit points, preserves aspect ratio and
+never upscales its natural size. Input still maps the actual drawable picture.
+The public command details and remaining unsupported options are in
+[native client commands](docs/native-client-cli.md#macos-desktop-client).
+
+Portable production policy regressions cover request consumption, fresh/expired
+gestures, focus loss and emergency stop; sizing tests preserve Retina logical
+sizes and bound extreme dimensions. All 12 policy/sizing tests and strict
+component Clippy pass, as do 240 core tests, formatting and documentation checks.
+Real pathname-owner, typed-completion and Session lifecycle regressions are
+included but have not executed here: the
+unchanged pinned Asupersync compiler was killed by SIGKILL even with one job,
+debug/incremental output disabled and reduced compiler parallelism. Full
+workspace gates remain unverified. Native AppKit event delivery and a live
+macOS reconnect/close sequence still require Mac execution. The separate macOS
+client verification job enables `macos-desktop`, which the existing default-feature
+macOS workspace job did not compile. Tracking: `fr-5a4w`, `fr-55k1`; neither
+broader platform bead is closed by source or portable evidence.
+
 ## macOS outbound identity (2026-11-08; live on the installed app)
 
 `fr-tailnet` provides the ordinary private `PeerTarget`, `NativeClient`,

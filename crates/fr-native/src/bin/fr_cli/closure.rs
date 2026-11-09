@@ -200,7 +200,10 @@ const fn cleanup(stage: Cleanup) -> &'static str {
 
 /// Local cleanup failure/cancellation must keep any already-collected host
 /// report. The failure code and exit status still win; no success is fabricated.
-#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn preserve<T>(
     result: Result<T, Failure>,
     outcome: Option<ViewerCloseOutcome>,

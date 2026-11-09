@@ -70,7 +70,10 @@ pub(super) fn closed_by_code(reason: Reason) -> Failure {
 
 /// A granted controller's own closing exchange: the host's lease report as
 /// content-free stages, or null when none arrived.
-#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn lease_json(value: Option<Revoked>) -> String {
     value.map_or_else(
         || "null".to_owned(),
@@ -90,7 +93,10 @@ pub(super) fn lease_json(value: Option<Revoked>) -> String {
     )
 }
 
-#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 pub(super) fn lease_text(value: Revoked) -> String {
     let report = Report {
         reason: value.reason,

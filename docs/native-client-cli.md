@@ -119,7 +119,39 @@ Metal draws them, with the client-rendered remote cursor, into a
 `CAMetalLayer` in an AppKit window. AppKit keyboard, pointer and wheel events
 enter the same `frd` input path as the Linux viewer. As on Linux, losing focus,
 hiding the window or a change of picture size stops local input and ends
-control; closing the window ends the session.
+control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
+stops the original session locally before any other input from that native
+batch can be forwarded.
+
+The initial `--control` request is consumed once for the whole invocation.
+Automatic reconnects obtain fresh viewing only; after the recovered window is
+visible, focused and fresh, press and release **F8** to request new control.
+Held, repeated, modified or stale keys cannot request a grant. No queued
+gesture, input action or grant crosses an attempt. Focus/visibility loss and
+known host revocation remain terminal. Completion distinguishes request counts
+and viewing reconnects, confirmed local cleanup, and the host's independently
+reported cleanup/effect stages. A close click cannot hide a native cleanup
+failure or an adverse host report.
+
+`--fit WIDTHxHEIGHT` bounds the initial macOS content rectangle in **AppKit
+points**. It preserves aspect ratio, never enlarges the natural window, and
+still fits inside the available local screen. Rendering stays in Metal; input
+coordinates use the actual drawable picture after layout, including the local
+Retina scale. Without `--fit`, the remote logical size remains the default.
+
+The original foreground connection also answers local commands:
+
+```sh
+fr robot session status NODE_ID --json
+fr disconnect NODE_ID
+fr robot session close NODE_ID --connection-id INSTANCE --json
+```
+
+These authenticate the same-user local peer and exact target/instance. Close
+cancels the original invocation and waits for its native cleanup result; it
+does not create another remote connection. An unavailable reply leaves the
+outcome unknown. These local operations do not need a responsive Tailscale
+lookup. Plain `fr status` continues to report installed-Tailscale metadata.
 
 The client's tailnet lookups (the peer target before dialing, and its renewal
 once a second during a session) use the status/WhoIs/status sequence above over
@@ -127,12 +159,12 @@ the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
-`--choose-host`, `--display choose`, `--fit`, `--capture-system-shortcuts`,
+`--choose-host`, `--display choose`, `--capture-system-shortcuts`,
 `--audio`, `--microphone`, file transfer (`--send`, `--file-drop`,
 `--file-commands`, `--receive`) and `fr robot session open`. The clipboard,
-on by default on Linux, is reported as `local_clipboard_unavailable`. This path
-does not bind the local session-control socket, so `fr status` and
-`fr disconnect` cannot reach a running macOS viewer.
+on by default on Linux, is reported as `local_clipboard_unavailable`.
+Local status identifies the foreground invocation; optional quality and
+automation observations remain unavailable on macOS.
 
 **Evidence (2026-11-08):** from the owner's Mac to a Linux NVENC host (ts2), the
 window showed the host's live desktop and typed keys reached the host. A build
@@ -143,6 +175,11 @@ ran for about a minute until ts2, under heavy memory pressure, ended them
 Pointer, wheel and click delivery and the window-close outcome have not been
 confirmed live. fr-native's macOS tests decode a real HEVC stream through VideoToolbox
 into the Metal surface.
+
+The reconnect-consent, emergency-release, fitted-window and local-owner changes
+have portable regression coverage. Native AppKit event delivery, the macOS
+pathname owner and a full live reconnect/close sequence still require execution
+on a Mac; Linux-side policy tests are not hardware qualification.
 
 ## Check local capture, encoding and input readiness
 

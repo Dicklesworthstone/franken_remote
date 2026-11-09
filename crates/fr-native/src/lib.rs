@@ -45,6 +45,11 @@ pub mod macos;
 // Pure keycode data: compiled for tests everywhere so ordinary CI checks it.
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 pub mod macos_keys;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+mod macos_sizing;
+// Invocation consent and native key gestures are portable policy, not AppKit.
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+mod macos_control;
 
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod capture;

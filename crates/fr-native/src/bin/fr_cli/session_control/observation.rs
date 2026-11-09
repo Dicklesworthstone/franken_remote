@@ -1,13 +1,25 @@
 //! Read-only snapshots on the ORIGINAL authenticated local control socket.
 //! The comparison ID pins an invocation; it is not a credential or input lease.
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use super::UnixStream;
 use super::{Cx, Deadline, Error, HANDSHAKE, Info, bounded, identified};
 use asupersync::io::{AsyncReadExt, AsyncWriteExt};
 use fr_client::robot::live::Snapshot;
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use fr_client::robot::live::{Observation, Phase};
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -28,13 +40,21 @@ pub(crate) enum ReadError {
     Unavailable,
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[derive(Clone, Default)]
 pub(crate) struct Publisher(
     Arc<Mutex<Observation>>,
     Arc<Mutex<Option<fr_client::robot::snapshot::Handle>>>,
 );
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 impl Publisher {
     /// Session-thread work is bounded and never waits for a reader-held lock.
     pub fn update(
@@ -134,7 +154,11 @@ fn reply_length(header: &[u8; 26], instance: [u8; 16]) -> Result<usize, Error> {
     Ok(length)
 }
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 pub(super) async fn respond(
     stream: &mut UnixStream,
     instance: [u8; 16],
@@ -174,6 +198,10 @@ pub(super) async fn respond(
 #[path = "observation_tests.rs"]
 mod tests;
 
-#[cfg(any(feature = "linux-desktop", test))]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop"),
+    test
+))]
 #[path = "observation/screenshot.rs"]
 mod screenshot;
