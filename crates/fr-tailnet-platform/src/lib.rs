@@ -2,7 +2,7 @@
 //!
 //! macOS uses the installed Tailscale application's signed CLI, never a caller's
 //! executable, shell, HTTP proxy or loopback bearer token. Only fixed status and
-//! numeric-address WhoIs queries exist. Callers must own every child on a drained
+//! numeric-address `WhoIs` queries exist. Callers must own every child on a drained
 //! blocking operation and check their original deadline before resuming it.
 //! This crate neither parses metadata nor grants observation or input authority.
 use std::{fmt, net::IpAddr};
@@ -94,7 +94,9 @@ mod native;
 #[cfg(target_os = "macos")]
 pub use native::Snapshot;
 
+// Keeps the macOS-only encoder compiled (and its tests run) on other targets.
 #[cfg(not(target_os = "macos"))]
+#[allow(clippy::type_complexity)]
 const _: fn(Command) -> Result<(u8, [u8; 16]), Error> = Command::wire;
 
 #[cfg(test)]

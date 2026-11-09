@@ -4,6 +4,7 @@ use crate::Error;
 const LOOKUP_US: u64 = 1_000_000;
 
 #[derive(Clone)]
+#[allow(clippy::struct_field_names)] // Every field is a microsecond instant.
 pub(super) struct Clock {
     pub(super) issued_us: u64,
     pub(super) wall_issued_us: u64,

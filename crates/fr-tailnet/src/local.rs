@@ -240,7 +240,11 @@ impl LocalApi {
     }
     async fn status(&self, cx: &Cx) -> Result<(Status, UCred), Error> {
         let (body, process) = self
-            .query(cx, LocalQuery::Status { peers: true }, metadata::STATUS_BYTES)
+            .query(
+                cx,
+                LocalQuery::Status { peers: true },
+                metadata::STATUS_BYTES,
+            )
             .await?;
         Ok((Status::parse(&body)?, process))
     }

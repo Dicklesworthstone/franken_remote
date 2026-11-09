@@ -89,7 +89,7 @@ pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Tar
     })
 }
 
-/// Bind the fixed installed-app WhoIs query to the exact status-selected node.
+/// Bind the fixed installed-app `WhoIs` query to the exact status-selected node.
 /// This verifies destination identity only. Missing machine-approval evidence
 /// cannot grant host observation or control, and no remote sharing scope is
 /// guessed from the client's local user identity.

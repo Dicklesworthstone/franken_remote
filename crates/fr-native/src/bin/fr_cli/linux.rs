@@ -2338,8 +2338,10 @@ mod tests {
         }
     }
 
+    // Linux without its desktop feature. The macOS desktop build also compiles
+    // this module, but there `LocalApi::new` refuses every custom endpoint.
     #[test]
-    #[cfg(not(feature = "linux-desktop"))]
+    #[cfg(all(target_os = "linux", not(feature = "linux-desktop")))]
     fn connect_without_desktop_feature_returns_gui_unavailable() {
         let options = crate::options::Connection {
             choose_host: false,

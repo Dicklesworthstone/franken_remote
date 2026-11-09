@@ -36,8 +36,8 @@ pub use endpoint::{
 mod metadata;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local::{
-    CertificateEvent, CertificateEventKind, CertificatePolicy, CredentialStatus,
-    LocalQuery, NativeServerIdentity, NodeIdentity, ingress,
+    CertificateEvent, CertificateEventKind, CertificatePolicy, CredentialStatus, LocalQuery,
+    NativeServerIdentity, NodeIdentity, ingress,
 };
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local::{ConnectedPeer, DialRoute, LocalApi, NativeClient, PeerTarget};

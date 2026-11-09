@@ -79,7 +79,8 @@ fn peer_alias_help_is_local_and_remote_probe_options_are_refused() {
     assert!(value.get("peers").is_none());
 }
 
-#[cfg(target_os = "macos")]
+// The default macOS build; with `macos-desktop`, `connect` is supported.
+#[cfg(all(target_os = "macos", not(feature = "macos-desktop")))]
 #[test]
 fn macos_snapshot_does_not_enable_custom_endpoints_or_remote_operations() {
     for name in ["hosts", "peers"] {
