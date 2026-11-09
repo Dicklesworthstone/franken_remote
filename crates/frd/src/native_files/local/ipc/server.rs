@@ -2,14 +2,11 @@
 //! No per-peer threads and no blocking join on the caller/authority thread.
 use super::{
     Arc, Error, HANDSHAKE, Handler, Info, MAX_PEERS, Scope, Status, TICK, check_peer, check_time,
-    name, wire,
+    endpoint, wire,
 };
 use std::{
     io::{self, Read, Write},
-    os::{
-        linux::net::SocketAddrExt,
-        unix::net::{SocketAddr, UnixListener, UnixStream},
-    },
+    os::unix::net::{UnixListener, UnixStream},
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     sync::{
@@ -91,18 +88,10 @@ impl Owner {
     fn bind_scoped(scope: Scope, target: &str, handler: Arc<dyn Handler>) -> Result<Self, Error> {
         scope.check_target(target)?;
         let uid = rustix::process::geteuid().as_raw();
-        let address = SocketAddr::from_abstract_name(name(scope, uid, target))
-            .map_err(|_| Error::InvalidTarget)?;
-        let listener = match UnixListener::bind_addr(&address) {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
-                // Public abstract-name occupancy is not proof of a trusted owner.
-                let existing = super::connect(scope, uid, target)?;
-                check_peer(&existing, uid)?;
-                return Err(Error::AlreadyRunning);
-            }
-            Err(_) => return Err(Error::Unavailable),
-        };
+        let until = Instant::now()
+            .checked_add(HANDSHAKE)
+            .ok_or(Error::Unavailable)?;
+        let listener = endpoint::bind(scope, uid, target, until)?;
         listener
             .set_nonblocking(true)
             .map_err(|_| Error::Unavailable)?;
@@ -460,6 +449,7 @@ fn socket_loop(
             match listener.accept() {
                 Ok((stream, _)) => {
                     if peers.len() < MAX_PEERS
+                        && stream.set_nonblocking(true).is_ok()
                         && check_peer(&stream, uid).is_ok()
                         && let Ok(peer) = Peer::new(stream)
                     {

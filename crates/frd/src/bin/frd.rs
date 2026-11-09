@@ -179,12 +179,12 @@ mod local_install;
 #[path = "frd/macos_run.rs"]
 mod macos_run;
 #[cfg(all(host_stack, target_os = "macos"))]
-use macos_run::{audio, file_commands_host, microphone, select_desktop, session_monitor};
+use macos_run::{audio, microphone, select_desktop, session_monitor};
 
-#[cfg(target_os = "linux")]
+#[cfg(native_stack)]
 #[path = "frd/file_commands.rs"]
 mod file_commands;
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 #[path = "frd/file_commands_host.rs"]
 mod file_commands_host;
 
@@ -218,11 +218,13 @@ fn main() -> ExitCode {
         "approval" => execute_policy(&args, true, json),
         "sharing" => execute_policy(&args, false, json),
         "run" => execute_run(&args, json),
-        #[cfg(target_os = "linux")]
+        #[cfg(native_stack)]
         "send" => file_commands::execute(&args, json),
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(native_stack))]
         "send" => {
-            eprintln!("host_file_commands_unsupported: local host file commands require Linux");
+            eprintln!(
+                "host_file_commands_unsupported: local host file commands require the Linux or macOS native stack"
+            );
             ExitCode::from(2)
         }
         "install" => local_install::execute(&args, json),

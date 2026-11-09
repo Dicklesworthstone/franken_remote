@@ -1,7 +1,7 @@
 # Native file downloads
 
-A controlling Linux viewer can receive files and portable directories explicitly
-selected by the host operator. The transfer uses the existing ATP profiles on
+A controlling native Linux or macOS viewer can receive files and portable
+directories explicitly selected by the host operator. The transfer uses the existing ATP profiles on
 the original session's independently admitted, one-use file attachment.
 
 ## Select a source and destination
@@ -47,8 +47,8 @@ its original download consent and results are never replayed or replaced.
 
 ## Select more files during the same session
 
-On Linux, `--send-control NAME` opens an explicit local command endpoint for
-the original foreground host. It requires `--once` and `--input-agent`, and
+On Linux and macOS, `--send-control NAME` opens an explicit local command endpoint
+for the original foreground host. It requires `--once` and `--input-agent`, and
 cannot be combined with startup `--send` selections:
 
 ```bash
@@ -68,6 +68,18 @@ same effective user, to select a batch:
 frd send --target desk --status --json
 frd send --target desk /home/alice/report.pdf /home/alice/project --json
 ```
+
+On macOS, add the same `--once --send-control desk` options to the existing
+native host invocation with `--input-agent`, then use `frd send` on that Mac:
+
+```bash
+frd send --target desk --status --json
+frd send --target desk /Users/alice/report.pdf /Users/alice/project --json
+```
+
+The macOS host uses the same selected-source, control-grant and transfer owners.
+File commands do not grant input permission, bypass Accessibility consent, or
+select a different desktop. Native capture and input setup must already work.
 
 Each batch accepts up to eight absolute file or portable-directory paths, without
 parent traversal. Selection pins the existing no-follow source descriptors on
@@ -132,8 +144,21 @@ a fresh, explicitly configured session. Cancelling an already completed request
 does not cancel a later batch. Earlier publications and uncertain effects remain
 in their original results; cancellation is not rollback.
 
-The local endpoint uses a same-effective-user Linux abstract Unix socket, with
-bounded peers, payloads and command deadlines. It is not exposed to the tailnet.
+The local endpoint uses a Unix socket and authenticates the peer's effective UID
+from the kernel on both platforms. Linux retains its abstract namespace. macOS
+uses separate host and upload names under `/tmp/fr-files-UID`, a real directory
+owned by that user with no group or other permissions. A private, non-followed
+lock stays with the original listener. A subsequent owner can reclaim an old
+socket only after obtaining that lock, observing connection refusal and checking
+that the socket's ownership and inode have not changed. Live owners, uncertain
+connects, foreign objects and symlinks are preserved and refused; closing an
+owner never unlinks a successor's endpoint. The kernel identity check and
+original random instance remain mandatory after connecting.
+
+Each endpoint bounds concurrent peers to four, a selection to eight paths of
+at most 4096 bytes each, and command handshake/dispatch to the original two-second
+deadline. Pathname connection attempts are nonblocking and do not renew that
+deadline. The endpoint is not exposed to the tailnet.
 Current host and upload clients require local protocol v2 and refuse an older
 owner during identification before sending their command, without falling back.
 Current owners still accept existing v1 send/status/cancel clients on the same
@@ -311,6 +336,15 @@ The running-controller integration lives in
 `session_startup/viewer/controlled/files/download.rs`. Native selection and
 content-free status are in `frd::native_files`; the shipped commands use those
 same owners.
+
+The macOS command endpoint shares the production IPC framing, worker lifetime
+and retained result implementation. In the 2026-11-09 development environment,
+that exact IPC source compiled against the pinned dependencies and passed
+strict Clippy. Fifteen tests passed, including real Unix socketpair protocol and
+credential checks plus pathname privacy, symlink, deadline and object-preservation
+cases. Twenty-one listener tests could not run because the managed environment
+denies Unix listener binding; the tests remain enabled. A full native build,
+macOS endpoint execution and a live Mac file-command session remain unverified.
 
 Regression targets cover real ATP, TLS/UDP, filesystem publication and both
 controller loops, plus the isolated native CLI harness in

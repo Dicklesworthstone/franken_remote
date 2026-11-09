@@ -16,7 +16,7 @@ pub(super) fn supported(
     approval: Approval,
     json: bool,
 ) -> Result<(), ExitCode> {
-    let refusals: [(bool, &str, &str); 9] = [
+    let refusals: [(bool, &str, &str); 8] = [
         (
             approval == Approval::Local,
             "local_approval_unavailable",
@@ -51,11 +51,6 @@ pub(super) fn supported(
             options.headless || options.display.is_some(),
             "no_display",
             "macOS shares the logged-in user's display; --headless and --display are X11 options",
-        ),
-        (
-            options.send_control.is_some(),
-            "host_file_commands_unsupported",
-            "--send-control uses a Linux-only local socket",
         ),
         (
             options.socket.is_some(),
@@ -100,32 +95,4 @@ pub(super) fn microphone(
     _json: bool,
 ) -> Result<Option<frd::host_run::MicrophoneOptions>, ExitCode> {
     Ok(None)
-}
-
-/// `--send-control` is refused in [`supported`], so no owner ever exists.
-pub(super) mod file_commands_host {
-    use super::run_refusal;
-    use frd::native_files::HostSelection;
-    use std::process::ExitCode;
-
-    pub(in super::super) enum Owner {}
-
-    pub(in super::super) fn open(
-        _target: &str,
-        json: bool,
-    ) -> Result<(HostSelection, Owner), ExitCode> {
-        Err(run_refusal(
-            json,
-            "host_file_commands_unsupported",
-            "--send-control uses a Linux-only local socket",
-            2,
-        ))
-    }
-
-    pub(in super::super) fn finish(owner: Option<&Owner>) -> bool {
-        match owner {
-            None => true,
-            Some(owner) => match *owner {},
-        }
-    }
 }

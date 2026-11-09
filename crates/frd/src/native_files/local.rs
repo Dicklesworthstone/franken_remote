@@ -81,6 +81,14 @@ pub struct BatchStatus {
 #[derive(Clone)]
 pub struct Results(Arc<Mutex<Vec<Record>>>);
 impl Results {
+    /// Latest original selection's progress, without retaining its local paths
+    /// or providing any selection, cancellation or replacement capability.
+    pub fn latest_snapshot(&self) -> Option<super::SendSnapshot> {
+        self.records()
+            .last()
+            .map(|record| record.control.snapshot())
+    }
+
     pub fn batches(&self) -> Vec<BatchStatus> {
         self.records()
             .iter()

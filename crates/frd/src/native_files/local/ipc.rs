@@ -14,6 +14,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod endpoint;
 mod server;
 mod wire;
 pub(super) use server::Owner;
@@ -331,7 +332,7 @@ fn identify(scope: Scope, target: &str) -> Result<(UnixStream, Info, [u8; 16], I
         .checked_add(HANDSHAKE)
         .ok_or(Error::Unavailable)?;
     let uid = rustix::process::geteuid().as_raw();
-    let mut stream = connect(scope, uid, target)?;
+    let mut stream = endpoint::connect(scope, uid, target, until)?;
     check_peer(&stream, uid)?;
     write(&mut stream, &CLIENT_VERSION.identify(), until)?;
     let mut bytes = [0; wire::IDENTITY_BYTES];
@@ -353,28 +354,8 @@ fn identify(scope: Scope, target: &str) -> Result<(UnixStream, Info, [u8; 16], I
         until,
     ))
 }
-fn connect(scope: Scope, uid: u32, target: &str) -> Result<UnixStream, Error> {
-    use rustix::net::{AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
-    let socket = rustix::net::socket_with(
-        AddressFamily::UNIX,
-        SocketType::STREAM,
-        SocketFlags::NONBLOCK | SocketFlags::CLOEXEC,
-        None,
-    )
-    .map_err(|_| Error::Unavailable)?;
-    let address = SocketAddrUnix::new_abstract_name(&name(scope, uid, target))
-        .map_err(|_| Error::InvalidTarget)?;
-    rustix::net::connect(&socket, &address).map_err(|error| match error {
-        rustix::io::Errno::CONNREFUSED | rustix::io::Errno::NOENT => Error::NoSession,
-        rustix::io::Errno::AGAIN | rustix::io::Errno::INPROGRESS => Error::Busy,
-        _ => Error::Unavailable,
-    })?;
-    Ok(UnixStream::from(socket))
-}
 fn check_peer(stream: &UnixStream, uid: u32) -> Result<(), Error> {
-    if rustix::net::sockopt::socket_peercred(stream)
-        .is_ok_and(|credentials| credentials.uid.as_raw() == uid)
-    {
+    if endpoint::peer_uid(stream).is_ok_and(|actual| actual == uid) {
         Ok(())
     } else {
         Err(Error::UntrustedPeer)
@@ -391,6 +372,7 @@ fn check_target(target: &str) -> Result<(), Error> {
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
 fn name(scope: Scope, uid: u32, target: &str) -> Vec<u8> {
     let direction = match scope {
         Scope::Host => "send",

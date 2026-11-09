@@ -14,10 +14,10 @@ impl RunOptions {
     /// daemon or infer control consent from a source path.
     pub fn validate_file_send(&self) -> Result<(), Error> {
         if let Some(target) = &self.send_control {
-            // The local send-control endpoint is Linux-only (abstract socket).
-            #[cfg(target_os = "linux")]
+            // Both native Unix hosts use the same bounded command protocol.
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let valid = crate::native_files::local::validate_target(target).is_ok();
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             let valid = {
                 let _ = target;
                 false

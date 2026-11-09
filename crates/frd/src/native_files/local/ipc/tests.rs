@@ -1,17 +1,11 @@
-//! Real Linux abstract sockets and credentials exercise the shipped local
+//! Real native Unix sockets and credentials exercise the shipped local
 //! command framing and worker ownership. The recording handler witnesses IPC
 //! delivery only; these tests do not claim file publication or remote authority.
 use super::*;
 use std::{
     cell::RefCell,
     ffi::OsString,
-    os::{
-        linux::net::SocketAddrExt,
-        unix::{
-            ffi::OsStringExt,
-            net::{SocketAddr, UnixListener},
-        },
-    },
+    os::unix::ffi::OsStringExt,
     sync::{
         Condvar, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -574,8 +568,8 @@ fn a_stalled_selection_does_not_refresh_its_original_command_deadline() {
 fn a_lost_or_malformed_post_command_reply_is_never_a_safe_retry() {
     let target = target();
     let uid = rustix::process::geteuid().as_raw();
-    let address = SocketAddr::from_abstract_name(name(Scope::Host, uid, &target)).unwrap();
-    let listener = UnixListener::bind_addr(&address).unwrap();
+    let listener = endpoint::bind(Scope::Host, uid, &target, Instant::now() + HANDSHAKE).unwrap();
+    listener.set_nonblocking(false).unwrap();
     let instance = [17; 16];
     let client_target = target.clone();
     let peer = thread::spawn(move || {
@@ -583,6 +577,7 @@ fn a_lost_or_malformed_post_command_reply_is_never_a_safe_retry() {
         stream.set_read_timeout(Some(HANDSHAKE)).unwrap();
         stream.set_write_timeout(Some(HANDSHAKE)).unwrap();
         check_peer(&stream, uid).unwrap();
+        stream.set_nonblocking(false).unwrap();
         let mut identify = [0; 8];
         stream.read_exact(&mut identify).unwrap();
         assert_eq!(identify, wire::Version::V2.identify());
@@ -928,7 +923,7 @@ fn live_upload_pacing_targets_only_its_retained_request_and_original_lease() {
 fn legacy_identify(scope: Scope, target: &str) -> Result<(UnixStream, [u8; 16], Instant), Error> {
     let until = Instant::now().checked_add(HANDSHAKE).unwrap();
     let uid = rustix::process::geteuid().as_raw();
-    let mut stream = connect(scope, uid, target)?;
+    let mut stream = endpoint::connect(scope, uid, target, until)?;
     check_peer(&stream, uid)?;
     write(&mut stream, &wire::IDENTIFY, until)?;
     let mut identity = [0; wire::IDENTITY_BYTES];
@@ -1026,8 +1021,8 @@ fn new_clients_refuse_legacy_owners_before_command_without_fallback() {
     for scope in [Scope::Host, Scope::Upload] {
         let connection = connection();
         let uid = rustix::process::geteuid().as_raw();
-        let address = SocketAddr::from_abstract_name(name(scope, uid, &connection)).unwrap();
-        let listener = UnixListener::bind_addr(&address).unwrap();
+        let listener = endpoint::bind(scope, uid, &connection, Instant::now() + HANDSHAKE).unwrap();
+        listener.set_nonblocking(false).unwrap();
         let instance = [74; 16];
         let client_target = connection.clone();
         let peer = thread::spawn(move || {
@@ -1069,8 +1064,9 @@ fn v2_pacing_post_command_lost_malformed_or_legacy_reply_is_unknown_without_repl
         for mode in 0..3 {
             let connection = connection();
             let uid = rustix::process::geteuid().as_raw();
-            let address = SocketAddr::from_abstract_name(name(scope, uid, &connection)).unwrap();
-            let listener = UnixListener::bind_addr(&address).unwrap();
+            let listener =
+                endpoint::bind(scope, uid, &connection, Instant::now() + HANDSHAKE).unwrap();
+            listener.set_nonblocking(false).unwrap();
             let instance = [75; 16];
             let client_target = connection.clone();
             let peer = thread::spawn(move || {
