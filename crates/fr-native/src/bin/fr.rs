@@ -19,6 +19,9 @@ mod help;
 ))]
 #[path = "fr_cli/linux.rs"]
 mod linux;
+#[cfg(any(all(target_os = "macos", not(feature = "macos-desktop")), test))]
+#[path = "fr_cli/macos_inspect.rs"]
+mod macos_inspect;
 #[path = "fr_cli/options.rs"]
 mod options;
 #[path = "fr_cli/output.rs"]
@@ -202,14 +205,14 @@ fn main() -> ExitCode {
     ))]
     let result = linux::run(&parsed);
     #[cfg(all(target_os = "macos", not(feature = "macos-desktop")))]
-    let result = if matches!(parsed.command, options::Command::Hosts) {
-        discovery::run(&parsed)
-    } else {
-        Err(Failure::new(
+    let result = match &parsed.command {
+        options::Command::Hosts => discovery::run(&parsed),
+        options::Command::Inspect(_) => macos_inspect::run(&parsed),
+        _ => Err(Failure::new(
             "platform_unavailable",
-            "This macOS build supports local Tailscale discovery with fr hosts; build fr-native with the macos-desktop feature for fr connect and fr status.",
+            "This macOS build supports fr hosts and fr inspect for installed Tailscale identity; build fr-native with the macos-desktop feature for fr connect and fr status.",
             2,
-        ))
+        )),
     };
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(Failure::new(

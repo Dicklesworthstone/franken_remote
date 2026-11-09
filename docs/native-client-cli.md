@@ -52,6 +52,8 @@ The advertisement does not qualify the current desktop or codec; see
 
 ## macOS discovery
 
+### Default-build identity inspection
+
 Build the default CLI on macOS with the repository-pinned Rust toolchain and
 Apple's command-line development tools:
 
@@ -59,9 +61,11 @@ Apple's command-line development tools:
 cargo build -p fr-native --bin fr --locked
 ./target/debug/fr hosts --json
 ./target/debug/fr peers --json
+./target/debug/fr inspect NODE_ID --json
+./target/debug/fr inspect machine.example.ts.net --by-name --port 9443
 ```
 
-Both commands take one informational snapshot. `peers` is a snapshot-only alias;
+`hosts` and `peers` take one informational snapshot. `peers` is a snapshot-only alias;
 it rejects saved-host operations and remote probes. The Linux `hosts` behavior
 above remains unchanged. macOS supports the standard installed
 `/Applications/Tailscale.app/Contents/MacOS/Tailscale` bridge, selected exactly
@@ -90,16 +94,41 @@ The single one-second lookup budget starts before blocking-pool admission.
 Cancellation cleanup retains and reaps the original child before this one-shot
 CLI returns, so cleanup can take longer than the lookup's work deadline.
 
-macOS `--socket` refuses with `localapi_endpoint_unsupported` before starting
-a runtime. This bridge grants no session authority and does not loosen Linux's
-credential-checked Unix socket adapter. In a default build every other command
-answers `platform_unavailable`; `fr connect` needs the desktop build below.
-Remote `--probe` and hosting are not available on macOS.
+The default build also supports `inspect NODE_ID`, or a full canonical name
+with `--by-name`, through a fresh signed status/WhoIs/status sequence. Every
+child must have the same verified signed-image identity. The selected node,
+key, user, tags and exact node-owned addresses must agree; routed subnets and
+conflicting identities refuse. All commands and parses share the original
+one-second budget, and original children retire before output. The result
+carries the verified stable ID even when selected by name. It cannot select a
+replacement from a name prefix or accept caller-supplied identity JSON.
 
-**Evidence (2026-11-08, macOS 27, Tailscale 1.104.1, `io.tailscale.ipn.macsys`):**
+Default-build inspection uses the existing inspect envelope with state
+`identity_checked`. `displays_count` and `requires_approval` are null (shown as
+`unknown` in human output). The direct, relayed or unknown path is Tailscale's
+last observation in the final status snapshot; it does not measure
+FrankenRemote reachability or verify a remote TLS connection. `--port` defaults
+to 8443 and is reported as configuration; no connection is made to it. This is
+a snapshot, not a reusable authority handle or desktop readiness result.
+
+For default-build `hosts` and `inspect`, `--socket` refuses with
+`localapi_endpoint_unsupported` before starting a runtime. Default-build
+inspection also rejects `--saved`/`--hosts-file` with `saved_hosts_unsupported`
+and remote `--probe` with `platform_unavailable` before runtime or process
+creation; it never downgrades those requests to an ordinary lookup. This bridge
+grants no session authority and does not loosen Linux's credential-checked Unix
+socket adapter. Other commands need the desktop build below; its existing
+command dispatch and feature choices remain separate. Hosting is not enabled.
+
+The new default-build inspection sequence still needs an installed-app run on
+macOS. Portable helper/metadata tests and Rust-only cross-target checks do not
+establish that platform result.
+
+**Earlier bridge evidence (2026-11-08, macOS 27, Tailscale 1.104.1, `io.tailscale.ipn.macsys`):**
 `fr hosts --json` listed the tailnet's peers through the bridge, and the
 suspended-child signature refusal/reap regression passed. The App Store variant
-(`io.tailscale.ipn.macos`) has not been exercised.
+(`io.tailscale.ipn.macos`) has not been exercised. These results predate the
+strengthened status/WhoIs/status backend and do not qualify that new sequence.
 
 ## macOS desktop client
 
@@ -117,12 +146,14 @@ hiding the window or a change of picture size stops local input and ends
 control; closing the window ends the session.
 
 The client's tailnet lookups (the peer target before dialing, and its renewals
-during a session) use the signed bridge above: every read is a fresh,
-signature-checked `status --json` child (`--peers=false` for the local node).
-The app's loopback LocalAPI token is never used. On the development Mac one read
-took about 5 ms to verify and 45 ms to run, using 60-80 ms of CPU. A session
-renews once a second with two reads, about 12-16% of one core; a cheaper
-transport is still to come.
+during a session) use the signed status/WhoIs/status sequence above. Every child
+is authenticated, and all three responses must agree on the selected identity
+and signed-image identity. The app's loopback LocalAPI token is never used.
+The development Mac measured about 5 ms to verify and 45 ms to run one status
+query, using 60-80 ms of CPU. Those measurements belong to the previous
+status-only bridge, which used two reads per renewal (about 12-16% of one core
+when renewing once a second). The new three-read sequence has not been measured
+on that Mac; a cheaper authenticated transport remains follow-up work.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
 `--choose-host`, `--display choose`, `--fit`, `--capture-system-shortcuts`,
