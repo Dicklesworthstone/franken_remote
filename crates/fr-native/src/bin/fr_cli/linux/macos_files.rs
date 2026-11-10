@@ -15,8 +15,13 @@ pub(super) fn select(connection: &Connection) -> Result<Files, Failure> {
         .map(crate::options::ReceiveOptions::open)
         .transpose()?;
     let files = Files::new(upload, download).map_err(upload::selection_failure)?;
-    Ok(if connection.upload.file_commands {
+    let files = if connection.upload.file_commands {
         files.with_commands()
+    } else {
+        files
+    };
+    Ok(if connection.upload.file_drop {
+        files.with_file_drop()
     } else {
         files
     })
@@ -40,6 +45,9 @@ impl Summary {
             }
             Some(Status::Configured(snapshot)) => upload::Summary::from_snapshot(sizes, &snapshot),
         };
+        for batch in files.dropped_batches() {
+            upload.append_later(&batch.sizes, batch.status.as_ref().map_err(|code| *code));
+        }
         upload.commands = files.command_results().map(|result| match result {
             Err(error) => Err(crate::file_commands::local_failure(error).code),
             Ok(results) => {

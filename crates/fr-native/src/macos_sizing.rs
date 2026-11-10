@@ -104,9 +104,91 @@ pub(crate) fn sharing_points_with_text(
     Ok((width.max(480), height))
 }
 
+/// The explicit file-selection button has its own 144-point slot beside the
+/// existing direction/progress controls. Keep both rows inside the same fit
+/// ceiling; never enlarge a controlled picture when selection is requested.
+pub(crate) fn sharing_points_with_selections(
+    pixels: (u32, u32),
+    logical: (u32, u32),
+    fit: Option<(u32, u32)>,
+    directions: u32,
+    clipboard: bool,
+    text: bool,
+    selections: bool,
+) -> Result<(u32, u32), ()> {
+    if directions > 2 || (selections && directions == 0) {
+        return Err(());
+    }
+    let minimum = 152 + 230 * directions + u32::from(clipboard) * 184 + u32::from(selections) * 144;
+    if fit.is_some_and(|(width, _)| width < minimum) {
+        return Err(());
+    }
+    let (width, height) =
+        sharing_points_with_text(pixels, logical, fit, directions, clipboard, text)?;
+    Ok((width.max(minimum), height))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{points, sharing_points, sharing_points_with_text};
+    use super::{points, sharing_points, sharing_points_with_selections, sharing_points_with_text};
+
+    #[test]
+    fn native_selection_button_and_both_cancel_controls_fit_inside_the_same_ceiling() {
+        for directions in [1, 2] {
+            for clipboard in [false, true] {
+                let width = 152 + 230 * directions + u32::from(clipboard) * 184 + 144;
+                for pixels in [(64, 64), (1920, 1080), (1080, 1920)] {
+                    let fitted = sharing_points_with_selections(
+                        pixels,
+                        pixels,
+                        Some((width, 600)),
+                        directions,
+                        clipboard,
+                        true,
+                        true,
+                    )
+                    .unwrap();
+                    assert_eq!(fitted.0, width);
+                    assert!(fitted.1 >= 64 && fitted.1 + 120 <= 600);
+                    assert!(
+                        sharing_points_with_selections(
+                            pixels,
+                            pixels,
+                            Some((width - 1, 600)),
+                            directions,
+                            clipboard,
+                            true,
+                            true
+                        )
+                        .is_err()
+                    );
+                }
+                assert_eq!(
+                    sharing_points_with_selections(
+                        (64, 64),
+                        (64, 64),
+                        Some((width, 184)),
+                        directions,
+                        clipboard,
+                        true,
+                        true
+                    ),
+                    Ok((width, 64))
+                );
+            }
+        }
+        assert!(
+            sharing_points_with_selections((64, 64), (64, 64), None, 0, false, true, true).is_err()
+        );
+        assert!(
+            sharing_points_with_selections((64, 64), (64, 64), None, u32::MAX, false, true, true)
+                .is_err()
+        );
+        assert_eq!(
+            sharing_points_with_selections((64, 64), (64, 64), None, 1, false, true, false),
+            sharing_points_with_text((64, 64), (64, 64), None, 1, false, true)
+        );
+    }
 
     #[test]
     fn text_editor_reserves_both_rows_before_the_picture_is_mapped() {

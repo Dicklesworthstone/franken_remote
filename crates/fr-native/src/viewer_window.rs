@@ -7,8 +7,8 @@
 //! may choose a smaller initial target. A checked resize always retires that
 //! target; an opted-in supervisor may open fresh viewing only after cleanup.
 mod choice;
-pub(crate) mod file_drop;
-pub(crate) mod file_send;
+pub(crate) use crate::file_drop;
+pub(crate) use crate::file_selection as file_send;
 mod focus;
 mod resize;
 use crate::viewer_input::display_switch;

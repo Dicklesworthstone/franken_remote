@@ -238,9 +238,12 @@ ceiling includes the 44-point toolbar for Change Display and sharing controls.
 Controlling windows reserve an additional 76-point local text row before input
 mapping, so opening the editor does not resize a controlled picture. They need
 at least 184 points of height and the greater of 480 points or the sharing-strip
-width: 152 plus 230 per file direction and 184 for the default-on clipboard.
+width: 152 plus 230 per file direction, 184 for the default-on clipboard, and
+144 for `--file-drop`'s **Send copied files** button.
 Both file directions with clipboard need 796x184 points; with
 `--no-clipboard`, one file direction needs 480x184 and both need 612x184.
+Adding `--file-drop` makes those two-direction minima 940x184 and 756x184;
+upload with native selection alone needs 710x184, or 526x184 with `--no-clipboard`.
 Viewing-only windows retain the 152x108 minimum. Smaller explicit ceilings
 refuse before a connection. A narrow picture can have horizontal letterboxing
 to keep the local controls accessible. Without
@@ -287,8 +290,7 @@ the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
-`--capture-system-shortcuts`, `--audio`, `--microphone`,
-`--file-drop` and
+`--capture-system-shortcuts`, `--audio`, `--microphone` and
 `fr robot session open`. The Mac client offers the controlling text clipboard
 by default; the host must independently enable it. A Mac host still has no
 clipboard backend and returns a typed absence without disabling control.
@@ -418,8 +420,8 @@ Cancellation does not undo files already published. Unknown publication or
 pending cleanup remains explicit; neither becomes “nothing sent.”
 
 The shared CLI report projection also preserves these distinctions on Linux.
-macOS drag-and-drop selection, audio and microphone support remain
-separate unavailable features. Explicit local file commands are described below.
+Audio and microphone support remain separate unavailable Mac features. Later
+native selections and explicit local file commands are described below.
 
 **Verification limit for this extension (2026-11-09):** five portable sizing
 tests pass with the pinned compiler and strict standalone Clippy, including
@@ -432,11 +434,73 @@ dependency, before it reached the new runtime integration. Native macOS
 builds and a real two-direction transfer/cancel/reconnect run remain required;
 the earlier viewer evidence above does not qualify this extension.
 
-### Later macOS file selections on the original connection
+### Native macOS file selections
+
+`--control --file-drop` explicitly enables later native uploads on the original
+connection. It may accompany initial `--send` paths, `--file-commands`, and an
+independently selected `--receive` directory. `--send` alone does not enable
+native selection. The host still needs control approval and `--files DIR`.
+
+```sh
+# First copy the desired files or directories in Finder.
+fr connect NODE_ID --control --file-drop --experimental-native --display only
+```
+
+After the original control grant and file attachment are ready, click
+**Send copied files** in the viewer's toolbar. That fresh local click reads
+the currently copied file URLs and reserves one selection. Copy the files
+before connecting or before requesting control: activating Finder during
+control triggers the existing focus-loss stop. The button does not switch
+applications or open a chooser. It never polls for copied files or sends them
+automatically. `--no-clipboard` disables text synchronization independently;
+the explicit native file-selection gesture remains available.
+
+The picture also accepts copy-only file-URL drops while the original window
+remains focused, visible, current and authorized. A drag that changes focus
+cannot restore control or defer itself until a later grant. Ordinary Finder
+dragging may activate Finder and therefore be refused; use the copied-file
+button for the same-window workflow. The exact AppKit focus/drag behavior
+still needs a native run and is not inferred from portable tests.
+
+Each gesture accepts at most eight local file or directory URLs in 32 KiB of
+UTF-8 metadata. Remote URLs, nonlocal authorities, file promises, malformed
+escapes, duplicate paths and oversized selections refuse. A refused gesture
+shows **Send: Selection refused**. Pasteboard metadata is read only after the
+click or actual drop, and a change during that read refuses the whole selection.
+No promise is materialized, no URL is resolved, and no source is opened by the
+AppKit callback. The existing descriptor selection worker performs filesystem
+checks off the window/session thread. It checks the original two-second
+gesture deadline and original intake eligibility before and after selection;
+slow filesystem work cannot refresh the gesture or schedule a retry.
+
+Both native gestures and local commands share the original upload intake,
+sender policy, attachment, control lease, cumulative host limits and publication
+receipts. Finish the current batch before selecting another. There is one
+pending native selection and at most eight native batch results per invocation.
+The native progress strip follows the current batch. Its **Cancel** retires
+upload selection consent and cancels admitted uploads; it leaves the separate
+receive direction intact. Closing, Escape, focus loss, display change and
+connection cleanup also fence native selection. A later viewing reconnect or
+new F8 request cannot replay it. Cleanup must confirm the original selection
+worker has exited before another attempt can begin.
+
+Completion retains initial, native and local-command outcomes with stable
+indices. An accepted gesture that expires during preparation remains a refused
+result, and an already published file remains published after cancellation.
+Paths and names do not enter progress labels or completion history.
+
+**Verification boundary (2026-11-10):** regression targets exercise the shared
+production descriptor-selection boundary with real files, original readiness
+checks, bounded native ingress, one-use consent, cancellation and fitted chrome.
+These do not qualify AppKit pasteboard delivery, Finder interaction, Apple SDK
+compilation, or a real upload/cancel/reconnect session. Those native checks are
+still required for this extension; earlier Mac viewer evidence does not cover it.
+
+### Later macOS file selections using local commands
 
 `--file-commands` enables later explicit uploads without restarting the desktop.
-It may be used alone, alongside initial `--send` selections, or alongside the
-independent `--receive` destination. An empty initial upload opens no source
+It may be used alone, alongside initial `--send` selections or `--file-drop`,
+and alongside the independent `--receive` destination. An empty initial upload opens no source
 and reads no file contents. The original host still needs to approve control
 and enable the receiving file directory.
 

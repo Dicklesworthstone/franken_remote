@@ -1,5 +1,39 @@
 # Implementation status
 
+## Native Mac file selections on the original upload (2026-11-10)
+
+The macOS client now accepts `--control --file-drop` and provides a local
+**Send copied files** button plus copy-only file-URL drops onto the picture.
+Copying files in Finder before taking control provides an explicit same-window
+selection workflow while preserving the existing focus-loss stop. Drops require
+the original viewer to remain focused, visible and eligible. Initial `--send`,
+native selections and `--file-commands` share one original upload intake;
+`--receive` remains an independent direction.
+
+The AppKit boundary imports URL metadata only after an explicit local gesture,
+with at most eight items and 32 KiB. It refuses file promises and multi-URL
+items; the existing parser also refuses nonlocal URLs, malformed paths and
+duplicates. The existing selection worker pins descriptors off the window
+thread, preserving the gesture's original two-second lifetime before and after
+filesystem work and at final admission. Native cancellation and admission retain
+the actual transfer's cancellation handle under one lock, so a stop cannot miss
+a just-admitted source. Progress and final receipts retain every selected batch.
+Cleanup waits for the original worker; reconnect does not replay selections or
+renew their consent. The toolbar and `--fit` checks reserve the button's space.
+
+**Passed source/component checks:** pinned workspace formatting, whitespace
+checks, all nine production sizing tests (including the new toolbar case), and
+all seven shared file-URL parser/inbox tests. UBS reported no critical findings;
+its new warnings are test assertion/lock heuristics, not new production warnings.
+The standalone component tests use the real source modules without substitute
+types. They do not compile the entire native client or exercise AppKit.
+
+**Blocked/not tested:** full runtime compilation and tests remain constrained
+by the unchanged pinned Asupersync build and execution-environment resources.
+Apple SDK compilation, actual Finder/pasteboard delivery and a real Mac upload,
+cancel and reconnect session remain unqualified. These remaining checks are
+tracked in `fr-macos-file-selection-h9nw`; no native capability pass is claimed.
+
 ## Optional audio receive expiry preserves the desktop (2026-11-10)
 
 The original completed audio-down and microphone-up attachments now retire

@@ -53,15 +53,40 @@ pub(crate) struct Sample {
     pub(crate) visible: bool,
 }
 
-fn upload(files: &files::Files) -> Progress {
+fn upload(files: &files::Files, native_last: bool) -> Progress {
     use files::Status;
     // Later admitted batches have independent progress and cleanup. Sampling
     // their retained handle never replaces the initial selection's receipts.
-    let status = match files
-        .command_snapshot()
-        .map(Status::Configured)
-        .or_else(|| files.upload_status())
+    let command = files.command_snapshot();
+    let native = files.drop_progress();
+    let active = |snapshot: &frd::native_files::SendSnapshot| {
+        snapshot.status.absence.is_none()
+            && matches!(
+                snapshot.status.phase,
+                SendPhase::WaitingForControl | SendPhase::Negotiating | SendPhase::Sending
+            )
+    };
+    // Both local selectors use the same one-slot intake. A refused concurrent
+    // gesture must not conceal progress of the batch actually being sent.
+    let later = if command.as_ref().is_some_and(active) {
+        command.map(Ok)
+    } else if native.as_ref().is_some_and(|status| match status {
+        Ok(snapshot) => active(snapshot),
+        Err(code) => *code == "file_selection_preparing",
+    }) || native_last
     {
+        native.or_else(|| command.map(Ok))
+    } else {
+        command.map(Ok).or(native)
+    };
+    let later = match later {
+        Some(Ok(snapshot)) => Some(Status::Configured(snapshot)),
+        Some(Err("file_selection_preparing")) => return Progress::state(State::Waiting),
+        Some(Err("file_selection_stopped")) => return Progress::state(State::Cancelled),
+        Some(Err(_)) => return Progress::state(State::Failed),
+        None => None,
+    };
+    let status = match later.or_else(|| files.upload_status()) {
         None => return Progress::default(),
         Some(Status::NotStarted) => return Progress::state(State::Waiting),
         Some(Status::Unavailable(absence)) => {
@@ -191,6 +216,9 @@ pub(crate) struct Ui {
     previous: Option<Duration>,
     sampled: Option<Duration>,
     displayed: Option<View>,
+    command_batches: usize,
+    native_batches: usize,
+    native_last: bool,
 }
 impl Ui {
     pub(crate) fn turn(
@@ -226,8 +254,21 @@ impl Ui {
             return Ok(());
         }
         self.sampled = Some(now);
+        let commands = files
+            .command_results()
+            .and_then(Result::ok)
+            .map_or(0, |results| results.batches().len());
+        let native = files.dropped_batches().len();
+        if commands != self.command_batches {
+            self.native_last = false;
+        }
+        if native != self.native_batches {
+            self.native_last = true;
+        }
+        self.command_batches = commands;
+        self.native_batches = native;
         let view = View {
-            upload: upload(files),
+            upload: upload(files, self.native_last),
             download: download(files),
         };
         if self.displayed != Some(view) {

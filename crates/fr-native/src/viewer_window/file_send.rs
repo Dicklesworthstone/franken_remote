@@ -6,12 +6,13 @@
 //! another desktop. The original sender remains the only source/transport owner.
 #![forbid(unsafe_code)]
 
-use super::{
-    Status as WindowStatus, WindowControl,
-    file_drop::{Dropped, Inbox, MAX_AGE},
+use crate::file_drop::{Dropped, Inbox, MAX_AGE};
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+use crate::{
+    file_progress::{Control as PanelControl, Status as PanelStatus},
+    viewer_window::{Status as WindowStatus, WindowControl},
 };
-use crate::file_progress::{Control as PanelControl, Status as PanelStatus};
-use frd::native_files::{Selection, SendControl, SendIntake, SendStatus};
+use frd::native_files::{Selection, SendControl, SendIntake, SendRequest, SendStatus};
 use std::{
     fmt,
     sync::{
@@ -19,13 +20,59 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 const TURN: Duration = Duration::from_millis(10);
 /// Bound content-free history as well as explicitly requested selections.
 /// The host's cumulative transfer/byte limits still apply across every batch.
 const MAX_BATCHES: usize = 8;
+
+/// Native lifecycle and progress, without borrowing a window or calling a UI
+/// toolkit from the selection worker. Both adapters bind one original surface.
+pub(crate) trait Surface: Send + 'static {
+    fn live(&self) -> bool;
+    fn ready(&self) -> bool;
+    /// Admit and retain the exact cancellation handle as one local operation.
+    /// A native stop cannot fall between intake admission and handle retention.
+    fn submit(
+        &self,
+        intake: &SendIntake,
+        request: SendRequest,
+        captured: Instant,
+    ) -> Result<(SendControl, bool), &'static str>;
+}
+
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+struct X11Surface {
+    window: WindowControl,
+    panel: PanelControl,
+}
+#[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+impl Surface for X11Surface {
+    fn live(&self) -> bool {
+        self.window.status() == WindowStatus::Mapped
+            && !matches!(self.panel.status(), PanelStatus::Stopped(_))
+    }
+    fn ready(&self) -> bool {
+        self.live() && self.panel.status() == PanelStatus::Running
+    }
+    fn submit(
+        &self,
+        intake: &SendIntake,
+        request: SendRequest,
+        captured: Instant,
+    ) -> Result<(SendControl, bool), &'static str> {
+        if captured.elapsed() >= MAX_AGE {
+            return Err("file_selection_expired");
+        }
+        let source = intake
+            .submit(request)
+            .map_err(|_| "file_selection_unavailable")?;
+        let live = self.panel.replace_upload(source.clone());
+        Ok((source, live))
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
@@ -92,6 +139,16 @@ impl Shared {
 #[derive(Clone)]
 pub struct Control(Arc<Shared>);
 impl Control {
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn latest_snapshot(
+        &self,
+    ) -> Option<Result<frd::native_files::SendSnapshot, &'static str>> {
+        self.0.batches().last().map(|batch| match &batch.outcome {
+            Outcome::Preparing => Err("file_selection_preparing"),
+            Outcome::Refused(code) => Err(*code),
+            Outcome::Submitted(control) => Ok(control.snapshot()),
+        })
+    }
     pub fn batches(&self) -> Vec<BatchStatus> {
         self.0
             .batches()
@@ -124,28 +181,29 @@ pub(crate) struct Manager {
     thread: Option<JoinHandle<()>>,
 }
 impl Manager {
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
     pub(crate) fn start(
         window: WindowControl,
         intake: SendIntake,
         panel: PanelControl,
     ) -> Result<Self, Error> {
-        if window.status() != WindowStatus::Mapped
-            || intake.is_closed()
-            || matches!(panel.status(), PanelStatus::Stopped(_))
-        {
+        let inbox = window.file_drop_inbox();
+        Self::start_on(inbox, intake, X11Surface { window, panel })
+    }
+    pub(crate) fn start_on(
+        inbox: Inbox,
+        intake: SendIntake,
+        surface: impl Surface,
+    ) -> Result<Self, Error> {
+        if !surface.live() || intake.is_closed() || inbox.is_closed() {
             return Err(Error::Unavailable);
         }
         let shared = Arc::new(Shared::default());
-        let inbox = window.file_drop_inbox();
-        if inbox.is_closed() {
-            return Err(Error::Unavailable);
-        }
         let worker = Worker {
             shared: Arc::clone(&shared),
             inbox: inbox.clone(),
-            window,
             intake,
-            panel,
+            surface: Box::new(surface),
         };
         let thread = thread::Builder::new()
             .name("fr-file-selection".into())
@@ -165,43 +223,45 @@ impl Manager {
         self.inbox.close();
     }
     pub(crate) fn finish(&mut self) -> bool {
-        let Some(thread) = &self.thread else {
-            return true;
-        };
-        if !thread.is_finished() {
+        if !self.is_finished() {
             return false;
         }
+        let Some(thread) = self.thread.take() else {
+            return true;
+        };
         // Completion, including unwind, proves this sole selection worker no
         // longer retains paths/descriptors. It says nothing about remote effects.
-        let _joined = self.thread.take().expect("original worker").join();
+        let _joined = thread.join();
         true
+    }
+    pub(crate) fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }
 }
 impl Drop for Manager {
     fn drop(&mut self) {
         self.stop();
+        let _ = self.finish();
     }
 }
 
 struct Worker {
     shared: Arc<Shared>,
     inbox: Inbox,
-    window: WindowControl,
     intake: SendIntake,
-    panel: PanelControl,
+    surface: Box<dyn Surface>,
 }
 impl Worker {
     fn live(&self) -> bool {
         !self.shared.stopped()
             && !self.inbox.is_closed()
-            && self.window.status() == WindowStatus::Mapped
+            && self.surface.live()
             && !self.intake.is_closed()
-            && !matches!(self.panel.status(), PanelStatus::Stopped(_))
     }
     fn ready(&self) -> bool {
         self.live()
             && self.intake.ready()
-            && self.panel.status() == PanelStatus::Running
+            && self.surface.ready()
             && self.shared.batches().len() < MAX_BATCHES
     }
     fn run(self) {
@@ -236,42 +296,52 @@ impl Worker {
         self.shared.batches()[index].outcome = outcome;
     }
     fn select(&self, dropped: &Dropped, index: usize) -> Outcome {
-        if !self.ready_for(dropped) {
-            return Outcome::Refused("file_selection_expired");
-        }
-        // This is the sole potentially blocking local path operation. The
-        // native window and original session continue on their own owners.
-        let selected = match Selection::select(&dropped.paths) {
-            Ok(selected) => selected,
-            Err(refusal) => return Outcome::Refused(refusal.reason.code()),
-        };
-        self.shared.batches()[index].sizes = selected.sizes().collect();
-        let request = match selected.request() {
+        let (sizes, request) = prepare_selection(dropped, || {
+            self.live() && self.intake.ready() && self.surface.ready()
+        });
+        self.shared.batches()[index].sizes = sizes;
+        let request = match request {
             Ok(request) => request,
-            Err(refusal) => return Outcome::Refused(refusal.reason.code()),
+            Err(code) => return Outcome::Refused(code),
         };
-        // A slow local filesystem cannot replay a stale gesture after a close,
-        // control loss or a later readiness transition. No retry is scheduled.
-        if !self.ready_for(dropped) {
-            return Outcome::Refused("file_selection_expired");
-        }
-        let Ok(source) = self.intake.submit(request) else {
-            return Outcome::Refused("file_selection_unavailable");
+        let (source, live) = match self.surface.submit(&self.intake, request, dropped.captured) {
+            Ok(admitted) => admitted,
+            Err(code) => return Outcome::Refused(code),
         };
-        // Every new native window holds this new immutable control. A hide or
-        // failure racing after intake admission stops future drops, but cannot
-        // cancel an already accepted transfer. Preserve its real later receipt.
-        if !self.panel.replace_upload(source.clone()) {
+        // The surface has retained this actual control before a concurrent
+        // local stop can finish. Keep its receipt even when the surface closes.
+        if !live {
             self.inbox.close();
         }
         Outcome::Submitted(source)
     }
-    fn ready_for(&self, dropped: &Dropped) -> bool {
-        dropped.captured.elapsed() < MAX_AGE
-            && self.live()
-            && self.intake.ready()
-            && self.panel.status() == PanelStatus::Running
+}
+
+/// Production preparation boundary shared by both native desktops. These are
+/// the only blocking path operations; the original gesture and admission gates
+/// are checked on both sides, without extending either deadline or retrying.
+fn prepare_selection(
+    dropped: &Dropped,
+    current: impl Fn() -> bool,
+) -> (Vec<Option<u64>>, Result<SendRequest, &'static str>) {
+    let ready = || dropped.captured.elapsed() < MAX_AGE && current();
+    let unknown = || vec![None; dropped.paths.len()];
+    if !ready() {
+        return (unknown(), Err("file_selection_expired"));
     }
+    let selected = match Selection::select(&dropped.paths) {
+        Ok(selected) => selected,
+        Err(refusal) => return (unknown(), Err(refusal.reason.code())),
+    };
+    let sizes = selected.sizes().collect();
+    let request = match selected.request() {
+        Ok(request) => request,
+        Err(refusal) => return (sizes, Err(refusal.reason.code())),
+    };
+    if !ready() {
+        return (sizes, Err("file_selection_expired"));
+    }
+    (sizes, Ok(request))
 }
 impl Drop for Worker {
     fn drop(&mut self) {
@@ -290,6 +360,57 @@ impl Drop for Worker {
 mod tests {
     use super::*;
     use std::{path::PathBuf, time::Instant};
+
+    #[test]
+    fn production_preparation_pins_real_sources_and_checks_the_original_gate_twice() {
+        use std::{cell::Cell, fs, sync::atomic::AtomicU64};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "fr-selection-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let source = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        source.set_len(7).unwrap();
+        let dropped = Dropped {
+            paths: vec![path.clone()],
+            captured: Instant::now(),
+        };
+        let checks = Cell::new(0);
+        let (sizes, prepared) = prepare_selection(&dropped, || {
+            checks.set(checks.get() + 1);
+            checks.get() == 1 // original surface retires while descriptors are selected
+        });
+        assert_eq!(sizes, [Some(7)]);
+        assert_eq!(prepared.unwrap_err(), "file_selection_expired");
+        assert_eq!(checks.get(), 2);
+        let (sizes, prepared) = prepare_selection(&dropped, || true);
+        assert_eq!(sizes, [Some(7)]);
+        assert!(prepared.is_ok());
+        drop(prepared);
+        fs::remove_file(&path).unwrap();
+        // A closed/expired gesture refuses before touching a now-missing path.
+        assert_eq!(
+            prepare_selection(&dropped, || false).1.unwrap_err(),
+            "file_selection_expired"
+        );
+        assert_eq!(
+            prepare_selection(&dropped, || true).1.unwrap_err(),
+            "send_missing"
+        );
+        let old = Dropped {
+            paths: vec![path],
+            captured: Instant::now() - MAX_AGE,
+        };
+        assert_eq!(
+            prepare_selection(&old, || true).1.unwrap_err(),
+            "file_selection_expired"
+        );
+    }
 
     #[test]
     fn retired_intent_is_reported_once_after_stop_without_losing_earlier_results() {

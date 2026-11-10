@@ -27,6 +27,7 @@ async fn blocked(
     kind: u16,
     partial: bool,
 ) {
+    let capacity = endpoint(l, !host).usage().framed_capacity;
     let bytes = record(kind, send.binding, if partial { 1100 } else { 52 });
     endpoint(l, host)
         .send(
@@ -68,7 +69,7 @@ async fn blocked(
                 },
             )
             .unwrap();
-        if held || (partial && endpoint(l, !host).usage().framed_capacity >= bytes.len()) {
+        if held || (partial && endpoint(l, !host).usage().framed_capacity > capacity) {
             break;
         }
     }

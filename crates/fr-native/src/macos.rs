@@ -17,10 +17,11 @@ use fr_media::access_unit::{EncodedAccessUnit, FrameId, FrameKind};
 use fr_media::config::{CodecConfiguration, ColorRange};
 use fr_media::hevc::HevcGuard;
 use fr_media::worker::overlay::Update as CursorUpdate;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(crate) use crate::macos_text::Commit as TextCommit;
 pub(crate) const TEXT_COMPOSER_FLAG: u32 = 16;
+pub(crate) const FILE_SELECTION_FLAG: u32 = 32;
 
 /// A consumed native slot, including a locally refused gesture. A native error
 /// is separate because it must fence the original owner before native cleanup.
@@ -123,6 +124,15 @@ unsafe extern "C" {
     ) -> c_int;
     fn fr_mac_window_clipboard_update(window: *mut c_void, state: u32) -> c_int;
     fn fr_mac_window_clipboard_visible(window: *mut c_void, visible: *mut c_int) -> c_int;
+    fn fr_mac_window_file_selection_bind(
+        window: *mut c_void,
+        context: *mut c_void,
+        ready: unsafe extern "C" fn(*mut c_void) -> c_int,
+        submit: unsafe extern "C" fn(*mut c_void, *const u8, usize, f64) -> c_int,
+        stop: unsafe extern "C" fn(*mut c_void),
+        release: unsafe extern "C" fn(*mut c_void),
+    ) -> c_int;
+    fn fr_mac_window_file_selection_update(window: *mut c_void) -> c_int;
     fn fr_mac_window_state(
         window: *mut c_void,
         width: *mut u32,
@@ -491,6 +501,34 @@ impl Window {
             fr_mac_window_text_complete(self.raw.as_ptr(), context, c_int::from(admitted))
         })
     }
+    pub(crate) fn file_selection_bind(
+        &self,
+        ingress: crate::macos_file_drop::Ingress,
+    ) -> Result<(), NativeError> {
+        let context = Box::into_raw(Box::new(FileSelectionBridge(ingress)));
+        // SAFETY: the native main-thread window adopts the unique Box only on
+        // success, clearing every callback before its sole release callback.
+        let result = status(unsafe {
+            fr_mac_window_file_selection_bind(
+                self.raw.as_ptr(),
+                context.cast(),
+                file_selection_ready,
+                file_selection_submit,
+                file_selection_stop,
+                file_selection_release,
+            )
+        });
+        if result.is_err() {
+            // SAFETY: failed native binding retained no pointer or callback.
+            drop(unsafe { Box::from_raw(context) });
+        }
+        result
+    }
+    pub(crate) fn file_selection_update(&self) -> Result<(), NativeError> {
+        // SAFETY: a live window on the same owning main thread, no out pointers.
+        status(unsafe { fr_mac_window_file_selection_update(self.raw.as_ptr()) })
+    }
+
     /// Bind the original local Off owner before any clipboard setup can run.
     pub(crate) fn clipboard_bind(&self, privacy: clipboard::Privacy) -> Result<(), NativeError> {
         let context = Box::into_raw(Box::new(ClipboardSwitch(privacy)));
@@ -664,6 +702,59 @@ unsafe extern "C" fn clipboard_release(context: *mut c_void) {
     }
     // SAFETY: exactly once after the glue has cleared its context/callbacks.
     drop(unsafe { Box::from_raw(context.cast::<ClipboardSwitch>()) });
+}
+
+struct FileSelectionBridge(crate::macos_file_drop::Ingress);
+impl Drop for FileSelectionBridge {
+    fn drop(&mut self) {
+        self.0.stop();
+    }
+}
+unsafe extern "C" fn file_selection_ready(context: *mut c_void) -> c_int {
+    if context.is_null() {
+        return 0;
+    }
+    // SAFETY: same-thread native callbacks borrow the Box until native clears
+    // all callback slots before release. No session or AppKit reentry occurs.
+    let bridge = unsafe { &*context.cast::<FileSelectionBridge>() };
+    c_int::from(bridge.0.ready())
+}
+unsafe extern "C" fn file_selection_submit(
+    context: *mut c_void,
+    bytes: *const u8,
+    length: usize,
+    age: f64,
+) -> c_int {
+    if context.is_null()
+        || bytes.is_null()
+        || length == 0
+        || length > crate::file_drop::MAX_BYTES
+        || !(0.0..crate::file_drop::MAX_AGE.as_secs_f64()).contains(&age)
+    {
+        return 0;
+    }
+    let Some(captured) = Instant::now().checked_sub(Duration::from_secs_f64(age)) else {
+        return 0;
+    };
+    // SAFETY: native lends its initialized bounded stack buffer for this call;
+    // neither the borrowed bytes nor a native pointer escapes into the worker.
+    let bytes = unsafe { std::slice::from_raw_parts(bytes, length) };
+    // SAFETY: same original callback Box, retained until native clears slots.
+    let bridge = unsafe { &*context.cast::<FileSelectionBridge>() };
+    c_int::from(bridge.0.submit(bytes, captured))
+}
+unsafe extern "C" fn file_selection_stop(context: *mut c_void) {
+    if !context.is_null() {
+        // SAFETY: native borrows its original Box; stop is idempotent and has
+        // no filesystem, AppKit or main-thread session operations.
+        unsafe { &*context.cast::<FileSelectionBridge>() }.0.stop();
+    }
+}
+unsafe extern "C" fn file_selection_release(context: *mut c_void) {
+    if !context.is_null() {
+        // SAFETY: exactly once, after native clears every callback and pointer.
+        drop(unsafe { Box::from_raw(context.cast::<FileSelectionBridge>()) });
+    }
 }
 
 /// Held modifier keys, for turning `FlagsChanged` into presses and releases.

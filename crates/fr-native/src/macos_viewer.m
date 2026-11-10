@@ -413,7 +413,8 @@ enum {
     FR_MAC_CHANGE_DISPLAY = 4,
     FR_MAC_CLIPBOARD = 8,
     FR_MAC_TEXT_COMPOSER = 16,
-    FR_MAC_SHARE_ALL = 31,
+    FR_MAC_FILE_SELECTION = 32,
+    FR_MAC_SHARE_ALL = 63,
 };
 #define FR_MAC_SHARING_HEIGHT 44.0
 #define FR_MAC_TEXT_HEIGHT 76.0
@@ -424,9 +425,17 @@ enum {
 #define FR_MAC_SHARING_CELL 230.0
 #define FR_MAC_CHANGE_WIDTH 136.0
 #define FR_MAC_CLIPBOARD_WIDTH 184.0
+#define FR_MAC_FILE_SELECTION_WIDTH 144.0
+#define FR_MAC_FILE_SELECTION_BYTES (32 * 1024)
+#define FR_MAC_FILE_SELECTION_PATHS 8
+#define FR_MAC_FILE_SELECTION_AGE 2.0
 
 typedef void (*FrClipboardStop)(void *, int);
 typedef void (*FrClipboardRelease)(void *);
+typedef int (*FrFileSelectionReady)(void *);
+typedef int (*FrFileSelectionSubmit)(void *, const uint8_t *, size_t, double);
+typedef void (*FrFileSelectionStop)(void *);
+typedef void (*FrFileSelectionRelease)(void *);
 
 static BOOL fr_sharing_status(uint32_t status) {
     return status <= 5;
@@ -465,7 +474,8 @@ static unsigned fr_sharing_cells(uint32_t flags) {
 static double fr_sharing_width(uint32_t flags) {
     double width = 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(flags) +
                    ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0) +
-                   ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0);
+                   ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0) +
+                   ((flags & FR_MAC_FILE_SELECTION) ? FR_MAC_FILE_SELECTION_WIDTH : 0);
     return (flags & FR_MAC_TEXT_COMPOSER) ? fmax(width, FR_MAC_TEXT_MIN_WIDTH) : width;
 }
 
@@ -541,6 +551,15 @@ static BOOL fr_any_key(const BOOL *keys) {
     NSTextField *clipboardLabel;
     FrSharingButton *uploadCancel, *downloadCancel, *changeDisplay;
     FrSharingButton *clipboardOff;
+    FrSharingButton *sendCopiedFiles;
+    void *fileSelectionContext;
+    FrFileSelectionReady fileSelectionReady;
+    FrFileSelectionSubmit fileSelectionSubmit;
+    FrFileSelectionStop fileSelectionStop;
+    FrFileSelectionRelease fileSelectionRelease;
+    BOOL fileSelectionStopped;
+    NSInteger fileDragSequence;
+    double fileDragCaptured;
     void *clipboardContext;
     FrClipboardStop clipboardStop;
     FrClipboardRelease clipboardRelease;
@@ -585,6 +604,11 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)stopClipboardWithoutUI:(BOOL)userOff;
 - (void)finishStoppedUI;
 - (void)disableClipboard:(id)sender;
+- (BOOL)fileSelectionAvailable;
+- (void)stopFileSelections;
+- (void)updateFileSelections;
+- (void)sendCopiedFiles:(id)sender;
+- (BOOL)submitFilePasteboard:(NSPasteboard *)pasteboard captured:(double)captured;
 - (BOOL)textWindowReady;
 - (BOOL)textPhysicalClear;
 - (BOOL)textGesture:(NSEvent *)event;
@@ -753,6 +777,44 @@ static BOOL fr_any_key(const BOOL *keys) {
 @end
 
 @implementation FrMetalView
+- (NSDragOperation)draggingEntered:(id<NSDraggingInfo>)sender {
+    // AppKit only requests metadata import after the actual release. Entering
+    // or hovering neither reads a URL nor opens a source.
+    return [self.owner fileSelectionAvailable] &&
+           (sender.draggingSourceOperationMask & NSDragOperationCopy)
+        ? NSDragOperationCopy : NSDragOperationNone;
+}
+- (NSDragOperation)draggingUpdated:(id<NSDraggingInfo>)sender {
+    return [self draggingEntered:sender];
+}
+- (BOOL)prepareForDragOperation:(id<NSDraggingInfo>)sender {
+    FrWindowOwner *owner = self.owner;
+    if (!owner || [self draggingEntered:sender] != NSDragOperationCopy) return NO;
+    owner->fileDragSequence = sender.draggingSequenceNumber;
+    owner->fileDragCaptured = NSProcessInfo.processInfo.systemUptime;
+    return YES;
+}
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    FrWindowOwner *owner = self.owner;
+    if (!owner || owner->fileDragCaptured <= 0 ||
+        owner->fileDragSequence != sender.draggingSequenceNumber) return NO;
+    double captured = owner->fileDragCaptured;
+    owner->fileDragCaptured = 0; // consume this release once, before native reads
+    // Apple's NSDraggingDestination contract imports from the sender's actual
+    // pasteboard here, only after prepareForDragOperation returned YES:
+    // developer.apple.com/documentation/appkit/nsdraggingdestination
+    return [owner submitFilePasteboard:sender.draggingPasteboard captured:captured];
+}
+- (void)draggingExited:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    FrWindowOwner *owner = self.owner;
+    if (owner) owner->fileDragCaptured = 0;
+}
+- (void)draggingEnded:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    FrWindowOwner *owner = self.owner;
+    if (owner) owner->fileDragCaptured = 0;
+}
 - (BOOL)wantsUpdateLayer {
     return YES;
 }
@@ -843,6 +905,39 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     return button;
 }
 
+static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, size_t *length) {
+    NSInteger revision = pasteboard.changeCount;
+    NSArray<NSPasteboardItem *> *items = pasteboard.pasteboardItems;
+    if (!items.count || items.count > FR_MAC_FILE_SELECTION_PATHS) return NO;
+    // Promise types are a different, potentially materializing workflow.
+    // Apple documents this complete list for both modern/legacy promises:
+    // developer.apple.com/documentation/appkit/nsfilepromisereceiver/readabledraggedtypes
+    NSArray<NSString *> *promises = NSFilePromiseReceiver.readableDraggedTypes;
+    *length = 0;
+    for (NSPasteboardItem *item in items) {
+        for (NSString *promise in promises)
+            if ([item.types containsObject:promise]) return NO;
+        if (![item.types containsObject:NSPasteboardTypeFileURL]) return NO;
+        NSString *uri = [item stringForType:NSPasteboardTypeFileURL];
+        if (!uri || uri.length > FR_MAC_FILE_SELECTION_BYTES) return NO;
+        // One pasteboard item denotes one URL. Do not let an embedded line
+        // separator manufacture extra selections in the shared URI-list parser.
+        if ([uri rangeOfCharacterFromSet:NSCharacterSet.newlineCharacterSet].location != NSNotFound)
+            return NO;
+        NSUInteger count = [uri lengthOfBytesUsingEncoding:NSUTF8StringEncoding];
+        // Bound the entire payload before any application buffer copy.
+        if (!count || count >= FR_MAC_FILE_SELECTION_BYTES - *length) return NO;
+        NSUInteger used = 0;
+        if (![uri getBytes:bytes + *length maxLength:count usedLength:&used
+                   encoding:NSUTF8StringEncoding options:0
+                      range:NSMakeRange(0, uri.length) remainingRange:NULL] || used != count)
+            return NO;
+        *length += count;
+        bytes[(*length)++] = '\n';
+    }
+    return pasteboard.changeCount == revision;
+}
+
 @implementation FrWindowOwner
 
 - (void)dealloc {
@@ -869,6 +964,13 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         clipboardLabel = fr_sharing_label(sharing, @"Clipboard: Waiting");
         clipboardOff = fr_sharing_button(sharing, @"Turn Off", self, @selector(disableClipboard:));
         clipboardOff.accessibilityLabel = @"Turn off shared text clipboard";
+    }
+    if (sharingFlags & FR_MAC_FILE_SELECTION) {
+        sendCopiedFiles = fr_sharing_button(sharing, @"Send copied files", self,
+                                           @selector(sendCopiedFiles:));
+        sendCopiedFiles.accessibilityLabel = @"Send the local files explicitly copied in Finder";
+        sendCopiedFiles.toolTip = @"Copy files in Finder before taking control, then click here. Up to 8 local files or directories.";
+        sendCopiedFiles.enabled = NO;
     }
     if (sharingFlags & FR_MAC_SHARE_UPLOAD) {
         uploadStatus = 1;
@@ -909,6 +1011,10 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         clipboardLabel.frame = NSMakeRect(8 + offset, 14, 108, 17);
         clipboardOff.frame = NSMakeRect(8 + offset + 112, 8, 68, 28);
         offset += FR_MAC_CLIPBOARD_WIDTH;
+    }
+    if (sendCopiedFiles) {
+        sendCopiedFiles.frame = NSMakeRect(8 + offset, 8, FR_MAC_FILE_SELECTION_WIDTH - 8, 28);
+        offset += FR_MAC_FILE_SELECTION_WIDTH;
     }
     double cell = cells ? (NSWidth(sharing.bounds) - 16 - offset) / cells : 0;
     unsigned index = 0;
@@ -1081,6 +1187,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 }
 - (void)stopNativeInput:(NSString *)message {
     nativeStopPending = YES;
+    [self stopFileSelections];
     textContext = 0;
     textUntil = 0;
     textEligible = NO;
@@ -1200,6 +1307,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 - (void)cancelUpload:(id)sender {
     (void)sender;
     if (!uploadCancel.enabled || uploadCancelled) return;
+    [self stopFileSelections];
     uploadCancelled = YES;
     sharingActions |= FR_MAC_SHARE_UPLOAD;
     uploadCancel.enabled = NO;
@@ -1222,6 +1330,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         !isfinite(event.timestamp) || event.timestamp <= 0 || now < event.timestamp ||
         now - event.timestamp >= 0.250) return;
     displayChangeUsed = YES;
+    [self stopFileSelections];
     // This is a nonterminal handoff: Rust must first inspect the rest of the
     // batch for a queued veto, then park the original producer. IME/chrome
     // cleanup waits for its explicit text_stopped acknowledgment.
@@ -1261,6 +1370,57 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     (void)sender;
     if (!clipboardOff.enabled) return;
     [self stopClipboard:YES];
+}
+
+- (BOOL)fileSelectionAvailable {
+    if (!(sharingFlags & FR_MAC_FILE_SELECTION) || fileSelectionStopped ||
+        uploadCancelled || !fileSelectionContext || !fileSelectionReady ||
+        !fileSelectionSubmit || ![self textWindowReady] || !sharing || sharing.isHidden)
+        return NO;
+    return fileSelectionReady(fileSelectionContext) != 0;
+}
+- (void)stopFileSelections {
+    fileSelectionStopped = YES;
+    fileDragCaptured = 0;
+    // This callback fences metadata and the exact latest transfer without
+    // entering AppKit or borrowing the main-thread session.
+    if (fileSelectionContext && fileSelectionStop) fileSelectionStop(fileSelectionContext);
+}
+- (void)updateFileSelections {
+    if (!sendCopiedFiles || nativeStopPending) return;
+    sendCopiedFiles.enabled = [self fileSelectionAvailable];
+    // Cancelling remains available while an explicit selector is alive, even
+    // after a completed/refused batch, and during local descriptor preparation.
+    if (!uploadCancelled && !fileSelectionStopped) uploadCancel.enabled = YES;
+}
+- (void)sendCopiedFiles:(id)sender {
+    NSEvent *event = NSApp.currentEvent;
+    if (sender != sendCopiedFiles || !sendCopiedFiles.enabled ||
+        ![self fileSelectionAvailable] || ![self textPhysicalClear] ||
+        ![self textGesture:event]) return;
+    // No clipboard URL is inspected on hover, a timer, or remote input. Keep
+    // the click's original age across all pasteboard and worker operations.
+    [self submitFilePasteboard:NSPasteboard.generalPasteboard captured:event.timestamp];
+}
+- (BOOL)submitFilePasteboard:(NSPasteboard *)pasteboard captured:(double)captured {
+    if (![self fileSelectionAvailable] || !isfinite(captured) || captured <= 0) return NO;
+    BOOL accepted = NO;
+    @autoreleasepool {
+        uint8_t bytes[FR_MAC_FILE_SELECTION_BYTES];
+        size_t length = 0;
+        BOOL selected = fr_file_selection_bytes(pasteboard, bytes, &length);
+        double now = NSProcessInfo.processInfo.systemUptime;
+        // Rust validates local file-URL syntax and reserves the single bounded
+        // slot. No NSURL resolution, metadata lookup or source read occurs here.
+        if (selected && [self fileSelectionAvailable] && now >= captured &&
+            now - captured < FR_MAC_FILE_SELECTION_AGE)
+            accepted = fileSelectionSubmit(fileSelectionContext, bytes, length, now - captured) != 0;
+        if (!nativeStopPending && uploadLabel) {
+            uploadLabel.stringValue = accepted ? @"Send: Preparing" : @"Send: Selection refused";
+        }
+        [self updateFileSelections];
+    }
+    return accepted;
 }
 
 - (void)push:(FrMacEvent)event {
@@ -1479,7 +1639,8 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
                       uint32_t point_height, uint32_t sharing_flags, const char *title,
                       size_t title_len, void **out) {
     if (!out || width < 16 || height < 16 || point_width < 1 || point_height < 1 ||
-        (sharing_flags & ~FR_MAC_SHARE_ALL) || (title_len && !title))
+        (sharing_flags & ~FR_MAC_SHARE_ALL) || (title_len && !title) ||
+        ((sharing_flags & FR_MAC_FILE_SELECTION) && !(sharing_flags & FR_MAC_SHARE_UPLOAD)))
         return FR_MAC_INVALID;
     *out = NULL;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
@@ -1841,6 +2002,32 @@ int fr_mac_window_clipboard_bind(void *handle, void *context, FrClipboardStop st
     return FR_MAC_OK;
 }
 
+// Adopt one original selection owner. Callbacks and view registration are
+// main-thread only; a failed bind retains no pointer.
+int fr_mac_window_file_selection_bind(void *handle, void *context,
+        FrFileSelectionReady ready, FrFileSelectionSubmit submit,
+        FrFileSelectionStop stop, FrFileSelectionRelease release) {
+    if (!handle || !context || !ready || !submit || !stop || !release) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->sendCopiedFiles || owner->fileSelectionContext) return FR_MAC_INVALID;
+    owner->fileSelectionContext = context;
+    owner->fileSelectionReady = ready;
+    owner->fileSelectionSubmit = submit;
+    owner->fileSelectionStop = stop;
+    owner->fileSelectionRelease = release;
+    if (owner->fileSelectionStopped || owner->nativeStopPending) stop(context);
+    else [owner->view registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    return FR_MAC_OK;
+}
+int fr_mac_window_file_selection_update(void *handle) {
+    if (!handle) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    [owner updateFileSelections];
+    return FR_MAC_OK;
+}
+
 int fr_mac_window_clipboard_update(void *handle, uint32_t state) {
     if (!handle || state > 4) return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
@@ -2075,6 +2262,16 @@ void fr_mac_window_free(void *handle) {
     if (!handle) return;
     @autoreleasepool {
         FrWindowOwner *owner = (__bridge_transfer FrWindowOwner *)handle;
+        [owner stopFileSelections];
+        void *fileContext = owner->fileSelectionContext;
+        FrFileSelectionRelease fileRelease = owner->fileSelectionRelease;
+        owner->fileSelectionContext = NULL;
+        owner->fileSelectionReady = NULL;
+        owner->fileSelectionSubmit = NULL;
+        owner->fileSelectionStop = NULL;
+        owner->fileSelectionRelease = NULL;
+        [owner->view unregisterDraggedTypes];
+        if (fileContext && fileRelease) fileRelease(fileContext);
         atomic_store_explicit(&owner->lifetime->unavailable, true, memory_order_release);
         for (id observer in owner->lifetimeObservers) [owner->lifetimeCenter removeObserver:observer];
         [owner->lifetimeObservers removeAllObjects];
@@ -2119,6 +2316,7 @@ void fr_mac_window_free(void *handle) {
         owner->downloadCancel = nil;
         owner->changeDisplay = nil;
         owner->clipboardOff = nil;
+        owner->sendCopiedFiles = nil;
     }
 }
 

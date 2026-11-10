@@ -838,6 +838,7 @@ fn service(
         if !retired {
             return Ok(false);
         }
+        files.borrow_mut().cancel();
         intent.borrow_mut().invalidate();
         let pending = display_intent.borrow().pending();
         if !pending {
@@ -882,7 +883,14 @@ fn service(
                 .map_or((None, 0, false), Input::text_status);
             opened.text_update(context, until, ready).is_ok()
         };
+        files.borrow().file_drop_ready(
+            input
+                .borrow()
+                .as_ref()
+                .is_some_and(|input| !input.stopped()),
+        );
         if !text_updated
+            || opened.file_selection_update().is_err()
             || opened
                 .display_change_enabled(display_intent.borrow().enabled())
                 .is_err()
@@ -944,6 +952,9 @@ fn service(
         return;
     };
     let state = opened.state().ok();
+    files
+        .borrow()
+        .file_drop_ready(input.is_some() && state.is_some_and(super::WindowState::input_ready));
     let display_action = opened.take_display_change();
     drop(slot);
     let reason = if display_action.is_err() {
@@ -1264,12 +1275,18 @@ impl Application for Session {
         let clipboard = self.clipboard.clone();
         let clipboard_requested = clipboard.borrow().available();
         let file_directions = sharing::flags(&files.borrow()).count_ones();
+        let file_selections = files.borrow().file_drop_requested();
         let text_requested = self
             .control
             .is_some_and(|policy| policy.capabilities.contains(Capability::Text));
         let sharing_flags = sharing::flags(&files.borrow())
             | 4
             | (u32::from(clipboard_requested) << 3)
+            | if file_selections {
+                super::FILE_SELECTION_FLAG
+            } else {
+                0
+            }
             | if text_requested {
                 TEXT_COMPOSER_FLAG
             } else {
@@ -1304,18 +1321,20 @@ impl Application for Session {
         let picker_error = self.picker_error.clone();
         let window_slot = window.clone();
         let clipboard_ui = clipboard.clone();
+        let file_ui = files.clone();
         let decoder_hardware = hardware.clone();
         let approval_report = report.clone();
         let native_started = self.native_started.clone();
         let opening = viewer.observe_with_renderer(
             move |display, _original| async move {
-                let points = crate::macos_sizing::sharing_points_with_text(
+                let points = crate::macos_sizing::sharing_points_with_selections(
                     (display.pixel_width, display.pixel_height),
                     (display.logical_width, display.logical_height),
                     fit_window,
                     file_directions,
                     clipboard_requested,
                     text_requested,
+                    file_selections,
                 )?;
                 // From this point onward, losing the observer is not proof
                 // that AppKit, the renderer or its worker finished cleanup.
@@ -1329,6 +1348,9 @@ impl Application for Session {
                 )
                 .map_err(|_| ())?;
                 clipboard_ui.borrow_mut().install(&opened).map_err(|_| ())?;
+                if let Some(ingress) = file_ui.borrow().file_drop_ingress() {
+                    opened.file_selection_bind(ingress).map_err(|_| ())?;
+                }
                 let surface = opened.surface();
                 *window_slot.borrow_mut() = Some(opened);
                 Launch::in_process(

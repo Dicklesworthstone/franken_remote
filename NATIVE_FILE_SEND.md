@@ -372,6 +372,47 @@ combined result reporting. Those runtime-dependent Rust targets and an actual
 file-manager/X11 drop have not yet been executed in this change's workspace;
 the parser and C checks do not qualify the complete desktop workflow.
 
+## macOS native selections on the original client upload
+
+The Mac desktop opts in with `--control --file-drop`. Its **Send copied files**
+button and picture drop target share the same bounded URI parser, selection
+worker and original `NativeObserver` upload intake described above. Unlike the
+Linux `--send` convenience behavior, Mac native selection always requires the
+explicit `--file-drop` flag. It combines with initial `--send`, independent
+`--receive`, and `--file-commands` without negotiating a second file lane.
+
+For a same-window workflow, copy local files in Finder before connecting or
+requesting control, then click **Send copied files** once the upload is ready.
+Reading file-URL metadata happens only on that fresh local click or the actual
+drop. Turning off text clipboard synchronization does not disable this separately
+requested local file-selection gesture. The callback does not open, resolve or
+read a source, and it never creates or fulfills a file promise. AppKit registers
+only `NSPasteboardTypeFileURL`; promise types and nonlocal URLs are refused.
+The original click/release age includes native pasteboard work, then the shared
+worker's descriptor selection. Neither phase refreshes the two-second budget.
+
+At most eight paths and 32 KiB of URL metadata enter one pending slot; at most
+eight native selection results survive for completion. Each result retains the
+actual sender control and receipt. The toolbar shows content-free preparation,
+progress or refusal, and Cancel retires native/command upload intake and cancels
+admitted uploads without changing the download destination. Original source,
+native selections and commands keep their independent outcomes in completion.
+Window close, focus loss, hiding, display change and session shutdown fence the
+native inbox. An accepted intent cannot reappear on reconnect, and the original
+worker must actually exit before another attempt may begin.
+
+The existing focus-loss stop is preserved. Finder dragging may focus Finder
+and invalidate a controlling session before release; native drops are accepted
+only while the original focused, visible and current picture remains eligible.
+The copied-file button avoids switching applications during control. Physical
+Finder/AppKit behavior, the Apple SDK build and actual transfer/cancel/reconnect
+qualification remain outstanding. Portable regression targets cover the real
+descriptor-selection boundary, bounded native ingress, original consent and
+toolbar sizing; they do not establish a native session result.
+
+See [the Mac client workflow](docs/native-client-cli.md#native-macos-file-selections)
+for commands, focus behavior, and the 144-point toolbar reservation.
+
 ## Local commands on the original client upload
 
 The Linux client can accept later explicit selections without an X11 file-manager
