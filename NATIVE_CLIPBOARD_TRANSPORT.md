@@ -198,8 +198,11 @@ A transport drive may flush up to eight 900-byte bulk prefixes before its single
 receive wait. A critical prefix takes priority and yields back to receive/service.
 Each prefix rechecks authority, original send deadlines, native congestion and
 flow credit, including reserved critical credit. One 250 ms outer bound covers
-the entire turn. The transport still relies on Asupersync for pacing, loss and
-congestion control; this is not an unbounded bulk-write loop.
+the entire turn. It is judged after each poll of the turn, so time the thread
+spends preempted between two polls cannot fail a turn that finishes on its next
+poll; a turn still pending past the bound fails as before. The transport still
+relies on Asupersync for pacing, loss and congestion control; this is not an
+unbounded bulk-write loop.
 
 Collect `Bridge::take_received` regularly. A submitted, uncertain, or refused
 publication result is terminal for that record and retained until collected;

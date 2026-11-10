@@ -6,7 +6,7 @@ use super::{Error, QuicRecords, attachment::Reservation, now};
 use asupersync::cx::Cx;
 use std::{
     future::{Future, poll_fn},
-    pin::pin,
+    pin::{Pin, pin},
     sync::Arc,
     task::Poll,
 };
@@ -81,6 +81,35 @@ impl QuicRecords {
         self.terminal_lifetime_check = Some(terminal);
         self.check(cx, &mut || true).map(|_| ())
     }
+}
+
+/// One drive turn under its bound, judged only AFTER the turn has been polled.
+///
+/// `asupersync::time::timeout` fails a future as soon as its deadline has
+/// passed, before polling it again. On an oversubscribed host the thread can
+/// be away from a turn for longer than the bound between two of its polls
+/// (preempted, or inside another task's long poll) while the turn's I/O
+/// finished; that turn failed, closing the connection, without being looked
+/// at. Measured on a loaded macOS host: one 252 ms hub poll, then
+/// a turn with a 10 ms receive wait "expired" after 259 ms, ending sessions
+/// after 5-36 s. Here the turn gets its poll first: if it can finish now, it
+/// finishes. The bound still holds: once `bound` is ready, the first poll that
+/// leaves the turn pending fails it with `Error::Expired` and drops it exactly
+/// as the timeout did (`Held` makes that terminal), so a turn never runs more
+/// than one poll past its bound.
+///
+/// Both futures stay pinned in the caller: holding them by value here would
+/// store the large turn future twice in the caller's state.
+pub(super) fn within_turn_bound<'a, T>(
+    mut turn: Pin<&'a mut impl Future<Output = Result<T, Error>>>,
+    mut bound: Pin<&'a mut impl Future<Output = ()>>,
+) -> impl Future<Output = Result<T, Error>> + 'a {
+    poll_fn(move |task| {
+        if let Poll::Ready(result) = turn.as_mut().poll(task) {
+            return Poll::Ready(result);
+        }
+        bound.as_mut().poll(task).map(|()| Err(Error::Expired))
+    })
 }
 
 /// Immutable entry evidence from the exclusive native owner. Queued FRD0
@@ -169,3 +198,6 @@ pub(super) async fn poll_io_at_boundary<T, E>(
     })
     .await
 }
+
+#[cfg(test)]
+mod turn_bound_tests;

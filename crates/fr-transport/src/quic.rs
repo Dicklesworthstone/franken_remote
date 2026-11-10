@@ -6,7 +6,7 @@ use asupersync::{
         NativeQuicUdpConnection, QuicConnectionState, QuicStream, StreamDirection, StreamId,
         StreamRole,
     },
-    time::timeout,
+    time::sleep,
 };
 use fr_wire::{
     HEADER_BYTES,
@@ -15,6 +15,7 @@ use fr_wire::{
 use std::{
     collections::VecDeque,
     fmt,
+    pin::pin,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -928,7 +929,9 @@ impl QuicRecords {
     /// opportunity keeps a continuous critical backlog from starving recovery.
     /// Each prefix rechecks authority, deadlines, native congestion and flow
     /// credit. The whole turn retains one 250 ms bound; backpressure never
-    /// becomes an unbounded write loop.
+    /// becomes an unbounded write loop. The bound is judged after each poll of
+    /// the turn (`lifetime::within_turn_bound`): time the thread spent
+    /// preempted between two polls cannot fail a turn that finishes on its next.
     /// Dropping an active native I/O operation is terminal. The session watchdog
     /// must independently cancel Cx on expiry/revoke, including during silence.
     pub async fn drive(
@@ -941,14 +944,12 @@ impl QuicRecords {
         if wait > Duration::from_millis(100) {
             return Err(Error::InvalidPolicy);
         }
-        let result = timeout(
-            cx.now(),
-            Duration::from_millis(250),
-            self.drive_turn(cx, wait, &mut authorize),
-        )
-        .await
-        .map_err(|_| Error::Expired)
-        .and_then(core::convert::identity);
+        let result = {
+            // Dropped at this block's end: a failed turn never outlives it.
+            let turn = pin!(self.drive_turn(cx, wait, &mut authorize));
+            let bound = pin!(sleep(cx.now(), Duration::from_millis(250)));
+            lifetime::within_turn_bound(turn, bound).await
+        };
         if let Err(error) = result {
             self.close_on_error(error);
         }
