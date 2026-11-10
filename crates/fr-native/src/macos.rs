@@ -141,6 +141,18 @@ unsafe extern "C" {
         visible: *mut c_int,
         geometry_current: *mut c_int,
     ) -> c_int;
+    fn fr_mac_window_resize_bind(
+        window: *mut c_void,
+        context: *mut c_void,
+        changed: unsafe extern "C" fn(*mut c_void, *const crate::macos_resize::Sample),
+        release: unsafe extern "C" fn(*mut c_void),
+        initial: *mut crate::macos_resize::Sample,
+    ) -> c_int;
+    fn fr_mac_window_resize_seal(
+        window: *mut c_void,
+        sample: *mut crate::macos_resize::Sample,
+    ) -> c_int;
+    fn fr_mac_window_place(window: *mut c_void, x: i32, y: i32) -> c_int;
     fn fr_mac_window_set_resizable(window: *mut c_void, resizable: c_int) -> c_int;
     fn fr_mac_window_renderer(window: *mut c_void) -> *mut c_void;
     fn fr_mac_surface_offscreen(width: u32, height: u32, out: *mut *mut c_void) -> c_int;
@@ -356,6 +368,68 @@ impl Window {
             _main_thread: PhantomData,
         })
     }
+    /// Bind one metadata-only native watcher to this original session. Its
+    /// callback fences input before AppKit can deliver any post-resize event.
+    pub(crate) fn watch_resize(
+        &self,
+        intent: std::rc::Rc<crate::macos_resize::Intent>,
+        stop: frd::session_startup::StreamingViewerControl,
+    ) -> Result<(), NativeError> {
+        let bridge = Box::new(ResizeBridge {
+            intent: intent.clone(),
+            stop: stop.clone(),
+        });
+        let context = Box::into_raw(bridge).cast();
+        let mut initial = crate::macos_resize::Sample::default();
+        // SAFETY: main-thread live window and writable scalar output. Native
+        // takes the Box only on success and clears callbacks before release.
+        let result = status(unsafe {
+            fr_mac_window_resize_bind(
+                self.raw.as_ptr(),
+                context,
+                resize_changed,
+                resize_release,
+                &raw mut initial,
+            )
+        });
+        if let Err(error) = result {
+            // SAFETY: failed binding did not retain the unique context.
+            drop(unsafe { Box::from_raw(context.cast::<ResizeBridge>()) });
+            intent.cancel();
+            return Err(error);
+        }
+        if !intent.arm(initial) {
+            intent.cancel();
+            stop.stop();
+            return Err(NativeError::GeometryChanged);
+        }
+        if let Err(error) = self.set_resizable(true) {
+            intent.cancel();
+            stop.stop();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Called after the original stop and a complete bounded event drain.
+    pub(crate) fn seal_resize(&self) -> Result<crate::macos_resize::Sample, NativeError> {
+        let mut sample = crate::macos_resize::Sample::default();
+        // SAFETY: live main-thread owner and one writable scalar receipt.
+        status(unsafe { fr_mac_window_resize_seal(self.raw.as_ptr(), &raw mut sample) })?;
+        Ok(sample)
+    }
+
+    pub(crate) fn place(
+        &self,
+        placement: crate::macos_resize::Placement,
+    ) -> Result<(), NativeError> {
+        // SAFETY: checked local point scalars; native also checks a currently
+        // visible screen before moving this newly constructed window.
+        status(unsafe {
+            fr_mac_window_place(self.raw.as_ptr(), placement.origin.0, placement.origin.1)
+        })
+    }
+
     pub(crate) fn sharing_update(&self, view: sharing::View) -> Result<(), NativeError> {
         // SAFETY: live main-thread window, bounded status enums and scalar counts.
         status(unsafe {
@@ -676,6 +750,45 @@ impl Drop for Window {
     fn drop(&mut self) {
         // SAFETY: unique owner of the +1 window reference, on the main thread.
         unsafe { fr_mac_window_free(self.raw.as_ptr()) };
+    }
+}
+
+// Main-thread-only and owned by one exact Window. The policy uses Cell, so
+// these native callbacks perform no session borrow, lock, native work or I/O.
+struct ResizeBridge {
+    intent: std::rc::Rc<crate::macos_resize::Intent>,
+    stop: frd::session_startup::StreamingViewerControl,
+}
+impl Drop for ResizeBridge {
+    fn drop(&mut self) {
+        self.stop.stop();
+    }
+}
+unsafe extern "C" fn resize_changed(
+    context: *mut c_void,
+    sample: *const crate::macos_resize::Sample,
+) {
+    if context.is_null() {
+        return;
+    }
+    // SAFETY: the original window retains this Box until it clears every
+    // callback, and the native stack sample lives for this same-thread call.
+    let bridge = unsafe { &*context.cast::<ResizeBridge>() };
+    if sample.is_null() {
+        bridge.intent.cancel();
+    } else {
+        bridge
+            .intent
+            .observe(unsafe { *sample }, bridge.stop.is_stopped());
+    }
+    // Recording a causal receipt is not authority. Stop is terminal even when
+    // the sample was malformed or an earlier local failure already vetoed it.
+    bridge.stop.stop();
+}
+unsafe extern "C" fn resize_release(context: *mut c_void) {
+    if !context.is_null() {
+        // SAFETY: exactly once after native clears the original callback slots.
+        drop(unsafe { Box::from_raw(context.cast::<ResizeBridge>()) });
     }
 }
 

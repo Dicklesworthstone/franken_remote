@@ -430,6 +430,15 @@ enum {
 #define FR_MAC_FILE_SELECTION_PATHS 8
 #define FR_MAC_FILE_SELECTION_AGE 2.0
 
+// Main-thread scalar receipt; no renderer, surface or input token crosses it.
+typedef struct {
+    uint64_t revision;
+    double width, height, x, y, observed;
+    int32_t eligible;
+} FrMacResizeSample;
+typedef void (*FrResizeChanged)(void *, const FrMacResizeSample *);
+typedef void (*FrResizeRelease)(void *);
+
 typedef void (*FrClipboardStop)(void *, int);
 typedef void (*FrClipboardRelease)(void *);
 typedef int (*FrFileSelectionReady)(void *);
@@ -592,6 +601,14 @@ static BOOL fr_any_key(const BOOL *keys) {
     NSNotificationCenter *lifetimeCenter;
     NSMutableArray<id> *lifetimeObservers;
     uint32_t buttons;  // pressed mouse buttons that went down inside the picture
+    void *resizeContext;
+    FrResizeChanged resizeChanged;
+    FrResizeRelease resizeRelease;
+    uint64_t resizeRevision;
+    uint32_t resizeSourceWidth, resizeSourceHeight;
+    CGSize resizeDrawable;
+    double resizeScale;
+    BOOL resizeSealed;
 }
 - (void)push:(FrMacEvent)event;
 - (void)layout;
@@ -618,6 +635,7 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)retireText:(NSString *)message;
 - (void)cleanupRetiredText;
 - (void)stopNativeInput:(NSString *)message;
+- (void)cancelResize;
 - (void)clearText:(NSString *)message;
 - (void)openText:(id)sender;
 - (void)sendText:(id)sender;
@@ -938,6 +956,35 @@ static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, si
     return pasteboard.changeCount == revision;
 }
 
+// Reads only the original window and the renderer's short geometry lock.
+// A missing/currently hidden window cannot grant a replacement attempt.
+static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
+    FrMacResizeSample sample = {0};
+    os_unfair_lock_lock(&owner->renderer->geometryLock);
+    sample.revision = owner->renderer->geometry.revision;
+    BOOL sameSource = !owner->resizeContext ||
+        (owner->renderer->geometry.sourceWidth == owner->resizeSourceWidth &&
+         owner->renderer->geometry.sourceHeight == owner->resizeSourceHeight);
+    os_unfair_lock_unlock(&owner->renderer->geometryLock);
+    NSWindow *window = owner->window;
+    NSSize size = window.contentView.bounds.size;
+    NSPoint origin = window.frame.origin;
+    sample.width = size.width;
+    sample.height = size.height;
+    sample.x = origin.x;
+    sample.y = origin.y;
+    sample.observed = NSProcessInfo.processInfo.systemUptime;
+    sample.eligible = sameSource && !owner->nativeStopPending && !owner->overflow &&
+        !owner->textActive && !owner->textPending && !owner->displayChangeAt &&
+        // Native polling pauses at an undelivered sharing action. That is not
+        // a complete final event turn: a queued close/focus/escape may follow.
+        !owner->sharingActions &&
+        !atomic_load_explicit(&owner->lifetime->unavailable, memory_order_acquire) &&
+        window.isKeyWindow && window.isVisible && !window.isMiniaturized &&
+        window.isOnActiveSpace && (window.occlusionState & NSWindowOcclusionStateVisible);
+    return sample;
+}
+
 @implementation FrWindowOwner
 
 - (void)dealloc {
@@ -1185,7 +1232,14 @@ static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, si
     if (nativeStopPending) retiredTextEditor = retired;
     textCleaning = NO;
 }
+- (void)cancelResize {
+    if (resizeContext && resizeChanged) {
+        FrMacResizeSample sample = {0}; // negative only, even after a prior seal
+        resizeChanged(resizeContext, &sample);
+    }
+}
 - (void)stopNativeInput:(NSString *)message {
+    [self cancelResize];
     nativeStopPending = YES;
     [self stopFileSelections];
     textContext = 0;
@@ -1445,6 +1499,23 @@ static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, si
     }
     double scale = window ? window.backingScaleFactor : 1;
     [renderer resizeTo:view.bounds.size scale:scale];
+    if (resizeContext && resizeChanged) {
+        FrMacResizeSample sample = fr_resize_sample(self);
+        if (sample.revision != resizeRevision) {
+            os_unfair_lock_lock(&renderer->geometryLock);
+            BOOL localGeometry = renderer->geometry.scale != resizeScale ||
+                !CGSizeEqualToSize(renderer->geometry.drawable, resizeDrawable);
+            resizeScale = renderer->geometry.scale;
+            resizeDrawable = renderer->geometry.drawable;
+            os_unfair_lock_unlock(&renderer->geometryLock);
+            resizeRevision = sample.revision;
+            // Remote picture reconfiguration is not a local window gesture.
+            if (resizeSealed || !localGeometry) sample.eligible = 0;
+            // The callback records this receipt and synchronously fences the
+            // original viewer before another input or IME/native cleanup call.
+            resizeChanged(resizeContext, &sample);
+        }
+    }
     layoutInProgress = NO;
     if ((textActive || textPending) && ![self textWindowReady]) {
         // A true native geometry/window loss invalidates this active draft.
@@ -2139,6 +2210,80 @@ int fr_mac_window_state(void *handle, uint32_t *width, uint32_t *height, int *ke
     return FR_MAC_OK;
 }
 
+// Arm after the original startup produced a real current picture. Rust owns
+// the context until success; this exact window then owns its one final release.
+int fr_mac_window_resize_bind(void *handle, void *context, FrResizeChanged changed,
+                              FrResizeRelease release, FrMacResizeSample *initial) {
+    if (!handle || !context || !changed || !release || !initial) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (owner->resizeContext) return FR_MAC_INVALID;
+    FrMacResizeSample sample = fr_resize_sample(owner);
+    os_unfair_lock_lock(&owner->renderer->geometryLock);
+    BOOL current = owner->renderer->submittedPicture &&
+        owner->renderer->submittedRevision == sample.revision &&
+        owner->renderer->geometry.revision == sample.revision;
+    owner->resizeSourceWidth = owner->renderer->geometry.sourceWidth;
+    owner->resizeSourceHeight = owner->renderer->geometry.sourceHeight;
+    owner->resizeDrawable = owner->renderer->geometry.drawable;
+    owner->resizeScale = owner->renderer->geometry.scale;
+    os_unfair_lock_unlock(&owner->renderer->geometryLock);
+    if (!current || !sample.eligible) return FR_MAC_UNAVAILABLE;
+    owner->resizeContext = context;
+    owner->resizeChanged = changed;
+    owner->resizeRelease = release;
+    owner->resizeRevision = sample.revision;
+    *initial = sample;
+    return FR_MAC_OK;
+}
+
+// A complete native event turn precedes this seal. Later terminal callbacks
+// may still veto it; native owner release clears callbacks before our own close.
+int fr_mac_window_resize_seal(void *handle, FrMacResizeSample *sample) {
+    if (!handle || !sample) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->resizeContext || owner->resizeSealed) return FR_MAC_UNAVAILABLE;
+    *sample = fr_resize_sample(owner);
+    owner->resizeSealed = YES;
+    return FR_MAC_OK;
+}
+
+// Restore a checked local point position only while constructing a NEW window.
+// A removed monitor is a refusal; never reopen invisibly off-screen.
+int fr_mac_window_place(void *handle, int32_t x, int32_t y) {
+    if (!handle) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (owner->resizeContext) return FR_MAC_INVALID;
+    NSRect frame = owner->window.frame;
+    frame.origin = NSMakePoint(x, y);
+    // A backing-scale transition commonly straddles two screens. Select only
+    // a currently intersecting screen, then make the fresh title accessible;
+    // no original off-screen location can silently migrate to another display.
+    NSScreen *target = nil;
+    double largest = 0;
+    for (NSScreen *screen in NSScreen.screens) {
+        NSRect overlap = NSIntersectionRect(frame, screen.visibleFrame);
+        double area = NSWidth(overlap) * NSHeight(overlap);
+        if (area > largest) { largest = area; target = screen; }
+    }
+    if (!target) return FR_MAC_GEOMETRY;
+    NSRect visible = target.visibleFrame;
+    double titleWidth = fmin(frame.size.width, 160);
+    if (NSWidth(visible) < titleWidth || NSHeight(visible) < 28) return FR_MAC_GEOMETRY;
+    double maxX = NSMaxX(visible) - fmin(frame.size.width, NSWidth(visible));
+    frame.origin.x = fmax(NSMinX(visible), fmin(frame.origin.x, maxX));
+    double top = fmax(NSMinY(visible) + 28,
+                      fmin(NSMaxY(frame), NSMaxY(visible)));
+    frame.origin.y = top - frame.size.height;
+    NSRect title = NSMakeRect(frame.origin.x, top - 28, titleWidth, 28);
+    if (!NSContainsRect(visible, title)) return FR_MAC_GEOMETRY;
+    [owner->window setFrameOrigin:frame.origin];
+    [owner layout];
+    return FR_MAC_OK;
+}
+
 // Fix or free the window's size. An input layout is valid for one size only.
 int fr_mac_window_set_resizable(void *handle, int resizable) {
     if (!handle) return FR_MAC_INVALID;
@@ -2262,6 +2407,14 @@ void fr_mac_window_free(void *handle) {
     if (!handle) return;
     @autoreleasepool {
         FrWindowOwner *owner = (__bridge_transfer FrWindowOwner *)handle;
+        // Clear the original geometry callbacks before our own native teardown
+        // generates focus/layout changes. No late callback can reach a new window.
+        void *resizeContext = owner->resizeContext;
+        FrResizeRelease resizeRelease = owner->resizeRelease;
+        owner->resizeContext = NULL;
+        owner->resizeChanged = NULL;
+        owner->resizeRelease = NULL;
+        if (resizeContext && resizeRelease) resizeRelease(resizeContext);
         [owner stopFileSelections];
         void *fileContext = owner->fileSelectionContext;
         FrFileSelectionRelease fileRelease = owner->fileSelectionRelease;

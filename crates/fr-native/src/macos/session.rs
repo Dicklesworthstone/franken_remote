@@ -9,6 +9,9 @@
 //! input to the granted session's one event `Source`. Focus loss, hiding, a
 //! changed picture size, event overflow or a closed window stop that source
 //! (frd's contract for a native producer): control then ends with the session.
+//! Checked native geometry changes can reopen a fresh viewing window after
+//! original cleanup, retaining only local point size/position. They never reuse
+//! the old mapping, control, clipboard, file selection or text composition.
 //! The invocation's initial control choice is consumed once. A recovered
 //! window stays viewing until a fresh F8 press and release requests a new
 //! grant; Ctrl+Alt+Shift+Escape closes the session locally.
@@ -21,6 +24,7 @@ use super::{
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
+use crate::macos_resize::{Intent as ResizeIntent, Placement};
 use crate::macos_scroll::{CaptureClock, Refusal as ScrollRefusal, Scroll};
 use crate::macos_switch::{Intent as DisplayIntent, Mode as DisplayMode};
 use asupersync::{
@@ -44,7 +48,9 @@ use fr_wire::{
 };
 use frd::{
     media::PresentationStage,
-    native_connection::reconnect::{Application, CallbackError, CompletionAction, Status},
+    native_connection::reconnect::{
+        self, Application, CallbackError, CompletionAction, LocalLayoutChange, Status,
+    },
     session_startup::{
         ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
         Presentation, StreamingViewerControl, Viewer,
@@ -126,6 +132,9 @@ pub struct Report {
     pub viewing_reconnects: u32,
     pub display_changes: u32,
     pub display_change_closes: Vec<DisplayChangeReport>,
+    pub window_resizes: u32,
+    /// Failed original attempts, retained separately from a successful reopen.
+    pub window_resize_closes: Vec<WindowResizeReport>,
     pub keys: u64,
     pub pointer: u64,
     pub buttons: u64,
@@ -151,6 +160,12 @@ pub struct DisplayChangeReport {
     pub attempt: u8,
     pub close_exchange: Option<fr_transport::quic::CloseOutcome>,
     pub lease_revocation: Option<fr_wire::lease_revoked::Revoked>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WindowResizeReport {
+    pub original: DisplayChangeReport,
+    pub interruption: reconnect::Failure,
 }
 
 type Choose = Box<dyn FnMut(&Catalog) -> Result<Option<u128>, ()>>;
@@ -560,6 +575,8 @@ pub struct Session {
     epoch: u128,
     title: String,
     fit_window: Option<(u32, u32)>,
+    placement: Option<Placement>,
+    resize: Rc<ResizeIntent>,
     window: WindowSlot,
     /// The started observer, reaped in `cleanup`. `run` and `cleanup` both
     /// take `&mut self`, so `run`'s borrow has ended before cleanup starts.
@@ -572,6 +589,7 @@ pub struct Session {
     intent: Rc<RefCell<Intent>>,
     display_intent: Rc<RefCell<DisplayIntent>>,
     service_succeeded: bool,
+    service_failure: Option<ObserverError>,
     started: bool,
     /// Set inside the deferred renderer, after approval and display selection.
     /// Entering `run` alone does not mean any native cleanup owner exists.
@@ -614,6 +632,8 @@ impl Session {
             epoch,
             title,
             fit_window: None,
+            placement: None,
+            resize: Rc::default(),
             window: Rc::default(),
             observer: None,
             input: Rc::default(),
@@ -624,6 +644,7 @@ impl Session {
             intent: Rc::new(RefCell::new(Intent::new(control.is_some()))),
             display_intent: Rc::default(),
             service_succeeded: false,
+            service_failure: None,
             started: false,
             native_started: Rc::default(),
             cleanup_confirmed: false,
@@ -680,6 +701,106 @@ impl Session {
     ) -> Result<(), frd::native_files::local::Error> {
         self.files.borrow_mut().command_connection(connection)
     }
+    /// Fence first, then inspect the original window's final bounded native
+    /// turn. Ordinary events are discarded; no input or text is replayed.
+    fn seal_window_resize(&self) {
+        if !self.resize.armed() {
+            return;
+        }
+        let mut events = Vec::with_capacity(64);
+        let mut window = self.window.borrow_mut();
+        let Some(opened) = window.as_mut() else {
+            self.resize.cancel();
+            return;
+        };
+        opened.poll(Duration::ZERO, &mut events);
+        if let Some(reason) = terminal_event(&events) {
+            self.resize.cancel();
+            let mut report = self.report.borrow_mut();
+            if report
+                .local_stop
+                .is_none_or(|reason| reason == LocalStop::PictureChanged)
+            {
+                report.local_stop = Some(reason);
+            }
+            if matches!(reason, LocalStop::WindowClosed | LocalStop::LocalEscape) {
+                self.closed.set(true);
+            }
+        } else if self.resize.changed() {
+            self.intent.borrow_mut().retire_initial();
+            self.display_intent.borrow_mut().cancel();
+            self.report
+                .borrow_mut()
+                .local_stop
+                .get_or_insert(LocalStop::PictureChanged);
+            match opened.seal_resize() {
+                Ok(sample) => {
+                    self.resize.seal(sample);
+                }
+                Err(_) => self.resize.cancel(),
+            }
+        }
+    }
+
+    fn window_resize_action(
+        &mut self,
+        failure: reconnect::Failure,
+        now: Option<Duration>,
+    ) -> Option<LocalLayoutChange> {
+        if !self.resize.changed() {
+            return None;
+        }
+        let report = self.report.borrow();
+        if self.service_succeeded
+            || !self.cleanup_confirmed
+            || self.started
+            || self.native_started.get()
+            || self.observer.is_some()
+            || self.picker.borrow().is_some()
+            || self.closed.get()
+            || report.local_stop != Some(LocalStop::PictureChanged)
+            || self.display_intent.borrow().pending()
+            || self.terminal_failure().is_some()
+            || !(1..32).contains(&report.attempts)
+            || report.window_resize_closes.len() >= 31
+            || !reconnect::resize_interrupted(failure)
+            || self.service_failure.is_some_and(|error| {
+                matches!(
+                    error,
+                    ObserverError::Application
+                        | ObserverError::Streaming(
+                            frd::session_startup::StreamingViewerError::Application
+                        )
+                ) || !reconnect::resize_interrupted(reconnect::Failure::Observation(error))
+            })
+        {
+            self.resize.cancel();
+            return None;
+        }
+        let original = DisplayChangeReport {
+            attempt: report.attempts,
+            close_exchange: report.close_exchange,
+            lease_revocation: report.lease_revocation,
+        };
+        drop(report);
+        let placement = self.resize.take(now)?;
+        self.fit_window = Some(placement.size);
+        self.placement = Some(placement);
+        self.intent.borrow_mut().retire_initial();
+        self.files.borrow_mut().cancel();
+        let mut report = self.report.borrow_mut();
+        report.window_resizes += 1;
+        report.window_resize_closes.push(WindowResizeReport {
+            original,
+            interruption: failure,
+        });
+        // Only this precise checked interruption loses its local stop latch;
+        // neither focus/hide/close nor another native failure can enter here.
+        report.local_stop = None;
+        Some(LocalLayoutChange::WindowResize)
+    }
+
+    /// Original-attempt receipts and cumulative local activity.
     pub fn report(&self) -> Report {
         let mut report = self.report.borrow().clone();
         let mut clipboard = self.clipboard.borrow_mut();
@@ -808,6 +929,8 @@ fn service(
     report: &RefCell<Report>,
     intent: &RefCell<Intent>,
     display_intent: &RefCell<DisplayIntent>,
+    resize: &Rc<ResizeIntent>,
+    can_resize: bool,
     closed: &Cell<bool>,
     stop: &StreamingViewerControl,
     files: &RefCell<files::Files>,
@@ -818,6 +941,7 @@ fn service(
     events.clear();
     let halt = |reason: LocalStop, input: &mut Option<Input>, report: &mut Report| {
         report.local_stop.get_or_insert(reason);
+        resize.cancel();
         display_intent.borrow_mut().cancel();
         *input = None;
         stop.stop();
@@ -825,6 +949,24 @@ fn service(
         files.borrow_mut().cancel();
         clipboard.borrow_mut().stop(window.borrow().as_ref());
     };
+    let geometry_stopped = || {
+        // Native already cancelled this exact original viewer before returning
+        // from layout. Drop the producer before entering any native cleanup.
+        input.borrow_mut().take();
+        stop.stop();
+        intent.borrow_mut().retire_initial();
+        display_intent.borrow_mut().cancel();
+        report
+            .borrow_mut()
+            .local_stop
+            .get_or_insert(LocalStop::PictureChanged);
+        files.borrow_mut().cancel();
+        clipboard.borrow_mut().stop(window.borrow().as_ref());
+    };
+    if resize.changed() {
+        geometry_stopped();
+        return;
+    }
     let retire_stopped = || -> Result<bool, ()> {
         let retired = {
             let mut slot = input.borrow_mut();
@@ -903,6 +1045,10 @@ fn service(
             terminal_event(events)
         }
     };
+    if terminal.is_none() && resize.changed() {
+        geometry_stopped();
+        return;
+    }
     if terminal.is_none() {
         match retire_stopped() {
             Ok(true) => return,
@@ -993,6 +1139,16 @@ fn service(
             display_intent
                 .borrow_mut()
                 .set_mode(DisplayMode::Disabled, event_time());
+            return;
+        }
+    }
+    if can_resize && !resize.armed() && state.is_some_and(super::WindowState::input_ready) {
+        let watched = window
+            .borrow()
+            .as_ref()
+            .is_some_and(|opened| opened.watch_resize(resize.clone(), stop.clone()).is_ok());
+        if !watched {
+            halt(LocalStop::NativeFailure, &mut input, &mut report);
             return;
         }
     }
@@ -1157,13 +1313,14 @@ fn attach(
     display: Display,
     window: &RefCell<Option<Window>>,
     slot: &Rc<RefCell<Option<Input>>>,
+    resize: &ResizeIntent,
 ) -> Result<bool, ()> {
     let window = window.borrow();
     let window = window.as_ref().ok_or(())?;
     let state = window.state().map_err(|_| ())?;
     let (width, height) = state.picture;
-    if !state.input_ready() {
-        return Ok(false); // wait for a submitted, current, focused picture
+    if !state.input_ready() || !resize.watching() {
+        return Ok(false); // wait for a current picture and its independent native fence
     }
     let source = InputBounds::new(
         DesktopPoint {
@@ -1177,8 +1334,8 @@ fn attach(
     let area = SurfaceRect::new(0, 0, width, height).map_err(|_| ())?;
     let layout = viewer.configure_viewport(source, area).map_err(|_| ())?;
     viewer.confirm_viewport(&layout).map_err(|_| ())?;
-    // The layout is valid for this size only.
-    window.set_resizable(false).map_err(|_| ())?;
+    // The layout is valid for this size only. The independently armed native
+    // watcher fences it synchronously on the next real geometry change.
     window.claim_input().map_err(|_| ())?;
     let binding = viewer.input_result_binding();
     let stop = Arc::new(AtomicBool::new(false));
@@ -1266,6 +1423,7 @@ impl Application for Session {
         }
         self.started = true;
         self.service_succeeded = false;
+        self.service_failure = None;
         self.cleanup_confirmed = false;
         self.report.borrow_mut().attempts = attempt;
         let stop = viewer.control();
@@ -1296,6 +1454,8 @@ impl Application for Session {
         let closed = self.closed.clone();
         let intent = self.intent.clone();
         let display_intent = self.display_intent.clone();
+        let resize = self.resize.clone();
+        let can_resize = Cell::new(false);
         let close_cx = self.close_cx.clone();
         let switchable = self.control.is_none() || close_cx.is_some();
         display_intent.borrow_mut().set_mode(
@@ -1314,6 +1474,7 @@ impl Application for Session {
             .ok_or(ObserverError::InvalidConfiguration)?;
         let title = self.title.clone();
         let fit_window = self.fit_window;
+        let placement = self.placement;
         let control = self.control;
         let choose = &mut self.choose;
         let select_fresh_display = self.display_picker;
@@ -1347,6 +1508,9 @@ impl Application for Session {
                     sharing_flags,
                 )
                 .map_err(|_| ())?;
+                if let Some(placement) = placement {
+                    opened.place(placement).map_err(|_| ())?;
+                }
                 clipboard_ui.borrow_mut().install(&opened).map_err(|_| ())?;
                 if let Some(ingress) = file_ui.borrow().file_drop_ingress() {
                     opened.file_selection_bind(ingress).map_err(|_| ())?;
@@ -1395,6 +1559,8 @@ impl Application for Session {
                 &report,
                 &intent,
                 &display_intent,
+                &resize,
+                can_resize.get(),
                 &closed,
                 &stop,
                 &files,
@@ -1414,6 +1580,9 @@ impl Application for Session {
         }
         let display = opened.display();
         let observer = self.observer.insert(opened);
+        // Startup owns a real first frame; a missing repaint is never inferred
+        // to be a resize. The next current native sample can arm its watcher.
+        can_resize.set(true);
         files.borrow_mut().configure(observer);
         clipboard.borrow_mut().configure(
             observer,
@@ -1470,6 +1639,7 @@ impl Application for Session {
                 let ui_intent = intent.clone();
                 let switching = display_intent.clone();
                 let results = report.clone();
+                let ui_resize = resize.clone();
                 let mut ui = move |state: InteractiveViewerState<'_>, frame| {
                     frames(frame);
                     let eligible = switchable
@@ -1556,7 +1726,8 @@ impl Application for Session {
                                 last_shown = Some(frame);
                             }
                             if !attached {
-                                attached = attach(viewer, display, &ui_window, &ui_input)?;
+                                attached =
+                                    attach(viewer, display, &ui_window, &ui_input, &ui_resize)?;
                             }
                             if let Some(input) = ui_input.borrow_mut().as_mut() {
                                 input.refresh_text(viewer)?;
@@ -1600,6 +1771,7 @@ impl Application for Session {
             }
         };
         self.service_succeeded = outcome.is_ok();
+        self.service_failure = outcome.as_ref().err().copied();
         outcome
     }
     fn cleanup(
@@ -1612,6 +1784,7 @@ impl Application for Session {
         if let Some(observer) = &self.observer {
             observer.control().stop();
         }
+        self.seal_window_resize();
         let text_retired = retire_text(&self.window, TextRetireMode::Fenced).is_ok();
         self.intent.borrow_mut().invalidate();
         self.clipboard
@@ -1699,10 +1872,14 @@ impl Application for Session {
                     return Err(CallbackError);
                 }
                 self.native_started.set(false);
+                // The old window and callback Box were positively retired.
+                // A late reference to its policy cannot affect this new owner.
+                self.resize = Rc::default();
                 self.cleanup_confirmed = false;
                 self.terminal = None;
                 self.picker_error.set(None);
                 self.service_succeeded = false;
+                self.service_failure = None;
                 self.report.borrow_mut().close_exchange = None;
                 self.report.borrow_mut().lease_revocation = None;
                 self.intent.borrow_mut().begin_attempt();
@@ -1759,6 +1936,13 @@ impl Application for Session {
         self.files.borrow_mut().cancel();
         Ok(CompletionAction::Reopen)
     }
+    fn local_layout_change(
+        &mut self,
+        failure: reconnect::Failure,
+    ) -> Result<Option<LocalLayoutChange>, CallbackError> {
+        Ok(self.window_resize_action(failure, super::event_time()))
+    }
+
     fn terminal_failure(&self) -> Option<ObserverError> {
         self.terminal
             .filter(|error| !self.service_succeeded || !requested_terminal(*error))
@@ -1875,6 +2059,169 @@ mod tests {
         assert!(intent.begin_close());
         drop(intent);
         session
+    }
+
+    fn resized_session() -> Session {
+        // Policy fixture only; no window, native owner, host or grant exists.
+        let mut session = failed_startup(false);
+        session.started = false;
+        session.cleanup_confirmed = true;
+        session.terminal = None;
+        session.service_failure = Some(ObserverError::Streaming(
+            frd::session_startup::StreamingViewerError::Closed,
+        ));
+        session.intent = Rc::new(RefCell::new(Intent::new(true)));
+        session.report.borrow_mut().local_stop = Some(LocalStop::PictureChanged);
+        let initial = crate::macos_resize::Sample {
+            revision: 1,
+            width: 960.0,
+            height: 660.0,
+            x: 40.0,
+            y: 80.0,
+            observed: 0.1,
+            eligible: 1,
+        };
+        assert!(session.resize.arm(initial));
+        let changed = crate::macos_resize::Sample {
+            revision: 2,
+            width: 1280.0,
+            height: 840.0,
+            observed: 0.11,
+            ..initial
+        };
+        session.resize.observe(changed, false);
+        assert!(session.resize.seal(crate::macos_resize::Sample {
+            observed: 0.12,
+            ..changed
+        }));
+        session
+    }
+
+    #[test]
+    fn checked_geometry_hook_reopens_once_without_regrant_or_original_receipt_loss() {
+        let mut session = resized_session();
+        let failure = reconnect::Failure::Cancelled;
+        assert_eq!(
+            session.window_resize_action(failure, Some(Duration::from_millis(130))),
+            Some(LocalLayoutChange::WindowResize),
+        );
+        assert_eq!(session.fit_window, Some((1280, 840)));
+        assert_eq!(session.placement.unwrap().origin, (40, 80));
+        assert!(session.intent.borrow().needs_explicit_request());
+        let report = session.report();
+        assert_eq!(report.window_resizes, 1);
+        assert_eq!(report.window_resize_closes.len(), 1);
+        assert_eq!(report.window_resize_closes[0].original.attempt, 1);
+        assert!(
+            report.window_resize_closes[0]
+                .original
+                .close_exchange
+                .is_none()
+        );
+        assert!(
+            report.window_resize_closes[0]
+                .original
+                .lease_revocation
+                .is_none()
+        );
+        assert_eq!(report.window_resize_closes[0].interruption, failure);
+        assert!(report.local_stop.is_none());
+        assert_eq!(
+            session.window_resize_action(failure, Some(Duration::from_millis(140))),
+            None
+        );
+        session.status(Status::Connecting { attempt: 2 }).unwrap();
+        assert!(!session.resize.armed());
+        assert!(
+            !session
+                .intent
+                .borrow_mut()
+                .take_request(true, Some(Duration::from_millis(150)))
+        );
+        assert_eq!(session.report().window_resize_closes.len(), 1);
+    }
+
+    #[test]
+    fn geometry_hook_refuses_unrelated_failures_terminal_locals_and_unreaped_owners() {
+        for refusal in 0..11 {
+            let mut session = resized_session();
+            let mut failure = reconnect::Failure::Cancelled;
+            match refusal {
+                0 => session.cleanup_confirmed = false,
+                1 => session.service_succeeded = true,
+                2 => session.started = true,
+                3 => session.native_started.set(true),
+                4 => session.closed.set(true),
+                5 => session.report.borrow_mut().local_stop = Some(LocalStop::FocusLost),
+                6 => session.terminal = Some(ObserverError::Application),
+                7 => session.report.borrow_mut().attempts = 32,
+                8 => session.service_failure = Some(ObserverError::Application),
+                9 => failure = reconnect::Failure::Clock,
+                10 => {
+                    let mut display = session.display_intent.borrow_mut();
+                    display.set_mode(DisplayMode::Viewing, Some(Duration::from_millis(1)));
+                    assert!(
+                        display.request(Duration::from_millis(2), Some(Duration::from_millis(3)))
+                    );
+                    assert!(display.begin_close());
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                session.window_resize_action(failure, Some(Duration::from_millis(130))),
+                None
+            );
+            assert_eq!(session.report().window_resizes, 0);
+            assert!(session.fit_window.is_none());
+        }
+    }
+
+    #[test]
+    fn geometry_hook_keeps_reported_host_close_terminal_even_after_local_cancel() {
+        use frd::session_startup::{Error, StreamingViewerError};
+        for cleanup in [
+            fr_wire::closure::Cleanup::Complete,
+            fr_wire::closure::Cleanup::Incomplete,
+        ] {
+            let mut session = resized_session();
+            let closed = fr_wire::closure::Closed {
+                reason: fr_wire::closure::ClosedReason::ClientRequested,
+                cleanup,
+                effects: fr_wire::closure::OutstandingEffects::Unknown,
+            };
+            let outcome = fr_transport::quic::CloseOutcome {
+                request_acknowledged: true,
+                report: Some(closed),
+                transport: Ok(()),
+            };
+            session.report.borrow_mut().close_exchange = Some(outcome);
+            session.terminal = Some(ObserverError::Streaming(StreamingViewerError::Session(
+                Error::RemoteClosed(closed),
+            )));
+            assert_eq!(
+                session.window_resize_action(
+                    reconnect::Failure::Cancelled,
+                    Some(Duration::from_millis(130))
+                ),
+                None
+            );
+            assert_eq!(session.report().close_exchange, Some(outcome));
+            assert!(session.report().window_resize_closes.is_empty());
+        }
+    }
+
+    #[test]
+    fn geometry_hook_cannot_spend_the_receipt_after_cleanup_used_its_original_lifetime() {
+        let mut session = resized_session();
+        assert_eq!(
+            session.window_resize_action(
+                reconnect::Failure::Cancelled,
+                Some(Duration::from_millis(2110))
+            ),
+            None
+        );
+        assert_eq!(session.report().local_stop, Some(LocalStop::PictureChanged));
+        assert!(session.report().window_resize_closes.is_empty());
     }
 
     #[test]

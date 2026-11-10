@@ -265,6 +265,33 @@ Repaint alone creates no new frame receipt or visibility freshness. Escape and
 local close still work while the geometry is pending. Missing Metal resources
 fail the media operation instead of counting a black or unsubmitted frame.
 
+After the first submitted picture is current, the macOS viewer accepts local
+window resizing and changes of the display's backing scale. The original
+AppKit layout callback fences that exact session's input immediately. A checked
+resize can reopen viewing in a new window with the latest local point size and
+position, after the original media, input, clipboard and file owners have all
+finished cleanup. The new attempt performs ordinary authenticated startup and
+qualifies its own decoded picture and input mapping. Press F8 again to request
+control; no old keys, buttons, text, file selection or clipboard consent is
+replayed. This also works in observation-only viewing.
+
+Only a focused, visible original window can supply this receipt. Startup layout,
+repaint alone and remote picture reconfiguration do not qualify. Close, Escape,
+focus loss, hiding, event overflow, an active or pending text draft, a retained
+host terminal report or uncertain cleanup prevents reopening. A resize arriving
+after an unrelated cancellation cannot change its cause. Coalesced local
+geometry has one two-second opportunity measured from its first native event,
+including cleanup; additional changes and a late cleanup cannot extend it. An
+expired receipt ends the invocation. A window straddling displays is placed on
+a currently intersecting screen with an accessible title bar; a location wholly
+outside all current screens refuses the replacement. These local changes share the
+32-attempt native-owner bound and do not consume automatic network retries.
+Completion retains each accepted interruption in `window_resizes` and
+`window_resize_closes`, including the original failure, close exchange and lease
+report; an absent host report continues to mean unknown cleanup/effects even if
+the replacement later succeeds. These are source and policy guarantees, not a
+claim of Retina, multi-monitor or compositor hardware qualification.
+
 AppKit window creation and final window retirement still run on the main
 thread. Final window-owned renderer releases can therefore delay that native
 boundary after input has been fenced; this change does not claim a hard

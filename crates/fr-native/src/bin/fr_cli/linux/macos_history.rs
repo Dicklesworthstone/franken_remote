@@ -48,6 +48,47 @@ fn history(report: &Report) -> crate::ControlHistory {
         ",\"display_changes\":{},\"display_change_closes\":[{entries}]",
         report.display_changes,
     );
+    let mut resizes = String::new();
+    for change in &report.window_resize_closes {
+        if !resizes.is_empty() {
+            resizes.push(',');
+        }
+        let original = change.original;
+        let close = original.close_exchange.map(crate::closure::Report::from);
+        // Failure is content-free; JSON encoding still protects the output
+        // contract if a later typed reason gains punctuation.
+        let interruption = serde_json::Value::String(change.interruption.to_string());
+        let _ = write!(
+            resizes,
+            "{{\"attempt\":{},\"interruption\":{},\"close_exchange\":{},\"lease_report\":{}}}",
+            original.attempt,
+            interruption,
+            close.map_or_else(|| "null".to_owned(), crate::closure::Report::json),
+            crate::terminal::lease_json(original.lease_revocation),
+        );
+        let _ = write!(
+            text,
+            " Window geometry changed after attempt {} ({}): {} A fresh viewing attempt was requested; control requires a new F8 request.",
+            original.attempt,
+            change.interruption,
+            close.map_or_else(
+                || "No completed close exchange; host cleanup remains unknown.".to_owned(),
+                crate::closure::Report::text,
+            ),
+        );
+        if let Some(lease) = original.lease_revocation {
+            let _ = write!(
+                text,
+                " Lease report: {}.",
+                crate::terminal::lease_text(lease)
+            );
+        }
+    }
+    let _ = write!(
+        json,
+        ",\"window_resizes\":{},\"window_resize_closes\":[{resizes}]",
+        report.window_resizes,
+    );
     if refused_scroll(report) {
         let _ = write!(
             json,
@@ -124,6 +165,7 @@ pub(super) fn finish(
     json: bool,
 ) -> Result<String, Failure> {
     if report.display_change_closes.is_empty()
+        && report.window_resize_closes.is_empty()
         && !refused_scroll(report)
         && !text_activity(report)
         && !report.input_receipts.observed()
@@ -140,7 +182,7 @@ pub(super) fn finish(
             let Some(prefix) = text.trim_end().strip_suffix('}') else {
                 let mut failure = Failure::new(
                     "native_output_invalid",
-                    "The session completion could not be formatted; retained display-change reports and native input refusals remain available in this error.",
+                    "The session completion could not be formatted; retained original session reports and native input refusals remain available in this error.",
                     1,
                 );
                 preserve(&history, &mut failure);
@@ -178,6 +220,64 @@ mod tests {
             }],
             ..Report::default()
         }
+    }
+
+    fn resized() -> Report {
+        Report {
+            window_resizes: 1,
+            window_resize_closes: vec![fr_native::macos::session::WindowResizeReport {
+                original: DisplayChangeReport {
+                    attempt: 1,
+                    close_exchange: None,
+                    lease_revocation: None,
+                },
+                interruption: frd::native_connection::reconnect::Failure::Cancelled,
+            }],
+            ..Report::default()
+        }
+    }
+
+    #[test]
+    fn resize_interruption_and_unknown_original_cleanup_survive_later_success() {
+        let rendered = finish(
+            &resized(),
+            Ok("{\"outcome\":\"success\"}\n".to_owned()),
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["window_resizes"], 1);
+        assert_eq!(value["window_resize_closes"][0]["attempt"], 1);
+        assert_eq!(
+            value["window_resize_closes"][0]["interruption"],
+            "Cancelled"
+        );
+        assert!(value["window_resize_closes"][0]["close_exchange"].is_null());
+        assert!(value["window_resize_closes"][0]["lease_report"].is_null());
+        let rendered = finish(&resized(), Ok("Session ended.\n".to_owned()), false).unwrap();
+        assert!(rendered.contains("host cleanup remains unknown"));
+        assert!(rendered.contains("control requires a new F8 request"));
+    }
+
+    #[test]
+    fn failed_new_attempt_keeps_prior_resize_interruption() {
+        let failure = Failure::new("native_session_failed", "Dial failed.", 1);
+        let retained = finish(&resized(), Err(failure), true).unwrap_err();
+        assert_eq!(retained.code, failure.code);
+        let history = retained.control_history.unwrap();
+        assert!(
+            history
+                .text
+                .contains("A fresh viewing attempt was requested")
+        );
+        assert!(!history.text.contains("Viewing reopened"));
+        let value: serde_json::Value =
+            serde_json::from_str(&format!("{{\"outcome\":\"error\"{}}}", history.json)).unwrap();
+        assert_eq!(
+            value["window_resize_closes"][0]["interruption"],
+            "Cancelled"
+        );
+        assert!(value["window_resize_closes"][0]["close_exchange"].is_null());
     }
 
     #[test]

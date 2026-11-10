@@ -388,7 +388,7 @@ fn finish_result(
                 ),
                 Some(LocalStop::PictureChanged) => failure(
                     "control_window_resized",
-                    "The viewer's picture changed size (for example, moved to a display with another scale), so its input mapping and control ended; reconnect.",
+                    "The viewer's geometry changed and a checked fresh viewing attempt could not complete. The original input mapping and control ended; reconnect, then request control again with F8. Nothing is replayed.",
                 ),
                 _ => match error {
                         reconnect::Failure::Connection(frd::native_connection::Error::Tailnet(
