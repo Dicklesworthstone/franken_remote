@@ -3,8 +3,8 @@
 //! Only completed `AppKit` turns publish positive visibility evidence. A
 //! separate IPC/watchdog thread can expire that original evidence while the
 //! native loop is blocked. No capture, input, clipboard or approval API is used.
-use crate::{clock, macos_observation_policy::Evidence};
 pub use crate::macos_observation_policy::{Status, Stop};
+use crate::{clock, macos_observation_policy::Evidence};
 use core::{ffi::c_void, marker::PhantomData, ptr::NonNull};
 use std::{
     rc::Rc,

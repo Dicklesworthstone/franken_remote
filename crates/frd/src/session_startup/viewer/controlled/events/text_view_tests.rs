@@ -15,20 +15,26 @@ fn view() -> InputView {
 }
 
 fn receiver() -> Receiver {
-    Receiver::new(Arc::new(Mutex::new(Queue {
-        events: VecDeque::new(),
-        last_sample: ClientInstant(7),
-        view: view(),
-    })))
+    let context = TextState::new(view(), 0, false).unwrap();
+    Receiver::new(
+        Arc::new(Mutex::new(Queue {
+            events: VecDeque::new(),
+            last_sample: ClientInstant(7),
+            context,
+            text_ready: true,
+        })),
+        context,
+        true,
+    )
 }
 
 fn capture(receiver: &Receiver, text: &str) {
     let mut queue = receiver.queue.lock().unwrap();
-    let original = queue.view;
+    let original = queue.context;
     queue.events.push_back(Captured {
         event: Event::Text(CommittedText::new(text).unwrap()),
         sampled: ClientInstant(7),
-        text_view: Some(original),
+        text_context: Some(original),
     });
 }
 
@@ -85,7 +91,7 @@ fn fresh_capture_uses_published_view_and_keeps_original_time_and_bytes() {
     capture(&receiver, "e\u{301}é漢🙂");
     let captured = receiver.front(replacement).unwrap().unwrap();
     assert_eq!(captured.sampled, ClientInstant(7));
-    assert_eq!(captured.text_view, Some(replacement));
+    assert_eq!(captured.text_context.unwrap().view, replacement);
     assert!(matches!(
         &captured.event,
         Event::Text(text) if text.as_str() == "e\u{301}é漢🙂"
@@ -113,7 +119,7 @@ fn replacement_does_not_discard_a_preceding_key_release() {
             transition: KeyTransition::Release,
         },
         sampled: ClientInstant(7),
-        text_view: None,
+        text_context: None,
     });
     capture(&receiver, "old");
     let replacement = replacements()[2];

@@ -2,6 +2,8 @@
 //! never borrows QUIC or holds an authority lock while making native calls.
 mod native;
 #[cfg(test)]
+mod text_context_tests;
+#[cfg(test)]
 mod text_view_tests;
 use super::{ControlledViewer, ViewerControl, now};
 use fr_client::input::{self, Action};
@@ -51,21 +53,130 @@ pub enum Error {
     Overflow,
     Unavailable,
     UnsupportedText,
+    StaleTextContext,
+    TextNotReady,
     Text(TextError),
+}
+/// A local draft belongs to one original producer and one uninterrupted input
+/// context. It contains no ticket and grants no authority. Capture it BEFORE
+/// entering native text handling; never substitute a later token for a draft
+/// or commit that the platform already produced.
+#[derive(Clone)]
+pub struct TextContext {
+    queue: Weak<Mutex<Queue>>,
+    state: TextState,
+}
+impl PartialEq for TextContext {
+    fn eq(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.queue, &other.queue) && self.state == other.state
+    }
+}
+impl Eq for TextContext {}
+impl TextContext {
+    fn belongs_to(&self, queue: &Weak<Mutex<Queue>>) -> bool {
+        Weak::ptr_eq(&self.queue, queue)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TextState {
+    view: InputView,
+    revision: u64,
+    suspensions: u32,
+    suspended: bool,
+}
+impl TextState {
+    fn new(view: InputView, suspensions: u32, suspended: bool) -> Result<Self, Error> {
+        // The input owner's diagnostic count saturates. Refuse before that
+        // history could hide a later lapse instead of treating equal counts
+        // as proof of uninterrupted readiness.
+        if suspensions == u32::MAX {
+            return Err(Error::Unavailable);
+        }
+        Ok(Self {
+            view,
+            revision: 0,
+            suspensions,
+            suspended,
+        })
+    }
+    fn update(
+        &mut self,
+        view: InputView,
+        suspensions: u32,
+        suspended: bool,
+    ) -> Result<(), Error> {
+        if suspensions < self.suspensions || suspensions == u32::MAX {
+            return Err(Error::Unavailable);
+        }
+        if self.view != view || self.suspensions != suspensions || self.suspended != suspended {
+            self.revision = self.revision.checked_add(1).ok_or(Error::Unavailable)?;
+            self.view = view;
+            self.suspensions = suspensions;
+            self.suspended = suspended;
+        }
+        Ok(())
+    }
 }
 struct Captured {
     event: Event,
     sampled: ClientInstant,
     /// A Unicode commit cannot acquire a replacement view while queued.
     /// Physical positioned events retain their existing checked Layout.
-    text_view: Option<InputView>,
+    text_context: Option<TextState>,
 }
 struct Queue {
     events: VecDeque<Captured>,
     last_sample: ClientInstant,
     /// Last view checked by this original viewer's dispatch owner. A producer
     /// racing a replacement sees the old value and is conservatively refused.
-    view: InputView,
+    context: TextState,
+    /// A compositor candidate can briefly make Send unavailable without
+    /// cancelling a valid local draft or changing its original context.
+    text_ready: bool,
+}
+impl Queue {
+    fn context_ready(&self, context: TextState) -> Result<bool, Error> {
+        if context.suspended || context != self.context {
+            return Err(Error::StaleTextContext);
+        }
+        Ok(self.text_ready)
+    }
+    fn push(
+        &mut self,
+        event: Event,
+        sampled: ClientInstant,
+        context: Option<TextState>,
+    ) -> Result<(), Error> {
+        if let Some(context) = context
+            && !self.context_ready(context)?
+        {
+            return Err(Error::TextNotReady);
+        }
+        if sampled < self.last_sample {
+            return Err(Error::Clock);
+        }
+        self.last_sample = sampled;
+        // Only adjacent pointer moves coalesce, never across an action.
+        if matches!(event, Event::Pointer(_))
+            && self
+                .events
+                .back()
+                .is_some_and(|e| matches!(e.event, Event::Pointer(_)))
+        {
+            self.events.pop_back();
+        }
+        if self.events.len() == MAX_EVENTS {
+            return Err(Error::Overflow);
+        }
+        let text_context = matches!(event, Event::Text(_)).then_some(self.context);
+        self.events.push_back(Captured {
+            event,
+            sampled,
+            text_context,
+        });
+        Ok(())
+    }
 }
 /// A single native event producer. Drop, focus loss, hiding, resize, suspend and
 /// native failure must stop it. The authority fence is lock-free and wakes
@@ -80,6 +191,10 @@ pub struct Source {
 }
 pub(super) struct Receiver {
     queue: Arc<Mutex<Queue>>,
+    /// Authoritative even when the producer currently holds the queue. A
+    /// deferred publication must not restore a context after a suspension.
+    context: TextState,
+    text_ready: bool,
     pending: Option<Captured>,
     /// Presses dropped as aged: their later release or repeat goes with them.
     dropped_keys: [bool; 256],
@@ -134,11 +249,73 @@ impl Source {
     pub const fn supports_text(&self) -> bool {
         self.capabilities.contains(Capability::Text)
     }
+    /// Content-free context for a new local composition. `None` means input
+    /// is suspended. Ordinary compositor candidate gaps preserve the context;
+    /// `text_context_ready` separately reports the last checked Send eligibility.
+    /// Equality includes source identity, every view generation and suspension
+    /// history, even when the same view resumes before the next publication.
+    pub fn text_context(&self) -> Result<Option<TextContext>, Error> {
+        self.clock()?;
+        if !self.supports_text() {
+            return Err(Error::UnsupportedText);
+        }
+        let shared = self.queue.upgrade().ok_or(Error::Closed)?;
+        let queue = shared.lock().map_err(|_| Error::Unavailable)?;
+        if self.control.is_stopped() {
+            return Err(Error::Closed);
+        }
+        Ok((!queue.context.suspended).then(|| TextContext {
+            queue: self.queue.clone(),
+            state: queue.context,
+        }))
+    }
+    /// Last owner-checked eligibility for this exact draft. This is local UI
+    /// state, not permission: dispatch still checks the original view, ticket
+    /// and authority immediately before encoding and transport admission.
+    pub fn text_context_ready(&self, context: &TextContext) -> Result<bool, Error> {
+        self.clock()?;
+        if !self.supports_text() {
+            return Err(Error::UnsupportedText);
+        }
+        if !context.belongs_to(&self.queue) {
+            return Err(Error::StaleTextContext);
+        }
+        let shared = self.queue.upgrade().ok_or(Error::Closed)?;
+        let queue = shared.lock().map_err(|_| Error::Unavailable)?;
+        if self.control.is_stopped() {
+            return Err(Error::Closed);
+        }
+        queue.context_ready(context.state)
+    }
+    /// Submit a native commit under the context that began its local draft.
+    /// Stale/replaced context is a whole-value refusal with no wire identity
+    /// or retry; physical-key operation remains available on the same source.
+    pub fn commit_text_in_context(
+        &mut self,
+        context: &TextContext,
+        text: &str,
+        sampled: ClientInstant,
+    ) -> Result<(), Error> {
+        let result = (|| {
+            not_future(sampled, self.clock()?)?;
+            if !self.supports_text() {
+                return Err(Error::UnsupportedText);
+            }
+            if !context.belongs_to(&self.queue) {
+                return Err(Error::StaleTextContext);
+            }
+            let text = CommittedText::new(text).map_err(Error::Text)?;
+            self.push_in_context(Event::Text(text), sampled, Some(context.state))
+        })();
+        self.finish_capture(result)
+    }
     /// Capture one completed IME/software-keyboard commit. Do not also send the
     /// physical keys that produced the same text. No clipboard or layout fallback.
     /// Oversized commits are refused whole, never split into separately retried actions.
     /// The original dispatch view is pinned with the commit; a queued value
     /// cannot be rebound to new geometry, viewport, configuration or recovery.
+    /// A native draft edited across callbacks must instead retain `TextContext`
+    /// from its beginning and use `commit_text_in_context` on explicit Send.
     pub fn commit_text(&mut self, text: &str, sampled: ClientInstant) -> Result<(), Error> {
         let result = (|| {
             not_future(sampled, self.clock()?)?;
@@ -164,8 +341,14 @@ impl Source {
         self.push(Event::HeldState(observed), sampled)
     }
     fn finish_capture(&self, result: Result<(), Error>) -> Result<(), Error> {
-        // Capability refusal admitted nothing. Keep physical-key operation usable.
-        if result.is_err() && result != Err(Error::UnsupportedText) {
+        // These whole-value refusals admitted nothing. Keep physical keys
+        // usable, and let a still-valid local draft await a compositor gap.
+        if result.is_err()
+            && !matches!(
+                result,
+                Err(Error::UnsupportedText | Error::StaleTextContext | Error::TextNotReady)
+            )
+        {
             self.stop();
         }
         result
@@ -179,6 +362,14 @@ impl Source {
         self.finish_capture(result)
     }
     fn push_inner(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
+        self.push_in_context(event, sampled, None)
+    }
+    fn push_in_context(
+        &mut self,
+        event: Event,
+        sampled: ClientInstant,
+        context: Option<TextState>,
+    ) -> Result<(), Error> {
         let current = self.clock()?;
         // An aged event is still admitted: the session drops it as obsolete,
         // or sends it late if it releases what the host holds (`expire`).
@@ -191,28 +382,7 @@ impl Source {
         if self.control.is_stopped() {
             return Err(Error::Closed);
         }
-        if sampled < queue.last_sample {
-            return Err(Error::Clock);
-        }
-        queue.last_sample = sampled;
-        if matches!(event, Event::Pointer(_))
-            && queue
-                .events
-                .back()
-                .is_some_and(|e| matches!(e.event, Event::Pointer(_)))
-        {
-            queue.events.pop_back();
-        }
-        if queue.events.len() == MAX_EVENTS {
-            return Err(Error::Overflow);
-        }
-        let text_view = matches!(event, Event::Text(_)).then_some(queue.view);
-        queue.events.push_back(Captured {
-            event,
-            sampled,
-            text_view,
-        });
-        Ok(())
+        queue.push(event, sampled, context)
     }
 }
 impl Drop for Source {
@@ -315,9 +485,11 @@ fn sent(event: &Event, keys: &mut [bool; 256], buttons: &mut [bool; 5]) {
     }
 }
 impl Receiver {
-    fn new(queue: Arc<Mutex<Queue>>) -> Self {
+    fn new(queue: Arc<Mutex<Queue>>, context: TextState, text_ready: bool) -> Self {
         Self {
             queue,
+            context,
+            text_ready,
             pending: None,
             dropped_keys: [false; 256],
             dropped_buttons: [false; 5],
@@ -377,11 +549,14 @@ impl Receiver {
         unseen_press(event, &mut self.refused_keys, &mut self.refused_buttons);
     }
     fn front(&mut self, view: InputView) -> Result<Option<&Captured>, Error> {
+        self.context
+            .update(view, self.context.suspensions, self.context.suspended)?;
         // Publish only the dispatch owner's checked view; native code cannot
         // update it, and this never changes an already captured commit.
         match self.queue.try_lock() {
             Ok(mut queue) => {
-                queue.view = view;
+                queue.context = self.context;
+                queue.text_ready = self.text_ready;
                 if self.pending.is_none() {
                     self.pending = queue.events.pop_front();
                 }
@@ -393,13 +568,36 @@ impl Receiver {
         if self
             .pending
             .as_ref()
-            .is_some_and(|captured| captured.text_view.is_some_and(|original| original != view))
+            .is_some_and(|captured| {
+                captured
+                    .text_context
+                    .is_some_and(|original| original.suspended || original != self.context)
+            })
         {
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
             self.note_refused(&event);
             return Ok(None);
         }
         Ok(self.pending.as_ref())
+    }
+    fn publish_context(
+        &mut self,
+        view: InputView,
+        suspensions: u32,
+        suspended: bool,
+        ready: bool,
+    ) -> Result<(), Error> {
+        self.context.update(view, suspensions, suspended)?;
+        self.text_ready = ready && !suspended;
+        match self.queue.try_lock() {
+            Ok(mut queue) => {
+                queue.context = self.context;
+                queue.text_ready = self.text_ready;
+                Ok(())
+            }
+            Err(TryLockError::WouldBlock) => Ok(()),
+            Err(TryLockError::Poisoned(_)) => Err(Error::Unavailable),
+        }
     }
 }
 impl ControlledViewer {
@@ -415,17 +613,40 @@ impl ControlledViewer {
         events
             .try_reserve_exact(MAX_EVENTS)
             .map_err(|_| super::Error::Capture(Error::Unavailable))?;
+        let ready = self.input.tick(at).map_err(super::Error::View)?;
+        let context = TextState::new(
+            self.input.input_view(),
+            self.input.suspension_totals(at).0,
+            self.input.suspended_since().is_some(),
+        )
+        .map_err(super::Error::Capture)?;
         let queue = Arc::new(Mutex::new(Queue {
             events,
             last_sample: at,
-            view: self.input.input_view(),
+            context,
+            text_ready: ready,
         }));
-        self.events = Some(Receiver::new(queue.clone()));
+        self.events = Some(Receiver::new(queue.clone(), context, ready));
         Ok(Source {
             queue: Arc::downgrade(&queue),
             control: self.control(),
             capabilities: self.input.capabilities(),
         })
+    }
+    pub(super) fn publish_text_context(
+        &mut self,
+        ready: bool,
+        at: ClientInstant,
+    ) -> Result<(), super::Error> {
+        let view = self.input.input_view();
+        let suspensions = self.input.suspension_totals(at).0;
+        let suspended = self.input.suspended_since().is_some();
+        if let Some(receiver) = &mut self.events {
+            receiver
+                .publish_context(view, suspensions, suspended, ready)
+                .map_err(super::Error::Capture)?;
+        }
+        Ok(())
     }
     pub(super) fn dispatch_captured(&mut self) -> Result<(), super::Error> {
         let Some(mut receiver) = self.events.take() else {
@@ -439,6 +660,18 @@ impl ControlledViewer {
     }
     fn dispatch_one(&mut self, receiver: &mut Receiver) -> Result<(), super::Error> {
         let at = self.check_inner()?;
+        // The receiver is temporarily outside `self.events`: publish directly
+        // after the maintenance check, including a lapse it discovered while
+        // the producer held the queue or the same view has already resumed.
+        let ready = self.input.tick(at).map_err(super::Error::View)?;
+        receiver
+            .publish_context(
+                self.input.input_view(),
+                self.input.suspension_totals(at).0,
+                self.input.suspended_since().is_some(),
+                ready,
+            )
+            .map_err(super::Error::Capture)?;
         let input = &self.input;
         receiver
             .expire(at, &|held| match held {
@@ -451,6 +684,7 @@ impl ControlledViewer {
             .map_err(super::Error::Capture)?
             .is_none()
             || self.pending_send()
+            || (!ready && self.input.suspended_since().is_none())
         {
             return Ok(());
         }

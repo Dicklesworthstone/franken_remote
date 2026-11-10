@@ -1,5 +1,30 @@
 # Implementation status
 
+## Original text context survives only uninterrupted input (2026-11-10)
+
+Queued Unicode commits and local composition contexts now carry the original
+source identity, full input view and a checked continuity revision. A real
+suspension invalidates them even when the same view resumes between owner
+publications. The dispatch owner retains that revision outside the producer
+queue lock, so a contended publication cannot revive old text. Ordinary
+compositor candidate gaps only hold dispatch and disable Send; they preserve a
+valid draft and its original capture-time bound. Context refusals admit no wire
+identity and leave physical input usable.
+
+Eight new boundary regressions and the five existing view-generation regressions
+cover this behavior. They received independent source review, but the execution
+environment disconnected before these new tests or final formatting could run.
+This change supplies the producer API; the native Mac composer is separate work.
+
+Before the disconnect, the published indicator implementation at `731cf819`
+was recovered and checked: 18 supervisor tests and 17 native policy/role/pipe/clock
+tests passed, as did narrow strict Clippy, an Apple-target Rust Clippy check
+against the installed target standard library, and the real Linux minimal-feature
+helper check. Six formatter-only updates and one equivalent notification
+match-arm consolidation preserve those verified source bytes here. No Apple SDK
+link, AppKit execution or complete application build is claimed; the unchanged
+Asupersync compiler memory limit remains separate.
+
 ## Mac Stop control accessibility and visibility (2026-11-10)
 
 The required indicator added in `731cf819` now exposes its Stop action to

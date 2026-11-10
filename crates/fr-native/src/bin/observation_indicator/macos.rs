@@ -124,10 +124,9 @@ fn notify(signals: &UnixDatagram, signal: Signal) {
     let mut last = first;
     loop {
         match signals.send(&bytes) {
-            // Datagram writes are atomic. Never duplicate a completed send.
-            Ok(_) => return,
             Err(error) if retry(&error) => {}
-            Err(_) => return,
+            // Datagram writes are atomic. Never duplicate a completed send.
+            Ok(_) | Err(_) => return,
         }
         let now = clock::monotonic_ns();
         if !matches!((last, now, until), (Some(last), Some(now), Some(until))

@@ -72,12 +72,7 @@ impl Evidence {
         self.status
     }
 
-    pub(crate) fn complete(
-        &mut self,
-        started: u64,
-        now: Option<u64>,
-        native: Status,
-    ) -> Status {
+    pub(crate) fn complete(&mut self, started: u64, now: Option<u64>, native: Status) -> Status {
         if let stopped @ Status::Stopped(_) = self.status(now) {
             return stopped;
         }
@@ -143,7 +138,10 @@ mod tests {
     #[test]
     fn a_real_turn_keeps_its_start_time_and_exclusive_expiry() {
         let mut evidence = Evidence::new(Some(0));
-        assert_eq!(evidence.complete(10, Some(50), Status::Shown), Status::Shown);
+        assert_eq!(
+            evidence.complete(10, Some(50), Status::Shown),
+            Status::Shown
+        );
         assert_eq!(evidence.status(Some(10 + VALID_NS - 1)), Status::Shown);
         assert_eq!(
             evidence.status(Some(10 + VALID_NS)),
@@ -177,7 +175,10 @@ mod tests {
     #[test]
     fn readers_cannot_extend_a_native_observation() {
         let mut evidence = Evidence::new(Some(0));
-        assert_eq!(evidence.complete(10, Some(20), Status::Shown), Status::Shown);
+        assert_eq!(
+            evidence.complete(10, Some(20), Status::Shown),
+            Status::Shown
+        );
         for elapsed in [1, 100, 1_000, VALID_NS - 1] {
             assert_eq!(evidence.status(Some(10 + elapsed.max(10))), Status::Shown);
         }
@@ -204,7 +205,12 @@ mod tests {
 
     #[test]
     fn every_stop_preserves_its_first_reason_and_cannot_reopen() {
-        for why in [Stop::Local, Stop::AuthorityEnded, Stop::Failed, Stop::Expired] {
+        for why in [
+            Stop::Local,
+            Stop::AuthorityEnded,
+            Stop::Failed,
+            Stop::Expired,
+        ] {
             let mut evidence = Evidence::new(Some(0));
             assert_eq!(evidence.complete(1, Some(2), Status::Shown), Status::Shown);
             assert_eq!(evidence.stop(why), Status::Stopped(why));
@@ -236,10 +242,19 @@ mod tests {
     fn a_request_requires_a_native_turn_started_after_its_own_receipt() {
         let mut evidence = Evidence::new(Some(0));
         assert!(!evidence.ready_since(1, Some(1)));
-        assert_eq!(evidence.complete(10, Some(30), Status::Shown), Status::Shown);
-        assert!(!evidence.ready_since(20, Some(30)), "finishing after receipt is insufficient");
+        assert_eq!(
+            evidence.complete(10, Some(30), Status::Shown),
+            Status::Shown
+        );
+        assert!(
+            !evidence.ready_since(20, Some(30)),
+            "finishing after receipt is insufficient"
+        );
         assert!(evidence.ready_since(10, Some(30)));
-        assert_eq!(evidence.complete(31, Some(40), Status::Shown), Status::Shown);
+        assert_eq!(
+            evidence.complete(31, Some(40), Status::Shown),
+            Status::Shown
+        );
         assert!(evidence.ready_since(20, Some(40)));
         assert!(!evidence.ready_since(41, Some(40)));
         assert!(!evidence.ready_since(20, Some(31 + VALID_NS)));
@@ -249,7 +264,10 @@ mod tests {
     #[test]
     fn missing_regressed_or_overflowing_clocks_refuse() {
         for now in [None, Some(u64::MAX), Some(u64::MAX - OPEN_NS + 1)] {
-            assert_eq!(Evidence::new(now).status(now), Status::Stopped(Stop::Failed));
+            assert_eq!(
+                Evidence::new(now).status(now),
+                Status::Stopped(Stop::Failed)
+            );
         }
         let mut missing = Evidence::new(Some(1));
         assert_eq!(missing.status(None), Status::Stopped(Stop::Failed));

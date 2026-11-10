@@ -40,7 +40,10 @@ fn an_expired_lease_or_opening_cannot_be_revived_by_a_fresh_reply() {
         let ended = state.until;
         assert_eq!(state.ready_at(ended, Ok(ended)), Err(Error::Expired));
         assert_eq!(state.status, Status::Stopped(Error::Expired));
-        assert_eq!(state.ready_at(ended + 1, Ok(ended + 1)), Err(Error::Expired));
+        assert_eq!(
+            state.ready_at(ended + 1, Ok(ended + 1)),
+            Err(Error::Expired)
+        );
     }
 }
 #[test]
@@ -515,14 +518,20 @@ raise SystemExit(0)
             .map(|packet| {
                 format!(
                     "bytes([{}])",
-                    packet.iter().map(u8::to_string).collect::<Vec<_>>().join(",")
+                    packet
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
                 )
             })
             .collect::<Vec<_>>()
             .join(",");
         crate::executable::write(
             &path,
-            FIXTURE.replace("@PACKETS@", &packets).replace("@MODE@", mode),
+            FIXTURE
+                .replace("@PACKETS@", &packets)
+                .replace("@MODE@", mode),
         );
         let stopped = Arc::new(AtomicBool::new(false));
         let original = stopped.clone();
@@ -536,7 +545,10 @@ raise SystemExit(0)
             if let Status::Stopped(cause) = control.status() {
                 break cause;
             }
-            assert!(Instant::now() < until, "original child did not stop: {mode}");
+            assert!(
+                Instant::now() < until,
+                "original child did not stop: {mode}"
+            );
             thread::sleep(TURN);
         };
         assert_eq!(cause, expected, "terminal cause: {mode}");

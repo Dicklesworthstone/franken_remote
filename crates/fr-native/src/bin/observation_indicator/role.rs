@@ -56,7 +56,13 @@ mod tests {
             assert!(Observation::open(Frame { kind, ..valid }).is_none());
         }
         assert!(Observation::open(Frame { epoch: 0, ..valid }).is_none());
-        assert!(Observation::open(Frame { sequence: 2, ..valid }).is_none());
+        assert!(
+            Observation::open(Frame {
+                sequence: 2,
+                ..valid
+            })
+            .is_none()
+        );
     }
 
     #[test]
@@ -69,29 +75,58 @@ mod tests {
         };
         let mut role = Observation::open(original).unwrap();
         for foreign in [
-            Frame { sequence: 1, ..check },
-            Frame { sequence: 3, ..check },
+            Frame {
+                sequence: 1,
+                ..check
+            },
+            Frame {
+                sequence: 3,
+                ..check
+            },
             Frame { epoch: 8, ..check },
-            Frame { kind: Kind::CheckMicrophone, ..check },
-            Frame { kind: Kind::ApprovalCheck, ..check },
-            Frame { kind: Kind::Ready, ..check },
-            Frame { kind: Kind::Open, ..check },
+            Frame {
+                kind: Kind::CheckMicrophone,
+                ..check
+            },
+            Frame {
+                kind: Kind::ApprovalCheck,
+                ..check
+            },
+            Frame {
+                kind: Kind::Ready,
+                ..check
+            },
+            Frame {
+                kind: Kind::Open,
+                ..check
+            },
         ] {
             assert_eq!(role.accept(foreign), None);
         }
         assert_eq!(role.accept(check), Some(Kind::Check));
         assert_eq!(role.accept(check), None);
         assert_eq!(
-            role.accept(Frame { kind: Kind::Stop, sequence: 3, ..original }),
+            role.accept(Frame {
+                kind: Kind::Stop,
+                sequence: 3,
+                ..original
+            }),
             Some(Kind::Stop)
         );
     }
 
     #[test]
     fn sequence_cannot_wrap_into_another_lifetime() {
-        let mut role = Observation { epoch: 7, next: u64::MAX };
+        let mut role = Observation {
+            epoch: 7,
+            next: u64::MAX,
+        };
         assert_eq!(
-            role.accept(Frame { kind: Kind::Check, sequence: u64::MAX, ..open() }),
+            role.accept(Frame {
+                kind: Kind::Check,
+                sequence: u64::MAX,
+                ..open()
+            }),
             None
         );
     }

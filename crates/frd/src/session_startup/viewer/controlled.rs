@@ -272,7 +272,7 @@ impl ControlledViewer {
     pub(super) fn report_admitted(&mut self, receipt: QueuedReport) -> Result<(), Error> {
         let at = self.check()?;
         self.input.report_admitted(receipt, at)?;
-        self.abandon_if_suspended()?;
+        self.abandon_if_suspended(at)?;
         Ok(())
     }
     pub(super) fn presented_sample(
@@ -323,7 +323,7 @@ impl ControlledViewer {
         }
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.suspend_for_recovery(t)?;
-        self.abandon_if_suspended()?;
+        self.abandon_if_suspended(t)?;
         self.channels
             .begin_recovery(&self.session.transport)
             .map_err(Error::Input)?;
@@ -490,7 +490,9 @@ impl ControlledViewer {
         }
         let t = ClientInstant(now(&self.session.cx)?);
         self.input.maintenance_deadline(t)?;
-        self.abandon_if_suspended()?;
+        let ready = self.input.tick(t)?;
+        self.publish_text_context(ready, t)?;
+        self.abandon_if_suspended(t)?;
         if let Some(events) = &mut self.events {
             let input = &self.input;
             events
@@ -516,13 +518,14 @@ impl ControlledViewer {
     /// A stale view suspended input (plan 11.3): the one record the transport
     /// never admitted is returned to the input owner, never sent late and never
     /// expired as a failure. The host never saw it.
-    fn abandon_if_suspended(&mut self) -> Result<(), Error> {
-        if self.input.suspended_since().is_some()
-            && let Some(pending) = self.pending.take()
-        {
-            self.input
-                .abandon_unsent(pending.unsent)
-                .map_err(Error::View)?;
+    fn abandon_if_suspended(&mut self, at: ClientInstant) -> Result<(), Error> {
+        if self.input.suspended_since().is_some() {
+            self.publish_text_context(false, at)?;
+            if let Some(pending) = self.pending.take() {
+                self.input
+                    .abandon_unsent(pending.unsent)
+                    .map_err(Error::View)?;
+            }
         }
         Ok(())
     }
@@ -685,7 +688,7 @@ impl ControlledViewer {
                 Ok(quic::SendAdmission::Accepted) => self.pending = None,
                 Ok(quic::SendAdmission::Refused(error)) => {
                     if self.input.suspended_since().is_some() && self.input.stopped().is_none() {
-                        self.abandon_if_suspended()?;
+                        self.abandon_if_suspended(t)?;
                     } else if !matches!(
                         error,
                         Error::View(presentation::Error::Input(input::Error::NoPresentedView))
@@ -708,7 +711,7 @@ impl ControlledViewer {
                 // Suspended between the check and this send: admission refused
                 // it (all or nothing), so it was never admitted either.
                 Err(_) if self.input.suspended_since().is_some() && !self.control.is_stopped() => {
-                    self.abandon_if_suspended()?;
+                    self.abandon_if_suspended(t)?;
                 }
                 Err(e) => {
                     return Err(match (e, view.take()) {
@@ -760,7 +763,9 @@ impl ControlledViewer {
             self.clock_at = sample.received_at_us();
         }
         let t = ClientInstant(now(&self.session.cx)?);
-        if self.input.tick(t)? || self.input.suspended_since().is_some() {
+        let ready = self.input.tick(t)?;
+        self.publish_text_context(ready, t)?;
+        if ready || self.input.suspended_since().is_some() {
             // A compositor gap holds local events without encoding them. A
             // genuine suspension still consumes/refuses them as before, so
             // input captured on a stale view is never replayed on recovery.

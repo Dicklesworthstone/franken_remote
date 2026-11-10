@@ -158,7 +158,10 @@ fn installer_owned_and_one_shot_flags_are_not_run_options() {
         &["--once"][..],
         &["--input-agent", "relative/fr-input-agent"][..],
         &["--session-monitor", "relative/fr-session-monitor"][..],
-        &["--observation-indicator", "relative/fr-observation-indicator"][..],
+        &[
+            "--observation-indicator",
+            "relative/fr-observation-indicator",
+        ][..],
         &["--no-such-flag"][..],
     ] {
         let mut args = vec!["--", "--encoder", "videotoolbox"];

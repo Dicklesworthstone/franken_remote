@@ -87,7 +87,10 @@ mod macos_session_policy;
 // Visible host-lifetime stop surface; never constructs an input executor.
 #[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
 pub mod macos_observation;
-#[cfg(any(test, all(target_os = "macos", feature = "macos-observation-indicator")))]
+#[cfg(any(
+    test,
+    all(target_os = "macos", feature = "macos-observation-indicator")
+))]
 mod macos_observation_policy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_sizing;
