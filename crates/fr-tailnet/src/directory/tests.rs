@@ -92,8 +92,20 @@ fn only_the_host_and_the_viewers_own_untagged_machines_are_listed() {
         odd_os,
         upper,
     ];
-    peers.extend(planted);
 
+    // Policy exclusions (the viewer itself, other users, tags, sharing,
+    // expiry, the network map) are not the viewer's to see: no gap is
+    // reported for them. The viewer's own machines that cannot be listed
+    // exactly (a foreign or nested name, no tailnet address, no name, an odd
+    // ID) are reported as a gap.
+    let unlistable = planted.split_off(planted.len() - 5);
+    let mut policy_only = peers.clone();
+    policy_only.extend(planted.iter().cloned());
+    let directory = select_json(&status(policy_only), scope()).unwrap();
+    assert_eq!(directory.nodes.len(), 5);
+    assert!(!directory.truncated, "policy exclusions are not a gap");
+    peers.extend(planted);
+    peers.extend(unlistable);
     let directory = select_json(&status(peers), scope()).unwrap();
     assert_eq!(
         names(&directory),
@@ -105,7 +117,7 @@ fn only_the_host_and_the_viewers_own_untagged_machines_are_listed() {
             "trj.tail1f21e.ts.net",
         ]
     );
-    assert!(!directory.truncated);
+    assert!(directory.truncated, "an own machine that cannot be listed is a gap");
     let host = &directory.nodes[0];
     assert!(host.serving && host.online);
     assert_eq!(host.node_id, "nHOST");
@@ -183,6 +195,14 @@ fn duplicates_are_dropped_and_large_tailnets_are_truncated_visibly() {
         names(&directory),
         ["mac-mini-old.tail1f21e.ts.net", "unique.tail1f21e.ts.net"]
     );
+    assert!(directory.truncated, "a dropped duplicate is a visible gap");
+    // A copy of the host's own ID alone is no gap in the viewer's machines.
+    let directory = select_json(&status(peers.split_off(2)), scope()).unwrap();
+    assert_eq!(
+        names(&directory),
+        ["mac-mini-old.tail1f21e.ts.net", "unique.tail1f21e.ts.net"]
+    );
+    assert!(!directory.truncated);
 
     peers = (0..300)
         .map(|i| {

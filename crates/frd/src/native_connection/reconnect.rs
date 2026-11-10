@@ -312,7 +312,11 @@ impl Client {
         )
     }
 
-    /// [`Self::run_observing`] for a [`Client::named`] client.
+    /// [`Self::run_observing`] for a [`Client::named`] client. Each attempt
+    /// re-resolves the name and checks its pin, and TLS binds the name; but
+    /// with no client `LocalAPI` there is no membership lease, so a key,
+    /// membership or tailnet change during a session is not seen here (the
+    /// host's own admission still ends it). See fr-tailnet `named`.
     pub fn run_named_observing<'a, A: Application + 'a>(
         &'a mut self,
         cx: Cx,
@@ -674,7 +678,9 @@ pub fn resize_interrupted(failure: Failure) -> bool {
 /// restart observation AFTER cleanup. The old namespace/decoder is never reused,
 /// and decode failure does not become retryable merely because roles ran out.
 /// A native handshake timeout also permits a fresh attempt: the dialer has
-/// dropped the old socket and no Viewer/application was exposed. Each retry
+/// dropped the old socket and no Viewer/application was exposed. So does a
+/// name that did not resolve or a busy lookup: nothing was dialed, and the
+/// next attempt resolves and checks the pin again. Each retry
 /// revalidates the pinned identity and performs strict TLS again; a typed
 /// certificate, protocol or authority refusal is still terminal.
 /// A streamed worker deadline keeps its original request bound and stops the
@@ -704,7 +710,11 @@ pub fn retryable(failure: Failure) -> bool {
             | fr_tailnet::Error::BackendNotRunning
             | fr_tailnet::Error::NativeRouteIo
             | fr_tailnet::Error::HandshakeTimeout
-            | fr_tailnet::Error::Timeout,
+            | fr_tailnet::Error::Timeout
+            // The named route's resolver (a phone between networks while
+            // Tailscale reconnects) and a lookup slot held by another dial.
+            | fr_tailnet::Error::NameUnresolved
+            | fr_tailnet::Error::Busy,
         ))
         | Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Recovery(crate::media_quic::recovery::Error::NamespaceExhausted(

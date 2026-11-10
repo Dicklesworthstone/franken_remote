@@ -54,7 +54,9 @@ impl fmt::Debug for DirectoryNode {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Directory {
     pub nodes: Vec<DirectoryNode>,
-    /// More machines matched than [`MAX_NODES`].
+    /// Some of the viewer's machines are not listed: more matched than
+    /// [`MAX_NODES`], or one could not be listed exactly (an odd or missing
+    /// `MagicDNS` name or ID, no tailnet address, a duplicate).
     pub truncated: bool,
 }
 impl fmt::Debug for Directory {
@@ -140,12 +142,10 @@ fn label_ok(label: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 fn tailnet_v4(ip: Ipv4Addr) -> bool {
-    let [a, b, ..] = ip.octets();
-    a == 100 && (64..128).contains(&b)
+    crate::named::is_tailnet_address(IpAddr::V4(ip))
 }
 fn tailnet_v6(ip: Ipv6Addr) -> bool {
-    let s = ip.segments();
-    s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+    crate::named::is_tailnet_address(IpAddr::V6(ip))
 }
 /// This node as listed, or None when it cannot be listed exactly.
 fn listed(node: &Node, suffix: &str, serving: bool) -> Option<DirectoryNode> {
@@ -219,6 +219,9 @@ pub(crate) fn select(status: &Status, scope: Scope<'_>) -> Result<Directory, Err
         .ok_or(Error::MalformedMetadata)?;
     let host = listed(&status.this, &suffix, true).ok_or(Error::MalformedMetadata)?;
     let mut nodes: Vec<DirectoryNode> = Vec::new();
+    // The viewer's own machines that could not be listed exactly: the
+    // listing says some are missing rather than omitting them silently.
+    let mut unlisted = false;
     if scope.user != 0 {
         for peer in status.peers.values() {
             let own = peer.user == scope.user
@@ -228,11 +231,17 @@ pub(crate) fn select(status: &Status, scope: Scope<'_>) -> Result<Directory, Err
                 && !peer.expired
                 && peer.in_map
                 && peer.id.as_deref().is_some_and(|id| id != scope.viewer);
-            if let Some(node) = own.then(|| listed(peer, &suffix, false)).flatten()
-                && node.node_id != host.node_id
-                && node.name != host.name
-            {
-                nodes.push(node);
+            if !own {
+                continue;
+            }
+            match listed(peer, &suffix, false) {
+                Some(node) if node.node_id != host.node_id && node.name != host.name => {
+                    nodes.push(node);
+                }
+                // A second copy of the host itself is not one of the
+                // viewer's other machines.
+                Some(_) => {}
+                None => unlisted = true,
             }
         }
     }
@@ -245,7 +254,7 @@ pub(crate) fn select(status: &Status, scope: Scope<'_>) -> Result<Directory, Err
         .filter(|n| nodes.iter().filter(|m| duplicate(n, m)).count() == 1)
         .cloned()
         .collect();
-    let truncated = unique.len() > MAX_NODES - 1;
+    let truncated = unlisted || unique.len() < nodes.len() || unique.len() > MAX_NODES - 1;
     let mut listed_nodes = Vec::with_capacity(unique.len().min(MAX_NODES - 1) + 1);
     listed_nodes.push(host);
     listed_nodes.extend(unique.into_iter().take(MAX_NODES - 1));

@@ -7,15 +7,20 @@
 //! Only Tailscale's control plane can obtain a publicly trusted certificate
 //! for a `ts.net` name, and only for the node that owns it, so a completed
 //! handshake proves "the node that currently holds this name". Resolution
-//! uses the system resolver (`MagicDNS` while the Tailscale VPN is up), and
-//! every resolved address must lie inside Tailscale's own ranges, so a name
-//! that resolves off-tailnet is refused before any packet is sent.
+//! uses the system resolver (`MagicDNS` while the Tailscale VPN is up) for
+//! the absolute name, and every resolved address must lie inside the ranges
+//! Tailscale assigns to nodes ([`is_tailnet_address`]): a name that resolves
+//! anywhere else is refused before any packet is sent. That is a routing
+//! check, not identity (`100.64.0.0/10` is also carrier-grade NAT space):
+//! a wrong host inside those ranges fails the certificate check instead.
 //!
 //! [`HostPin`] adds continuity across sessions: the first successful connect
 //! reports the exact tailnet addresses the name resolved to; later connects
 //! that present that pin refuse (`IdentityChanged`) when the name resolves to
-//! any address outside it, so a renamed or replaced machine that inherits the
-//! name is not silently trusted. Tailnet addresses are stable per node.
+//! a different address of a family the pin holds, so a renamed or replaced
+//! machine that inherits the name is not silently trusted. Tailnet addresses
+//! are stable per node; a family the pin never saw (`MagicDNS` answering
+//! AAAA only later) is admitted and added to the observed pin.
 //!
 //! What this does NOT prove: the client's own identity (the host admits the
 //! connection independently from its `LocalAPI` `WhoIs` of the source
@@ -103,17 +108,24 @@ impl HostName {
 }
 
 /// Tailscale assigns node addresses only from `100.64.0.0/10` (shared address
-/// space) and `fd7a:115c:a1e0::/48`. This is a routing sanity check, not
-/// identity: identity is the certificate and the pin.
+/// space) and `fd7a:115c:a1e0::/48`, never from the parts of those it keeps
+/// for itself: `100.100.100.0/24` (its DNS and service addresses),
+/// `100.115.92.0/23` (`ChromeOS` guests) and the 4via6 subnet-router prefix
+/// `fd7a:115c:a1e0:b1a::/64`, whose addresses reach a host BEHIND a node.
+/// This is a routing sanity check, not identity: identity is the certificate
+/// and the pin.
 pub fn is_tailnet_address(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
-            a == 100 && (64..128).contains(&b)
+            let [a, b, c, _] = v4.octets();
+            a == 100
+                && (64..128).contains(&b)
+                && !(b == 100 && c == 100)
+                && !(b == 115 && (92..94).contains(&c))
         }
         IpAddr::V6(v6) => {
             let s = v6.segments();
-            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0
+            s[0] == 0xfd7a && s[1] == 0x115c && s[2] == 0xa1e0 && s[3] != 0x0b1a
         }
     }
 }
@@ -189,16 +201,27 @@ impl HostPin {
         &self.addresses
     }
     /// A resolution is trusted under this pin only when it is the same name
-    /// and every resolved address was already pinned. Fewer addresses (one
-    /// family withdrawn) still match; any new address does not.
-    pub fn admits(&self, name: &HostName, resolved: &[IpAddr]) -> Result<(), Error> {
+    /// and every resolved address of a family the pin holds was already
+    /// pinned. Fewer addresses (one family withdrawn) still match; a new
+    /// address of a pinned family does not. An address of a family the pin
+    /// never held (`MagicDNS` answered A only when it was made) is admitted:
+    /// the certificate check still binds it to the name. Returns the pin to
+    /// record: this one, plus any newly seen family.
+    pub fn admits(&self, name: &HostName, resolved: &[IpAddr]) -> Result<Self, Error> {
         if &self.name != name {
             return Err(Error::InvalidPolicy);
         }
-        if resolved.is_empty() || !resolved.iter().all(|ip| self.addresses.contains(ip)) {
+        let pinned = |v4: bool| self.addresses.iter().any(|ip| ip.is_ipv4() == v4);
+        if resolved.is_empty()
+            || !resolved
+                .iter()
+                .all(|ip| self.addresses.contains(ip) || !pinned(ip.is_ipv4()))
+        {
             return Err(Error::IdentityChanged);
         }
-        Ok(())
+        let mut observed = self.addresses.clone();
+        observed.extend(resolved.iter().filter(|ip| !pinned(ip.is_ipv4())));
+        Self::new(self.name.clone(), observed)
     }
 }
 
@@ -299,20 +322,17 @@ impl NamedClient {
                 other => other,
             })?;
             let addresses = checked_addresses(resolved)?;
-            if let Some(pin) = pin {
-                pin.admits(&self.destination, &addresses)?;
-            }
-            self.dial_resolved(cx, &addresses, port, started, end)
+            let observed = match pin {
+                Some(pin) => pin.admits(&self.destination, &addresses)?,
+                None => HostPin::new(self.destination.clone(), addresses.clone())?,
+            };
+            // The family split starts after resolution: a slow resolver must
+            // not use up the preferred family's half of the budget.
+            let dialing = now(cx)?;
+            self.dial_resolved(cx, &addresses, port, dialing, end)
                 .await
                 .map(|native| NamedConnection {
-                    pin: pin.cloned().unwrap_or_else(|| HostPin {
-                        name: self.destination.clone(),
-                        addresses: {
-                            let mut sorted = addresses.clone();
-                            sorted.sort_unstable();
-                            sorted
-                        },
-                    }),
+                    pin: observed,
                     native,
                 })
         })
@@ -370,7 +390,7 @@ impl NamedClient {
             .copied()
             .find(|ip| ip.is_ipv4() != preferred.is_ipv4());
         let preferred_end = if alternate.is_some() {
-            started + (end - started) / 2
+            started.saturating_add(end.saturating_sub(started) / 2)
         } else {
             end
         };
@@ -485,7 +505,8 @@ fn resolve(
     }
     let shared: Arc<Mutex<Resolution>> = Arc::new(Mutex::new(Resolution::default()));
     let worker = shared.clone();
-    let query = name.as_str().to_owned();
+    // Absolute (trailing dot): no resolver search domain is ever appended.
+    let query = format!("{}.", name.as_str());
     let release = Release;
     std::thread::Builder::new()
         .name("fr-resolve".into())

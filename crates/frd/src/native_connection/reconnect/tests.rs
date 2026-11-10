@@ -158,10 +158,12 @@ fn backoff_is_bounded_and_attempt_counter_does_not_reset_or_wrap() {
     }
 }
 #[test]
-fn native_route_io_and_handshake_timeout_allow_a_fresh_connection_attempt() {
+fn transient_route_and_name_failures_allow_a_fresh_connection_attempt() {
     for error in [
         fr_tailnet::Error::NativeRouteIo,
         fr_tailnet::Error::HandshakeTimeout,
+        fr_tailnet::Error::NameUnresolved,
+        fr_tailnet::Error::Busy,
     ] {
         assert!(retryable(Failure::Connection(ConnectionError::Tailnet(
             error
@@ -187,6 +189,7 @@ fn denial_identity_protocol_codec_and_local_stop_never_retry() {
         T::ScopeDenied,
         T::Clock,
         T::Cancelled,
+        T::OutsideTailnet,
     ] {
         assert!(!retryable(Failure::Connection(ConnectionError::Tailnet(
             error
