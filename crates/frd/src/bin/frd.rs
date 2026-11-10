@@ -65,8 +65,9 @@ OPTIONS:
     --display :N    X11 display to share (default: $DISPLAY)
     --worker PATH   Absolute fr-media-worker path (default: next to frd)
     --observation-indicator PATH  Absolute fr-observation-indicator image: require
-                    a live on-desktop Stop sharing window before listening,
-                    including for view-only audio. UI loss ends this host run.
+                    a live Stop sharing control before listening, including
+                    for view-only audio (a menu bar item on macOS, a desktop
+                    window on Linux). UI loss ends this host run.
                     macOS always requires it (default: next to frd), including
                     control hosts; build with --features macos-observation-indicator.
                     Linux: off by default, view-only hosts, --features linux-input.
@@ -532,7 +533,12 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 }
                 if profile.observation_indicator {
                     println!(
-                        "frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run"
+                        "{}",
+                        if cfg!(target_os = "macos") {
+                            "frd: the Stop sharing item in the menu bar is required while this run is enabled; losing it ends the run"
+                        } else {
+                            "frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run"
+                        }
                     );
                 }
                 if profile.session_lifetime && cfg!(target_os = "macos") {
