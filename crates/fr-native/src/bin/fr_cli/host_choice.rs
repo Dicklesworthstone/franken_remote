@@ -82,7 +82,7 @@ mod tests {
     use super::*;
 
     fn target() -> Target {
-        let args = "connect --choose-host --experimental-native --display choose"
+        let args = "connect --choose-host --view-only --experimental-native --display choose"
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>();
