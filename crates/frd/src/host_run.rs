@@ -841,6 +841,32 @@ pub(crate) async fn session_opened(
     }
 }
 
+/// Policy/certificate setup owns no listener or native share yet, so a session
+/// end may discard its result and drop the original wait. Keep one future across
+/// timer turns, and expire evidence even when neither it nor the monitor wakes.
+/// Binding and cleanup must retain their owners instead of using this guard.
+pub(crate) async fn session_setup<T>(
+    cx: &Cx,
+    lifetime: Option<&session_monitor::Control>,
+    work: impl Future<Output = T>,
+) -> Result<T, Error> {
+    let Some(lifetime) = lifetime else {
+        return Ok(work.await);
+    };
+    let mut work = pin!(work);
+    loop {
+        let mut tick = pin!(asupersync::time::sleep(cx.now(), Duration::from_millis(50)));
+        let ready = poll_fn(|task| match lifetime.poll_setup(task, work.as_mut()) {
+            Poll::Ready(result) => Poll::Ready(result.map(Some).map_err(Error::SessionEnded)),
+            Poll::Pending => tick.as_mut().poll(task).map(|()| Ok(None)),
+        })
+        .await?;
+        if let Some(value) = ready {
+            return Ok(value);
+        }
+    }
+}
+
 /// Stop the monitor and reap its thread and child within a bound; residue is
 /// reported, never silently kept.
 fn retire_session_monitor(mut monitor: Monitor, report: &Reporter) {
@@ -1077,7 +1103,11 @@ fn serve_run(
             let roots =
                 fr_tailnet::trust::root_store(&options.trust_roots).map_err(Error::Trust)?;
             let Some(ready) = unless_stopped(
-                policy.ready_with_approval(&broker, approval.is_some()),
+                session_setup(
+                    &broker,
+                    lifetime,
+                    policy.ready_with_approval(&broker, approval.is_some()),
+                ),
                 stop,
                 &mut signals,
                 lifetime,
@@ -1086,15 +1116,21 @@ fn serve_run(
             else {
                 return Ok(());
             };
-            ready?;
+            ready??;
             // Nothing is bound yet, so a stop during the fetch just drops it.
             report(Event::ObtainingCertificate);
             let fetch = api.native_server_identity(&broker, roots, CertificatePolicy::default());
-            let identity = unless_stopped(fetch, stop, &mut signals, lifetime).await;
+            let identity = unless_stopped(
+                session_setup(&broker, lifetime, fetch),
+                stop,
+                &mut signals,
+                lifetime,
+            )
+            .await;
             let Some(identity) = identity else {
                 return Ok(());
             };
-            let identity = identity.map_err(Error::Tailnet)?;
+            let identity = identity?.map_err(Error::Tailnet)?;
             let host_boot = HostBootId::from_raw(random_nonzero_u128()?);
             let renew = identity.serve_renewal(&renewal).map_err(Error::Tailnet)?;
             let serving = async {
@@ -1685,7 +1721,7 @@ impl Share<'_> {
             .map(Ended::Session)
             .or_else(|| self.stop.is_requested().then_some(Ended::Served));
         if let Some(ended) = ended {
-            if linux.stop(&self.cx()?).await.is_err() {
+            if linux.stop(broker).await.is_err() {
                 (self.report)(Event::CleanupFailed { stage: "ingress" });
                 return Err(Error::Cleanup("ingress"));
             }

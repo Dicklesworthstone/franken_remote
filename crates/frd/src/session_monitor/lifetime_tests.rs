@@ -183,6 +183,94 @@ fn poisoned_evidence_cannot_remain_active_or_be_renewed() {
 }
 
 #[test]
+fn pending_setup_is_woken_and_fenced_without_repolling_its_original_work() {
+    use std::{cell::Cell, future::poll_fn, pin::pin, sync::atomic::AtomicUsize, task::Wake};
+
+    struct Wakes(AtomicUsize);
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    let now = now_ns().unwrap();
+    let control = Control(Arc::new(shared(Status::Active, now, now + OPEN_NS)));
+    let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+    let waker = Waker::from(wakes.clone());
+    let mut task = Context::from_waker(&waker);
+    let polls = Cell::new(0);
+    let mut work = pin!(poll_fn(|_| {
+        polls.set(polls.get() + 1);
+        Poll::<()>::Pending
+    }));
+    assert_eq!(control.poll_setup(&mut task, work.as_mut()), Poll::Pending);
+    assert_eq!(polls.get(), 1);
+    control.0.stop(Error::Native(State::Inactive));
+    assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        control.poll_setup(&mut task, work.as_mut()),
+        Poll::Ready(Err(Error::Native(State::Inactive)))
+    );
+    assert_eq!(polls.get(), 1, "ended setup must never poll work again");
+}
+
+#[test]
+fn evidence_expiry_ends_pending_setup_without_a_native_notification() {
+    use std::{cell::Cell, future::poll_fn, pin::pin};
+
+    let now = now_ns().unwrap();
+    let control = Control(Arc::new(shared(Status::Active, now, now + OPEN_NS)));
+    let mut task = Context::from_waker(Waker::noop());
+    let polls = Cell::new(0);
+    let mut work = pin!(poll_fn(|_| {
+        polls.set(polls.get() + 1);
+        Poll::<()>::Pending
+    }));
+    assert_eq!(control.poll_setup(&mut task, work.as_mut()), Poll::Pending);
+    // The host's independent timer supplies this next poll. No native end or
+    // wake has been published, but the original evidence is now expired.
+    control.0.evidence().until_ns = now_ns().unwrap();
+    assert_eq!(
+        control.poll_setup(&mut task, work.as_mut()),
+        Poll::Ready(Err(Error::EvidenceExpired))
+    );
+    assert_eq!(polls.get(), 1);
+    assert_terminal(&control.0, Error::EvidenceExpired);
+}
+
+#[test]
+fn terminal_evidence_beats_setup_that_is_ready_in_the_same_turn() {
+    use std::{cell::Cell, pin::pin};
+
+    struct ReadyOwner<'a>(&'a Cell<usize>);
+    impl Drop for ReadyOwner<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+    for already_ended in [true, false] {
+        let now = now_ns().unwrap();
+        let control = Control(Arc::new(shared(Status::Active, now, now + OPEN_NS)));
+        let mut task = Context::from_waker(Waker::noop());
+        let polled = Cell::new(false);
+        let dropped = Cell::new(0);
+        if already_ended {
+            control.0.stop(Error::Native(State::Suspending));
+        }
+        let mut work = pin!(async {
+            polled.set(true);
+            control.0.stop(Error::Native(State::Suspending));
+            ReadyOwner(&dropped)
+        });
+        assert!(matches!(
+            control.poll_setup(&mut task, work.as_mut()),
+            Poll::Ready(Err(Error::Native(State::Suspending)))
+        ));
+        assert_eq!(polled.get(), !already_ended);
+        assert_eq!(dropped.get(), usize::from(!already_ended));
+    }
+}
+
+#[test]
 fn awaiting_initial_evidence_expires_without_a_child_wakeup() {
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
 
@@ -242,4 +330,28 @@ fn a_native_stop_during_startup_beats_ready_certificate_or_policy_work() {
         );
         assert!(stop.is_requested());
     }
+}
+
+#[test]
+fn pending_host_setup_expires_without_a_child_wakeup() {
+    use asupersync::{runtime::RuntimeBuilder, types::Budget};
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    runtime.block_on(async {
+        let now = now_ns().unwrap();
+        let control = Control(Arc::new(shared(Status::Active, now, now + 20_000_000)));
+        let result = asupersync::time::timeout(
+            cx.now(),
+            Duration::from_secs(1),
+            crate::host_run::session_setup(&cx, Some(&control), std::future::pending::<()>()),
+        )
+        .await
+        .expect("the original setup wait must expire without child progress");
+        assert_eq!(
+            result,
+            Err(crate::host_run::Error::SessionEnded(Error::EvidenceExpired))
+        );
+        assert_eq!(control.status(), Status::Stopped(Error::EvidenceExpired));
+    });
 }

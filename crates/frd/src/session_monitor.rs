@@ -6,12 +6,14 @@ mod process;
 pub mod protocol;
 pub use protocol::{Platform, Selection, State};
 use std::{
+    future::Future,
     path::PathBuf,
+    pin::Pin,
     sync::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
-    task::{Context, Waker},
+    task::{Context, Poll, Waker},
     thread::{self, JoinHandle},
 };
 
@@ -215,6 +217,25 @@ impl Control {
         if w.as_ref().is_none_or(|w| !w.will_wake(task.waker())) {
             *w = Some(task.waker().clone());
         }
+    }
+
+    /// Poll disposable startup work while the original session remains live.
+    /// A terminal event or expiry wins even when the work becomes ready in
+    /// the same turn. The caller retains the future across pending turns.
+    pub(crate) fn poll_setup<T>(
+        &self,
+        task: &mut Context<'_>,
+        work: Pin<&mut impl Future<Output = T>>,
+    ) -> Poll<Result<T, Error>> {
+        self.register(task);
+        if let Status::Stopped(error) = self.status() {
+            return Poll::Ready(Err(error));
+        }
+        let result = work.poll(task);
+        if let Status::Stopped(error) = self.status() {
+            return Poll::Ready(Err(error));
+        }
+        result.map(Ok)
     }
 }
 
