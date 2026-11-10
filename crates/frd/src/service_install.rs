@@ -913,8 +913,9 @@ mod tests {
             "<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>"
         ));
         assert!(plist.contains("<key>ThrottleInterval</key>\n    <integer>10</integer>"));
-        // Output goes to the user's own log directory, never a shared /tmp.
-        assert!(!plist.contains("/tmp/"));
+        // Output goes to the user's own log directory, never the old shared
+        // /tmp files (HOME itself may live under /tmp in a build container).
+        assert!(!plist.contains("<string>/tmp/frd"));
         assert!(plist.contains("Library/Logs/FrankenRemote/frd.log</string>"));
     }
 
