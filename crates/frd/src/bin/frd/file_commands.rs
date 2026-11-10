@@ -245,6 +245,8 @@ fn cleanup(value: Cleanup) -> &'static str {
     }
 }
 
+/// Only the host side (`frd run --send-control`) reports through this.
+#[cfg(host_stack)]
 pub(super) fn report_error(error: Error, json_output: bool) -> ExitCode {
     let (code, detail) = error_detail(error);
     failure(code, detail, json_output, 1)

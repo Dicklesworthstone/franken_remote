@@ -435,6 +435,8 @@ jobs:
         run: cargo check -p fr-native --all-targets --features macos-desktop --locked
       - name: Clippy native macOS client (deny warnings)
         run: cargo clippy -p fr-native --all-targets --features macos-desktop --locked -- -D warnings
+      - name: Clippy frd macOS viewer build (deny warnings)
+        run: cargo clippy -p frd --lib --bins --features macos-viewer --locked -- -D warnings
       - name: Test macOS control consent and window sizing
         run: |
           cargo test -p fr-native --lib --features macos-desktop --locked macos_control::
