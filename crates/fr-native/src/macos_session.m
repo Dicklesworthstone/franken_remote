@@ -26,7 +26,7 @@ typedef struct {
     uint32_t uid;
     uint32_t security_session;
     uint32_t console_set;
-    uint32_t flags; // on-console, login-done, graphic access, protected data
+    uint32_t flags; // on-console, login-done, graphic access, protected data, awake display
 } FrSessionSnapshot;
 
 @interface FrSessionMonitor : NSObject {
@@ -132,10 +132,18 @@ static int snapshot(FrSessionMonitor *owner, FrSessionSnapshot *out) {
     status = security_identity(&last);
     if (status != FR_MS_OK) return status;
     if (first != last) return FR_MS_IDENTITY_CHANGED;
+    // Subscribe to display sleep and also sample current state: the helper may
+    // start after the sleep notification. This is display-power evidence only,
+    // never proof that the graphical session is unlocked.
+    CGDirectDisplayID display = CGMainDisplayID();
+    if (display == kCGNullDirectDisplay || !CGDisplayIsOnline(display))
+        return FR_MS_SESSION_UNAVAILABLE;
+    BOOL display_awake = !CGDisplayIsAsleep(display);
     if (@available(macOS 12.0, *)) {
         result.security_session = first;
         result.flags = (on_console ? 1u : 0u) | (logged_in ? 2u : 0u) | 4u |
-                       (NSApp.isProtectedDataAvailable ? 8u : 0u);
+                       (NSApp.isProtectedDataAvailable ? 8u : 0u) |
+                       (display_awake ? 16u : 0u);
     } else {
         return FR_MS_UNSUPPORTED;
     }
@@ -168,6 +176,8 @@ int fr_ms_open(uint32_t uid, void **out) {
                                          name:NSWorkspaceSessionDidResignActiveNotification object:nil];
                 [owner.workspace addObserver:owner selector:@selector(suspending:)
                                          name:NSWorkspaceWillSleepNotification object:nil];
+                [owner.workspace addObserver:owner selector:@selector(suspending:)
+                                         name:NSWorkspaceScreensDidSleepNotification object:nil];
                 [owner.workspace addObserver:owner selector:@selector(ending:)
                                          name:NSWorkspaceWillPowerOffNotification object:nil];
                 [[NSNotificationCenter defaultCenter]

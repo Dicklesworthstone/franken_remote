@@ -9,8 +9,8 @@ fn shared(status: Status, last_ns: u64, until_ns: u64) -> Shared {
     Shared {
         evidence: Mutex::new(Evidence {
             status,
-            last_ns,
             until_ns,
+            last_ns,
         }),
         waker: Mutex::new(None),
     }
@@ -208,4 +208,38 @@ fn awaiting_initial_evidence_expires_without_a_child_wakeup() {
         );
         assert_eq!(control.status(), Status::Stopped(Error::OpeningExpired));
     });
+}
+
+#[test]
+fn a_native_stop_during_startup_beats_ready_certificate_or_policy_work() {
+    use asupersync::runtime::RuntimeBuilder;
+    use std::cell::Cell;
+
+    let runtime = RuntimeBuilder::current_thread().build().unwrap();
+    for state in [
+        Status::Stopped(Error::Native(State::Locked)),
+        Status::Active,
+    ] {
+        // The Active case has already expired on the shared kernel clock.
+        let control = Control(Arc::new(shared(state, 0, 1)));
+        let stop = crate::host_run::StopHandle::default();
+        let mut handled = (None, None);
+        let mut signals = crate::signals::Watch::new(&mut handled);
+        let polled = Cell::new(false);
+        let result = runtime.block_on(crate::host_run::unless_stopped(
+            async {
+                polled.set(true);
+                7
+            },
+            &stop,
+            &mut signals,
+            Some(&control),
+        ));
+        assert_eq!(result, None);
+        assert!(
+            !polled.get(),
+            "stale native evidence must win before network work"
+        );
+        assert!(stop.is_requested());
+    }
 }

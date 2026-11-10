@@ -134,7 +134,9 @@ pub struct Options {
     /// typed cause. Linux additionally consumes the selected logind lock hint;
     /// macOS console/sleep evidence does not establish screen-lock state.
     /// No original grant automatically resumes. `None`: the session lifetime
-    /// is not observed; the operator is told that locking does not end sharing.
+    /// is not observed on Linux; the operator is told that locking does not end
+    /// sharing. macOS requires its same-user inherited login selection even
+    /// when this API is called without the CLI.
     pub session_monitor: Option<session_monitor::Configuration>,
 }
 
@@ -1055,7 +1057,8 @@ fn serve_run(
             // evidence remains specific to the selected platform adapter.
             if let Some(lifetime) = lifetime {
                 let Some(opened) =
-                    unless_stopped(session_opened(&broker, lifetime), stop, &mut signals).await
+                    unless_stopped(session_opened(&broker, lifetime), stop, &mut signals, None)
+                        .await
                 else {
                     return Ok(());
                 };
@@ -1071,6 +1074,7 @@ fn serve_run(
                 policy.ready_with_approval(&broker, approval.is_some()),
                 stop,
                 &mut signals,
+                lifetime,
             )
             .await
             else {
@@ -1080,7 +1084,7 @@ fn serve_run(
             // Nothing is bound yet, so a stop during the fetch just drops it.
             report(Event::ObtainingCertificate);
             let fetch = api.native_server_identity(&broker, roots, CertificatePolicy::default());
-            let identity = unless_stopped(fetch, stop, &mut signals).await;
+            let identity = unless_stopped(fetch, stop, &mut signals, lifetime).await;
             let Some(identity) = identity else {
                 return Ok(());
             };
@@ -1210,6 +1214,20 @@ fn check(options: &Options) -> Result<(), Error> {
     {
         return Err(Error::Configuration);
     }
+    match options.session_monitor.as_ref().map(|m| &m.selection) {
+        Some(selection)
+            if cfg!(target_os = "macos")
+                && selection.platform == session_monitor::Platform::Macos
+                && selection.uid != 0
+                && selection.uid == rustix::process::geteuid().as_raw()
+                && selection.validate().is_ok() => {}
+        Some(selection)
+            if cfg!(target_os = "linux")
+                && selection.platform == session_monitor::Platform::Linux
+                && selection.validate().is_ok() => {}
+        None if cfg!(target_os = "linux") => {}
+        _ => return Err(Error::SessionMonitor(session_monitor::Error::Selection)),
+    }
     audio::check(options)?;
     microphone::check(options)
 }
@@ -1227,15 +1245,22 @@ fn signals(enabled: bool) -> Signals {
 
 /// Drive `work` unless a handled signal or the stop handle ends the wait first
 /// (`None`); used only before anything is bound, so dropping `work` is cleanup.
-async fn unless_stopped<T>(
+pub(crate) async fn unless_stopped<T>(
     work: impl Future<Output = T>,
     stop: &StopHandle,
     signals: &mut Watch<'_>,
+    lifetime: Option<&session_monitor::Control>,
 ) -> Option<T> {
     let mut work = pin!(work);
     poll_fn(|task| {
         if signals.fired(task) {
             stop.request();
+        }
+        if let Some(lifetime) = lifetime {
+            lifetime.register(task);
+            if session_ended(Some(lifetime)).is_some() {
+                stop.request();
+            }
         }
         stop.register(task.waker());
         if stop.is_requested() {
@@ -1373,6 +1398,9 @@ impl Share<'_> {
     }
 
     async fn bind(&self, broker: &Cx) -> Result<LinuxServer, Error> {
+        if let Some(cause) = session_ended(self.lifetime) {
+            return Err(Error::SessionEnded(cause));
+        }
         let node = self
             .api
             .node_identity(broker)
@@ -1383,6 +1411,11 @@ impl Share<'_> {
         }
         let (enforcement, addresses, interface) =
             self.ingress_plan(broker, node.addresses()).await?;
+        // Metadata and interface qualification can wait. Their successful
+        // result cannot renew the original local session's evidence.
+        if let Some(cause) = session_ended(self.lifetime) {
+            return Err(Error::SessionEnded(cause));
+        }
         let mut configurations = Vec::with_capacity(addresses.len());
         for ip in addresses {
             let address = SocketAddr::new(ip, self.options.port);
@@ -1633,7 +1666,25 @@ impl Share<'_> {
         epoch: Option<crate::host_policy::live::Lease>,
         consent: &mut approval::Owner,
     ) -> Result<Ended, Error> {
+        if let Some(cause) = session_ended(self.lifetime) {
+            return Ok(Ended::Session(cause));
+        }
+        if self.stop.is_requested() {
+            return Ok(Ended::Served);
+        }
         let mut linux = self.bind(broker).await?;
+        // Binding itself awaits native ingress work. Retire it before reporting
+        // Listening if the original login or local run ended during that wait.
+        let ended = session_ended(self.lifetime)
+            .map(Ended::Session)
+            .or_else(|| self.stop.is_requested().then_some(Ended::Served));
+        if let Some(ended) = ended {
+            if linux.stop(&self.cx()?).await.is_err() {
+                (self.report)(Event::CleanupFailed { stage: "ingress" });
+                return Err(Error::Cleanup("ingress"));
+            }
+            return Ok(ended);
+        }
         for address in linux.addresses() {
             (self.report)(Event::Listening { address });
         }
@@ -2258,7 +2309,11 @@ mod tests {
             port: 8443,
             interface: "tailscale0".into(),
             worker: PathBuf::from("fr-media-worker"),
-            display: ":0".into(),
+            display: if cfg!(target_os = "macos") {
+                String::new()
+            } else {
+                ":0".into()
+            },
             xauthority: None,
             trust_roots: PathBuf::from(fr_tailnet::trust::SYSTEM_BUNDLE),
             sharing: Scope::OwnUser,
@@ -2274,7 +2329,10 @@ mod tests {
             microphone: None,
             files: None,
             file_send: None,
-            session_monitor: None,
+            session_monitor: cfg!(target_os = "macos").then(|| session_monitor::Configuration {
+                image: PathBuf::from("/unprovisioned/fr-session-monitor"),
+                selection: session_monitor::Selection::macos(rustix::process::geteuid().as_raw()),
+            }),
         };
         let report: Reporter = Arc::new(|_| {});
         let stop = Arc::new(StopHandle::default());
@@ -2300,6 +2358,23 @@ mod tests {
         adaptive_only.worker = PathBuf::from("/unprovisioned/fr-media-worker");
         adaptive_only.adaptive_capture = true;
         assert_eq!(check(&adaptive_only), Ok(()));
+        let mut foreign_lifetime = adaptive_only.clone();
+        foreign_lifetime.session_monitor = Some(session_monitor::Configuration {
+            image: PathBuf::from("/unprovisioned/fr-session-monitor"),
+            selection: session_monitor::Selection::macos(rustix::process::geteuid().as_raw() ^ 1),
+        });
+        assert_eq!(
+            check(&foreign_lifetime),
+            Err(Error::SessionMonitor(session_monitor::Error::Selection))
+        );
+        if cfg!(target_os = "macos") {
+            let mut absent_lifetime = adaptive_only.clone();
+            absent_lifetime.session_monitor = None;
+            assert_eq!(
+                check(&absent_lifetime),
+                Err(Error::SessionMonitor(session_monitor::Error::Selection))
+            );
+        }
         let mut relative_agent = options.clone();
         relative_agent.worker = PathBuf::from("/usr/bin/fr-media-worker");
         relative_agent.input_agent = Some(PathBuf::from("fr-input-agent"));
@@ -2334,7 +2409,11 @@ mod tests {
         );
         let mut empty = options.clone();
         empty.worker = PathBuf::from("/usr/bin/fr-media-worker");
-        empty.display = String::new();
+        empty.display = if cfg!(target_os = "macos") {
+            ":0".into()
+        } else {
+            String::new()
+        };
         assert_eq!(run(&empty, &report, &stop), Err(Error::Configuration));
         // A relative audio server or a hostile sink name refuses before I/O.
         for (server, sink) in [
@@ -2459,7 +2538,7 @@ mod tests {
         let stop = StopHandle::default();
         let mut handled = (None, None);
         let mut signals = Watch::new(&mut handled);
-        let done = runtime.block_on(unless_stopped(async { 7 }, &stop, &mut signals));
+        let done = runtime.block_on(unless_stopped(async { 7 }, &stop, &mut signals, None));
         assert_eq!(done, Some(7));
         stop.request();
         let polled = std::cell::Cell::new(false);
@@ -2470,6 +2549,7 @@ mod tests {
             },
             &stop,
             &mut signals,
+            None,
         ));
         assert_eq!(stopped, None);
         assert!(!polled.get());

@@ -61,6 +61,7 @@ fn configuration() -> Configuration {
     Configuration {
         image,
         selection: Selection {
+            platform: frd::session_monitor::Platform::Linux,
             session: "c1".into(),
             uid: 1000,
             seat: "seat0".into(),

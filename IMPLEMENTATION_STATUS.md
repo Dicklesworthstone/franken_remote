@@ -1,5 +1,25 @@
 # Implementation status
 
+## Session startup and display-sleep fences (2026-11-10)
+
+The macOS library entry point now requires the same-user native session
+monitor, matching the CLI. A terminal monitor result interrupts policy and
+certificate startup work before that work can progress. The host rechecks the
+original evidence after ingress qualification and after binding; a share that
+ended during a wait retires its ingress before reporting Listening.
+
+The native monitor also requires an online, awake main display and consumes
+screen-sleep notifications. A sleeping display refuses startup, and a later
+wake cannot resume the original owner. This extends display-power coverage;
+the graphical screen-lock qualification gap described below remains open.
+
+Validation: the updated native evidence policy passed all 11 source tests and
+strict Clippy. The added runtime startup regression is present but remains
+unexecuted locally because compiling the unchanged Asupersync dependency is
+killed by the executor's memory limit. Apple SDK compilation and physical
+display sleep/wake behavior still require native qualification.
+Tracking: `fr-rc2-lock-logout-revokes-wmrt` (broader acceptance remains open).
+
 ## Native session lifecycle supervision
 
 The shared session monitor now validates executable images without blocking on

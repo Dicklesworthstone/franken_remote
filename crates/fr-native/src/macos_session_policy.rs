@@ -39,6 +39,7 @@ pub(crate) struct Observation {
     pub(crate) login_done: bool,
     pub(crate) graphic_access: bool,
     pub(crate) protected_data_available: bool,
+    pub(crate) display_awake: bool,
 }
 
 /// One helper process epoch. A negative signal or expired read permanently
@@ -141,6 +142,9 @@ impl Evidence {
         if !observation.on_console {
             return self.stop(Stop::Inactive);
         }
+        if !observation.display_awake {
+            return self.stop(Stop::Suspending);
+        }
         self.identity = Some(observation.identity);
         self.until = until;
         self.status = Status::Active { until_ns: until };
@@ -163,6 +167,7 @@ mod tests {
             login_done: true,
             graphic_access: true,
             protected_data_available: true,
+            display_awake: true,
         }
     }
 
@@ -277,6 +282,30 @@ mod tests {
             assert_eq!(
                 evidence.observe(3, Some(4), observation()),
                 Status::Stopped(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn a_sleeping_display_never_opens_or_resumes_an_original_session() {
+        for was_active in [false, true] {
+            let mut evidence = Evidence::new(501, Some(0));
+            if was_active {
+                assert!(matches!(
+                    evidence.observe(1, Some(2), observation()),
+                    Status::Active { .. }
+                ));
+            }
+            let mut sleeping = observation();
+            sleeping.display_awake = false;
+            assert_eq!(
+                evidence.observe(3, Some(4), sleeping),
+                Status::Stopped(Stop::Suspending)
+            );
+            // An independently observed wake cannot restore this monitor epoch.
+            assert_eq!(
+                evidence.observe(5, Some(6), observation()),
+                Status::Stopped(Stop::Suspending)
             );
         }
     }

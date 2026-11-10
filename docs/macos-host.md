@@ -121,6 +121,12 @@ state and completed login. It subscribes to AppKit user-switch, sleep,
 logout/power-off and protected-data loss events before obtaining its first
 snapshot. These events can only stop the original owner; none grants authority.
 
+It also requires an online main display whose current `CGDisplayIsAsleep`
+result is false, and subscribes to `NSWorkspaceScreensDidSleepNotification`.
+A sleeping main display at startup refuses the share; display sleep during a
+share ends the original session, and waking cannot reopen it. These checks
+cover display power state; graphical screen-lock detection remains unqualified.
+
 Native framework work stays on the helper's main thread. Its independent pipe
 responder reports Opening during initialization and can expire evidence while
 the main thread is blocked. Each real native read keeps its original 500 ms
@@ -154,7 +160,9 @@ Tracking: `fr-uvji`; the separate screen-lock qualification is `fr-6y4w`.
 API references: Apple's
 [Security session declarations](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_authorization/lib/AuthSession.h),
 [Window Server session properties](https://developer.apple.com/documentation/coregraphics/window-server-session-properties),
-and [session switch-out notification](https://developer.apple.com/documentation/appkit/nsworkspace/sessiondidresignactivenotification).
+[session switch-out notification](https://developer.apple.com/documentation/appkit/nsworkspace/sessiondidresignactivenotification),
+[display sleep state](https://developer.apple.com/documentation/coregraphics/cgdisplayisasleep(_:)),
+and [screen sleep notification](https://developer.apple.com/documentation/appkit/nsworkspace/screensdidsleepnotification).
 
 ## Tailscale
 

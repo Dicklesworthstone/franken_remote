@@ -166,7 +166,7 @@ impl Monitor {
         if code != 0 {
             return self.control.stop(native_stop(code));
         }
-        if snapshot.flags & !15 != 0 {
+        if snapshot.flags & !31 != 0 {
             return self.control.stop(Stop::Failed);
         }
         let observation = Observation {
@@ -179,6 +179,7 @@ impl Monitor {
             login_done: snapshot.flags & 2 != 0,
             graphic_access: snapshot.flags & 4 != 0,
             protected_data_available: snapshot.flags & 8 != 0,
+            display_awake: snapshot.flags & 16 != 0,
         };
         let mut evidence = self.control.lock();
         reply(evidence.observe(started, clock::monotonic_ns(), observation))
