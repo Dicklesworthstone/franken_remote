@@ -590,8 +590,15 @@ fn receive_expiry_at_final_reply_admission_preserves_the_original_viewer() {
         .await;
         configure(&mut f, &h, 1).await;
         let incoming = hold_audio_stop(&mut f, &h).await;
+        // Fail the output in a service call of its own. A fixture turn would
+        // also drive the viewer, which consumes the held host stop (stale once
+        // the output has reset), and its receive deadline would be gone before
+        // the reply below reaches its final admission.
         f.calls.borrow_mut().fail_once = true;
-        turn(&mut f).await;
+        let q = f.viewer.io().unwrap().0;
+        f.audio
+            .service(q, &c, now(&c).unwrap(), &mut || c.checkpoint().is_ok())
+            .unwrap();
         assert_eq!(f.calls.borrow().resets, 1);
         // The failed output left an original pending local AudioStop. Cross
         // the deadline at the send's final authorization, after its first
