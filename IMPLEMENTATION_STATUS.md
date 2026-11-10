@@ -9,6 +9,16 @@ to complete UTF-8 and separate from the broker. Prepare/publish consumes the
 original native bytes once, retains the local revision and origin fence, and
 rounds the original monotonic deadline down rather than renewing it.
 
+A follow-up timing correction applies to both Mac client and host. Privacy
+clock sampling now occurs under the heartbeat mutex, preventing preempted
+readers from misclassifying a newer UI pulse as clock rollback. The heartbeat
+also retains Darwin's sleep-inclusive monotonic sample: the 250 ms privacy cap
+expires across system sleep even when Rust's uptime clock pauses. A later UI
+turn cannot renew expired evidence; clock failure/regression remains terminal.
+The protocol's original item deadline and its clock domain are unchanged.
+Deterministic injected-clock regressions cover serialization and these cases;
+this is not a claim that the host's separate lock/logout gap is solved.
+
 The child keeps its own visible Off panel on the main thread and native work on
 one worker. A separate watchdog closes the original parent's content-free privacy
 signal on Off, parent loss or a stale UI heartbeat, without waiting for native

@@ -65,7 +65,10 @@ fn publication_receipts_survive_a_post_reply_stop_without_reopening_the_owner() 
             }
         );
         assert!(retained.1.is_none());
-        assert!(owner.is_poisoned(), "receipt retention is not authorization");
+        assert!(
+            owner.is_poisoned(),
+            "receipt retention is not authorization"
+        );
         let before = transcript(&log);
         assert_eq!(owner.watch(), Err(RemoteError::Channel));
         assert_eq!(

@@ -2,8 +2,8 @@
 //! Native backends supply only their final submission gate and typed errors.
 //! Authority, lease lifetime and record attachment remain in frd.
 use super::{
-    Duration, EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED, Read, Reply, Request, UnixStream,
-    process, receive, send,
+    Duration, EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED, Read, Reply, Request, UnixStream, process,
+    receive, send,
 };
 use fr_core::clipboard::{ClipboardSink, Publication, Stamp, process::Change, process::Failure};
 use fr_wire::clipboard::session::synchronize::{NativeClipboard, NativeText};

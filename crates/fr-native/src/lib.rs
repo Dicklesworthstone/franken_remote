@@ -138,7 +138,10 @@ pub use parent::{ParentUnbound, bind_parent};
             feature = "linux-microphone-playout"
         )
     ),
-    all(target_os = "macos", feature = "macos-input")
+    all(
+        target_os = "macos",
+        any(test, feature = "macos-input", feature = "macos-clipboard")
+    )
 ))]
 pub mod clock;
 

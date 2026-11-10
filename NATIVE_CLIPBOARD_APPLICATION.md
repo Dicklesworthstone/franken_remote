@@ -56,6 +56,13 @@ for an already attempted publication's exact receipt. No blocked native provider
 can postpone that privacy signal. The original broker still owns process
 termination and reaping; a finished privacy thread is not native cleanup proof.
 
+Both Mac applications sample privacy clocks while holding the original
+heartbeat mutex. A reader preempted before that lock cannot mistake a newer UI
+pulse for clock rollback. The existing uptime checks are retained, alongside
+Darwin's sleep-inclusive monotonic clock: a 250 ms UI gap in either clock,
+clock failure or regression is terminal. A late UI turn after sleep cannot
+renew the old heartbeat. This changes no protocol/item deadline clock domain.
+
 Prepared publication consumes the original native bytes once, retaining the
 pasteboard revision fence, origin stamp and immutable deadline. The raw child
 monotonic deadline is rounded down to microseconds, never extended. Each native

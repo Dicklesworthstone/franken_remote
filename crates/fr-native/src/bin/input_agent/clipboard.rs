@@ -1,9 +1,9 @@
 //! `fr-input-agent --clipboard`: the per-lease native clipboard process for
-//! frd's controlled share. The broker loads neither AppKit nor Xlib/XCB.
+//! frd's controlled share. The broker loads neither `AppKit` nor Xlib/XCB.
 //!
 //! Launched only by frd's `clipboard_process` factory, on the clipboard worker
 //! thread, after the controller's input grant and bilateral clipboard
-//! readiness, with a cleared environment (DISPLAY, optional XAUTHORITY),
+//! readiness, with a cleared environment (Linux DISPLAY, optional XAUTHORITY),
 //! `--parent-pid` and private `SOCK_STREAM` channels: commands on stdin and a
 //! content-free clipboard privacy stop channel on stdout. It
 //! holds no lease, ticket, peer identity or network socket: frd's synchronizer

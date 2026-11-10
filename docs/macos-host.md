@@ -69,7 +69,9 @@ input grant and bilateral clipboard readiness. It shows **Clipboard sharing —
 click to turn off** below the control badge on the Mac's main screen. Clicking
 it stops the original clipboard lane. Losing the panel or its bounded UI
 heartbeat also stops the lane, including while a native pasteboard call is
-blocked; the broker retains kill/reap custody of the original child.
+blocked; the broker retains kill/reap custody of the original child. A UI gap
+of 250 ms or more, including time asleep, permanently stops that clipboard
+owner. Activity after waking cannot reopen the old clipboard lane.
 
 Both directions use the existing bounded protocol: complete UTF-8 items,
 at most 1 MiB, original item deadlines, exact-origin echo suppression and

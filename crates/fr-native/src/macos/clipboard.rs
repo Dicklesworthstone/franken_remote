@@ -18,7 +18,7 @@ use frd::{
 use std::{
     sync::{Arc, Mutex},
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const WATCH_TURN: Duration = Duration::from_millis(10);
@@ -157,7 +157,7 @@ impl Clipboard {
                 crate::macos_clipboard::MacClipboard::open(
                     &ProtocolLimits::ABSOLUTE,
                     move |until| {
-                        if !privacy.heartbeat.live(Instant::now()) {
+                        if !privacy.heartbeat.live() {
                             source.stop();
                             return false;
                         }
@@ -198,7 +198,7 @@ impl Clipboard {
                         if !source.status().enabled {
                             return;
                         }
-                        if !privacy.heartbeat.live(Instant::now()) {
+                        if !privacy.heartbeat.live() {
                             source.stop();
                             return;
                         }
@@ -218,7 +218,7 @@ impl Clipboard {
             let visible = window
                 .and_then(|window| window.clipboard_visible().ok())
                 .unwrap_or(false);
-            if !visible || !self.privacy.heartbeat.progress(Instant::now()) {
+            if !visible || !self.privacy.heartbeat.progress() {
                 self.privacy.stop(false);
                 source.stop();
             }

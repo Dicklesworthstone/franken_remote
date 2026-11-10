@@ -29,13 +29,13 @@ pub struct Privacy(crate::macos_clipboard_privacy::Heartbeat);
 
 impl Privacy {
     /// Call only after the original native panel is verified visible.
-    pub fn progress(&self, now: Instant) -> bool {
-        self.0.progress(now)
+    pub fn progress(&self) -> bool {
+        self.0.progress()
     }
 
     /// A blocked UI becomes terminal after the existing 250 ms maximum silence.
-    pub fn live(&self, now: Instant) -> bool {
-        self.0.live(now)
+    pub fn live(&self) -> bool {
+        self.0.live()
     }
 
     pub fn stop(&self, user_off: bool) {

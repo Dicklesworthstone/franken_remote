@@ -23,7 +23,7 @@ use std::{
     os::fd::AsFd,
     sync::Arc,
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const TURN: Duration = Duration::from_millis(10);
@@ -45,7 +45,7 @@ impl State {
     }
 
     fn live(&self) -> bool {
-        if self.privacy.live(Instant::now()) {
+        if self.privacy.live() {
             true
         } else {
             self.stop(false);
@@ -106,7 +106,7 @@ impl Surface {
             watcher: None,
         };
         if owner.indicator.pump(Duration::ZERO) != IndicatorStatus::Shown
-            || !owner.state.privacy.progress(Instant::now())
+            || !owner.state.privacy.progress()
         {
             return Err(());
         }
@@ -128,7 +128,7 @@ impl Surface {
             return;
         }
         match self.indicator.pump(UI_TURN) {
-            IndicatorStatus::Shown if self.state.privacy.progress(Instant::now()) => {}
+            IndicatorStatus::Shown if self.state.privacy.progress() => {}
             IndicatorStatus::LocalStop => self.state.stop(true),
             _ => self.state.stop(false),
         }
@@ -277,7 +277,7 @@ mod tests {
             signal,
             command,
         };
-        assert!(state.privacy.progress(Instant::now()));
+        assert!(state.privacy.progress());
         (state, peer_signal, peer_command, executor)
     }
 
@@ -286,7 +286,7 @@ mod tests {
         let (state, mut peer_signal, mut peer_command, mut executor) = channels();
         state.stop(true);
         assert!(!state.live());
-        assert!(!state.privacy.progress(Instant::now()));
+        assert!(!state.privacy.progress());
         assert!(state.privacy.user_off());
         let mut byte = [0; 1];
         assert_eq!(executor.read(&mut byte).unwrap(), 0);

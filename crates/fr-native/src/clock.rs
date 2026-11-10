@@ -1,6 +1,7 @@
 //! Raw `CLOCK_MONOTONIC` for the out-of-process input executor's final check.
 //! The broker translates its authority deadline into this clock domain (the
 //! Asupersync wall-clock timer ticks at the same rate); it is never wall time.
+//! On macOS it includes sleep, unlike std's `Instant` (`CLOCK_UPTIME_RAW`).
 use core::ffi::{c_int, c_long};
 
 #[repr(C)]
@@ -86,14 +87,19 @@ mod tests {
     }
 
     #[test]
-    fn monotonic_clock_never_regresses_and_tracks_std_instant() {
+    fn monotonic_clock_never_regresses_and_includes_an_awake_delay() {
+        #[cfg(target_os = "linux")]
         let start = std::time::Instant::now();
         let a = super::monotonic_ns().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         let b = super::monotonic_ns().unwrap();
-        let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap();
         assert!(b >= a + 20_000_000);
-        // Same clock as std's Instant (and the runtime's wall-clock timer).
-        assert!(b - a <= elapsed);
+        #[cfg(target_os = "linux")]
+        {
+            let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap();
+            // Linux Instant shares this clock; macOS Instant excludes sleep
+            // while the unchanged broker/child CLOCK_MONOTONIC includes it.
+            assert!(b - a <= elapsed);
+        }
     }
 }
