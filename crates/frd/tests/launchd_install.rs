@@ -123,12 +123,7 @@ fn an_agent_needs_an_explicit_encoder_and_a_daemon_is_refused() {
 #[test]
 fn capabilities_without_a_macos_backend_refuse_with_frd_runs_own_codes() {
     let home = Home::new();
-    let agent = "/opt/fr/fr-input-agent";
     for (tail, code) in [
-        (
-            &["--input-agent", agent, "--clipboard"][..],
-            "clipboard_unavailable",
-        ),
         (&["--audio"][..], "audio_server_unavailable"),
         (&["--headless"][..], "no_display"),
         (&["--display", ":1"][..], "no_display"),
@@ -233,7 +228,8 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
         ]
     );
     // Exactly what frd run's own parser accepts.
-    assert!(frd::host_policy::options::RunOptions::parse(&arguments[2..]).is_ok());
+    let parsed = frd::host_policy::options::RunOptions::parse(&arguments[2..]).unwrap();
+    assert!(parsed.clipboard, "the installed control role defaults on");
     // The log goes to the user's own 0700 directory, never a shared /tmp.
     let logs = home.0.join("Library/Logs/FrankenRemote");
     assert!(plist.contains(&format!(
@@ -269,6 +265,45 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
         stages,
         [std::ffi::OsString::from("com.example.other.plist")]
     );
+}
+
+#[test]
+fn installed_clipboard_choices_roundtrip_through_the_real_run_parser() {
+    let home = Home::new();
+    let port = free_port();
+    for (choice, enabled) in [
+        (None, true),
+        (Some("--clipboard"), true),
+        (Some("--no-clipboard"), false),
+    ] {
+        let mut args = vec![
+            "install",
+            "--json",
+            "--port",
+            &port,
+            "--",
+            "--encoder",
+            "videotoolbox",
+            "--input-agent",
+            "/opt/fr/fr-input-agent",
+        ];
+        if let Some(choice) = choice {
+            args.push(choice);
+        }
+        let output = home.frd(&args);
+        assert!(output.status.success(), "{}", json(&output));
+        let plist = fs::read_to_string(home.agent()).unwrap();
+        let arguments = program_arguments(&plist);
+        let parsed = frd::host_policy::options::RunOptions::parse(&arguments[2..]).unwrap();
+        assert_eq!(parsed.clipboard, enabled);
+        assert_eq!(
+            parsed.macos_refusal(frd::host_policy::Approval::parse("none").unwrap()),
+            None
+        );
+        if let Some(choice) = choice {
+            assert!(arguments.iter().any(|argument| argument == choice));
+        }
+    }
 }
 
 #[test]

@@ -1,5 +1,39 @@
 # Implementation status
 
+## macOS host text clipboard and privacy receipts (2026-11-10)
+
+The macOS host now connects default-on controlling clipboard negotiation to a
+real per-lease `fr-input-agent --clipboard` role. The existing client pasteboard
+backend is shared through `macos-clipboard`; it remains thread-confined, bounded
+to complete UTF-8 and separate from the broker. Prepare/publish consumes the
+original native bytes once, retains the local revision and origin fence, and
+rounds the original monotonic deadline down rather than renewing it.
+
+The child keeps its own visible Off panel on the main thread and native work on
+one worker. A separate watchdog closes the original parent's content-free privacy
+signal on Off, parent loss or a stale UI heartbeat, without waiting for native
+clipboard work. Read shutdown fences future commands while the write side can
+return an already attempted publication receipt. The broker poisons the owner
+before exposing such a receipt; text and later operations stay blocked.
+A publication stopped before its first possible IPC write is definitely not
+submitted. A lost reply after a possible write remains uncertain, without retry.
+
+`--input-agent` enables clipboard by default; explicit On/Off and their
+LaunchAgent persistence use the real run parser. View-only stays excluded.
+The existing bounded dispatcher is shared with Linux, preserving its final
+X11 deadline/privacy checks. A test-module path error observed in first-batch CI
+was corrected with an explicit nested path.
+
+Validation: the source and regression additions received independent review.
+The workspace execution service became unavailable before compilation, so no
+new native or full-suite pass is claimed. Added regressions cover private
+pasteboard publication/local supersession, socket dispatch, exact receipt
+retention, command shutdown with receipt writes, parent loss, original deadline
+projection and installed default/On/Off choices. The Mac-host workflow explicitly
+runs the helper and broker lifecycle tests. Native Mac host/client copy/paste,
+the physical Off surface, stalled native provider behavior and all-three-host-OS
+acceptance remain open. Tracking: `fr-p2-shared-clipboard-wgd`, `fr-5a4w`.
+
 ## Native media scheduling and macOS repaint isolation (2026-11-09)
 
 An admitted in-process presenter now lives on one Asupersync drained blocking

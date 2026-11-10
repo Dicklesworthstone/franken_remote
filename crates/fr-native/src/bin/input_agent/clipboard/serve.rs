@@ -219,4 +219,5 @@ fn failed<C: Backend>(clipboard: &C, error: C::Error) -> Reply {
 }
 
 #[cfg(test)]
+#[path = "serve/tests.rs"]
 mod tests;

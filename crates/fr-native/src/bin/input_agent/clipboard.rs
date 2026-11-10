@@ -1,5 +1,5 @@
-//! `fr-input-agent --clipboard`: the per-lease out-of-process X11 CLIPBOARD
-//! owner for frd's controlled share (frd never loads Xlib/XCB).
+//! `fr-input-agent --clipboard`: the per-lease native clipboard process for
+//! frd's controlled share. The broker loads neither AppKit nor Xlib/XCB.
 //!
 //! Launched only by frd's `clipboard_process` factory, on the clipboard worker
 //! thread, after the controller's input grant and bilateral clipboard
@@ -9,11 +9,11 @@
 //! holds no lease, ticket, peer identity or network socket: frd's synchronizer
 //! performs every authority check. This child only executes one bounded native
 //! request at a time, and re-checks frd's publication deadline in its own
-//! `CLOCK_MONOTONIC` immediately before the X11 ownership call.
+//! `CLOCK_MONOTONIC` immediately before every native publication call.
 //!
 //! Payloads are bounded by the item size agreed in `Hello`, checked from the
 //! frame before any allocation. On EOF, Stop or a protocol violation it erases
-//! its private copies and closes X11 without resetting another application's
+//! its private copies and closes the owner without resetting another application's
 //! newer selection. It writes nothing but reply frames and never logs text.
 use crate::channel::{EXIT_CHANNEL, EXIT_PROTOCOL, EXIT_REFUSED};
 use fr_core::clipboard::process::{self, Reply, Request};
@@ -27,13 +27,20 @@ const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// frd reads every reply at once; a reader that stops is gone.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[cfg(feature = "linux-clipboard")]
+#[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
 #[path = "clipboard/linux.rs"]
 mod linux;
-#[cfg(feature = "linux-clipboard")]
+#[cfg(all(target_os = "macos", feature = "macos-input"))]
+#[path = "clipboard/macos.rs"]
+mod macos;
+#[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
 #[path = "clipboard/privacy.rs"]
 mod privacy;
-#[cfg(any(feature = "linux-clipboard", test))]
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-clipboard"),
+    all(target_os = "macos", feature = "macos-input"),
+    test
+))]
 #[path = "clipboard/serve.rs"]
 mod serve;
 
@@ -71,14 +78,21 @@ fn hello(command: &mut UnixStream) -> Result<(u128, u32), i32> {
     Ok((epoch, max_item_bytes))
 }
 
-/// Serve one clipboard lane. Without the `linux-clipboard` build the role
+/// Serve one clipboard lane. Without the selected platform backend the role
 /// exists only to refuse typed (`Unsupported`), never to pretend.
 pub(super) fn run(command: UnixStream) -> i32 {
-    #[cfg(feature = "linux-clipboard")]
+    #[cfg(all(target_os = "linux", feature = "linux-clipboard"))]
     {
         linux::run(command)
     }
-    #[cfg(not(feature = "linux-clipboard"))]
+    #[cfg(all(target_os = "macos", feature = "macos-input"))]
+    {
+        macos::run(command)
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", feature = "linux-clipboard"),
+        all(target_os = "macos", feature = "macos-input")
+    )))]
     {
         let mut command = command;
         if let Err(code) = hello(&mut command) {

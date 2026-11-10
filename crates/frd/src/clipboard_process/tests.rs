@@ -1,7 +1,7 @@
 //! The real frd side (spawn, socketpair, bounded payloads, deadline
 //! translation, timeouts, poisoning, kill/reap custody) against a Python
-//! PROTOCOL fixture child. The fixture owns no X11 selection; real X11 effects
-//! are qualified by fr-native's Xvfb test and the namespace e2e.
+//! PROTOCOL fixture child. The fixture owns no native clipboard; OS effects
+//! require separate native platform and end-to-end qualification.
 use super::*;
 use crate::input_watchdog::host_now;
 use asupersync::{
@@ -46,7 +46,8 @@ fn runtime() -> Runtime {
     RuntimeBuilder::new().worker_threads(1).build().unwrap()
 }
 fn launch(image: &Path) -> ProcessLaunch {
-    ProcessLaunch::new(image, ":0", None, 0x5eed_cafe).unwrap()
+    let display = if cfg!(target_os = "macos") { "" } else { ":0" };
+    ProcessLaunch::new(image, display, None, 0x5eed_cafe).unwrap()
 }
 fn stamp(sequence: u64) -> Stamp {
     Stamp {
@@ -71,16 +72,20 @@ fn a_local_copy_is_read_and_a_published_item_keeps_its_stamp() {
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     let (image, log) = fixture("normal");
     let mut owner = RemoteClipboard::start(&launch(&image), cx.clone(), 4096).unwrap();
-    // The child runs with a cleared environment: DISPLAY only (no XAUTHORITY
-    // was configured), and the launch arguments name the clipboard role.
-    // DISPLAY only (Python's own C-locale coercion may add LC_CTYPE).
+    // The child runs with a cleared environment. Only Linux supplies DISPLAY;
+    // neither platform supplies XAUTHORITY here. Python may add LC_CTYPE.
     let start = line(&log, "START").unwrap();
     let env = start.rsplit(' ').next().unwrap();
     assert!(
-        env.split(',').all(|k| k == "DISPLAY" || k == "LC_CTYPE"),
+        env.split(',').all(|key| {
+            key.is_empty() || key == "LC_CTYPE" || (cfg!(target_os = "linux") && key == "DISPLAY")
+        }),
         "{env}"
     );
-    assert!(env.split(',').any(|k| k == "DISPLAY"));
+    assert_eq!(
+        env.split(',').any(|key| key == "DISPLAY"),
+        cfg!(target_os = "linux")
+    );
     assert_eq!(line(&log, "HELLO").as_deref(), Some("HELLO 4096"));
     let bootstrap = owner.watch().unwrap();
     assert_eq!(bootstrap, 1);

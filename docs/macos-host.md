@@ -2,7 +2,8 @@
 
 A Mac shares its desktop with `frd run`, built with `--features macos-host`:
 ScreenCaptureKit capture, VideoToolbox HEVC, and (with `--input-agent`)
-control through a Quartz input agent with an on-screen indicator. It runs as a
+control through a Quartz input agent with an on-screen indicator and default-on
+plain-text clipboard sharing with its own local Off panel. It runs as a
 per-user LaunchAgent in your login session: macOS allows screen capture and
 input only there, so there is no system-wide daemon.
 
@@ -31,8 +32,9 @@ Defaults: control allowed (`--input-agent`; `--view-only` omits it), sharing
 limited to your own devices (`--approval none --sharing own-user`), 60 fps
 and 30 Mbit/s caps. Options after `--` go to `frd run`; `frd install` checks
 them with `frd run`'s own parser and refuses anything every start would refuse
-(no encoder, a macOS-unsupported option such as `--clipboard` or `--audio`, a
-LaunchDaemon).
+(no encoder, a macOS-unsupported option such as `--audio`, a LaunchDaemon).
+Clipboard follows the controlling share by default; pass `-- --no-clipboard`
+to install with it disabled, or select `--view-only` to omit control entirely.
 
 `frd install` alone (without the script) writes the plist and prints the
 `launchctl` steps; it never starts the agent.
@@ -52,6 +54,34 @@ and launchd starts it again 10 seconds later. A Developer ID signature keeps
 the grants across updates; an unsigned or ad-hoc build would need them again
 after every rebuild. Both entries can be revoked any time in System Settings >
 Privacy & Security.
+
+## Text clipboard
+
+With `--input-agent`, the host enables plain UTF-8 clipboard sharing for the
+controller. The helper must be built with `macos-input` (the install script
+already selects it); this brings in the shared `macos-clipboard` backend.
+`--no-clipboard` disables sharing before native access, and `--clipboard`
+explicitly selects the default. The installed LaunchAgent preserves that choice.
+Read-only viewers receive no clipboard.
+
+The separate `fr-input-agent --clipboard` child opens only after the original
+input grant and bilateral clipboard readiness. It shows **Clipboard sharing —
+click to turn off** below the control badge on the Mac's main screen. Clicking
+it stops the original clipboard lane. Losing the panel or its bounded UI
+heartbeat also stops the lane, including while a native pasteboard call is
+blocked; the broker retains kill/reap custody of the original child.
+
+Both directions use the existing bounded protocol: complete UTF-8 items,
+at most 1 MiB, original item deadlines, exact-origin echo suppression and
+local-copy supersession. Cleanup clears private buffers without clearing a
+newer OS pasteboard value. No images, file promises or rich-text conversion
+are enabled. A clipboard refusal normally leaves viewing and input usable.
+If an outgoing clipboard payload is already retained inside active native
+transport I/O, the original connection closes to enforce the privacy stop.
+
+The host implementation and private-pasteboard/IPC regressions are in source.
+Live Mac-host copy/paste, the local Off panel and stalled-provider behavior
+still need native qualification; this is not a hardware or tailnet pass claim.
 
 ## Operate
 

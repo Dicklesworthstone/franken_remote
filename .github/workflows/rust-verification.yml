@@ -467,6 +467,10 @@ jobs:
         run: cargo clippy -p frd --lib --bins --features macos-host --locked -- -D warnings
       - name: Test display geometry, key mapping and held input state
         run: cargo test -p fr-native --lib --no-default-features --features macos-media,macos-input --locked macos_
+      - name: Test the macOS clipboard executor and broker lifecycle
+        run: |
+          cargo test -p fr-native --bin fr-input-agent --no-default-features --features macos-input --locked clipboard::
+          cargo test -p frd --lib --features macos-host --locked clipboard_process::
       - name: Test the macOS LaunchAgent installer and service publication
         run: |
           cargo test -p frd --features macos-host --locked --test launchd_install

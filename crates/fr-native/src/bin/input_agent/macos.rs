@@ -48,14 +48,21 @@ const PUMP: Duration = Duration::from_millis(20);
 
 pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
-    let parent = match (args.next().as_deref(), args.next(), args.next()) {
+    let mut first = args.next();
+    let clipboard = first.as_deref() == Some("--clipboard");
+    if clipboard {
+        first = args.next();
+    }
+    let parent = match (first.as_deref(), args.next(), args.next()) {
         (Some("--parent-pid"), Some(pid), None) => pid.parse::<u32>().ok(),
-        // `--clipboard` has no macOS backend: refused like any other usage.
         _ => None,
     };
     // Refuse an already reparented launch before any native call.
     if parent.is_none_or(|pid| macos_input::bind_parent(pid).is_err()) {
         return EXIT_USAGE;
+    }
+    if clipboard {
+        return command_channel().map_or(EXIT_USAGE, crate::clipboard::run);
     }
     let (Ok(mut command), Ok(signals)) = (command_channel(), signal_channel()) else {
         return EXIT_USAGE;

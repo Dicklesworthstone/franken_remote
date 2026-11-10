@@ -28,8 +28,8 @@
 //! further request, so it cannot inject anything.
 //!
 //! `--clipboard --parent-pid PID` selects a different, separately launched
-//! role: the per-lease X11 CLIPBOARD owner for frd's `clipboard_process`
-//! (see `input_agent/clipboard.rs`; built with `linux-clipboard`, otherwise it
+//! role: the per-lease native clipboard owner for frd's `clipboard_process`
+//! (see `input_agent/clipboard.rs`; built with `linux-clipboard` or `macos-input`, otherwise it
 //! refuses typed). The same locally installed image, launch validation and
 //! trust limit apply; the two roles never share a process or a channel.
 #[cfg(all(target_os = "linux", feature = "linux-input"))]
@@ -353,8 +353,11 @@ mod linux {
     }
 }
 
-// The clipboard owner role (`--clipboard`); no input or indicator in it.
-#[cfg(all(target_os = "linux", feature = "linux-input"))]
+// The separate clipboard owner role and its own privacy Off surface.
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-input"),
+    all(target_os = "macos", feature = "macos-input")
+))]
 #[path = "input_agent/clipboard.rs"]
 mod clipboard;
 

@@ -1,4 +1,4 @@
-//! The macOS client's plain UTF-8 pasteboard, confined to the original admitted
+//! The macOS plain UTF-8 pasteboard, confined to the original admitted
 //! clipboard worker. No window, runtime, thread, native callback queue or grant
 //! is created here. The visible application's gate remains live across every
 //! native operation; publication additionally retains the original deadline.
@@ -20,6 +20,36 @@ use std::{
     rc::Rc,
     time::{Duration, Instant},
 };
+
+/// Original visible clipboard Off surface. A UI heartbeat grants no clipboard
+/// or input authority; it only adds a terminal, bounded privacy prerequisite.
+/// A late UI turn, clock regression or stop cannot re-enable this instance.
+#[derive(Clone, Default)]
+pub struct Privacy(crate::macos_clipboard_privacy::Heartbeat);
+
+impl Privacy {
+    /// Call only after the original native panel is verified visible.
+    pub fn progress(&self, now: Instant) -> bool {
+        self.0.progress(now)
+    }
+
+    /// A blocked UI becomes terminal after the existing 250 ms maximum silence.
+    pub fn live(&self, now: Instant) -> bool {
+        self.0.live(now)
+    }
+
+    pub fn stop(&self, user_off: bool) {
+        self.0.stop(user_off);
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.0.stopped()
+    }
+
+    pub fn user_off(&self) -> bool {
+        self.0.user_off()
+    }
+}
 
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const OK: i32 = 0;
@@ -321,12 +351,41 @@ impl MacClipboard {
         Ok(())
     }
 
-    fn publish_inner(&mut self, text: &str, stamp: Stamp, until: HostInstant) -> Publication {
+    /// Consume the original prepared bytes once, without another text copy.
+    /// The host's private IPC uses this only after its Prepare acknowledgement.
+    /// `until` belongs to the clock used by this owner's original gate; the
+    /// process adapter rounds its raw monotonic nanosecond cap DOWN to micros.
+    pub fn publish_prepared_until(&mut self, stamp: Stamp, until: HostInstant) -> Publication {
+        self.finish_publish(None, stamp, until)
+    }
+
+    fn finish_publish(
+        &mut self,
+        length: Option<usize>,
+        stamp: Stamp,
+        until: HostInstant,
+    ) -> Publication {
+        let result = self.publish_inner(length, stamp, until);
+        self.cancel_prepared();
+        if result == Publication::UnknownEffect {
+            // Preserve the receipt and fence this owner before any later turn.
+            // Native cleanup remains the original worker's responsibility.
+            self.retired = true;
+        }
+        result
+    }
+
+    fn publish_inner(
+        &mut self,
+        length: Option<usize>,
+        stamp: Stamp,
+        until: HostInstant,
+    ) -> Publication {
         self.reading = None;
         let Some(prepared) = self.prepared.take() else {
             return Publication::NotSubmitted(PlatformError::Unavailable);
         };
-        if stamp != prepared.stamp || text.len() != prepared.len {
+        if stamp != prepared.stamp || length.is_some_and(|len| len != prepared.len) {
             return Publication::NotSubmitted(PlatformError::Unavailable);
         }
         let replacement = match Replacement::new(prepared.change.count) {
@@ -401,15 +460,7 @@ impl ClipboardSink for MacClipboard {
     }
 
     fn publish_until(&mut self, text: &str, stamp: Stamp, until: HostInstant) -> Publication {
-        let result = self.publish_inner(text, stamp, until);
-        self.cancel_prepared();
-        if result == Publication::UnknownEffect {
-            // An uncertain write must not be re-observed as a fresh local copy.
-            // Return the retained receipt before foreign cleanup; the next
-            // worker turn retires this owner and performs the actual close.
-            self.retired = true;
-        }
-        result
+        self.finish_publish(Some(text.len()), stamp, until)
     }
 
     fn cancel_prepared(&mut self) {
@@ -781,5 +832,43 @@ mod tests {
             owner.publish_until("remote", stamp(1), HostInstant::from_micros(200)),
             Publication::NotSubmitted(PlatformError::Unavailable)
         );
+    }
+    #[test]
+    fn prepared_process_publication_uses_original_bytes_once_and_keeps_its_stamp() {
+        let mut owner = board(|_| true);
+        owner.watch().unwrap();
+        let original = stamp(1);
+        let revision = owner.revision();
+        owner
+            .prepare_for_revision("host process λ", original, revision)
+            .unwrap();
+        assert_eq!(
+            owner.publish_prepared_until(original, HostInstant::from_micros(100)),
+            Publication::SubmittedToOs
+        );
+        let after = owner.revision();
+        assert_eq!(
+            owner.publish_prepared_until(original, HostInstant::from_micros(200)),
+            Publication::NotSubmitted(PlatformError::Unavailable)
+        );
+        assert_eq!(owner.revision(), after);
+        owner.begin_read().unwrap();
+        let text = owner.poll_read().unwrap().unwrap();
+        assert_eq!(text.text(), "host process λ");
+        assert_eq!(text.origin(), Some(original));
+    }
+
+    #[test]
+    fn prepared_process_publication_cannot_replace_a_newer_local_copy() {
+        let mut owner = board(|_| true);
+        owner.watch().unwrap();
+        owner.prepare("remote", stamp(1)).unwrap();
+        copy(&mut owner, b"newer local");
+        assert_eq!(
+            owner.publish_prepared_until(stamp(1), HostInstant::from_micros(100)),
+            Publication::NotSubmitted(PlatformError::LocalChanged)
+        );
+        owner.begin_read().unwrap();
+        assert_eq!(owner.poll_read().unwrap().unwrap().text(), "newer local");
     }
 }

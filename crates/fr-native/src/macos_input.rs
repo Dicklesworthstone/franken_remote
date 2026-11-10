@@ -97,6 +97,7 @@ unsafe extern "C" {
     fn fr_in_bind_parent(expected: i32) -> c_int;
     fn fr_in_route_to_process(pid: i32);
     fn fr_in_indicator_open(display_id: u32, timeout_ms: u32) -> c_int;
+    fn fr_in_clipboard_indicator_open(timeout_ms: u32) -> c_int;
     fn fr_in_indicator_pump(timeout_ms: u32) -> c_int;
     fn fr_in_indicator_close();
 }
@@ -659,7 +660,27 @@ impl Indicator {
     /// Show the indicator on `display_id`; `Ok` only once it is on screen.
     pub fn open(display_id: u32) -> Result<Self, PlatformError> {
         // SAFETY: scalar arguments; the glue refuses any thread but the main one.
-        status(unsafe { fr_in_indicator_open(display_id, INDICATOR_TIMEOUT_MS) })?;
+        Self::opened(unsafe { fr_in_indicator_open(display_id, INDICATOR_TIMEOUT_MS) })
+    }
+
+    /// A separately launched clipboard child shows its own Off surface on the
+    /// main screen. This creates no input source and grants no input authority.
+    pub fn open_clipboard() -> Result<Self, PlatformError> {
+        // SAFETY: scalar argument; the glue requires the main thread and one panel.
+        Self::opened(unsafe { fr_in_clipboard_indicator_open(INDICATOR_TIMEOUT_MS) })
+    }
+
+    fn opened(code: c_int) -> Result<Self, PlatformError> {
+        if let Err(error) = status(code) {
+            // FR_IN_INVALID refuses before allocation (wrong thread or another
+            // live panel). It must never retire somebody else's native owner.
+            if code != -1 {
+                // SAFETY: close is main-thread checked and tolerates no panel.
+                // Only this failed attempt could have allocated the window.
+                unsafe { fr_in_indicator_close() };
+            }
+            return Err(error);
+        }
         Ok(Self {
             _main_thread: PhantomData,
         })

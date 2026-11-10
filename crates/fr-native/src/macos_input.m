@@ -317,6 +317,7 @@ static BOOL posted_here(NSEvent *event) {
 }
 
 @interface FrControlBadge : NSView
+@property(nonatomic) BOOL clipboard;
 @end
 
 @implementation FrControlBadge
@@ -353,7 +354,8 @@ static BOOL posted_here(NSEvent *event) {
         NSFontAttributeName : [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName : NSColor.whiteColor,
     };
-    NSString *text = @"Remote control active — click to stop";
+    NSString *text = self.clipboard ? @"Clipboard sharing — click to turn off"
+                                    : @"Remote control active — click to stop";
     NSSize size = [text sizeWithAttributes:attributes];
     [text drawAtPoint:NSMakePoint(NSMidX(self.bounds) - size.width / 2,
                                   NSMidY(self.bounds) - size.height / 2)
@@ -362,6 +364,7 @@ static BOOL posted_here(NSEvent *event) {
 @end
 
 static NSPanel *indicator;
+static BOOL clipboard_indicator;
 
 static NSScreen *screen_for(uint32_t display_id) {
     for (NSScreen *screen in NSScreen.screens) {
@@ -385,9 +388,15 @@ static BOOL onscreen(NSInteger window) {
     return shown;
 }
 
+static BOOL clipboard_visible(NSPanel *panel) {
+    return panel.isVisible && !panel.isMiniaturized && panel.isOnActiveSpace &&
+           !NSApp.isHidden && (panel.occlusionState & NSWindowOcclusionStateVisible) &&
+           onscreen(panel.windowNumber);
+}
+
 // Show the indicator on `display_id` and wait (bounded) until the window
 // server has it on screen. FR_IN_OK only then.
-int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
+static int indicator_open(uint32_t display_id, uint32_t timeout_ms, BOOL clipboard) {
     if (!pthread_main_np() || indicator) return FR_IN_INVALID;
     @autoreleasepool {
         [NSApplication sharedApplication];
@@ -397,9 +406,10 @@ int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
         NSScreen *screen = screen_for(display_id);
         if (!screen) return FR_IN_GEOMETRY;
         NSRect visible = screen.visibleFrame;
-        NSSize size = NSMakeSize(300, 28);
+        NSSize size = NSMakeSize(clipboard ? 340 : 300, 28);
         NSRect frame = NSMakeRect(round(NSMidX(visible) - size.width / 2),
-                                  round(NSMaxY(visible) - size.height - 6), size.width, size.height);
+                                  round(NSMaxY(visible) - size.height - (clipboard ? 40 : 6)),
+                                  size.width, size.height);
         NSPanel *panel =
             [[NSPanel alloc] initWithContentRect:frame
                                        styleMask:NSWindowStyleMaskBorderless |
@@ -418,11 +428,16 @@ int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
         panel.floatingPanel = YES;
         panel.becomesKeyOnlyIfNeeded = YES;
         panel.releasedWhenClosed = NO;
-        panel.contentView = [[FrControlBadge alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
-        [panel orderFrontRegardless];
+        FrControlBadge *badge =
+            [[FrControlBadge alloc] initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+        if (!badge) return FR_IN_UNAVAILABLE;
+        badge.clipboard = clipboard;
+        panel.contentView = badge;
+        clipboard_indicator = clipboard;
         indicator = panel;
+        [panel orderFrontRegardless];
         NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
-        while (!onscreen(panel.windowNumber)) {
+        while (!(clipboard ? clipboard_visible(panel) : onscreen(panel.windowNumber))) {
             if ([until timeIntervalSinceNow] <= 0) return FR_IN_UNAVAILABLE;
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]
@@ -434,23 +449,55 @@ int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
     return FR_IN_OK;
 }
 
+// These roles run in separate children; neither can replace a live panel.
+int fr_in_indicator_open(uint32_t display_id, uint32_t timeout_ms) {
+    @try {
+        return indicator_open(display_id, timeout_ms, NO);
+    } @catch (NSException *exception) {
+        (void)exception;
+        return FR_IN_UNAVAILABLE;
+    }
+}
+
+int fr_in_clipboard_indicator_open(uint32_t timeout_ms) {
+    @try {
+        // Clipboard covers the logged-in session; show its independent Off
+        // surface on the local main screen, below the control badge.
+        return indicator_open(CGMainDisplayID(), timeout_ms, YES);
+    } @catch (NSException *exception) {
+        (void)exception;
+        return FR_IN_UNAVAILABLE;
+    }
+}
+
 // Handle indicator events for up to `timeout_ms`. FR_IND_SHOWN while shown,
 // FR_IND_LOCAL_STOP once the local user clicked it or hid it.
 int fr_in_indicator_pump(uint32_t timeout_ms) {
     if (!pthread_main_np() || !indicator) return FR_IND_FAILED;
     @autoreleasepool {
-        NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
-        NSEvent *event;
-        while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
-                                           untilDate:until
-                                              inMode:NSDefaultRunLoopMode
-                                             dequeue:YES])) {
-            [NSApp sendEvent:event];
-            until = [NSDate distantPast];
-        }
-        if (!indicator.isVisible || NSApp.isHidden) {
+        @try {
+            NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
+            // Bounded event work: a flood cannot starve the privacy heartbeat.
+            for (unsigned i = 0; i < 64; ++i) {
+                NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                   untilDate:until
+                                                      inMode:NSDefaultRunLoopMode
+                                                     dequeue:YES];
+                if (!event) break;
+                [NSApp sendEvent:event];
+                until = [NSDate distantPast];
+            }
+            if (!indicator.isVisible || NSApp.isHidden) {
+                int shown = FR_IND_SHOWN;
+                atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_LOCAL_STOP);
+            } else if (clipboard_indicator && !clipboard_visible(indicator)) {
+                int shown = FR_IND_SHOWN;
+                atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_FAILED);
+            }
+        } @catch (NSException *exception) {
+            (void)exception;
             int shown = FR_IND_SHOWN;
-            atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_LOCAL_STOP);
+            atomic_compare_exchange_strong(&indicator_state, &shown, FR_IND_FAILED);
         }
     }
     return atomic_load(&indicator_state);
@@ -458,6 +505,12 @@ int fr_in_indicator_pump(uint32_t timeout_ms) {
 
 void fr_in_indicator_close(void) {
     if (!pthread_main_np() || !indicator) return;
-    [indicator orderOut:nil];
+    NSPanel *panel = indicator;
     indicator = nil;
+    @try {
+        [panel orderOut:nil];
+    } @catch (NSException *exception) {
+        // Native cleanup cannot unwind across Rust's Drop boundary.
+        (void)exception;
+    }
 }

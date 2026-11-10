@@ -2,15 +2,15 @@
 
 ## Native desktop controls
 
-Linux `fr connect --control` and `frd run --input-agent PATH` enable text
-clipboard sharing by default. `--no-clipboard` disables it at either end;
+Supported Linux X11 and macOS builds of `fr connect --control` and
+`frd run --input-agent PATH` enable text clipboard sharing by default. `--no-clipboard` disables it at either end;
 `--clipboard` explicitly selects the default. Conflicting choices are refused.
 Service installation preserves the disable. View-only never accesses clipboard.
 
 The actual grant, approval, bilateral readiness and OS permission gate access.
 The client and host each show a clipboard **Turn off** control. Native setup
-waits for mapped, drawn, responsive UI. Hiding, obscuring, closing or losing it
-fences the original lane, including during blocked native work. Old controls
+waits for mapped, drawn, responsive UI. Losing required visibility, closing or
+losing the control fences the original lane, including during blocked native work. Old controls
 cannot affect later sessions; cleanup preserves newer OS clipboard values.
 
 Without retained clipboard payload, retirement preserves the desktop. A stop
@@ -18,7 +18,9 @@ during protected native I/O with retained payload still closes the connection:
 the pinned transport cannot selectively retract that packet. This privacy fence
 remains mandatory. Missing support, permission or UI reports typed absence.
 
-Before decoder startup, a control client requesting clipboard sharing reserves
+### Linux desktop placement
+
+Before decoder startup, a Linux control client requesting clipboard sharing reserves
 room for its compact 640-by-96-pixel local control strip. The original viewer
 window is capped to the local screen with space below it and margins for local
 window decorations; an explicit `--fit` remains an upper bound and no image is upscaled. The existing aspect-fit renderer
@@ -37,6 +39,37 @@ before opening their Desktop, then configure the original clipboard as usual.
 Full Cargo/session execution remains blocked locally by shared storage and
 memory exhaustion. Focused native checks are separate evidence; new CLI and
 session regressions are retained for execution on a provisioned builder.
+
+## macOS host application
+
+A `macos-input` build of `fr-input-agent` now serves the same bounded clipboard
+process protocol through the shared synchronous `macos-clipboard` backend.
+The helper entrypoint validates its original parent before native work.
+The host broker starts it only for the original controlling lease after
+bilateral readiness; it loads no AppKit or pasteboard library itself.
+
+AppKit and the independent local Off panel stay on the main thread. A single
+separate worker owns NSPasteboard and the command channel. A content-free
+watchdog closes the parent privacy signal when the UI heartbeat expires or
+the parent disappears. It shuts down command reads, preserving the write side
+for an already attempted publication's exact receipt. No blocked native provider
+can postpone that privacy signal. The original broker still owns process
+termination and reaping; a finished privacy thread is not native cleanup proof.
+
+Prepared publication consumes the original native bytes once, retaining the
+pasteboard revision fence, origin stamp and immutable deadline. The raw child
+monotonic deadline is rounded down to microseconds, never extended. Each native
+mutation rechecks the original privacy and deadline gates. Later local copies
+win; uncertain mutation fences the owner; nothing is replayed.
+
+CLI and LaunchAgent defaults follow the input agent on macOS as on Linux.
+`--no-clipboard` persists through installation. Missing native support or panel
+visibility returns typed absence rather than borrowing input permission.
+Private-pasteboard, executor lifecycle and installed-option regressions are
+authored; CI selects the Mac helper and broker suites explicitly. They have
+not run in this session's unavailable execution workspace. Real two-machine
+Mac-host synchronization and local/native fault qualification remain open.
+See [running a macOS host](docs/macos-host.md#text-clipboard).
 
 ## Publication receipts after a local privacy stop
 

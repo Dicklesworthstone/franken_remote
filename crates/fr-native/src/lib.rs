@@ -50,11 +50,11 @@ pub use error::NativeError;
 pub mod macos;
 #[cfg(all(target_os = "macos", feature = "macos-media"))]
 pub mod macos_capture;
-#[cfg(all(target_os = "macos", feature = "macos-desktop"))]
+#[cfg(all(target_os = "macos", feature = "macos-clipboard"))]
 pub mod macos_clipboard;
-#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+#[cfg(any(test, all(target_os = "macos", feature = "macos-clipboard")))]
 mod macos_clipboard_privacy;
-#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+#[cfg(any(test, all(target_os = "macos", feature = "macos-clipboard")))]
 mod macos_clipboard_state;
 // Pure keycode data: compiled for tests everywhere so ordinary CI checks it.
 #[cfg(any(

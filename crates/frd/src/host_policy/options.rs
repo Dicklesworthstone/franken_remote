@@ -58,8 +58,8 @@ pub struct RunOptions {
     /// Let that controller's text clipboard follow its lease. CLI parsing
     /// enables this with `input_agent` unless `--no-clipboard` is selected;
     /// explicit `--clipboard` without an input agent is refused by the caller.
-    /// The clipboard owner is an X11 role, so macOS never enables it by
-    /// default; an explicit `--clipboard` there is refused by the caller.
+    /// The separately launched native role requires its own visible Off
+    /// surface; an unavailable clipboard keeps the input session usable.
     pub clipboard: bool,
     /// Local enable of host playback audio (off by default). Only an admitted
     /// observer that selected audio-down receives it; see `frd run --help`.
@@ -216,8 +216,7 @@ impl RunOptions {
                 _ => return Err(Error::InvalidArgument),
             }
         }
-        options.clipboard =
-            clipboard.unwrap_or(cfg!(not(target_os = "macos")) && options.input_agent.is_some());
+        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some());
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
         // Control retains its existing mandatory per-lease indicator. The two
@@ -302,16 +301,11 @@ impl RunOptions {
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn macos_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 7] = [
+        let refusals: [(bool, &str, &str); 6] = [
             (
                 approval == Approval::Local,
                 "local_approval_unavailable",
                 "macOS has no local approval prompt yet; share with your own devices using --approval none",
-            ),
-            (
-                self.clipboard,
-                "clipboard_unavailable",
-                "--clipboard has no macOS backend yet; control works without it",
             ),
             (
                 self.audio,
@@ -442,11 +436,8 @@ mod tests {
     fn clipboard_defaults_to_control_and_accepts_one_explicit_choice() {
         assert!(!parse(&["--software-explicit"]).unwrap().clipboard);
         assert!(!parse(&["--no-clipboard"]).unwrap().clipboard);
-        // Control brings the clipboard along where its X11 owner exists.
-        assert_eq!(
-            parse(&["--input-agent", "/a"]).unwrap().clipboard,
-            cfg!(not(target_os = "macos"))
-        );
+        // Both native host roles default on only for a controlling share.
+        assert!(parse(&["--input-agent", "/a"]).unwrap().clipboard);
         assert!(
             parse(&["--input-agent", "/a", "--clipboard"])
                 .unwrap()
@@ -480,6 +471,25 @@ mod tests {
             );
         }
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_accepts_default_clipboard_without_relaxing_other_capability_refusals() {
+        let approval = Approval::parse("none").unwrap();
+        let options = parse(&["--input-agent", "/a"]).unwrap();
+        assert!(options.clipboard);
+        assert_eq!(options.macos_refusal(approval), None);
+        assert_eq!(
+            options.macos_refusal(Approval::Local).map(|(code, _)| code),
+            Some("local_approval_unavailable")
+        );
+        let options = parse(&["--input-agent", "/a", "--audio"]).unwrap();
+        assert_eq!(
+            options.macos_refusal(approval).map(|(code, _)| code),
+            Some("audio_server_unavailable")
+        );
+    }
+
     #[test]
     fn audio_is_an_explicit_local_enable_with_optional_local_selection() {
         let off = parse(&["--software-explicit"]).unwrap();

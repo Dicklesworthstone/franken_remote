@@ -9,6 +9,7 @@ fn main() {
     build_viewer_window();
     build_host_picker();
     build_macos_viewer();
+    build_macos_clipboard();
     build_macos_capture();
     build_macos_input();
     link_clang_runtime();
@@ -522,7 +523,6 @@ fn build_opus_process() {
 fn build_macos_viewer() {
     println!("cargo:rerun-if-changed=src/macos_viewer.m");
     println!("cargo:rerun-if-changed=src/macos_picker.m");
-    println!("cargo:rerun-if-changed=src/macos_clipboard.m");
     if env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {
@@ -539,7 +539,6 @@ fn build_macos_viewer() {
     for (source, object) in [
         ("src/macos_viewer.m", "macosviewer.o"),
         ("src/macos_picker.m", "macospicker.o"),
-        ("src/macos_clipboard.m", "macosclipboard.o"),
     ] {
         assert!(
             Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
@@ -568,7 +567,6 @@ fn build_macos_viewer() {
             .arg(out.join("libfrmacosviewer.a"))
             .arg(out.join("macosviewer.o"))
             .arg(out.join("macospicker.o"))
-            .arg(out.join("macosclipboard.o"))
             .status()
             .unwrap()
             .success()
@@ -591,12 +589,67 @@ fn build_macos_viewer() {
     println!("cargo:rustc-link-lib=objc");
 }
 
+/// Shared host/client pasteboard boundary, independent of the viewer/codec.
+/// Only system `AppKit`/`Foundation` APIs; no clipboard access at build or link.
+fn build_macos_clipboard() {
+    println!("cargo:rerun-if-changed=src/macos_clipboard.m");
+    if env::var_os("CARGO_FEATURE_MACOS_CLIPBOARD").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS clipboard cross-builds require an explicit SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_clipboard.m", "-o"])
+            .arg(out.join("macosclipboard.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "install the Xcode command line tools (xcode-select --install)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacosclipboard.a"))
+            .arg(out.join("macosclipboard.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacosclipboard");
+    for framework in ["AppKit", "Foundation"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-lib=objc");
+}
+
 /// The macOS glue's `@available` checks call `__isPlatformVersionAtLeast`.
 /// Rust's std defines it only weakly and no Rust code calls it, so LTO (the
 /// release profile) drops it and the link fails with an undefined symbol; std
 /// documents linking Clang's own runtime instead, which defines it strongly.
 fn link_clang_runtime() {
-    let glue = env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_some()
+    let glue = env::var_os("CARGO_FEATURE_MACOS_CLIPBOARD").is_some()
+        || env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_some()
         || env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_some()
         || env::var_os("CARGO_FEATURE_MACOS_INPUT").is_some();
     if !glue || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {

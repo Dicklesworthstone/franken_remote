@@ -1,11 +1,11 @@
-//! One per-lease out-of-process X11 clipboard owner (`fr-input-agent
+//! One per-lease out-of-process native clipboard owner (`fr-input-agent
 //! --clipboard`), the host's `NativeClipboard` for the controlled share.
 //!
-//! frd never loads Xlib/XCB (AGENTS 3.2/3.5). The canonical synchronizer, the
+//! frd never loads Xlib/XCB or `AppKit` (AGENTS 3.2/3.5). The canonical synchronizer, the
 //! channel ledger and every authority/expiry check stay on the existing
 //! clipboard worker thread (`clipboard_quic::WorkerSeed::spawn`); only the
-//! NATIVE owner moves behind a private socketpair to a child that owns the X11
-//! CLIPBOARD connection for exactly one clipboard lane, which itself exists
+//! NATIVE owner moves behind a private socketpair to a child that owns the
+//! selected desktop's X11 clipboard or macOS pasteboard for one lane, which exists
 //! only while the controller's input lease is active. It reuses the input
 //! executor's launch validation, image, process group and kill/reap custody.
 //!
@@ -19,12 +19,12 @@
 //!
 //! Publication: the core's last authority check yields an exclusive deadline
 //! (the item's, bounded by the lease); it is translated into the child's
-//! `CLOCK_MONOTONIC` and re-checked there immediately before the X11 ownership
-//! call. A publication without a deadline never reaches the child.
+//! `CLOCK_MONOTONIC` and re-checked there immediately before native mutation.
+//! A publication without a deadline never reaches the child.
 //!
 //! Clipboard text never appears in Debug output, errors or logs here. This is
 //! crash/hang isolation of the broker, NOT a security sandbox: the child runs as
-//! the same desktop user with the same X server authority.
+//! the same desktop user with that user's native clipboard permissions.
 use crate::{
     input_process::{ProcessLaunch, kill_group, monotonic_ns},
     input_watchdog,
@@ -51,10 +51,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Opening the display and negotiating `XFixes`.
+/// Opening the native clipboard and mapping its independent privacy control.
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-/// One exchange, payload included. The child's own worst case is two 100 ms
-/// preparation waits, or 32 events plus one 16 KiB property read.
+/// One whole exchange, payload included. A native provider may block beyond
+/// this bound; expiration poisons the channel and kills the original child.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(1);
 const STOP_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -120,7 +120,7 @@ impl fmt::Debug for RemoteText {
     }
 }
 
-/// The `NativeClipboard` for one out-of-process X11 owner. Thread-confined to
+/// The `NativeClipboard` for one out-of-process native owner. Thread-confined to
 /// the clipboard worker by use; one outstanding request at a time.
 pub struct RemoteClipboard {
     child: Option<Child>,
@@ -165,7 +165,6 @@ impl RemoteClipboard {
         let mut spawn = Command::new(&launch.image);
         spawn
             .env_clear()
-            .env("DISPLAY", &launch.display)
             .arg("--clipboard")
             .arg("--parent-pid")
             .arg(std::process::id().to_string())
@@ -173,8 +172,12 @@ impl RemoteClipboard {
             .stdout(Stdio::from(OwnedFd::from(child_signals)))
             .stderr(Stdio::null())
             .process_group(0);
-        if let Some(path) = &launch.xauthority {
-            spawn.env("XAUTHORITY", path);
+        #[cfg(target_os = "linux")]
+        {
+            spawn.env("DISPLAY", &launch.display);
+            if let Some(path) = &launch.xauthority {
+                spawn.env("XAUTHORITY", path);
+            }
         }
         let child = spawn.spawn().map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => PlatformError::Unsupported,
@@ -470,8 +473,8 @@ impl NativeClipboard for RemoteClipboard {
     fn suspend(&mut self) -> Result<(), RemoteError> {
         self.done(Request::Suspend)
     }
-    /// Orderly stop (the child erases its private copies and closes X11
-    /// without resetting another application's newer selection), then kill
+    /// Orderly stop (the child erases its private copies and closes the native
+    /// owner without resetting another application's newer selection), then kill
     /// and reap. Idempotent.
     fn close(&mut self) {
         if !self.poisoned

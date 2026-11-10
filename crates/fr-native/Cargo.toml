@@ -41,13 +41,15 @@ macos-media = ["media-worker"]
 # macOS client presentation (fr-5a4w): VideoToolbox HEVC decode into
 # IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an
 # AppKit window. Objective-C glue compiled by build.rs; system frameworks only.
-macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer"]
+macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer", "macos-clipboard"]
 # The per-lease input executor binary `fr-input-agent`; each platform's input
 # feature enables it.
 input-agent = []
 # macOS host control (fr-macos-host-control-b14s): Quartz event injection and
 # the AppKit control indicator in `fr-input-agent`. System frameworks only.
-macos-input = ["input-agent"]
+macos-input = ["input-agent", "macos-clipboard"]
+# Shared synchronous NSPasteboard boundary; no viewer, codec or broker dependency.
+macos-clipboard = []
 linux-media = ["media-worker"]
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []
