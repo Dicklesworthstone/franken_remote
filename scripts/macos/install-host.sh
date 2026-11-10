@@ -94,6 +94,13 @@ for arg in "$@"; do args+=("${arg//__BIN__/$bin}"); done
 "$bin/frd" install --approval none --sharing own-user -- "${args[@]}"
 domain=gui/$(id -u)
 launchctl bootout "$domain/com.frankenremote.frd" 2>/dev/null || true
+# bootout returns while the old frd is still ending its share; bootstrapping
+# before launchd has let it go fails with "5: Input/output error" and leaves
+# no agent loaded. Wait (bounded) until the old one is gone.
+for _ in {1..100}; do
+  launchctl print "$domain/com.frankenremote.frd" >/dev/null 2>&1 || break
+  sleep 0.2
+done
 launchctl bootstrap "$domain" "$HOME/Library/LaunchAgents/com.frankenremote.frd.plist"
 sleep 2
 launchctl print "$domain/com.frankenremote.frd" | grep -E "^\s*(state|pid|last exit code) ="
