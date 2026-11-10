@@ -42,6 +42,8 @@ pub enum Error {
     Closed,
     Busy,
     InvalidRecord,
+    /// The original optional microphone attachment's receive framing expired.
+    ReceiveExpired,
     EgressExpired,
     Order,
     CaptureTransport,

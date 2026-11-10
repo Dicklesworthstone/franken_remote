@@ -410,6 +410,7 @@ fn error_code(error: mic::Error) -> &'static str {
             "microphone_permission_missing"
         }
         mic::Error::EgressExpired => "microphone_speech_expired",
+        mic::Error::ReceiveExpired => "microphone_receive_expired",
         _ => "microphone_failed",
     }
 }
@@ -417,6 +418,25 @@ fn error_code(error: mic::Error) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receive_expiry_is_distinct_from_speech_custody_and_session_failure() {
+        assert_eq!(
+            error_code(mic::Error::ReceiveExpired),
+            "microphone_receive_expired"
+        );
+        assert_eq!(
+            error_code(mic::Error::Transport(fr_transport::quic::Error::Stream(
+                fr_wire::stream::StreamError::Expired,
+            ))),
+            "microphone_failed"
+        );
+        assert_eq!(
+            error_code(mic::Error::EgressExpired),
+            "microphone_speech_expired"
+        );
+        assert_eq!(error_code(mic::Error::Closed), "microphone_session_ended");
+    }
 
     fn local() -> Local {
         Local {

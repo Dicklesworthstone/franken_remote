@@ -67,7 +67,7 @@ pub(super) struct Reservation {
     pub(super) inbound: StreamId,
     outbound: StreamId,
     retired_receive_accounted: u64,
-    /// Original framing expiry retired this completed clipboard or file pair.
+    /// Original framing expiry retired this completed optional pair.
     /// Retain the cause beside the one-use reservation after buffers are gone.
     receive_expired: bool,
     role: MediaRole,

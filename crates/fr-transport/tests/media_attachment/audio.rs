@@ -5,6 +5,9 @@ use super::delivery::{attach, enable, record, transfer};
 use super::*;
 use fr_wire::attachment::MediaRole;
 
+#[path = "audio/expiry.rs"]
+mod expiry;
+
 fn offer_audio(l: &mut Link, cx: &Cx, selection: &Selection) -> Result<MediaChannel, Error> {
     l.h.offer_media_role(
         cx,

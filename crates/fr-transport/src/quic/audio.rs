@@ -145,6 +145,9 @@ impl AudioUpChannel {
     /// closed or used as evidence that the original connection has drained.
     pub fn check(&self, q: &QuicRecords) -> Result<(), Error> {
         self.original(q)?;
+        if self.receive_expired(q) {
+            return Err(Error::Stream(fr_wire::stream::StreamError::Expired));
+        }
         if q.is_closed() || !self.attachment.is_complete() {
             return Err(Error::Closed);
         }
@@ -161,6 +164,13 @@ impl AudioUpChannel {
             return Err(Error::Closed);
         }
         Ok(())
+    }
+    /// This exact completed microphone pair reached its original receive
+    /// framing deadline, locally or at its peer. The terminal reservation is
+    /// evidence only on the original live connection; cleanup cannot erase it
+    /// or use it to reopen capture, consent, or transport admission.
+    pub fn receive_expired(&self, q: &QuicRecords) -> bool {
+        self.attachment.receive_expired(q)
     }
     /// Positive evidence that only this exact optional pair was retired while
     /// its original parent control pair remains open. A generic `Closed` error

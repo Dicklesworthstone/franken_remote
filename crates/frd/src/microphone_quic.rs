@@ -38,6 +38,8 @@ pub enum Error {
     Cancelled,
     Closed,
     Protocol,
+    /// The original completed optional microphone pair exceeded its receive deadline.
+    ReceiveExpired,
     SetupExpired,
     AcknowledgementExpired,
     AcknowledgementUnknown,
@@ -475,10 +477,17 @@ impl Host {
         // Observe the actual original reservation BEFORE cleanup. Voluntarily
         // retiring afterward cannot turn a failed parent control route into
         // evidence of healthy optional retirement.
-        let optional = matches!(error, quic::Error::Closed | quic::Error::WrongRoute)
-            && self.lane.is_retired(q) == Ok(true);
+        let optional = self.lane.is_retired(q) == Ok(true)
+            && (matches!(error, quic::Error::Closed | quic::Error::WrongRoute)
+                || (error == quic::Error::Stream(fr_wire::stream::StreamError::Expired)
+                    && self.lane.receive_expired(q)));
         if optional {
-            return self.refuse(q, Error::Transport(error));
+            let reason = if self.lane.receive_expired(q) {
+                Error::ReceiveExpired
+            } else {
+                Error::Transport(error)
+            };
+            return self.refuse(q, reason);
         }
         self.shared.stop();
         q.close();

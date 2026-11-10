@@ -522,6 +522,20 @@ pair discards only that direction's retained work, keeps its consumed identities
 as tombstones, and cannot reopen it. An unfinished attachment retains the
 connection-fencing cancellation policy.
 
+On a completed audio pair, the existing reliable-record first-byte deadline
+also covers a partial record and a complete record held by the application.
+Expiry retires that direction before dispatch, clears its retained framing and
+send work, and preserves its one-use identities. The peer receives the same
+terminal cause through QUIC reset/stop codes `0x46524145` (AudioDown) or
+`0x46525545` (AudioUp). These codes grant no retry, renewal, or new talk epoch.
+Playback/source owners fence their queues and native work before another audio
+service or admission; video, input and the other audio direction remain
+independent. Critical-stream expiry, malformed framing, unfinished attachment
+deadlines and retained-send failures keep their connection-failure behavior.
+AudioUp retirement still closes the original connection if native outgoing
+microphone datagrams or unsettled protected output cannot be withdrawn;
+removing routes cannot authorize those bytes to leave later.
+
 Public native offers do not enable this capability merely because its wire and
 transport support is compiled. The operational owner must also install a
 qualified virtual source, independent host microphone approval, explicit

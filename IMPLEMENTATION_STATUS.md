@@ -1,5 +1,40 @@
 # Implementation status
 
+## Optional audio receive expiry preserves the desktop (2026-11-10)
+
+The original completed audio-down and microphone-up attachments now retire
+independently when their first-byte receive framing deadline expires. Both a
+partial record and a complete record held by a blocked consumer keep their
+original deadline. Retirement retains the original binding and stream identities
+as terminal tombstones, reports the receive-expiry cause to the peer, and returns
+receive credit without reopening the attachment. Input, video and the other
+audio direction remain independently usable.
+
+The host playback owner withdraws source demand and fences its exclusive ring;
+the viewer drops its playback owner and pending acknowledgment. Their checks
+cover expiry before service, during native output, and inside final transport
+admission. Microphone owners report a distinct `ReceiveExpired` result only
+when the original live connection proves that its completed optional pair
+retired. An unfinished attachment, unexpected transport failure, retained-send
+expiry, or microphone output still held by native transport retains its existing
+connection-closing behavior. Retirement cannot grant new capture consent or
+replay speech.
+
+Regression coverage is added at the real UDP/TLS transport boundary and at the
+host/viewer owners, including both audio directions, control and reply streams,
+partial and blocked records, original-connection checks, surviving desktop
+traffic, native-output fences and retained microphone output. These are source
+tests, not a claim of physical microphone or speaker qualification.
+
+**Verification at the initial checkpoint:** source review completed; runtime
+test execution **blocked**. The pinned Asupersync dependency was killed during
+code generation before the focused audio tests could compile. An all-target,
+all-feature metadata check was then interrupted after dependency compilation
+made the execution environment unavailable. Neither attempt is a passing gate.
+The toolchain, dependency pin, features and assertions are unchanged. Full
+runtime, native-device and two-machine qualification remain outstanding under
+`fr-audio-receive-expiry-8t7n`.
+
 ## Original native Send deadlines and stop-before-cleanup (2026-11-10)
 
 The Mac composer's explicit Send now freezes the original controlled owner's

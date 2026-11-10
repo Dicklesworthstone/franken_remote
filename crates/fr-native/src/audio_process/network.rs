@@ -56,6 +56,8 @@ pub enum Error {
     Clock,
     Closed,
     InvalidRecord,
+    /// Only the original optional microphone pair exceeded its receive deadline.
+    ReceiveExpired,
     EgressExpired,
     Capture(transmit::Error),
     Consent(uplink::Error),
@@ -527,6 +529,23 @@ impl Uplink {
     }
     fn fail(&mut self, q: &mut QuicRecords, reason: Error) -> Result<(), Error> {
         let connection_closed = q.is_closed();
+        // A send's final admission check can retire the pair after the owner
+        // preflight. Preserve its exact terminal cause without relabeling a
+        // closed parent, lost authority, or retained microphone output.
+        let reason = if matches!(
+            reason,
+            Error::Transport(
+                quic::Error::Closed
+                    | quic::Error::WrongRoute
+                    | quic::Error::Stream(fr_wire::stream::StreamError::Expired)
+            )
+        ) && self.lane.is_retired(q) == Ok(true)
+            && self.lane.receive_expired(q)
+        {
+            Error::ReceiveExpired
+        } else {
+            reason
+        };
         self.reason = Some(reason);
         self.retire(q)?;
         if connection_closed {
@@ -560,7 +579,12 @@ impl Uplink {
         self.publish_guard();
         if let Err(error) = self.lane.check(q) {
             if self.lane.is_retired(q) == Ok(true) {
-                return self.fail(q, Error::Closed);
+                let reason = if self.lane.receive_expired(q) {
+                    Error::ReceiveExpired
+                } else {
+                    Error::Closed
+                };
+                return self.fail(q, reason);
             }
             return Err(Error::Transport(error));
         }
@@ -845,13 +869,20 @@ impl Uplink {
             },
         );
         if let Err(error) = received {
-            if matches!(error, quic::Error::WrongRoute | quic::Error::Closed)
-                && self.lane.is_retired(q) == Ok(true)
+            if self.lane.is_retired(q) == Ok(true)
+                && (matches!(error, quic::Error::WrongRoute | quic::Error::Closed)
+                    || (error == quic::Error::Stream(fr_wire::stream::StreamError::Expired)
+                        && self.lane.receive_expired(q)))
             {
                 // An original configuration witness may close inside a gate.
                 // Only the existing retired reservation proves optional
                 // isolation; parent-control closure and closed q stay fatal.
-                return self.fail(q, Error::Closed);
+                let reason = if self.lane.receive_expired(q) {
+                    Error::ReceiveExpired
+                } else {
+                    Error::Closed
+                };
+                return self.fail(q, reason);
             }
             return Err(Error::Transport(error));
         }

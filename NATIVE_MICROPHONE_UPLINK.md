@@ -106,6 +106,22 @@ not a child-reaping receipt; `Running` is not proof that a local application
 selected or heard the virtual microphone. This integration does not add new
 physical microphone, desktop application or live-tailnet qualification.
 
+An expired partial or unconsumed reliable record on the completed original
+microphone pair now retires that optional direction with the typed
+`ReceiveExpired` cause. Both the host coordinator and client capture owner stop
+the original epoch and retain its cleanup receipts; the client completion uses
+`microphone_receive_expired`. Generic parent transport expiry is a separate
+failure and cannot acquire this label without the original pair's retirement
+witness. A held configuration or reply cannot start native resources, grant
+consent, or implicitly reopen talk after this terminal retirement. Original input
+and playback continue only while their own authority remains valid.
+
+The native-output privacy fence still takes precedence: queued outgoing
+microphone datagrams or unsettled protected output require the original
+connection to close, because removing a stream or route cannot retract them.
+The new authenticated transport and owner regressions exercise these boundaries;
+they add no physical-device or live-tailnet qualification result.
+
 The new controlled-session regression cases cover refusal before allocation,
 fixed-deadline cancellation, original-owner fencing, optional worker failure
 and native readiness/stop through the canonical drive loop. Hosted run

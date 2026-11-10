@@ -109,7 +109,7 @@ fn turn(audio: &mut ViewerAudio, now: u64, admit: bool) -> Vec<(Vec<u8>, u64)> {
             if admit {
                 Ok(())
             } else {
-                Err(quic::Error::Backpressure)
+                Err(reply::SendFailure::Transport(quic::Error::Backpressure))
             }
         })
         .unwrap();
@@ -298,14 +298,38 @@ fn revocation_before_service_or_after_callback_fences_the_original_output() {
 
 #[test]
 fn permanent_transport_refusal_is_not_a_decoder_restart() {
-    let (mut audio, calls, _) = configured();
-    let error = audio.service_reply(1, &mut live(), &mut |_, _, _, _| {
-        Err(quic::Error::Unauthorized)
-    });
-    assert_eq!(error, Err(Error::Transport(quic::Error::Unauthorized)));
+    for failure in [
+        quic::Error::Unauthorized,
+        quic::Error::WrongRoute,
+        quic::Error::Stream(fr_wire::stream::StreamError::Expired),
+    ] {
+        let (mut audio, calls, _) = configured();
+        let error = audio.service_reply(1, &mut live(), &mut |_, _, _, _| {
+            Err(reply::SendFailure::Transport(failure))
+        });
+        assert_eq!(error, Err(Error::Transport(failure)));
+        assert_eq!(audio.state, State::Ended);
+        assert!(audio.pending_reply.is_none());
+        assert_eq!(calls.borrow().resets, 0);
+    }
+}
+
+#[test]
+fn receive_expiry_during_reply_admission_fences_the_output_without_a_restart() {
+    let (mut audio, calls, script) = configured();
+    audio
+        .service_reply(1, &mut live(), &mut |_, _, _, _| {
+            Err(reply::SendFailure::ReceiveExpired)
+        })
+        .unwrap();
     assert_eq!(audio.state, State::Ended);
-    assert!(audio.pending_reply.is_none());
+    assert!(audio.pending_reply.is_none() && audio.stop.is_none() && audio.output.is_none());
+    assert_eq!(calls.borrow().ended, [AudioEnd::ReceiveExpired]);
+    assert_eq!(calls.borrow().dropped, 1);
     assert_eq!(calls.borrow().resets, 0);
+    assert_eq!(script.borrow().admitted, 0);
+    assert!(turn(&mut audio, 2, true).is_empty());
+    assert_eq!(script.borrow().services, 1);
 }
 
 #[test]

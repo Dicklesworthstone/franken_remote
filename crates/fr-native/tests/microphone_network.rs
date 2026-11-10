@@ -50,6 +50,86 @@ macro_rules! run_test {
 }
 
 #[test]
+fn receive_expiry_stops_the_original_microphone_without_recording_or_losing_control() {
+    run_test!(cx, {
+        let mut link = Link::with_policy(
+            &cx,
+            fr_transport::quic::Policy {
+                record_lifetime_micros: 500_000,
+                ..fr_transport::quic::Policy::default()
+            },
+        )
+        .await;
+        let (host, client) = link.microphone(&cx).await;
+        let (mut input, origin) = link.controller(&cx).await;
+        let mut uplink = link.uplink(
+            &cx,
+            client,
+            &mut input,
+            origin,
+            Path::new("/nonexistent/private-pulse"),
+        );
+        let original = link.client.binding();
+        let mut stop = [0; audio::AUDIO_STOP_RECORD_BYTES];
+        audio::encode_stop(
+            &audio::AudioStop {
+                direction: AudioDirection::Uplink,
+                generation: AudioGeneration::from_raw(1),
+                reason: fr_core::audio::AudioStopReason::HostDisabled,
+            },
+            CHANNEL,
+            &mut stop,
+        )
+        .unwrap();
+        host.send_control_prepared(
+            &mut link.host,
+            &cx,
+            &stop,
+            network::clock(&cx) + 1_000_000,
+            || true,
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+        let until = network::clock(&cx) + 400_000;
+        let mut held = false;
+        while !held || link.host.usage().retained_send_records != 0 {
+            assert!(network::clock(&cx) < until);
+            link.drive(&cx).await;
+            link.client
+                .receive_ready(
+                    &cx,
+                    || true,
+                    |route| matches!(route, Route::Stream(r) if r.binding == CHANNEL),
+                    |_, bytes| {
+                        assert_eq!(bytes, stop);
+                        held = true;
+                        Ok(Disposition::Blocked)
+                    },
+                )
+                .unwrap();
+        }
+        asupersync::time::sleep(cx.now(), Duration::from_millis(600)).await;
+        link.drive_uplink(&cx, &mut uplink).await;
+        assert_eq!(uplink.state(), State::Stopped);
+        assert_eq!(uplink.reason(), Some(Error::ReceiveExpired));
+        assert!(
+            uplink.retirement().is_none(),
+            "an unconsumed reply opened capture resources"
+        );
+        assert!(
+            uplink
+                .begin_talk(MicTalkMode::OpenMic { active: true })
+                .is_err()
+        );
+        uplink.maintain(&mut link.client).unwrap();
+        assert_eq!(uplink.reason(), Some(Error::ReceiveExpired));
+        assert!(link.client.is_bound_to(&original));
+        assert!(!link.client.is_closed());
+        link.assert_original_control_usable(&cx).await;
+    });
+}
+
+#[test]
 fn constructor_permission_and_selection_refusals_retire_only_the_proven_optional_lane() {
     for changed_selection in [false, true] {
         run_test!(cx, {

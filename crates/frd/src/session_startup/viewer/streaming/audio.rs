@@ -29,6 +29,10 @@ pub enum AudioEnd {
     NoOutput,
     /// The local output or its bounded reply path failed or refused.
     Local,
+    /// This original optional audio pair reached its first-byte receive deadline.
+    ReceiveExpired,
+    /// The original audio pair was retired without a usable AudioStop record.
+    ChannelClosed,
 }
 
 /// The local output refused or failed; audio ends, video continues.
@@ -176,6 +180,13 @@ impl ViewerAudio {
             output.ended(end);
         }
     }
+    fn retired(&mut self, end: AudioEnd) {
+        self.end(end);
+        self.stop = None;
+        // Drop is the required nonblocking playback/decoder fence. Its native
+        // owner retains any independently observed cleanup result.
+        drop(self.output.take());
+    }
     /// The local output failed: tell the host (`DeviceChanged` = reset me),
     /// drop the failed epoch's device/decoder at once, and wait for a fresh
     /// epoch. Old samples are never replayed into the next output.
@@ -299,11 +310,68 @@ impl ViewerAudio {
         now_us: u64,
         live: &mut dyn FnMut() -> bool,
     ) -> Result<(), Error> {
+        if !self.check_pair(q, cx, live)? {
+            return Ok(());
+        }
+        let inbound = self.lanes.control;
         self.service_reply(
             now_us,
             &mut || cx.checkpoint().is_ok() && live(),
-            &mut |route, bytes, until, permitted| q.send(cx, route, bytes, until, permitted),
-        )
+            &mut |route, bytes, until, permitted| match q.send(cx, route, bytes, until, permitted) {
+                Err(quic::Error::WrongRoute) if q.audio_receive_expired(inbound) == Ok(true) => {
+                    Err(reply::SendFailure::ReceiveExpired)
+                }
+                result => result.map_err(reply::SendFailure::Transport),
+            },
+        )?;
+        // Native completion can cross the deadline even without a reply. The
+        // original pair must still be usable before this turn returns.
+        self.check_pair(q, cx, live)?;
+        Ok(())
+    }
+    fn check_pair(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        live: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, Error> {
+        // Retire expired framing before any native output callback. A missing
+        // audio route cannot leave queued playback alive, or turn its pending
+        // acknowledgement into a WrongRoute failure of the desktop session.
+        if let Err(error) = q.tick(cx, &mut *live) {
+            self.close();
+            return Err(Error::Transport(error));
+        }
+        let expired = match q.audio_receive_expired(self.lanes.control) {
+            Ok(expired) => expired,
+            Err(error) => {
+                self.close();
+                return Err(Error::Transport(error));
+            }
+        };
+        let routes_missing = !q.has_route(Route::Stream(self.lanes.control))
+            || !q.has_route(Route::Stream(self.lanes.replies))
+            || !q.has_route(Route::Datagram(self.lanes.packets));
+        let ended = if expired || routes_missing {
+            true
+        } else {
+            match q.receive_ended(self.lanes.control) {
+                Ok(ended) => ended,
+                Err(error) => {
+                    self.close();
+                    return Err(Error::Transport(error));
+                }
+            }
+        };
+        if ended {
+            self.retired(if expired {
+                AudioEnd::ReceiveExpired
+            } else {
+                AudioEnd::ChannelClosed
+            });
+            return Ok(false);
+        }
+        Ok(true)
     }
 }
 

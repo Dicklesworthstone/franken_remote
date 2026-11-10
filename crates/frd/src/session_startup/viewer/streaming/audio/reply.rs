@@ -11,6 +11,13 @@ const CAPACITY: usize = if wire::AUDIO_CONFIGURED_RECORD_BYTES > wire::AUDIO_STO
     wire::AUDIO_STOP_RECORD_BYTES
 };
 
+/// Only the original transport adapter can prove optional receive retirement.
+/// A generic transport expiry may instead have closed the entire connection.
+pub(super) enum SendFailure {
+    ReceiveExpired,
+    Transport(quic::Error),
+}
+
 #[derive(Clone, Copy)]
 enum Completion {
     Configured(AudioConfiguration),
@@ -59,7 +66,7 @@ impl ViewerAudio {
         &mut self,
         now: u64,
         live: &mut dyn FnMut() -> bool,
-        send: &mut impl FnMut(Route, &[u8], u64, &mut dyn FnMut() -> bool) -> Result<(), quic::Error>,
+        send: &mut impl FnMut(Route, &[u8], u64, &mut dyn FnMut() -> bool) -> Result<(), SendFailure>,
     ) -> Result<(), Error> {
         if !live() {
             self.close();
@@ -155,7 +162,7 @@ impl ViewerAudio {
         &mut self,
         now: u64,
         live: &mut dyn FnMut() -> bool,
-        send: &mut impl FnMut(Route, &[u8], u64, &mut dyn FnMut() -> bool) -> Result<(), quic::Error>,
+        send: &mut impl FnMut(Route, &[u8], u64, &mut dyn FnMut() -> bool) -> Result<(), SendFailure>,
     ) -> Result<bool, Error> {
         if !live() {
             self.close();
@@ -199,18 +206,18 @@ impl ViewerAudio {
                 }
                 Ok(true)
             }
-            Err(quic::Error::Backpressure) => Ok(false),
-            Err(error) => {
+            Err(SendFailure::Transport(quic::Error::Backpressure)) => Ok(false),
+            Err(SendFailure::ReceiveExpired) => {
+                self.retired(AudioEnd::ReceiveExpired);
+                Ok(false)
+            }
+            Err(SendFailure::Transport(error)) => {
                 self.close();
                 Err(Error::Transport(error))
             }
         }
     }
     fn reply_failed(&mut self) {
-        self.end(AudioEnd::Local);
-        self.stop = None;
-        // No native cleanup or queued playback may keep this failed lane live.
-        // Drop is the nonblocking fence required by AudioOutput's contract.
-        drop(self.output.take());
+        self.retired(AudioEnd::Local);
     }
 }

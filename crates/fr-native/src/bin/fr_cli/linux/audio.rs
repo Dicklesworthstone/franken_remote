@@ -307,6 +307,8 @@ mod output {
             ViewerAudioEnd::Host(AudioStopReason::UserMute) => "host_audio_stopped",
             ViewerAudioEnd::NoOutput => "local_output_not_configured",
             ViewerAudioEnd::Local => "local_output_failed",
+            ViewerAudioEnd::ReceiveExpired => "audio_receive_expired",
+            ViewerAudioEnd::ChannelClosed => "audio_channel_closed",
         }
     }
     impl ViewerAudioOutput for Output {

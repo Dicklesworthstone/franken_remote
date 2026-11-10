@@ -193,6 +193,62 @@ fn original_input_connection_and_separate_microphone_consent_precede_native_setu
 }
 
 #[test]
+fn blocked_microphone_configuration_expiry_retires_only_its_original_owner() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        let mut host = f.host(true, absent_launch()).unwrap();
+        let original = f.link.h.binding();
+        let record = configuration(1, AudioDirection::Uplink);
+        f.send(&record);
+        let until = clock(&f.cx) + 1_000_000;
+        let mut held = false;
+        while !held || f.link.c.usage().retained_send_records != 0 {
+            assert!(clock(&f.cx) < until);
+            f.drive(&host).await;
+            host.lane
+                .dispatch(
+                    &mut f.link.h,
+                    &f.cx,
+                    || host.permits_io(),
+                    |_| true,
+                    |_, bytes, _| {
+                        assert_eq!(bytes, record);
+                        held = true;
+                        Ok(Disposition::Blocked)
+                    },
+                )
+                .unwrap();
+        }
+        asupersync::time::sleep(f.cx.now(), Duration::from_millis(2100)).await;
+        assert_eq!(
+            host.service(&mut f.link.h, || true).unwrap(),
+            State::Retired
+        );
+        assert_eq!(host.reason(), Some(Error::ReceiveExpired));
+        assert!(host.control().is_stopped());
+        assert!(
+            host.retirement().is_none(),
+            "unconsumed configuration started native capture"
+        );
+        assert_eq!(host.statistics(), Statistics::default());
+        assert!(!f.input.control().is_stopped());
+        assert!(f.input_pair.0.completed_on(&f.link.h).is_ok());
+        assert!(f.link.h.is_bound_to(&original));
+        assert!(!f.link.h.is_closed());
+        assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
+        // A later, untyped stale-route observation cannot erase the terminal
+        // cause or be used to renew this original microphone attachment.
+        assert_eq!(
+            host.transport_refusal(&mut f.link.h, quic::Error::WrongRoute)
+                .unwrap(),
+            State::Retired
+        );
+        assert_eq!(host.reason(), Some(Error::ReceiveExpired));
+        assert!(!f.link.h.is_closed());
+    });
+}
+
+#[test]
 fn local_microphone_permission_refusal_retires_the_completed_pair_before_native_setup() {
     runtime().block_on(async {
         let mut f = Fixture::new().await;

@@ -18,6 +18,20 @@ const FILES_RECEIVE_EXPIRED: u64 = 0x4652_4645;
 const MEDIA_RETIRED: u64 = 0x4652_4d44;
 const AUDIO_RETIRED: u64 = 0x4652_4144;
 const MICROPHONE_RETIRED: u64 = 0x4652_4155;
+const AUDIO_RECEIVE_EXPIRED: u64 = 0x4652_4145;
+const MICROPHONE_RECEIVE_EXPIRED: u64 = 0x4652_5545;
+
+fn receive_expiry_code(role: MediaRole) -> Option<u64> {
+    match role {
+        MediaRole::Clipboard => Some(CLIPBOARD_RECEIVE_EXPIRED),
+        MediaRole::Files | MediaRole::FilesDownload => Some(FILES_RECEIVE_EXPIRED),
+        MediaRole::AudioDown => Some(AUDIO_RECEIVE_EXPIRED),
+        MediaRole::AudioUp => Some(MICROPHONE_RECEIVE_EXPIRED),
+        MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video | MediaRole::Input => {
+            None
+        }
+    }
+}
 
 pub(super) fn retirement_code(role: MediaRole) -> Option<u64> {
     match role {
@@ -117,6 +131,29 @@ impl MediaChannel {
     }
 }
 impl QuicRecords {
+    /// Read the terminal receive cause of one registered audio pair. `inbound`
+    /// must be the exact original receive route, including direction, role,
+    /// priority and bound. This diagnostic neither admits data nor establishes
+    /// connection identity: its session owner must supply its original checked
+    /// connection. A closed connection is not evidence of optional retirement.
+    pub fn audio_receive_expired(&self, inbound: crate::quic::StreamRoute) -> Result<bool, Error> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        if inbound.outbound || !self.streams.contains(&inbound) {
+            return Err(Error::WrongRoute);
+        }
+        let reservation = self
+            .attachments
+            .iter()
+            .find(|r| {
+                r.inbound == inbound.stream
+                    && r.binding == inbound.binding
+                    && matches!(r.role, MediaRole::AudioDown | MediaRole::AudioUp)
+            })
+            .ok_or(Error::WrongRoute)?;
+        Ok(reservation.retired() && reservation.receive_expired)
+    }
     /// Run before framing/retained-record deadline checks. A peer's reset/FIN
     /// cancels this media/optional pair; it is not EOF on the critical input stream.
     /// So does the local owner's `request_retirement`.
@@ -128,9 +165,9 @@ impl QuicRecords {
                 continue;
             }
             if r.state.load(Ordering::Acquire) == ACTIVE {
-                // Clipboard and files share congestion capacity with higher-
-                // priority input and media. A stalled prefix or unconsumed
-                // complete record expires its optional pair, not its desktop.
+                // Optional clipboard, files and audio share this connection
+                // with input and video. A stalled prefix or unconsumed complete
+                // record expires its optional pair, not its desktop.
                 // Retire the ACTIVE original pair before generic framing checks;
                 // never extend the first-byte deadline or reuse its binding.
                 // Malformed records, unfinished exchanges and critical streams
@@ -138,10 +175,7 @@ impl QuicRecords {
                 let receive_expired = self.inbound.iter().any(|s| {
                     s.route.stream == r.inbound
                         && !s.fin
-                        && matches!(
-                            r.role,
-                            MediaRole::Files | MediaRole::FilesDownload | MediaRole::Clipboard
-                        )
+                        && receive_expiry_code(r.role).is_some()
                         && s.framing.next_deadline().is_some_and(|until| now >= until)
                 });
                 let streams = self
@@ -154,14 +188,10 @@ impl QuicRecords {
                 let outgoing = streams.stream(r.outbound).map_err(|_| Error::Native)?;
                 let incoming = streams.stream(r.inbound).map_err(|_| Error::Native)?;
                 let receive_expired = receive_expired
-                    || (r.role.is_files()
-                        && (outgoing.stop_sending_error_code == Some(FILES_RECEIVE_EXPIRED)
-                            || incoming.recv_reset.map(|(code, _)| code)
-                                == Some(FILES_RECEIVE_EXPIRED)))
-                    || (r.role == MediaRole::Clipboard
-                        && (outgoing.stop_sending_error_code == Some(CLIPBOARD_RECEIVE_EXPIRED)
-                            || incoming.recv_reset.map(|(code, _)| code)
-                                == Some(CLIPBOARD_RECEIVE_EXPIRED)));
+                    || receive_expiry_code(r.role).is_some_and(|code| {
+                        outgoing.stop_sending_error_code == Some(code)
+                            || incoming.recv_reset.map(|(code, _)| code) == Some(code)
+                    });
                 if receive_expired
                     || r.retire.load(Ordering::Acquire)
                     || outgoing.stop_sending_error_code.is_some()
@@ -189,10 +219,8 @@ impl QuicRecords {
     /// original Files exchange reached its direction-specific staged final boundary.
     fn retire_reservation_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
-        let code = if r.role == MediaRole::Clipboard && r.receive_expired {
-            CLIPBOARD_RECEIVE_EXPIRED
-        } else if r.role.is_files() && r.receive_expired {
-            FILES_RECEIVE_EXPIRED
+        let code = if r.receive_expired {
+            receive_expiry_code(r.role).ok_or(Error::WrongRoute)?
         } else {
             retirement_code(r.role).ok_or(Error::WrongRoute)?
         };

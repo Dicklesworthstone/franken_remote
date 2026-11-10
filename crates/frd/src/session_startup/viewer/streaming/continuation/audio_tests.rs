@@ -8,7 +8,7 @@ use crate::{
         HostSession,
         running::{
             controlled::tests::attach,
-            tests::{pair_initialized, run},
+            tests::{pair_initialized_with_transport, run},
         },
         tests::support,
         viewer::streaming::audio::{AudioEnd, AudioOutput, OutputRefused, ViewerAudio},
@@ -34,6 +34,8 @@ struct Calls {
     rendered: u32,
     resets: u32,
     dropped: u32,
+    ended: Vec<AudioEnd>,
+    delay: Option<Duration>,
     fail_once: bool,
     cancel: Option<Cx>,
 }
@@ -61,6 +63,11 @@ impl AudioOutput for Output {
         }
         let mut calls = self.calls.borrow_mut();
         calls.serviced += 1;
+        if let Some(delay) = calls.delay.take() {
+            // Explicit slow-output TEST DOUBLE. This crosses the real framing
+            // deadline inside native service, after the transport pre-check.
+            std::thread::sleep(delay);
+        }
         if let Some(cx) = calls.cancel.take() {
             // A native callback returning success cannot override cancellation.
             cx.cancel_fast(asupersync::types::CancelKind::User);
@@ -115,9 +122,11 @@ impl AudioOutput for Output {
         }
         Ok(())
     }
-    fn ended(&mut self, _: AudioEnd) {
+    fn ended(&mut self, end: AudioEnd) {
         self.pending = None;
-        self.calls.borrow_mut().queued = 0;
+        let mut calls = self.calls.borrow_mut();
+        calls.ended.push(end);
+        calls.queued = 0;
     }
     fn reset(&mut self) {
         self.pending = None;
@@ -145,6 +154,17 @@ struct Fixture {
     stops: u32,
 }
 async fn fixture(c: &Cx, h: &Cx) -> Fixture {
+    fixture_with_policy(
+        c,
+        h,
+        quic::Policy {
+            critical_send_records: 1,
+            ..quic::Policy::default()
+        },
+    )
+    .await
+}
+async fn fixture_with_policy(c: &Cx, h: &Cx, policy: quic::Policy) -> Fixture {
     let mut caps: Vec<_> = [
         fr_wire::decoder::CAPABILITY,
         attachment::CAPABILITY,
@@ -160,7 +180,7 @@ async fn fixture(c: &Cx, h: &Cx) -> Fixture {
     })
     .collect();
     caps.sort_by(|a, b| a.name.cmp(&b.name));
-    let (mut host, mut viewer) = pair_initialized(c, h, caps, |_| {}).await;
+    let (mut host, mut viewer) = pair_initialized_with_transport(c, h, caps, policy, |_| {}).await;
     let (_, mut media) = media_pair(&mut host, &mut viewer, c, h).await;
     let (ha, va) = attach(
         &mut host,
@@ -418,6 +438,183 @@ fn local_audio_failure_can_exchange_stop_and_new_epoch_without_ending_recovery()
         assert_eq!(f.calls.borrow().admitted, 2);
         assert_eq!(f.audio.statistics().restarts, 1);
         assert!(f.viewer.io().unwrap().0.is_bound_to(&connection));
+        assert!(!c.is_cancel_requested());
+    });
+}
+
+async fn hold_audio_stop(f: &mut Fixture, h: &Cx) -> quic::StreamRoute {
+    let incoming = f
+        ._media
+        .audio_lanes(f.viewer.io().unwrap().0)
+        .unwrap()
+        .unwrap()
+        .control;
+    let mut bytes = [0; wire::AUDIO_STOP_RECORD_BYTES];
+    wire::encode_stop(
+        &wire::AudioStop {
+            direction: AudioDirection::Downlink,
+            generation: AudioGeneration::from_raw(1),
+            reason: AudioStopReason::HostDisabled,
+        },
+        AUDIO_BINDING,
+        &mut bytes,
+    )
+    .unwrap();
+    let route = Route::Stream(f.host_audio.control);
+    send(f, h, route, &bytes).await;
+    let until = now(h).unwrap() + 400_000;
+    let mut held = false;
+    loop {
+        assert!(
+            now(h).unwrap() < until,
+            "audio stop did not reach original receive custody"
+        );
+        let (host, viewer) = Box::pin(support::both(
+            f.host.drive(
+                Duration::from_millis(1),
+                || {
+                    f.nonce += 1;
+                    Ok(f.nonce)
+                },
+                |_, _| Ok(Disposition::Consumed),
+            ),
+            f.viewer.drive(Duration::from_millis(1), |route, received| {
+                assert_eq!(route, Route::Stream(incoming));
+                assert_eq!(received, bytes);
+                held = true;
+                Ok(Disposition::Blocked)
+            }),
+        ))
+        .await;
+        host.unwrap();
+        viewer.unwrap();
+        if held
+            && f.host.io().unwrap().0.usage().retained_send_records == 0
+            && f.viewer.io().unwrap().0.usage().retained_send_records == 0
+        {
+            return incoming;
+        }
+    }
+}
+
+#[test]
+fn expired_audio_record_fences_playback_without_ending_the_original_viewer() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture_with_policy(
+            &c,
+            &h,
+            quic::Policy {
+                critical_send_records: 1,
+                record_lifetime_micros: 500_000,
+                ..quic::Policy::default()
+            },
+        ))
+        .await;
+        configure(&mut f, &h, 1).await;
+        let original = f.viewer.io().unwrap().0.binding();
+        let incoming = hold_audio_stop(&mut f, &h).await;
+        asupersync::time::sleep(c.now(), Duration::from_millis(600)).await;
+        let services = f.calls.borrow().serviced;
+        f.calls.borrow_mut().queued = 3;
+        turn(&mut f).await;
+        {
+            let calls = f.calls.borrow();
+            assert_eq!(
+                calls.serviced, services,
+                "retired output must not render its queue"
+            );
+            assert_eq!(calls.queued, 0);
+            assert_eq!(calls.rendered, 0);
+            assert_eq!(calls.dropped, 1);
+            assert_eq!(calls.ended, [AudioEnd::ReceiveExpired]);
+            assert_eq!(calls.resets, 0);
+        }
+        for _ in 0..3 {
+            turn(&mut f).await;
+        }
+        assert_eq!(f.calls.borrow().dropped, 1);
+        let q = f.viewer.io().unwrap().0;
+        assert_eq!(q.audio_receive_expired(incoming), Ok(true));
+        assert!(q.is_bound_to(&original));
+        assert!(!q.is_closed());
+        assert!(!c.is_cancel_requested());
+    });
+}
+
+#[test]
+fn receive_deadline_crossed_inside_output_service_is_still_an_optional_failure() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture_with_policy(
+            &c,
+            &h,
+            quic::Policy {
+                critical_send_records: 1,
+                record_lifetime_micros: 500_000,
+                ..quic::Policy::default()
+            },
+        ))
+        .await;
+        configure(&mut f, &h, 1).await;
+        let original = f.viewer.io().unwrap().0.binding();
+        let incoming = hold_audio_stop(&mut f, &h).await;
+        let services = f.calls.borrow().serviced;
+        f.calls.borrow_mut().delay = Some(Duration::from_millis(600));
+        // No native reply is due here. The post-service check must still fence
+        // the original output before returning to video/control recovery.
+        turn(&mut f).await;
+        assert_eq!(f.calls.borrow().serviced, services + 1);
+        assert_eq!(f.calls.borrow().ended, [AudioEnd::ReceiveExpired]);
+        assert_eq!(f.calls.borrow().dropped, 1);
+        assert_eq!(f.calls.borrow().resets, 0);
+        turn(&mut f).await;
+        let q = f.viewer.io().unwrap().0;
+        assert_eq!(q.audio_receive_expired(incoming), Ok(true));
+        assert!(q.is_bound_to(&original));
+        assert!(!q.is_closed());
+    });
+}
+
+#[test]
+fn receive_expiry_at_final_reply_admission_preserves_the_original_viewer() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture_with_policy(
+            &c,
+            &h,
+            quic::Policy {
+                critical_send_records: 1,
+                record_lifetime_micros: 500_000,
+                ..quic::Policy::default()
+            },
+        ))
+        .await;
+        configure(&mut f, &h, 1).await;
+        let incoming = hold_audio_stop(&mut f, &h).await;
+        f.calls.borrow_mut().fail_once = true;
+        turn(&mut f).await;
+        assert_eq!(f.calls.borrow().resets, 1);
+        // The failed output left an original pending local AudioStop. Cross
+        // the deadline at the send's final authorization, after its first
+        // check and allocation. All gates still use the original connection.
+        let mut gates = 0;
+        let q = f.viewer.io().unwrap().0;
+        f.audio
+            .service(q, &c, now(&c).unwrap(), &mut || {
+                gates += 1;
+                if gates == 5 {
+                    std::thread::sleep(Duration::from_millis(600));
+                }
+                c.checkpoint().is_ok()
+            })
+            .unwrap();
+        assert!(gates >= 5);
+        assert_eq!(q.audio_receive_expired(incoming), Ok(true));
+        assert!(!q.is_closed());
+        assert_eq!(f.calls.borrow().ended, [AudioEnd::ReceiveExpired]);
+        assert_eq!(f.calls.borrow().dropped, 1);
+        assert_eq!(f.calls.borrow().resets, 1);
+        assert_eq!(f.stops, 0, "the retired pair admitted no local stop");
+        turn(&mut f).await;
+        assert!(!f.viewer.is_closed());
         assert!(!c.is_cancel_requested());
     });
 }

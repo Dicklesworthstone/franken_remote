@@ -182,6 +182,30 @@ impl EntryAudio {
         }
         self.lanes = Some(lanes);
         let mut authorize = || owner.check().is_ok() && control.check().is_ok();
+        if let Err(error) = transport.tick(cx, &mut authorize) {
+            self.close();
+            return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
+        }
+        // Even an idle lane must observe optional retirement before preserving
+        // source demand. Callers have already checked the original connection.
+        if !transport.has_route(Route::Stream(lanes.control))
+            || !transport.has_route(Route::Stream(lanes.replies))
+            || !transport.has_route(Route::Datagram(lanes.packets))
+        {
+            self.close();
+            return Ok(());
+        }
+        match transport.receive_ended(lanes.replies) {
+            Ok(false) => {}
+            Ok(true) => {
+                self.close();
+                return Ok(());
+            }
+            Err(error) => {
+                self.close();
+                return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
+            }
+        }
         for _ in 0..RECORDS_PER_TURN {
             let now = owner.check().map_err(Error::Media)?.as_micros();
             let action = self.lane.next(ring, now);
@@ -233,6 +257,15 @@ impl EntryAudio {
                 }
                 Err(quic::Error::Backpressure) => {
                     report.pending = true;
+                    return Ok(());
+                }
+                // The final admission check can retire the pair after the
+                // pre-service check. Only this original pair's expiry witness
+                // permits treating WrongRoute as an optional audio failure.
+                Err(quic::Error::WrongRoute)
+                    if transport.audio_receive_expired(lanes.replies) == Ok(true) =>
+                {
+                    self.close();
                     return Ok(());
                 }
                 // Allocation/authority checks may consume the last instant of
@@ -335,7 +368,6 @@ impl Entry {
             || !transport.has_route(Route::Stream(lanes.control))
             || !transport.has_route(Route::Stream(lanes.replies))
             || !transport.has_route(Route::Datagram(lanes.packets))
-            || transport.receive_ended(lanes.replies).unwrap_or(true)
         {
             self.audio.close();
             return Ok(());

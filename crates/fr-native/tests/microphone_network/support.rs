@@ -106,11 +106,13 @@ pub struct Link {
 }
 impl Link {
     pub async fn new(cx: &Cx) -> Self {
+        Self::with_policy(cx, Policy::default()).await
+    }
+    pub async fn with_policy(cx: &Cx, policy: Policy) -> Self {
         let (client, host) = network::native_pair(cx, "localhost", ALPN).await;
         let (mut client, client_control) =
-            QuicRecords::bootstrap(client.unwrap(), cx, Policy::default()).unwrap();
-        let (mut host, host_control) =
-            QuicRecords::bootstrap(host.unwrap(), cx, Policy::default()).unwrap();
+            QuicRecords::bootstrap(client.unwrap(), cx, policy).unwrap();
+        let (mut host, host_control) = QuicRecords::bootstrap(host.unwrap(), cx, policy).unwrap();
         let client_control = client
             .bind_control(cx, client_control, 7, 4096, || true)
             .unwrap();

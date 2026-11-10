@@ -74,7 +74,6 @@ impl AudioFeed {
             || !q.has_route(Route::Stream(lanes.control))
             || !q.has_route(Route::Stream(lanes.replies))
             || !q.has_route(Route::Datagram(lanes.packets))
-            || q.receive_ended(lanes.replies).unwrap_or(true)
         {
             state.close();
             return Ok(report);
@@ -82,7 +81,7 @@ impl AudioFeed {
         let owner = state.owner.clone();
         owner.check().map_err(Error::Media)?;
         let State { ring, audio, .. } = &mut *state;
-        audio.service(
+        if let Err(error) = audio.service(
             &owner.context(),
             q,
             ring,
@@ -90,7 +89,15 @@ impl AudioFeed {
             &owner,
             &owner,
             &mut report,
-        )?;
+        ) {
+            state.close();
+            return Err(error);
+        }
+        if state.audio.lane.is_stopped() {
+            // Retirement may have happened inside the final send check. Fence
+            // the exclusive ring as well as demand before returning to source.
+            state.close();
+        }
         Ok(report)
     }
     /// Dispatch from the ORIGINAL session only, after its connection/authority

@@ -33,6 +33,18 @@ its retained-output deadline and failure rules still apply to the connection.
 This admission lifetime is separate from the acknowledgement wait, which starts
 only after configuration admission, and from each packet's capture deadline.
 
+A completed AudioDown pair also retires when a partial incoming record or a
+complete unconsumed record reaches its original transport receive deadline.
+The viewer stops and drops the original output, discards pending acknowledgements
+and stops, and reports `audio_receive_expired`. The host withdraws that viewer's
+source demand; an exclusive source also discards its ring. This check runs even
+when no audio packet is ready and again at final reply/send admission, so a
+deadline crossing during native completion or record preparation cannot become
+a desktop `WrongRoute` failure. Other source subscribers remain independent.
+No decoder restart, automatic reattachment or longer deadline follows expiry.
+Only the exact retired pair's cause on its original live connection permits
+this isolation; retained send failure and parent-control failure remain fatal.
+
 ## Authority, scheduling and teardown
 
 Original observation approval and expiry gate audio, including any observation before the local control request. Input still requires its separate explicit grant, presented-view checks, valid tickets and native submission checks. Audio never supplies evidence of screen freshness and cannot renew or resume input authority.
@@ -46,6 +58,13 @@ On session end, revoke the original authority first, close the audio lane and di
 The source includes capability, route/epoch, acknowledgement, deadline and scheduling regressions. Those tests do not certify speakers, a physical microphone, an installed desktop audio server, live-tailnet interoperability, or audio/input timing under impairment. Bead `fr-rc2-audio-during-control-35e3` remains open until the real controlled-session audio and independent-input acceptance tests pass with retained evidence.
 
 ## Experimental Linux CLI path
+
+Receive-expiry regressions for `fr-audio-receive-expiry-8t7n` use actual UDP/TLS
+attachments and original session/source owners. The viewer output and source
+payloads in those tests are explicitly recorded or synthetic fixtures. They
+cover directional retirement, blocked/partial records, output and source fences,
+and the final send boundary; they do not provide physical-device or loaded-session
+qualification. Their implementation checkpoint is not a passing execution claim.
 
 The executable connection is wired in source by `305c4eb` (host service and
 combined offer) and `761faab` (CLI and completion reporting). This supersedes

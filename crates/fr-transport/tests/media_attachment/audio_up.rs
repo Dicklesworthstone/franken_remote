@@ -8,7 +8,7 @@ use fr_wire::attachment::MediaRole;
 #[path = "audio_up/channel.rs"]
 mod channel;
 
-fn enable(l: &mut Link) {
+pub(super) fn enable(l: &mut Link) {
     l.selection.role = Role::RequestControl;
     for (name, version) in [
         (

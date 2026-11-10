@@ -10,6 +10,9 @@ use fr_media::{
 };
 use fr_transport::quic::{DatagramRoute, Messages, Priority, StreamRoute};
 
+#[path = "expiry.rs"]
+mod expiry;
+
 fn lanes() -> AudioLanes {
     let stream = |id, outbound, messages| StreamRoute {
         stream: StreamId(id),
