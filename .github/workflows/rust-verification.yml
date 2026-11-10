@@ -461,6 +461,8 @@ jobs:
         uses: ./.github/actions/build-swap
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
+      - name: Build and link the standalone read-only observation helper
+        run: cargo build -p fr-native --no-default-features --features macos-observation-indicator --bin fr-observation-indicator --locked
       - name: Check the read-only session monitor against the Apple SDK
         run: cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/macos_session.m
       - name: Check the observation indicator against the Apple SDK

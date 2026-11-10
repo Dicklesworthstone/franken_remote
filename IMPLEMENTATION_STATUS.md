@@ -1,5 +1,28 @@
 # Implementation status
 
+## Mac Stop control accessibility and visibility (2026-11-10)
+
+The required indicator added in `731cf819` now exposes its Stop action to
+accessibility clients and requires completed drawing of each retained original
+badge, with its expected content view and visible bounds. Native terminal state
+is an atomic first-cause latch: callbacks during a visibility query cannot be
+overwritten by a late Shown result. A full bounded event turn with a remaining
+backlog ends readiness before a queued Stop can be deferred indefinitely.
+
+The signed installer builds the helper separately with only
+`macos-observation-indicator` and no default features; it does not pull the
+input, clipboard, viewer or broker/runtime features into that artifact.
+The existing Mac verification lane now builds and links that standalone
+configuration before broader native checks. Two pre-existing session-monitor
+test assertions were made compatible with the pinned strict Clippy lane;
+their empty-output requirements remain unchanged.
+
+These follow-up changes were independently source reviewed. The execution
+environment is unavailable, so their final format/build/test and actual
+AppKit/accessibility behavior are not claimed as verified. The existing
+`fr-hjl0` qualification task stays open. The earlier queued-text view fence
+`3b78949` is also on main; native text composition remains separate work.
+
 ## Required macOS host Stop sharing surface (2026-11-10)
 
 The macOS CLI now requires a separate read-only `fr-observation-indicator`

@@ -126,7 +126,7 @@ mod tests {
                 serve(&mut input, &mut output, 7, || panic!("invalid query")),
                 Err(())
             );
-            assert!(output.is_empty());
+            assert_eq!(output, [] as [u8; 0]);
         }
     }
 
@@ -141,6 +141,6 @@ mod tests {
             }),
             Err(())
         );
-        assert!(output.is_empty());
+        assert_eq!(output, [] as [u8; 0]);
     }
 }

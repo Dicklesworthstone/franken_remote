@@ -14,7 +14,9 @@ admission. Local approval uses its separate platform-specific consent path.
 
 ## macOS hosting
 
-The signed macOS installer builds and installs the helper. A manual build uses:
+The signed macOS installer builds this helper separately with its minimal
+feature selection, then signs and installs it. The helper build does not enable
+the input, clipboard, desktop-client or broker/runtime features. A manual build uses:
 
 ```sh
 cargo build -p fr-native --no-default-features --features macos-observation-indicator --bin fr-observation-indicator --locked
@@ -27,13 +29,21 @@ waiting for peers. The native adapter pins the display set and geometry;
 hotplug or a geometry change ends this run and requires a new host start.
 The control and clipboard panels retain their own separate lifetimes.
 
+Each original Stop control must complete drawing and retain its expected
+content view and visible bounds before the panel can establish readiness.
+The control is exposed as an accessibility button with a Stop action; that
+action only revokes the current lifetime. A late visibility result cannot
+overwrite an earlier terminal callback. If a full 32-event turn still leaves
+native events queued, the helper refuses readiness rather than postponing a
+potential Stop behind the backlog.
+
 AppKit runs only on the child's main thread. A separate command responder and
 watchdog check a sleep-inclusive, terminal 250 ms visibility heartbeat. Commands
 cannot refresh that evidence. Each readiness reply waits for a completed native
 event/visibility turn that began after that request arrived; cached visibility
 alone cannot extend the parent's request deadline. A stalled native call,
 hidden or lost panel, parent loss or malformed IPC ends the original host.
-A genuine local Stop uses the local-revoke signal; ordinary host cleanup
+A local Stop action uses the local-revoke signal; ordinary host cleanup
 completes with a successful exit, so launchd's failure-only restart does not
 undo that action. The macOS role refuses approval and microphone commands
 rather than reusing the observation surface for another capability.

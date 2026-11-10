@@ -9,6 +9,7 @@
 #include <math.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <unistd.h>
 
@@ -39,6 +40,7 @@ int fr_oi_bind_parent(uint32_t parent) {
 @class FrObservationPanels;
 @interface FrObservationBadge : NSView
 @property(nonatomic, weak) FrObservationPanels *owner;
+@property(nonatomic) BOOL drawn;
 @end
 
 @interface FrObservationPanel : NSPanel
@@ -46,6 +48,7 @@ int fr_oi_bind_parent(uint32_t parent) {
 @property(nonatomic) NSRect displayFrame;
 @property(nonatomic) CGFloat displayScale;
 @property(nonatomic) NSRect originalFrame;
+@property(nonatomic, strong) FrObservationBadge *originalBadge;
 @end
 @implementation FrObservationPanel
 - (BOOL)canBecomeKeyWindow { return NO; }
@@ -54,7 +57,7 @@ int fr_oi_bind_parent(uint32_t parent) {
 
 @interface FrObservationPanels : NSObject {
   @public
-    int state;
+    atomic_int state;
 }
 @property(nonatomic, strong) NSMutableArray<FrObservationPanel *> *panels;
 - (void)stop:(int)reason;
@@ -65,7 +68,7 @@ int fr_oi_bind_parent(uint32_t parent) {
 - (instancetype)init {
     self = [super init];
     if (self) {
-        state = FR_OI_OPENING;
+        atomic_init(&state, FR_OI_OPENING);
         _panels = [NSMutableArray array];
         // These AppKit notifications are delivered on its main thread. Even
         // a display that disappears and returns between polls ends this owner;
@@ -80,7 +83,11 @@ int fr_oi_bind_parent(uint32_t parent) {
     return self;
 }
 - (void)stop:(int)reason {
-    if (state == FR_OI_OPENING || state == FR_OI_SHOWN) state = reason;
+    // Native callbacks and accessibility actions may arrive while a visibility
+    // query is completing. Preserve the first terminal cause permanently.
+    int previous = atomic_load(&state);
+    while (previous < FR_OI_LOCAL_STOP &&
+           !atomic_compare_exchange_weak(&state, &previous, reason)) {}
 }
 - (void)lost:(NSNotification *)notification {
     (void)notification;
@@ -148,20 +155,35 @@ int fr_oi_bind_parent(uint32_t parent) {
 }
 - (void)rightMouseDown:(NSEvent *)event { [self mouseDown:event]; }
 - (void)otherMouseDown:(NSEvent *)event { [self mouseDown:event]; }
+- (BOOL)accessibilityPerformPress {
+    // Accessibility exposes only this negative action, never peer approval.
+    [self.owner stop:FR_OI_LOCAL_STOP];
+    return YES;
+}
 - (BOOL)isOpaque { return YES; }
 - (void)drawRect:(NSRect)dirty {
     (void)dirty;
-    [[NSColor colorWithSRGBRed:0.08 green:0.28 blue:0.52 alpha:1.0] setFill];
-    NSRectFill(self.bounds);
-    NSDictionary *attributes = @{
-        NSFontAttributeName : [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
-        NSForegroundColorAttributeName : NSColor.whiteColor,
-    };
-    NSString *label = @"Screen sharing enabled — click to stop";
-    NSSize size = [label sizeWithAttributes:attributes];
-    [label drawAtPoint:NSMakePoint(NSMidX(self.bounds) - size.width / 2,
-                                   NSMidY(self.bounds) - size.height / 2)
-       withAttributes:attributes];
+    FrObservationPanels *owner = self.owner;
+    if (!owner) return;
+    @try {
+        [[NSColor colorWithSRGBRed:0.08 green:0.28 blue:0.52 alpha:1.0] setFill];
+        NSRectFill(self.bounds);
+        NSDictionary *attributes = @{
+            NSFontAttributeName : [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+            NSForegroundColorAttributeName : NSColor.whiteColor,
+        };
+        NSString *label = @"Screen sharing enabled — click to stop";
+        NSSize size = [label sizeWithAttributes:attributes];
+        [label drawAtPoint:NSMakePoint(NSMidX(self.bounds) - size.width / 2,
+                                       NSMidY(self.bounds) - size.height / 2)
+           withAttributes:attributes];
+        // Window mapping alone is not proof that its original Stop control
+        // was drawn. No drawing result can change terminal owner state.
+        self.drawn = YES;
+    } @catch (NSException *exception) {
+        (void)exception;
+        [owner stop:FR_OI_FAILED];
+    }
 }
 @end
 
@@ -218,7 +240,8 @@ static BOOL server_absent(CGWindowID window) {
 // No monitor can silently acquire a new panel. Sharing after display-set,
 // placement, size or scale changes requires a fresh original host lifetime.
 static int visible(FrObservationPanels *owner) {
-    if (owner->state >= FR_OI_LOCAL_STOP) return owner->state;
+    int status = atomic_load(&owner->state);
+    if (status >= FR_OI_LOCAL_STOP) return status;
     NSArray<NSScreen *> *screens = NSScreen.screens;
     if (screens.count != owner.panels.count || screens.count == 0 || NSApp.isHidden)
         return FR_OI_FAILED;
@@ -237,13 +260,19 @@ static int visible(FrObservationPanels *owner) {
             screen_number(panel.screen) != panel.displayID ||
             !NSContainsRect(original.visibleFrame, panel.frame) || panel.alphaValue != 1.0)
             return FR_OI_FAILED;
-        BOOL shown = panel.isVisible && !panel.isMiniaturized && panel.isOnActiveSpace &&
+        FrObservationBadge *badge = panel.originalBadge;
+        BOOL shown = badge && panel.contentView == badge && badge.window == panel &&
+                     badge.drawn && !badge.hidden && rectangle(badge.bounds) &&
+                     NSContainsRect(badge.visibleRect, badge.bounds) &&
+                     panel.isVisible && !panel.isMiniaturized && panel.isOnActiveSpace &&
                      (panel.occlusionState & NSWindowOcclusionStateVisible) &&
                      server_visible(panel);
         if (!shown) mapped = NO;
     }
+    status = atomic_load(&owner->state);
+    if (status >= FR_OI_LOCAL_STOP) return status;
     if (mapped) return FR_OI_SHOWN;
-    return owner->state == FR_OI_OPENING ? FR_OI_OPENING : FR_OI_FAILED;
+    return status == FR_OI_OPENING ? FR_OI_OPENING : FR_OI_FAILED;
 }
 
 int fr_oi_open(uint32_t max_displays, void **out) {
@@ -313,6 +342,10 @@ int fr_oi_open(uint32_t max_displays, void **out) {
                     initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
                 if (!badge) return FR_OI_FAILED;
                 badge.owner = owner;
+                badge.accessibilityElement = YES;
+                badge.accessibilityRole = NSAccessibilityButtonRole;
+                badge.accessibilityLabel = @"Screen sharing enabled. Stop sharing.";
+                panel.originalBadge = badge;
                 panel.contentView = badge;
                 [owner.panels addObject:panel];
                 [panel orderFrontRegardless];
@@ -332,19 +365,34 @@ int fr_oi_pump(void *handle, uint32_t timeout_ms) {
     @autoreleasepool {
         FrObservationPanels *owner = (__bridge FrObservationPanels *)handle;
         @try {
-            if (owner->state >= FR_OI_LOCAL_STOP) return owner->state;
+            int state = atomic_load(&owner->state);
+            if (state >= FR_OI_LOCAL_STOP) return state;
             NSDate *until = [NSDate dateWithTimeIntervalSinceNow:timeout_ms / 1000.0];
             // Bounded native work; floods cannot produce an unbounded queue in
             // this helper or replace completion of the real visibility check.
-            for (unsigned i = 0; i < 32; ++i) {
+            unsigned drained = 0;
+            for (; drained < 32; ++drained) {
                 NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                    untilDate:until
                                                       inMode:NSDefaultRunLoopMode
                                                      dequeue:YES];
                 if (!event) break;
                 [NSApp sendEvent:event];
-                if (owner->state >= FR_OI_LOCAL_STOP) return owner->state;
+                state = atomic_load(&owner->state);
+                if (state >= FR_OI_LOCAL_STOP) return state;
                 until = [NSDate distantPast];
+            }
+            if (drained == 32) {
+                // Do not mint readiness behind an already queued local Stop.
+                // Peeking is bounded and does not consume or drop that event.
+                NSEvent *pending = [NSApp nextEventMatchingMask:NSEventMaskAny
+                                                     untilDate:NSDate.distantPast
+                                                        inMode:NSDefaultRunLoopMode
+                                                       dequeue:NO];
+                if (pending) {
+                    [owner stop:FR_OI_FAILED];
+                    return atomic_load(&owner->state);
+                }
             }
             // An already queued NSEvent flood must not bypass every other
             // main-loop source. A zero-time run makes one bounded source pass;
@@ -352,17 +400,27 @@ int fr_oi_pump(void *handle, uint32_t timeout_ms) {
             SInt32 turn = CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
             if (turn == kCFRunLoopRunStopped || turn == kCFRunLoopRunFinished) {
                 [owner stop:FR_OI_FAILED];
-                return owner->state;
+                return atomic_load(&owner->state);
             }
+            state = atomic_load(&owner->state);
+            if (state >= FR_OI_LOCAL_STOP) return state;
             [NSApp updateWindows];
+            state = atomic_load(&owner->state);
+            if (state >= FR_OI_LOCAL_STOP) return state;
             int status = visible(owner);
-            if (status == FR_OI_SHOWN) owner->state = status;
-            else if (status >= FR_OI_LOCAL_STOP) [owner stop:status];
-            return owner->state;
+            if (status == FR_OI_SHOWN) {
+                int opening = FR_OI_OPENING;
+                // A callback during any AppKit query above cannot be replaced
+                // by a late positive observation of the same panel set.
+                atomic_compare_exchange_strong(&owner->state, &opening, FR_OI_SHOWN);
+            } else if (status >= FR_OI_LOCAL_STOP) {
+                [owner stop:status];
+            }
+            return atomic_load(&owner->state);
         } @catch (NSException *exception) {
             (void)exception;
             [owner stop:FR_OI_FAILED];
-            return owner->state;
+            return atomic_load(&owner->state);
         }
     }
 }

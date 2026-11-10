@@ -51,8 +51,10 @@ if (( ! skip_build )); then
   (cd "$repo" &&
     cargo build --release --locked -p frd --features macos-host --bin frd &&
     cargo build --release --locked -p fr-native \
-      --features macos-media,macos-input,macos-desktop,macos-session-monitor,macos-observation-indicator \
-      --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr-observation-indicator --bin fr)
+      --features macos-media,macos-input,macos-desktop,macos-session-monitor \
+      --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr &&
+    cargo build --release --locked -p fr-native --no-default-features \
+      --features macos-observation-indicator --bin fr-observation-indicator)
 fi
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/fr-install.XXXXXX")
