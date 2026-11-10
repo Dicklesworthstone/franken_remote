@@ -84,7 +84,7 @@ fn compositor_gap_preserves_draft_but_refuses_send_without_queue_or_clock_effect
     receiver.publish_context(view(), 0, false, true).unwrap();
     assert!(original == token(&receiver));
     submit(&receiver, &original, "e\u{301}é漢🙂").unwrap();
-    let captured = receiver.front(view()).unwrap().unwrap();
+    let captured = receiver.front(view(), ClientInstant(10)).unwrap().unwrap();
     assert_eq!(captured.sampled, ClientInstant(8));
     assert_eq!(captured.text_context, Some(original.state));
     assert!(matches!(
@@ -99,7 +99,7 @@ fn suspension_then_same_view_resume_permanently_rejects_original_draft_and_pendi
     let mut receiver = receiver();
     let original = token(&receiver);
     submit(&receiver, &original, "old").unwrap();
-    assert!(receiver.front(view()).unwrap().is_some());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_some());
     receiver.publish_context(view(), 1, true, false).unwrap();
     let suspended = token(&receiver);
     assert!(suspended.state.suspended);
@@ -109,7 +109,7 @@ fn suspension_then_same_view_resume_permanently_rejects_original_draft_and_pendi
     );
     receiver.publish_context(view(), 1, false, true).unwrap();
     assert!(original != token(&receiver));
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 1);
     assert_eq!(
         submit(&receiver, &original, "old"),
@@ -121,7 +121,7 @@ fn suspension_then_same_view_resume_permanently_rejects_original_draft_and_pendi
     );
     let fresh = token(&receiver);
     submit(&receiver, &fresh, "fresh").unwrap();
-    assert!(receiver.front(view()).unwrap().is_some());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_some());
     assert_eq!(receiver.suspended(), 1);
 }
 
@@ -138,7 +138,7 @@ fn suspension_and_resume_between_publications_still_invalidates_the_same_view() 
         submit(&receiver, &original, "old"),
         Err(Error::StaleTextContext)
     );
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 1);
 }
 
@@ -153,9 +153,9 @@ fn legacy_commit_captured_while_suspended_cannot_replay_after_same_view_resume()
         .push(text("already committed"), ClientInstant(8), None)
         .unwrap();
     receiver.publish_context(view(), 1, false, true).unwrap();
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 1);
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 1);
 }
 
@@ -165,7 +165,7 @@ fn contended_publication_cannot_revive_old_pending_or_queued_text() {
     let original = token(&receiver);
     submit(&receiver, &original, "pending").unwrap();
     submit(&receiver, &original, "queued").unwrap();
-    assert!(receiver.front(view()).unwrap().is_some());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_some());
     let shared = receiver.queue.clone();
     let mut guard = shared.lock().unwrap();
     receiver.publish_context(view(), 1, true, false).unwrap();
@@ -176,12 +176,12 @@ fn contended_publication_cannot_revive_old_pending_or_queued_text() {
     guard
         .push(text("racing"), ClientInstant(9), Some(original.state))
         .unwrap();
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 1);
     drop(guard);
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 2);
-    assert!(receiver.front(view()).unwrap().is_none());
+    assert!(receiver.front(view(), ClientInstant(10)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 3);
     assert!(original != token(&receiver));
     assert_eq!(
@@ -245,11 +245,47 @@ fn whole_context_refusal_preserves_earlier_physical_release_and_time() {
         assert_eq!(queue.events.len(), 1);
     }
     assert!(matches!(
-        &receiver.front(view()).unwrap().unwrap().event,
+        &receiver.front(view(), ClientInstant(10)).unwrap().unwrap().event,
         Event::Key {
             transition: KeyTransition::Release,
             ..
         }
     ));
     assert_eq!(receiver.suspended(), 0);
+}
+
+#[test]
+fn bounded_completion_cannot_inherit_readiness_after_a_compositor_gap() {
+    let mut receiver = receiver();
+    let original = token(&receiver);
+    receiver.publish_context(view(), 0, false, false).unwrap();
+    {
+        let mut queue = receiver.queue.lock().unwrap();
+        assert_eq!(
+            queue.push_bounded(
+                text("completed"),
+                ClientInstant(8),
+                Some(original.state),
+                Some(ClientInstant(9)),
+            ),
+            Err(Error::TextNotReady)
+        );
+        assert!(queue.events.is_empty());
+        assert_eq!(queue.last_sample, ClientInstant(7));
+    }
+    receiver.publish_context(view(), 0, false, true).unwrap();
+    assert!(original == token(&receiver));
+    receiver
+        .queue
+        .lock()
+        .unwrap()
+        .push_bounded(
+            text("original deadline"),
+            ClientInstant(8),
+            Some(original.state),
+            Some(ClientInstant(9)),
+        )
+        .unwrap();
+    assert!(receiver.front(view(), ClientInstant(9)).unwrap().is_none());
+    assert_eq!(receiver.suspended(), 1);
 }

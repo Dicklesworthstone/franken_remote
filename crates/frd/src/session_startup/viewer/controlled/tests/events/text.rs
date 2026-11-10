@@ -193,3 +193,68 @@ fn maximum_sized_text_still_obeys_event_capacity_and_terminal_overflow() {
         state.host.close();
     });
 }
+
+#[test]
+fn expired_native_completion_refuses_without_stopping_physical_control() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture_with_caps(
+            &client,
+            &host,
+            caps().with(Capability::Text),
+        ))
+        .await;
+        let mut source = state.viewer.capture_input().unwrap();
+        let context = source.text_context().unwrap().unwrap();
+        let sampled = source.clock().unwrap();
+        assert_eq!(
+            source.commit_text_in_context_until(&context, "expired 漢", sampled, sampled),
+            Err(events::Error::TextNotReady)
+        );
+        assert_eq!(state.viewer.pending_actions(), 0);
+        assert!(!state.viewer.pending_send());
+        assert!(!state.viewer.is_closed());
+        source.push(physical(KeyTransition::Press), sampled).unwrap();
+        state.viewer.dispatch_captured().unwrap();
+        assert_eq!(state.viewer.pending_actions(), 1);
+        assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
+        source.stop();
+        state.viewer.close();
+        state.host.close();
+    });
+}
+
+#[test]
+fn encoded_native_commit_keeps_its_original_checked_deadline() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture_with_caps(
+            &client,
+            &host,
+            caps().with(Capability::Text),
+        ))
+        .await;
+        let mut source = state.viewer.capture_input().unwrap();
+        let context = source.text_context().unwrap().unwrap();
+        let (_, checked_until) = state.viewer.input_capture_context().unwrap();
+        let sampled = source.clock().unwrap();
+        let original = ClientInstant(checked_until.0.min(sampled.0 + 25_000));
+        source
+            .commit_text_in_context_until(&context, "original", sampled, original)
+            .unwrap();
+        state.viewer.dispatch_captured().unwrap();
+        let pending = state.viewer.pending.as_ref().unwrap();
+        let deadline = pending.until;
+        let bytes = pending.bytes[..pending.len].to_vec();
+        assert!(deadline <= original.0);
+        source
+            .commit_text_in_context_until(&context, "later", sampled, checked_until)
+            .unwrap();
+        state.viewer.dispatch_captured().unwrap();
+        let pending = state.viewer.pending.as_ref().unwrap();
+        assert_eq!(pending.until, deadline);
+        assert_eq!(&pending.bytes[..pending.len], bytes);
+        assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
+        source.stop();
+        state.viewer.close();
+        state.host.close();
+    });
+}

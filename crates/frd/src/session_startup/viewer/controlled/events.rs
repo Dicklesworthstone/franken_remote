@@ -124,6 +124,8 @@ struct Captured {
     /// A Unicode commit cannot acquire a replacement view while queued.
     /// Physical positioned events retain their existing checked Layout.
     text_context: Option<TextState>,
+    /// The native commit's original checked send bound, never a renewed ticket.
+    text_until: Option<ClientInstant>,
 }
 struct Queue {
     events: VecDeque<Captured>,
@@ -147,6 +149,15 @@ impl Queue {
         event: Event,
         sampled: ClientInstant,
         context: Option<TextState>,
+    ) -> Result<(), Error> {
+        self.push_bounded(event, sampled, context, None)
+    }
+    fn push_bounded(
+        &mut self,
+        event: Event,
+        sampled: ClientInstant,
+        context: Option<TextState>,
+        until: Option<ClientInstant>,
     ) -> Result<(), Error> {
         if let Some(context) = context
             && !self.context_ready(context)?
@@ -174,6 +185,7 @@ impl Queue {
             event,
             sampled,
             text_context,
+            text_until: until,
         });
         Ok(())
     }
@@ -296,8 +308,33 @@ impl Source {
         text: &str,
         sampled: ClientInstant,
     ) -> Result<(), Error> {
+        self.capture_text_in_context(context, text, sampled, None)
+    }
+    /// Native completion additionally freezes the original checked client-clock
+    /// send deadline. Neither queueing nor later same-context ticket renewal can
+    /// extend it. A stale deadline refuses the whole commit without stopping keys.
+    pub fn commit_text_in_context_until(
+        &mut self,
+        context: &TextContext,
+        text: &str,
+        sampled: ClientInstant,
+        until: ClientInstant,
+    ) -> Result<(), Error> {
+        self.capture_text_in_context(context, text, sampled, Some(until))
+    }
+    fn capture_text_in_context(
+        &mut self,
+        context: &TextContext,
+        text: &str,
+        sampled: ClientInstant,
+        until: Option<ClientInstant>,
+    ) -> Result<(), Error> {
         let result = (|| {
-            not_future(sampled, self.clock()?)?;
+            let current = self.clock()?;
+            not_future(sampled, current)?;
+            if until.is_some_and(|until| current >= until) {
+                return Err(Error::TextNotReady);
+            }
             if !self.supports_text() {
                 return Err(Error::UnsupportedText);
             }
@@ -305,7 +342,7 @@ impl Source {
                 return Err(Error::StaleTextContext);
             }
             let text = CommittedText::new(text).map_err(Error::Text)?;
-            self.push_in_context(Event::Text(text), sampled, Some(context.state))
+            self.push_bounded(Event::Text(text), sampled, Some(context.state), until)
         })();
         self.finish_capture(result)
     }
@@ -370,6 +407,15 @@ impl Source {
         sampled: ClientInstant,
         context: Option<TextState>,
     ) -> Result<(), Error> {
+        self.push_bounded(event, sampled, context, None)
+    }
+    fn push_bounded(
+        &mut self,
+        event: Event,
+        sampled: ClientInstant,
+        context: Option<TextState>,
+        until: Option<ClientInstant>,
+    ) -> Result<(), Error> {
         let current = self.clock()?;
         // An aged event is still admitted: the session drops it as obsolete,
         // or sends it late if it releases what the host holds (`expire`).
@@ -382,7 +428,11 @@ impl Source {
         if self.control.is_stopped() {
             return Err(Error::Closed);
         }
-        queue.push(event, sampled, context)
+        if let Some(until) = until {
+            queue.push_bounded(event, sampled, context, Some(until))
+        } else {
+            queue.push(event, sampled, context)
+        }
     }
 }
 impl Drop for Source {
@@ -548,7 +598,7 @@ impl Receiver {
         self.suspended = self.suspended.saturating_add(1);
         unseen_press(event, &mut self.refused_keys, &mut self.refused_buttons);
     }
-    fn front(&mut self, view: InputView) -> Result<Option<&Captured>, Error> {
+    fn front(&mut self, view: InputView, now: ClientInstant) -> Result<Option<&Captured>, Error> {
         self.context
             .update(view, self.context.suspensions, self.context.suspended)?;
         // Publish only the dispatch owner's checked view; native code cannot
@@ -572,6 +622,7 @@ impl Receiver {
                 captured
                     .text_context
                     .is_some_and(|original| original.suspended || original != self.context)
+                    || captured.text_until.is_some_and(|until| now >= until)
             })
         {
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
@@ -680,7 +731,7 @@ impl ControlledViewer {
             })
             .map_err(super::Error::Capture)?;
         if receiver
-            .front(self.input.input_view())
+            .front(self.input.input_view(), at)
             .map_err(super::Error::Capture)?
             .is_none()
             || self.pending_send()
@@ -736,6 +787,9 @@ impl ControlledViewer {
                     .0
                     .checked_add(MAX_EVENT_AGE_US)
                     .ok_or(super::Error::Capture(Error::Clock))?;
+                let deadline = captured
+                    .text_until
+                    .map_or(deadline, |until| deadline.min(until.0));
                 if deadline > at.0
                     && let Some(pending) = &mut self.pending
                 {

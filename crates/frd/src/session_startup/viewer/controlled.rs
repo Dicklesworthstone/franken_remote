@@ -426,6 +426,16 @@ impl ControlledViewer {
         let sample = self.input.presented_sample(at)?;
         Ok((self.input.input_view(), sample))
     }
+    /// Current input view and the original owner's absolute send deadline.
+    /// Native composition uses this only to bound local availability. It cannot
+    /// renew a ticket or replace the ordinary encoding/submission checks.
+    pub fn input_capture_context(
+        &mut self,
+    ) -> Result<(fr_core::input::InputView, ClientInstant), Error> {
+        let at = self.check()?;
+        let (until, _) = self.input.send_limit(at)?;
+        Ok((self.input.input_view(), until))
+    }
     /// Immutable receipt identity, excluding the bearer input ticket.
     pub fn input_result_binding(&self) -> fr_wire::input_result::ResultBinding {
         self.input.binding()
