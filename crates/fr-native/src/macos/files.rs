@@ -7,11 +7,12 @@
 //! explicitly enabled local command endpoint owns only selection admission
 //! into that same original lane, never another connection or transfer loop.
 //! A reconnect or a later control gesture never repeats the file choices.
+use crate::{file_selection::BatchStatus, macos_file_drop};
 use fr_wire::negotiation::Offer;
 use frd::{
     native_files::{
         Absence, Directory, ReceiveControl, ReceiveRequest, ReceiveStatus, SelectRefusal,
-        Selection, SendControl, SendRequest, SendSnapshot, local,
+        Selection, SendControl, SendIntake, SendRequest, SendSnapshot, local,
     },
     session_startup::{FileSendError, NativeObserver},
 };
@@ -140,32 +141,10 @@ impl Commands {
         }
     }
 
-    fn configure(
-        &mut self,
-        observer: &mut NativeObserver,
-        request: Upload,
-        cancelled: bool,
-    ) -> Result<SendControl, Absence> {
-        let deferred = matches!(request, Upload::Deferred);
-        let result = match request {
-            Upload::Selected(request) => observer.configure_file_send_with_intake(request),
-            Upload::Deferred => observer.configure_file_drop(),
-        };
-        let (control, intake) = match result {
-            Ok(configured) => configured,
-            Err(absence) => {
-                if self.outcome.is_none() {
-                    self.outcome = Some(Err(local::Error::Unavailable));
-                }
-                return Err(absence);
-            }
-        };
+    fn configure(&mut self, intake: SendIntake, cancelled: bool) -> bool {
         if cancelled || self.cancelled {
-            // Settle the original negotiated attachment without admitting a
-            // local command or starting a previously selected source.
-            control.cancel();
             self.stop();
-            return Ok(control);
+            return false;
         }
         let owner = self
             .connection
@@ -176,18 +155,13 @@ impl Commands {
             Ok(owner) => {
                 self.outcome = Some(Ok(owner.results()));
                 self.owner = Some(owner);
+                true
             }
             Err(error) => {
                 self.outcome = Some(Err(error));
-                // An explicit initial selection remains usable if the optional
-                // endpoint fails. An empty lane has no possible selector.
-                if deferred {
-                    control.cancel();
-                    return Err(Absence::Unavailable);
-                }
+                false
             }
         }
-        Ok(control)
     }
 }
 
@@ -200,6 +174,7 @@ pub struct Files {
     sizes: Vec<Option<u64>>,
     download: Option<Direction<ReceiveRequest, ReceiveControl>>,
     commands: Option<Commands>,
+    selections: Option<macos_file_drop::Owner>,
 }
 impl Files {
     /// Duplicate the selected source descriptors and retain the pinned local
@@ -222,6 +197,7 @@ impl Files {
             sizes,
             download: download.map(|directory| Direction::new(ReceiveRequest::new(&directory))),
             commands: None,
+            selections: None,
         })
     }
 
@@ -234,6 +210,45 @@ impl Files {
         self.upload
             .get_or_insert_with(|| Direction::new(Upload::Deferred));
         self
+    }
+
+    /// Explicit native selection consent for this original upload only. No
+    /// pasteboard or path is read here; reconnect cannot renew this owner.
+    #[must_use]
+    pub fn with_file_drop(mut self) -> Self {
+        self.selections
+            .get_or_insert_with(macos_file_drop::Owner::default);
+        self.upload
+            .get_or_insert_with(|| Direction::new(Upload::Deferred));
+        self
+    }
+
+    pub const fn file_drop_requested(&self) -> bool {
+        self.selections.is_some()
+    }
+
+    pub(crate) fn file_drop_ingress(&self) -> Option<macos_file_drop::Ingress> {
+        self.selections
+            .as_ref()
+            .map(macos_file_drop::Owner::ingress)
+    }
+
+    pub(crate) fn file_drop_ready(&self, ready: bool) {
+        if let Some(selections) = &self.selections {
+            selections.ingress().set_ready(ready);
+        }
+    }
+
+    /// Independent results for every admitted native gesture, in selection
+    /// order. The original preselected and local-command receipts stay intact.
+    pub fn dropped_batches(&self) -> Vec<BatchStatus> {
+        self.selections
+            .as_ref()
+            .map_or_else(Vec::new, macos_file_drop::Owner::batches)
+    }
+
+    pub(crate) fn drop_progress(&self) -> Option<Result<SendSnapshot, &'static str>> {
+        self.selections.as_ref()?.progress()
     }
 
     /// Bind command consent to the original foreground connection exactly once,
@@ -266,18 +281,18 @@ impl Files {
     /// the host's later attachment offer fail the whole controlled session.
     /// The existing observer gates all contents on the original control grant.
     pub fn configure(&mut self, observer: &mut NativeObserver) {
-        if let Some(upload) = &mut self.upload
-            && let Some(request) = upload.pending.take()
-        {
-            let configured = if let Some(commands) = &mut self.commands {
-                commands.configure(observer, request, upload.pending_cancelled)
-            } else {
-                match request {
-                    Upload::Selected(request) => observer.configure_file_send(request),
-                    Upload::Deferred => Err(Absence::Unavailable),
-                }
-            };
-            upload.configured(configured, SendControl::cancel);
+        let pending = self.upload.as_mut().and_then(|upload| {
+            upload
+                .pending
+                .take()
+                .map(|request| (request, upload.pending_cancelled))
+        });
+        if let Some((request, cancelled)) = pending {
+            let configured = self.configure_upload(observer, request, cancelled);
+            self.upload
+                .as_mut()
+                .expect("original upload")
+                .configured(configured, SendControl::cancel);
         }
         if let Some(download) = &mut self.download
             && let Some(request) = download.pending.take()
@@ -287,6 +302,70 @@ impl Files {
                 ReceiveControl::cancel,
             );
         }
+    }
+
+    fn configure_upload(
+        &mut self,
+        observer: &mut NativeObserver,
+        request: Upload,
+        cancelled: bool,
+    ) -> Result<SendControl, Absence> {
+        if self.commands.is_none() && self.selections.is_none() {
+            return match request {
+                Upload::Selected(request) => observer.configure_file_send(request),
+                Upload::Deferred => Err(Absence::Unavailable),
+            };
+        }
+        let deferred = matches!(request, Upload::Deferred);
+        // Configure exactly once. Every optional local selector shares this
+        // original bounded intake, immutable policy and authority checks.
+        let configured = match request {
+            Upload::Selected(request) => observer.configure_file_send_with_intake(request),
+            Upload::Deferred => observer.configure_file_drop(),
+        };
+        let (control, intake) = match configured {
+            Ok(configured) => configured,
+            Err(absence) => {
+                if let Some(commands) = &mut self.commands {
+                    commands
+                        .outcome
+                        .get_or_insert(Err(local::Error::Unavailable));
+                }
+                if let Some(selections) = &self.selections {
+                    selections.cancel();
+                }
+                return Err(absence);
+            }
+        };
+        if cancelled {
+            control.cancel();
+            if let Some(commands) = &mut self.commands {
+                commands.stop();
+            }
+            if let Some(selections) = &self.selections {
+                selections.cancel();
+            }
+            return Ok(control);
+        }
+        let commands = self
+            .commands
+            .as_mut()
+            .is_some_and(|commands| commands.configure(intake.clone(), false));
+        let native = self.selections.as_mut().is_some_and(|selections| {
+            if selections.configure(intake).is_ok() {
+                true
+            } else {
+                selections.cancel();
+                false
+            }
+        });
+        // An initial --send remains useful when optional local UI setup fails.
+        // A deferred lane needs at least one live explicit selection surface.
+        if deferred && !commands && !native {
+            control.cancel();
+            return Err(Absence::Unavailable);
+        }
+        Ok(control)
     }
 
     /// Whether this invocation explicitly selected an upload. Cancellation
@@ -303,6 +382,9 @@ impl Files {
     /// Fence only the original upload, including before configuration.
     /// The independent download choice and its receipts are unchanged.
     pub fn cancel_upload(&mut self) {
+        if let Some(selections) = &self.selections {
+            selections.cancel();
+        }
         if let Some(commands) = &mut self.commands {
             commands.stop();
         }
@@ -383,10 +465,14 @@ impl Files {
     /// Actual retirement of the original local socket and selection workers.
     /// A cancellation request alone cannot allow another native attempt.
     pub fn commands_complete(&self) -> bool {
-        self.commands
+        self.selections
             .as_ref()
-            .and_then(|commands| commands.owner.as_ref())
-            .is_none_or(local::Owner::is_complete)
+            .is_none_or(macos_file_drop::Owner::complete)
+            && self
+                .commands
+                .as_ref()
+                .and_then(|commands| commands.owner.as_ref())
+                .is_none_or(local::Owner::is_complete)
     }
 
     /// `None` means no destination was selected. Retained results distinguish
@@ -467,6 +553,45 @@ mod tests {
                 clipboard
             );
         }
+    }
+
+    #[test]
+    fn native_selection_consent_is_explicit_combines_with_commands_and_never_reopens() {
+        let fixture = Fixture::new();
+        for selected in [false, true] {
+            let mut files =
+                Files::new(selected.then(|| fixture.upload()), Some(fixture.download()))
+                    .unwrap()
+                    .with_file_drop()
+                    .with_commands();
+            assert!(files.file_drop_requested());
+            assert_eq!(files.upload_sizes().len(), usize::from(selected));
+            assert!(files.dropped_batches().is_empty());
+            assert!(files.drop_progress().is_none());
+            assert!(files.commands_complete());
+            assert!(has(&files.offer(false), fr_wire::files::DUPLEX_CAPABILITY));
+            let ingress = files.file_drop_ingress().unwrap();
+            files.file_drop_ready(true);
+            // UI eligibility alone cannot manufacture an original intake.
+            assert!(!ingress.ready());
+            assert!(!ingress.submit(b"file:///tmp/not-selected", std::time::Instant::now()));
+            files.cancel_upload();
+            let files = files.with_file_drop().with_commands();
+            files.file_drop_ready(true);
+            assert!(!ingress.ready());
+            assert!(!has(
+                &files.offer(false),
+                fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+            ));
+            assert!(has(
+                &files.offer(false),
+                fr_wire::files::DOWNLOAD_CAPABILITY
+            ));
+            assert_eq!(files.download_status(), Some(Status::NotStarted));
+            assert!(files.dropped_batches().is_empty());
+            assert!(files.commands_complete());
+        }
+        assert!(!Files::default().file_drop_requested());
     }
 
     #[test]

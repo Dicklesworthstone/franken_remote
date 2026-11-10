@@ -111,6 +111,28 @@ mod macos_text;
 #[path = "macos/files.rs"]
 pub mod macos_files;
 
+// One bounded local-drop parser and selection worker for both native desktops.
+// These contain no window-system calls or alternate transfer implementation.
+#[cfg(any(
+    test,
+    all(target_os = "linux", feature = "linux-viewer-window"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "viewer_window/file_drop.rs"]
+pub(crate) mod file_drop;
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-viewer-window"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "viewer_window/file_send.rs"]
+pub mod file_selection;
+#[cfg(any(
+    all(test, target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "macos/file_drop.rs"]
+mod macos_file_drop;
+
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod capture;
 

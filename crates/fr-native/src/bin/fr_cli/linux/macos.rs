@@ -3,11 +3,11 @@
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
-//! interactive file drops, audio, microphone,
+//! audio, microphone,
 //! and system-shortcut capture. Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
-//! Explicit --send/--receive choices and opt-in local upload commands use the
-//! original controlled file lanes.
+//! Explicit --send/--receive choices, --file-drop native selections and opt-in
+//! local upload commands use the original controlled file lanes.
 #[path = "macos_clipboard.rs"]
 mod clipboard;
 #[path = "macos_files.rs"]
@@ -55,11 +55,21 @@ fn check(connection: &Connection) -> Result<(), Failure> {
             2,
         ));
     }
-    let directions =
-        u32::from(!connection.upload.paths.is_empty() || connection.upload.file_commands)
-            + u32::from(connection.receive.is_some());
+    if !connection.control && connection.upload.file_drop {
+        return Err(Failure::new(
+            "file_drop_requires_control",
+            "Native file selections use the original upload control lease; pass --control with --file-drop. A viewing reconnect never re-enables them.",
+            2,
+        ));
+    }
+    let directions = u32::from(
+        !connection.upload.paths.is_empty()
+            || connection.upload.file_commands
+            || connection.upload.file_drop,
+    ) + u32::from(connection.receive.is_some());
     let clipboard = u32::from(connection.control && connection.clipboard);
-    let sharing_width = 152 + 230 * directions + 184 * clipboard;
+    let sharing_width =
+        152 + 230 * directions + 184 * clipboard + 144 * u32::from(connection.upload.file_drop);
     let minimum_width = if connection.control {
         sharing_width.max(480)
     } else {
@@ -72,7 +82,7 @@ fn check(connection: &Connection) -> Result<(), Failure> {
     {
         return Err(Failure::new(
             "viewer_fit_too_small",
-            "--fit must leave room for Change Display and visible sharing controls. Controlling windows also reserve the local text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction and 184 for the default-on clipboard; both file directions with clipboard need 796x184. Viewing-only windows need 152x108. --no-clipboard removes only the clipboard strip.",
+            "--fit must leave room for Change Display and visible sharing controls. Controlling windows also reserve the local text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction, 184 for the default-on clipboard and 144 for --file-drop's Send copied files button; both file directions with clipboard and file-drop need 940x184. Viewing-only windows need 152x108. --no-clipboard removes only the clipboard strip.",
             2,
         ));
     }
@@ -82,10 +92,6 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         Some("--audio is not implemented on macOS yet.")
     } else if connection.microphone.is_some() {
         Some("--microphone is not implemented on macOS yet.")
-    } else if connection.upload.file_drop {
-        Some(
-            "--file-drop is not implemented on macOS yet; use --file-commands for later explicit selections, or choose --send paths and/or a --receive directory before connecting.",
-        )
     } else {
         None
     };
@@ -539,10 +545,16 @@ mod tests {
             assert!(check(&connection).is_ok());
             assert!(!connection.upload.file_drop && !connection.upload.file_commands);
         }
-        assert_eq!(
-            check(&connection("--file-drop")).err().unwrap().code,
-            "platform_unavailable"
-        );
+        for flags in [
+            "--file-drop",
+            "--file-drop --send /private/chosen",
+            "--file-drop --file-commands",
+            "--file-drop --file-commands --send /private/chosen --receive /private/inbox",
+        ] {
+            let connection = connection(flags);
+            assert!(check(&connection).is_ok());
+            assert!(connection.upload.file_drop);
+        }
         for flags in [
             "--file-commands",
             "--file-commands --send /private/chosen",
@@ -572,6 +584,12 @@ mod tests {
             check(&commands).err().unwrap().code,
             "file_commands_require_control"
         );
+        let mut native = connection("--file-drop");
+        native.control = false;
+        assert_eq!(
+            check(&native).err().unwrap().code,
+            "file_drop_requires_control"
+        );
         for (flags, width, height) in [
             ("", 479, 184),
             ("", 480, 183),
@@ -580,6 +598,12 @@ mod tests {
             ("--receive /private/inbox", 566, 183),
             ("--send /private/chosen --receive /private/inbox", 795, 184),
             ("--file-commands --receive /private/inbox", 795, 184),
+            ("--file-drop", 709, 184),
+            (
+                "--file-drop --file-commands --receive /private/inbox",
+                939,
+                184,
+            ),
         ] {
             let mut c = connection(flags);
             c.fit_window = Some((width, height));
@@ -597,6 +621,9 @@ mod tests {
             ("--file-commands", 566),
             ("--receive /private/inbox", 566),
             ("--file-commands --receive /private/inbox", 796),
+            ("--file-drop", 710),
+            ("--file-drop --file-commands --receive /private/inbox", 940),
+            ("--file-drop --no-clipboard", 526),
             ("--no-clipboard", 480),
         ] {
             let mut c = connection(flags);
