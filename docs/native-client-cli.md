@@ -167,6 +167,47 @@ and [fixed-point scroll-field](https://developer.apple.com/documentation/coregra
 documentation. Fixed-point event-field retention is distinct from proving that
 every target application consumes subpixel fractions.
 
+### Unicode text and Mac input methods
+
+A controlling Mac window reserves a local **Edit Text** composer. Once the host
+has selected and granted the optional `native-input-text` capability, release
+all remote keys and mouse buttons, click **Edit Text**, and type with the Mac's
+normal input method. AppKit owns preedit, conversion and candidate placement in
+that local editor. Finish composition and click **Send** to queue one complete
+Unicode value, limited to 4096 UTF-8 bytes. **Cancel** discards the local draft.
+Local paste and file/rich-text import are unavailable in this bounded editor.
+Physical key and shortcut forwarding remains the default outside the editor;
+the keys used for composition are never also sent as remote physical keys.
+
+The composer belongs to the original controlled source and its uninterrupted
+input view. A changed display, viewport, codec/recovery generation, actual input
+suspension, focus loss or hidden window cancels its draft and any unsent commit.
+Ordinary compositor candidate gaps temporarily disable Send while preserving a
+valid draft. An explicit Send retains its original native event timestamp and
+the existing 100 ms local-input age bound. A refused admission never retries
+automatically; if the same draft remains valid, a fresh Send click is required.
+Ctrl+Alt+Shift+Escape remains a local stop in editing mode.
+
+This composer sends committed text through the existing host text-input path.
+It does not synchronize a remote caret, implement remote preedit, infer a remote
+keyboard layout, or substitute clipboard sharing. Hosts without a granted Text
+capability keep the editor unavailable and retain ordinary control.
+
+Completion JSON retains `native_text.queued_locally` and
+`native_text.refused_locally` when text was attempted. A locally queued value
+does not confirm OS submission or application delivery. The separate
+`native_input_receipts` object preserves validated original host results:
+confirmed submitted action-operation prefixes, partial and uncertain effects,
+rejections/expiry/cancellation, duplicate receipts and unavailable retained
+history. Pointer reports can repeat and add no action effects. Duplicates add
+no effects; unavailable history leaves the corresponding
+effects unknown. These reports survive a later connection or cleanup error.
+
+The local composer, original-context integration and receipt projections have
+source-reviewed regressions. The execution environment disconnected before
+their formatter/compiler/test runs. Actual AppKit/IME editing, the SDK build
+and a Mac-to-Mac text session remain unqualified.
+
 The initial `--control` request is consumed once for the whole invocation.
 Automatic reconnects obtain fresh viewing only; after the recovered window is
 visible, focused and fresh, press and release **F8** to request new control.
@@ -181,11 +222,14 @@ failure or an adverse host report.
 points**. The picture preserves its aspect ratio and fits inside the available
 local screen. Rendering stays in Metal; input coordinates use the actual
 drawable picture after layout, including the local Retina scale. The same
-ceiling includes the reserved 44-point toolbar for Change Display and sharing
-controls. The content needs at least 152 points of width, plus 230 per file
-direction and 184 for the default-on controlling clipboard, and 108 points of
-height. Both file directions with clipboard need 796x108 points. With
-`--no-clipboard`, the previous file-only widths are 382 or 612 points. Smaller explicit ceilings
+ceiling includes the 44-point toolbar for Change Display and sharing controls.
+Controlling windows reserve an additional 76-point local text row before input
+mapping, so opening the editor does not resize a controlled picture. They need
+at least 184 points of height and the greater of 480 points or the sharing-strip
+width: 152 plus 230 per file direction and 184 for the default-on clipboard.
+Both file directions with clipboard need 796x184 points; with
+`--no-clipboard`, one file direction needs 480x184 and both need 612x184.
+Viewing-only windows retain the 152x108 minimum. Smaller explicit ceilings
 refuse before a connection. A narrow picture can have horizontal letterboxing
 to keep the local controls accessible. Without
 `--fit`, the remote logical size remains the picture's default.

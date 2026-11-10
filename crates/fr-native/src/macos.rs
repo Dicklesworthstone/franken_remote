@@ -19,6 +19,9 @@ use fr_media::hevc::HevcGuard;
 use fr_media::worker::overlay::Update as CursorUpdate;
 use std::time::Duration;
 
+pub(crate) use crate::macos_text::Commit as TextCommit;
+pub(crate) const TEXT_COMPOSER_FLAG: u32 = 16;
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct RawEvent {
@@ -73,6 +76,16 @@ unsafe extern "C" {
     ) -> c_int;
     fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
     fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
+    fn fr_mac_window_text_update(window: *mut c_void, context: u64, held_clear: c_int) -> c_int;
+    fn fr_mac_window_text_take(
+        window: *mut c_void,
+        bytes: *mut u8,
+        capacity: usize,
+        length: *mut usize,
+        context: *mut u64,
+        captured: *mut f64,
+    ) -> c_int;
+    fn fr_mac_window_text_complete(window: *mut c_void, context: u64, admitted: c_int) -> c_int;
     fn fr_mac_window_clipboard_bind(
         window: *mut c_void,
         context: *mut c_void,
@@ -343,6 +356,77 @@ impl Window {
         Duration::try_from_secs_f64(captured)
             .map(Some)
             .map_err(|_| NativeError::Unavailable)
+    }
+    /// Publish only the original session's opaque text context. Losing or
+    /// replacing it clears native preedit, draft and an unsent Send. Repeated
+    /// publication of the same context preserves local editing. `held_clear`
+    /// is a negative admission gate, never permission to release remote input.
+    pub(crate) fn text_update(
+        &self,
+        context: Option<u64>,
+        held_clear: bool,
+    ) -> Result<(), NativeError> {
+        if context == Some(0) {
+            return Err(NativeError::InvalidConfiguration);
+        }
+        // SAFETY: live main-thread window and scalar, content-free metadata.
+        status(unsafe {
+            fr_mac_window_text_update(
+                self.raw.as_ptr(),
+                context.unwrap_or(0),
+                c_int::from(held_clear),
+            )
+        })
+    }
+    /// Consume at most one original local Send. Call only after validating the
+    /// whole native batch: close, escape, focus, geometry and overflow win.
+    /// The native editor stays exclusive through the pump that captures Send,
+    /// so no later physical action can overtake this side-slot commit.
+    pub(crate) fn take_text(&self) -> Result<Option<TextCommit>, NativeError> {
+        let mut bytes = [0; fr_core::input::MAX_COMMITTED_TEXT_BYTES];
+        let (mut length, mut context, mut captured) = (0, 0, 0.0);
+        // SAFETY: live main-thread window; exactly capacity writable bytes and
+        // valid scalar outputs. The glue clears its one slot before returning.
+        let taken = status(unsafe {
+            fr_mac_window_text_take(
+                self.raw.as_ptr(),
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                &raw mut length,
+                &raw mut context,
+                &raw mut captured,
+            )
+        });
+        let result = (|| {
+            taken?;
+            if length == 0 {
+                return if context == 0 && captured == 0.0 {
+                    Ok(None)
+                } else {
+                    Err(NativeError::Unavailable)
+                };
+            }
+            let value = bytes.get(..length).ok_or(NativeError::Unavailable)?;
+            let now = event_time().ok_or(NativeError::Unavailable)?;
+            TextCommit::from_native(context, captured, value, now)
+                .map(Some)
+                .map_err(|_| NativeError::Unavailable)
+        })();
+        // Best-effort local cleanup, not a claim about compiler or AppKit copies.
+        bytes.fill(0);
+        result
+    }
+    /// Complete that one consumed Send before another native pump. Admission
+    /// clears the draft; refusal preserves it only under the same context and
+    /// requires a fresh explicit Send. Neither outcome claims OS submission.
+    pub(crate) fn text_complete(&self, context: u64, admitted: bool) -> Result<(), NativeError> {
+        if context == 0 {
+            return Err(NativeError::InvalidConfiguration);
+        }
+        // SAFETY: live main-thread window and content-free completion metadata.
+        status(unsafe {
+            fr_mac_window_text_complete(self.raw.as_ptr(), context, c_int::from(admitted))
+        })
     }
     /// Bind the original local Off owner before any clipboard setup can run.
     pub(crate) fn clipboard_bind(&self, privacy: clipboard::Privacy) -> Result<(), NativeError> {

@@ -59,12 +59,19 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         u32::from(!connection.upload.paths.is_empty() || connection.upload.file_commands)
             + u32::from(connection.receive.is_some());
     let clipboard = u32::from(connection.control && connection.clipboard);
+    let sharing_width = 152 + 230 * directions + 184 * clipboard;
+    let minimum_width = if connection.control {
+        sharing_width.max(480)
+    } else {
+        sharing_width
+    };
+    let minimum_height = if connection.control { 184 } else { 108 };
     if connection.fit_window.is_some_and(|(width, height)| {
-        width < 152 + 230 * directions + 184 * clipboard || height < 108
+        width < minimum_width || height < minimum_height
     }) {
         return Err(Failure::new(
             "viewer_fit_too_small",
-            "--fit must leave room for Change Display and visible sharing controls. Minimum height is 108 points; width is 152 plus 230 per file direction and 184 for the default-on clipboard. Both file directions with clipboard need at least 796x108; --no-clipboard removes only the clipboard strip.",
+            "--fit must leave room for Change Display and visible sharing controls. Controlling windows also reserve the local text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction and 184 for the default-on clipboard; both file directions with clipboard need 796x184. Viewing-only windows need 152x108. --no-clipboard removes only the clipboard strip.",
             2,
         ));
     }
@@ -565,36 +572,36 @@ mod tests {
             "file_commands_require_control"
         );
         for (flags, width, height) in [
-            ("", 151, 108),
-            ("", 152, 107),
-            ("--send /private/chosen", 381, 108),
-            ("--file-commands", 381, 108),
-            ("--receive /private/inbox", 382, 107),
-            ("--send /private/chosen --receive /private/inbox", 611, 108),
-            ("--file-commands --receive /private/inbox", 611, 108),
+            ("", 479, 184),
+            ("", 480, 183),
+            ("--send /private/chosen", 565, 184),
+            ("--file-commands", 565, 184),
+            ("--receive /private/inbox", 566, 183),
+            ("--send /private/chosen --receive /private/inbox", 795, 184),
+            ("--file-commands --receive /private/inbox", 795, 184),
         ] {
             let mut c = connection(flags);
             c.fit_window = Some((width, height));
             assert_eq!(check(&c).err().unwrap().code, "viewer_fit_too_small");
         }
         let mut c = connection("--no-clipboard --send /private/chosen --receive /private/inbox");
-        c.fit_window = Some((612, 108));
+        c.fit_window = Some((612, 184));
         assert!(check(&c).is_ok());
     }
 
     #[test]
     fn clipboard_privacy_control_has_space_independently_of_file_controls() {
         for (flags, minimum) in [
-            ("", 336),
+            ("", 480),
             ("--file-commands", 566),
             ("--receive /private/inbox", 566),
             ("--file-commands --receive /private/inbox", 796),
-            ("--no-clipboard", 152),
+            ("--no-clipboard", 480),
         ] {
             let mut c = connection(flags);
-            c.fit_window = Some((minimum - 1, 108));
+            c.fit_window = Some((minimum - 1, 184));
             assert_eq!(check(&c).err().unwrap().code, "viewer_fit_too_small");
-            c.fit_window = Some((minimum, 108));
+            c.fit_window = Some((minimum, 184));
             assert!(check(&c).is_ok());
         }
         let mut viewing = connection("");

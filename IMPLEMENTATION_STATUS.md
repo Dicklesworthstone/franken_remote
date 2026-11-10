@@ -1,5 +1,36 @@
 # Implementation status
 
+## Native Mac Unicode composer and retained action effects (2026-11-10)
+
+The controlling Mac viewer now offers optional `native-input-text` and requests
+Text in its default control profile. A granted session exposes a bounded local
+`NSTextView` editor with explicit Edit Text, Send and Cancel. AppKit owns real
+local preedit/candidates; the complete value is handed to the existing host
+Unicode path only on a fresh Send click. The editor accepts typed/input-method
+text, with local paste/file import and rich attachments explicitly unavailable.
+Physical control remains the default outside the editor; composer keys and
+their remaining releases stay local, and emergency revoke stays active.
+
+The producer captures the original source/view continuity token before native
+editing. Actual suspension, generation changes and native lifecycle loss clear
+old drafts and pending Sends; ordinary compositor gaps only disable sending.
+One bounded pending value retains its original native timestamp and receives a
+synchronous admission acknowledgement before another native pump. Neither
+refusal nor loss retries it. The composer reserves its window space before
+viewport mapping, including matching CLI fit preflight.
+
+Completion preserves confirmed action-operation prefixes, partial/unknown
+outcomes, zero-submission refusals and unavailable retained history on both
+success and failure. Pointer reports are separately labeled as possibly repeated
+and never increase confirmed action effects. A queued local commit does not
+claim OS submission, application delivery or rollback.
+
+Tracking: `fr-c2u1` remains in progress. The coherent source and regressions have
+independent source review. New formatter/compiler/test runs were blocked by the
+execution environment disconnect; actual AppKit/IME, native sleep notifications
+and Mac-to-Mac delivery remain unqualified. The earlier indicator component
+checks recorded below do not validate this new composer or full runtime.
+
 ## Original text context survives only uninterrupted input (2026-11-10)
 
 Queued Unicode commits and local composition contexts now carry the original

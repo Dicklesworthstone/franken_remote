@@ -75,9 +75,94 @@ pub(crate) fn sharing_points(
     Ok((width.max(minimum_width), height.max(64)))
 }
 
+/// Reserve the local text editor before establishing a remote viewport. Its
+/// 76-point row never opens by resizing a live controlled picture. The old
+/// sharing row remains unchanged, including every file/clipboard control.
+pub(crate) fn sharing_points_with_text(
+    pixels: (u32, u32),
+    logical: (u32, u32),
+    fit: Option<(u32, u32)>,
+    directions: u32,
+    clipboard: bool,
+    text: bool,
+) -> Result<(u32, u32), ()> {
+    if !text {
+        return sharing_points(pixels, logical, fit, directions, clipboard);
+    }
+    let picture_and_sharing_fit = match fit {
+        Some((width, height)) if width >= 480 => {
+            Some((width, height.checked_sub(76).ok_or(())?))
+        }
+        Some(_) => return Err(()),
+        None => None,
+    };
+    let (width, height) =
+        sharing_points(pixels, logical, picture_and_sharing_fit, directions, clipboard)?;
+    Ok((width.max(480), height))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{points, sharing_points};
+    use super::{points, sharing_points, sharing_points_with_text};
+
+    #[test]
+    fn text_editor_reserves_both_rows_before_the_picture_is_mapped() {
+        for directions in [0, 1, 2] {
+            for clipboard in [false, true] {
+                let width = (152 + 230 * directions + u32::from(clipboard) * 184).max(480);
+                let fitted = sharing_points_with_text(
+                    (1920, 1080),
+                    (1920, 1080),
+                    Some((width, 600)),
+                    directions,
+                    clipboard,
+                    true,
+                )
+                .unwrap();
+                assert_eq!(fitted.0, width);
+                assert!(fitted.1 + 120 <= 600);
+                assert_eq!(
+                    sharing_points_with_text(
+                        (64, 64),
+                        (64, 64),
+                        Some((width, 184)),
+                        directions,
+                        clipboard,
+                        true,
+                    ),
+                    Ok((width, 64))
+                );
+                assert!(sharing_points_with_text(
+                    (64, 64),
+                    (64, 64),
+                    Some((width, 183)),
+                    directions,
+                    clipboard,
+                    true,
+                )
+                .is_err());
+            }
+        }
+        assert!(sharing_points_with_text(
+            (64, 64),
+            (64, 64),
+            Some((479, 600)),
+            0,
+            false,
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn text_disabled_preserves_the_original_picture_sizing() {
+        for fit in [None, Some((800, 600)), Some((152, 108))] {
+            assert_eq!(
+                sharing_points_with_text((1920, 1080), (1920, 1080), fit, 0, false, false),
+                sharing_points((1920, 1080), (1920, 1080), fit, 0, false),
+            );
+        }
+    }
 
     #[test]
     fn display_and_file_controls_fit_inside_the_original_content_ceiling() {

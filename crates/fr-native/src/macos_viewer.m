@@ -18,6 +18,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <unistd.h>
+#include <stdbool.h>
+#include <stdatomic.h>
 
 enum {
     FR_MAC_OK = 0,
@@ -408,9 +411,15 @@ enum {
     FR_MAC_SHARE_DOWNLOAD = 2,
     FR_MAC_CHANGE_DISPLAY = 4,
     FR_MAC_CLIPBOARD = 8,
-    FR_MAC_SHARE_ALL = 15,
+    FR_MAC_TEXT_COMPOSER = 16,
+    FR_MAC_SHARE_ALL = 31,
 };
 #define FR_MAC_SHARING_HEIGHT 44.0
+#define FR_MAC_TEXT_HEIGHT 76.0
+#define FR_MAC_TEXT_MIN_WIDTH 480.0
+#define FR_MAC_TEXT_BYTES 4096
+#define FR_MAC_TEXT_AGE 0.100
+#define FR_MAC_REMOTE_INPUT_TAG INT64_C(0x46524350)
 #define FR_MAC_SHARING_CELL 230.0
 #define FR_MAC_CHANGE_WIDTH 136.0
 #define FR_MAC_CLIPBOARD_WIDTH 184.0
@@ -453,11 +462,40 @@ static unsigned fr_sharing_cells(uint32_t flags) {
 }
 
 static double fr_sharing_width(uint32_t flags) {
-    return 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(flags) +
-           ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0) +
-           ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0);
+    double width = 16 + FR_MAC_SHARING_CELL * fr_sharing_cells(flags) +
+                   ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0) +
+                   ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0);
+    return (flags & FR_MAC_TEXT_COMPOSER) ? fmax(width, FR_MAC_TEXT_MIN_WIDTH) : width;
 }
 
+static double fr_sharing_height(uint32_t flags) {
+    return flags ? FR_MAC_SHARING_HEIGHT +
+                       ((flags & FR_MAC_TEXT_COMPOSER) ? FR_MAC_TEXT_HEIGHT : 0)
+                 : 0;
+}
+
+static NSUInteger fr_held_modifiers(NSUInteger flags) {
+    // Function/numeric-pad flags classify some key events; they do not prove
+    // a modifier remains held after an arrow/function key release.
+    return flags & (NSEventModifierFlagShift | NSEventModifierFlagControl |
+                    NSEventModifierFlagOption | NSEventModifierFlagCommand);
+}
+
+static BOOL fr_any_key(const BOOL *keys) {
+    for (unsigned i = 0; i < 256; i++) if (keys[i]) return YES;
+    return NO;
+}
+
+
+// Notification callbacks retain only this plain negative flag. They never
+// retain an AppKit owner whose final release could occur off the main thread.
+@interface FrWindowLifetime : NSObject {
+  @public
+    _Atomic(bool) unavailable;
+}
+@end
+@implementation FrWindowLifetime
+@end
 
 @class FrWindowOwner;
 
@@ -472,6 +510,12 @@ static double fr_sharing_width(uint32_t flags) {
 // controls act on mouse-down and return immediately, so holding the button
 // cannot postpone Rust's cancellation/authority turn.
 @interface FrSharingButton : NSButton
+@end
+
+// AppKit owns real text editing, input methods and candidate placement here.
+// This view is local chrome, not a guessed remote document or caret.
+@interface FrTextComposer : NSTextView
+@property(nonatomic, weak) FrWindowOwner *owner;
 @end
 
 
@@ -498,10 +542,26 @@ static double fr_sharing_width(uint32_t flags) {
     BOOL uploadCancelled, downloadCancelled, layoutInProgress;
     BOOL displayChangeUsed;
     double displayChangeAt;
+    FrTextComposer *textEditor;
+    NSScrollView *textScroll;
+    NSTextField *textLabel;
+    NSString *textNotice;
+    FrSharingButton *textOpen, *textSend, *textCancel;
+    uint64_t textContext, textPendingContext;
+    double textContextSince, textOpenedAt, textPendingAt;
+    BOOL textEligible, textActive, textPending, textTaken, textQuarantine;
+    BOOL physicalKeys[256], localTextKeys[256];
+    NSUInteger physicalModifiers, localTextModifiers;
+    uint8_t textBytes[FR_MAC_TEXT_BYTES];
+    size_t textLength;
     FrRenderer *renderer;
     FrMacEvent queue[FR_MAC_QUEUE];
     size_t head, count;
     BOOL overflow;
+    FrWindowLifetime *lifetime;
+    BOOL sessionUnavailableReported;
+    NSNotificationCenter *lifetimeCenter;
+    NSMutableArray<id> *lifetimeObservers;
     uint32_t buttons;  // pressed mouse buttons that went down inside the picture
 }
 - (void)push:(FrMacEvent)event;
@@ -513,6 +573,100 @@ static double fr_sharing_width(uint32_t flags) {
 - (void)changeDisplay:(id)sender;
 - (void)stopClipboard:(BOOL)userOff;
 - (void)disableClipboard:(id)sender;
+- (BOOL)textWindowReady;
+- (BOOL)textPhysicalClear;
+- (BOOL)textGesture:(NSEvent *)event;
+- (void)updateTextControls;
+- (void)checkSessionUnavailable;
+- (void)clearText:(NSString *)message;
+- (void)openText:(id)sender;
+- (void)sendText:(id)sender;
+- (void)cancelText:(id)sender;
+- (BOOL)allowsTextReplacement:(NSRange)range string:(id)string;
+@end
+
+@implementation FrTextComposer
+- (BOOL)shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)string {
+    if (![super shouldChangeTextInRange:range replacementString:string]) return NO;
+    return [self.owner allowsTextReplacement:range string:string];
+}
+- (BOOL)shouldChangeTextInRanges:(NSArray<NSValue *> *)ranges
+             replacementStrings:(NSArray<NSString *> *)strings {
+    // AppKit requires this superclass check first; it checks editing/delegate
+    // permission without changing storage. Payload bounds still precede edits.
+    if (![super shouldChangeTextInRanges:ranges replacementStrings:strings]) return NO;
+    // This bounded composer has one local selection. A multiple-selection
+    // edit cannot multiply an individually admitted replacement.
+    if (ranges.count != 1 || (strings && strings.count != 1)) return NO;
+    return [self.owner allowsTextReplacement:ranges[0].rangeValue
+                                     string:strings ? strings[0] : nil];
+}
+- (void)keyDown:(NSEvent *)event {
+    FrWindowOwner *owner = self.owner;
+    NSUInteger required = NSEventModifierFlagShift | NSEventModifierFlagControl |
+                          NSEventModifierFlagOption;
+    // Also catch a key dispatched by AppKit's own editor processing, rather
+    // than solely relying on the outer event pump's first check.
+    if (owner && event.keyCode == 53 && (event.modifierFlags & required) == required) {
+        FrMacEvent e = {0};
+        e.kind = FR_MAC_KEY_DOWN;
+        e.code = event.keyCode;
+        e.modifiers = event.modifierFlags;
+        e.timestamp = event.timestamp;
+        [owner push:e];
+        [owner clearText:@"Local text discarded without sending."];
+        return;
+    }
+    if (owner && owner->textActive && !owner->textPending) [super keyDown:event];
+}
+- (void)insertText:(id)string replacementRange:(NSRange)range {
+    if ([self.owner allowsTextReplacement:range string:string])
+        [super insertText:string replacementRange:range];
+}
+- (void)setMarkedText:(id)string selectedRange:(NSRange)selection replacementRange:(NSRange)range {
+    NSString *value = [string isKindOfClass:NSAttributedString.class]
+                         ? [(NSAttributedString *)string string]
+                         : ([string isKindOfClass:NSString.class] ? string : nil);
+    if (!value || selection.location > value.length ||
+        selection.length > value.length - selection.location) return;
+    if ([self.owner allowsTextReplacement:range string:string])
+        [super setMarkedText:string selectedRange:selection replacementRange:range];
+}
+- (void)didChangeText {
+    [super didChangeText];
+    FrWindowOwner *owner = self.owner;
+    if (owner) {
+        owner->textNotice = nil;
+        [owner updateTextControls];
+    }
+}
+// The text editor accepts text/input-method events only. It does not acquire
+// files, attributed attachments, a clipboard fallback, or an undo journal.
+- (void)refuseLocalPaste {
+    FrWindowOwner *owner = self.owner;
+    if (owner) {
+        owner->textNotice = @"Paste is unavailable in this text composer.";
+        [owner updateTextControls];
+    }
+}
+- (void)paste:(id)sender { (void)sender; [self refuseLocalPaste]; }
+- (void)pasteAsPlainText:(id)sender { (void)sender; [self refuseLocalPaste]; }
+- (void)pasteAsRichText:(id)sender { (void)sender; [self refuseLocalPaste]; }
+- (BOOL)readSelectionFromPasteboard:(NSPasteboard *)pasteboard {
+    (void)pasteboard;
+    [self refuseLocalPaste];
+    return NO;
+}
+- (BOOL)readSelectionFromPasteboard:(NSPasteboard *)pasteboard type:(NSPasteboardType)type {
+    (void)pasteboard;
+    (void)type;
+    [self refuseLocalPaste];
+    return NO;
+}
+- (BOOL)performDragOperation:(id<NSDraggingInfo>)sender {
+    (void)sender;
+    return NO;
+}
 @end
 
 @implementation FrMetalView
@@ -608,6 +762,19 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 
 @implementation FrWindowOwner
 
+- (void)dealloc {
+    for (id observer in lifetimeObservers) [lifetimeCenter removeObserver:observer];
+}
+- (void)checkSessionUnavailable {
+    if (atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) &&
+        !sessionUnavailableReported) {
+        sessionUnavailableReported = YES;
+        // Reuse the original native source's terminal focus-loss path. A wake
+        // notification never clears this flag or restores this window's input.
+        [self windowDidResignKey:nil];
+    }
+}
+
 - (void)buildSharing {
     if (sharingFlags & FR_MAC_CHANGE_DISPLAY) {
         changeDisplay = fr_sharing_button(sharing, @"Change Display", self,
@@ -632,6 +799,48 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         downloadCancel = fr_sharing_button(sharing, @"Cancel", self, @selector(cancelDownload:));
         downloadCancel.accessibilityLabel = @"Cancel receiving file";
     }
+    if (sharingFlags & FR_MAC_TEXT_COMPOSER) {
+        textLabel = fr_sharing_label(sharing, @"Text input unavailable");
+        textOpen = fr_sharing_button(sharing, @"Edit Text", self, @selector(openText:));
+        textSend = fr_sharing_button(sharing, @"Send", self, @selector(sendText:));
+        textCancel = fr_sharing_button(sharing, @"Cancel", self, @selector(cancelText:));
+        textOpen.accessibilityLabel = @"Compose text locally with your Mac input method";
+        textSend.accessibilityLabel = @"Send this complete text to the original remote session";
+        textCancel.accessibilityLabel = @"Discard local text without sending";
+        textScroll = [[NSScrollView alloc] initWithFrame:NSZeroRect];
+        textScroll.borderType = NSBezelBorder;
+        textScroll.hasVerticalScroller = YES;
+        textScroll.hasHorizontalScroller = NO;
+        textEditor = [[FrTextComposer alloc] initWithFrame:NSMakeRect(0, 0, 100, 48)];
+        textEditor.owner = self;
+        textEditor.richText = NO;
+        textEditor.importsGraphics = NO;
+        textEditor.allowsUndo = NO;
+        textEditor.smartInsertDeleteEnabled = NO;
+        textEditor.usesFindPanel = NO;
+        textEditor.automaticTextReplacementEnabled = NO;
+        textEditor.automaticSpellingCorrectionEnabled = NO;
+        textEditor.automaticQuoteSubstitutionEnabled = NO;
+        textEditor.automaticDashSubstitutionEnabled = NO;
+        textEditor.automaticLinkDetectionEnabled = NO;
+        textEditor.automaticDataDetectionEnabled = NO;
+        textEditor.continuousSpellCheckingEnabled = NO;
+        textEditor.grammarCheckingEnabled = NO;
+        textEditor.font = [NSFont systemFontOfSize:13];
+        textEditor.textContainerInset = NSMakeSize(4, 4);
+        textEditor.minSize = NSMakeSize(0, 48);
+        textEditor.maxSize = NSMakeSize(CGFLOAT_MAX, FR_MAC_TEXT_BYTES * 32.0);
+        textEditor.verticallyResizable = YES;
+        textEditor.horizontallyResizable = NO;
+        textEditor.autoresizingMask = NSViewWidthSizable;
+        textEditor.textContainer.size = NSMakeSize(100, FR_MAC_TEXT_BYTES * 32.0);
+        textEditor.textContainer.widthTracksTextView = YES;
+        [textEditor unregisterDraggedTypes];
+        textEditor.accessibilityLabel = @"Local text, sent only when you click Send";
+        textScroll.documentView = textEditor;
+        [sharing addSubview:textScroll];
+        [self updateTextControls];
+    }
 }
 - (void)layoutSharing {
     if (!sharing || !sharingFlags) return;
@@ -653,6 +862,172 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         labels[i].frame = NSMakeRect(x + 4, 14, fmax(1, cell - 78), 17);
         controls[i].frame = NSMakeRect(x + cell - 70, 8, 66, 28);
     }
+    if (textEditor) {
+        double width = NSWidth(sharing.bounds);
+        textLabel.frame = NSMakeRect(8, 46, fmax(1, width - 16), 16);
+        textScroll.frame = NSMakeRect(8, 64, fmax(1, width - 104), 48);
+        textOpen.frame = NSMakeRect(width - 92, 76, 84, 28);
+        textSend.frame = NSMakeRect(width - 92, 62, 84, 24);
+        textCancel.frame = NSMakeRect(width - 92, 88, 84, 24);
+    }
+}
+
+- (BOOL)textWindowReady {
+    if (atomic_load_explicit(&lifetime->unavailable, memory_order_acquire)) return NO;
+    if (!window.isKeyWindow || !window.isVisible || window.isMiniaturized ||
+        !window.isOnActiveSpace || !(window.occlusionState & NSWindowOcclusionStateVisible))
+        return NO;
+    os_unfair_lock_lock(&renderer->geometryLock);
+    BOOL ready = renderer->submittedPicture &&
+                 renderer->submittedRevision == renderer->geometry.revision;
+    os_unfair_lock_unlock(&renderer->geometryLock);
+    return ready;
+}
+- (BOOL)textPhysicalClear {
+    return !buttons && !physicalModifiers && !localTextModifiers &&
+           !fr_any_key(physicalKeys) && !fr_any_key(localTextKeys);
+}
+- (BOOL)textGesture:(NSEvent *)event {
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!event || event.type != NSEventTypeLeftMouseDown || event.window != window ||
+        !isfinite(event.timestamp) || event.timestamp <= 0 ||
+        event.timestamp < textContextSince || now < event.timestamp ||
+        now - event.timestamp >= FR_MAC_TEXT_AGE)
+        return NO;
+    CGEventRef native = event.CGEvent;
+    // A selector invocation, self-created NSEvent or this product's remotely
+    // injected event cannot manufacture fresh local Send intent.
+    return native &&
+           CGEventGetIntegerValueField(native, kCGEventSourceUserData) != FR_MAC_REMOTE_INPUT_TAG &&
+           CGEventGetIntegerValueField(native, kCGEventSourceUnixProcessID) != getpid();
+}
+- (void)updateTextControls {
+    if (!textEditor) return;
+    BOOL available = textContext && textEligible && [self textWindowReady];
+    BOOL clear = [self textPhysicalClear];
+    textOpen.hidden = textActive;
+    textOpen.enabled = available && clear && !textPending;
+    textSend.hidden = !textActive;
+    textCancel.hidden = !textActive;
+    textScroll.hidden = !textActive;
+    textEditor.editable = textActive && !textPending && textContext;
+    textEditor.selectable = textEditor.editable;
+    textSend.enabled = available && clear && textActive && !textPending &&
+                       textEditor.string.length > 0 && !textEditor.hasMarkedText;
+    textCancel.enabled = textActive;
+    if (textNotice) {
+        textLabel.stringValue = textNotice;
+    } else if (textPending) {
+        textLabel.stringValue = @"Text awaiting the original session";
+    } else if (textActive) {
+        textLabel.stringValue = textEditor.hasMarkedText
+            ? @"Finish composition, then click Send. Text remains local until Send."
+            : (available ? @"Text remains local until Send. Limit: 4096 UTF-8 bytes."
+                         : @"Sending paused. Your local text has not been sent.");
+    } else {
+        textLabel.stringValue = textContext
+            ? @"Use your Mac input method. Physical keyboard control stays unchanged."
+            : @"Text input unavailable";
+    }
+}
+- (void)clearText:(NSString *)message {
+    if (!textEditor) return;
+    // Fence callbacks and the one native payload BEFORE AppKit cleanup.
+    textActive = NO;
+    textPending = NO;
+    textTaken = NO;
+    textPendingContext = 0;
+    textPendingAt = 0;
+    textOpenedAt = 0;
+    textLength = 0;
+    memset(textBytes, 0, sizeof(textBytes));
+    textEditor.editable = NO;
+    [textEditor.inputContext discardMarkedText];
+    textEditor.string = @"";
+    textNotice = message;
+    // Retain local held keys until their real releases; a later key-up must
+    // not escape into the physical stream after Cancel or a successful Send.
+    textQuarantine = fr_any_key(localTextKeys) || localTextModifiers != 0;
+    if (window.firstResponder == textEditor) [window makeFirstResponder:view];
+    [self updateTextControls];
+}
+- (void)openText:(id)sender {
+    if (sender != textOpen || !textOpen.enabled || textActive || textPending ||
+        !textContext || !textEligible || ![self textWindowReady] ||
+        ![self textPhysicalClear] || ![self textGesture:NSApp.currentEvent])
+        return;
+    textActive = YES;
+    textQuarantine = YES;
+    textOpenedAt = NSApp.currentEvent.timestamp;
+    [textEditor setSelectedRange:NSMakeRange(0, 0)];
+    textNotice = nil;
+    [self updateTextControls];
+    if (![window makeFirstResponder:textEditor])
+        [self clearText:@"Text input unavailable"];
+}
+- (void)sendText:(id)sender {
+    NSEvent *event = NSApp.currentEvent;
+    if (sender != textSend || !textActive || textPending || !textContext ||
+        !textEligible || ![self textWindowReady] || ![self textPhysicalClear] ||
+        ![self textGesture:event] || event.timestamp < textOpenedAt)
+        return;
+    if (textEditor.hasMarkedText) {
+        textNotice = @"Finish composition before sending text.";
+        [self updateTextControls];
+        return;
+    }
+    NSString *value = textEditor.string;
+    if (!value.length || value.length > FR_MAC_TEXT_BYTES) return;
+    NSData *encoded = [value dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!encoded || !encoded.length || encoded.length > FR_MAC_TEXT_BYTES) {
+        textNotice = @"Text exceeds the 4096-byte limit. Nothing was sent.";
+        [self updateTextControls];
+        return;
+    }
+    memcpy(textBytes, encoded.bytes, encoded.length);
+    textLength = encoded.length;
+    textPendingContext = textContext;
+    textPendingAt = event.timestamp;
+    textPending = YES;
+    textTaken = NO;
+    textNotice = nil;
+    [self updateTextControls];
+}
+- (void)cancelText:(id)sender {
+    if (sender == textCancel) [self clearText:@"Local text discarded without sending."];
+}
+- (BOOL)allowsTextReplacement:(NSRange)range string:(id)replacement {
+    if (!textActive || textPending || !textContext || ![self textWindowReady]) return NO;
+    if (!replacement) return YES; // attributes only; rich text/attachments are disabled
+    NSString *value = [replacement isKindOfClass:NSAttributedString.class]
+                         ? [(NSAttributedString *)replacement string]
+                         : ([replacement isKindOfClass:NSString.class] ? replacement : nil);
+    NSString *current = textEditor.string;
+    if (!value) return NO;
+    if (value.length > FR_MAC_TEXT_BYTES || current.length > FR_MAC_TEXT_BYTES) {
+        textNotice = @"Text exceeds the 4096-byte limit. Nothing was sent.";
+        [self updateTextControls];
+        return NO;
+    }
+    if (range.location == NSNotFound)
+        range = textEditor.hasMarkedText ? textEditor.markedRange : textEditor.selectedRange;
+    if (range.location > current.length || range.length > current.length - range.location)
+        return NO;
+    if (value.length > FR_MAC_TEXT_BYTES - (current.length - range.length)) {
+        textNotice = @"Text exceeds the 4096-byte limit. Nothing was sent.";
+        [self updateTextControls];
+        return NO;
+    }
+    // Both UTF-16 lengths are bounded before constructing the candidate. A
+    // whole conversion is admitted or refused; no scalar/preedit truncation.
+    NSString *candidate = [current stringByReplacingCharactersInRange:range withString:value];
+    NSData *encoded = [candidate dataUsingEncoding:NSUTF8StringEncoding allowLossyConversion:NO];
+    if (!encoded || encoded.length > FR_MAC_TEXT_BYTES) {
+        textNotice = @"Text exceeds the 4096-byte limit. Nothing was sent.";
+        [self updateTextControls];
+        return NO;
+    }
+    return YES;
 }
 - (void)cancelUpload:(id)sender {
     (void)sender;
@@ -679,6 +1054,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         !isfinite(event.timestamp) || event.timestamp <= 0 || now < event.timestamp ||
         now - event.timestamp >= 0.250) return;
     displayChangeUsed = YES;
+    [self clearText:@"Text cancelled: the selected display is changing."];
     [self stopClipboard:NO];
     displayChangeAt = event.timestamp;
     changeDisplay.enabled = NO;
@@ -703,6 +1079,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 - (void)push:(FrMacEvent)event {
     if (count == FR_MAC_QUEUE) {
         overflow = YES;
+        [self clearText:@"Text cancelled: native input overflow."];
         [self stopClipboard:NO];
         return;
     }
@@ -714,17 +1091,21 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     layoutInProgress = YES;
     if (content) {
         NSRect bounds = content.bounds;
-        sharing.frame = NSMakeRect(0, 0, NSWidth(bounds), FR_MAC_SHARING_HEIGHT);
-        view.frame = NSMakeRect(0, FR_MAC_SHARING_HEIGHT, NSWidth(bounds),
-                                fmax(1, NSHeight(bounds) - FR_MAC_SHARING_HEIGHT));
+        double chrome = fr_sharing_height(sharingFlags);
+        sharing.frame = NSMakeRect(0, 0, NSWidth(bounds), chrome);
+        view.frame = NSMakeRect(0, chrome, NSWidth(bounds),
+                                fmax(1, NSHeight(bounds) - chrome));
         [self layoutSharing];
     }
     double scale = window ? window.backingScaleFactor : 1;
     [renderer resizeTo:view.bounds.size scale:scale];
     layoutInProgress = NO;
+    if ((textActive || textPending) && ![self textWindowReady])
+        [self clearText:@"Text cancelled: the visible picture changed."];
 }
 - (BOOL)windowShouldClose:(NSWindow *)sender {
     (void)sender;
+    [self clearText:@"Local text discarded without sending."];
     [self stopClipboard:NO];
     FrMacEvent e = {0};
     e.kind = FR_MAC_CLOSE;
@@ -733,8 +1114,14 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 }
 - (void)windowDidResignKey:(NSNotification *)note {
     (void)note;
+    [self clearText:@"Text cancelled: the window lost focus."];
     [self stopClipboard:NO];
     buttons = 0;  // the session releases everything it holds remotely
+    memset(physicalKeys, 0, sizeof(physicalKeys));
+    memset(localTextKeys, 0, sizeof(localTextKeys));
+    physicalModifiers = 0;
+    localTextModifiers = 0;
+    textQuarantine = NO;
     FrMacEvent e = {0};
     e.kind = FR_MAC_FOCUS_LOST;
     [self push:e];
@@ -751,43 +1138,84 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 }
 - (void)windowWillMiniaturize:(NSNotification *)note {
     (void)note;
+    [self clearText:@"Text cancelled: the window was hidden."];
     [self stopClipboard:NO];
 }
 - (void)windowDidChangeOcclusionState:(NSNotification *)note {
     (void)note;
     if (!window.isVisible || window.isMiniaturized || !window.isOnActiveSpace ||
-        !(window.occlusionState & NSWindowOcclusionStateVisible)) [self stopClipboard:NO];
+        !(window.occlusionState & NSWindowOcclusionStateVisible)) {
+        [self clearText:@"Text cancelled: the window was hidden."];
+        [self stopClipboard:NO];
+    }
 }
 
 // Returns YES when AppKit should still receive the event.
 - (BOOL)translate:(NSEvent *)event {
     if (event.window != window) return YES;
+    if (atomic_load_explicit(&lifetime->unavailable, memory_order_acquire)) {
+        [self checkSessionUnavailable];
+        return YES; // only AppKit cleanup/local window actions; no remote events
+    }
     FrMacEvent e = {0};
     e.modifiers = event.modifierFlags;
     e.timestamp = event.timestamp;
-    switch (event.type) {
-        case NSEventTypeKeyDown:
-        case NSEventTypeKeyUp:
-            if (!window.isKeyWindow) return NO;
-            e.kind = event.type == NSEventTypeKeyDown ? FR_MAC_KEY_DOWN : FR_MAC_KEY_UP;
+    BOOL keyboard = event.type == NSEventTypeKeyDown || event.type == NSEventTypeKeyUp ||
+                    event.type == NSEventTypeFlagsChanged;
+    if (keyboard) {
+        if (!window.isKeyWindow) return NO;
+        // Local emergency revoke precedes text mode, readiness, and all native
+        // key suppression. Never ask the text system to interpret this chord.
+        NSUInteger escapeFlags = NSEventModifierFlagShift | NSEventModifierFlagControl |
+                                 NSEventModifierFlagOption;
+        if (event.type == NSEventTypeKeyDown && event.keyCode == 53 &&
+            (event.modifierFlags & escapeFlags) == escapeFlags) {
+            e.kind = FR_MAC_KEY_DOWN;
             e.code = event.keyCode;
-            e.flags = event.type == NSEventTypeKeyDown && event.isARepeat ? 1 : 0;
+            e.flags = event.isARepeat ? 1 : 0;
             [self push:e];
+            [self clearText:@"Local text discarded without sending."];
             return NO;
-        case NSEventTypeFlagsChanged:
-            if (!window.isKeyWindow) return NO;
+        }
+        if (event.keyCode >= 256) {
+            overflow = YES;
+            [self clearText:@"Text cancelled: invalid native key."];
+            return NO;
+        }
+        if (textActive || textPending || textQuarantine) {
+            localTextModifiers = fr_held_modifiers(event.modifierFlags);
+            if (event.type != NSEventTypeFlagsChanged)
+                localTextKeys[event.keyCode] = event.type == NSEventTypeKeyDown;
+            BOOL dispatch = textActive && !textPending && textContext &&
+                            isfinite(event.timestamp) && event.timestamp >= textOpenedAt;
+            if (!textActive && !textPending && !fr_any_key(localTextKeys) && !localTextModifiers)
+                textQuarantine = NO;
+            [self updateTextControls];
+            // AppKit receives the original event only while the local editor
+            // owns it. A consumed key-up never reaches the remote HID stream.
+            return dispatch;
+        }
+        physicalModifiers = fr_held_modifiers(event.modifierFlags);
+        if (event.type == NSEventTypeFlagsChanged) {
             e.kind = FR_MAC_MODIFIERS;
-            e.code = event.keyCode;
-            [self push:e];
-            return NO;
-        default:
-            break;
+        } else {
+            physicalKeys[event.keyCode] = event.type == NSEventTypeKeyDown;
+            e.kind = event.type == NSEventTypeKeyDown ? FR_MAC_KEY_DOWN : FR_MAC_KEY_UP;
+            e.flags = event.type == NSEventTypeKeyDown && event.isARepeat ? 1 : 0;
+        }
+        e.code = event.keyCode;
+        [self push:e];
+        [self updateTextControls];
+        return NO;
     }
     NSPoint p = [view convertPoint:event.locationInWindow fromView:nil];
     BOOL inside = NO;
     BOOL inView = NSPointInRect(p, view.bounds);
     [renderer normalize:p x:&e.x y:&e.y inside:&inside];
     e.flags = inside ? 1 : 0;
+    // Editing is an explicit local mode. Remote pointer/button/scroll actions
+    // cannot move the target document while a draft or Send is pending.
+    if ((textActive || textPending || textQuarantine) && inView) return NO;
     switch (event.type) {
         case NSEventTypeMouseMoved:
             if (!inView) return YES;
@@ -874,12 +1302,30 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
         FrWindowOwner *owner = [FrWindowOwner new];
         owner->renderer = renderer;
         owner->sharingFlags = sharing_flags;
+        FrWindowLifetime *signal = [FrWindowLifetime new];
+        if (!signal) return FR_MAC_ALLOCATION;
+        atomic_init(&signal->unavailable, false);
+        owner->lifetime = signal;
+        owner->lifetimeCenter = NSWorkspace.sharedWorkspace.notificationCenter;
+        owner->lifetimeObservers = [NSMutableArray arrayWithCapacity:3];
+        if (!owner->lifetimeCenter || !owner->lifetimeObservers) return FR_MAC_ALLOCATION;
+        for (NSNotificationName name in @[NSWorkspaceWillSleepNotification,
+                                           NSWorkspaceScreensDidSleepNotification,
+                                           NSWorkspaceSessionDidResignActiveNotification]) {
+            id token = [owner->lifetimeCenter addObserverForName:name object:nil queue:nil
+                usingBlock:^(NSNotification *note) {
+                    (void)note;
+                    atomic_store_explicit(&signal->unavailable, true, memory_order_release);
+                }];
+            if (!token) return FR_MAC_UNAVAILABLE;
+            [owner->lifetimeObservers addObject:token];
+        }
         // Start at the remote display's logical size in points, so a 2x
         // remote lands 1:1 on a 2x screen and a 1x remote keeps its natural
         // size. Only a picture that does not fit the visible screen (below
         // the title bar) is shrunk, with a margin and the aspect ratio kept:
         // any shrink resamples, so a fitting picture keeps its exact size.
-        double chromeHeight = sharing_flags ? FR_MAC_SHARING_HEIGHT : 0;
+        double chromeHeight = fr_sharing_height(sharing_flags);
         double minimumWidth = sharing_flags
                                   ? fr_sharing_width(sharing_flags)
                                   : 1;
@@ -1035,6 +1481,83 @@ int fr_mac_window_take_display_change(void *handle, double *captured) {
     return FR_MAC_OK;
 }
 
+// Contexts are opaque, monotonic identifiers issued by the original Rust
+// source owner. A changed/absent context clears draft and pending bytes before
+// any new context can be exposed. Temporary readiness loss only disables Send.
+int fr_mac_window_text_update(void *handle, uint64_t context, int eligible) {
+    if (!handle || (eligible != 0 && eligible != 1)) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->textEditor) return context ? FR_MAC_INVALID : FR_MAC_OK;
+    if (owner->textContext != context) {
+        BOOL hadDraft = owner->textActive || owner->textPending;
+        owner->textContext = 0;
+        owner->textEligible = NO;
+        [owner clearText:hadDraft ? @"Text cancelled: view or control changed." : nil];
+        owner->textContextSince = NSProcessInfo.processInfo.systemUptime;
+        owner->textContext = context;
+    }
+    owner->textEligible = context && eligible;
+    if ((owner->textActive || owner->textPending) && ![owner textWindowReady])
+        [owner clearText:@"Text cancelled: the visible window changed."];
+    [owner updateTextControls];
+    return FR_MAC_OK;
+}
+
+// Copy one bounded original Send at most once. The visible draft stays local
+// and disabled until the synchronous admission acknowledgement below. Native
+// state cannot renew the Send timestamp, retry it, or construct wire input.
+int fr_mac_window_text_take(void *handle, uint8_t *bytes, size_t capacity, size_t *length,
+                            uint64_t *context, double *captured) {
+    if (!handle || !bytes || !length || !context || !captured) return FR_MAC_INVALID;
+    *length = 0;
+    *context = 0;
+    *captured = 0;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->textPending || owner->textTaken) return FR_MAC_OK;
+    if (!owner->textContext || owner->textContext != owner->textPendingContext ||
+        ![owner textWindowReady]) {
+        [owner clearText:@"Text cancelled: view or control changed."];
+        return FR_MAC_OK;
+    }
+    if (!owner->textLength || owner->textLength > FR_MAC_TEXT_BYTES ||
+        capacity < owner->textLength)
+        return FR_MAC_INVALID;
+    *length = owner->textLength;
+    *context = owner->textPendingContext;
+    *captured = owner->textPendingAt;
+    memcpy(bytes, owner->textBytes, owner->textLength);
+    memset(owner->textBytes, 0, sizeof(owner->textBytes));
+    owner->textLength = 0;
+    owner->textTaken = YES;
+    return FR_MAC_OK;
+}
+
+int fr_mac_window_text_complete(void *handle, uint64_t context, int admitted) {
+    if (!handle || !context || (admitted != 0 && admitted != 1)) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    // A late completion cannot touch a different draft, including one cleared
+    // by a native focus/change callback after Send was captured.
+    if (!owner->textPending || !owner->textTaken || context != owner->textPendingContext)
+        return FR_MAC_OK;
+    if (admitted) {
+        [owner clearText:@"Text queued for remote input."];
+    } else if (context == owner->textContext && [owner textWindowReady]) {
+        owner->textPending = NO;
+        owner->textTaken = NO;
+        owner->textPendingContext = 0;
+        owner->textPendingAt = 0;
+        owner->textNotice = @"Text was not queued. Click Send again only if you still intend to send.";
+        [owner updateTextControls];
+        [owner->window makeFirstResponder:owner->textEditor];
+    } else {
+        [owner clearText:@"Text cancelled: view or control changed."];
+    }
+    return FR_MAC_OK;
+}
+
 // Adopt exactly once, only after all validation. Failure retains nothing.
 int fr_mac_window_clipboard_bind(void *handle, void *context, FrClipboardStop stop,
                                   FrClipboardRelease release) {
@@ -1081,14 +1604,15 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     if (!handle || ![NSThread isMainThread]) return 0;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     size_t dequeued = 0;
+    [owner checkSessionUnavailable];
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        // A display change must inspect the full bounded batch so a queued
-        // close, escape or focus loss can veto reopening. File-only cancel
-        // still reaches Rust immediately when no display choice is pending.
-        while ((!owner->sharingActions || owner->displayChangeAt > 0) && owner->count < FR_MAC_QUEUE &&
-               dequeued < FR_MAC_PUMP_EVENTS) {
+        // A display change or captured Send must inspect the full bounded
+        // batch so queued close, escape or focus loss can veto the action.
+        // File-only cancel still reaches Rust immediately when neither is pending.
+        while ((!owner->sharingActions || owner->displayChangeAt > 0 || owner->textPending) &&
+               owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until
                                                    inMode:NSDefaultRunLoopMode
@@ -1109,6 +1633,7 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     // treated as incomplete too; checking that would require another poll.
     if (owner->count == FR_MAC_QUEUE || dequeued == FR_MAC_PUMP_EVENTS) {
         owner->overflow = YES;
+        [owner clearText:@"Text cancelled: native input overflow."];
         [owner stopClipboard:NO];
     }
     size_t n = 0;
@@ -1146,8 +1671,9 @@ int fr_mac_window_state(void *handle, uint32_t *width, uint32_t *height, int *ke
     *width = f.size.width >= 1 ? (uint32_t)f.size.width : 0;
     *height = f.size.height >= 1 ? (uint32_t)f.size.height : 0;
     NSWindow *w = owner->window;
-    *key = w.isKeyWindow ? 1 : 0;
-    *visible = w.isVisible && !w.isMiniaturized &&
+    BOOL available = !atomic_load_explicit(&owner->lifetime->unavailable, memory_order_acquire);
+    *key = available && w.isKeyWindow ? 1 : 0;
+    *visible = available && w.isVisible && !w.isMiniaturized &&
                        (w.occlusionState & NSWindowOcclusionStateVisible)
                    ? 1
                    : 0;
@@ -1277,6 +1803,14 @@ void fr_mac_window_free(void *handle) {
     if (!handle) return;
     @autoreleasepool {
         FrWindowOwner *owner = (__bridge_transfer FrWindowOwner *)handle;
+        atomic_store_explicit(&owner->lifetime->unavailable, true, memory_order_release);
+        for (id observer in owner->lifetimeObservers) [owner->lifetimeCenter removeObserver:observer];
+        [owner->lifetimeObservers removeAllObjects];
+        owner->lifetimeCenter = nil;
+        owner->textContext = 0;
+        owner->textEligible = NO;
+        [owner clearText:nil];
+        owner->textEditor.owner = nil;
         [owner stopClipboard:NO];
         // Clear callbacks before releasing the unique Rust owner.
         void *context = owner->clipboardContext;
@@ -1294,6 +1828,20 @@ void fr_mac_window_free(void *handle) {
         owner->view = nil;
         owner->content = nil;
         owner->sharing = nil;
+        owner->textEditor = nil;
+        owner->textScroll = nil;
+        owner->textLabel = nil;
+        owner->textOpen = nil;
+        owner->textSend = nil;
+        owner->textCancel = nil;
+        owner->textNotice = nil;
+        owner->uploadLabel = nil;
+        owner->downloadLabel = nil;
+        owner->clipboardLabel = nil;
+        owner->uploadCancel = nil;
+        owner->downloadCancel = nil;
+        owner->changeDisplay = nil;
+        owner->clipboardOff = nil;
     }
 }
 
