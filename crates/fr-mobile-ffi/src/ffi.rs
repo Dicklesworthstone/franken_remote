@@ -171,6 +171,7 @@ const fn code(result: InputResult) -> i32 {
         InputResult::Unsupported => FR_UNSUPPORTED,
         InputResult::Invalid => FR_INVALID,
         InputResult::ControlLost => FR_CONTROL_LOST,
+        InputResult::Busy => FR_BUSY,
     }
 }
 
@@ -230,7 +231,8 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
     let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
     };
-    // Claim a slot before starting any thread.
+    // Refuse early when every slot is taken (registering the started
+    // session below still refuses if another start won the last slot).
     if lookup_free_slots() == 0 {
         return FR_BUSY;
     }
@@ -344,10 +346,17 @@ pub unsafe extern "C" fn fr_directory_fetch(
             let _slot = slot;
             let done = done;
             // JSON never holds a NUL (serde escapes it); fall back to an
-            // internal failure rather than skip the one callback.
-            let json = CString::new(directory::fetch(request)).unwrap_or_else(|_| {
-                CString::from(c"{\"status\":\"failed\",\"end\":10,\"detail\":\"Internal\"}")
-            });
+            // internal failure rather than skip the one callback. A panic in
+            // the fetch (a debug build unwinds) still calls back once.
+            let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                directory::fetch(request)
+            }));
+            let json = fetched
+                .ok()
+                .and_then(|json| CString::new(json).ok())
+                .unwrap_or_else(|| {
+                    CString::from(c"{\"status\":\"failed\",\"end\":10,\"detail\":\"Internal\"}")
+                });
             // SAFETY: per this function's contract; the string outlives the call.
             unsafe { (done.call)(done.context, json.as_ptr()) };
         });
@@ -636,7 +645,7 @@ pub unsafe extern "C" fn fr_session_stats(handle: FrHandle, out: *mut FrStats) -
     let (decoded, decode_micros) = shared.frames.decode_stats();
     let stats = FrStats {
         presented: shared.frames.presented(),
-        drawn_frame: shared.frames.drawn(),
+        drawn_frame: shared.frames.drawn_raw(),
         decoded,
         decode_micros,
         first_view_micros: shared.first_view_micros(),

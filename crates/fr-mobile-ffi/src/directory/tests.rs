@@ -68,6 +68,48 @@ fn a_listing_becomes_machines_with_pins_of_exactly_the_listed_addresses() {
 }
 
 #[test]
+fn another_tailnets_name_gets_no_pin_and_only_the_fetched_host_is_serving() {
+    let listing = Listing {
+        entries: vec![
+            entry("mac-mini-old.tail1f21e.ts.net", Some(1), None, true),
+            // Planted: a name in another tailnet with tailnet addresses.
+            entry("bank.tail9999.ts.net", Some(2), None, false),
+            // Planted: a second row claiming to be the serving host.
+            entry("trj.tail1f21e.ts.net", Some(3), None, true),
+        ],
+        truncated: false,
+    };
+    let value = parsed(&Outcome::Listed(listing));
+    let machines = value["machines"].as_array().unwrap();
+    assert_eq!(machines.len(), 3, "shown, not dropped");
+    assert_eq!(machines[0]["serving"], true);
+    assert!(machines[0]["pin"].is_string());
+    assert_eq!(machines[1]["pin"], Value::Null);
+    assert_eq!(machines[1]["ipv4"], "100.70.0.2");
+    assert_eq!(machines[2]["serving"], false);
+    assert_eq!(
+        machines[2]["pin"],
+        "fr-pin-v1 trj.tail1f21e.ts.net 100.70.0.3"
+    );
+    // The same machine fetched through a host of its own tailnet is pinned.
+    let other = to_json(
+        "gw.tail9999.ts.net",
+        &Outcome::Listed(Listing {
+            entries: vec![
+                entry("gw.tail9999.ts.net", Some(9), None, true),
+                entry("bank.tail9999.ts.net", Some(2), None, false),
+            ],
+            truncated: false,
+        }),
+    );
+    let other: Value = serde_json::from_str(&other).unwrap();
+    assert_eq!(
+        other["machines"][1]["pin"],
+        "fr-pin-v1 bank.tail9999.ts.net 100.70.0.2"
+    );
+}
+
+#[test]
 fn refusals_and_failures_stay_typed() {
     let ok = Listing {
         entries: vec![entry("m.tail1f21e.ts.net", Some(1), None, true)],

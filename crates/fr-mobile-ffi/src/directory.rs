@@ -5,12 +5,15 @@
 //! untagged machines; nothing here grants, selects a session, or touches
 //! capture. The result crosses to Swift as one JSON document.
 //!
-//! Every listed machine with a dialable `MagicDNS` name carries a pin of the
-//! addresses the host listed, so the app can dial it directly (the resolver
-//! may answer only one family; frd may serve only the other) while TLS still
-//! verifies the certificate for exactly that name. Nothing is ever invented:
-//! a machine the app cannot dial is shown without a pin, and an incomplete
-//! listing says so.
+//! Every listed machine with a dialable `MagicDNS` name in the fetched host's
+//! own tailnet carries a pin of the addresses the host listed, so the app can
+//! dial it directly (the resolver may answer only one family; frd may serve
+//! only the other) while TLS still verifies the certificate for exactly that
+//! name. Nothing is ever invented or widened: a machine the app cannot dial,
+//! or one named in another tailnet, is shown without a pin; only the fetched
+//! host's own row is marked serving; and an incomplete listing says so.
+//! (frd lists only its own tailnet and marks only itself; these checks keep
+//! the app from relying on that.)
 use crate::session::{end, tailnet_end};
 use asupersync::{runtime::RuntimeBuilder, time::timeout, types::Budget};
 use fr_wire::{
@@ -138,10 +141,22 @@ pub const fn reason_name(reason: Reason) -> &'static str {
     }
 }
 
+/// The tailnet part of a `MagicDNS` name (after the machine label).
+fn tailnet(name: &HostName) -> &str {
+    name.as_str()
+        .split_once('.')
+        .map_or("", |(_, tailnet)| tailnet)
+}
+
 /// The pin a listed machine is dialed with: its exact `MagicDNS` name and
-/// the tailnet addresses the host listed. None when the app cannot name it.
-pub fn pin(entry: &Entry) -> Option<HostPin> {
+/// the tailnet addresses the host listed. None when the app cannot name it,
+/// or when the name is in another tailnet than `via`'s.
+pub fn pin(via: &str, entry: &Entry) -> Option<HostPin> {
     let name = HostName::parse(&entry.name).ok()?;
+    let via = HostName::parse(via).ok()?;
+    if tailnet(&name) != tailnet(&via) {
+        return None;
+    }
     let addresses: Vec<IpAddr> = entry
         .ipv4
         .map(IpAddr::V4)
@@ -157,7 +172,11 @@ pub fn to_json(via: &str, outcome: &Outcome) -> String {
             "status": "ok",
             "via": via,
             "truncated": listing.truncated,
-            "machines": listing.entries.iter().map(machine).collect::<Vec<_>>(),
+            "machines": listing
+                .entries
+                .iter()
+                .map(|entry| machine(via, entry))
+                .collect::<Vec<_>>(),
         }),
         Outcome::Refused(reason) => json!({
             "status": "refused",
@@ -174,16 +193,22 @@ pub fn to_json(via: &str, outcome: &Outcome) -> String {
     value.to_string()
 }
 
-fn machine(entry: &Entry) -> Value {
+fn machine(via: &str, entry: &Entry) -> Value {
+    // Serving: the host the app fetched from (its saved port and pin apply).
+    let serving = entry.serving
+        && HostName::parse(&entry.name)
+            .ok()
+            .zip(HostName::parse(via).ok())
+            .is_some_and(|(name, via)| name == via);
     json!({
         "name": entry.name,
         "node_id": entry.node_id,
         "os": entry.os,
         "online": entry.online,
-        "serving": entry.serving,
+        "serving": serving,
         "ipv4": entry.ipv4.map(|ip| ip.to_string()),
         "ipv6": entry.ipv6.map(|ip| ip.to_string()),
-        "pin": pin(entry).map(|pin| pin.to_string()),
+        "pin": pin(via, entry).map(|pin| pin.to_string()),
     })
 }
 

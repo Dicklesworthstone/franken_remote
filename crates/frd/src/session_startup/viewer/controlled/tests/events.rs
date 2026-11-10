@@ -175,6 +175,25 @@ fn dropping_event_source_fences_control_without_polling_the_network() {
     });
 }
 #[test]
+fn a_producer_can_see_its_queued_events_and_pace_below_capacity() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture(&client, &host)).await;
+        let mut source = state.viewer.capture_input().unwrap();
+        let at = source.clock().unwrap();
+        assert_eq!(source.queued(), Some(0));
+        source.push(physical(KeyTransition::Press), at).unwrap();
+        source.push(physical(KeyTransition::Release), at).unwrap();
+        assert_eq!(source.queued(), Some(2));
+        // A paced producer stops before the terminal bound.
+        while source.queued().is_some_and(|n| n < events::MAX_EVENTS) {
+            source.push(physical(KeyTransition::Press), at).unwrap();
+        }
+        assert_eq!(source.queued(), Some(events::MAX_EVENTS));
+        assert!(!state.viewer.is_closed());
+        state.host.close();
+    });
+}
+#[test]
 fn captured_event_capacity_is_terminal_not_a_dropped_release() {
     run(|client, host| async move {
         let mut state = Box::pin(fixture(&client, &host)).await;

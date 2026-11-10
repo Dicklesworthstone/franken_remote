@@ -22,7 +22,7 @@ listing grants nothing: every listed machine is reached by its own name, under
 its own certificate and its own host's admission.
 
 What is listed, from one `LocalAPI` status read after a fresh admission
-refresh:
+refresh (the admission must still hold when the read ends):
 
 - the serving host first (Tailscale `Self`, which must be the admitted host
   identity and running);
@@ -55,7 +55,8 @@ inspection). After ClientHello:
    it may send next. SelectedConfiguration, approval and every session record
    are refused in this mode.
 4. The host fences the startup (no session can follow), refreshes the
-   admission, reads its daemon once and sends the `DirectoryListing` records
+   admission (its ordinary status, WhoIs and status reads), makes one more
+   status read for the listing, and sends the `DirectoryListing` records
    (0x0087), or `DirectoryUnavailable` (17) when the read or the listing
    fails. It waits up to one second for the viewer to close first, then closes.
 
@@ -105,4 +106,7 @@ certificate-checked and pinned connection a session uses. Each listed
 machine with a dialable `MagicDNS` name gets a pin of exactly the listed
 addresses; a session to it (`FrConfig.direct`) dials those addresses without
 the resolver, and TLS still verifies the certificate for exactly that name.
-The app shows only what the host sent and shows a refusal as one.
+The app shows only what the host sent and shows a refusal as one. It pins
+only names in the answering host's own tailnet, trusts the serving flag only
+on the answering host's own entry, and opens a machine the user already
+saved exactly as saved (its port and pin).

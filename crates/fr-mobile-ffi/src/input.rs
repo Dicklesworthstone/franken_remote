@@ -41,8 +41,10 @@ impl LineScroller {
     /// Add `dx`, `dy` lines; returns whole lines in 16.16 when at least one
     /// line accumulated on some axis. Non-finite input is ignored. Each axis
     /// sends at most [`MAX_LINES_PER_EVENT`] lines; the rest stays queued
-    /// in the remainder for the next event (never dropped, never sent
-    /// fractionally).
+    /// in the remainder for the next event, never sent fractionally. The
+    /// remainder is bounded at four events' worth per axis: scrolling past
+    /// that before the host takes it is dropped (a stuck or runaway
+    /// gesture), not queued without limit.
     pub fn add(&mut self, dx: f64, dy: f64) -> Option<(i32, i32)> {
         if dx.is_finite() {
             self.x += dx;

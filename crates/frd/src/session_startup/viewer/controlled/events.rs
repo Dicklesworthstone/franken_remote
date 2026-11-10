@@ -252,6 +252,18 @@ impl Source {
             }
         }
     }
+    /// Captured events not yet taken for dispatch, so a native producer can
+    /// pace a burst (pasted or dictated text typed as keys) below
+    /// [`MAX_EVENTS`] instead of overflowing, which is terminal. `None` when
+    /// it cannot tell without waiting: the dispatcher holds the queue, or the
+    /// viewer is gone. Never a grant, and never waits for a lock.
+    pub fn queued(&self) -> Option<usize> {
+        let queue = self.queue.upgrade()?;
+        match queue.try_lock() {
+            Ok(queue) => Some(queue.events.len()),
+            Err(TryLockError::Poisoned(_) | TryLockError::WouldBlock) => None,
+        }
+    }
     /// The host-granted capability, not permission to bypass freshness or expiry.
     pub const fn supports_text(&self) -> bool {
         self.capabilities.contains(Capability::Text)

@@ -289,10 +289,16 @@ impl Drop for Decoder {
 /// The newest presented picture, for the app's renderer. A sequence number
 /// lets the renderer skip pictures it already drew; the frame id lets it
 /// report which picture actually reached the screen ([`FrameSlot::drawn`]).
+///
+/// frd numbers frames per capture source, so a reconnect can start again
+/// from zero. The id the app sees carries the attempt's generation in its top
+/// bits ([`FrameSlot::app_id`]): a picture drawn in an earlier attempt can
+/// never stand for one of this attempt.
 #[derive(Default)]
 pub struct FrameSlot {
     latest: Mutex<Option<Latest>>,
     sequence: AtomicU64,
+    generation: AtomicU64,
     drawn: AtomicU64,
     presented: AtomicU64,
     decode_micros: AtomicU64,
@@ -312,10 +318,24 @@ pub struct FrameInfo {
     pub height: u32,
     pub full_range: bool,
 }
+/// Bits of an app-visible frame id that hold frd's own frame id (2^44
+/// frames: centuries at any frame rate); the rest is the attempt generation.
+const RAW_BITS: u32 = 44;
+const RAW_MASK: u64 = (1 << RAW_BITS) - 1;
+
 impl FrameSlot {
+    /// A new connection attempt: later ids are all above every earlier one.
+    pub fn begin_attempt(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+    /// The app-visible id of frd frame `raw` in the current attempt.
+    pub fn app_id(&self, raw: u64) -> u64 {
+        (self.generation.load(Ordering::Acquire) << RAW_BITS) | (raw & RAW_MASK)
+    }
     /// Publish a presented picture (frd frame id `frame`).
     pub fn publish(&self, image: Image, frame: u64) {
         let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
+        let frame = self.app_id(frame);
         if let Ok(mut latest) = self.latest.lock() {
             *latest = Some(Latest {
                 image,
@@ -345,13 +365,19 @@ impl FrameSlot {
             },
         ))
     }
-    /// The app drew the picture with frd frame id `frame` into a presented
-    /// drawable. Monotonic: an older report never lowers it.
+    /// The app drew the picture with app-visible id `frame` (from
+    /// [`FrameInfo::frame`]) into a presented drawable. Monotonic: an older
+    /// report never lowers it.
     pub fn mark_drawn(&self, frame: u64) {
         self.drawn.fetch_max(frame, Ordering::AcqRel);
     }
+    /// The newest app-visible id reported drawn.
     pub fn drawn(&self) -> u64 {
         self.drawn.load(Ordering::Acquire)
+    }
+    /// frd's frame id within [`Self::drawn`] (content-free statistics).
+    pub fn drawn_raw(&self) -> u64 {
+        self.drawn() & RAW_MASK
     }
     pub fn presented(&self) -> u64 {
         self.presented.load(Ordering::Relaxed)

@@ -32,14 +32,17 @@ extern "C" {
 
 /* Status codes (input calls and fr_session_start). */
 #define FR_OK 0
-#define FR_PENDING 1          /* accepted, nothing sent yet (sub-line scroll, held key) */
+#define FR_PENDING 1          /* accepted, nothing sent yet (sub-line scroll, key already in that state) */
 #define FR_INVALID (-1)       /* bad argument, name, pin or usage */
 #define FR_NOT_CONTROLLED (-2)
 #define FR_OUTSIDE (-3)       /* position outside the picture */
 #define FR_UNSUPPORTED (-4)   /* the host did not grant this kind of input */
 #define FR_CONTROL_LOST (-5)  /* control (and so the session) is ending */
 #define FR_CLOSED (-6)
-#define FR_BUSY (-7)          /* all session slots in use, or no thread */
+#define FR_BUSY (-7)          /* start: all session slots in use, or no thread;
+                                 key press/text: the host's input queue is
+                                 backed up, nothing sent: send it again next
+                                 frame */
 #define FR_STALE (-8)         /* the handle names no live session */
 
 /* Event kinds. */
@@ -47,7 +50,7 @@ extern "C" {
 #define FR_EVENT_PIN 2        /* a host pin is available: fr_session_copy_pin */
 #define FR_EVENT_VIDEO 3      /* display or picture size (nonzero fields) */
 #define FR_EVENT_ENDED 4      /* value: FR_END_*; always the last event */
-#define FR_EVENT_OVERFLOW 5   /* older events were dropped; re-read state */
+#define FR_EVENT_OVERFLOW 5   /* older events were dropped; re-read state and stats */
 
 /* Session states. */
 #define FR_STATE_CONNECTING 1
@@ -72,6 +75,9 @@ extern "C" {
 #define FR_END_SESSION_FAILED 8
 #define FR_END_CANCELLED 9
 #define FR_END_INTERNAL 10
+#define FR_END_CONTROL_STOPPED 11 /* this device stopped control (view hidden,
+                                     input refused, picture resized); the
+                                     session ended with it */
 
 /* A generation-checked session handle (ADR 0003). Never 0 when issued; a
  * handle used after fr_session_free finds nothing (FR_STALE). */

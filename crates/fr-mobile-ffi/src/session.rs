@@ -6,9 +6,12 @@
 //! The app's main thread never blocks on the session. It polls events,
 //! copies the newest picture, reports what it actually drew, and pushes input;
 //! each input call takes one short lock and either queues one event in frd's
-//! bounded source or refuses. A refused push ends control (frd's contract for
-//! a native producer); so do closing, backgrounding and an invisible view.
-//! Ending control ends the session; viewing again is a new session.
+//! bounded source or refuses. A new key press or text while that source is
+//! backed up answers `Busy` (the app sends it again on a later frame, so a
+//! paste never overflows it); any other refused push ends control (frd's
+//! contract for a native producer); so do closing, backgrounding and an
+//! invisible view. Ending control ends the session (`CONTROL_STOPPED` when
+//! this device stopped it); viewing again is a new session.
 use crate::{
     events::{self, Event, Events, kind, state},
     input::{self, LineScroller},
@@ -74,6 +77,32 @@ pub mod end {
     pub const SESSION_FAILED: u32 = 8;
     pub const CANCELLED: u32 = 9;
     pub const INTERNAL: u32 = 10;
+    /// Control stopped on this device (the view left the screen, input was
+    /// refused, or the picture changed size), and the session with it.
+    pub const CONTROL_STOPPED: u32 = 11;
+}
+
+/// Why this device stopped control (`CONTROL_STOPPED`'s detail). The first
+/// reason recorded wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+enum LocalStop {
+    /// The view left the screen (background, a covering system view).
+    Hidden = 1,
+    /// frd refused an input push (a closed or failed source).
+    InputRefused = 2,
+    /// The host's picture changed size, so the attached layout is stale.
+    PictureChanged = 3,
+}
+impl LocalStop {
+    const fn from_code(code: u32) -> Option<Self> {
+        match code {
+            1 => Some(Self::Hidden),
+            2 => Some(Self::InputRefused),
+            3 => Some(Self::PictureChanged),
+            _ => None,
+        }
+    }
 }
 
 /// Input call results (`FR_INPUT_*`).
@@ -88,6 +117,9 @@ pub enum InputResult {
     Invalid,
     /// The push failed: control (and with it this session) is ending.
     ControlLost,
+    /// A new press or text was not sent because frd's input queue is backed
+    /// up ([`PACED_EVENTS`]); send it again on a later frame.
+    Busy,
 }
 
 /// The control request this app makes: the host's grant profile minus
@@ -156,8 +188,12 @@ pub struct Shared {
     granted: Mutex<Option<Granted>>,
     close: AtomicBool,
     want_control: AtomicBool,
-    release_control: AtomicBool,
     visible: AtomicBool,
+    /// How many times the view went from visible to hidden: a control
+    /// request made before a hide never completes after it.
+    hides: AtomicU64,
+    /// [`LocalStop`] code, 0 until this device stopped control.
+    local_stop: AtomicU32,
     serving: AtomicBool,
     finished: AtomicBool,
     picture: Mutex<(u32, u32)>,
@@ -178,8 +214,9 @@ impl Shared {
             granted: Mutex::default(),
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
-            release_control: AtomicBool::new(false),
             visible: AtomicBool::new(false),
+            hides: AtomicU64::new(0),
+            local_stop: AtomicU32::new(0),
             serving: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             picture: Mutex::new((0, 0)),
@@ -195,19 +232,22 @@ impl Shared {
     /// Orderly close: a serving session sends its close; anything earlier
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
-        self.stop_control();
         self.close.store(true, Ordering::SeqCst);
+        self.stop_control(None);
     }
     pub fn finished(&self) -> bool {
         self.finished.load(Ordering::SeqCst)
     }
     /// The view is on screen in an active app (not backgrounded, covered or
     /// detached). Frames count as seen only while this holds; losing it
-    /// ends control at once.
+    /// ends control at once, and a pending control request with it.
     pub fn set_visible(&self, visible: bool) {
-        self.visible.store(visible, Ordering::SeqCst);
+        let was = self.visible.swap(visible, Ordering::SeqCst);
         if !visible {
-            self.stop_control();
+            if was {
+                self.hides.fetch_add(1, Ordering::SeqCst);
+            }
+            self.stop_control(Some(LocalStop::Hidden));
         }
     }
     pub fn request_control(&self) {
@@ -216,7 +256,7 @@ impl Shared {
     /// Ending control ends the session (frd's contract); this asks for the
     /// orderly close and fences input now.
     pub fn release_control(&self) {
-        self.release_control.store(true, Ordering::SeqCst);
+        self.want_control.store(false, Ordering::SeqCst);
         self.close();
     }
     pub fn pin(&self) -> Option<String> {
@@ -242,15 +282,25 @@ impl Shared {
         self.granted.lock().is_ok_and(|g| g.is_some())
     }
     /// Fence the granted source now (focus loss, backgrounding, close).
-    fn stop_control(&self) {
+    /// `reason`: this device stopped a live grant (not a close it asked
+    /// for, and not the attempt's own cleanup).
+    fn stop_control(&self, reason: Option<LocalStop>) {
         let dropped = match self.granted.lock() {
             Ok(mut granted) => granted.take(),
             Err(poisoned) => poisoned.into_inner().take(),
         };
         if dropped.is_some() {
+            if let Some(reason) = reason {
+                self.note_local_stop(reason);
+            }
             self.events.state(state::CONTROL_ENDED, 0);
         }
         drop(dropped);
+    }
+    fn note_local_stop(&self, reason: LocalStop) {
+        let _ =
+            self.local_stop
+                .compare_exchange(0, reason as u32, Ordering::SeqCst, Ordering::SeqCst);
     }
 
     fn with_granted(&self, act: impl FnOnce(&mut Granted) -> InputResult) -> InputResult {
@@ -268,6 +318,7 @@ impl Shared {
         let result = act(granted);
         if result == InputResult::ControlLost {
             drop(slot.take());
+            self.note_local_stop(LocalStop::InputRefused);
             self.events.state(state::CONTROL_ENDED, 0);
         }
         result
@@ -357,6 +408,9 @@ impl Shared {
             if g.keys[slot] == pressed {
                 return InputResult::Pending;
             }
+            if pressed && paced(g) {
+                return InputResult::Busy;
+            }
             let transition = if pressed {
                 KeyTransition::Press
             } else {
@@ -375,6 +429,9 @@ impl Shared {
             if !g.source.supports_text() {
                 return InputResult::Unsupported;
             }
+            if paced(g) {
+                return InputResult::Busy;
+            }
             let Ok(sampled) = g.source.clock() else {
                 return InputResult::ControlLost;
             };
@@ -387,8 +444,10 @@ impl Shared {
             }
         })
     }
-    /// Release every key and button this session pressed (keyboard hidden,
-    /// gesture cancelled). Returns the first failure, if any.
+    /// Release every key this session pressed (keyboard hidden, focus
+    /// lost). Buttons are the gesture code's to release; frd's held-state
+    /// cleanup also releases anything held when control ends. Returns the
+    /// first failure, if any.
     pub fn release_all(&self) -> InputResult {
         self.with_granted(|g| {
             for slot in 0..256_usize {
@@ -417,6 +476,20 @@ impl Shared {
     }
 }
 
+/// New key presses and text wait (`Busy`) while frd's captured-event queue
+/// holds this many events. A pasted string typed as keys arrives faster than
+/// one dispatch per event drains it; the queue's bound (`MAX_EVENTS`) is
+/// terminal, and a press older than `MAX_EVENT_AGE_US` is dropped, so a
+/// short queue keeps every press young. The app retries every frame, which
+/// still types hundreds of characters a second. Releases always go: they
+/// only follow presses that went.
+const PACED_EVENTS: usize = frd::session_startup::viewer_events::MAX_EVENTS / 8;
+fn paced(g: &Granted) -> bool {
+    g.source
+        .queued()
+        .is_some_and(|queued| queued >= PACED_EVENTS)
+}
+
 fn push(g: &mut Granted, event: InputEvent) -> InputResult {
     let Ok(sampled) = g.source.clock() else {
         return InputResult::ControlLost;
@@ -443,7 +516,16 @@ impl Session {
         std::thread::Builder::new()
             .name("fr-session".into())
             .stack_size(4 * 1024 * 1024)
-            .spawn(move || run(&worker, config))?;
+            .spawn(move || {
+                // A debug build unwinds: still end exactly once, ENDED last.
+                let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    run(&worker, config);
+                }));
+                if ran.is_err() && !worker.finished() {
+                    worker.frames.clear();
+                    finish(&worker, end::INTERNAL, Some("Panic".into()));
+                }
+            })?;
         Ok(Self { shared, control })
     }
     pub fn shared(&self) -> &Shared {
@@ -463,7 +545,7 @@ impl Drop for Session {
 }
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
-    shared.stop_control();
+    shared.stop_control(None);
     if let Ok(mut slot) = shared.detail.lock() {
         *slot = detail;
     }
@@ -543,20 +625,40 @@ fn run(shared: &Arc<Shared>, config: Config) {
         runtime.block_on(supervise(&cx, shared, operation))
     };
     publish_pin(shared, client.pin_watch().as_ref());
-    let terminal = app.terminal_failure();
-    let closed = shared.close.load(Ordering::SeqCst);
-    let (code, detail) = match result {
-        Ok(()) => (if closed { end::OK } else { end::HOST_CLOSED }, None),
-        Err(failure) => (
+    let (code, detail) = ending(
+        result,
+        shared.close.load(Ordering::SeqCst),
+        LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst)),
+        app.terminal_failure(),
+    );
+    shared.frames.clear();
+    finish(shared, code, detail);
+}
+
+/// The end code and detail for a finished run. `closed`: this app asked
+/// for the close; `stopped`: this device stopped control first.
+fn ending(
+    result: Result<(), Failure>,
+    closed: bool,
+    stopped: Option<LocalStop>,
+    terminal: Option<ObserverError>,
+) -> (u32, Option<String>) {
+    match (result, stopped) {
+        (Ok(()), _) if closed => (end::OK, None),
+        // This device stopped control, and so ended the session in order
+        // (or its close then failed): never "the host closed".
+        (Ok(()) | Err(Failure::Observation(_)), Some(reason)) => {
+            (end::CONTROL_STOPPED, Some(format!("{reason:?}")))
+        }
+        (Ok(()), None) => (end::HOST_CLOSED, None),
+        (Err(failure), _) => (
             classify(failure, closed),
             Some(format!(
                 "{:?}",
                 terminal.map_or(failure, Failure::Observation)
             )),
         ),
-    };
-    shared.frames.clear();
-    finish(shared, code, detail);
+    }
 }
 
 /// Content-free classification for the app's message. The exact typed
@@ -565,10 +667,15 @@ fn classify(failure: Failure, closed: bool) -> u32 {
     use frd::native_connection::Error as C;
     // Cancellation or a served session's end after this app's own close is
     // the orderly end it asked for. A refused connection keeps its reason.
+    // A close during a reconnect makes the supervisor's status callback
+    // refuse to go on (`Notification`): also the end this app asked for.
     if closed
         && matches!(
             failure,
-            Failure::Cancelled | Failure::Observation(_) | Failure::Connection(C::Cancelled)
+            Failure::Cancelled
+                | Failure::Notification
+                | Failure::Observation(_)
+                | Failure::Connection(C::Cancelled)
         )
     {
         return end::OK;
@@ -702,7 +809,7 @@ impl LocalPresenter for Presenter {
             .map(|mut p| std::mem::replace(&mut *p, picture))
             .unwrap_or_default();
         if previous != (0, 0) && previous != picture {
-            self.shared.stop_control();
+            self.shared.stop_control(Some(LocalStop::PictureChanged));
         }
         self.shared.events.push(Event {
             kind: kind::VIDEO,
@@ -734,21 +841,23 @@ impl LocalPresenter for Presenter {
     }
 }
 
-/// A presented frame counts as seen only once the app drew it (or a later
-/// one) into a presented drawable while the view was visible.
+/// A presented frame counts as seen once the app has drawn it (or a later
+/// one) into a presented drawable and the view is visible.
 /// frd hands a submitted picture to the session callback before the app's
 /// Metal pass has drawn it, then calls again with `None` after every network
-/// turn. Keep the newest submitted picture pending until the app reports it
-/// (or a later one) drawn, and report it once. A newer submission replaces
-/// it: frd's view tracker accepts visibility of its newest picture only.
+/// turn. Keep the newest submitted picture pending, even while the view is
+/// hidden (an idle host may send nothing newer once it is back), until the
+/// app reports it (or a later one) drawn while visible, and report it once.
+/// A newer submission replaces it: frd's view tracker accepts visibility of
+/// its newest picture only. Drawn ids carry the attempt's generation
+/// ([`FrameSlot::app_id`]), so an earlier attempt's drawing never counts.
 fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>) -> Option<u64> {
-    let visible = shared.visible.load(Ordering::SeqCst);
     if let Some(frame) = frame {
-        *pending = (frame.stage == PresentationStage::SubmittedToCompositor && visible)
-            .then(|| frame.frame.as_raw());
+        *pending =
+            (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw());
     }
     let id = (*pending)?;
-    if !visible || shared.frames.drawn() < id {
+    if !shared.visible.load(Ordering::SeqCst) || shared.frames.drawn() < shared.frames.app_id(id) {
         return None;
     }
     *pending = None;
@@ -766,12 +875,29 @@ fn choose_display(catalog: &Catalog) -> Result<Option<u128>, ()> {
         .map(|d| d.handle))
 }
 
+/// What attaching the granted source did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Attach {
+    /// No picture yet, or the view is not visible: try again next turn.
+    NotYet,
+    Installed,
+    /// The view hid or the app closed while attaching: the grant was fenced
+    /// before any input could use it.
+    Fenced,
+}
+
 /// Attach the granted source with a layout that maps the whole encoded
-/// picture onto the selected display.
-fn attach(viewer: &mut ControlledViewer, display: Display, shared: &Shared) -> Result<bool, ()> {
+/// picture onto the selected display. `hides` is the hide count when control
+/// was requested: a hide since then (even one racing this attach) fences.
+fn attach(
+    viewer: &mut ControlledViewer,
+    display: Display,
+    shared: &Shared,
+    hides: u64,
+) -> Result<Attach, ()> {
     let picture = shared.picture.lock().map(|p| *p).map_err(|_| ())?;
     if picture.0 == 0 || picture.1 == 0 || !shared.visible.load(Ordering::SeqCst) {
-        return Ok(false);
+        return Ok(Attach::NotYet);
     }
     let source = InputBounds::new(
         DesktopPoint {
@@ -791,26 +917,39 @@ fn attach(viewer: &mut ControlledViewer, display: Display, shared: &Shared) -> R
         stop: stop.clone(),
         released: released.clone(),
     };
+    let mut outcome = Attach::Fenced;
     viewer
         .capture_input_owned(&layout.clone(), |source| {
-            if let Ok(mut slot) = shared.granted.lock() {
-                *slot = Some(Granted {
-                    source,
-                    layout,
-                    picture,
-                    stop,
-                    released,
-                    keys: [false; 256],
-                    buttons: [false; 5],
-                    scroll: LineScroller::default(),
-                });
-                Ok(capture)
+            let Ok(mut slot) = shared.granted.lock() else {
+                return Err(());
+            };
+            let granted = Granted {
+                source,
+                layout,
+                picture,
+                stop,
+                released,
+                keys: [false; 256],
+                buttons: [false; 5],
+                scroll: LineScroller::default(),
+            };
+            // Re-checked under the lock `set_visible` and `close` fence
+            // through: one that ran after the check above found nothing to
+            // fence, so this grant must not outlive it. Dropping it stops
+            // the source and reports it released.
+            if shared.visible.load(Ordering::SeqCst)
+                && !shared.close.load(Ordering::SeqCst)
+                && shared.hides.load(Ordering::SeqCst) == hides
+            {
+                *slot = Some(granted);
+                outcome = Attach::Installed;
             } else {
-                Err(())
+                drop(granted);
             }
+            Ok(capture)
         })
         .map_err(|_| ())?;
-    Ok(true)
+    Ok(outcome)
 }
 
 /// frd's per-attempt application: open the presenter after approval and
@@ -853,6 +992,7 @@ impl Application for Mobile {
         }
         self.started = true;
         self.service_succeeded = false;
+        self.shared.frames.begin_attempt();
         publish_pin(&self.shared, Some(&self.watch));
         let attempt_number = u32::from(attempt);
         let epoch = self
@@ -916,6 +1056,7 @@ impl Application for Mobile {
             let mut last_shown = None;
             let mut attached = false;
             let mut requested = false;
+            let mut hides_at_request = 0;
             let mut announced_control = false;
             let ui = move |state: InteractiveViewerState<'_>, frame: Option<Presentation>| {
                 if shared.close.load(Ordering::SeqCst) {
@@ -945,6 +1086,7 @@ impl Application for Mobile {
                         {
                             shared.want_control.store(false, Ordering::SeqCst);
                             requested = true;
+                            hides_at_request = shared.hides.load(Ordering::SeqCst);
                             view.request_control().map_err(|_| ())?;
                             shared
                                 .events
@@ -952,6 +1094,13 @@ impl Application for Mobile {
                         }
                     }
                     InteractiveViewerState::Requesting(pending) => {
+                        if shared.hides.load(Ordering::SeqCst) != hides_at_request {
+                            // Hidden while asking: the grant must not attach
+                            // when the view returns (no automatic
+                            // reacquisition), so the request ends the session.
+                            shared.note_local_stop(LocalStop::Hidden);
+                            return Ok(ControlFlow::Break(fr_wire::closure::Reason::Requested));
+                        }
                         if let Some(frame) = fresh
                             && pending.visible(frame).is_ok()
                         {
@@ -967,10 +1116,24 @@ impl Application for Mobile {
                             last_shown = Some(frame);
                         }
                         if !attached {
-                            attached = attach(viewer, display, &shared)?;
-                            if attached && !announced_control {
-                                announced_control = true;
-                                shared.events.state(state::CONTROLLED, attempt_number);
+                            match attach(viewer, display, &shared, hides_at_request)? {
+                                Attach::NotYet
+                                    if shared.hides.load(Ordering::SeqCst) == hides_at_request => {}
+                                Attach::NotYet | Attach::Fenced => {
+                                    if !shared.close.load(Ordering::SeqCst) {
+                                        shared.note_local_stop(LocalStop::Hidden);
+                                    }
+                                    return Ok(ControlFlow::Break(
+                                        fr_wire::closure::Reason::Requested,
+                                    ));
+                                }
+                                Attach::Installed => {
+                                    attached = true;
+                                    if !announced_control {
+                                        announced_control = true;
+                                        shared.events.state(state::CONTROLLED, attempt_number);
+                                    }
+                                }
                             }
                         } else if !shared.controlled() {
                             // The local source was fenced (hidden view, a
@@ -1019,7 +1182,7 @@ impl Application for Mobile {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
         // Fence at call time: no input outlives the attempt.
-        self.shared.stop_control();
+        self.shared.stop_control(None);
         self.shared.serving.store(false, Ordering::SeqCst);
         async move {
             let result = match self.observer.as_mut() {

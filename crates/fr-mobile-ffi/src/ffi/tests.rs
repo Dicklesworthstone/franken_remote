@@ -57,6 +57,7 @@ fn every_header_constant_matches_the_rust_value() {
         ("FR_END_SESSION_FAILED", end::SESSION_FAILED),
         ("FR_END_CANCELLED", end::CANCELLED),
         ("FR_END_INTERNAL", end::INTERNAL),
+        ("FR_END_CONTROL_STOPPED", end::CONTROL_STOPPED),
     ] {
         expected.push((name.to_owned(), value.into()));
     }
