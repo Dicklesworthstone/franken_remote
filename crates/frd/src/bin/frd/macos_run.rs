@@ -1,6 +1,7 @@
 //! `frd run` on macOS (fr-p1-host-macos-vif). The shared desktop is the
 //! logged-in user's window server, read by the macOS capture worker, and
-//! identity comes from the installed Tailscale app's `LocalAPI`. Options whose
+//! identity comes from the installed Tailscale `LocalAPI` (the app's loopback
+//! endpoint, or the open-source tailscaled's root socket). Options whose
 //! backends exist only on Linux so far are typed refusals, never ignored.
 // These keep the Linux functions' signatures so the shared run calls either.
 #![allow(clippy::unnecessary_wraps)]
@@ -10,51 +11,15 @@ use frd::host_policy::{Approval, options::RunOptions};
 use std::process::ExitCode;
 
 /// Refuse every requested capability this host cannot provide on macOS yet,
-/// before any network, worker or capture I/O.
+/// before any network, worker or capture I/O (the table is shared with
+/// `frd install`).
 pub(super) fn supported(
     options: &RunOptions,
     approval: Approval,
     json: bool,
 ) -> Result<(), ExitCode> {
-    let refusals: [(bool, &str, &str); 7] = [
-        (
-            approval == Approval::Local,
-            "local_approval_unavailable",
-            "macOS has no local approval prompt yet; share with your own devices using --approval none",
-        ),
-        (
-            options.clipboard,
-            "clipboard_unavailable",
-            "--clipboard has no macOS backend yet; control works without it",
-        ),
-        (
-            options.audio,
-            "audio_server_unavailable",
-            "--audio has no macOS capture backend yet; omit it to share without audio",
-        ),
-        (
-            options.microphone,
-            "microphone_endpoint_unavailable",
-            "--microphone has no macOS backend yet",
-        ),
-        (
-            options.observation_indicator.is_some(),
-            "observation_indicator_unavailable",
-            "--observation-indicator is an X11 window; it has no macOS backend yet",
-        ),
-        (
-            options.logind_session.is_some(),
-            "session_monitor_unavailable",
-            "--logind-session is a Linux logind selection",
-        ),
-        (
-            options.headless || options.display.is_some(),
-            "no_display",
-            "macOS shares the logged-in user's display; --headless and --display are X11 options",
-        ),
-    ];
-    match refusals.iter().find(|(refused, _, _)| *refused) {
-        Some(&(_, code, detail)) => Err(run_refusal(json, code, detail, 2)),
+    match options.macos_refusal(approval) {
+        Some((code, detail)) => Err(run_refusal(json, code, detail, 2)),
         None => Ok(()),
     }
 }

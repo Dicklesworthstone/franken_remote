@@ -64,6 +64,7 @@ unsafe extern "C" {
     fn fr_cap_free(handle: *mut c_void);
     fn fr_cap_display_check(expected: *const RawDisplay) -> c_int;
     fn fr_cap_bind_parent(expected: i32) -> c_int;
+    fn fr_cap_request_access() -> c_int;
 }
 
 const UNCHANGED: c_int = 1;
@@ -101,6 +102,15 @@ impl MacDisplay {
         // SAFETY: a readable description for the duration of the call.
         status(unsafe { fr_cap_display_check(&raw const raw) })
     }
+}
+
+/// Ask macOS for Screen Recording on behalf of this process's responsible
+/// process (frd under launchd, so the prompt and the System Settings entry
+/// name frd). The system prompts only while no decision is recorded;
+/// afterwards this only reports. Startup probes only, never a live share.
+pub fn request_access() -> bool {
+    // SAFETY: a scalar query with no arguments.
+    unsafe { fr_cap_request_access() != 0 }
 }
 
 /// End this process when `expected` (its parent) exits: the macOS form of

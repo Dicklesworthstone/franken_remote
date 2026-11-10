@@ -51,6 +51,7 @@ struct RawInputDisplay {
 
 unsafe extern "C" {
     fn fr_in_access() -> c_int;
+    fn fr_in_request_access() -> c_int;
     fn fr_in_displays(out: *mut RawInputDisplay, capacity: usize, count: *mut usize) -> c_int;
     fn fr_in_display_check(expected: *const RawInputDisplay) -> c_int;
     fn fr_in_open() -> *mut c_void;
@@ -115,6 +116,15 @@ fn status(code: c_int) -> Result<(), PlatformError> {
 pub fn access() -> bool {
     // SAFETY: a scalar query with no arguments.
     unsafe { fr_in_access() != 0 }
+}
+
+/// Ask macOS for the Accessibility grant on behalf of this process's
+/// responsible process (frd under launchd, so the prompt and the System
+/// Settings entry name frd). The system prompts only while no decision is
+/// recorded; afterwards this only reports. Startup probes only.
+pub fn request_access() -> bool {
+    // SAFETY: a scalar query with no arguments.
+    unsafe { fr_in_request_access() != 0 }
 }
 
 /// End this process when `expected` (its parent) exits, releasing whatever
@@ -189,9 +199,10 @@ fn implemented() -> Capabilities {
 
 /// frd's startup probe: the capabilities a lease executor would advertise,
 /// with no event source, indicator or input. `Permission` without the
-/// Accessibility grant, `Unavailable` without a representable display.
+/// Accessibility grant (asked for once, see [`request_access`]),
+/// `Unavailable` without a representable display.
 pub fn probe() -> Result<Capabilities, PlatformError> {
-    if !access() {
+    if !access() && !request_access() {
         return Err(PlatformError::Permission);
     }
     if displays()?.iter().any(|d| desktop_bounds(d).is_some()) {

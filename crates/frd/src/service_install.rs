@@ -7,7 +7,7 @@
 //!   - Linux: `systemd` user units (recommended for graphical sessions) or system units
 //!   - macOS: `launchd` `LaunchAgent` (GUI session) or `LaunchDaemon`
 //!   - Windows: Windows Service
-//! - Idempotent Linux publication and removal through verified directory handles
+//! - Idempotent Linux and macOS publication and removal through verified directory handles
 //! - Setup preflight: verifies executable, checks port conflicts, and validates directory permissions
 //! - Safe uninstall: removes `FrankenRemote` unit files without touching Tailscale or tailnet policy
 //! - Dry-run mode for previewing generated unit/plist specifications without filesystem mutation
@@ -15,7 +15,7 @@
 use std::fmt::{self, Write as _};
 
 mod options;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod publication;
 mod quoting;
 #[cfg(unix)]
@@ -349,7 +349,13 @@ fn current_uid() -> Option<u32> {
             .and_then(|ids| ids.split_whitespace().next()?.parse().ok())
     })
 }
-#[cfg(not(target_os = "linux"))]
+/// The installing account's real uid (the `gui/<uid>` launchd domain).
+#[cfg(target_os = "macos")]
+#[allow(clippy::unnecessary_wraps)] // The Linux read of the same signature can fail.
+fn current_uid() -> Option<u32> {
+    Some(rustix::process::getuid().as_raw())
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn current_uid() -> Option<u32> {
     None
 }
@@ -456,43 +462,61 @@ WantedBy={}
     )
 }
 
-/// Render a macOS launchd property list for `frd`.
+/// The launchd job label (and the `LaunchAgents` file stem).
+pub const LAUNCHD_LABEL: &str = "com.frankenremote.frd";
+
+/// Where a `LaunchAgent`'s output goes: the user's own log directory, never a
+/// shared `/tmp` path another account could pre-create or read.
+#[must_use]
+pub fn resolve_log_path(options: &InstallOptions) -> PathBuf {
+    if let Some(dir) = &options.custom_unit_dir {
+        return dir.join("frd.log");
+    }
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    PathBuf::from(home)
+        .join("Library")
+        .join("Logs")
+        .join("FrankenRemote")
+        .join("frd.log")
+}
+
+/// Render a macOS launchd property list for `frd`: a per-user `LaunchAgent`
+/// in the login (Aqua) session, whose window server is the shared desktop.
+/// launchd restarts a failed start (a permission not granted yet, Tailscale
+/// not up yet) after `ThrottleInterval`; a clean exit stays stopped.
 #[must_use]
 pub fn render_launchd_plist(options: &InstallOptions) -> String {
-    let mut program_args = format!(
-        "        <string>{}</string>\n        <string>run</string>\n        <string>--port</string>\n        <string>{}</string>",
-        quoting::xml(&options.exec_path.to_string_lossy()),
-        options.service_port
-    );
-
+    fn arg(out: &mut String, value: &str) {
+        let _ = write!(out, "\n        <string>{}</string>", quoting::xml(value));
+    }
+    let mut program_args = String::new();
+    arg(&mut program_args, &options.exec_path.to_string_lossy());
+    arg(&mut program_args, "run");
+    arg(&mut program_args, "--port");
+    arg(&mut program_args, &options.service_port.to_string());
     if let Some(sock) = &options.socket_path {
-        let _ = write!(
-            program_args,
-            "\n        <string>--socket</string>\n        <string>{}</string>",
-            quoting::xml(&sock.to_string_lossy())
-        );
+        arg(&mut program_args, "--socket");
+        arg(&mut program_args, &sock.to_string_lossy());
     }
     if let Some(path) = &options.config_path {
-        let _ = write!(
-            program_args,
-            "\n        <string>--config</string>\n        <string>{}</string>",
-            quoting::xml(&path.to_string_lossy())
-        );
+        arg(&mut program_args, "--config");
+        arg(&mut program_args, &path.to_string_lossy());
     }
     if !options.approval_mode.is_empty() {
-        let _ = write!(
-            program_args,
-            "\n        <string>--approval</string>\n        <string>{}</string>",
-            quoting::xml(&options.approval_mode)
-        );
+        arg(&mut program_args, "--approval");
+        arg(&mut program_args, &options.approval_mode);
     }
     if !options.sharing_scope.is_empty() {
-        let _ = write!(
-            program_args,
-            "\n        <string>--sharing</string>\n        <string>{}</string>",
-            quoting::xml(&options.sharing_scope)
-        );
+        arg(&mut program_args, "--sharing");
+        arg(&mut program_args, &options.sharing_scope);
     }
+    if options.software_explicit {
+        arg(&mut program_args, "--software-explicit");
+    }
+    for value in &options.run_args {
+        arg(&mut program_args, value);
+    }
+    let log = quoting::xml(&resolve_log_path(options).to_string_lossy());
 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -500,19 +524,32 @@ pub fn render_launchd_plist(options: &InstallOptions) -> String {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.frankenremote.frd</string>
+    <string>{LAUNCHD_LABEL}</string>
     <key>ProgramArguments</key>
-    <array>
-{program_args}
+    <array>{program_args}
     </array>
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+    <key>ProcessType</key>
+    <string>Interactive</string>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>RUST_BACKTRACE</key>
+        <string>1</string>
+    </dict>
     <key>StandardOutPath</key>
-    <string>/tmp/frd.log</string>
+    <string>{log}</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/frd.err.log</string>
+    <string>{log}</string>
 </dict>
 </plist>
 "#
@@ -618,6 +655,10 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
             unit_path.display()
         ));
     } else {
+        // launchd opens the log at each start but creates no directory.
+        if options.kind == ServiceKind::LaunchdAgent {
+            prepare_log_directory(&resolve_log_path(options))?;
+        }
         durable = Some(publish_unit(&unit_path, unit_content.as_bytes())?);
         if durable == Some(false) {
             next_steps.push(
@@ -646,9 +687,10 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
                 );
             }
             ServiceKind::LaunchdAgent => {
-                next_steps.push(format!(
-                    "Run 'launchctl load {}' to start the agent.",
-                    unit_path.display()
+                next_steps.extend(launchd_agent_steps(
+                    &unit_path,
+                    &resolve_log_path(options),
+                    options,
                 ));
             }
             ServiceKind::LaunchdDaemon => {
@@ -694,20 +736,68 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
     })
 }
 
-/// Only Linux has a supported persistent host install. Other platforms retain
-/// their preview renderers, but cannot write a weaker path than the shipped CLI.
+/// Linux and macOS have a supported persistent host install. Other platforms
+/// retain their preview renderers, but cannot write a weaker path than the
+/// shipped CLI.
 fn publish_unit(path: &std::path::Path, bytes: &[u8]) -> Result<bool, ServiceError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         publication::write(path, bytes)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         let _ = (path, bytes);
         Err(ServiceError::UnsupportedPlatform {
-            detail: "persistent service installation is implemented only on Linux; use a dry run to preview other service formats".into(),
+            detail: "persistent service installation is implemented only on Linux and macOS; use a dry run to preview other service formats".into(),
         })
     }
+}
+
+/// The agent's private log directory, created (0700) through the same
+/// verified, no-follow directory walk as the definition itself.
+fn prepare_log_directory(log: &std::path::Path) -> Result<(), ServiceError> {
+    let directory = log.parent().ok_or(ServiceError::UnsafeUnitPath)?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        publication::prepare_directory(directory)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = directory;
+        Err(ServiceError::UnsupportedPlatform {
+            detail: "launchd agents exist only on macOS".into(),
+        })
+    }
+}
+
+/// Install never starts the agent: these are the operator's launchctl steps.
+/// `bootstrap` loads the definition into this login session and starts it;
+/// launchd never rereads a changed plist, so an update boots the old one out
+/// first.
+fn launchd_agent_steps(
+    unit: &std::path::Path,
+    log: &std::path::Path,
+    options: &InstallOptions,
+) -> Vec<String> {
+    let domain =
+        current_uid().map_or_else(|| "gui/$(id -u)".to_owned(), |uid| format!("gui/{uid}"));
+    let plist = quoting::shell(&unit.to_string_lossy());
+    let mut steps = vec![
+        format!(
+            "Run 'launchctl bootout {domain}/{LAUNCHD_LABEL}' (only if an earlier version is loaded) and then 'launchctl bootstrap {domain} {plist}' to start the agent; it also starts at every login."
+        ),
+        format!(
+            "Restart it with 'launchctl kickstart -k {domain}/{LAUNCHD_LABEL}'; its output goes to {}.",
+            log.display()
+        ),
+        "On its first start macOS asks for Screen Recording for frd (and Accessibility when it controls input). Allow frd under System Settings > Privacy & Security; frd retries every 10 seconds until both are granted, and a signed frd keeps the grants across updates.".into(),
+    ];
+    if options.run_args.iter().all(|arg| arg != "--input-agent") {
+        steps.push(
+            "This agent shares the desktop view-only: install with -- --input-agent PATH to allow control.".into(),
+        );
+    }
+    steps
 }
 
 /// Safely and idempotently uninstall the `frd` service.
@@ -722,6 +812,10 @@ pub fn uninstall(options: &InstallOptions) -> Result<UninstallReport, ServiceErr
         ServiceKind::SystemdSystem => vec![
             "Removing the unit file does not stop a running service: run 'sudo systemctl disable --now frd' and then 'sudo systemctl daemon-reload'.".into(),
         ],
+        ServiceKind::LaunchdAgent => vec![format!(
+            "Removing the definition does not stop a loaded agent: run 'launchctl bootout {}/{LAUNCHD_LABEL}'.",
+            current_uid().map_or_else(|| "gui/$(id -u)".to_owned(), |uid| format!("gui/{uid}"))
+        )],
         _ => vec![
             "Removing the service definition does not stop a running frd: unload or stop it with the platform service manager.".into(),
         ],
@@ -746,17 +840,17 @@ fn remove_unit(
     path: &std::path::Path,
     preview: bool,
 ) -> Result<(bool, Option<bool>), ServiceError> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         publication::remove(path, preview)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         if preview {
             return Ok((path.exists(), None));
         }
         Err(ServiceError::UnsupportedPlatform {
-            detail: "persistent service removal is implemented only on Linux; use a dry run to preview other service formats".into(),
+            detail: "persistent service removal is implemented only on Linux and macOS; use a dry run to preview other service formats".into(),
         })
     }
 }
@@ -810,6 +904,93 @@ mod tests {
         assert!(plist.contains("<string>com.frankenremote.frd</string>"));
         assert!(plist.contains("<string>/Applications/frd</string>"));
         assert!(plist.contains("<string>9000</string>"));
+        assert!(plist.contains("<string>--software-explicit</string>"));
+        // The login session's window server, restarted only after a failure.
+        assert!(plist.contains("<key>LimitLoadToSessionType</key>\n    <string>Aqua</string>"));
+        assert!(plist.contains("<key>ProcessType</key>\n    <string>Interactive</string>"));
+        assert!(plist.contains(
+            "<key>KeepAlive</key>\n    <dict>\n        <key>SuccessfulExit</key>\n        <false/>"
+        ));
+        assert!(plist.contains("<key>ThrottleInterval</key>\n    <integer>10</integer>"));
+        // Output goes to the user's own log directory, never a shared /tmp.
+        assert!(!plist.contains("/tmp/"));
+        assert!(plist.contains("Library/Logs/FrankenRemote/frd.log</string>"));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn launchd_agent_install_replaces_and_uninstall_removes_only_its_plist() {
+        use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+        struct Root(PathBuf);
+        impl Drop for Root {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut random = [0; 16];
+        getrandom::fill(&mut random).unwrap();
+        // The no-follow walk refuses macOS's /var symlink: use the real path.
+        let root = Root(
+            std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join(format!("frd-launchd-{:032x}", u128::from_ne_bytes(random))),
+        );
+        fs::DirBuilder::new().mode(0o700).create(&root.0).unwrap();
+        let foreign = root.0.join("com.example.other.plist");
+        fs::write(&foreign, b"another agent").unwrap();
+        let mut options = InstallOptions {
+            kind: ServiceKind::LaunchdAgent,
+            exec_path: PathBuf::from("/bin/sh"),
+            approval_mode: "none".into(),
+            software_explicit: true,
+            custom_unit_dir: Some(root.0.clone()),
+            ..InstallOptions::default()
+        };
+        // Bind to no fixed port: the preflight port probe is not under test.
+        options.service_port = {
+            let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            probe.local_addr().unwrap().port()
+        };
+        let first = install(&options).unwrap();
+        assert_eq!(first.unit_path, root.0.join("com.frankenremote.frd.plist"));
+        assert_eq!(first.durable, Some(true));
+        let written = fs::read_to_string(&first.unit_path).unwrap();
+        assert_eq!(written, first.unit_content);
+        let metadata = fs::symlink_metadata(&first.unit_path).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(metadata.mode() & 0o077, 0, "a private, unshared plist");
+        assert!(
+            first
+                .next_steps
+                .iter()
+                .any(|s| s.contains("launchctl bootstrap gui/"))
+        );
+        assert!(first.next_steps.iter().any(|s| s.contains("view-only")));
+
+        // A changed definition replaces the whole file atomically.
+        options.approval_mode = String::new();
+        let second = install(&options).unwrap();
+        assert_eq!(
+            fs::read_to_string(&second.unit_path).unwrap(),
+            second.unit_content
+        );
+        assert!(!second.unit_content.contains("--approval"));
+
+        let removed = uninstall(&options).unwrap();
+        assert!(removed.existed);
+        assert!(!removed.unit_path.exists());
+        assert!(removed.next_steps[0].contains("launchctl bootout gui/"));
+        assert!(!uninstall(&options).unwrap().existed);
+        assert_eq!(fs::read(&foreign).unwrap(), b"another agent");
+        let leftovers: Vec<_> = fs::read_dir(&root.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            leftovers,
+            [std::ffi::OsString::from("com.example.other.plist")]
+        );
     }
 
     #[test]

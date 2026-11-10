@@ -299,6 +299,12 @@ pub fn run() -> Result<(), Error> {
         Some("--probe-encoder") => {
             let backend = args.next().ok_or(Error::Malformed)?;
             parent(&mut args)?;
+            // frd's startup probe is where a missing grant is asked for and
+            // named, never a share: under launchd the prompt names frd.
+            if !macos_capture::request_access() {
+                println!("encoder_probe=refused reason=screen_recording_not_granted");
+                return Err(Error::Unsupported);
+            }
             return match probe_encoder(&backend) {
                 Ok((width, height, bytes, stats)) => {
                     println!(

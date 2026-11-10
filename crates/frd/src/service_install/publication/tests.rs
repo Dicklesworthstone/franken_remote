@@ -10,7 +10,9 @@ impl Root {
     fn new() -> Self {
         let mut random = [0; 16];
         getrandom::fill(&mut random).unwrap();
-        let path = std::env::temp_dir().join(format!(
+        // macOS's temporary directory is reached through the /var symlink,
+        // which the no-follow walk refuses by design: use the real path.
+        let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "frd-unit-stage-{:032x}",
             u128::from_ne_bytes(random)
         ));

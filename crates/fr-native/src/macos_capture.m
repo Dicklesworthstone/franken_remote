@@ -863,6 +863,11 @@ int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t f
 // later releases one frame's budget; past this many the request fails.
 #define FR_CAP_RESUBMITS 8
 
+// Asks for Screen Recording on behalf of this process's responsible process
+// (frd when launchd runs it). macOS shows its prompt only while no decision
+// is recorded; otherwise this only reports. Called by the startup probe only.
+int fr_cap_request_access(void) { return CGRequestScreenCaptureAccess() ? 1 : 0; }
+
 static int capture_live(FrCapture *c) {
     os_unfair_lock_lock(&c->lock);
     BOOL stopped = c->stopped || c->source.exhausted;

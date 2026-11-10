@@ -51,6 +51,11 @@ static int describe(CGDirectDisplayID id, FrInDisplay *out) {
 // This checks and never prompts.
 int fr_in_access(void) { return CGPreflightPostEventAccess() ? 1 : 0; }
 
+// Asks for the grant on behalf of this process's responsible process (frd
+// when launchd runs it). macOS shows its prompt only while no decision is
+// recorded; otherwise this only reports the current state.
+int fr_in_request_access(void) { return CGRequestPostEventAccess() ? 1 : 0; }
+
 // Active displays, mirrors excluded (the capture worker offers only sources).
 // Core Graphics only: input needs no Screen Recording grant.
 int fr_in_displays(FrInDisplay *out, size_t capacity, size_t *count) {

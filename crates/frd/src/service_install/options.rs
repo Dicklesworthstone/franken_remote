@@ -61,24 +61,6 @@ impl InstallOptions {
         {
             return Err(ServiceError::InvalidOptions);
         }
-        let encoder_selected = self.validate_run_args()?;
-        if matches!(
-            self.kind,
-            ServiceKind::SystemdUser | ServiceKind::SystemdSystem
-        ) {
-            // Reject missing/contradictory selection, not a hardware choice
-            // merely because the CPU legacy flag is absent. Native hardware
-            // availability still has to be established by the actual worker.
-            if !self.software_explicit && !encoder_selected {
-                return Err(ServiceError::HostProfileUnavailable {
-                    code: "hardware_hevc_unavailable",
-                    detail: "frd run needs an explicit encoder: pass --software-explicit or pass -- --encoder auto|nvenc|vaapi|software; auto probes hardware only",
-                });
-            }
-            if self.approval_mode == "local" {
-                self.validate_local_approval()?;
-            }
-        }
         for path in std::iter::once(&self.exec_path)
             .chain(self.socket_path.iter())
             .chain(self.config_path.iter())
@@ -105,6 +87,35 @@ impl InstallOptions {
                 detail: "Windows service registration cannot yet preserve these overrides".into(),
             });
         }
+        // Capture and input belong to a login session's window server; a
+        // daemon has none, so it could only refuse at every start.
+        if self.kind == ServiceKind::LaunchdDaemon {
+            return Err(ServiceError::UnsupportedPlatform {
+                detail: "a LaunchDaemon runs outside every login session, where macOS allows no screen capture or input; install the per-user LaunchAgent (frd install --user)".into(),
+            });
+        }
+        let encoder_selected = self.validate_run_args()?;
+        if matches!(
+            self.kind,
+            ServiceKind::SystemdUser | ServiceKind::SystemdSystem | ServiceKind::LaunchdAgent
+        ) {
+            // Reject missing/contradictory selection, not a hardware choice
+            // merely because the CPU legacy flag is absent. Native hardware
+            // availability still has to be established by the actual worker.
+            if !self.software_explicit && !encoder_selected {
+                return Err(ServiceError::HostProfileUnavailable {
+                    code: "hardware_hevc_unavailable",
+                    detail: if self.kind == ServiceKind::LaunchdAgent {
+                        "frd run needs an explicit encoder: pass -- --encoder videotoolbox (or auto); software is never an automatic fallback"
+                    } else {
+                        "frd run needs an explicit encoder: pass --software-explicit or pass -- --encoder auto|nvenc|vaapi|software; auto probes hardware only"
+                    },
+                });
+            }
+            if self.approval_mode == "local" {
+                self.validate_local_approval()?;
+            }
+        }
         Ok(())
     }
 }
@@ -115,7 +126,11 @@ impl InstallOptions {
     fn validate_local_approval(&self) -> Result<(), ServiceError> {
         let unavailable = || ServiceError::HostProfileUnavailable {
             code: "local_approval_unavailable",
-            detail: "local approval needs a user service with -- --logind-session ID for the shared graphical desktop, without --headless or --observation-indicator; startup revalidates that session and the packaged approval UI",
+            detail: if self.kind == ServiceKind::LaunchdAgent {
+                "macOS has no local approval prompt yet; share with your own devices using --approval none"
+            } else {
+                "local approval needs a user service with -- --logind-session ID for the shared graphical desktop, without --headless or --observation-indicator; startup revalidates that session and the packaged approval UI"
+            },
         };
         if self.kind != ServiceKind::SystemdUser {
             return Err(unavailable());
@@ -140,23 +155,35 @@ impl InstallOptions {
         if self.run_args.is_empty() {
             return Ok(false);
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(host_stack))]
         return Err(ServiceError::UnsupportedPlatform {
-            detail: "frd run options are currently supported only by the Linux host".into(),
+            detail: if cfg!(target_os = "macos") {
+                "this frd was built without the macos-host feature, so it cannot validate (or run) frd run options"
+            } else {
+                "frd run options are currently supported only by the Linux and macOS hosts"
+            }
+            .into(),
         });
-        #[cfg(target_os = "linux")]
-        self.validate_linux_run_args()
+        #[cfg(host_stack)]
+        self.validate_host_run_args()
     }
 
-    #[cfg(target_os = "linux")]
-    fn validate_linux_run_args(&self) -> Result<bool, ServiceError> {
+    #[cfg(host_stack)]
+    fn validate_host_run_args(&self) -> Result<bool, ServiceError> {
         use crate::host_policy::options::RunOptions;
-        if !matches!(
-            self.kind,
-            ServiceKind::SystemdUser | ServiceKind::SystemdSystem
-        ) {
+        let supported = if cfg!(target_os = "macos") {
+            self.kind == ServiceKind::LaunchdAgent
+        } else {
+            matches!(
+                self.kind,
+                ServiceKind::SystemdUser | ServiceKind::SystemdSystem
+            )
+        };
+        if !supported {
             return Err(ServiceError::UnsupportedPlatform {
-                detail: "frd run options are currently supported only by the Linux host".into(),
+                detail:
+                    "frd run options are supported only by this platform's host service (a systemd unit on Linux, the per-user LaunchAgent on macOS)"
+                        .into(),
             });
         }
         let run = RunOptions::parse(&self.run_args).map_err(|_| ServiceError::InvalidOptions)?;
@@ -195,6 +222,19 @@ impl InstallOptions {
                 code: "system_service_requires_headless",
                 detail: "a system unit has no user's X display; install a user unit, or pass -- --headless",
             });
+        }
+        // The same refusals `frd run` makes at every start on macOS. Saved
+        // local approval is refused here only when explicitly selected.
+        #[cfg(target_os = "macos")]
+        {
+            let approval = if self.approval_mode == "local" {
+                crate::host_policy::Approval::Local
+            } else {
+                crate::host_policy::Approval::None
+            };
+            if let Some((code, detail)) = run.macos_refusal(approval) {
+                return Err(ServiceError::HostProfileUnavailable { code, detail });
+            }
         }
         for path in [
             &run.worker,

@@ -294,6 +294,55 @@ impl RunOptions {
             port: self.port.unwrap_or(8443),
         })
     }
+
+    /// The first requested capability `frd run` cannot provide on macOS yet,
+    /// as a typed refusal `(code, detail)`. `frd run` refuses it before any
+    /// I/O, and `frd install` before writing a `LaunchAgent` that would only
+    /// refuse at every start.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn macos_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
+        let refusals: [(bool, &str, &str); 7] = [
+            (
+                approval == Approval::Local,
+                "local_approval_unavailable",
+                "macOS has no local approval prompt yet; share with your own devices using --approval none",
+            ),
+            (
+                self.clipboard,
+                "clipboard_unavailable",
+                "--clipboard has no macOS backend yet; control works without it",
+            ),
+            (
+                self.audio,
+                "audio_server_unavailable",
+                "--audio has no macOS capture backend yet; omit it to share without audio",
+            ),
+            (
+                self.microphone,
+                "microphone_endpoint_unavailable",
+                "--microphone has no macOS backend yet",
+            ),
+            (
+                self.observation_indicator.is_some(),
+                "observation_indicator_unavailable",
+                "--observation-indicator is an X11 window; it has no macOS backend yet",
+            ),
+            (
+                self.logind_session.is_some(),
+                "session_monitor_unavailable",
+                "--logind-session is a Linux logind selection",
+            ),
+            (
+                self.headless || self.display.is_some(),
+                "no_display",
+                "macOS shares the logged-in user's display; --headless and --display are X11 options",
+            ),
+        ];
+        refusals
+            .into_iter()
+            .find_map(|(refused, code, detail)| refused.then_some((code, detail)))
+    }
 }
 
 pub struct PolicyCommand {

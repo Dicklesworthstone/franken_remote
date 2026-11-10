@@ -3,38 +3,28 @@ use frd::service_install::{self, InstallOptions};
 use std::process::ExitCode;
 
 pub fn execute(args: &[String], json: bool) -> ExitCode {
-    // The service's only command is `frd run`, which refuses off Linux. A
-    // LaunchAgent/Windows service that can only ever refuse is not installed.
-    if !cfg!(target_os = "linux") {
+    // The service's only command is `frd run`: Linux, or macOS when this frd
+    // carries the host half (`macos-host`). A service that can only ever
+    // refuse is not installed.
+    if !cfg!(host_stack) {
+        let detail = if cfg!(target_os = "macos") {
+            "this frd was built without the macos-host feature, so it has no frd run to install; build with --features macos-host"
+        } else {
+            "frd run (the service's command) is currently implemented on Linux and macOS only."
+        };
         if json {
             println!(
                 "{}",
-                serde_json::json!({"outcome": "refusal", "code": "platform_unavailable"})
+                serde_json::json!({"outcome": "refusal", "code": "platform_unavailable", "detail": detail})
             );
         } else {
-            eprintln!(
-                "Service installation refused: frd run (the service's command) is currently implemented on Linux only."
-            );
+            eprintln!("Service installation refused: {detail}");
         }
         return ExitCode::from(2);
     }
     let options = match InstallOptions::parse_cli(args) {
         Ok(options) => options,
-        Err(error) => {
-            let code = match &error {
-                frd::service_install::ServiceError::HostProfileUnavailable { code, .. } => code,
-                _ => "invalid_service_options",
-            };
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"outcome": "refusal", "code": code})
-                );
-            } else {
-                eprintln!("Service installation refused: {error}");
-            }
-            return ExitCode::from(2);
-        }
+        Err(error) => return refused(&error, json),
     };
 
     match service_install::install(&options) {
@@ -105,4 +95,23 @@ pub fn execute(args: &[String], json: bool) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// A configuration refusal (exit 2): nothing was written.
+fn refused(error: &frd::service_install::ServiceError, json: bool) -> ExitCode {
+    use frd::service_install::ServiceError;
+    let code = match error {
+        ServiceError::HostProfileUnavailable { code, .. } => code,
+        ServiceError::UnsupportedPlatform { .. } => "platform_unavailable",
+        _ => "invalid_service_options",
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"outcome": "refusal", "code": code})
+        );
+    } else {
+        eprintln!("Service installation refused: {error}");
+    }
+    ExitCode::from(2)
 }

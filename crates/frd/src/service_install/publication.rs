@@ -1,4 +1,4 @@
-//! Linux service publication through the original directory descriptor. No
+//! Linux and macOS service publication through the original directory descriptor. No
 //! existing file is opened for writing: each invocation owns one exclusive
 //! random stage, and readers see one whole service definition after rename.
 use super::ServiceError;
@@ -34,6 +34,21 @@ pub(super) fn write(path: &Path, bytes: &[u8]) -> Result<bool, ServiceError> {
         .sync_all()
         .map_err(|e| io_error("synchronize the private service stage", e))?;
     stage.publish(name)
+}
+
+/// Create (0700) or verify a private directory through the same no-follow walk
+/// and ownership checks as a definition's directory, without writing a file.
+pub(super) fn prepare_directory(path: &Path) -> Result<(), ServiceError> {
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(ServiceError::UnsafeUnitPath);
+    }
+    directory(path, true)?
+        .map(drop)
+        .ok_or(ServiceError::UnsafeUnitPath)
 }
 
 /// No directory is created during removal, including a preview or an already
