@@ -8,17 +8,40 @@ use crate::input_process::ProcessLaunch;
 use std::{
     fmt,
     sync::{
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const OPEN_BUDGET: Duration = Duration::from_secs(3);
 const CHECK_BUDGET: Duration = Duration::from_millis(250);
 const CHECK_INTERVAL: Duration = Duration::from_millis(50);
 const TURN: Duration = Duration::from_millis(5);
+
+/// The original observation-indicator budget includes suspend. In particular,
+/// macOS `Instant` is uptime, so a sleeping host must not preserve Ready UI
+/// evidence merely because neither its worker nor its watcher was scheduled.
+/// This is the same kernel-clock convention as the native session monitor.
+fn now_ns() -> Result<u64, Error> {
+    #[cfg(target_os = "linux")]
+    let clock = rustix::time::ClockId::Boottime;
+    #[cfg(not(target_os = "linux"))]
+    let clock = rustix::time::ClockId::Monotonic;
+    let now = rustix::time::clock_gettime(clock);
+    u64::try_from(now.tv_sec)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000_000_000))
+        .and_then(|seconds| seconds.checked_add(u64::try_from(now.tv_nsec).ok()?))
+        .ok_or(Error::Clock)
+}
+
+fn deadline(issued: u64, budget: Duration) -> Result<u64, Error> {
+    issued
+        .checked_add(u64::try_from(budget.as_nanos()).map_err(|_| Error::Clock)?)
+        .ok_or(Error::Clock)
+}
 // Each locally selected role has one bounded native worker. A microphone-only
 // stop surface may coexist with observation indication, but neither role can
 // replace an uncollected original child.
@@ -60,6 +83,7 @@ pub enum Error {
     Stopped,
     Cleanup,
     Panicked,
+    Clock,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -69,30 +93,60 @@ pub enum Status {
 }
 struct State {
     status: Status,
-    until: Instant,
+    until: u64,
+    last: u64,
 }
 impl State {
-    fn check_at(&mut self, now: Instant) -> Status {
-        if !matches!(self.status, Status::Stopped(_)) && now >= self.until {
-            self.status = Status::Stopped(Error::Expired);
+    fn stop(&mut self, error: Error) -> Status {
+        if !matches!(self.status, Status::Stopped(_)) {
+            self.status = Status::Stopped(error);
         }
         self.status
     }
-    fn ready_at(&mut self, issued: Instant, now: Instant) -> bool {
-        if matches!(self.check_at(now), Status::Stopped(_)) {
-            return false;
+
+    fn check_at(&mut self, sample: Result<u64, Error>) -> Result<u64, Error> {
+        if let Status::Stopped(error) = self.status {
+            return Err(error);
         }
-        let Some(until) = issued.checked_add(CHECK_BUDGET) else {
-            self.status = Status::Stopped(Error::Expired);
-            return false;
+        let checked = sample.and_then(|now| {
+            if now < self.last {
+                return Err(Error::Clock);
+            }
+            if now >= self.until {
+                return Err(Error::Expired);
+            }
+            self.last = now;
+            Ok(now)
+        });
+        if let Err(error) = checked {
+            self.stop(error);
+        }
+        checked
+    }
+
+    fn ready_at(&mut self, issued: u64, sample: Result<u64, Error>) -> Result<(), Error> {
+        // Previous validity, current clock and publication share this one
+        // state lock. A reply cannot revive an expired or stopped owner.
+        let now = self.check_at(sample)?;
+        let renewed = deadline(issued, CHECK_BUDGET).and_then(|until| {
+            if issued > now {
+                Err(Error::Clock)
+            } else if now >= until {
+                Err(Error::Expired)
+            } else {
+                Ok(until)
+            }
+        });
+        let until = match renewed {
+            Ok(until) => until,
+            Err(error) => {
+                self.stop(error);
+                return Err(error);
+            }
         };
-        if issued > now || now >= until {
-            self.status = Status::Stopped(Error::Expired);
-            return false;
-        }
         self.status = Status::Ready;
         self.until = until;
-        true
+        Ok(())
     }
 }
 struct Shared {
@@ -102,15 +156,16 @@ struct Shared {
     state: Mutex<State>,
 }
 impl Shared {
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|poisoned| {
+            let mut state = poisoned.into_inner();
+            state.stop(Error::Panicked);
+            state
+        })
+    }
     fn stop(&self, error: Error) {
         {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !matches!(state.status, Status::Stopped(_)) {
-                state.status = Status::Stopped(error);
-            }
+            self.state().stop(error);
         }
         // Store the cause BEFORE waking the original host. Otherwise startup
         // could mistake this native refusal for an unrelated normal stop.
@@ -118,16 +173,17 @@ impl Shared {
         (self.on_stop)();
     }
     fn status(&self) -> Status {
-        let status = self
-            .state
-            .lock()
-            .map_or(Status::Stopped(Error::Panicked), |mut state| {
-                state.check_at(Instant::now())
-            });
-        if let Status::Stopped(error) = status {
+        let status = {
+            let mut state = self.state();
+            if !matches!(state.status, Status::Stopped(_)) {
+                let _ = state.check_at(now_ns());
+            }
+            state.status
+        };
+        if matches!(status, Status::Stopped(_)) {
             // The original stop has been requested before callers observe a
             // terminal return, even when THEY detect a worker's missed deadline.
-            self.stop(error);
+            (self.on_stop)();
         }
         status
     }
@@ -137,17 +193,19 @@ impl Shared {
             Status::Stopped(error) => Err(error),
         }
     }
-    fn ready(&self, issued: Instant) -> Result<(), Error> {
-        let ready = self
-            .state
-            .lock()
-            .is_ok_and(|mut state| state.ready_at(issued, Instant::now()));
-        if ready {
-            Ok(())
-        } else {
-            self.stop(Error::Expired);
-            Err(Error::Expired)
+    fn ready(&self, issued: u64) -> Result<(), Error> {
+        let result = {
+            let mut state = self.state();
+            if let Status::Stopped(error) = state.status {
+                Err(error)
+            } else {
+                state.ready_at(issued, now_ns())
+            }
+        };
+        if result.is_err() {
+            (self.on_stop)();
         }
+        result
     }
 }
 #[derive(Clone)]
@@ -189,6 +247,10 @@ impl Owner {
         role: Role,
     ) -> Result<Self, Error> {
         let capacity = role.capacity();
+        let timing = now_ns().and_then(|now| Ok((now, deadline(now, OPEN_BUDGET)?)));
+        let (now, until) = timing.inspect_err(|_| {
+            on_stop();
+        })?;
         if let Err(error) = claim(capacity) {
             on_stop();
             return Err(error);
@@ -197,7 +259,8 @@ impl Owner {
             on_stop: Box::new(on_stop),
             state: Mutex::new(State {
                 status: Status::Opening,
-                until: Instant::now() + OPEN_BUDGET,
+                until,
+                last: now,
             }),
         });
         let running = shared.clone();

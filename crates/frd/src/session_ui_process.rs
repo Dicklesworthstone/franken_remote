@@ -20,9 +20,14 @@ pub(crate) fn spawn(launch: &ProcessLaunch) -> io::Result<(Child, UnixStream, Un
     command.set_nonblocking(true)?;
     signals.set_nonblocking(true)?;
     let mut builder = Command::new(&launch.image);
+    builder.env_clear();
+    // The macOS role inherits the user's actual login-session bootstrap;
+    // it has no X11 display or authority. Match the input executor's launch
+    // contract instead of creating a misleading empty DISPLAY variable.
+    if !launch.display.is_empty() {
+        builder.env("DISPLAY", &launch.display);
+    }
     builder
-        .env_clear()
-        .env("DISPLAY", &launch.display)
         .arg("--parent-pid")
         .arg(std::process::id().to_string())
         .stdin(Stdio::from(OwnedFd::from(child_command)))
@@ -37,3 +42,7 @@ pub(crate) fn spawn(launch: &ProcessLaunch) -> io::Result<(Child, UnixStream, Un
     drop(builder);
     Ok((child, command, signals))
 }
+
+#[cfg(test)]
+#[path = "session_ui_process/tests.rs"]
+mod tests;

@@ -118,6 +118,6 @@ pub mod ingress_helper;
 mod session_ui_process;
 
 // Executable test fixture images, shared with the integration tests.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "../tests/support/executable.rs"]
 mod executable;
