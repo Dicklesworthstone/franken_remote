@@ -1,6 +1,8 @@
 //! Bounded OS-event handoff to the original controlled session. The UI thread
 //! never borrows QUIC or holds an authority lock while making native calls.
 mod native;
+#[cfg(test)]
+mod text_view_tests;
 use super::{ControlledViewer, ViewerControl, now};
 use fr_client::input::{self, Action};
 pub use fr_client::input::{
@@ -10,7 +12,7 @@ pub use fr_client::input::{
 pub use fr_core::held_state::HeldState;
 pub use fr_core::input::{CommittedText, TextError};
 use fr_core::{
-    input::{KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey, PointerButton},
+    input::{InputView, KeyTransition, MAX_COMMITTED_TEXT_BYTES, PhysicalKey, PointerButton},
     input_submission::{Capabilities, Capability},
 };
 pub use native::{CaptureCleanup, CaptureReapError, CaptureStartError, NativeCapture};
@@ -54,10 +56,16 @@ pub enum Error {
 struct Captured {
     event: Event,
     sampled: ClientInstant,
+    /// A Unicode commit cannot acquire a replacement view while queued.
+    /// Physical positioned events retain their existing checked Layout.
+    text_view: Option<InputView>,
 }
 struct Queue {
     events: VecDeque<Captured>,
     last_sample: ClientInstant,
+    /// Last view checked by this original viewer's dispatch owner. A producer
+    /// racing a replacement sees the old value and is conservatively refused.
+    view: InputView,
 }
 /// A single native event producer. Drop, focus loss, hiding, resize, suspend and
 /// native failure must stop it. The authority fence is lock-free and wakes
@@ -129,6 +137,8 @@ impl Source {
     /// Capture one completed IME/software-keyboard commit. Do not also send the
     /// physical keys that produced the same text. No clipboard or layout fallback.
     /// Oversized commits are refused whole, never split into separately retried actions.
+    /// The original dispatch view is pinned with the commit; a queued value
+    /// cannot be rebound to new geometry, viewport, configuration or recovery.
     pub fn commit_text(&mut self, text: &str, sampled: ClientInstant) -> Result<(), Error> {
         let result = (|| {
             not_future(sampled, self.clock()?)?;
@@ -196,7 +206,12 @@ impl Source {
         if queue.events.len() == MAX_EVENTS {
             return Err(Error::Overflow);
         }
-        queue.events.push_back(Captured { event, sampled });
+        let text_view = matches!(event, Event::Text(_)).then_some(queue.view);
+        queue.events.push_back(Captured {
+            event,
+            sampled,
+            text_view,
+        });
         Ok(())
     }
 }
@@ -361,13 +376,28 @@ impl Receiver {
         self.suspended = self.suspended.saturating_add(1);
         unseen_press(event, &mut self.refused_keys, &mut self.refused_buttons);
     }
-    fn front(&mut self) -> Result<Option<&Captured>, Error> {
-        if self.pending.is_none() {
-            match self.queue.try_lock() {
-                Ok(mut queue) => self.pending = queue.events.pop_front(),
-                Err(TryLockError::WouldBlock) => return Ok(None),
-                Err(TryLockError::Poisoned(_)) => return Err(Error::Unavailable),
+    fn front(&mut self, view: InputView) -> Result<Option<&Captured>, Error> {
+        // Publish only the dispatch owner's checked view; native code cannot
+        // update it, and this never changes an already captured commit.
+        match self.queue.try_lock() {
+            Ok(mut queue) => {
+                queue.view = view;
+                if self.pending.is_none() {
+                    self.pending = queue.events.pop_front();
+                }
             }
+            Err(TryLockError::WouldBlock) if self.pending.is_none() => return Ok(None),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Poisoned(_)) => return Err(Error::Unavailable),
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|captured| captured.text_view.is_some_and(|original| original != view))
+        {
+            let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
+            self.note_refused(&event);
+            return Ok(None);
         }
         Ok(self.pending.as_ref())
     }
@@ -388,6 +418,7 @@ impl ControlledViewer {
         let queue = Arc::new(Mutex::new(Queue {
             events,
             last_sample: at,
+            view: self.input.input_view(),
         }));
         self.events = Some(Receiver::new(queue.clone()));
         Ok(Source {
@@ -415,7 +446,12 @@ impl ControlledViewer {
                 Held::Button(button) => input.holds_button(button),
             })
             .map_err(super::Error::Capture)?;
-        if receiver.front().map_err(super::Error::Capture)?.is_none() || self.pending_send() {
+        if receiver
+            .front(self.input.input_view())
+            .map_err(super::Error::Capture)?
+            .is_none()
+            || self.pending_send()
+        {
             return Ok(());
         }
         let Some(captured) = receiver.pending.as_ref() else {
