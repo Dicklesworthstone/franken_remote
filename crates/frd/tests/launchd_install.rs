@@ -175,6 +175,7 @@ fn installer_owned_and_one_shot_flags_are_not_run_options() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One install/uninstall scenario on the same private home.
 fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
     let home = Home::new();
     let port = free_port();
