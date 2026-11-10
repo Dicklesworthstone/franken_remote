@@ -30,10 +30,14 @@ fn pki() -> &'static Path {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let dir = std::env::temp_dir().join(format!("fr-cert-{}-{stamp}",std::process::id()));
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
-        openssl(&dir, &["req","-x509","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-pkeyopt","ec_param_enc:named_curve","-nodes","-keyout","ca.key","-out","ca.pem","-days","2","-subj","/CN=Ephemeral FR certificate fixture","-addext","basicConstraints=critical,CA:TRUE"]);
+        // `req` would also apply the system openssl.cnf. macOS LibreSSL's sets
+        // x509_extensions = v3_ca, which adds a second basicConstraints next to
+        // -addext; WebPKI rejects the CA (ExtensionValueInvalid). Use only ours.
+        std::fs::write(dir.join("req.cnf"), "[req]\ndistinguished_name=dn\n[dn]\n").unwrap();
+        openssl(&dir, &["req","-config","req.cnf","-x509","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-pkeyopt","ec_param_enc:named_curve","-nodes","-keyout","ca.key","-out","ca.pem","-days","2","-subj","/CN=Ephemeral FR certificate fixture","-addext","basicConstraints=critical,CA:TRUE"]);
         for name in ["one", "two", "wrong", "expired"] {
             let key = format!("{name}.key"); let csr = format!("{name}.csr"); let pem = format!("{name}.pem");
-            openssl(&dir, &["req","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-pkeyopt","ec_param_enc:named_curve","-nodes","-keyout",&key,"-out",&csr,"-subj","/CN=Fixture leaf"]);
+            openssl(&dir, &["req","-config","req.cnf","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-pkeyopt","ec_param_enc:named_curve","-nodes","-keyout",&key,"-out",&csr,"-subj","/CN=Fixture leaf"]);
             let host = if name == "wrong" { "wrong.fixture.ts.net" } else { HOST };
             std::fs::write(dir.join("extensions"), format!("subjectAltName=DNS:{host}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")).unwrap();
             if name == "expired" {

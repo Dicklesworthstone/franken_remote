@@ -264,6 +264,10 @@ fn pki() -> &'static Path {
                 .as_nanos()
         ));
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        // `req` would also apply the system openssl.cnf. macOS LibreSSL's sets
+        // x509_extensions = v3_ca, which adds a second basicConstraints next to
+        // -addext; WebPKI rejects the CA (ExtensionValueInvalid). Use only ours.
+        std::fs::write(dir.join("req.cnf"), "[req]\ndistinguished_name=dn\n[dn]\n").unwrap();
         for ca in ["ca", "rogue"] {
             issue_ca(&dir, ca);
         }
@@ -283,6 +287,8 @@ fn issue_ca(dir: &Path, ca: &str) {
         dir,
         &[
             "req",
+            "-config",
+            "req.cnf",
             "-x509",
             "-newkey",
             "ec",
@@ -311,6 +317,8 @@ fn issue_leaf(dir: &Path, label: &str, ca: &str, name: &str) {
         dir,
         &[
             "req",
+            "-config",
+            "req.cnf",
             "-newkey",
             "ec",
             "-pkeyopt",
