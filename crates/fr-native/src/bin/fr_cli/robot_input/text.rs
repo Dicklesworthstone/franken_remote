@@ -186,7 +186,6 @@ pub(super) mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn selected_file_refuses_links_directories_missing_files_and_unconnected_fifos() {
-        use rustix::fs::{CWD, Mode, mkfifoat};
         let directory = directory();
         let regular = directory.join("regular");
         std::fs::write(&regular, "private fixture").unwrap();
@@ -196,7 +195,13 @@ pub(super) mod tests {
         let dangling = directory.join("dangling");
         std::os::unix::fs::symlink(&missing, &dangling).unwrap();
         let fifo = directory.join("fifo");
-        mkfifoat(CWD, &fifo, Mode::RUSR | Mode::WUSR).unwrap();
+        // POSIX mkfifo(1): rustix has no FIFO constructor on Apple targets.
+        let made = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo failed: {made}");
         for path in [&link, &dangling, &directory, &missing, &fifo] {
             let error = read(path.to_str().unwrap())
                 .err()
