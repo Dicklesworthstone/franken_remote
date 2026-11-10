@@ -257,20 +257,20 @@ impl Clipboard {
                     match receipt.publication {
                         Publication::SubmittedToOs => {
                             self.report.received_submitted =
-                                self.report.received_submitted.saturating_add(1)
+                                self.report.received_submitted.saturating_add(1);
                         }
                         Publication::UnknownEffect => {
                             self.report.received_unknown =
-                                self.report.received_unknown.saturating_add(1)
+                                self.report.received_unknown.saturating_add(1);
                         }
                         Publication::NotSubmitted(_) => {
                             self.report.received_refused =
-                                self.report.received_refused.saturating_add(1)
+                                self.report.received_refused.saturating_add(1);
                         }
                     }
                 }
                 Received::Refused(_) => {
-                    self.report.received_refused = self.report.received_refused.saturating_add(1)
+                    self.report.received_refused = self.report.received_refused.saturating_add(1);
                 }
                 Received::Deferred | Received::Consumed(None) => {}
             }

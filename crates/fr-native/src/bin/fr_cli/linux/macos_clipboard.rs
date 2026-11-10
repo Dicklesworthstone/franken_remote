@@ -68,9 +68,7 @@ fn evidence(report: &ClipboardReport) -> crate::ControlHistory {
         code(absence),
         code(ended),
     );
-    let text = if !report.requested {
-        " Clipboard: not requested.".to_owned()
-    } else {
+    let text = if report.requested {
         format!(
             " Clipboard: {}; {} host text item(s) submitted to the local pasteboard, {} with unknown publication, {} refused. Local Off selected: {}. Clipboard worker cleanup: {cleanup}.{}",
             if report.active {
@@ -84,6 +82,8 @@ fn evidence(report: &ClipboardReport) -> crate::ControlHistory {
             report.disabled,
             ended.map_or_else(String::new, |reason| format!(" Ended: {reason}.")),
         )
+    } else {
+        " Clipboard: not requested.".to_owned()
     };
     crate::ControlHistory { json, text }
 }

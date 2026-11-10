@@ -614,10 +614,8 @@ mod tests {
         let raw = owner.acquire().unwrap();
         // SAFETY: this test created a private board; the test-only native entry
         // refuses a general board and copies the borrowed bytes synchronously.
-        assert_eq!(
-            unsafe { fr_mac_clip_test_replace(raw, bytes.as_ptr(), bytes.len()) },
-            OK
-        );
+        let status = unsafe { fr_mac_clip_test_replace(raw, bytes.as_ptr(), bytes.len()) };
+        assert_eq!(status, OK);
     }
 
     fn refresh(owner: &mut MacClipboard) -> NativeChanges {

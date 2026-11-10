@@ -478,7 +478,7 @@ mod tests {
                 .with_commands();
             assert!(files.has_upload());
             assert_eq!(files.has_download(), download);
-            assert!(files.upload_sizes().is_empty());
+            assert_eq!(files.upload_sizes(), []);
             assert_eq!(files.upload_status(), Some(Status::NotStarted));
             assert!(files.upload_control().is_none());
             assert!(files.command_snapshot().is_none());
