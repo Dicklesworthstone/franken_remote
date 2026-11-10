@@ -329,6 +329,74 @@ fn a_picture_the_host_could_not_send_in_time_is_recovered_instead_of_ending_the_
     });
 }
 
+/// A host stalled between capture and send hands its viewer a picture that is
+/// already past the reference horizon. That is the same broken chain as one
+/// that expires unsent (above), and the viewer recovers the same way. It used
+/// to close the viewer's cache on enqueue, so the publisher could not keep it
+/// and a sole viewer's departure ended the share.
+#[test]
+fn a_picture_already_late_on_arrival_is_recovered_instead_of_ending_the_viewer() {
+    let rt = support::runtime();
+    let cleanup_cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let policy = SendPolicy {
+            reference_horizon_micros: 40_000,
+            ..SendPolicy::default()
+        };
+        let mut g = Box::pin(group_with_worker_mode(
+            &rt,
+            1,
+            &[wire::CAPABILITY],
+            true,
+            policy,
+            HostDuration::from_micros(5_000_000),
+            "delay-first-encoded",
+        ))
+        .await;
+        ready(&mut g).await;
+        let worker = g.publisher.worker_id();
+        let view = g.peers[0].media.binding();
+        // The worker holds this picture 60 ms: it arrives past the 40 ms
+        // horizon. Neither delivered nor refused: the viewer stays a member,
+        // fenced, awaiting recovery.
+        let late = g.publisher.capture_next().await.unwrap();
+        assert_eq!((late.delivered, late.refused), (0, 0));
+        let p = &mut g.peers[0];
+        let until = deadline(p);
+        assert!(p.control.check().is_ok());
+        let mut failures = Vec::new();
+        for _ in 0..20 {
+            network(p).await.unwrap();
+            failures.extend(received(p));
+        }
+        assert_eq!(
+            failures,
+            [Err(fr_media::delivery::DeliveryError::ReferenceExpired)]
+        );
+        assert!(!p.frames.contains(&late.frame));
+        admit(p).await;
+        assert_eq!(deadline(p), until);
+        let failed = g.peers.remove(0);
+        let recovered = Box::pin(replace(failed)).await;
+        g.peers.push(recovered);
+        let idr = g.publisher.capture_next().await.unwrap();
+        assert_eq!((idr.delivered, idr.refused), (1, 0));
+        ready(&mut g).await;
+        let p = &mut g.peers[0];
+        let host = p.shared.as_ref().unwrap();
+        assert_eq!(host.statistics().recovery_requests, 1);
+        assert_eq!(host.statistics().recovered_streams, 1);
+        assert_eq!(p.media.binding().recovery, view.recovery.next().unwrap());
+        assert!(p.frames.contains(&idr.frame));
+        let next = g.publisher.capture_next().await.unwrap();
+        while !p.frames.contains(&next.frame) {
+            p.turn().await.unwrap();
+        }
+        assert_eq!(g.publisher.worker_id(), worker);
+        cleanup(&mut g, &cleanup_cx).await;
+    });
+}
+
 #[test]
 fn duplicate_wire_request_during_attachment_does_not_recharge_or_extend_failure() {
     let rt = support::runtime();

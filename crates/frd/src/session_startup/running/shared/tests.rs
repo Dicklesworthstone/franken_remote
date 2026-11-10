@@ -56,7 +56,11 @@ fn codec() -> Codec {
         generation: CodecConfigurationGeneration::INITIAL,
     }
 }
-async fn source(control: &ObservationControl, changing: bool) -> CaptureSource {
+async fn source_with_mode(
+    control: &ObservationControl,
+    changing: bool,
+    mode: &str,
+) -> CaptureSource {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let mut payload = String::new();
     for nal in [
@@ -68,7 +72,7 @@ async fn source(control: &ObservationControl, changing: bool) -> CaptureSource {
         write!(payload, "{:08x}{nal}", nal.len() / 2).unwrap();
     }
     let script = include_str!("../../../../tests/support/recovery_worker_fixture.py")
-        .replace("@MODE@", "healthy")
+        .replace("@MODE@", mode)
         .replace(
             "if kind == 7 and not force and last is not None:",
             if changing {
@@ -315,6 +319,26 @@ async fn group_with_source_lifetime(
     policy: SendPolicy,
     source_lifetime: HostDuration,
 ) -> Box<Group> {
+    group_with_worker_mode(
+        rt,
+        count,
+        extra,
+        changing,
+        policy,
+        source_lifetime,
+        "healthy",
+    )
+    .await
+}
+async fn group_with_worker_mode(
+    rt: &Runtime,
+    count: usize,
+    extra: &[&str],
+    changing: bool,
+    policy: SendPolicy,
+    source_lifetime: HostDuration,
+    mode: &str,
+) -> Box<Group> {
     let mut peers = Vec::new();
     for i in 0..count {
         peers.push(
@@ -328,7 +352,7 @@ async fn group_with_source_lifetime(
         );
     }
     let owner = source_control_with_lifetime(rt, source_lifetime);
-    let mut src = source(&owner, changing).await;
+    let mut src = source_with_mode(&owner, changing, mode).await;
     let pool = SharedFramePool::new(ProtocolLimits::ABSOLUTE, 32 * 1024 * 1024, 8).unwrap();
     let initial = src
         .prepare_shared_capture(&owner, &pool)

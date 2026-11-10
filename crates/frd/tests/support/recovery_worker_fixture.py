@@ -26,6 +26,7 @@ generation = struct.unpack(">Q", config[20:28])[0]
 reply(h, 257, config)
 last = None
 pending = False
+delayed = False
 while True:
     h = read(36)
     b = read(struct.unpack(">I", h[32:])[0])
@@ -48,6 +49,11 @@ while True:
             time.sleep(0.05)
         reply(h, 265, struct.pack(">QQQ", frame, last, observed))
         continue
+    if MODE == "delay-first-encoded" and last is not None and not delayed:
+        # A host stalled between capture and send: this picture reaches its
+        # viewer after the test's reference horizon. Only once.
+        delayed = True
+        time.sleep(0.06)
     idr = last is None or (force and MODE != "ignore-force")
     reference = 0 if idr else last
     reply(h, 258, struct.pack(">QQQQB7x", frame, observed, generation, reference, 0 if idr else 1) + b"test-only-unit")

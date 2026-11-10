@@ -4,7 +4,7 @@ use crate::media_egress::Egress;
 use fr_core::ids::CodecConfigurationGeneration;
 use fr_media::{
     access_unit::FrameId,
-    delivery::{DeliveryMode, SharedFrame, SharedFramePool, SharedFrameReservation},
+    delivery::{DeliveryMode, SendError, SharedFrame, SharedFramePool, SharedFrameReservation},
     worker::UnchangedCapture,
 };
 use std::sync::Arc;
@@ -190,14 +190,25 @@ impl Subscription {
             }
             Ok(())
         })();
-        if result.is_err() {
+        if let Err(error) = &result {
             // Do not cancel the source's Cx or another viewer. Final OS input
             // submission checks this very authority mutex, so old tickets end
             // before this admission failure is returned to the caller.
             if let Ok(mut authority) = self.control.authority.lock() {
                 authority.mark_view_stale();
             }
-            self.cache.close();
+            // A picture already past its horizon on arrival (a host stalled
+            // between capture and send) is a broken reference chain, not a
+            // dead viewer: the cache has fenced its pictures and fixed one
+            // recovery deadline. Leave it open so a viewer that negotiated
+            // recovery is kept, as the tick path's unsent-original expiry
+            // already is (fr-xfvs). Every other refusal closes.
+            if !matches!(
+                error,
+                Error::Send(SendError::OriginalExpired | SendError::NeedsRecovery)
+            ) {
+                self.cache.close();
+            }
         }
         result
     }
