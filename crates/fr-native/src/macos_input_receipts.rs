@@ -71,7 +71,10 @@ impl Summary {
 
     #[must_use]
     pub const fn observed(self) -> bool {
-        self.completed != 0 || self.pointer_reports != 0 || self.duplicates != 0 || self.unretained != 0
+        self.completed != 0
+            || self.pointer_reports != 0
+            || self.duplicates != 0
+            || self.unretained != 0
     }
 }
 

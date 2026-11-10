@@ -100,12 +100,7 @@ impl TextState {
             suspended,
         })
     }
-    fn update(
-        &mut self,
-        view: InputView,
-        suspensions: u32,
-        suspended: bool,
-    ) -> Result<(), Error> {
+    fn update(&mut self, view: InputView, suspensions: u32, suspended: bool) -> Result<(), Error> {
         if suspensions < self.suspensions || suspensions == u32::MAX {
             return Err(Error::Unavailable);
         }
@@ -615,16 +610,12 @@ impl Receiver {
             Err(TryLockError::WouldBlock) => {}
             Err(TryLockError::Poisoned(_)) => return Err(Error::Unavailable),
         }
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|captured| {
-                captured
-                    .text_context
-                    .is_some_and(|original| original.suspended || original != self.context)
-                    || captured.text_until.is_some_and(|until| now >= until)
-            })
-        {
+        if self.pending.as_ref().is_some_and(|captured| {
+            captured
+                .text_context
+                .is_some_and(|original| original.suspended || original != self.context)
+                || captured.text_until.is_some_and(|until| now >= until)
+        }) {
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
             self.note_refused(&event);
             return Ok(None);

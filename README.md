@@ -17,6 +17,7 @@ Evidence levels: *live* = run against this repository's binaries on a real tailn
 
 | Command | What it does | Evidence |
 |---|---|---|
+| `fr connect NODE --control ...` with `macos-desktop`, to a Text-capable host | A bounded native [Edit Text / Send composer](docs/native-client-cli.md#unicode-text-and-mac-input-methods) uses Mac input methods and sends one complete Unicode value under its original source, view and deadline. Physical control remains available outside composition; cancellation never replays text | 16 queue/context and 8 native text-policy diagnostic tests; actual AppKit/IME, full runtime and Mac-to-Mac qualification remain open |
 | `frd run --encoder videotoolbox --input-agent PATH` on macOS | Controlling shares include bounded bidirectional UTF-8 text clipboard through an isolated native child and an independent local Off panel. `--no-clipboard` disables it and is preserved by LaunchAgent installation. See [Mac host clipboard](docs/macos-host.md#text-clipboard) | implementation and regression sources; Mac-host native/tailnet qualification remains open |
 | `frd status [--json]` | Probes the installed Tailscale LocalAPI for this node's identity; every media/permission row stays `not_tested` (nothing is measured) | live |
 | `fr hosts [--json]` | Lists machines from installed Tailscale discovery (machines, not ready desktops) | live |

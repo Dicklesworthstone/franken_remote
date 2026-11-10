@@ -11,17 +11,20 @@ pub(crate) const MAX_GESTURE_AGE: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refusal {
     Context,
+    Deadline,
     Timestamp,
     Expired,
     Encoding,
     Text(TextError),
 }
 
-/// One explicit native Send, consumed once. No Debug or Clone: typed text is
+/// One explicit native Send, consumed once. No `Debug` or `Clone`: typed text is
 /// neither diagnostics nor a replayable command. A fresh clock sample never
 /// replaces the original `NSEvent` timestamp.
 pub(crate) struct Commit {
     pub(crate) context: u64,
+    /// Opaque original client-clock send bound; never compared to native uptime.
+    pub(crate) until: u64,
     pub(crate) captured: Duration,
     pub(crate) text: CommittedText,
 }
@@ -29,12 +32,16 @@ pub(crate) struct Commit {
 impl Commit {
     pub(crate) fn from_native(
         context: u64,
+        until: u64,
         captured: f64,
         bytes: &[u8],
         now: Duration,
     ) -> Result<Self, Refusal> {
         if context == 0 {
             return Err(Refusal::Context);
+        }
+        if until == 0 {
+            return Err(Refusal::Deadline);
         }
         let captured = Duration::try_from_secs_f64(captured)
             .ok()
@@ -51,9 +58,25 @@ impl Commit {
         let text = CommittedText::new(value).map_err(Refusal::Text)?;
         Ok(Self {
             context,
+            until,
             captured,
             text,
         })
+    }
+}
+
+/// A new producer must use a new window, so its serial cannot reuse an old
+/// editor or pending commit even if attachment is attempted outside the shell.
+#[derive(Default)]
+pub(crate) struct Attachment {
+    claimed: std::cell::Cell<bool>,
+}
+impl Attachment {
+    pub(crate) fn claim(&self) -> Result<(), ()> {
+        if self.claimed.replace(true) {
+            return Err(());
+        }
+        Ok(())
     }
 }
 
@@ -62,7 +85,7 @@ mod tests {
     use super::*;
 
     fn capture(value: &[u8]) -> Result<Commit, Refusal> {
-        Commit::from_native(7, 1.0, value, Duration::from_millis(1001))
+        Commit::from_native(7, 42_000, 1.0, value, Duration::from_millis(1001))
     }
 
     #[test]
@@ -70,8 +93,26 @@ mod tests {
         let value = "e\u{301}é漢🙂\r\n\t\0";
         let commit = capture(value.as_bytes()).unwrap();
         assert_eq!(commit.context, 7);
+        assert_eq!(commit.until, 42_000);
         assert_eq!(commit.captured, Duration::from_secs(1));
         assert_eq!(commit.text.as_str().as_bytes(), value.as_bytes());
+    }
+
+    #[test]
+    fn opaque_completion_deadline_is_required_and_never_rebuilt_from_native_time() {
+        assert!(matches!(
+            Commit::from_native(7, 0, 1.0, b"x", Duration::from_secs(1)),
+            Err(Refusal::Deadline)
+        ));
+        let commit = Commit::from_native(7, 1, 1.0, b"x", Duration::from_secs(1)).unwrap();
+        assert_eq!(commit.until, 1);
+    }
+
+    #[test]
+    fn a_window_cannot_attach_a_second_producer_and_reuse_its_native_serial() {
+        let attachment = Attachment::default();
+        assert!(attachment.claim().is_ok());
+        assert!(attachment.claim().is_err());
     }
 
     #[test]
@@ -102,7 +143,7 @@ mod tests {
         assert!(matches!(capture(b""), Err(Refusal::Text(TextError::Empty))));
         assert!(matches!(capture(&[0xff]), Err(Refusal::Encoding)));
         assert!(matches!(
-            Commit::from_native(0, 1.0, b"x", Duration::from_secs(1)),
+            Commit::from_native(0, 42_000, 1.0, b"x", Duration::from_secs(1)),
             Err(Refusal::Context)
         ));
     }
@@ -111,18 +152,18 @@ mod tests {
     fn stale_send_cannot_acquire_a_new_capture_time() {
         for now in [1100, 1101, 60_000] {
             assert!(matches!(
-                Commit::from_native(7, 1.0, b"x", Duration::from_millis(now)),
+                Commit::from_native(7, 42_000, 1.0, b"x", Duration::from_millis(now)),
                 Err(Refusal::Expired)
             ));
         }
-        assert!(Commit::from_native(7, 1.0, b"x", Duration::from_millis(1099)).is_ok());
+        assert!(Commit::from_native(7, 42_000, 1.0, b"x", Duration::from_millis(1099)).is_ok());
     }
 
     #[test]
     fn invalid_future_and_rollback_timestamps_refuse() {
         for captured in [0.0, -1.0, f64::NAN, f64::INFINITY, 1.001] {
             assert!(matches!(
-                Commit::from_native(7, captured, b"x", Duration::from_secs(1)),
+                Commit::from_native(7, 42_000, captured, b"x", Duration::from_secs(1)),
                 Err(Refusal::Timestamp)
             ));
         }

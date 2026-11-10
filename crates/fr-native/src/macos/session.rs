@@ -16,8 +16,8 @@
 //! Main thread only: `AppKit` owns the window and its event loop, which this
 //! session services between network turns of the same runtime.
 use super::{
-    HevcDecoder, PicturePoint, Surface, TEXT_COMPOSER_FLAG, TextCommit, Window, WindowEvent,
-    clipboard, event_time, files, picker, sharing,
+    HevcDecoder, PicturePoint, Surface, TEXT_COMPOSER_FLAG, TextCommit, TextRetireMode,
+    TextRetirement, TextTaken, Window, WindowEvent, clipboard, event_time, files, picker, sharing,
 };
 use crate::NativeError;
 use crate::macos_control::{Intent, Key, Route};
@@ -49,8 +49,8 @@ use frd::{
         ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
         Presentation, StreamingViewerControl, Viewer,
         viewer_events::{
-            Event, Layout, LocalPoint, MAX_EVENT_AGE_US, NativeCapture, PositionedAction, Source,
-            TextContext,
+            Error as CaptureError, Event, Layout, LocalPoint, MAX_EVENT_AGE_US, NativeCapture,
+            PositionedAction, Source, TextContext,
         },
     },
     worker::{Deadline, Launch, LocalPresenter},
@@ -178,6 +178,7 @@ impl Drop for Capture {
 /// The granted session's event source and the layout it was attached with.
 struct Input {
     source: Source,
+    binding: fr_wire::input_result::ResultBinding,
     layout: Layout,
     picture: (u32, u32),
     stop: Arc<AtomicBool>,
@@ -188,6 +189,7 @@ struct Input {
     capture_clock: CaptureClock,
     text_context: Option<TextContext>,
     text_serial: Option<u64>,
+    text_until: u64,
 }
 impl Drop for Input {
     fn drop(&mut self) {
@@ -196,54 +198,106 @@ impl Drop for Input {
     }
 }
 impl Input {
+    fn stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst) || self.source.control().is_stopped()
+    }
+
+    /// Sample the real original input owner's send bound. This does not mint a
+    /// ticket; the source context and final admission still check continuity.
+    fn refresh_text(&mut self, viewer: &mut ControlledViewer) -> Result<(), ()> {
+        if viewer.input_result_binding() != self.binding {
+            return Err(());
+        }
+        let until = viewer
+            .input_capture_context()
+            .ok()
+            .map(|(_, until)| until.0);
+        // The check above publishes any actual suspension before this token is
+        // read. A compositor gap keeps the same opaque context but disables Send.
+        self.text_status();
+        self.text_until = if self.text_context.is_some() {
+            until.unwrap_or(0)
+        } else {
+            0
+        };
+        Ok(())
+    }
+
     /// Keep native composition attached to its original source and uninterrupted
     /// view. A compositor gap disables Send without cancelling a valid draft.
-    fn text_status(&mut self) -> (Option<u64>, bool) {
-        if self.stop.load(Ordering::SeqCst) || !self.source.supports_text() {
+    fn text_status(&mut self) -> (Option<u64>, u64, bool) {
+        if self.stopped() || !self.source.supports_text() {
             self.text_context = None;
-            return (None, false);
+            self.text_until = 0;
+            return (None, 0, false);
         }
         let Ok(context) = self.source.text_context() else {
             self.text_context = None;
-            return (None, false);
+            self.text_until = 0;
+            return (None, 0, false);
         };
         if context != self.text_context {
             self.text_context = context;
+            self.text_until = 0;
             self.text_serial = self.text_serial.and_then(|serial| serial.checked_add(1));
         }
         let (Some(context), Some(serial)) = (&self.text_context, self.text_serial) else {
-            return (None, false);
+            return (None, 0, false);
         };
         let ready = self.source.text_context_ready(context).unwrap_or(false)
+            && self.source.clock().is_ok_and(|now| now.0 < self.text_until)
             && !self.keys.iter().any(|held| *held)
             && !self.buttons.iter().any(|held| *held);
-        (Some(serial), ready)
+        (Some(serial), if ready { self.text_until } else { 0 }, ready)
     }
 
     /// Consume one explicit Send, never a draft/preedit update. A refusal cannot
     /// choose a replacement context or retime and replay the original gesture.
-    fn deliver_text(&mut self, commit: TextCommit, report: &mut Report) -> bool {
+    fn deliver_text(&mut self, commit: TextCommit, report: &mut Report) -> Result<bool, ()> {
         let admitted = (|| {
-            if self.stop.load(Ordering::SeqCst)
-                || self.text_serial != Some(commit.context)
+            if self.stopped() {
+                return Err(());
+            }
+            if self.text_serial != Some(commit.context)
                 || self.keys.iter().any(|held| *held)
                 || self.buttons.iter().any(|held| *held)
             {
-                return None;
+                return Ok(false);
             }
-            let context = self.text_context.as_ref()?;
-            let now = self.source.clock().ok()?;
-            let sampled = ClientInstant(self.capture_clock.map(commit.captured)?);
-            if now.0.checked_sub(sampled.0)? >= MAX_EVENT_AGE_US {
-                return None;
+            let Some(context) = self.text_context.as_ref() else {
+                return Ok(false);
+            };
+            let now = self.source.clock().map_err(|_| ())?;
+            let Some(sampled) = self.capture_clock.map(commit.captured).map(ClientInstant) else {
+                return Ok(false);
+            };
+            if now.0 >= commit.until
+                || now
+                    .0
+                    .checked_sub(sampled.0)
+                    .is_none_or(|age| age >= MAX_EVENT_AGE_US)
+            {
+                return Ok(false);
             }
             self.scroll.reset();
-            self.source
-                .commit_text_in_context(context, commit.text.as_str(), sampled)
-                .ok()
-        })()
-        .is_some();
-        if admitted {
+            match self.source.commit_text_in_context_until(
+                context,
+                commit.text.as_str(),
+                sampled,
+                ClientInstant(commit.until),
+            ) {
+                Ok(()) => Ok(true),
+                Err(
+                    CaptureError::UnsupportedText
+                    | CaptureError::StaleTextContext
+                    | CaptureError::TextNotReady,
+                ) => Ok(false),
+                Err(_) => Err(()),
+            }
+        })();
+        // The source owns its bounded copy, or the whole original Send refused.
+        drop(commit);
+        if admitted == Ok(true) {
             report.text_queued = report.text_queued.saturating_add(1);
         } else {
             report.text_refused = report.text_refused.saturating_add(1);
@@ -525,6 +579,18 @@ pub struct Session {
     cleanup_confirmed: bool,
     terminal: Option<ObserverError>,
 }
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Fence before field destruction can free a native window or enter IME
+        // teardown. This does not claim that mandatory cleanup completed.
+        if let Some(observer) = &self.observer {
+            observer.control().stop();
+        }
+        if let Ok(mut input) = self.input.try_borrow_mut() {
+            input.take();
+        }
+    }
+}
 impl Session {
     /// `control` None observes; Some consumes the invocation's initial control
     /// choice once. Recovered viewing requires a fresh local F8 choice.
@@ -699,11 +765,37 @@ async fn reap_clipboard_watchdog(
     }
 }
 
-/// Clear only local composition. Call after fencing or parking its producer;
-/// no native callback receives or borrows the original input authority.
-fn cancel_text(window: &RefCell<Option<Window>>) {
-    if let Some(opened) = window.borrow().as_ref() {
-        let _ = opened.text_update(None, false);
+/// Parking does no native cleanup. Only a fenced owner can request and
+/// positively complete teardown; a prior negative does not invalidate cleanup.
+fn retire_text(window: &RefCell<Option<Window>>, mode: TextRetireMode) -> Result<(), ()> {
+    let expected = match mode {
+        TextRetireMode::Park => TextRetirement::Parked,
+        TextRetireMode::Fenced => TextRetirement::Clean,
+    };
+    let outcome = window.borrow().as_ref().map_or(Ok(expected), |opened| {
+        opened.text_stopped(mode).map_err(|_| ())
+    })?;
+    if outcome != expected {
+        return Err(());
+    }
+    Ok(())
+}
+
+/// Select terminal batch evidence before any follow-up native call.
+fn terminal_event(events: &[WindowEvent]) -> Option<LocalStop> {
+    if events.contains(&WindowEvent::CloseRequested) {
+        Some(LocalStop::WindowClosed)
+    } else if events.iter().any(|event| {
+        matches!(*event, WindowEvent::Key { usage, pressed, modifiers, .. }
+            if crate::macos_control::emergency_escape(usage, pressed, modifiers))
+    }) {
+        Some(LocalStop::LocalEscape)
+    } else if events.contains(&WindowEvent::FocusLost) {
+        Some(LocalStop::FocusLost)
+    } else if events.contains(&WindowEvent::Overflow) {
+        Some(LocalStop::Overflow)
+    } else {
+        None
     }
 }
 
@@ -723,86 +815,139 @@ fn service(
     sharing: &mut sharing::Ui,
     events: &mut Vec<WindowEvent>,
 ) {
-    let mut slot = window.borrow_mut();
-    let Some(opened) = slot.as_mut() else {
-        return;
-    };
     events.clear();
-    // Drop every Source/queue borrow before entering AppKit. This publication
-    // does not grant authority; explicit Send rechecks the retained token.
-    let (text_context, text_ready) = input
-        .borrow_mut()
-        .as_mut()
-        .map_or((None, false), Input::text_status);
-    let text_updated = opened.text_update(text_context, text_ready).is_ok();
-    let display_enabled = opened
-        .display_change_enabled(display_intent.borrow().enabled())
-        .is_ok();
-    opened.poll(Duration::ZERO, events);
-    let state = opened.state().ok();
-    let display_action = opened.take_display_change();
-    clipboard.borrow_mut().turn(Some(opened));
-    drop(slot);
-    let mut report = report.borrow_mut();
-    let mut input = input.borrow_mut();
-    let mut intent = intent.borrow_mut();
     let halt = |reason: LocalStop, input: &mut Option<Input>, report: &mut Report| {
         report.local_stop.get_or_insert(reason);
         display_intent.borrow_mut().cancel();
-        // Dropping the source fences the granted session before another turn.
         *input = None;
-        cancel_text(window);
+        stop.stop();
+        let _ = retire_text(window, TextRetireMode::Fenced);
         files.borrow_mut().cancel();
         clipboard.borrow_mut().stop(window.borrow().as_ref());
-        stop.stop();
     };
-    // Validate the whole native batch and current window before forwarding any
-    // action. A late FocusLost or overflow cannot follow earlier exported keys.
-    if events.contains(&WindowEvent::CloseRequested) {
-        closed.set(true);
-        intent.invalidate();
-        halt(LocalStop::WindowClosed, &mut input, &mut report);
-        return;
-    }
-    // Resizing or a stuck media call must never suppress local escape. It
-    // revokes work, so it needs no valid viewport, clock or remote evidence.
-    if events.iter().any(|event| {
-        matches!(*event, WindowEvent::Key { usage, pressed, modifiers, .. }
-            if crate::macos_control::emergency_escape(usage, pressed, modifiers))
-    }) {
-        closed.set(true);
-        intent.invalidate();
-        halt(LocalStop::LocalEscape, &mut input, &mut report);
-        return;
-    }
-    // Native file-only buttons act before ordinary input and network work.
-    // A missing local control surface fences its original owners too.
-    let sharing_ok = window
-        .borrow()
-        .as_ref()
-        .is_some_and(|window| sharing.turn(window, &mut files.borrow_mut()).is_ok());
-    if !sharing_ok {
-        intent.invalidate();
-        halt(LocalStop::NativeFailure, &mut input, &mut report);
-        return;
-    }
-    if input
-        .as_ref()
-        .is_some_and(|input| input.stop.load(Ordering::SeqCst))
-    {
-        intent.invalidate();
-        *input = None;
-        cancel_text(window);
-        if !display_intent.borrow().pending() {
+    let retire_stopped = || -> Result<bool, ()> {
+        let retired = {
+            let mut slot = input.borrow_mut();
+            if slot.as_ref().is_some_and(Input::stopped) {
+                *slot = None;
+                true
+            } else {
+                false
+            }
+        };
+        if !retired {
+            return Ok(false);
+        }
+        intent.borrow_mut().invalidate();
+        let pending = display_intent.borrow().pending();
+        if !pending {
+            stop.stop();
+        }
+        // A pending explicit close has already parked its original producer.
+        let mode = if pending {
+            TextRetireMode::Park
+        } else {
+            TextRetireMode::Fenced
+        };
+        retire_text(window, mode)?;
+        Ok(!pending)
+    };
+    match retire_stopped() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(()) => {
+            halt(
+                LocalStop::NativeFailure,
+                &mut input.borrow_mut(),
+                &mut report.borrow_mut(),
+            );
             return;
         }
     }
-    let reason = if !text_updated || !display_enabled || display_action.is_err() {
+    let terminal = {
+        let mut slot = window.borrow_mut();
+        let Some(opened) = slot.as_mut() else {
+            return;
+        };
+        // A parked producer never republishes its old context or allows native
+        // editor cleanup before the original close fences its owners.
+        let text_updated = if display_intent.borrow().pending() {
+            true
+        } else {
+            // Drop every source/queue borrow before AppKit. An ordinary update
+            // cannot acknowledge a native stop, even when context is absent.
+            let (context, until, ready) = input
+                .borrow_mut()
+                .as_mut()
+                .map_or((None, 0, false), Input::text_status);
+            opened.text_update(context, until, ready).is_ok()
+        };
+        if !text_updated
+            || opened
+                .display_change_enabled(display_intent.borrow().enabled())
+                .is_err()
+        {
+            Some(LocalStop::NativeFailure)
+        } else {
+            opened.poll(Duration::ZERO, events);
+            // Native terminal callbacks defer IME cleanup. Fence owners before
+            // state, clipboard or sharing can enter another native call.
+            terminal_event(events)
+        }
+    };
+    if terminal.is_none() {
+        match retire_stopped() {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(()) => {
+                halt(
+                    LocalStop::NativeFailure,
+                    &mut input.borrow_mut(),
+                    &mut report.borrow_mut(),
+                );
+                return;
+            }
+        }
+    }
+    let mut report = report.borrow_mut();
+    let mut input = input.borrow_mut();
+    let mut intent = intent.borrow_mut();
+    if let Some(reason) = terminal {
+        if matches!(reason, LocalStop::WindowClosed | LocalStop::LocalEscape) {
+            closed.set(true);
+            intent.invalidate();
+            halt(reason, &mut input, &mut report);
+        } else {
+            intent.suspend();
+            if reason == LocalStop::NativeFailure
+                || input.is_some()
+                || intent.requested()
+                || display_intent.borrow().pending()
+            {
+                halt(reason, &mut input, &mut report);
+            } else {
+                // No input owner exists. Keep viewing, but discard old local
+                // composition and any display choice across focus/queue loss.
+                display_intent
+                    .borrow_mut()
+                    .set_mode(DisplayMode::Disabled, event_time());
+                let _ = retire_text(window, TextRetireMode::Fenced);
+            }
+        }
+        return;
+    }
+    let slot = window.borrow();
+    let Some(opened) = slot.as_ref() else {
+        drop(slot);
+        intent.invalidate();
+        halt(LocalStop::NativeFailure, &mut input, &mut report);
+        return;
+    };
+    let state = opened.state().ok();
+    let display_action = opened.take_display_change();
+    drop(slot);
+    let reason = if display_action.is_err() {
         Some(LocalStop::NativeFailure)
-    } else if events.contains(&WindowEvent::FocusLost) {
-        Some(LocalStop::FocusLost)
-    } else if events.contains(&WindowEvent::Overflow) {
-        Some(LocalStop::Overflow)
     } else {
         match state {
             None => Some(LocalStop::NativeFailure),
@@ -821,7 +966,6 @@ fn service(
     };
     if let Some(reason) = reason {
         intent.suspend();
-        cancel_text(window);
         if input.is_some()
             || intent.requested()
             || (display_intent.borrow().pending() && reason != LocalStop::PictureChanged)
@@ -829,6 +973,8 @@ fn service(
             halt(reason, &mut input, &mut report);
             return;
         }
+        // No input owner remains; native cleanup cannot delay an input fence.
+        let _ = retire_text(window, TextRetireMode::Fenced);
         // A view without input can choose another display before its first
         // picture. Focus, hiding and invalid native state never carry a click
         // forward to a later eligible window.
@@ -839,6 +985,16 @@ fn service(
             return;
         }
     }
+    clipboard.borrow_mut().turn(window.borrow().as_ref());
+    let sharing_ok = window
+        .borrow()
+        .as_ref()
+        .is_some_and(|window| sharing.turn(window, &mut files.borrow_mut()).is_ok());
+    if !sharing_ok {
+        intent.invalidate();
+        halt(LocalStop::NativeFailure, &mut input, &mut report);
+        return;
+    }
     let now = event_time();
     if let Ok(Some(captured)) = display_action
         && display_intent.borrow_mut().request(captured, now)
@@ -847,6 +1003,10 @@ fn service(
         // session before its orderly close callback can fence the actual grant.
         // No new event enters it after this turn, including the click itself.
         intent.retire_initial();
+        if retire_text(window, TextRetireMode::Park).is_err() {
+            halt(LocalStop::NativeFailure, &mut input, &mut report);
+            return;
+        }
         files.borrow_mut().cancel();
         clipboard.borrow_mut().stop(window.borrow().as_ref());
     }
@@ -854,7 +1014,6 @@ fn service(
     let expired = display_intent.borrow().expired(now);
     if pending {
         intent.invalidate();
-        cancel_text(window);
         if expired {
             halt(LocalStop::NativeFailure, &mut input, &mut report);
         }
@@ -902,6 +1061,19 @@ fn service(
         }
         routes.push(route);
     }
+    // Native queries above can synchronously discover a new terminal event.
+    // Probe/take before any Source delivery; the owned text still follows the
+    // earlier physical batch, and remains exclusive until its acknowledgment.
+    let text = match window.borrow().as_ref() {
+        Some(opened) => opened.take_text(),
+        None => return,
+    };
+    if text.is_err() {
+        report.text_refused = report.text_refused.saturating_add(1);
+        intent.invalidate();
+        halt(LocalStop::NativeFailure, &mut input, &mut report);
+        return;
+    }
     for (event, route) in events.iter().zip(routes) {
         if route == Route::Remote
             && let Some(granted) = input.as_mut()
@@ -912,34 +1084,44 @@ fn service(
             return;
         }
     }
-    // The native pending slot owns all later keyboard input until this exact
-    // admission is acknowledged, preserving ordering after the earlier batch.
-    let text = match window.borrow().as_ref() {
-        Some(opened) => opened.take_text(),
-        None => return,
-    };
-    match text {
-        Ok(Some(commit)) => {
+    let completion = match text {
+        Ok(TextTaken::Commit(commit)) => {
             let context = commit.context;
             let admitted = if let Some(granted) = input.as_mut() {
                 granted.deliver_text(commit, &mut report)
             } else {
                 report.text_refused = report.text_refused.saturating_add(1);
-                false
+                Ok(false)
             };
-            let completed = window
-                .borrow()
-                .as_ref()
-                .is_some_and(|opened| opened.text_complete(context, admitted).is_ok());
-            if !completed {
-                intent.invalidate();
-                halt(LocalStop::NativeFailure, &mut input, &mut report);
+            match admitted {
+                Ok(admitted) => Some((context, admitted)),
+                Err(()) => {
+                    intent.invalidate();
+                    halt(LocalStop::NativeFailure, &mut input, &mut report);
+                    return;
+                }
             }
         }
-        Ok(None) => {}
+        Ok(TextTaken::Refused { context }) => {
+            report.text_refused = report.text_refused.saturating_add(1);
+            Some((context, false))
+        }
+        Ok(TextTaken::Empty) => None,
         Err(_) => {
             report.text_refused = report.text_refused.saturating_add(1);
-            cancel_text(window);
+            intent.invalidate();
+            halt(LocalStop::NativeFailure, &mut input, &mut report);
+            return;
+        }
+    };
+    if let Some((context, admitted)) = completion {
+        let completed = window
+            .borrow()
+            .as_ref()
+            .is_some_and(|opened| opened.text_complete(context, admitted).is_ok());
+        if !completed {
+            intent.invalidate();
+            halt(LocalStop::NativeFailure, &mut input, &mut report);
         }
     }
 }
@@ -988,6 +1170,8 @@ fn attach(
     viewer.confirm_viewport(&layout).map_err(|_| ())?;
     // The layout is valid for this size only.
     window.set_resizable(false).map_err(|_| ())?;
+    window.claim_input().map_err(|_| ())?;
+    let binding = viewer.input_result_binding();
     let stop = Arc::new(AtomicBool::new(false));
     let released = Arc::new(AtomicBool::new(false));
     let capture = Capture {
@@ -1000,6 +1184,7 @@ fn attach(
             let capture_clock = CaptureClock::new(event_time().ok_or(())?, sampled.0);
             *slot.borrow_mut() = Some(Input {
                 source,
+                binding,
                 layout,
                 picture: (width, height),
                 stop,
@@ -1010,6 +1195,7 @@ fn attach(
                 capture_clock,
                 text_context: None,
                 text_serial: Some(0),
+                text_until: 0,
             });
             Ok::<_, ()>(capture)
         })
@@ -1086,7 +1272,11 @@ impl Application for Session {
         let sharing_flags = sharing::flags(&files.borrow())
             | 4
             | (u32::from(clipboard_requested) << 3)
-            | if text_requested { TEXT_COMPOSER_FLAG } else { 0 };
+            | if text_requested {
+                TEXT_COMPOSER_FLAG
+            } else {
+                0
+            };
         let report = self.report.clone();
         let closed = self.closed.clone();
         let intent = self.intent.clone();
@@ -1348,6 +1538,9 @@ impl Application for Session {
                             if !attached {
                                 attached = attach(viewer, display, &ui_window, &ui_input)?;
                             }
+                            if let Some(input) = ui_input.borrow_mut().as_mut() {
+                                input.refresh_text(viewer)?;
+                            }
                         }
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
@@ -1394,9 +1587,12 @@ impl Application for Session {
         cx: &Cx,
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
-        // Fence at call time: no input outlives the attempt.
+        // Fence at call time, before any AppKit/IME cleanup can block.
         self.input.borrow_mut().take();
-        cancel_text(&self.window);
+        if let Some(observer) = &self.observer {
+            observer.control().stop();
+        }
+        let text_retired = retire_text(&self.window, TextRetireMode::Fenced).is_ok();
         self.intent.borrow_mut().invalidate();
         self.clipboard
             .borrow_mut()
@@ -1458,7 +1654,7 @@ impl Application for Session {
             };
             let commands = reap_file_commands(&self.files, cx, deadline).await;
             let clipboard = reap_clipboard_watchdog(&self.clipboard, cx, deadline).await;
-            if !result || !picker_closed || !commands || !clipboard {
+            if !result || !text_retired || !picker_closed || !commands || !clipboard {
                 return Err(CallbackError);
             }
             self.observer = None;
@@ -1764,6 +1960,38 @@ mod tests {
             .unwrap()
             .required = true;
         assert_eq!(session.offer(3, &required), Err(CallbackError));
+    }
+
+    #[test]
+    fn terminal_batch_fences_ignore_timestamps_and_keep_close_escape_priority() {
+        let mut events = vec![
+            WindowEvent::Key {
+                usage: 4,
+                pressed: true,
+                repeat: false,
+                captured: Some(Duration::from_millis(1)),
+                modifiers: 0,
+            },
+            WindowEvent::Overflow,
+            WindowEvent::FocusLost,
+            WindowEvent::Key {
+                usage: 0x29,
+                pressed: true,
+                repeat: true,
+                captured: None,
+                modifiers: (1 << 17) | (1 << 18) | (1 << 19),
+            },
+            WindowEvent::CloseRequested,
+        ];
+        assert_eq!(terminal_event(&events), Some(LocalStop::WindowClosed));
+        events.pop();
+        assert_eq!(terminal_event(&events), Some(LocalStop::LocalEscape));
+        events.pop();
+        assert_eq!(terminal_event(&events), Some(LocalStop::FocusLost));
+        events.pop();
+        assert_eq!(terminal_event(&events), Some(LocalStop::Overflow));
+        events.pop();
+        assert_eq!(terminal_event(&events), None);
     }
 
     #[test]

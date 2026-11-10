@@ -83,7 +83,10 @@ The selected file must be one regular, non-symlink UTF-8 file of 1..4096 bytes.
 Its content is preserved exactly, including whitespace and combining sequences.
 The CLI reads it once and never puts its content in process arguments, receipts
 or logs. It creates one original input action; no clipboard operation or guessed
-keyboard layout is used. macOS native-window IME capture is still unavailable.
+keyboard layout is used. A controlling native macOS viewer also has an explicit
+[Edit Text / Send composer](native-client-cli.md#unicode-text-and-mac-input-methods)
+using the same optional host capability. Native IME and application-delivery
+qualification are tracked separately from the source implementation.
 
 Each complete Unicode scalar receives its original submission-time authority
 check. A supplementary scalar's two UTF-16 units stay together. Both native

@@ -66,9 +66,10 @@ fn check(connection: &Connection) -> Result<(), Failure> {
         sharing_width
     };
     let minimum_height = if connection.control { 184 } else { 108 };
-    if connection.fit_window.is_some_and(|(width, height)| {
-        width < minimum_width || height < minimum_height
-    }) {
+    if connection
+        .fit_window
+        .is_some_and(|(width, height)| width < minimum_width || height < minimum_height)
+    {
         return Err(Failure::new(
             "viewer_fit_too_small",
             "--fit must leave room for Change Display and visible sharing controls. Controlling windows also reserve the local text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction and 184 for the default-on clipboard; both file directions with clipboard need 796x184. Viewing-only windows need 152x108. --no-clipboard removes only the clipboard strip.",

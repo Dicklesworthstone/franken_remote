@@ -183,10 +183,19 @@ The composer belongs to the original controlled source and its uninterrupted
 input view. A changed display, viewport, codec/recovery generation, actual input
 suspension, focus loss or hidden window cancels its draft and any unsent commit.
 Ordinary compositor candidate gaps temporarily disable Send while preserving a
-valid draft. An explicit Send retains its original native event timestamp and
-the existing 100 ms local-input age bound. A refused admission never retries
-automatically; if the same draft remains valid, a fresh Send click is required.
+valid draft. An explicit Send retains its original native event timestamp,
+the existing 100 ms local-input age bound, and the original owner's checked
+send deadline. The completed value keeps that deadline through the native
+handoff, local queue and encoded transport; a later renewal cannot extend it.
+A refused admission never retries automatically; if the same draft remains
+valid, a fresh Send click is required.
 Ctrl+Alt+Shift+Escape remains a local stop in editing mode.
+
+Each opening starts a fresh local editor, so a delayed completion from a
+cancelled draft cannot enter a later draft. Stop and focus-loss handling fences
+control before asking the native input method to clean up. Mouse selection is
+serviced through the same bounded event pump; wheel and caret scrolling remain
+available without a blocking scrollbar drag.
 
 This composer sends committed text through the existing host text-input path.
 It does not synchronize a remote caret, implement remote preedit, infer a remote
@@ -203,10 +212,13 @@ history. Pointer reports can repeat and add no action effects. Duplicates add
 no effects; unavailable history leaves the corresponding
 effects unknown. These reports survive a later connection or cleanup error.
 
-The local composer, original-context integration and receipt projections have
-source-reviewed regressions. The execution environment disconnected before
-their formatter/compiler/test runs. Actual AppKit/IME editing, the SDK build
-and a Mac-to-Mac text session remain unqualified.
+The original queue/context diagnostic passes 16 tests, and the native text
+policy diagnostic passes 8 tests; both pass strict Clippy under the pinned
+toolchain. These checks use production source and dependencies, but do not
+exercise the full session runtime or AppKit FFI. The full runtime remains
+locally blocked by the existing dependency compiler memory limit. Actual
+AppKit/IME editing, the Apple SDK build and a Mac-to-Mac text session remain
+unqualified; CI has explicit native syntax, text and receipt-policy checks.
 
 The initial `--control` request is consumed once for the whole invocation.
 Automatic reconnects obtain fresh viewing only; after the recovered window is

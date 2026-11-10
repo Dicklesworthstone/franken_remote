@@ -1,5 +1,37 @@
 # Implementation status
 
+## Original native Send deadlines and stop-before-cleanup (2026-11-10)
+
+The Mac composer's explicit Send now freezes the original controlled owner's
+checked client-clock deadline, in addition to the original native event time.
+That bound survives native handoff, local queue contention, compositor gaps and
+an encoded send waiting on transport. Later renewal cannot extend old text.
+An expired or stale-context completion refuses without disabling otherwise
+valid physical control; it never acquires a replacement context or retries.
+
+Each opening uses a fresh native editor with an immutable opening context.
+Callbacks from a cancelled or retired editor cannot enter a later draft, even
+within the same input view. One window can attach only its original input
+producer. Local text selection is handled one event at a time rather than
+entering a native mouse-tracking loop that postpones the owner pump.
+
+Close, emergency revoke, focus loss, native sleep/session loss and overflow
+retire text before native cleanup. Rust prioritizes terminal batch evidence and
+fences its original input and streaming owners before acknowledging AppKit/IME
+cleanup. Ordinary availability updates cannot stand in for that acknowledgment.
+The existing Change Display path still parks its original producer for orderly
+close, and a valid locally refused Send still requires a fresh explicit click.
+
+After execution access recovered, **16 exact-source queue/context regressions**
+and **8 native text-policy regressions passed** under `nightly-2026-08-31`.
+Both limited diagnostics passed strict Clippy with real production dependencies;
+they do not compile or exercise the full session runtime or native AppKit FFI.
+The Mac CI lane now checks Objective-C syntax against the real Apple SDK before
+the broader Cargo build and explicitly runs text and receipt policy tests.
+Full runtime compilation remains blocked locally by the unchanged Asupersync
+compiler memory failure. Apple SDK compilation, native IME/lifecycle behavior
+and Mac-to-Mac text delivery remain unqualified; `fr-c2u1` stays in progress.
+
 ## Native Mac Unicode composer and retained action effects (2026-11-10)
 
 The controlling Mac viewer now offers optional `native-input-text` and requests
@@ -26,10 +58,10 @@ and never increase confirmed action effects. A queued local commit does not
 claim OS submission, application delivery or rollback.
 
 Tracking: `fr-c2u1` remains in progress. The coherent source and regressions have
-independent source review. New formatter/compiler/test runs were blocked by the
-execution environment disconnect; actual AppKit/IME, native sleep notifications
-and Mac-to-Mac delivery remain unqualified. The earlier indicator component
-checks recorded below do not validate this new composer or full runtime.
+independent source review. The initial publication occurred during an execution
+environment disconnect; the subsequent portable checks and remaining native
+qualification limits are recorded above. The earlier indicator component checks
+recorded below do not validate this composer or the full runtime.
 
 ## Original text context survives only uninterrupted input (2026-11-10)
 
@@ -42,10 +74,11 @@ compositor candidate gaps only hold dispatch and disable Send; they preserve a
 valid draft and its original capture-time bound. Context refusals admit no wire
 identity and leave physical input usable.
 
-Eight new boundary regressions and the five existing view-generation regressions
-cover this behavior. They received independent source review, but the execution
-environment disconnected before these new tests or final formatting could run.
-This change supplies the producer API; the native Mac composer is separate work.
+Eight boundary regressions and five view-generation regressions cover this
+behavior. With the three subsequent queue-deadline cases, all 16 passed in the
+exact-source queue/context diagnostic after execution access recovered. Its
+strict Clippy check also passed. The two full-runtime deadline regressions and
+native Mac integration remain separate qualification work.
 
 Before the disconnect, the published indicator implementation at `731cf819`
 was recovered and checked: 18 supervisor tests and 17 native policy/role/pipe/clock

@@ -22,6 +22,28 @@ use std::time::Duration;
 pub(crate) use crate::macos_text::Commit as TextCommit;
 pub(crate) const TEXT_COMPOSER_FLAG: u32 = 16;
 
+/// A consumed native slot, including a locally refused gesture. A native error
+/// is separate because it must fence the original owner before native cleanup.
+pub(crate) enum TextTaken {
+    Empty,
+    Refused { context: u64 },
+    Commit(TextCommit),
+}
+
+/// Park never runs `AppKit` cleanup; Fenced requires the original owners stopped.
+#[derive(Clone, Copy)]
+pub(crate) enum TextRetireMode {
+    Park,
+    Fenced,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextRetirement {
+    Parked,
+    Veto,
+    Clean,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct RawEvent {
@@ -76,7 +98,12 @@ unsafe extern "C" {
     ) -> c_int;
     fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
     fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
-    fn fr_mac_window_text_update(window: *mut c_void, context: u64, held_clear: c_int) -> c_int;
+    fn fr_mac_window_text_update(
+        window: *mut c_void,
+        context: u64,
+        until: u64,
+        held_clear: c_int,
+    ) -> c_int;
     fn fr_mac_window_text_take(
         window: *mut c_void,
         bytes: *mut u8,
@@ -84,7 +111,9 @@ unsafe extern "C" {
         length: *mut usize,
         context: *mut u64,
         captured: *mut f64,
+        until: *mut u64,
     ) -> c_int;
+    fn fr_mac_window_text_stopped(window: *mut c_void, fenced: c_int) -> c_int;
     fn fr_mac_window_text_complete(window: *mut c_void, context: u64, admitted: c_int) -> c_int;
     fn fr_mac_window_clipboard_bind(
         window: *mut c_void,
@@ -269,6 +298,7 @@ pub struct Window {
     raw: NonNull<c_void>,
     modifiers: Modifiers,
     buffer: Vec<RawEvent>,
+    input_attachment: crate::macos_text::Attachment,
     _main_thread: PhantomData<*mut ()>,
 }
 impl Window {
@@ -312,6 +342,7 @@ impl Window {
             // Drain the glue's entire bounded batch before deciding whether
             // any local control gesture is eligible.
             buffer: vec![RawEvent::default(); 1024],
+            input_attachment: crate::macos_text::Attachment::default(),
             _main_thread: PhantomData,
         })
     }
@@ -357,16 +388,40 @@ impl Window {
             .map(Some)
             .map_err(|_| NativeError::Unavailable)
     }
+    /// One original producer per window; a new grant cannot reuse native serials.
+    pub(crate) fn claim_input(&self) -> Result<(), NativeError> {
+        self.input_attachment
+            .claim()
+            .map_err(|()| NativeError::Unavailable)
+    }
+    /// Park only retires local state and probes for a veto. Fenced permits
+    /// actual native cleanup; an already-observed negative is not cleanup failure.
+    pub(crate) fn text_stopped(&self, mode: TextRetireMode) -> Result<TextRetirement, NativeError> {
+        let fenced = match mode {
+            TextRetireMode::Park => 0,
+            TextRetireMode::Fenced => 1,
+        };
+        // SAFETY: live main-thread window; Fenced requires stopped owners.
+        let result = unsafe { fr_mac_window_text_stopped(self.raw.as_ptr(), fenced) };
+        match (mode, result) {
+            (TextRetireMode::Park, 0) => Ok(TextRetirement::Parked),
+            (TextRetireMode::Park, 1) => Ok(TextRetirement::Veto),
+            (TextRetireMode::Fenced, 0 | 1) => Ok(TextRetirement::Clean),
+            (_, result) => status(result).and(Err(NativeError::Unavailable)),
+        }
+    }
     /// Publish only the original session's opaque text context. Losing or
     /// replacing it clears native preedit, draft and an unsent Send. Repeated
-    /// publication of the same context preserves local editing. `held_clear`
-    /// is a negative admission gate, never permission to release remote input.
+    /// publication of the same context preserves local editing. The opaque
+    /// client-clock `until` is frozen by native Send, never compared to uptime.
+    /// `held_clear` is a negative gate, never permission to release remote input.
     pub(crate) fn text_update(
         &self,
         context: Option<u64>,
+        until: u64,
         held_clear: bool,
     ) -> Result<(), NativeError> {
-        if context == Some(0) {
+        if context == Some(0) || (context.is_none() && until != 0) {
             return Err(NativeError::InvalidConfiguration);
         }
         // SAFETY: live main-thread window and scalar, content-free metadata.
@@ -374,6 +429,7 @@ impl Window {
             fr_mac_window_text_update(
                 self.raw.as_ptr(),
                 context.unwrap_or(0),
+                until,
                 c_int::from(held_clear),
             )
         })
@@ -382,9 +438,9 @@ impl Window {
     /// whole native batch: close, escape, focus, geometry and overflow win.
     /// The native editor stays exclusive through the pump that captures Send,
     /// so no later physical action can overtake this side-slot commit.
-    pub(crate) fn take_text(&self) -> Result<Option<TextCommit>, NativeError> {
+    pub(crate) fn take_text(&self) -> Result<TextTaken, NativeError> {
         let mut bytes = [0; fr_core::input::MAX_COMMITTED_TEXT_BYTES];
-        let (mut length, mut context, mut captured) = (0, 0, 0.0);
+        let (mut length, mut context, mut captured, mut until) = (0, 0, 0.0, 0);
         // SAFETY: live main-thread window; exactly capacity writable bytes and
         // valid scalar outputs. The glue clears its one slot before returning.
         let taken = status(unsafe {
@@ -395,22 +451,29 @@ impl Window {
                 &raw mut length,
                 &raw mut context,
                 &raw mut captured,
+                &raw mut until,
             )
         });
         let result = (|| {
             taken?;
             if length == 0 {
-                return if context == 0 && captured == 0.0 {
-                    Ok(None)
+                return if context == 0 && captured == 0.0 && until == 0 {
+                    Ok(TextTaken::Empty)
                 } else {
                     Err(NativeError::Unavailable)
                 };
             }
+            if context == 0 || until == 0 {
+                return Err(NativeError::Unavailable);
+            }
             let value = bytes.get(..length).ok_or(NativeError::Unavailable)?;
             let now = event_time().ok_or(NativeError::Unavailable)?;
-            TextCommit::from_native(context, captured, value, now)
-                .map(Some)
-                .map_err(|_| NativeError::Unavailable)
+            Ok(
+                match TextCommit::from_native(context, until, captured, value, now) {
+                    Ok(commit) => TextTaken::Commit(commit),
+                    Err(_) => TextTaken::Refused { context },
+                },
+            )
         })();
         // Best-effort local cleanup, not a claim about compiler or AppKit copies.
         bytes.fill(0);

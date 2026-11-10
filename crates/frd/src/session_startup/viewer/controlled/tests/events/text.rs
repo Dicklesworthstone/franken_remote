@@ -213,7 +213,9 @@ fn expired_native_completion_refuses_without_stopping_physical_control() {
         assert_eq!(state.viewer.pending_actions(), 0);
         assert!(!state.viewer.pending_send());
         assert!(!state.viewer.is_closed());
-        source.push(physical(KeyTransition::Press), sampled).unwrap();
+        source
+            .push(physical(KeyTransition::Press), sampled)
+            .unwrap();
         state.viewer.dispatch_captured().unwrap();
         assert_eq!(state.viewer.pending_actions(), 1);
         assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);

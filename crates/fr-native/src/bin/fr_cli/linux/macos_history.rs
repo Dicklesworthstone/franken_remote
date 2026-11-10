@@ -254,12 +254,7 @@ mod tests {
             },
             ..Report::default()
         };
-        let rendered = finish(
-            &report,
-            Ok("{\"outcome\":\"success\"}\n".to_owned()),
-            true,
-        )
-        .unwrap();
+        let rendered = finish(&report, Ok("{\"outcome\":\"success\"}\n".to_owned()), true).unwrap();
         let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
         assert_eq!(value["native_text"]["queued_locally"], 3);
         assert_eq!(value["native_text"]["refused_locally"], 1);
@@ -295,10 +290,17 @@ mod tests {
         let history = retained.control_history.unwrap();
         let value: serde_json::Value =
             serde_json::from_str(&format!("{{\"outcome\":\"error\"{}}}", history.json)).unwrap();
-        assert_eq!(value["native_input_receipts"]["submitted_action_operations"], 2);
+        assert_eq!(
+            value["native_input_receipts"]["submitted_action_operations"],
+            2
+        );
         assert_eq!(value["native_input_receipts"]["unknown_next_operation"], 1);
         assert_eq!(value["native_text"]["queued_locally"], 1);
-        assert!(history.text.contains("confirmed submitted action-operation prefix 2"));
+        assert!(
+            history
+                .text
+                .contains("confirmed submitted action-operation prefix 2")
+        );
         assert!(history.text.contains("1 with an uncertain next operation"));
     }
 

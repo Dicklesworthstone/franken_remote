@@ -245,7 +245,11 @@ fn whole_context_refusal_preserves_earlier_physical_release_and_time() {
         assert_eq!(queue.events.len(), 1);
     }
     assert!(matches!(
-        &receiver.front(view(), ClientInstant(10)).unwrap().unwrap().event,
+        &receiver
+            .front(view(), ClientInstant(10))
+            .unwrap()
+            .unwrap()
+            .event,
         Event::Key {
             transition: KeyTransition::Release,
             ..

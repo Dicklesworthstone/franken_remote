@@ -105,7 +105,10 @@ fn fresh_capture_uses_published_view_and_keeps_original_time_and_bytes() {
             .is_none()
     );
     capture(&receiver, "e\u{301}é漢🙂");
-    let captured = receiver.front(replacement, ClientInstant(8)).unwrap().unwrap();
+    let captured = receiver
+        .front(replacement, ClientInstant(8))
+        .unwrap()
+        .unwrap();
     assert_eq!(captured.sampled, ClientInstant(7));
     assert_eq!(captured.text_context.unwrap().view, replacement);
     assert!(matches!(

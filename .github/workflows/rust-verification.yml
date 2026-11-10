@@ -431,16 +431,20 @@ jobs:
         uses: ./.github/actions/build-swap
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
+      - name: Check the AppKit composer against the Apple SDK
+        run: cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/macos_viewer.m
       - name: Check native macOS client (including test targets)
         run: cargo check -p fr-native --all-targets --features macos-desktop --locked
       - name: Clippy native macOS client (deny warnings)
         run: cargo clippy -p fr-native --all-targets --features macos-desktop --locked -- -D warnings
       - name: Clippy frd macOS viewer build (deny warnings)
         run: cargo clippy -p frd --lib --bins --features macos-viewer --locked -- -D warnings
-      - name: Test macOS control consent and window sizing
+      - name: Test macOS control consent, committed text and window sizing
         run: |
           cargo test -p fr-native --lib --features macos-desktop --locked macos_control::
           cargo test -p fr-native --lib --features macos-desktop --locked macos_sizing::
+          cargo test -p fr-native --lib --features macos-desktop --locked macos_text::
+          cargo test -p fr-native --lib --features macos-desktop --locked macos_input_receipts::
           cargo test -p fr-native --lib --features macos-desktop --locked macos::session::tests::
           cargo test -p fr-native --bin fr --features macos-desktop --locked macos_completion::
           cargo test -p fr-native --bin fr --features macos-desktop --locked session_control:: -- --test-threads=1

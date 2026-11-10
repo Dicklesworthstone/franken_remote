@@ -90,14 +90,17 @@ pub(crate) fn sharing_points_with_text(
         return sharing_points(pixels, logical, fit, directions, clipboard);
     }
     let picture_and_sharing_fit = match fit {
-        Some((width, height)) if width >= 480 => {
-            Some((width, height.checked_sub(76).ok_or(())?))
-        }
+        Some((width, height)) if width >= 480 => Some((width, height.checked_sub(76).ok_or(())?)),
         Some(_) => return Err(()),
         None => None,
     };
-    let (width, height) =
-        sharing_points(pixels, logical, picture_and_sharing_fit, directions, clipboard)?;
+    let (width, height) = sharing_points(
+        pixels,
+        logical,
+        picture_and_sharing_fit,
+        directions,
+        clipboard,
+    )?;
     Ok((width.max(480), height))
 }
 
@@ -132,26 +135,23 @@ mod tests {
                     ),
                     Ok((width, 64))
                 );
-                assert!(sharing_points_with_text(
-                    (64, 64),
-                    (64, 64),
-                    Some((width, 183)),
-                    directions,
-                    clipboard,
-                    true,
-                )
-                .is_err());
+                assert!(
+                    sharing_points_with_text(
+                        (64, 64),
+                        (64, 64),
+                        Some((width, 183)),
+                        directions,
+                        clipboard,
+                        true,
+                    )
+                    .is_err()
+                );
             }
         }
-        assert!(sharing_points_with_text(
-            (64, 64),
-            (64, 64),
-            Some((479, 600)),
-            0,
-            false,
-            true,
-        )
-        .is_err());
+        assert!(
+            sharing_points_with_text((64, 64), (64, 64), Some((479, 600)), 0, false, true,)
+                .is_err()
+        );
     }
 
     #[test]
