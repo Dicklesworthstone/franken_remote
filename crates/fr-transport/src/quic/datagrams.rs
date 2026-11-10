@@ -1,7 +1,10 @@
 //! Independently bounded receive custody for admitted DATAGRAM routes.
 //!
-//! Video and pointer routes preserve one held record and one parked arrival:
-//! partial/clock-only receives never discard reference fragments. Audio alone
+//! Video routes preserve one held record and one parked arrival:
+//! partial/clock-only receives never discard reference fragments. Canonical
+//! absolute pointers coalesce only within their exact original input scope;
+//! stale or repeated sequences cannot renew custody. Other pointer records keep
+//! their original held/parked delivery for the input owner's validation. Audio
 //! may buffer four more packets across a briefly blocked consumer. Once that
 //! fixed allowance is full, additional audio is discarded and counted instead
 //! of stopping native reads for unrelated video or input. The existing native
@@ -14,12 +17,15 @@
 //! recovery can still delay audio behind a parked video fragment; this change
 //! does not discard video references to solve that separate limitation.
 use super::{Bytes, DatagramRoute, Disposition, Error, MAX_DATAGRAMS, Route};
+use core::cmp::Ordering;
+use fr_wire::input::{InputDelivery, InputDirection, decode_input};
 
 // Four overflow slots across ALL audio routes, not four per peer identifier.
 // The owner validates each payload against MAX_DATAGRAM_RECORD before custody,
 // so this adds at most 4 * 1150 payload bytes and fixed inline metadata.
 const AUDIO_OVERFLOW: usize = 4;
 const AUDIO_PACKET: u16 = 0x0062;
+const POINTER_PACKET: u16 = 0x0042;
 const AUDIO_LIFETIME_US: u64 = fr_core::audio::MAX_JITTER_CEILING_MS as u64 * 1000;
 
 /// Original local application custody of one admitted datagram, in this
@@ -62,6 +68,31 @@ struct Pending {
     receipt: DatagramReceipt,
 }
 
+/// Compare only complete ordinary absolute-pointer records. Extensions retain
+/// their original custody so a future optional field or a negotiated record cap
+/// cannot be hidden by supersession. The normal input handler still validates
+/// every non-coalescible record; this is not authority or submission admission.
+fn pointer_order(previous: &[u8], incoming: &[u8], binding: u32) -> Option<Ordering> {
+    let pointer_bytes = fr_wire::HEADER_BYTES + fr_wire::input::INPUT_PREFIX_BYTES + 8;
+    if previous.len() != pointer_bytes || incoming.len() != pointer_bytes {
+        return None;
+    }
+    let decode = |bytes| {
+        decode_input(
+            bytes,
+            &fr_core::limits::ProtocolLimits::ABSOLUTE,
+            binding,
+            InputDirection::ViewerToHost,
+            InputDelivery::Datagram,
+        )
+        .ok()
+        .map(|request| (request.credentials, request.sequence))
+    };
+    let previous = decode(previous)?;
+    let incoming = decode(incoming)?;
+    (incoming.0 == previous.0).then(|| incoming.1.cmp(&previous.1))
+}
+
 pub(super) struct PendingDatagrams {
     // Metadata is inline and payloads are already bounded/validated by the
     // connection owner. No peer-supplied identifier causes a map allocation.
@@ -87,9 +118,10 @@ impl PendingDatagrams {
     }
 
     /// `true`: the owner may read another native record (this one was held,
-    /// buffered, or counted as audio overflow). `false`: a non-audio route's
-    /// later arrival is parked; no further native read until `waiting` clears.
-    /// Existing bytes/deadlines and other routes' slots are never displaced.
+    /// buffered, coalesced pointer motion, or counted as audio overflow).
+    /// `false`: a non-coalescible arrival is parked; no further native read until
+    /// `waiting` clears. A newer pointer takes only its own original custody;
+    /// stale/duplicate pointers never renew the held record's deadline.
     pub(super) fn hold(
         &mut self,
         route: DatagramRoute,
@@ -110,7 +142,20 @@ impl PendingDatagrams {
         if self.next.is_some() {
             return Err(Error::Backpressure);
         }
-        if self.slots.iter().flatten().any(|p| p.route == route) {
+        if let Some(held) = self.slots.iter_mut().flatten().find(|p| p.route == route) {
+            if route.kind == POINTER_PACKET
+                && let Some(order) = pointer_order(&held.bytes, &bytes, route.binding)
+            {
+                if order == Ordering::Greater {
+                    held.bytes = bytes;
+                    held.receipt = receipt;
+                }
+                // Pointer sequences are replaceable, including duplicate or
+                // reordered states. Nothing reached the native owner, so no
+                // submission receipt is fabricated. Its click barrier and
+                // final ticket/view/authority checks remain unchanged.
+                return Ok(true);
+            }
             if route.kind == AUDIO_PACKET {
                 if self.audio_len == AUDIO_OVERFLOW {
                     self.dropped_audio = self.dropped_audio.saturating_add(1);
@@ -306,6 +351,10 @@ mod audio_tests;
 #[cfg(test)]
 #[path = "datagrams/receipt_tests.rs"]
 mod receipt_tests;
+
+#[cfg(test)]
+#[path = "datagrams/pointer_tests.rs"]
+mod pointer_tests;
 
 #[cfg(test)]
 mod tests {

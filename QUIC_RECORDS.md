@@ -307,3 +307,25 @@ to require their own qualification; this slice does not take over that work.
 
 Ticketed native configuration/reply pairs and their shared route ceiling are
 implemented in [NATIVE_MEDIA_ATTACHMENT.md](NATIVE_MEDIA_ATTACHMENT.md).
+
+## Replaceable absolute-pointer receive custody
+
+A blocked input consumer no longer makes a burst of ordinary absolute-pointer
+datagrams park all subsequent datagram routes. The receive owner coalesces only
+complete, canonically decoded, extension-free PointerState records on the same
+route with exactly matching session, lease, ticket and all four view generations.
+It retains the greatest pointer sequence. A newer state keeps its own original
+receipt and expiry; a duplicate or reordered state cannot renew the held record.
+
+This adds no queue or allocation. Different input scopes, malformed payloads and
+extension-bearing records retain their original held/parked handling. Video
+reference fragments remain lossless within the existing bounded custody. The
+original input owner still checks authority, ticket expiry, view and click/scroll
+barriers immediately before native submission; coalescing creates no receipt
+claiming that discarded motion reached the OS.
+
+The production custody tests cover scope changes, zero initial generations and
+sequences, reordered/duplicate motion, expiry, retirement and fixed byte bounds.
+The localhost UDP/TLS regressions exercise both readiness and handler
+backpressure while unrelated audio/video records progress. These are source
+regressions; native input and physical-path qualification remain separate.
