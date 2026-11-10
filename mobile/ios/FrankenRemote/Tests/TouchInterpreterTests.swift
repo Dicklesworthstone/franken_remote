@@ -106,6 +106,33 @@ final class TouchInterpreterTests: XCTestCase {
         XCTAssertFalse(touch.hasPointer)
     }
 
+    func testTheCursorIsDrawnAtTheTrackpadPointerOnlyWhileTheFingerDrivesIt() throws {
+        // View-only: never local, even with a pointer.
+        touch.seedPointer(CGPoint(x: 100, y: 200))
+        XCTAssertNil(touch.localPointer(at: 0))
+        touch.controlling = true
+        touch.seedPointer(CGPoint(x: 100, y: 200))
+        // Idle: the host's report is drawn.
+        XCTAssertNil(touch.localPointer(at: 0))
+        // A finger down draws locally at once, before any move...
+        _ = touch.began(1, at: middle, time: 1)
+        XCTAssertEqual(touch.localPointer(at: 1), CGPoint(x: 100, y: 200))
+        // ...and a move is drawn where this device put the pointer.
+        _ = touch.moved(1, to: CGPoint(x: 192, y: 420), time: 1.02)
+        _ = touch.moved(1, to: CGPoint(x: 192, y: 440), time: 1.04)
+        let moved = try XCTUnwrap(touch.pointer)
+        XCTAssertNotEqual(moved, CGPoint(x: 100, y: 200))
+        XCTAssertEqual(touch.localPointer(at: 1.05), moved)
+        _ = touch.ended(1, at: CGPoint(x: 192, y: 440), time: 1.06)
+        // Still local for the hold after the last move, then the host's.
+        XCTAssertEqual(touch.localPointer(at: 1.04 + touch.localPointerHold - 0.05), moved)
+        XCTAssertNil(touch.localPointer(at: 1.04 + touch.localPointerHold + 0.05))
+        // Planted negative: direct mode draws the host's report.
+        touch.mode = .direct
+        _ = touch.began(2, at: middle, time: 3)
+        XCTAssertNil(touch.localPointer(at: 3))
+    }
+
     func testTwoFingerTapRightClicksAndDoubleTapDoubleClicks() {
         touch.controlling = true
         _ = touch.began(1, at: CGPoint(x: 150, y: 400), time: 0)

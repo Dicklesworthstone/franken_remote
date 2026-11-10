@@ -61,9 +61,15 @@ final class TouchInterpreter {
     var pinchThreshold: CGFloat = 24
     var edgeMargin: CGFloat = 44
     var autoPanSpeed: CGFloat = 700
+    /// How long after this device last moved the trackpad pointer the cursor
+    /// is still drawn where it put it (`localPointer(at:)`), not where the
+    /// host last reported its cursor (one network round trip behind).
+    var localPointerHold = 1.0
 
     /// The trackpad pointer, in picture pixels.
     private(set) var pointer: CGPoint?
+    /// When this device last moved the trackpad pointer (touch time).
+    private var pointerMovedAt: Double?
 
     private struct One {
         var id: Int
@@ -162,7 +168,7 @@ final class TouchInterpreter {
                 effects.append(.viewport)
                 state = .one(one)
             } else if mode == .trackpad {
-                movePointer(delta, interval: interval, effects: &effects)
+                movePointer(delta, interval: interval, at: time, effects: &effects)
                 state = .one(one)
             } else if let start = one.startPicture {
                 sink?.button(.primary, pressed: true, at: start)
@@ -180,7 +186,7 @@ final class TouchInterpreter {
             }
         case .trackpadDrag(let drag, let last, let lastTime) where drag == id:
             let delta = CGVector(dx: location.x - last.x, dy: location.y - last.y)
-            movePointer(delta, interval: time - lastTime, effects: &effects)
+            movePointer(delta, interval: time - lastTime, at: time, effects: &effects)
             state = .trackpadDrag(id: id, last: location, lastTime: time)
         case .directDrag(let drag, _, var inside) where drag == id:
             if let point = mapper.toPicture(location) {
@@ -341,6 +347,7 @@ final class TouchInterpreter {
         touches.removeAll()
         state = .idle
         pointer = nil
+        pointerMovedAt = nil
     }
 
     // MARK: Internals
@@ -447,6 +454,18 @@ final class TouchInterpreter {
     /// Whether the trackpad pointer has a position yet.
     var hasPointer: Bool { pointer != nil }
 
+    /// Where to draw the host's cursor at `time` instead of where the host
+    /// last reported it: the trackpad pointer while a finger is down in
+    /// trackpad mode, or until `localPointerHold` after this device last
+    /// moved it, so the cursor moves with the finger. nil (view-only, direct
+    /// mode, or idle): draw the host's report, the truth once it caught up.
+    func localPointer(at time: Double) -> CGPoint? {
+        guard controlling, mode == .trackpad, let pointer else { return nil }
+        if !touches.isEmpty { return pointer }
+        guard let moved = pointerMovedAt, time - moved < localPointerHold else { return nil }
+        return pointer
+    }
+
     /// Place the trackpad pointer (e.g. at the host's reported cursor).
     func seedPointer(_ point: CGPoint) {
         guard point.x >= 0, point.y >= 0, point.x < mapper.picture.width,
@@ -454,7 +473,8 @@ final class TouchInterpreter {
         pointer = point
     }
 
-    private func movePointer(_ delta: CGVector, interval: Double, effects: inout [TouchEffect]) {
+    private func movePointer(_ delta: CGVector, interval: Double, at time: Double,
+                             effects: inout [TouchEffect]) {
         let start = ensurePointer()
         let travel = acceleration.travel(delta, interval: interval, scale: mapper.scale)
         // The pointer is ours to keep inside the picture (unlike a touch).
@@ -463,7 +483,10 @@ final class TouchInterpreter {
         let next = CGPoint(x: min(max(0, start.x + travel.dx), limit.width),
                            y: min(max(0, start.y + travel.dy), limit.height))
         pointer = next
-        if next != start { sink?.pointer(to: next) }
+        if next != start {
+            pointerMovedAt = time
+            sink?.pointer(to: next)
+        }
         if mapper.reveal(next, margin: edgeMargin) { effects.append(.viewport) }
     }
 

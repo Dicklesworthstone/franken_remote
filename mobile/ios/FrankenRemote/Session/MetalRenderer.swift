@@ -44,6 +44,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         return CGPoint(x: CGFloat(cursor.x), y: CGFloat(cursor.y))
     }
 
+    /// Where to draw the host's cursor shape instead of its reported
+    /// position (picture pixels): the trackpad pointer while this device
+    /// drives it (`TouchInterpreter.localPointer(at:)`). nil: as reported.
+    var localCursor: CGPoint? {
+        didSet { if localCursor != oldValue { dirty = true } }
+    }
+
     /// Content-free counters for the stats overlay.
     private(set) var drawnPictures: UInt64 = 0
     private(set) var presentedPictures: UInt64 = 0
@@ -145,8 +152,11 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
         encoder.setFragmentTexture(current.chroma, index: 1)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         if let cursor, cursor.visible != 0, let texture = cursorTexture {
-            let origin = geometry.toView(CGPoint(x: Int(cursor.x) - Int(cursor.hotspot_x),
-                                                 y: Int(cursor.y) - Int(cursor.hotspot_y)))
+            // Whole picture pixels, like the host's report: a crisp shape.
+            let at = localCursor.map { CGPoint(x: $0.x.rounded(.down), y: $0.y.rounded(.down)) }
+                ?? CGPoint(x: Int(cursor.x), y: Int(cursor.y))
+            let origin = geometry.toView(CGPoint(x: at.x - CGFloat(cursor.hotspot_x),
+                                                 y: at.y - CGFloat(cursor.hotspot_y)))
             let size = CGSize(width: CGFloat(cursor.width) * geometry.scale,
                               height: CGFloat(cursor.height) * geometry.scale)
             var shape = PictureUniforms(

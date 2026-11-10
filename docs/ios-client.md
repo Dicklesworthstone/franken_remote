@@ -218,8 +218,13 @@ Slow trackpad motion follows the finger exactly as drawn (so zooming in gives
 finer control); faster strokes travel up to 2.6× further on a smooth curve.
 When zoomed, the view pans to keep the trackpad pointer in view, and a direct
 drag held near an edge pans that way. The trackpad pointer starts at the
-host's cursor when the host sends its cursor separately (else mid-view). Two
-fingers moving together scroll; a pinch, even with one finger still, zooms.
+host's cursor when the host sends its cursor separately (else mid-view).
+While a finger is down, and for a second after it last moved the pointer,
+the host's cursor shape is drawn at the pointer this device sent, so it
+moves with the finger rather than a network round trip later. Otherwise the
+cursor is drawn where the host reports it, and the pointer follows the
+host's cursor (a host-side move is kept by the next drag). Two fingers
+moving together scroll; a pinch, even with one finger still, zooms.
 
 ## Lifecycle
 

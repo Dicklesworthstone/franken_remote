@@ -136,10 +136,20 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
             if controlling, !isFirstResponder { becomeFirstResponder() }
         }
         // The trackpad pointer starts where the host's cursor is, so the
-        // first tap clicks under the cursor the user sees.
-        if controlling, !interpreter.hasPointer, let cursor = renderer?.hostCursor {
-            interpreter.seedPointer(cursor)
+        // first tap clicks under the cursor the user sees, and follows it
+        // while this device is not moving it (the host moved its cursor). The
+        // cursor is drawn at the pointer while the finger drives it.
+        let local = interpreter.localPointer(at: time)
+        if controlling, let cursor = renderer?.hostCursor {
+            if let pointer = interpreter.pointer {
+                if local == nil, hypot(pointer.x - cursor.x, pointer.y - cursor.y) > 1.5 {
+                    interpreter.seedPointer(cursor)
+                }
+            } else {
+                interpreter.seedPointer(cursor)
+            }
         }
+        renderer?.localCursor = local
         if !typing.isEmpty { drainTyping() }
         handle(interpreter.tick(time: time))
     }
