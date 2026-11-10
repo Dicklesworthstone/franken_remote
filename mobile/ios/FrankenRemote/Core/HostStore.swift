@@ -106,17 +106,31 @@ final class HostStore: ObservableObject {
     }
 
     /// Record the pin a session observed. Only a pin for this host's own
-    /// name is stored, and only when none is stored yet: replacing a pin
-    /// is the user's explicit `forgetPin`.
+    /// name is stored: when none is stored yet, or when it keeps every saved
+    /// address and adds a family the saved pin never held (the core admits a
+    /// new family and pins it; frd refuses a pinned family that changed).
+    /// Replacing an address is the user's explicit `forgetPin`.
     func recordPin(_ pin: String, for id: UUID) {
         guard let index = hosts.firstIndex(where: { $0.id == id }) else { return }
-        let fields = pin.split(separator: " ")
-        guard fields.count >= 3, fields[0] == "fr-pin-v1", fields[1] == hosts[index].name else { return }
-        if hosts[index].pin == nil {
+        guard let observed = Self.pinAddresses(pin, name: hosts[index].name) else { return }
+        if let saved = hosts[index].pin {
+            if let kept = Self.pinAddresses(saved, name: hosts[index].name),
+               kept.isSubset(of: observed), kept != observed {
+                hosts[index].pin = pin
+            }
+        } else {
             hosts[index].pin = pin
         }
         hosts[index].lastConnected = Date()
         save()
+    }
+
+    /// The address fields of `fr-pin-v1 <name> <addresses>` for exactly
+    /// `name`, else nil.
+    static func pinAddresses(_ pin: String, name: String) -> Set<String>? {
+        let fields = pin.split(separator: " ")
+        guard fields.count >= 3, fields[0] == "fr-pin-v1", fields[1] == name else { return nil }
+        return Set(fields.dropFirst(2).map(String.init))
     }
 
     func markConnected(_ id: UUID) {
@@ -178,7 +192,9 @@ struct DirectoryMachine: Identifiable, Equatable, Hashable, Decodable {
     var machine: String { String(name.split(separator: ".").first ?? Substring(name)) }
 
     /// A host to open a session to: the listed addresses, dialed directly,
-    /// with TLS still checked for exactly this name. Nil without a pin.
+    /// with TLS still checked for exactly this name. Nil without a pin. A
+    /// machine the user already saved opens as saved instead
+    /// (`AppModel.connect(_:control:)` for a directory machine).
     func host(port: UInt16) -> SavedHost? {
         guard let pin, port != 0 else { return nil }
         return SavedHost(id: UUID(), name: name, port: port, nickname: nil, pin: pin,

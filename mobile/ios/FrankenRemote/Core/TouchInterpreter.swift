@@ -49,11 +49,13 @@ final class TouchInterpreter {
     var mapper = PictureMapper()
     weak var sink: InputSink?
 
-    // Tuning (points and seconds).
+    // Tuning (points and seconds). A still touch is a tap until the hold
+    // (trackpad drag) or long press (direct right click) takes it over: no
+    // dead band where a press does nothing. Without control, `holdTime`
+    // bounds a tap too.
     var tapSlop: CGFloat = 10
-    var tapTime = 0.25
     var doubleTapTime = 0.3
-    var holdTime = 0.35
+    var holdTime = 0.5
     var longPressTime = 0.5
     var twoFingerTapTime = 0.3
     var pinchThreshold: CGFloat = 24
@@ -82,6 +84,8 @@ final class TouchInterpreter {
         var lastCentroid: CGPoint
         var lastDistance: CGFloat
         var kind = TwoKind.undecided
+        /// Either finger left the tap slop: no longer a two-finger tap.
+        var moved = false
     }
     private enum State {
         case idle
@@ -191,10 +195,17 @@ final class TouchInterpreter {
             if two.kind == .undecided {
                 let travel = Self.distance(centroid, two.startCentroid)
                 let spread = abs(distance - two.startDistance)
-                if spread > pinchThreshold, spread > travel {
+                if travel > tapSlop || spread > tapSlop { two.moved = true }
+                // A pinch with one finger still moves the centroid half as
+                // far as it spreads: spread at least the travel is a zoom, and
+                // a scroll needs fingers moving together (spread under half
+                // the travel). Ambiguous strokes decide once clearly long.
+                if spread > pinchThreshold, spread >= travel {
                     two.kind = .zoom
-                } else if travel > tapSlop {
+                } else if travel > tapSlop, !controlling || spread < travel / 2 {
                     two.kind = controlling ? .scroll : .zoom
+                } else if travel > 3 * tapSlop {
+                    two.kind = controlling && spread < travel ? .scroll : .zoom
                 }
             }
             let delta = CGVector(dx: centroid.x - two.lastCentroid.x,
@@ -232,7 +243,7 @@ final class TouchInterpreter {
         var effects: [TouchEffect] = []
         switch state {
         case .one(let one) where one.id == id:
-            if !one.moved, time - one.startTime <= tapTime {
+            if !one.moved, time - one.startTime < tapLimit {
                 tap(one, at: location, time: time, effects: &effects)
             }
             state = .idle
@@ -281,7 +292,9 @@ final class TouchInterpreter {
         case .one(let one) where controlling && !one.moved:
             if mode == .trackpad, time - one.startTime >= holdTime {
                 sink?.button(.primary, pressed: true, at: ensurePointer())
-                state = .trackpadDrag(id: one.id, last: one.last, lastTime: time)
+                // From where the finger is now (it may have crept inside
+                // the slop), so the drag never jumps at its first move.
+                state = .trackpadDrag(id: one.id, last: touches[one.id] ?? one.last, lastTime: time)
                 effects.append(.haptic)
             } else if mode == .direct, time - one.startTime >= longPressTime,
                       let point = one.startPicture {
@@ -321,11 +334,13 @@ final class TouchInterpreter {
         state = touches.isEmpty ? .idle : .ignoring
     }
 
-    /// Forget every touch (the view lost them all, e.g. on backgrounding).
+    /// Forget every touch and the trackpad pointer (a new session, or the
+    /// view lost every touch, e.g. on backgrounding).
     func reset() {
         cancelAll()
         touches.removeAll()
         state = .idle
+        pointer = nil
     }
 
     // MARK: Internals
@@ -341,13 +356,19 @@ final class TouchInterpreter {
         }
     }
 
+    /// How long a still touch stays a tap: until the hold or long press
+    /// would take it over.
+    private var tapLimit: Double {
+        controlling && mode == .direct ? longPressTime : holdTime
+    }
+
     private func tap(_ one: One, at location: CGPoint, time: Double, effects: inout [TouchEffect]) {
         guard controlling else {
             if let last = lastTap, time - last.time <= doubleTapTime,
                Self.distance(last.location, location) <= 44 {
                 lastTap = nil
-                if mapper.zoom > 1.01 {
-                    mapper.setZoom(1, at: location)
+                if !mapper.resting {
+                    mapper.reset()
                 } else {
                     let exact = mapper.actualPixelsZoom(screenScale: screenScale)
                     mapper.setZoom(exact > 1.2 ? exact : 2.5, at: location)
@@ -372,7 +393,7 @@ final class TouchInterpreter {
     private func endTwo(_ two: Two, time: Double, lifted: Bool, effects: inout [TouchEffect]) {
         switch two.kind {
         case .undecided:
-            guard lifted, controlling, time - two.startTime <= twoFingerTapTime else { return }
+            guard lifted, controlling, !two.moved, time - two.startTime <= twoFingerTapTime else { return }
             let point: CGPoint?
             switch mode {
             case .trackpad: point = ensurePointer()
@@ -390,13 +411,15 @@ final class TouchInterpreter {
             }
             if !scroller.coasting { sink?.scrollEnded() }
         case .zoom:
-            // Settle on fit or on pixel-exact zoom when close to either.
+            // Settle on pixel-exact zoom when close to it, else on the
+            // resting zoom when at or near it.
             let exact = mapper.actualPixelsZoom(screenScale: screenScale)
-            if mapper.zoom < 1.05 {
-                mapper.setZoom(1, at: two.lastCentroid)
-                effects.append(.viewport)
-            } else if abs(mapper.zoom - exact) / exact < 0.06 {
+            let rest = mapper.restingZoom
+            if abs(mapper.zoom - exact) / exact < 0.06 {
                 mapper.setZoom(exact, at: two.lastCentroid)
+                effects.append(.viewport)
+            } else if mapper.zoom < rest * 1.05 {
+                mapper.setZoom(rest, at: two.lastCentroid)
                 effects.append(.viewport)
             }
         }
@@ -420,6 +443,9 @@ final class TouchInterpreter {
         pointer = seed
         return seed
     }
+
+    /// Whether the trackpad pointer has a position yet.
+    var hasPointer: Bool { pointer != nil }
 
     /// Place the trackpad pointer (e.g. at the host's reported cursor).
     func seedPointer(_ point: CGPoint) {

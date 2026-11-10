@@ -27,6 +27,10 @@ enum SessionPhase: Equatable {
 enum SessionEnd: Equatable {
     case closedByYou, hostClosed, nameUnresolved, outsideTailnet, identityChanged, tlsRefused
     case unreachable, hostRefused, sessionFailed, cancelled, internalError
+    /// This device stopped control (the view left the screen, input was
+    /// refused, or the host's picture changed size); the session ended
+    /// with it, as the host requires.
+    case controlStopped
 
     init(code: UInt32) {
         switch Int32(bitPattern: code) {
@@ -40,6 +44,7 @@ enum SessionEnd: Equatable {
         case FR_END_HOST_REFUSED: self = .hostRefused
         case FR_END_SESSION_FAILED: self = .sessionFailed
         case FR_END_CANCELLED: self = .cancelled
+        case FR_END_CONTROL_STOPPED: self = .controlStopped
         default: self = .internalError
         }
     }
@@ -57,6 +62,7 @@ enum SessionEnd: Equatable {
         case .sessionFailed: return "The session failed"
         case .cancelled: return "Connection cancelled"
         case .internalError: return "Something went wrong"
+        case .controlStopped: return "Control ended"
         }
     }
 
@@ -79,6 +85,8 @@ enum SessionEnd: Equatable {
         case .sessionFailed: return "The session ended unexpectedly."
         case .cancelled: return "The connection was cancelled."
         case .internalError: return "The app could not run the session."
+        case .controlStopped:
+            return "Control stops the moment FrankenRemote leaves the screen (Control Center, a notification, another app) or the host's screen changes size, and the session ends with it. Try again to take control again."
         }
     }
 

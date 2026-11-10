@@ -15,13 +15,23 @@ struct MachinePickerView: View {
                 if let offer = model.reconnectOffer {
                     Section {
                         Button {
-                            model.connect(offer, control: true)
+                            model.reconnect(offer)
                         } label: {
-                            Label("Reconnect to \(offer.title)", systemImage: "arrow.clockwise")
+                            Label("Reconnect to \(offer.host.title)", systemImage: "arrow.clockwise")
                         }
                         Button("Not now", role: .cancel) { model.reconnectOffer = nil }
                     } footer: {
                         Text("The session closed when FrankenRemote left the screen.")
+                    }
+                }
+                if let starting = model.starting {
+                    Section {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Connecting to \(starting.host.title)…")
+                                .foregroundStyle(.secondary)
+                        }
+                        Button("Cancel", role: .cancel) { model.disconnect() }
                     }
                 }
                 if let error = model.startError {

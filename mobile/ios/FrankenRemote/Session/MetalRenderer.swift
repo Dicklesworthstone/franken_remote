@@ -37,6 +37,13 @@ final class MetalRenderer: NSObject, MTKViewDelegate {
     private var cursor: FrCursor?
     private var dirty = true
 
+    /// The host's cursor hotspot (picture pixels) when the host sends its
+    /// cursor separately and shows it; nil otherwise.
+    var hostCursor: CGPoint? {
+        guard let cursor, cursor.visible != 0 else { return nil }
+        return CGPoint(x: CGFloat(cursor.x), y: CGFloat(cursor.y))
+    }
+
     /// Content-free counters for the stats overlay.
     private(set) var drawnPictures: UInt64 = 0
     private(set) var presentedPictures: UInt64 = 0

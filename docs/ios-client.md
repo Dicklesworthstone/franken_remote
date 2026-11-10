@@ -67,6 +67,12 @@ turn (at most three, `TailnetDirectory` behind the `HostDirectory` seam in
 tailnet (via <machine>)", or that machine's typed refusal ("doesn't list
 machines", "couldn't read its Tailscale status", "can't list machines yet")
 or why it was unreachable. It never shows an entry the host did not send.
+The app never fetches while a session is starting or open. frd serves one
+connection at a time and listens again only after a short cooldown, so a
+session to the machine being asked waits ("Connecting to…", at most three
+seconds) for that fetch to end, then 400 ms more, before it dials; dialing
+alongside the fetch lost the session's first handshake packets and stalled
+it about five seconds (bead fr-w4yu).
 
 A listed machine opens directly: its entry carries a pin of exactly the
 addresses the host listed (`fr-pin-v1 <name> <addresses>`), and the session
@@ -75,7 +81,12 @@ MagicDNS may answer only one family while frd serves only the other (a Mac
 with IPv4 forwarding serves only IPv6); the listing has both. TLS still
 verifies the certificate for exactly the listed name, and that machine's own
 frd still admits the phone by WhoIs and policy. The machine's port is the
-app's default port (frd's 8443 unless changed in Settings).
+app's default port (frd's 8443 unless changed in Settings). A listed machine
+the user already saved (the answering host always is) opens exactly as saved
+instead: its port, its pin, its name resolved by MagicDNS. The core pins only
+names in the answering host's own tailnet, and marks only that host as
+serving; a pin a session observes that keeps every saved address and adds a
+new address family replaces the saved one, any other change does not.
 
 `fr_directory_fetch(config, context, done)` runs one fetch on its own thread
 (at most four at once) and calls `done` exactly once with a JSON document:
@@ -140,13 +151,19 @@ then reaches VideoToolbox (`src/vt_decode.c`, system frameworks only). A
 refused record never reaches VideoToolbox; a decode failure closes that
 decoder and recovery comes from a new IDR.
 
-The app's Metal view runs at the display's refresh rate (120 Hz on ProMotion)
-and draws only when a new picture, the geometry or the cursor changed.
-Colour is BT.709 with the stream's range. To stay crisp:
+The app's Metal view runs at the display's refresh rate (120 Hz on ProMotion
+iPhones: the app's Info.plist sets `CADisableMinimumFrameDurationOnPhone`)
+and draws only when a new picture, the geometry or the cursor changed. It
+draws at the panel's own density (`UIScreen.nativeScale`), with the picture's
+origin on the device pixel grid. Colour is BT.709 with the stream's range. To
+stay crisp:
 
 - at an integer number of device pixels per picture pixel ("Actual pixels"
   in the view menu, or a pinch that ends near it) luma is sampled nearest, so
-  text is pixel-exact;
+  text is pixel-exact. An untouched view rests there instead of at fit when
+  that is at most 15% smaller (a 1080p host on a landscape iPhone is one
+  device pixel per picture pixel, not 1.09); "Actual pixels" may zoom below
+  fit when the device has more pixels than the picture (an iPad);
 - when the picture is shrunk to fit (a 5K desktop on a phone), each screen
   pixel averages up to 4×4 picture samples instead of aliasing small text;
 - fractional magnification is bilinear.
@@ -174,7 +191,11 @@ grants them (today's hosts do not; the calls return `FR_UNSUPPORTED`).
 - Hardware keyboards send HID usages one-for-one (`UIKey.keyCode` are page-7
   usages). The software keyboard maps printable ASCII to US-layout keys plus
   Shift. Anything else goes to the host's text input if granted, and is
-  otherwise refused with a message: the app never guesses the host's layout.
+  otherwise refused with a message that never quotes it: the app never
+  guesses the host's layout. Software-keyboard input (a paste) waits in order
+  while the host's input queue is backed up (`FR_BUSY`) and goes on the next
+  frames; it never overflows frd's bounded queue. While the keyboard is up,
+  the picture stays above it.
   The extra-keys bar has Esc, Tab, sticky Ctrl/Opt/Cmd/Shift (tap: next key;
   tap again: locked; again: off), arrows, forward delete, Home/End, Page
   Up/Down and F1–F12.
@@ -187,24 +208,34 @@ zooms at the fingers, double tap toggles zoom.
 | With control | Trackpad (default) | Direct touch |
 | --- | --- | --- |
 | One finger moves | the pointer, relatively, with acceleration | drags from where it touched |
-| Tap | left click at the pointer | left click where touched |
+| Tap (until the hold) | left click at the pointer | left click where touched |
 | Two-finger tap | right click at the pointer | right click at the fingers |
-| Touch and hold | then drag: a left-button drag | right click |
+| Touch and hold (0.5 s) | then drag: a left-button drag | right click |
 | Two fingers move | scroll (natural direction, momentum) | scroll at the fingers |
 | Pinch | zoom the view at the fingers | zoom the view at the fingers |
 
 Slow trackpad motion follows the finger exactly as drawn (so zooming in gives
 finer control); faster strokes travel up to 2.6× further on a smooth curve.
 When zoomed, the view pans to keep the trackpad pointer in view, and a direct
-drag held near an edge pans that way.
+drag held near an edge pans that way. The trackpad pointer starts at the
+host's cursor when the host sends its cursor separately (else mid-view). Two
+fingers moving together scroll; a pinch, even with one finger still, zooms.
 
 ## Lifecycle
 
 - The session is visible only while its view is on screen in the active app.
   Losing that (control centre, app switcher, a covering sheet) ends control
-  at once, which ends the session (frd's rule for a native producer).
-- Going to the background closes the session; returning offers to reconnect.
-  No session ever runs unseen.
+  at once, which ends the session (frd's rule for a native producer): the
+  app shows "Control ended" (`FR_END_CONTROL_STOPPED`, also used when frd
+  refused input or the host's picture changed size), never "the host ended
+  the session". A control request still pending when the view hid ends the
+  same way: a grant never attaches after the view comes back. While in
+  control, edge swipes need a second swipe (deferred system gestures), and a
+  session on screen keeps the device awake. A view-only session survives a
+  hide.
+- Going to the background closes the session; returning offers to reconnect
+  with the same capability, using the saved host as it is now. No session
+  ever runs unseen.
 - Network path changes are reported in the session; frd's supervisor retries
   a lost connection up to three times before the session ends.
 - Rotation and safe-area changes keep the zoom and the centred picture point.

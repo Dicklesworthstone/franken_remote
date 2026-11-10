@@ -14,16 +14,29 @@ struct Insets: Equatable {
 /// The picture is fitted (letterboxed) into the safe area, then optionally
 /// zoomed. `center` is the picture pixel shown at the middle of the content
 /// area; on an axis where the zoomed picture is smaller than the content it is
-/// centred instead. Rotation and safe-area changes keep zoom and `center`.
+/// centred instead. Rotation and safe-area changes keep zoom and `center`,
+/// except that an untouched view stays at its resting zoom.
+///
+/// With the device's pixel density known (`deviceScale`), the picture's
+/// origin sits on the device pixel grid, the resting zoom prefers a whole
+/// number of device pixels per picture pixel when that costs at most 15% of
+/// the fitted size (sharp instead of an off-integer upscale), and the zoom
+/// may go below fit as far as one device pixel per picture pixel.
 struct PictureMapper: Equatable {
     var viewSize: CGSize = .zero
     var insets = Insets()
     /// Encoded picture size in pixels; zero until the first picture.
     var picture: CGSize = .zero
-    /// 1 = fit. Never below 1.
+    /// Device pixels per view point (the drawable's scale); 0 = unknown: no
+    /// grid snapping, and the zoom stays between fit and the maximum.
+    var deviceScale: CGFloat = 0
+    /// 1 = fit; between `minZoom` and `maxZoom`.
     private(set) var zoom: CGFloat = 1
     /// Picture pixel at the middle of the content area.
     private(set) var center: CGPoint = .zero
+    /// The user has not zoomed or panned since the last reset: geometry
+    /// changes keep the view at its resting zoom.
+    private(set) var resting = true
 
     /// Most view points one picture pixel may cover when zoomed in.
     static let maxPointsPerPixel: CGFloat = 6
@@ -59,26 +72,49 @@ struct PictureMapper: Equatable {
 
     var maxZoom: CGFloat { max(1, Self.maxPointsPerPixel / fitScale) }
 
+    /// Device pixels per picture pixel at fit (0 when unknown).
+    private var fitDevicePixels: CGFloat {
+        guard isReady, deviceScale > 0 else { return 0 }
+        return fitScale * deviceScale
+    }
+
+    /// Fit, or one device pixel per picture pixel when fit upscales.
+    var minZoom: CGFloat {
+        let d = fitDevicePixels
+        return d > 1 ? 1 / d : 1
+    }
+
+    /// The zoom an untouched view rests at: fit, or the largest whole number
+    /// of device pixels per picture pixel when that is at most 15% smaller.
+    var restingZoom: CGFloat {
+        let d = fitDevicePixels
+        let whole = d.rounded(.down)
+        guard whole >= 1, d - whole > 0.0001, whole / d >= 0.85 else { return 1 }
+        return whole / d
+    }
+
     /// The zoom at which one picture pixel is exactly one device pixel.
     func actualPixelsZoom(screenScale: CGFloat) -> CGFloat {
         guard isReady, screenScale > 0 else { return 1 }
-        return min(maxZoom, max(1, 1 / (screenScale * fitScale)))
+        return min(maxZoom, max(minZoom, 1 / (screenScale * fitScale)))
     }
 
     /// Device pixels per picture pixel; an integer means pixel-exact drawing.
     func devicePixelsPerPixel(screenScale: CGFloat) -> CGFloat { scale * screenScale }
 
-    /// Where the picture is drawn, in view points.
+    /// Where the picture is drawn, in view points; its origin on the device
+    /// pixel grid when `deviceScale` is known.
     var pictureRect: CGRect {
         guard isReady else { return .zero }
         let s = scale
         let size = CGSize(width: picture.width * s, height: picture.height * s)
+        let grid = deviceScale
         func origin(_ length: CGFloat, _ contentMin: CGFloat, _ contentLength: CGFloat,
                     _ center: CGFloat) -> CGFloat {
-            if length <= contentLength {
-                return contentMin + (contentLength - length) / 2
-            }
-            return contentMin + contentLength / 2 - center * s
+            let exact = length <= contentLength
+                ? contentMin + (contentLength - length) / 2
+                : contentMin + contentLength / 2 - center * s
+            return grid > 0 ? (exact * grid).rounded() / grid : exact
         }
         return CGRect(
             x: origin(size.width, content.minX, content.width, center.x),
@@ -120,34 +156,59 @@ struct PictureMapper: Equatable {
     mutating func setZoom(_ value: CGFloat, at anchor: CGPoint) {
         guard isReady, value.isFinite else { return }
         let fixed = toPictureUnbounded(anchor)
-        zoom = min(maxZoom, max(1, value))
+        zoom = min(maxZoom, max(minZoom, value))
         let s = scale
         center = CGPoint(
             x: fixed.x - (anchor.x - content.midX) / s,
             y: fixed.y - (anchor.y - content.midY) / s)
         clamp()
+        resting = abs(zoom - restingZoom) < 1e-9 && fitsBoth
     }
 
     /// Move the picture with a finger: by `delta` view points.
     mutating func pan(by delta: CGVector) {
         guard isReady, delta.dx.isFinite, delta.dy.isFinite else { return }
         let s = scale
+        let before = center
         center.x -= delta.dx / s
         center.y -= delta.dy / s
         clamp()
+        if center != before { resting = false }
     }
 
-    /// Back to fit, centred.
+    /// Back to the resting zoom, centred.
     mutating func reset() {
-        zoom = 1
+        zoom = restingZoom
         center = CGPoint(x: picture.width / 2, y: picture.height / 2)
+        resting = true
     }
 
-    /// A new picture size: a different size starts again at fit.
+    /// A new picture size: a different size starts again at rest.
     mutating func setPicture(_ size: CGSize) {
         guard size != picture else { return }
         picture = size
         reset()
+    }
+
+    /// The view, its safe area or the device scale changed (layout,
+    /// rotation): an untouched view settles at its new resting zoom, a
+    /// zoomed one keeps its zoom and centre.
+    mutating func setGeometry(viewSize: CGSize, insets: Insets, deviceScale: CGFloat) {
+        self.viewSize = viewSize
+        self.insets = insets
+        self.deviceScale = deviceScale.isFinite && deviceScale > 0 ? deviceScale : 0
+        if resting {
+            reset()
+        } else {
+            zoom = min(maxZoom, max(minZoom, zoom))
+            clamp()
+        }
+    }
+
+    /// The whole picture is inside the content area.
+    private var fitsBoth: Bool {
+        let s = scale
+        return picture.width * s <= content.width + 1e-9 && picture.height * s <= content.height + 1e-9
     }
 
     /// Keep the content area covered on every axis the picture overfills.

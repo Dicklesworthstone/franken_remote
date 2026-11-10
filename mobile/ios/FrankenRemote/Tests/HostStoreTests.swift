@@ -44,6 +44,13 @@ final class HostStoreTests: XCTestCase {
         s.recordPin("fr-pin-v1 mac.tailtest.ts.net 100.64.0.9", for: host.id)
         XCTAssertEqual(s.host(host.id)?.pin, "fr-pin-v1 mac.tailtest.ts.net 100.64.0.1",
                        "only the user's explicit forget replaces a pin")
+        // A pin that keeps every saved address and adds a new family is
+        // recorded (the core admitted the family and pinned it)...
+        s.recordPin("fr-pin-v1 mac.tailtest.ts.net 100.64.0.1 fd7a:115c:a1e0::1", for: host.id)
+        XCTAssertEqual(s.host(host.id)?.pin, "fr-pin-v1 mac.tailtest.ts.net 100.64.0.1 fd7a:115c:a1e0::1")
+        // ...but one that drops a saved address never replaces it.
+        s.recordPin("fr-pin-v1 mac.tailtest.ts.net fd7a:115c:a1e0::1 100.64.0.9", for: host.id)
+        XCTAssertEqual(s.host(host.id)?.pin, "fr-pin-v1 mac.tailtest.ts.net 100.64.0.1 fd7a:115c:a1e0::1")
         let reloaded = store()
         XCTAssertEqual(reloaded.hosts.map(\.name), ["mac.tailtest.ts.net"])
         XCTAssertEqual(reloaded.hosts.first?.title, "Mac")

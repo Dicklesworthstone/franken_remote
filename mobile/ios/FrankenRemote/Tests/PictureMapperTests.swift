@@ -94,6 +94,53 @@ final class PictureMapperTests: XCTestCase {
         XCTAssertEqual(rotated.x, centre.x, accuracy: 1e-6)
     }
 
+    /// A 1920x1080 host on a 2556x1179-pixel phone in landscape (393 points
+    /// tall at 3x): fit is 1.09 device pixels per picture pixel.
+    private func landscape() -> PictureMapper {
+        var m = PictureMapper(picture: CGSize(width: 1920, height: 1080))
+        m.setGeometry(viewSize: CGSize(width: 852, height: 393),
+                      insets: Insets(top: 0, left: 59, bottom: 0, right: 59), deviceScale: 3)
+        return m
+    }
+
+    func testAnUntouchedViewRestsAtWholeDevicePixelsWhenThatCostsLittle() {
+        let m = landscape()
+        // Planted negative: plain fit is an off-integer upscale (blurred).
+        XCTAssertEqual(m.fitScale * 3, 1179.0 / 1080.0, accuracy: 1e-9)
+        XCTAssertEqual(m.zoom, m.restingZoom)
+        XCTAssertLessThan(m.zoom, 1)
+        XCTAssertEqual(m.devicePixelsPerPixel(screenScale: 3), 1, accuracy: 1e-9)
+        // Its origin is on the device pixel grid.
+        let r = m.pictureRect
+        XCTAssertEqual((r.minX * 3).rounded(), r.minX * 3, accuracy: 1e-9)
+        XCTAssertEqual((r.minY * 3).rounded(), r.minY * 3, accuracy: 1e-9)
+        XCTAssertTrue(m.resting)
+        // Far from a whole number (iPad-like: 1.42), it rests at fit.
+        var pad = PictureMapper(picture: CGSize(width: 1920, height: 1080))
+        pad.setGeometry(viewSize: CGSize(width: 1366, height: 1024), insets: Insets(), deviceScale: 2)
+        XCTAssertEqual(pad.zoom, 1)
+    }
+
+    func testActualPixelsIsReachableBelowFitWhenTheDeviceHasMorePixels() {
+        var pad = PictureMapper(picture: CGSize(width: 1920, height: 1080))
+        pad.setGeometry(viewSize: CGSize(width: 1366, height: 1024), insets: Insets(), deviceScale: 2)
+        let exact = pad.actualPixelsZoom(screenScale: 2)
+        // Planted negative: the old floor of 1 made this impossible.
+        XCTAssertLessThan(exact, 1)
+        pad.setZoom(exact, at: CGPoint(x: 683, y: 512))
+        XCTAssertEqual(pad.devicePixelsPerPixel(screenScale: 2), 1, accuracy: 1e-9)
+        XCTAssertFalse(pad.resting)
+        pad.zoom(by: 0.1, at: CGPoint(x: 683, y: 512))
+        XCTAssertEqual(pad.zoom, pad.minZoom, accuracy: 1e-12, "never below one device pixel")
+        // Rotation keeps a chosen zoom; an untouched view re-rests.
+        pad.setGeometry(viewSize: CGSize(width: 1024, height: 1366), insets: Insets(), deviceScale: 2)
+        XCTAssertEqual(pad.devicePixelsPerPixel(screenScale: 2), 1, accuracy: 1e-9)
+        var phone = landscape()
+        phone.setGeometry(viewSize: CGSize(width: 393, height: 852),
+                          insets: Insets(top: 59, left: 0, bottom: 34, right: 0), deviceScale: 3)
+        XCTAssertEqual(phone.zoom, phone.restingZoom)
+    }
+
     func testRevealPansJustEnoughToShowAPoint() {
         var m = portrait()
         m.setZoom(4, at: CGPoint(x: 196, y: 455))

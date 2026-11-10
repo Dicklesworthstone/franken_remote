@@ -13,6 +13,9 @@ enum InputStatus: Equatable {
     case invalid
     /// Control (and so the session) is ending.
     case controlLost
+    /// A key press or text was not sent: the host's input queue is half
+    /// full. Send it again on a later frame.
+    case busy
     case closed
     case stale
 
@@ -25,6 +28,7 @@ enum InputStatus: Equatable {
         case -4: self = .unsupported
         case -5: self = .controlLost
         case -6: self = .closed
+        case -7: self = .busy
         case -8: self = .stale
         default: self = .invalid
         }

@@ -18,6 +18,13 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     private var modifiers = StickyModifiers()
     private var softwareKeyboard = false
     private var heldKeys: Set<UInt16> = []
+    /// Software-keyboard input waiting for the host's input queue (a paste
+    /// arrives faster than the host takes keys): sent in order on later
+    /// refreshes. Bounded; never logged.
+    private var typing = TypingQueue()
+    /// How far the keyboard (with its extra-keys bar) covers the view's
+    /// bottom edge: the picture's content area stops above it.
+    private var keyboardOverlap: CGFloat = 0
 
     weak var session: RemoteSession? {
         didSet {
@@ -58,6 +65,29 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         }
         extraKeys.onDismiss = { [weak self] in self?.setSoftwareKeyboard(false) }
         accessibilityLabel = "Remote screen"
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(keyboardFrameChanged(_:)),
+                           name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
+        center.addObserver(self, selector: #selector(keyboardWillHide(_:)),
+                           name: UIResponder.keyboardWillHideNotification, object: nil)
+    }
+
+    @objc private func keyboardFrameChanged(_ note: Notification) {
+        guard let window,
+              let frame = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+        let local = convert(frame, from: window.screen.coordinateSpace)
+        let overlap = local.intersects(bounds) ? max(0, bounds.maxY - local.minY) : 0
+        if overlap != keyboardOverlap {
+            keyboardOverlap = overlap
+            setNeedsLayout()
+        }
+    }
+
+    @objc private func keyboardWillHide(_ note: Notification) {
+        if keyboardOverlap != 0 {
+            keyboardOverlap = 0
+            setNeedsLayout()
+        }
     }
 
     @available(*, unavailable)
@@ -66,14 +96,21 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     override func layoutSubviews() {
         super.layoutSubviews()
         metalView.frame = bounds
+        // Draw at the panel's own pixel density (nativeScale; it differs
+        // from `scale` on some phones), so one picture pixel can be exactly
+        // one device pixel.
+        let deviceScale = window?.screen.nativeScale ?? traitCollection.displayScale
+        if metalView.contentScaleFactor != deviceScale { metalView.contentScaleFactor = deviceScale }
         var mapper = interpreter.mapper
-        mapper.viewSize = bounds.size
-        mapper.insets = Insets(top: safeAreaInsets.top, left: safeAreaInsets.left,
-                               bottom: safeAreaInsets.bottom, right: safeAreaInsets.right)
-        mapper.clamp()
+        mapper.setGeometry(viewSize: bounds.size,
+                           insets: Insets(top: safeAreaInsets.top, left: safeAreaInsets.left,
+                                          bottom: max(safeAreaInsets.bottom, keyboardOverlap),
+                                          right: safeAreaInsets.right),
+                           deviceScale: deviceScale)
         interpreter.mapper = mapper
-        interpreter.screenScale = window?.screen.scale ?? traitCollection.displayScale
-        // Match the display's refresh (120 Hz on ProMotion phones).
+        interpreter.screenScale = deviceScale
+        // Match the display's refresh (120 Hz on ProMotion phones, with
+        // CADisableMinimumFrameDurationOnPhone in the Info.plist).
         metalView.preferredFramesPerSecond = window?.screen.maximumFramesPerSecond ?? 60
     }
 
@@ -98,6 +135,12 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
             if !controlling { releaseKeys() }
             if controlling, !isFirstResponder { becomeFirstResponder() }
         }
+        // The trackpad pointer starts where the host's cursor is, so the
+        // first tap clicks under the cursor the user sees.
+        if controlling, !interpreter.hasPointer, let cursor = renderer?.hostCursor {
+            interpreter.seedPointer(cursor)
+        }
+        if !typing.isEmpty { drainTyping() }
         handle(interpreter.tick(time: time))
     }
 
@@ -204,22 +247,19 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
-        guard let session else { return }
-        var unsupported: [Character] = []
+        guard session != nil else { return }
+        var items: [TypingQueue.Item] = []
         for character in text {
             let held = modifiers.active.map(\.usage)
             if let stroke = KeyboardMap.stroke(for: character) {
-                let mods = stroke.shift ? held + [HIDUsage.leftShift] : held
-                KeyTyper.type(stroke.usage, modifiers: mods, into: session)
+                items.append(.stroke(stroke.usage, modifiers: stroke.shift ? held + [HIDUsage.leftShift] : held))
                 modifiers.consume()
-            } else if session.text(String(character)) == .unsupported {
-                unsupported.append(character)
+            } else {
+                items.append(.text(String(character)))
             }
         }
+        enqueue(items)
         extraKeys.show(modifiers)
-        if let first = unsupported.first {
-            session.notice = "“\(first)” can't be sent: this host takes key presses only, and the app won't guess the host's keyboard layout."
-        }
     }
 
     func deleteBackward() {
@@ -227,10 +267,30 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     }
 
     private func typeExtra(_ usage: UInt16) {
-        guard let session else { return }
-        KeyTyper.type(usage, modifiers: modifiers.active.map(\.usage), into: session)
+        guard session != nil else { return }
+        enqueue([.stroke(usage, modifiers: modifiers.active.map(\.usage))])
         modifiers.consume()
         extraKeys.show(modifiers)
+    }
+
+    private func enqueue(_ items: [TypingQueue.Item]) {
+        if !typing.append(items) {
+            session?.notice = "That's too much text to type at once. Only the start was sent."
+        }
+        drainTyping()
+    }
+
+    /// Send queued typing until the host's input queue backs up again.
+    private func drainTyping() {
+        guard let session else {
+            typing.clear()
+            return
+        }
+        let outcome = typing.drain(into: session)
+        if outcome.unsupported {
+            // Content-free: never quote what was typed.
+            session.notice = "Some characters can't be sent: this host takes key presses only, and the app won't guess the host's keyboard layout."
+        }
     }
 
     // Hardware keyboards: one press, one release, no repeat.
@@ -280,9 +340,11 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
         return HIDUsage.isSendable(usage) ? usage : nil
     }
 
-    /// Release every key this view pressed (focus loss, control end).
+    /// Release every key this view pressed (focus loss, control end), and
+    /// drop typing that has not gone yet.
     func releaseKeys() {
         heldKeys.removeAll()
+        typing.clear()
         session?.releaseAllKeys()
     }
 

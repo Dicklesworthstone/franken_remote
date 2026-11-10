@@ -43,6 +43,58 @@ final class KeyboardTests: XCTestCase {
         XCTAssertEqual(m.active, [.option, .shift])
     }
 
+    func testTypingNeverReleasesAKeyItDidNotPress() {
+        // Shift is already held on a hardware keyboard: the core answers
+        // pending. Planted negative (the old typer): releasing it here
+        // would let go of the user's own key.
+        let sink = RecordingSink()
+        sink.keyAnswer = { usage, pressed in usage == HIDUsage.leftShift && pressed ? .pending : .sent }
+        XCTAssertEqual(KeyTyper.type(0x04, modifiers: [HIDUsage.leftShift], into: sink), .sent)
+        XCTAssertEqual(sink.calls, [.key(HIDUsage.leftShift, true), .key(0x04, true), .key(0x04, false)])
+        // A busy host: nothing typed, every press it made released.
+        let busy = RecordingSink()
+        busy.keyAnswer = { usage, pressed in usage == 0x04 && pressed ? .busy : .sent }
+        XCTAssertEqual(KeyTyper.type(0x04, modifiers: [HIDUsage.leftGUI], into: busy), .busy)
+        XCTAssertEqual(busy.calls, [.key(HIDUsage.leftGUI, true), .key(0x04, true), .key(HIDUsage.leftGUI, false)])
+    }
+
+    func testQueuedTypingWaitsForABusyHostAndKeepsItsOrder() {
+        var queue = TypingQueue()
+        let sink = RecordingSink()
+        var allow = 2
+        // The host takes two presses, then is busy until allowed again.
+        sink.keyAnswer = { _, pressed in
+            guard pressed else { return .sent }
+            if allow == 0 { return .busy }
+            allow -= 1
+            return .sent
+        }
+        XCTAssertTrue(queue.append([.stroke(0x04, modifiers: []), .stroke(0x05, modifiers: []),
+                                    .stroke(0x06, modifiers: []), .text("é")]))
+        var outcome = queue.drain(into: sink)
+        XCTAssertEqual(outcome.sent, 2)
+        XCTAssertTrue(outcome.busy)
+        XCTAssertEqual(queue.count, 2, "c and é wait; planted negative: none dropped")
+        allow = 5
+        outcome = queue.drain(into: sink)
+        XCTAssertEqual(outcome.sent, 1)
+        XCTAssertTrue(outcome.unsupported, "text the host does not take")
+        XCTAssertTrue(queue.isEmpty)
+        let pressed = sink.calls.compactMap { call -> UInt16? in
+            if case .key(let usage, true) = call { return usage } else { return nil }
+        }
+        XCTAssertEqual(pressed, [0x04, 0x05, 0x06, 0x06], "in order; c retried once")
+        // Bounded: an over-long paste keeps its start.
+        var long = TypingQueue()
+        XCTAssertFalse(long.append(Array(repeating: .stroke(0x04, modifiers: []), count: TypingQueue.capacity + 1)))
+        XCTAssertEqual(long.count, TypingQueue.capacity)
+        // Control gone drops the rest.
+        let lost = RecordingSink()
+        lost.keyResult = .controlLost
+        _ = long.drain(into: lost)
+        XCTAssertTrue(long.isEmpty)
+    }
+
     func testTypingPressesModifiersAroundTheKeyAndAlwaysReleasesThem() {
         let sink = RecordingSink()
         let result = KeyTyper.type(0x06, modifiers: [HIDUsage.leftGUI, HIDUsage.leftShift], into: sink)

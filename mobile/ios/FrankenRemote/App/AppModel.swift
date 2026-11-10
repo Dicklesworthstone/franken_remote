@@ -17,10 +17,20 @@ final class AppModel: ObservableObject {
     /// The saved machine being asked right now.
     @Published private(set) var listingFrom: String?
     private var listingTask: Task<Void, Never>?
+    /// A session to open: the host and whether it is control-capable.
+    struct SessionStart: Equatable {
+        var host: SavedHost
+        var control: Bool
+    }
+    /// A start waiting for this app's directory fetch to the same machine to
+    /// finish (`connect`), shown on the home screen while it waits.
+    @Published private(set) var starting: SessionStart?
+    private var connectTask: Task<Void, Never>?
 
     @Published private(set) var session: RemoteSession?
-    /// A host whose session the app closed when it went to the background.
-    @Published var reconnectOffer: SavedHost?
+    /// A session the app closed when it went to the background (or a start
+    /// it dropped), to offer again as it was (view-only stays view-only).
+    @Published var reconnectOffer: SessionStart?
     @Published var startError: String?
     @Published private(set) var online = true
     @Published private(set) var pathDescription = ""
@@ -70,12 +80,49 @@ final class AppModel: ObservableObject {
 
     /// Start a session (closing any other). `control` asks for a
     /// control-capable session; control itself is requested separately.
+    ///
+    /// frd serves one connection at a time and rebinds its socket between
+    /// them, so a session dialed while this app's directory fetch to the
+    /// same machine is still open loses its first handshake packets and
+    /// stalls about five seconds (seen live: two flows at launch, the
+    /// session's handshake timed out on the host). Such a start waits for
+    /// the fetch (one short exchange, at most three seconds) and the host's
+    /// cooldown first.
     func connect(_ host: SavedHost, control: Bool) {
         reconnectOffer = nil
         startError = nil
         session?.close()
         session = nil
         subscriptions.removeAll()
+        cancelStart()
+        guard listingFrom == host.name else {
+            start(host, control: control)
+            return
+        }
+        starting = SessionStart(host: host, control: control)
+        connectTask = Task { @MainActor [weak self] in
+            let deadline = ContinuousClock.now + .seconds(3)
+            while self?.listingFrom == host.name, ContinuousClock.now < deadline {
+                try? await Task.sleep(for: .milliseconds(50))
+                if Task.isCancelled { return }
+            }
+            // frd's cooldown before it listens again (250 ms).
+            try? await Task.sleep(for: .milliseconds(400))
+            guard let self, !Task.isCancelled else { return }
+            self.connectTask = nil
+            self.starting = nil
+            self.start(host, control: control)
+        }
+    }
+
+    /// Drop a start that is still waiting.
+    private func cancelStart() {
+        connectTask?.cancel()
+        connectTask = nil
+        starting = nil
+    }
+
+    private func start(_ host: SavedHost, control: Bool) {
         do {
             let next = try RemoteSession(host: host, control: control,
                                          requestControl: control && settings.controlOnConnect)
@@ -102,18 +149,26 @@ final class AppModel: ObservableObject {
 
     /// Ask the saved machines in turn until one lists. With none listing,
     /// the most recent machine's answer stays (its refusal or failure).
+    /// Never while a session is starting or open: the list is not on screen
+    /// then, and a fetch would compete with the session for its host.
     func refreshDirectory() async {
+        if sessionBusy { return }
         listingTask?.cancel()
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             let candidates = Self.directoryCandidates(self.store.hosts)
             guard !candidates.isEmpty else {
                 self.listing = nil
+                self.listingFrom = nil
                 return
             }
             var first: DirectoryResult?
             for host in candidates {
-                if Task.isCancelled { return }
+                // A session that started meanwhile has its host to itself.
+                if Task.isCancelled || self.sessionBusy {
+                    self.listingFrom = nil
+                    return
+                }
                 self.listingFrom = host.name
                 let result = await self.directory.fetch(from: host)
                 if Task.isCancelled { return }
@@ -131,9 +186,20 @@ final class AppModel: ObservableObject {
         await task.value
     }
 
-    /// Open a session to a machine a host listed, at its listed addresses.
+    /// Reconnect after the app came back: the saved host as it is now (a pin
+    /// recorded since), with the capability the closed session had.
+    func reconnect(_ offer: SessionStart) {
+        connect(store.host(offer.host.id) ?? offer.host, control: offer.control)
+    }
+
+    /// Open a session to a machine a host listed. A machine the user saved
+    /// opens exactly as saved (its port, its pin, resolved by name); any
+    /// other at its listed addresses on the app's default frd port.
     func connect(_ machine: DirectoryMachine, control: Bool) {
-        // A listed machine's own port is unknown: the app's default for frd.
+        if let saved = Self.savedMatch(for: machine, in: store.hosts) {
+            connect(saved, control: control)
+            return
+        }
         let port = UInt16(exactly: settings.defaultPort).flatMap { $0 == 0 ? nil : $0 }
             ?? UInt16(AppSettings.frdDefaultPort)
         guard let host = machine.host(port: port) else {
@@ -143,7 +209,18 @@ final class AppModel: ObservableObject {
         connect(host, control: control)
     }
 
+    /// A session is starting or open.
+    private var sessionBusy: Bool {
+        starting != nil || session.map { !$0.phase.isEnded } == true
+    }
+
+    /// The saved host a listed machine is, by its exact name.
+    nonisolated static func savedMatch(for machine: DirectoryMachine, in hosts: [SavedHost]) -> SavedHost? {
+        hosts.first { $0.name == machine.name.lowercased() }
+    }
+
     func disconnect() {
+        cancelStart()
         session?.close()
         session = nil
         subscriptions.removeAll()
@@ -155,8 +232,11 @@ final class AppModel: ObservableObject {
         case .background:
             // Never keep control (or a view) running unseen: close, and offer
             // to reconnect when the user comes back.
+            // A start still waiting would open the session unseen: drop it too.
+            if let starting { reconnectOffer = starting }
+            cancelStart()
             if let session, !session.phase.isEnded {
-                reconnectOffer = session.host
+                reconnectOffer = SessionStart(host: session.host, control: session.controlCapable)
                 session.close()
             }
             session = nil

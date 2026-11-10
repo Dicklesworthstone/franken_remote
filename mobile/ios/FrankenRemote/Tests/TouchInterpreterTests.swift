@@ -26,10 +26,15 @@ final class TouchInterpreterTests: XCTestCase {
         _ = touch.ended(1, at: CGPoint(x: 21, y: 301), time: 0.1)
         let centre = CGPoint(x: 960, y: 540)
         XCTAssertEqual(sink.buttons, [.button(.primary, true, centre), .button(.primary, false, centre)])
-        // Planted negative: a slow press is not a tap.
+        // A still press is a tap right up to the hold (no dead band)...
         sink.calls.removeAll()
         _ = touch.began(2, at: middle, time: 1)
-        _ = touch.ended(2, at: middle, time: 1.3)
+        _ = touch.ended(2, at: middle, time: 1.45)
+        XCTAssertEqual(sink.buttons.count, 2)
+        // ...and planted negative: one held past it is not.
+        sink.calls.removeAll()
+        _ = touch.began(3, at: middle, time: 2)
+        _ = touch.ended(3, at: middle, time: 2.6)
         XCTAssertTrue(sink.buttons.isEmpty)
     }
 
@@ -64,12 +69,41 @@ final class TouchInterpreterTests: XCTestCase {
         touch.controlling = true
         _ = touch.began(1, at: middle, time: 0)
         XCTAssertEqual(touch.tick(time: 0.2), [])
-        XCTAssertEqual(touch.tick(time: 0.36), [.haptic])
+        XCTAssertEqual(touch.tick(time: 0.45), [])
+        XCTAssertEqual(touch.tick(time: 0.51), [.haptic])
         XCTAssertEqual(sink.buttons, [.button(.primary, true, CGPoint(x: 960, y: 540))])
         _ = touch.moved(1, to: CGPoint(x: 202, y: 400), time: 1.36)
         XCTAssertEqual(sink.pointers.last?.x ?? 0, 1010, accuracy: 1e-6)
         _ = touch.ended(1, at: CGPoint(x: 202, y: 400), time: 1.4)
         XCTAssertEqual(sink.buttons.last, .button(.primary, false, CGPoint(x: 1010, y: 540)))
+    }
+
+    func testAHoldDragStartsFromWhereTheFingerCreptNotWhereItLanded() {
+        touch.controlling = true
+        _ = touch.began(1, at: middle, time: 0)
+        // Creeps 8 points (inside the slop: still a still touch).
+        _ = touch.moved(1, to: CGPoint(x: 200, y: 400), time: 0.3)
+        XCTAssertTrue(sink.pointers.isEmpty)
+        XCTAssertEqual(touch.tick(time: 0.51), [.haptic])
+        // Planted negative (the old rule measured from the landing point):
+        // 2 more points is 10 pixels, not 50.
+        _ = touch.moved(1, to: CGPoint(x: 202, y: 400), time: 1.5)
+        XCTAssertEqual(sink.pointers.last?.x ?? 0, 970, accuracy: 1e-6)
+    }
+
+    func testTheTrackpadPointerStartsAtASeededHostCursor() {
+        touch.controlling = true
+        XCTAssertFalse(touch.hasPointer)
+        touch.seedPointer(CGPoint(x: 100, y: 200))
+        XCTAssertTrue(touch.hasPointer)
+        _ = touch.began(1, at: middle, time: 0)
+        _ = touch.ended(1, at: middle, time: 0.1)
+        let at = CGPoint(x: 100, y: 200)
+        XCTAssertEqual(sink.buttons, [.button(.primary, true, at), .button(.primary, false, at)])
+        // Off-picture seeds are refused; a reset forgets the pointer.
+        touch.reset()
+        touch.seedPointer(CGPoint(x: 1920, y: 10))
+        XCTAssertFalse(touch.hasPointer)
     }
 
     func testTwoFingerTapRightClicksAndDoubleTapDoubleClicks() {
@@ -145,6 +179,24 @@ final class TouchInterpreterTests: XCTestCase {
         XCTAssertTrue(sink.calls.isEmpty)
     }
 
+    func testAOneFingerPinchZoomsAndNeverScrolls() {
+        touch.controlling = true
+        _ = touch.began(1, at: CGPoint(x: 150, y: 400), time: 0)
+        _ = touch.began(2, at: CGPoint(x: 234, y: 400), time: 0.01)
+        // One finger still, the other spreading in 2-point steps: the
+        // centroid travels half as far as the spread. Planted negative: the
+        // old rule called this a scroll once the travel passed the slop.
+        for step in 1...30 {
+            _ = touch.moved(2, to: CGPoint(x: 234 + CGFloat(step) * 2, y: 400), time: 0.01 + Double(step) * 0.008)
+        }
+        XCTAssertTrue(sink.scrolls.isEmpty)
+        XCTAssertGreaterThan(touch.mapper.zoom, 1.3)
+        // And lifting after it moved is never a two-finger right click.
+        _ = touch.ended(1, at: CGPoint(x: 150, y: 400), time: 0.26)
+        _ = touch.ended(2, at: CGPoint(x: 294, y: 400), time: 0.27)
+        XCTAssertTrue(sink.buttons.isEmpty)
+    }
+
     // MARK: Direct
 
     func testDirectTapClicksWhereTouchedAndOutsideTouchesSendNothing() {
@@ -200,7 +252,7 @@ final class TouchInterpreterTests: XCTestCase {
     func testLosingControlMidDragReleasesTheButton() {
         touch.controlling = true
         _ = touch.began(1, at: middle, time: 0)
-        _ = touch.tick(time: 0.4)
+        _ = touch.tick(time: 0.51)
         touch.controlling = false
         XCTAssertEqual(sink.buttons.last, .button(.primary, false, CGPoint(x: 960, y: 540)))
         // The rest of that touch does nothing.

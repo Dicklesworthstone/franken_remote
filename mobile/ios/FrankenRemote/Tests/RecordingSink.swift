@@ -15,6 +15,8 @@ final class RecordingSink: InputSink {
     var calls: [Call] = []
     var keyResult = InputStatus.sent
     var textResult = InputStatus.unsupported
+    /// Per-call answer for keys when set (usage, pressed) -> status.
+    var keyAnswer: ((UInt16, Bool) -> InputStatus)?
 
     func pointer(to point: CGPoint) -> InputStatus { calls.append(.pointer(point)); return .sent }
     func button(_ button: PointerButton, pressed: Bool, at point: CGPoint) -> InputStatus {
@@ -24,7 +26,10 @@ final class RecordingSink: InputSink {
         calls.append(.scroll(dx, dy, point)); return .sent
     }
     func scrollEnded() { calls.append(.scrollEnded) }
-    func key(_ usage: UInt16, pressed: Bool) -> InputStatus { calls.append(.key(usage, pressed)); return keyResult }
+    func key(_ usage: UInt16, pressed: Bool) -> InputStatus {
+        calls.append(.key(usage, pressed))
+        return keyAnswer?(usage, pressed) ?? keyResult
+    }
     func text(_ text: String) -> InputStatus { calls.append(.text(text)); return textResult }
 
     var buttons: [Call] { calls.filter { if case .button = $0 { return true } else { return false } } }

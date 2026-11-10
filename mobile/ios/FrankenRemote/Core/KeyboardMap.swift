@@ -138,26 +138,32 @@ struct StickyModifiers: Equatable {
 /// (reverse order). No repeat is ever generated.
 struct KeyTyper {
     /// Press-and-release `usage` with `modifiers` held. Returns the first
-    /// failure, if any; held modifiers are always released.
+    /// failure, if any (`.busy`: nothing was typed, send it again later).
+    /// Only keys this call pressed are released: a key already down
+    /// (`.pending`, e.g. held on a hardware keyboard) stays its owner's.
     @discardableResult
     static func type(_ usage: UInt16, modifiers: [UInt16], into sink: InputSink) -> InputStatus {
         var pressed: [UInt16] = []
+        var seen: [UInt16] = []
         var result = InputStatus.sent
-        for modifier in modifiers where !pressed.contains(modifier) {
+        for modifier in modifiers where !seen.contains(modifier) {
+            seen.append(modifier)
             let status = sink.key(modifier, pressed: true)
-            if status == .sent || status == .pending {
+            if status == .sent {
                 pressed.append(modifier)
-            } else {
+            } else if status != .pending {
                 result = status
                 break
             }
         }
         if result == .sent {
             let down = sink.key(usage, pressed: true)
-            if down == .sent || down == .pending {
+            if down == .sent {
                 let up = sink.key(usage, pressed: false)
                 if up != .sent, up != .pending { result = up }
             } else {
+                // `.pending`: already held elsewhere; a release here would
+                // let go of the user's own key, so nothing is typed.
                 result = down
             }
         }
@@ -165,5 +171,87 @@ struct KeyTyper {
             sink.key(modifier, pressed: false)
         }
         return result
+    }
+}
+
+/// Software-keyboard input waiting for the host, sent in order. The core
+/// answers `.busy` while the host's input queue is backed up (a paste
+/// arrives faster than the host takes keys): the drain stops there and the
+/// rest goes on a later call. Bounded; holds what the user typed, so it is
+/// never logged or quoted.
+struct TypingQueue {
+    enum Item: Equatable {
+        case stroke(UInt16, modifiers: [UInt16])
+        case text(String)
+    }
+    /// Most items waiting at once; more are refused.
+    static let capacity = 4096
+
+    private var items: [Item] = []
+    private var head = 0
+
+    var isEmpty: Bool { head >= items.count }
+    var count: Int { items.count - head }
+
+    /// Queue `new` after what is waiting. False when some did not fit
+    /// (those are dropped, the rest kept in order).
+    mutating func append(_ new: [Item]) -> Bool {
+        compact()
+        let room = max(0, Self.capacity - count)
+        items.append(contentsOf: new.prefix(room))
+        return new.count <= room
+    }
+
+    mutating func clear() {
+        items.removeAll()
+        head = 0
+    }
+
+    struct Outcome: Equatable {
+        var sent = 0
+        /// Text the host does not take (key presses only) was dropped.
+        var unsupported = false
+        /// Stopped at a busy host; the rest waits.
+        var busy = false
+    }
+
+    /// Send in order until the host is busy or everything went. Control
+    /// gone drops the rest.
+    mutating func drain(into sink: InputSink) -> Outcome {
+        var outcome = Outcome()
+        while head < items.count {
+            let item = items[head]
+            let status: InputStatus
+            switch item {
+            case .stroke(let usage, let modifiers):
+                status = KeyTyper.type(usage, modifiers: modifiers, into: sink)
+            case .text(let text):
+                status = sink.text(text)
+            }
+            switch status {
+            case .busy:
+                outcome.busy = true
+                compact()
+                return outcome
+            case .sent, .pending:
+                outcome.sent += 1
+                head += 1
+            case .unsupported, .outside, .invalid:
+                if case .text = item { outcome.unsupported = true }
+                head += 1
+            case .notControlled, .controlLost, .closed, .stale:
+                clear()
+                return outcome
+            }
+        }
+        clear()
+        return outcome
+    }
+
+    private mutating func compact() {
+        if head > 0 {
+            items.removeFirst(head)
+            head = 0
+        }
     }
 }

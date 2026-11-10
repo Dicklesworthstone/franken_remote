@@ -76,6 +76,23 @@ final class DirectoryTests: XCTestCase {
         XCTAssertEqual(AppModel.directoryCandidates([]), [])
     }
 
+    func testAListedMachineTheUserSavedOpensAsSaved() throws {
+        guard case .listed(_, let machines, _)? = DirectoryResult.parse(listed) else {
+            return XCTFail("not a listing")
+        }
+        let saved = SavedHost(id: UUID(), name: "mac-mini-old.tail1f21e.ts.net", port: 18443,
+                              nickname: "Mini", pin: "fr-pin-v1 mac-mini-old.tail1f21e.ts.net 100.70.0.1")
+        let other = SavedHost(id: UUID(), name: "trj.tail1f21e.ts.net", port: 8443)
+        // The serving host (saved, as every directory source is) keeps its
+        // own port, pin and name resolution, not the listing's.
+        let match = try XCTUnwrap(AppModel.savedMatch(for: machines[0], in: [other, saved]))
+        XCTAssertEqual(match.id, saved.id)
+        XCTAssertEqual(match.port, 18443)
+        XCTAssertFalse(match.dialsDirectly)
+        // Planted negative: an unsaved listed machine has no saved match.
+        XCTAssertNil(AppModel.savedMatch(for: machines[1], in: [other, saved]))
+    }
+
     func testHostsSavedBeforeTheDirectoryStillLoadAndDialByName() throws {
         let suite = "fr.tests.directory.compat"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))

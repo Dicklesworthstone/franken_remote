@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The full-screen session: the host's picture edge to edge (content kept in
 /// the safe area), a toolbar that fades away while you work, and the
@@ -59,10 +60,17 @@ struct SessionScreen: View {
         .background(Color.black)
         .statusBarHidden(session.phase.isViewing && !toolbarVisible)
         .persistentSystemOverlays(session.phase.isViewing ? .hidden : .automatic)
+        // In control, an edge swipe needs a second swipe to open Control
+        // Center or go home: leaving the screen ends control (and the
+        // session), so a stray swipe should not.
+        .defersSystemGestures(on: session.phase == .controlled ? .all : [])
         .animation(.easeInOut(duration: 0.2), value: toolbarVisible)
-        .onChange(of: session.phase) { _, phase in
+        .onChange(of: session.phase, initial: true) { _, phase in
             if phase.isViewing { scheduleHide() } else { showToolbar() }
+            // A session on screen keeps the device awake.
+            UIApplication.shared.isIdleTimerDisabled = phase.isViewing
         }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         .task(id: settings.showStats) {
             guard settings.showStats else { return }
             while !Task.isCancelled {
