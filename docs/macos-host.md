@@ -48,12 +48,17 @@ start the probes ask once, and macOS shows its prompts naming `frd`:
 2. **Screen Recording**: the capture worker's encoder probe.
 
 Allow both, at the Mac itself (macOS never lets these be granted remotely).
-Until then each start refuses by name, for example
-`Refusal (encoder_unavailable): ... videotoolbox=screen_recording_not_granted`,
-and launchd starts it again 10 seconds later. A Developer ID signature keeps
-the grants across updates; an unsigned or ad-hoc build would need them again
-after every rebuild. Both entries can be revoked any time in System Settings >
-Privacy & Security.
+Until then `frd` binds nothing and waits, saying so once in its log:
+
+```
+frd: waiting for macOS Screen Recording permission: at this Mac, allow frd in System Settings > Privacy & Security > Screen Recording; sharing starts by itself once it is allowed
+```
+
+It checks again every 5 seconds for the first minute, then every 30 seconds,
+and starts sharing as soon as the permission is allowed. A Developer ID
+signature keeps the grants across updates; an unsigned or ad-hoc build would
+need them again after every rebuild. Both entries can be revoked any time in
+System Settings > Privacy & Security.
 
 ## Text clipboard
 
@@ -96,8 +101,9 @@ still need native qualification; this is not a hardware or tailnet pass claim.
 | Uninstall | `frd uninstall`, after `bootout` |
 
 launchd restarts the agent only after a failed start (`KeepAlive` on
-unsuccessful exit, throttled to 10 s). It starts at every login and stops at
-logout. Locking the screen does not end a share yet.
+unsuccessful exit, throttled to 10 s); waiting for a permission is not a
+failure. It starts at every login and stops at logout. Locking the screen does
+not end a share yet.
 
 ## Tailscale
 

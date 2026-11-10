@@ -791,7 +791,7 @@ fn launchd_agent_steps(
             "Restart it with 'launchctl kickstart -k {domain}/{LAUNCHD_LABEL}'; its output goes to {}.",
             log.display()
         ),
-        "On its first start macOS asks for Screen Recording for frd (and Accessibility when it controls input). Allow frd under System Settings > Privacy & Security; frd retries every 10 seconds until both are granted, and a signed frd keeps the grants across updates.".into(),
+        "On its first start macOS asks for Screen Recording for frd (and Accessibility when it controls input). Allow frd under System Settings > Privacy & Security; frd waits for each and starts sharing once it is allowed, and a signed frd keeps the grants across updates.".into(),
     ];
     if options.run_args.iter().all(|arg| arg != "--input-agent") {
         steps.push(
