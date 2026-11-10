@@ -128,24 +128,35 @@ fn serve(configuration: &Configuration, shared: &Shared, child: &mut Child) -> R
     }
 }
 
+fn open_image(path: &std::path::Path) -> Result<std::fs::File, Error> {
+    // Check the object after a nonblocking, no-follow open. An O_RDONLY open
+    // of a FIFO waits for a writer before metadata is available, preventing
+    // the original monitor worker from ever reaching its cleanup path.
+    let image = OpenOptions::new()
+        .read(true)
+        .custom_flags(
+            i32::try_from((OFlags::NOFOLLOW | OFlags::NONBLOCK).bits())
+                .map_err(|_| Error::Image)?,
+        )
+        .open(path)
+        .map_err(|_| Error::Image)?;
+    let metadata = image.metadata().map_err(|_| Error::Image)?;
+    let uid = rustix::process::geteuid().as_raw();
+    if !metadata.is_file()
+        || ![0, uid].contains(&metadata.uid())
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o111 == 0
+    {
+        return Err(Error::Image);
+    }
+    Ok(image)
+}
+
 pub(super) fn run(configuration: &Configuration, shared: &Shared) -> Result<(), Error> {
     // Execute the opened ELF image, not a path that could be replaced after the
     // ownership check. No shell, scripts, PATH, environment or bearer arguments.
     let launch = || -> Result<Child, Error> {
-        let image = OpenOptions::new()
-            .read(true)
-            .custom_flags(i32::try_from(OFlags::NOFOLLOW.bits()).map_err(|_| Error::Image)?)
-            .open(&configuration.image)
-            .map_err(|_| Error::Image)?;
-        let metadata = image.metadata().map_err(|_| Error::Image)?;
-        let uid = rustix::process::geteuid().as_raw();
-        if !metadata.is_file()
-            || ![0, uid].contains(&metadata.uid())
-            || metadata.mode() & 0o022 != 0
-            || metadata.mode() & 0o111 == 0
-        {
-            return Err(Error::Image);
-        }
+        let image = open_image(&configuration.image)?;
         if let Status::Stopped(error) = shared.status() {
             return Err(error);
         }
@@ -182,4 +193,33 @@ pub(super) fn run(configuration: &Configuration, shared: &Shared) -> Result<(), 
         OCCUPIED.store(false, Ordering::Release);
     }
     reaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fifo_image_refuses_without_waiting_for_a_writer() {
+        use rustix::fs::{CWD, Mode, mkfifoat};
+        use std::sync::mpsc;
+
+        let mut entropy = [0; 8];
+        getrandom::fill(&mut entropy).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fr-monitor-image-fifo-{}-{:x}",
+            std::process::id(),
+            u64::from_ne_bytes(entropy)
+        ));
+        mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR).unwrap();
+        let (reply, result) = mpsc::sync_channel(1);
+        let task = thread::spawn(move || {
+            let _ = reply.send(open_image(&path).map(|_| ()));
+        });
+        assert_eq!(
+            result.recv_timeout(Duration::from_secs(1)).unwrap(),
+            Err(Error::Image)
+        );
+        task.join().unwrap();
+    }
 }

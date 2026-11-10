@@ -137,6 +137,14 @@ display is the one being shared). Nothing is derived from the environment.
 inherited pipes, and every status check re-expires the child's evidence on
 `CLOCK_BOOTTIME` independently of its replies.
 
+The parent stores status, the original evidence deadline and its last clock
+sample under one lock. A native terminal response, expired response, clock
+regression or poisoned state is published as terminal before returning to the
+process supervisor; a later heartbeat cannot renew it. Startup also wakes on
+its own bounded timer when the native launcher produces no events. Executable
+validation uses a nonblocking, no-follow open before checking file metadata,
+so selecting a FIFO cannot strand the monitor while waiting for a writer.
+
 * Before any tailnet I/O, certificate fetch or bind, `frd run` waits (at most
   two seconds) for fresh Active evidence; otherwise it exits with
   `session_monitor_unavailable` and nothing is shared.

@@ -8,8 +8,8 @@ pub use protocol::{Selection, State};
 use std::{
     path::PathBuf,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, MutexGuard,
+        atomic::{AtomicBool, Ordering},
     },
     task::{Context, Waker},
     thread::{self, JoinHandle},
@@ -62,12 +62,87 @@ pub fn now_ns() -> Result<u64, Error> {
         .ok_or(Error::Clock)
 }
 struct Shared {
-    state: Mutex<Status>,
-    until: AtomicU64,
-    last: AtomicU64,
+    evidence: Mutex<Evidence>,
     waker: Mutex<Option<Waker>>,
 }
+/// Status and its original time bounds have one serialization point. In
+/// particular, accepting a reply cannot refresh an expiry or overwrite a clock
+/// regression discovered by another reader between separate checks.
+struct Evidence {
+    status: Status,
+    until_ns: u64,
+    last_ns: u64,
+}
+impl Evidence {
+    fn stop(&mut self, error: Error) {
+        if !matches!(self.status, Status::Stopped(_)) {
+            self.status = Status::Stopped(error);
+        }
+    }
+
+    fn check(&mut self, sample: Result<u64, Error>) -> Result<u64, Error> {
+        if let Status::Stopped(error) = self.status {
+            return Err(error);
+        }
+        let result = sample.and_then(|now| {
+            if now < self.last_ns {
+                return Err(Error::Clock);
+            }
+            if now >= self.until_ns {
+                return Err(if self.status == Status::Opening {
+                    Error::OpeningExpired
+                } else {
+                    Error::EvidenceExpired
+                });
+            }
+            self.last_ns = now;
+            Ok(now)
+        });
+        if let Err(error) = result {
+            self.stop(error);
+        }
+        result
+    }
+
+    fn accept(&mut self, reply: protocol::Reply, sent: u64, now: u64) -> Result<(), Error> {
+        let result = match reply.state {
+            State::Active => (|| {
+                // A valid IPC response cannot make its source evidence younger.
+                // The caller already checked the PREVIOUS bound under this lock.
+                let until = reply
+                    .until_ns
+                    .min(sent.checked_add(VALID_NS).ok_or(Error::Clock)?);
+                if now < sent || until <= now {
+                    return Err(Error::EvidenceExpired);
+                }
+                self.until_ns = until;
+                self.status = Status::Active;
+                Ok(())
+            })(),
+            State::Opening if self.status == Status::Opening => Ok(()),
+            State::Opening => Err(Error::Protocol),
+            state => Err(Error::Native(state)),
+        };
+        if let Err(error) = result {
+            // Publish the terminal cause before returning to the subprocess
+            // supervisor. A preempted supervisor must not leave old Active
+            // evidence usable after a native stop or invalid response.
+            self.stop(error);
+        }
+        result
+    }
+}
 impl Shared {
+    fn evidence(&self) -> MutexGuard<'_, Evidence> {
+        match self.evidence.lock() {
+            Ok(evidence) => evidence,
+            Err(poisoned) => {
+                let mut evidence = poisoned.into_inner();
+                evidence.stop(Error::Protocol);
+                evidence
+            }
+        }
+    }
     fn wake(&self) {
         let w = self
             .waker
@@ -79,77 +154,47 @@ impl Shared {
         }
     }
     fn stop(&self, error: Error) {
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !matches!(*state, Status::Stopped(_)) {
-                *state = Status::Stopped(error);
-            }
-        }
+        self.evidence().stop(error);
         self.wake();
     }
     fn status(&self) -> Status {
-        {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if matches!(*state, Status::Stopped(_)) {
-                return *state;
-            }
-            match now_ns() {
-                Err(error) => *state = Status::Stopped(error),
-                Ok(at) if at < self.last.fetch_max(at, Ordering::AcqRel) => {
-                    *state = Status::Stopped(Error::Clock);
-                }
-                Ok(at) if at >= self.until.load(Ordering::Acquire) => {
-                    *state = Status::Stopped(if *state == Status::Opening {
-                        Error::OpeningExpired
-                    } else {
-                        Error::EvidenceExpired
-                    });
-                }
-                Ok(_) => return *state,
-            }
+        self.status_with(now_ns)
+    }
+    fn status_with(&self, clock: impl FnOnce() -> Result<u64, Error>) -> Status {
+        let mut evidence = self.evidence();
+        if !matches!(evidence.status, Status::Stopped(_)) {
+            let _ = evidence.check(clock());
         }
-        self.wake();
-        *self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        let status = evidence.status;
+        drop(evidence);
+        if matches!(status, Status::Stopped(_)) {
+            self.wake();
+        }
+        status
     }
     fn accept(&self, reply: protocol::Reply, sent: u64) -> Result<(), Error> {
-        if let Status::Stopped(error) = self.status() {
-            return Err(error);
-        }
-        match reply.state {
-            State::Active => {
-                let mut state = self.state.lock().map_err(|_| Error::Protocol)?;
-                if let Status::Stopped(error) = *state {
-                    return Err(error);
-                }
-                let now = now_ns()?;
-                // IPC never refreshes old evidence. Sample inside the original
-                // state lock, so a suspended publisher cannot revive an expired owner.
-                let until = reply
-                    .until_ns
-                    .min(sent.checked_add(VALID_NS).ok_or(Error::Clock)?);
-                if now < sent || until <= now || now >= self.until.load(Ordering::Acquire) {
-                    return Err(Error::EvidenceExpired);
-                }
-                self.last.store(now, Ordering::Release);
-                self.until.store(until, Ordering::Release);
-                *state = Status::Active;
-                drop(state);
-                self.wake();
-                Ok(())
-            }
-            State::Opening if self.status() == Status::Opening => Ok(()),
-            State::Opening => Err(Error::Protocol),
-            state => Err(Error::Native(state)),
-        }
+        self.accept_with(reply, sent, now_ns)
+    }
+    fn accept_with(
+        &self,
+        reply: protocol::Reply,
+        sent: u64,
+        clock: impl FnOnce() -> Result<u64, Error>,
+    ) -> Result<(), Error> {
+        let mut evidence = self.evidence();
+        let result = if let Status::Stopped(error) = evidence.status {
+            Err(error)
+        } else {
+            // Clock sampling, previous-expiry validation and reply publication
+            // are one operation. No status reader can publish a newer sample
+            // between these checks or have it replaced by an older reply.
+            evidence
+                .check(clock())
+                .and_then(|now| evidence.accept(reply, sent, now))
+        };
+        drop(evidence);
+        self.wake();
+        result
     }
 }
 #[derive(Clone)]
@@ -191,9 +236,11 @@ impl Monitor {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
         let shared = Arc::new(Shared {
-            state: Mutex::new(Status::Opening),
-            until: AtomicU64::new(until),
-            last: AtomicU64::new(now),
+            evidence: Mutex::new(Evidence {
+                status: Status::Opening,
+                until_ns: until,
+                last_ns: now,
+            }),
             waker: Mutex::new(None),
         });
         let inside = shared.clone();
@@ -229,3 +276,6 @@ impl Drop for Monitor {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod lifetime_tests;

@@ -807,18 +807,28 @@ fn session_ended(lifetime: Option<&session_monitor::Control>) -> Option<session_
     }
 }
 
-/// Wait for the monitor's first fresh evidence. The monitor bounds opening
-/// itself (two seconds), so this cannot wait forever.
-async fn session_opened(lifetime: &session_monitor::Control) -> Result<(), Error> {
-    poll_fn(|task| {
-        lifetime.register(task);
-        match lifetime.status() {
-            Lifetime::Opening => Poll::Pending,
-            Lifetime::Active => Poll::Ready(Ok(())),
-            Lifetime::Stopped(cause) => Poll::Ready(Err(Error::SessionMonitor(cause))),
+/// Wait for the original monitor's first fresh evidence. Check its deadline
+/// independently of native/launch progress: a stuck child cannot be relied on
+/// to wake this future when the two-second opening budget expires.
+pub(crate) async fn session_opened(
+    cx: &Cx,
+    lifetime: &session_monitor::Control,
+) -> Result<(), Error> {
+    loop {
+        let mut tick = pin!(asupersync::time::sleep(cx.now(), Duration::from_millis(50)));
+        let result = poll_fn(|task| {
+            lifetime.register(task);
+            match lifetime.status() {
+                Lifetime::Active => Poll::Ready(Some(Ok(()))),
+                Lifetime::Stopped(cause) => Poll::Ready(Some(Err(Error::SessionMonitor(cause)))),
+                Lifetime::Opening => tick.as_mut().poll(task).map(|()| None),
+            }
+        })
+        .await;
+        if let Some(result) = result {
+            return result;
         }
-    })
-    .await
+    }
 }
 
 /// Stop the monitor and reap its thread and child within a bound; residue is
@@ -1042,7 +1052,7 @@ fn serve_run(
             // or binding; a locked or unverifiable session shares nothing.
             if let Some(lifetime) = lifetime {
                 let Some(opened) =
-                    unless_stopped(session_opened(lifetime), stop, &mut signals).await
+                    unless_stopped(session_opened(&broker, lifetime), stop, &mut signals).await
                 else {
                     return Ok(());
                 };
