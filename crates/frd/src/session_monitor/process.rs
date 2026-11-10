@@ -232,7 +232,6 @@ mod tests {
 
     #[test]
     fn fifo_image_refuses_without_waiting_for_a_writer() {
-        use rustix::fs::{CWD, Mode, mkfifoat};
         use std::sync::mpsc;
 
         let mut entropy = [0; 8];
@@ -242,7 +241,13 @@ mod tests {
             std::process::id(),
             u64::from_ne_bytes(entropy)
         ));
-        mkfifoat(CWD, &path, Mode::RUSR | Mode::WUSR).unwrap();
+        // POSIX mkfifo(1): rustix has no FIFO constructor on Apple targets.
+        let made = std::process::Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success(), "mkfifo {}", path.display());
         let (reply, result) = mpsc::sync_channel(1);
         let task = thread::spawn(move || {
             let _ = reply.send(open_image(&path).map(|_| ()));

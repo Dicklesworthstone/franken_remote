@@ -322,8 +322,8 @@ async fn run_native(
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 pub(crate) mod tests;
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod stream_fixture;

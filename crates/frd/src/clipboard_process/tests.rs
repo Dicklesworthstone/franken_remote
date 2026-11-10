@@ -68,17 +68,30 @@ fn line(log: &Path, prefix: &str) -> Option<String> {
 
 #[test]
 fn a_local_copy_is_read_and_a_published_item_keeps_its_stamp() {
+    // The child runs with a cleared environment. Only Linux supplies DISPLAY;
+    // neither platform supplies XAUTHORITY here. Python may add LC_CTYPE, and
+    // macOS's /usr/bin/python3 (the xcrun shim that runs this fixture) adds its
+    // SDK search variables and CoreFoundation's text encoding before the
+    // interpreter starts, also when launched with an empty environment.
+    const MACOS_SHIM: [&str; 5] = [
+        "CPATH",
+        "LIBRARY_PATH",
+        "MANPATH",
+        "SDKROOT",
+        "__CF_USER_TEXT_ENCODING",
+    ];
     let runtime = runtime();
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
     let (image, log) = fixture("normal");
     let mut owner = RemoteClipboard::start(&launch(&image), cx.clone(), 4096).unwrap();
-    // The child runs with a cleared environment. Only Linux supplies DISPLAY;
-    // neither platform supplies XAUTHORITY here. Python may add LC_CTYPE.
     let start = line(&log, "START").unwrap();
     let env = start.rsplit(' ').next().unwrap();
     assert!(
         env.split(',').all(|key| {
-            key.is_empty() || key == "LC_CTYPE" || (cfg!(target_os = "linux") && key == "DISPLAY")
+            key.is_empty()
+                || key == "LC_CTYPE"
+                || (cfg!(target_os = "linux") && key == "DISPLAY")
+                || (cfg!(target_os = "macos") && MACOS_SHIM.contains(&key))
         }),
         "{env}"
     );

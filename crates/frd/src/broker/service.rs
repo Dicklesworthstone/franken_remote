@@ -289,6 +289,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn named_display_reports_unknown_geometry_not_1080p() {
         for (wayland, x11, compositor, display) in [
             (Some("wayland-1"), None, "wayland", "wayland-1"),
@@ -310,6 +311,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn no_display_variables_is_a_typed_refusal() {
         assert_eq!(
             BrokerService::session_desktop(None, None),

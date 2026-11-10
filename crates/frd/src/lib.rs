@@ -21,7 +21,7 @@
 #![recursion_limit = "256"]
 //! Host broker integration. Native capture/codec code runs in child processes,
 //! never in an authority task. Asupersync QUIC remains the primary transport.
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, unix))]
 mod test_support;
 
 #[cfg(native_stack)]
@@ -125,4 +125,5 @@ mod session_ui_process;
 // Executable test fixture images, shared with the integration tests.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "../tests/support/executable.rs"]
+#[allow(dead_code)] // Used by the host-stack tests only.
 mod executable;

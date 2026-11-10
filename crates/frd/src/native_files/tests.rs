@@ -275,14 +275,14 @@ fn selection_refuses_links_and_special_files_by_type() {
     fs::create_dir(scratch.0.join("folder")).unwrap();
     symlink(&regular, scratch.0.join("alias.bin")).unwrap();
     let _socket = std::os::unix::net::UnixListener::bind(scratch.0.join("socket")).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        scratch.0.join("fifo"),
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::from_raw_mode(0o600),
-        0,
-    )
-    .unwrap();
+    // POSIX mkfifo(1): rustix has no FIFO constructor on Apple targets.
+    let fifo = scratch.0.join("fifo");
+    let made = std::process::Command::new("mkfifo")
+        .args(["-m", "600"])
+        .arg(&fifo)
+        .status()
+        .unwrap();
+    assert!(made.success(), "mkfifo {}", fifo.display());
     fs::write(scratch.0.join("a:b.txt"), b"x").unwrap();
     let other = Scratch::new(0o700);
     fs::write(other.0.join(name), b"same basename").unwrap();
