@@ -123,9 +123,14 @@ static int snapshot(FrSessionMonitor *owner, FrSessionSnapshot *out) {
     FrSessionSnapshot result = {0};
     BOOL on_console = NO, logged_in = NO;
     BOOL complete = number(session, kCGSessionUserIDKey, &result.uid) &&
-                    number(session, kCGSessionConsoleSetKey, &result.console_set) &&
                     boolean(session, kCGSessionOnConsoleKey, &on_console) &&
                     boolean(session, kCGSessionLoginDoneKey, &logged_in);
+    // macOS 27.0.1 no longer reports a console set. Bind it when present; an
+    // absent key reads as UINT32_MAX, so a key that appears, disappears or
+    // changes within an epoch is still an identity change.
+    result.console_set = UINT32_MAX;
+    if (complete && CFDictionaryContainsKey(session, kCGSessionConsoleSetKey))
+        complete = number(session, kCGSessionConsoleSetKey, &result.console_set);
     CFRelease(session);
     if (!complete) return FR_MS_SERVICE_UNAVAILABLE;
     if (result.uid != owner->uid) return FR_MS_IDENTITY_CHANGED;
@@ -165,7 +170,12 @@ int fr_ms_open(uint32_t uid, void **out) {
         @try {
             if (@available(macOS 12.0, *)) {
                 [NSApplication sharedApplication];
-                if (!NSApp || ![NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited])
+                if (!NSApp) return FR_MS_UNSUPPORTED;
+                // This unbundled helper already starts Prohibited, and AppKit
+                // answers NO to a switch that changes nothing (macOS 27.0.1).
+                // Require the resulting policy, not the call's answer.
+                (void)[NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];
+                if (NSApp.activationPolicy != NSApplicationActivationPolicyProhibited)
                     return FR_MS_UNSUPPORTED;
                 FrSessionMonitor *owner = [[FrSessionMonitor alloc] init];
                 if (!owner) return FR_MS_FAILED;
