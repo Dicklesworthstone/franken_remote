@@ -37,7 +37,11 @@ mod host_choice;
 ))]
 #[path = "fr_cli/linux.rs"]
 mod linux;
-#[cfg(any(all(target_os = "macos", not(feature = "macos-desktop")), test))]
+// Its tests also run on Linux; fr_tailnet has no peer selector on Windows.
+#[cfg(any(
+    all(target_os = "macos", not(feature = "macos-desktop")),
+    all(test, any(target_os = "linux", target_os = "macos"))
+))]
 #[path = "fr_cli/macos_inspect.rs"]
 mod macos_inspect;
 #[path = "fr_cli/options.rs"]

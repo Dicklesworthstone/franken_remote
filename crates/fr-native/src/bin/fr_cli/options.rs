@@ -23,6 +23,10 @@ pub struct Options {
     pub json: bool,
     pub socket: Option<PathBuf>,
 }
+#[allow(
+    clippy::large_enum_variant,
+    reason = "parsed once per process from argv; on Windows Connect is 432 bytes against 216"
+)]
 pub enum Command {
     Help,
     Hosts,

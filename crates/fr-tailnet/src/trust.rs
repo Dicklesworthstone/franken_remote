@@ -2,17 +2,19 @@
 //! Roots always come from a local file chosen by the operator (by default the
 //! distribution CA bundle), never from the contacted peer or `LocalAPI` output.
 use asupersync::tls::{Certificate, RootCertStore};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     fmt,
     fs::File,
     io::Read,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 
 /// Debian/Ubuntu/Arch/Fedora-compatible distribution bundle location. It is a
 /// regular file on Debian/Ubuntu and a symlink into the extracted trust store
-/// on Fedora/RHEL and Arch; see [`resolve_protected`].
+/// on Fedora/RHEL and Arch; see [`resolve_protected`]. Windows has no such
+/// bundle, and [`resolve_protected`] refuses this default there.
 #[cfg(not(target_os = "macos"))]
 pub const SYSTEM_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// The PEM bundle macOS ships for `LibreSSL` (root-owned, under the
@@ -43,6 +45,7 @@ impl std::error::Error for TrustError {}
 /// hops. Every link must be owned by root, and every directory holding a link or
 /// the file (lexically and after resolution) must be root-owned and not
 /// group/other-writable, so no unprivileged user can redirect the trust anchor.
+#[cfg(unix)]
 pub fn resolve_protected(path: &Path) -> Result<PathBuf, TrustError> {
     let mut current = path.to_path_buf();
     for _ in 0..=MAX_LINK_HOPS {
@@ -65,8 +68,17 @@ pub fn resolve_protected(path: &Path) -> Result<PathBuf, TrustError> {
     Err(TrustError::Unreadable)
 }
 
+/// Off Unix there is no root ownership to check, so no path is protected:
+/// the distribution default refuses, and roots must come from a regular file
+/// the operator names (read as on Unix, a symlink refused).
+#[cfg(not(unix))]
+pub fn resolve_protected(_path: &Path) -> Result<PathBuf, TrustError> {
+    Err(TrustError::Unreadable)
+}
+
 /// Every lexical ancestor (a root-owned directory or root-owned link) and every
 /// resolved ancestor directory is root-owned and not group/other-writable.
+#[cfg(unix)]
 fn protected_directories(dir: &Path) -> Result<(), TrustError> {
     let resolved = std::fs::canonicalize(dir).map_err(|_| TrustError::Unreadable)?;
     for ancestor in dir.ancestors().filter(|a| !a.as_os_str().is_empty()) {
@@ -172,6 +184,7 @@ mod tests {
     /// Independent oracle for one link chain on THIS host: the first element
     /// that breaks the documented policy (hop not root-owned, a directory not
     /// root-owned or group/other-writable, final file writable), or `None`.
+    #[cfg(unix)]
     fn policy_violation(path: &Path) -> Option<String> {
         let stat = |p: &Path| std::fs::symlink_metadata(p).ok();
         let mut current = path.to_path_buf();
@@ -206,6 +219,7 @@ mod tests {
         Some("too many hops".into())
     }
 
+    #[cfg(unix)]
     #[test]
     fn protected_resolution_follows_root_owned_links_and_refuses_user_links() {
         // A distribution-owned certificate link (Debian/Ubuntu layout). The
@@ -257,11 +271,14 @@ mod tests {
             read_certificates(Path::new("/nonexistent/fr-trust")).err(),
             Some(TrustError::Unreadable)
         );
-        let target = temp("link-target", b"x");
-        let link = target.with_file_name("link.pem");
-        let _ = std::fs::remove_file(&link);
-        std::os::unix::fs::symlink(&target, &link).unwrap();
-        assert_eq!(read_certificates(&link).err(), Some(TrustError::Unreadable));
+        #[cfg(unix)]
+        {
+            let target = temp("link-target", b"x");
+            let link = target.with_file_name("link.pem");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert_eq!(read_certificates(&link).err(), Some(TrustError::Unreadable));
+        }
         let big = vec![b'a'; usize::try_from(MAX_BYTES).unwrap() + 1];
         assert_eq!(
             read_certificates(&temp("big", &big)).err(),
@@ -271,6 +288,19 @@ mod tests {
         assert_eq!(
             read_certificates(&temp("many", many.as_bytes())).err(),
             Some(TrustError::TooLarge)
+        );
+    }
+
+    /// Off Unix nothing can vouch for a path's owner, so even an existing
+    /// regular file is not followed as the protected default.
+    #[cfg(not(unix))]
+    #[test]
+    fn no_path_is_protected_without_unix_ownership() {
+        let file = temp("unprotected", b"x");
+        assert_eq!(resolve_protected(&file).err(), Some(TrustError::Unreadable));
+        assert_eq!(
+            read_certificates(Path::new(SYSTEM_BUNDLE)).err(),
+            Some(TrustError::Unreadable)
         );
     }
 }
