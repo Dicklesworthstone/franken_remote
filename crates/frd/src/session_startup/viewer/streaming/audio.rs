@@ -31,7 +31,7 @@ pub enum AudioEnd {
     Local,
     /// This original optional audio pair reached its first-byte receive deadline.
     ReceiveExpired,
-    /// The original audio pair was retired without a usable AudioStop record.
+    /// The original audio pair was retired without a usable `AudioStop` record.
     ChannelClosed,
 }
 

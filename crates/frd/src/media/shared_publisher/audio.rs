@@ -157,6 +157,29 @@ impl EntryAudio {
             .authorize(action, binding, now)
             .map_err(|_| ())
     }
+    /// Even an idle lane must observe optional retirement before preserving
+    /// source demand. Callers have already checked the original connection.
+    /// `false`: the lane is closed now (a retired route or ended replies).
+    fn lane_open(&mut self, transport: &QuicRecords, lanes: AudioLanes) -> Result<bool, Error> {
+        if !transport.has_route(Route::Stream(lanes.control))
+            || !transport.has_route(Route::Stream(lanes.replies))
+            || !transport.has_route(Route::Datagram(lanes.packets))
+        {
+            self.close();
+            return Ok(false);
+        }
+        match transport.receive_ended(lanes.replies) {
+            Ok(false) => Ok(true),
+            Ok(true) => {
+                self.close();
+                Ok(false)
+            }
+            Err(error) => {
+                self.close();
+                Err(Error::Transport(crate::media_quic::Error::Transport(error)))
+            }
+        }
+    }
     /// The same bounded lane service for shared and exclusive publications.
     /// Native work never runs under this synchronous transport callback.
     #[allow(clippy::too_many_arguments)]
@@ -186,25 +209,8 @@ impl EntryAudio {
             self.close();
             return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
         }
-        // Even an idle lane must observe optional retirement before preserving
-        // source demand. Callers have already checked the original connection.
-        if !transport.has_route(Route::Stream(lanes.control))
-            || !transport.has_route(Route::Stream(lanes.replies))
-            || !transport.has_route(Route::Datagram(lanes.packets))
-        {
-            self.close();
+        if !self.lane_open(transport, lanes)? {
             return Ok(());
-        }
-        match transport.receive_ended(lanes.replies) {
-            Ok(false) => {}
-            Ok(true) => {
-                self.close();
-                return Ok(());
-            }
-            Err(error) => {
-                self.close();
-                return Err(Error::Transport(crate::media_quic::Error::Transport(error)));
-            }
         }
         for _ in 0..RECORDS_PER_TURN {
             let now = owner.check().map_err(Error::Media)?.as_micros();

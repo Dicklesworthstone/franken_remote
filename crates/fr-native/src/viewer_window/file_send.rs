@@ -404,7 +404,7 @@ mod tests {
         );
         let old = Dropped {
             paths: vec![path],
-            captured: Instant::now() - MAX_AGE,
+            captured: Instant::now().checked_sub(MAX_AGE).unwrap(),
         };
         assert_eq!(
             prepare_selection(&old, || true).1.unwrap_err(),

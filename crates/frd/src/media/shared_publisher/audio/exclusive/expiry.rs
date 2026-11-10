@@ -15,8 +15,8 @@ use fr_wire::{
 use std::time::Duration;
 use transport_support::{clock, runtime};
 
-#[path = "../../../../microphone_quic/tests/network.rs"]
-mod network;
+// The microphone tests' original UDP/TLS link, compiled once there.
+use crate::microphone_quic::tests::attachment as network;
 
 async fn fixture(
     cx: &Cx,

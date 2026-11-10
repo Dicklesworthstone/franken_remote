@@ -1,6 +1,6 @@
 //! Explicit native selections on the original controlled upload intake.
 //!
-//! AppKit submits bounded URL metadata only after a drop or local button
+//! `AppKit` submits bounded URL metadata only after a drop or local button
 //! gesture. The shared desktop worker pins descriptors off the window thread;
 //! the original frd owner alone admits contents and produces receipts.
 #![forbid(unsafe_code)]
@@ -28,7 +28,7 @@ struct State {
 }
 
 /// Native callbacks borrow this original owner without reentering the session
-/// or borrowing its main-thread RefCells.
+/// or borrowing its main-thread `RefCell`s.
 #[derive(Clone, Default)]
 pub(crate) struct Ingress(Arc<State>);
 impl Ingress {
@@ -113,7 +113,7 @@ impl fmt::Debug for Owner {
             .field("configured", &self.configured)
             .field("live", &self.ingress.live())
             .field("control", &self.control)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 impl Owner {
@@ -176,7 +176,8 @@ mod tests {
             assert!(!ingress.submit(invalid, Instant::now()));
             assert!(ingress.ready());
         }
-        assert!(!ingress.submit(uri, Instant::now() - Duration::from_secs(3)));
+        let stale = Instant::now().checked_sub(Duration::from_secs(3)).unwrap();
+        assert!(!ingress.submit(uri, stale));
         assert!(ingress.submit(uri, Instant::now()));
         assert!(!ingress.submit(b"file:///tmp/replacement", Instant::now()));
         ingress.stop();

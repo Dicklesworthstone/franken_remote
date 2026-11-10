@@ -145,8 +145,9 @@ struct Fixture {
     viewer: ViewerSession,
     audio: ViewerAudio,
     host_audio: AudioLanes,
-    // Keep the original negotiated owner, although video is never decoded here.
-    _media: NegotiatedMedia,
+    // The original negotiated owner (video is never decoded here; the audio
+    // stop tests read its lanes).
+    media: NegotiatedMedia,
     calls: Rc<RefCell<Calls>>,
     nonce: u128,
     acknowledgements: u32,
@@ -215,7 +216,7 @@ async fn fixture_with_policy(c: &Cx, h: &Cx, policy: quic::Policy) -> Fixture {
         viewer,
         audio,
         host_audio,
-        _media: media,
+        media,
         calls,
         nonce: 10_000,
         acknowledgements: 0,
@@ -444,7 +445,7 @@ fn local_audio_failure_can_exchange_stop_and_new_epoch_without_ending_recovery()
 
 async fn hold_audio_stop(f: &mut Fixture, h: &Cx) -> quic::StreamRoute {
     let incoming = f
-        ._media
+        .media
         .audio_lanes(f.viewer.io().unwrap().0)
         .unwrap()
         .unwrap()

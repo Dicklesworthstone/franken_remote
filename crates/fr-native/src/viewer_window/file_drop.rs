@@ -292,7 +292,9 @@ mod tests {
         assert!(!inbox.ready());
         inbox.set_ready(true);
         assert!(!inbox.publish(files(), Instant::now().checked_sub(MAX_AGE).unwrap()));
+        assert!(!inbox.is_closed());
         inbox.close();
+        assert!(inbox.is_closed());
         inbox.set_ready(true);
         assert!(!inbox.publish(files(), Instant::now()));
         assert!(!inbox.ready());

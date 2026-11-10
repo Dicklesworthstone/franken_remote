@@ -328,7 +328,7 @@ fn receive_expiry_during_reply_admission_fences_the_output_without_a_restart() {
     assert_eq!(calls.borrow().dropped, 1);
     assert_eq!(calls.borrow().resets, 0);
     assert_eq!(script.borrow().admitted, 0);
-    assert!(turn(&mut audio, 2, true).is_empty());
+    assert_eq!(turn(&mut audio, 2, true), Vec::<(Vec<u8>, u64)>::new());
     assert_eq!(script.borrow().services, 1);
 }
 

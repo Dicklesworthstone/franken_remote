@@ -18,7 +18,7 @@ use std::{path::Path, time::Duration};
 use transport_support::{clock, runtime};
 
 #[path = "tests/network.rs"]
-mod attachment;
+pub(crate) mod attachment;
 
 struct PolicyOnlyInput;
 impl InputSink for PolicyOnlyInput {
