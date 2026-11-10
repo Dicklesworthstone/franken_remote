@@ -30,19 +30,18 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Duration,
 };
+use asupersync::{time::sleep, types::Time};
 // The fixtures below (`tests`) import these through `super::*`; the clock
 // and pulse that used them moved to `crate::profile`.
-#[cfg(test)]
-use asupersync::{time::sleep, types::Time};
 #[cfg(test)]
 use std::{
     future::{Future, poll_fn},
     pin::pin,
     task::Poll,
-    time::Duration,
 };
 
 /// The daemon that answered: a Unix-socket server's kernel-reported PID, or
@@ -69,7 +68,11 @@ pub struct LocalApi {
     #[cfg(target_os = "macos")]
     app: Option<Arc<PathBuf>>,
     origin: Arc<()>,
+    /// The one admission lookup credit ([`Self::authorize`]).
     busy: Arc<AtomicBool>,
+    /// Admitted sessions' renewals waiting for `busy`: while any waits, a new
+    /// admission is refused rather than queued ahead of it.
+    renewing: Arc<AtomicUsize>,
     certificate_busy: Arc<AtomicBool>,
     /// One directory read at a time per API owner.
     directory_busy: Arc<AtomicBool>,
@@ -84,6 +87,14 @@ struct Lookup(Arc<AtomicBool>);
 impl Drop for Lookup {
     fn drop(&mut self) {
         self.0.store(false, Ordering::Release);
+    }
+}
+/// One renewal counted in [`LocalApi::renewing`] until it holds the credit,
+/// gives up, or is dropped.
+struct Waiting(Arc<AtomicUsize>);
+impl Drop for Waiting {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -113,6 +124,7 @@ impl LocalApi {
             app: None,
             origin: Arc::new(()),
             busy: Arc::new(AtomicBool::new(false)),
+            renewing: Arc::new(AtomicUsize::new(0)),
             certificate_busy: Arc::new(AtomicBool::new(false)),
             directory_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
@@ -130,7 +142,7 @@ impl LocalApi {
         addresses: ConnectionAddresses,
         policy: GrantPolicy,
     ) -> Result<Authorization, Error> {
-        self.authorize(cx, addresses, policy, AdmissionProfile::Membership)
+        self.authorize(cx, addresses, policy, AdmissionProfile::Membership, false)
             .await
     }
 
@@ -142,34 +154,46 @@ impl LocalApi {
         addresses: ConnectionAddresses,
         policy: GrantPolicy,
     ) -> Result<Authorization, Error> {
-        self.authorize(cx, addresses, policy, AdmissionProfile::AppCapability)
+        self.authorize(cx, addresses, policy, AdmissionProfile::AppCapability, false)
             .await
     }
 
+    /// One admission lookup at a time per API owner (process-wide for the
+    /// macOS installed endpoint). A new admission finding the credit held, or
+    /// an admitted session's renewal waiting for it, is refused `Busy` (the
+    /// connecting peer may retry). A `renewal` instead waits for the credit
+    /// inside its own lookup budget: frd ends a session whose renewal fails,
+    /// so another viewer's admission or renewal in flight must not end it.
     async fn authorize(
         &self,
         cx: &Cx,
         addresses: ConnectionAddresses,
         policy: GrantPolicy,
         profile: AdmissionProfile,
+        renewal: bool,
     ) -> Result<Authorization, Error> {
         policy.validate()?;
         addresses.validate()?;
-        if self
-            .busy
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return Err(Error::Busy);
-        }
-        let _lookup = Lookup(self.busy.clone());
+        let started_us = now(cx)?;
+        let budget =
+            u64::try_from(policy.lookup_timeout.as_micros()).map_err(|_| Error::InvalidPolicy)?;
+        let end_us = started_us.checked_add(budget).ok_or(Error::Clock)?;
+        let _lookup = if renewal {
+            self.claim_for_renewal(cx, end_us).await?
+        } else {
+            self.claim()?
+        };
         let issued_us = now(cx)?;
+        let lookup_timeout = Duration::from_micros(end_us.saturating_sub(issued_us));
+        if lookup_timeout.is_zero() {
+            return Err(Error::Timeout);
+        }
         let wall_issued_us = wall_now()?;
         let validity =
             u64::try_from(policy.validity.as_micros()).map_err(|_| Error::InvalidPolicy)?;
         let mut expires_us = issued_us.checked_add(validity).ok_or(Error::Clock)?;
         let (identity, permissions, expiries, daemon_pid) =
-            Box::pin(bounded(cx, policy.lookup_timeout, async {
+            Box::pin(bounded(cx, lookup_timeout, async {
                 for _ in 0..2 {
                     let (first, process) = self.status(cx).await?;
                     first.validate(addresses)?;
@@ -217,6 +241,42 @@ impl LocalApi {
         self.check(cx, &proof, addresses)?;
         Ok(proof)
     }
+    /// The credit for a new admission: refused while held or while a renewal
+    /// waits for it.
+    fn claim(&self) -> Result<Lookup, Error> {
+        if self.renewing.load(Ordering::Acquire) > 0 {
+            return Err(Error::Busy);
+        }
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::Busy)?;
+        Ok(Lookup(self.busy.clone()))
+    }
+    /// The credit for a renewal: wait while another lookup holds it, at most
+    /// until `end_us` (`Timeout`), polling every millisecond. Cancellation
+    /// ends the wait (`Cancelled`) and dropping the future withdraws it.
+    async fn claim_for_renewal(&self, cx: &Cx, end_us: u64) -> Result<Lookup, Error> {
+        self.renewing.fetch_add(1, Ordering::AcqRel);
+        let _waiting = Waiting(self.renewing.clone());
+        loop {
+            if self
+                .busy
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Ok(Lookup(self.busy.clone()));
+            }
+            let current = now(cx)?;
+            if current >= end_us {
+                return Err(Error::Timeout);
+            }
+            sleep(
+                Time::from_nanos(current.checked_mul(1000).ok_or(Error::Clock)?),
+                Duration::from_micros((end_us - current).min(1_000)),
+            )
+            .await;
+        }
+    }
     /// No renewal on failed reads or changed identity. An already expired proof
     /// cannot be resurrected; establish a new app session instead.
     pub async fn revalidate(
@@ -227,7 +287,7 @@ impl LocalApi {
     ) -> Result<Authorization, Error> {
         self.check(cx, old, addresses)?;
         let new = self
-            .authorize(cx, addresses, old.policy, old.profile)
+            .authorize(cx, addresses, old.policy, old.profile, true)
             .await?;
         // Original authority must still be live after awaiting the local daemon.
         self.check(cx, old, addresses)?;

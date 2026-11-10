@@ -28,12 +28,13 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
 
 static LOOKUP_BUSY: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+static LOOKUP_RENEWING: OnceLock<Arc<AtomicUsize>> = OnceLock::new();
 const LOOKUP: Duration = Duration::from_secs(1);
 
 /// The fixed read vocabulary; there is no caller-supplied URI.
@@ -171,6 +172,9 @@ impl LocalApi {
             origin: Arc::new(()),
             busy: LOOKUP_BUSY
                 .get_or_init(|| Arc::new(AtomicBool::new(false)))
+                .clone(),
+            renewing: LOOKUP_RENEWING
+                .get_or_init(|| Arc::new(AtomicUsize::new(0)))
                 .clone(),
             certificate_busy: Arc::new(AtomicBool::new(false)),
             directory_busy: Arc::new(AtomicBool::new(false)),

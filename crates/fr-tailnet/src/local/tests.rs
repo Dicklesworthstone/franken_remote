@@ -1412,3 +1412,80 @@ mod directory;
 mod macos_socket;
 #[cfg(target_os = "linux")]
 mod outbound;
+
+/// frd ends a session whose admission renewal fails, and every viewer of one
+/// host shares this lookup credit: another viewer's admission in flight must
+/// delay a renewal, not end it. New admissions meanwhile are refused rather
+/// than queued ahead of the waiting renewal.
+#[test]
+fn a_renewal_waits_for_another_lookup_instead_of_failing_busy() {
+    let (s, w) = fixtures();
+    let server = Server::responses(&[&s, &w, &s, &s, &w, &s, &s, &w, &s], Duration::from_millis(15));
+    run_async!(cx, {
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .await
+            .unwrap();
+        let mut admission = Box::pin(server.client.authorize_app_capability(
+            &cx,
+            endpoints(),
+            GrantPolicy::default(),
+        ));
+        let mut renewal = Box::pin(server.client.revalidate(&cx, &proof, endpoints()));
+        poll_fn(|task| {
+            assert!(admission.as_mut().poll(task).is_pending());
+            assert!(renewal.as_mut().poll(task).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        assert_eq!(server.client.renewing.load(Ordering::Acquire), 1);
+        assert_eq!(
+            server
+                .client
+                .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+                .await
+                .unwrap_err(),
+            Error::Busy
+        );
+        assert!(admission.await.unwrap().permissions().observe());
+        let renewed = renewal.await.unwrap();
+        assert!(renewed.matches_identity(&proof));
+        assert_eq!(server.calls.load(Ordering::SeqCst), 9);
+        assert_eq!(server.client.renewing.load(Ordering::Acquire), 0);
+        assert!(!server.client.busy.load(Ordering::Acquire));
+    });
+}
+
+#[test]
+fn a_renewal_that_never_gets_the_credit_times_out_inside_its_budget() {
+    let (s, w) = fixtures();
+    let server = Server::fixture(&s, &w, false);
+    run_async!(cx, {
+        let policy = GrantPolicy {
+            lookup_timeout: Duration::from_millis(30),
+            ..Default::default()
+        };
+        let proof = server
+            .client
+            .authorize_app_capability(&cx, endpoints(), policy)
+            .await
+            .unwrap();
+        // Another lookup holds the credit for longer than the budget.
+        server.client.busy.store(true, Ordering::Release);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            server
+                .client
+                .revalidate(&cx, &proof, endpoints())
+                .await
+                .unwrap_err(),
+            Error::Timeout
+        );
+        assert!(started.elapsed() >= Duration::from_millis(30));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(server.client.renewing.load(Ordering::Acquire), 0);
+        assert_eq!(server.calls.load(Ordering::SeqCst), 3);
+        server.client.busy.store(false, Ordering::Release);
+    });
+}

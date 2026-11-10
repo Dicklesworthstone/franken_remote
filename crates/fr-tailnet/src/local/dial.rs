@@ -6,7 +6,8 @@
 //! shared with the named-destination dialer (`crate::profile`).
 use super::{LocalApi, Lookup, PeerTarget, bounded, now};
 use crate::Error;
-// Re-exported for this module's tests and the certificate tests' fixtures.
+// Used here, and re-exported for this module's tests and the certificate
+// tests' fixtures.
 use crate::profile::{ALPN, connection_ids, handshake_error, may_try_alternate};
 pub(super) use crate::profile::{connection_config, endpoint_config, transport_parameters};
 use asupersync::{

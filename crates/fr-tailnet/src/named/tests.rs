@@ -67,6 +67,13 @@ fn only_tailscale_ranges_count_as_tailnet_addresses() {
         "100.127.255.255",
         "fd7a:115c:a1e0::1",
         "fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff",
+        // Next to the reserved blocks, still node space.
+        "100.100.99.255",
+        "100.100.101.0",
+        "100.115.91.255",
+        "100.115.94.0",
+        "fd7a:115c:a1e0:b19::1",
+        "fd7a:115c:a1e0:b1b::1",
     ] {
         assert!(is_tailnet_address(inside.parse().unwrap()), "{inside}");
     }
@@ -81,6 +88,16 @@ fn only_tailscale_ranges_count_as_tailnet_addresses() {
         "::1",
         "::ffff:100.64.0.1",
         "2001:db8::1",
+        // Tailscale's own service addresses (MagicDNS answers from here).
+        "100.100.100.100",
+        "100.100.100.0",
+        "100.100.100.255",
+        // ChromeOS guest range.
+        "100.115.92.1",
+        "100.115.93.255",
+        // 4via6: a host behind a subnet router, not a node.
+        "fd7a:115c:a1e0:b1a::a01:110",
+        "fd7a:115c:a1e0:b1a:ffff:ffff:ffff:ffff",
     ] {
         assert!(!is_tailnet_address(outside.parse().unwrap()), "{outside}");
     }
@@ -180,6 +197,41 @@ fn a_pin_admits_only_its_own_name_and_already_pinned_addresses() {
     assert_eq!(
         pinned.admits(&other, &ips(&["100.64.0.2"])).err(),
         Some(Error::InvalidPolicy)
+    );
+}
+
+#[test]
+fn a_family_the_pin_never_saw_is_admitted_and_recorded_but_a_pinned_one_must_match() {
+    let name = HostName::parse(NAME).unwrap();
+    // MagicDNS answered A only when this pin was made.
+    let v4_only = pin(&["100.64.0.2"]);
+    let both = ips(&["fd7a:115c:a1e0::2", "100.64.0.2"]);
+    let observed = v4_only.admits(&name, &both).unwrap();
+    assert_eq!(observed.addresses(), ips(&["100.64.0.2", "fd7a:115c:a1e0::2"]));
+    // An unchanged answer records the pin as it was.
+    assert_eq!(
+        v4_only.admits(&name, &ips(&["100.64.0.2"])).unwrap(),
+        v4_only
+    );
+    // The pinned family still decides: a new IPv4 address is a new node even
+    // when an IPv6 address arrives alongside it.
+    assert_eq!(
+        v4_only
+            .admits(&name, &ips(&["fd7a:115c:a1e0::2", "100.64.0.3"]))
+            .err(),
+        Some(Error::IdentityChanged)
+    );
+    // An IPv6-only pin likewise admits a first IPv4 answer.
+    let v6_only = pin(&["fd7a:115c:a1e0::2"]);
+    assert_eq!(
+        v6_only.admits(&name, &both).unwrap().addresses(),
+        ips(&["100.64.0.2", "fd7a:115c:a1e0::2"])
+    );
+    assert_eq!(
+        v6_only
+            .admits(&name, &ips(&["fd7a:115c:a1e0::9"]))
+            .err(),
+        Some(Error::IdentityChanged)
     );
 }
 
