@@ -155,13 +155,14 @@ Every macOS `frd run` requires the read-only `fr-observation-indicator` beside
 installer includes it. View-only hosting uses this surface too; a controlling
 session retains its independent control and clipboard panels.
 
-Before listening, the helper must show **Screen sharing enabled — click to
-stop** on every original display. The panel remains visible while the host
-waits for peers. A local Stop ends the original host and drains its existing
-owners. It is a successful cancellation even during startup, so launchd's
-failure-only restart does not undo that user action. Hidden/lost panels,
-display-set or geometry changes, malformed IPC and expired UI progress refuse
-or end the original run. A new host start is required afterward.
+Before listening, the helper must put a FrankenRemote item (a monochrome
+screen icon) in the menu bar. It stays there while the host waits for peers.
+Clicking it opens **Screen sharing is on** with a **Stop Sharing** button. A
+local Stop ends the original host and drains its existing owners. It is a
+successful cancellation even during startup, so launchd's failure-only restart
+does not undo that user action. A removed or never-shown item, malformed IPC
+and expired UI progress refuse or end the original run, and a new host start
+is required afterward. Display changes do not end it.
 
 The native event loop and independent command/watchdog worker retain original,
 sleep-inclusive visibility deadlines. A request waits for a completed native

@@ -22,37 +22,53 @@ the input, clipboard, desktop-client or broker/runtime features. A manual build 
 cargo build -p fr-native --no-default-features --features macos-observation-indicator --bin fr-observation-indicator --locked
 ```
 
-Before the host can start listening, the helper must show a **Screen sharing
-enabled — click to stop** panel on every original display, up to the protocol's
-eight-display bound. This indicates that hosting is enabled, including while
-waiting for peers. The native adapter pins the display set and geometry;
-hotplug or a geometry change ends this run and requires a new host start.
-The control and clipboard panels retain their own separate lifetimes.
+Before the host can start listening, the helper must put one FrankenRemote
+item in the menu bar (a monochrome screen icon) and see it on screen. This
+indicates that hosting is enabled, including while waiting for peers.
+Clicking the item opens a small popover, **Screen sharing is on**, with a
+**Stop Sharing** button. The item does not opt into Command-drag removal, and
+its autosave name keeps the place of a moved item. It does not depend on the
+display set, so attaching, removing or rearranging displays does not end the
+run. The control and clipboard panels keep their own separate lifetimes.
 
-Each original Stop control must complete drawing and retain its expected
-content view and visible bounds before the panel can establish readiness.
-The control is exposed as an accessibility button with a Stop action; that
-action only revokes the current lifetime. A late visibility result cannot
-overwrite an earlier terminal callback. If a full 32-event turn still leaves
-native events queued, the helper refuses readiness rather than postponing a
-potential Stop behind the backlog.
+Readiness requires the original item to be installed, ordered in and drawn,
+and on screen according to AppKit (occlusion state and screen). Before macOS
+26, the item lives in the helper's own window and WindowServer's record of
+that window must agree. macOS 26 and later draw status items in a system
+process (the helper's status window has no CGWindowID), so AppKit's state is
+the evidence there. After readiness, an item the system has collapsed still
+counts: when another app is full screen the menu bar slides away and the item
+with it, as the system's own recording indicator does. Hiding the item through
+System Settings or the notch's overflow is not detected.
+
+The item and the popover's Stop Sharing button act on mouse-down and never
+enter AppKit's control-tracking or menu loops, which would hold the main thread
+past its 250 ms turn while the mouse is down. Showing the popover grants
+nothing. Only an attributed local press of Stop Sharing, or its accessibility
+press, stops: a click that fr-input-agent posted for a remote controller does
+not. A late visibility result cannot overwrite an earlier terminal callback. If
+a full 32-event turn still leaves native events queued, the helper refuses
+readiness rather than postponing a potential Stop behind the backlog. The
+helper holds a latency-critical activity assertion, so App Nap does not
+throttle it (idle system sleep is still allowed).
 
 AppKit runs only on the child's main thread. A separate command responder and
 watchdog check a sleep-inclusive, terminal 250 ms visibility heartbeat. Commands
 cannot refresh that evidence. Each readiness reply waits for a completed native
 event/visibility turn that began after that request arrived; cached visibility
 alone cannot extend the parent's request deadline. A stalled native call,
-hidden or lost panel, parent loss or malformed IPC ends the original host.
+hidden or removed item, parent loss or malformed IPC ends the original host.
 A local Stop action uses the local-revoke signal; ordinary host cleanup
 completes with a successful exit, so launchd's failure-only restart does not
-undo that action. The macOS role refuses approval and microphone commands
+undo that action. Cleanup succeeds only once the item is removed and any open
+popover window has left WindowServer. The macOS role refuses approval and microphone commands
 rather than reusing the observation surface for another capability.
 
 This visible surface complements the independent
 [console-session monitor](macos-host.md#console-session-lifecycle). It does not
 establish graphical screen-lock detection or grant input authority. AppKit
 and window-server visibility checks are not optical proof that a person can
-see a panel. Native Mac execution and physical input/visibility qualification
+see the item. Native Mac execution and physical input/visibility qualification
 remain separate from source and protocol tests. Tracking: `fr-hjl0`.
 
 ## Linux build and run
@@ -87,7 +103,7 @@ window lifetimes has not been qualified, so it is not silently enabled.
 ## Lifetime and failure behavior
 
 The Linux child uses the existing X11 Stop sharing surface and its device-attributed
-input handling; macOS uses its own AppKit panels. Neither has capture,
+input handling; macOS uses its menu bar item. Neither has capture,
 clipboard, file-transfer, input-injection or positive-approval protocol.
 The parent/child channel is an inherited socketpair, not a listener; every
 record has fixed size, direction, sequence and epoch checks. The parent passes

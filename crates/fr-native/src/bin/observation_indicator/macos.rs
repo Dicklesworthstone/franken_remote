@@ -8,7 +8,7 @@ use fr_core::{
 };
 use fr_native::{
     clock,
-    macos_observation::{self, Control, Panels, Status, Stop},
+    macos_observation::{self, Control, Indicator, Status, Stop},
 };
 use std::{
     io::{self, Read, Write},
@@ -73,15 +73,15 @@ pub(crate) fn run() -> i32 {
         control.fail();
         return CHANNEL;
     };
-    let mut panels = Panels::open(control.clone()).ok();
+    let mut indicator = Indicator::open(control.clone()).ok();
     while matches!(control.status(), Status::Opening | Status::Shown) {
-        if let Some(panels) = panels.as_mut() {
-            panels.turn(PUMP);
+        if let Some(indicator) = indicator.as_mut() {
+            indicator.turn(PUMP);
         } else {
             control.fail();
         }
     }
-    drop(panels);
+    drop(indicator);
     // Native cleanup may hang; the independent worker still expires/terminates
     // this read-only process. A terminal flag never pretends cleanup finished.
     let _ = worker.join();

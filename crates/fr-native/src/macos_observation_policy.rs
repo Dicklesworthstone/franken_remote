@@ -1,4 +1,4 @@
-//! Bounded evidence from the original macOS observation panels. Only a
+//! Bounded evidence from the original macOS observation indicator. Only a
 //! completed native visibility/event turn can publish positive evidence.
 #![forbid(unsafe_code)]
 

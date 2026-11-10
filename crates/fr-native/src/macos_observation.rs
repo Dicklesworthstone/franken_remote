@@ -1,4 +1,5 @@
-//! Main-thread macOS observation panels for the read-only host helper.
+//! Main-thread macOS observation indicator (a menu bar status item) for the
+//! read-only host helper.
 //!
 //! Only completed `AppKit` turns publish positive visibility evidence. A
 //! separate IPC/watchdog thread can expire that original evidence while the
@@ -17,7 +18,7 @@ use std::{
 
 unsafe extern "C" {
     fn fr_oi_bind_parent(parent: u32) -> i32;
-    fn fr_oi_open(max_displays: u32, out: *mut *mut c_void) -> i32;
+    fn fr_oi_open(out: *mut *mut c_void) -> i32;
     fn fr_oi_pump(owner: *mut c_void, timeout_ms: u32) -> i32;
     fn fr_oi_close(owner: *mut c_void) -> i32;
 }
@@ -40,7 +41,7 @@ struct Shared {
 }
 
 /// Read-only liveness and negative stop control. This type cannot stamp new
-/// native evidence or recreate a stopped panel lifetime.
+/// native evidence or recreate a stopped indicator lifetime.
 #[derive(Clone)]
 pub struct Control(Arc<Shared>);
 
@@ -110,31 +111,26 @@ impl Control {
     }
 }
 
-/// Original bounded set of native panels, owned and pumped on the main thread.
+/// The original native status item, owned and pumped on the main thread.
 /// The non-Send marker prevents safe code from moving `AppKit` ownership.
-pub struct Panels {
+pub struct Indicator {
     owner: NonNull<c_void>,
     control: Control,
     _main_thread: PhantomData<Rc<()>>,
 }
 
-impl Panels {
-    /// Create one fixed panel per attached display, bounded by the admitted
-    /// display catalog. No positive evidence exists until a real `turn` ends.
+impl Indicator {
+    /// Put one status item in the menu bar. No positive evidence exists until
+    /// a real `turn` ends.
     pub fn open(control: Control) -> Result<Self, Stop> {
         if control.status() != Status::Opening {
             control.fail();
             return Err(Stop::Failed);
         }
-        let Ok(max_displays) = u32::try_from(fr_wire::display::MAX_DISPLAYS) else {
-            control.fail();
-            control.closed();
-            return Err(Stop::Failed);
-        };
         let mut pointer = core::ptr::null_mut();
         // SAFETY: writable pointer storage. The glue verifies main-thread and
-        // parent binding, retains its original panels, and stores no Rust data.
-        let code = unsafe { fr_oi_open(max_displays, &raw mut pointer) };
+        // parent binding, retains its original item, and stores no Rust data.
+        let code = unsafe { fr_oi_open(&raw mut pointer) };
         if code != 0 {
             control.fail();
             return Err(Stop::Failed);
@@ -143,19 +139,19 @@ impl Panels {
             control.fail();
             return Err(Stop::Failed);
         };
-        let panels = Self {
+        let indicator = Self {
             owner,
             control,
             _main_thread: PhantomData,
         };
-        if let Status::Stopped(why) = panels.control.status() {
+        if let Status::Stopped(why) = indicator.control.status() {
             return Err(why);
         }
-        Ok(panels)
+        Ok(indicator)
     }
 
-    /// Complete bounded event work and verify every original panel's native
-    /// visibility. A call that returns late cannot publish fresh readiness.
+    /// Complete bounded event work and verify the original status item's
+    /// native visibility. A call that returns late cannot publish fresh readiness.
     pub fn turn(&mut self, wait: Duration) -> Status {
         let Some(started) = self.control.begin() else {
             return self.control.status();
@@ -174,12 +170,12 @@ impl Panels {
     }
 }
 
-impl Drop for Panels {
+impl Drop for Indicator {
     fn drop(&mut self) {
         self.control.stop();
         // SAFETY: exactly one main-thread owner consumes this retained native
         // reference. Native cleanup contains Objective-C exceptions, and only
-        // reports success after its original WindowServer windows are absent.
+        // reports success after its original WindowServer windows are gone.
         if unsafe { fr_oi_close(self.owner.as_ptr()) } == 0 {
             self.control.closed();
         } else {
