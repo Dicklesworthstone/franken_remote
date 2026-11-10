@@ -78,14 +78,8 @@ impl InstallOptions {
                 detail: "saved host policy is currently supported only by the Linux host".into(),
             });
         }
-        if self.kind == ServiceKind::WindowsService
-            && (self.socket_path.is_some()
-                || !self.approval_mode.is_empty()
-                || !self.sharing_scope.is_empty())
-        {
-            return Err(ServiceError::UnsupportedPlatform {
-                detail: "Windows service registration cannot yet preserve these overrides".into(),
-            });
+        if self.kind == ServiceKind::WindowsService {
+            return Err(windows_service_unavailable());
         }
         // Capture and input belong to a login session's window server; a
         // daemon has none, so it could only refuse at every start.
@@ -270,6 +264,15 @@ fn validate_path(path: &Path) -> Result<(), ServiceError> {
     }
     Ok(())
 }
+/// frd has no Service Control Manager registration yet. Writing a definition
+/// file would report an install that `sc start frd` could never run, so every
+/// Windows service request refuses, dry runs included.
+pub(super) fn windows_service_unavailable() -> ServiceError {
+    ServiceError::UnsupportedPlatform {
+        detail: "frd cannot register a Windows service yet; run `frd run` in your signed-in Windows session instead".into(),
+    }
+}
+
 const fn system_kind() -> ServiceKind {
     if cfg!(target_os = "macos") {
         ServiceKind::LaunchdDaemon

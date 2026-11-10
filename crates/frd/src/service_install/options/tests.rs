@@ -63,6 +63,22 @@ fn invalid_options_refuse_even_for_dry_run() {
     }
 }
 #[test]
+fn a_windows_service_install_refuses_instead_of_writing_an_unregistered_definition() {
+    // Plain defaults, no overrides, a dry run: still refused, by validation
+    // and by install itself (which once wrote a JSON file and reported
+    // "Service configuration registered. Run 'sc start frd'").
+    let options = InstallOptions {
+        kind: ServiceKind::WindowsService,
+        dry_run: true,
+        ..InstallOptions::default()
+    };
+    assert_eq!(options.validate(), Err(windows_service_unavailable()));
+    assert_eq!(
+        crate::service_install::install(&options).err(),
+        Some(windows_service_unavailable())
+    );
+}
+#[test]
 fn programmatic_callers_cannot_bypass_validation() {
     let mut options = InstallOptions {
         dry_run: true,

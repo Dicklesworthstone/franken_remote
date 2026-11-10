@@ -5,8 +5,9 @@
 //! Implements bead `fr-p2-service-install-aw3` and plan §20.3:
 //! - Service specifications across platforms:
 //!   - Linux: `systemd` user units (recommended for graphical sessions) or system units
-//!   - macOS: `launchd` `LaunchAgent` (GUI session) or `LaunchDaemon`
-//!   - Windows: Windows Service
+//!   - macOS: `launchd` `LaunchAgent` (GUI session); a `LaunchDaemon` is refused
+//!   - Windows: a Windows Service, refused until Service Control Manager
+//!     registration exists (no definition file stands in for it)
 //! - Idempotent Linux and macOS publication and removal through verified directory handles
 //! - Setup preflight: verifies executable, checks port conflicts, and validates directory permissions
 //! - Safe uninstall: removes `FrankenRemote` unit files without touching Tailscale or tailnet policy
@@ -34,7 +35,8 @@ pub enum ServiceKind {
     LaunchdAgent,
     /// macOS launchd system daemon (`/Library/LaunchDaemons/com.frankenremote.frd.plist`).
     LaunchdDaemon,
-    /// Windows service via Service Control Manager.
+    /// Windows service via Service Control Manager: refused for now, since
+    /// frd cannot register one yet.
     WindowsService,
 }
 
@@ -638,13 +640,8 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
     let unit_content = match options.kind {
         ServiceKind::SystemdUser | ServiceKind::SystemdSystem => render_systemd_unit(options),
         ServiceKind::LaunchdAgent | ServiceKind::LaunchdDaemon => render_launchd_plist(options),
-        ServiceKind::WindowsService => {
-            format!(
-                r#"{{"name":"frd","display_name":"FrankenRemote Host Daemon","bin_path":"{}","port":{}}}"#,
-                options.exec_path.display(),
-                options.service_port
-            )
-        }
+        // validate() already refused it; nothing would register this file.
+        ServiceKind::WindowsService => return Err(options::windows_service_unavailable()),
     };
 
     let mut next_steps = Vec::new();
@@ -700,11 +697,8 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport, ServiceError> 
                     unit_path.display()
                 ));
             }
-            ServiceKind::WindowsService => {
-                next_steps.push(
-                    "Service configuration registered. Run 'sc start frd' to begin hosting.".into(),
-                );
-            }
+            // Refused before anything was rendered.
+            ServiceKind::WindowsService => {}
         }
     }
 
