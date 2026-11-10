@@ -194,8 +194,8 @@ fn pending_setup_is_woken_and_fenced_without_repolling_its_original_work() {
     }
     let now = now_ns().unwrap();
     let control = Control(Arc::new(shared(Status::Active, now, now + OPEN_NS)));
-    let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
-    let waker = Waker::from(wakes.clone());
+    let wake_count = Arc::new(Wakes(AtomicUsize::new(0)));
+    let waker = Waker::from(wake_count.clone());
     let mut task = Context::from_waker(&waker);
     let polls = Cell::new(0);
     let mut work = pin!(poll_fn(|_| {
@@ -205,7 +205,7 @@ fn pending_setup_is_woken_and_fenced_without_repolling_its_original_work() {
     assert_eq!(control.poll_setup(&mut task, work.as_mut()), Poll::Pending);
     assert_eq!(polls.get(), 1);
     control.0.stop(Error::Native(State::Inactive));
-    assert_eq!(wakes.0.load(Ordering::Relaxed), 1);
+    assert_eq!(wake_count.0.load(Ordering::Relaxed), 1);
     assert_eq!(
         control.poll_setup(&mut task, work.as_mut()),
         Poll::Ready(Err(Error::Native(State::Inactive)))

@@ -2393,6 +2393,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)] // One ordered list of refusals before any I/O.
     fn run_refuses_relative_worker_or_empty_display_before_any_io() {
         let options = Options {
             socket: None,
