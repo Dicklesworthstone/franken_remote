@@ -146,7 +146,14 @@ pub(super) fn finish(
                 preserve(&history, &mut failure);
                 return Err(failure);
             };
-            Ok(format!("{prefix}{}}}\n", history.json))
+            // History fields carry a leading comma; an empty completion
+            // object has no field for it to follow.
+            let fields = if prefix.trim_end().ends_with('{') {
+                history.json.strip_prefix(',').unwrap_or(&history.json)
+            } else {
+                &history.json
+            };
+            Ok(format!("{prefix}{fields}}}\n"))
         }
         Ok(mut text) => {
             text.push_str(history.text.trim_start());
