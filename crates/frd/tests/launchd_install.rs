@@ -157,6 +157,7 @@ fn installer_owned_and_one_shot_flags_are_not_run_options() {
         &["--socket", "/var/run/tailscaled.socket"][..],
         &["--once"][..],
         &["--input-agent", "relative/fr-input-agent"][..],
+        &["--session-monitor", "relative/fr-session-monitor"][..],
         &["--no-such-flag"][..],
     ] {
         let mut args = vec!["--", "--encoder", "videotoolbox"];
@@ -174,6 +175,7 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
     let home = Home::new();
     let port = free_port();
     let agent_path = "/Users/u/Library/Application Support/FrankenRemote/bin/fr-input-agent";
+    let monitor_path = "/Users/u/Library/Application Support/FrankenRemote/bin/fr-session-monitor";
     let install = |approval: &str| {
         home.frd(&[
             "install",
@@ -189,6 +191,8 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
             "videotoolbox",
             "--input-agent",
             agent_path,
+            "--session-monitor",
+            monitor_path,
         ])
     };
     let output = install("none");
@@ -225,11 +229,21 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
             "videotoolbox",
             "--input-agent",
             agent_path,
+            "--session-monitor",
+            monitor_path,
         ]
     );
     // Exactly what frd run's own parser accepts.
     let parsed = frd::host_policy::options::RunOptions::parse(&arguments[2..]).unwrap();
     assert!(parsed.clipboard, "the installed control role defaults on");
+    assert_eq!(
+        parsed.session_monitor.as_deref(),
+        Some(Path::new(monitor_path))
+    );
+    assert!(
+        parsed.logind_session.is_none(),
+        "macOS uses native session identity"
+    );
     // The log goes to the user's own 0700 directory, never a shared /tmp.
     let logs = home.0.join("Library/Logs/FrankenRemote");
     assert!(plist.contains(&format!(

@@ -136,8 +136,9 @@ OPTIONS:
                     every share and the run (exit with a typed cause; no
                     automatic resume). Absent: locking does NOT end sharing
     --logind-seat S With --logind-session: its seat (default seat0)
-    --session-monitor PATH  With --logind-session: absolute fr-session-monitor
-                    path (default: next to frd)
+    --session-monitor PATH  Absolute fr-session-monitor path (default: next to frd).
+                    Linux requires --logind-session; macOS always monitors its
+                    native console session (screen-lock detection is unqualified)
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
     --trust-roots P PEM CA bundle for the host certificate chain (default: system)
     --once          Serve one sharing session, then exit
@@ -440,7 +441,13 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "encoder_selection": profile.encoder.as_str(),
                 "video_fps_limit": profile.video.fps(),
                 "encoder_bitrate_target_bps": profile.video.bitrate(),
-                "session_lifetime": if profile.session_lifetime { "monitored" } else { "unmonitored" },
+                "session_lifetime": if !profile.session_lifetime {
+                    "unmonitored"
+                } else if cfg!(target_os = "macos") {
+                    "console_and_sleep_monitored"
+                } else {
+                    "monitored"
+                },
             }),
             Event::FamilyNotServed { ipv6 } => serde_json::json!({
                 "event": "family_not_served",
@@ -514,7 +521,12 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                         "frd: the desktop Stop sharing window is required while this run is enabled; closing or losing it ends the run"
                     );
                 }
-                if profile.session_lifetime {
+                if profile.session_lifetime && cfg!(target_os = "macos") {
+                    println!(
+                        "frd: logout, user switching, sleep or lost console-session evidence ends sharing; \
+                         macOS screen-lock detection remains unqualified"
+                    );
+                } else if profile.session_lifetime {
                     println!(
                         "frd: locking, logging out of, switching away from or suspending the \
                          selected logind session ends sharing"
@@ -893,6 +905,7 @@ fn session_monitor(
         ));
     };
     let selection = Selection {
+        platform: frd::session_monitor::protocol::Platform::Linux,
         session: session.clone(),
         uid: rustix::process::geteuid().as_raw(),
         seat: options

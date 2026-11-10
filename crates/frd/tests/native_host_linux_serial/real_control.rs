@@ -978,6 +978,7 @@ impl Controlled {
         let monitor = monitor.map(|(image, session)| frd::session_monitor::Configuration {
             image,
             selection: frd::session_monitor::Selection {
+                platform: frd::session_monitor::protocol::Platform::Linux,
                 session,
                 uid: rustix::process::geteuid().as_raw(),
                 seat: "seat0".into(),

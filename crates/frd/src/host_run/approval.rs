@@ -285,6 +285,7 @@ mod tests {
         options.session_monitor = Some(Monitor {
             image: PathBuf::from("/unprovisioned/fr-session-monitor"),
             selection: Selection {
+                platform: crate::session_monitor::protocol::Platform::Linux,
                 session: "c2".into(),
                 uid: rustix::process::geteuid().as_raw(),
                 seat: "seat0".into(),

@@ -79,6 +79,11 @@ pub mod macos_display;
 pub mod macos_input;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-input")))]
 pub mod macos_input_state;
+// Independent native session evidence; no capture, input, clipboard or UI grant.
+#[cfg(all(target_os = "macos", feature = "macos-session-monitor"))]
+pub mod macos_session;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-session-monitor")))]
+mod macos_session_policy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_sizing;
 // Invocation consent and native key gestures are portable policy, not AppKit.
@@ -140,7 +145,12 @@ pub use parent::{ParentUnbound, bind_parent};
     ),
     all(
         target_os = "macos",
-        any(test, feature = "macos-input", feature = "macos-clipboard")
+        any(
+            test,
+            feature = "macos-input",
+            feature = "macos-clipboard",
+            feature = "macos-session-monitor"
+        )
     )
 ))]
 pub mod clock;

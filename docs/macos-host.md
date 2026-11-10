@@ -18,7 +18,7 @@ scripts/macos/install-host.sh --remote mac-mini     # another Mac, over SSH
 
 The script:
 
-1. builds release `frd`, `fr-media-worker`, `fr-input-agent` and the `fr`
+1. builds release `frd`, `fr-media-worker`, `fr-input-agent`, `fr-session-monitor` and the `fr`
    client here (never on the target);
 2. signs each with your Developer ID (`--identity` to choose), the hardened
    runtime, a timestamp and a stable identifier (`com.frankenremote.<name>`);
@@ -102,8 +102,59 @@ still need native qualification; this is not a hardware or tailnet pass claim.
 
 launchd restarts the agent only after a failed start (`KeepAlive` on
 unsuccessful exit, throttled to 10 s); waiting for a permission is not a
-failure. It starts at every login and stops at logout. Locking the screen does
-not end a share yet.
+failure. It starts at every login and stops at logout. Graphical screen-lock
+revocation remains unqualified; the console-session scope is described below.
+
+## Console-session lifecycle
+
+The shipped macOS `frd run` path now requires the read-only `fr-session-monitor`
+beside `frd`, or at the absolute path supplied by `--session-monitor`. Build it
+with `cargo build -p fr-native --features macos-session-monitor --bin fr-session-monitor`;
+the signed installer includes it. A missing, invalid or unresponsive helper
+refuses startup with `session_monitor_unavailable`, before tailnet I/O or
+listening. This applies to viewing as well as controlling shares.
+
+The helper reads the current process's actual Security.framework session ID
+and the public CoreGraphics session dictionary. It binds the original UID,
+security session and console set, and requires graphical access, on-console
+state and completed login. It subscribes to AppKit user-switch, sleep,
+logout/power-off and protected-data loss events before obtaining its first
+snapshot. These events can only stop the original owner; none grants authority.
+
+Native framework work stays on the helper's main thread. Its independent pipe
+responder reports Opening during initialization and can expire evidence while
+the main thread is blocked. Each real native read keeps its original 500 ms
+deadline on Darwin's sleep-inclusive monotonic clock. IPC queries, later replies,
+wake and switch-in cannot refresh expired evidence or restore the old session.
+The broker retains the original child's kill/reap custody.
+
+When console identity, active state or evidence ends, the host uses its existing
+local-stop teardown: revoke input authority, retire the original clipboard and
+file lanes, and stop observation/capture. It reports a typed cause such as
+`session_inactive`, `session_suspending`, `session_ended`,
+`session_identity_changed` or `session_evidence_lost`. The normal service manager
+may start a new host process; no prior remote input lease is restored.
+
+**Graphical screen-lock detection remains unqualified.** Public CoreGraphics
+console properties contain no documented lock flag. Protected-data availability
+is not proof of an unlocked graphical session, and no private lock key is used.
+Apple DTS explicitly distinguishes those states in its
+[supported lock-state API discussion](https://developer.apple.com/forums/thread/850327).
+The listening report therefore uses `session_lifetime: "console_and_sleep_monitored"`
+and names this limit, rather than claiming the Linux logind lock contract.
+
+The selected desktop user, macOS and the signed native package remain trusted.
+Darwin launches the helper through a canonical installed path whose opened inode,
+ownership, executable mode and parent directories are checked; this is not an
+isolation boundary against that same user. Native subscriptions, SDK compilation,
+and physical switch/logout/sleep behavior require Mac qualification. Portable
+state/IPC tests and Rust boundary checks do not establish that hardware evidence.
+Tracking: `fr-uvji`; the separate screen-lock qualification is `fr-6y4w`.
+
+API references: Apple's
+[Security session declarations](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_authorization/lib/AuthSession.h),
+[Window Server session properties](https://developer.apple.com/documentation/coregraphics/window-server-session-properties),
+and [session switch-out notification](https://developer.apple.com/documentation/appkit/nsworkspace/sessiondidresignactivenotification).
 
 ## Tailscale
 

@@ -12,6 +12,7 @@ fn main() {
     build_macos_clipboard();
     build_macos_capture();
     build_macos_input();
+    build_macos_session_monitor();
     link_clang_runtime();
     println!("cargo:rerun-if-changed=src/bridge.c");
     println!("cargo:rerun-if-changed=src/x11_image.c");
@@ -651,7 +652,8 @@ fn link_clang_runtime() {
     let glue = env::var_os("CARGO_FEATURE_MACOS_CLIPBOARD").is_some()
         || env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_some()
         || env::var_os("CARGO_FEATURE_MACOS_MEDIA").is_some()
-        || env::var_os("CARGO_FEATURE_MACOS_INPUT").is_some();
+        || env::var_os("CARGO_FEATURE_MACOS_INPUT").is_some()
+        || env::var_os("CARGO_FEATURE_MACOS_SESSION_MONITOR").is_some();
     if !glue || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
         return;
     }
@@ -798,6 +800,66 @@ fn build_macos_input() {
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=frmacosinput");
     for framework in ["AppKit", "CoreFoundation", "CoreGraphics", "Foundation"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-lib=objc");
+}
+
+/// A read-only main-thread console-session monitor. System frameworks only;
+/// it is never linked into the safe broker and does not depend on media/input.
+fn build_macos_session_monitor() {
+    println!("cargo:rerun-if-changed=src/macos_session.m");
+    if env::var_os("CARGO_FEATURE_MACOS_SESSION_MONITOR").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS session monitor cross-builds require an explicit SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_session.m", "-o"])
+            .arg(out.join("macossession.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "install the Xcode command line tools (xcode-select --install)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacossession.a"))
+            .arg(out.join("macossession.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacossession");
+    for framework in [
+        "AppKit",
+        "CoreFoundation",
+        "CoreGraphics",
+        "Foundation",
+        "Security",
+    ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
     println!("cargo:rustc-link-lib=objc");

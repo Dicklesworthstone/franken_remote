@@ -53,7 +53,11 @@ macos-clipboard = []
 linux-media = ["media-worker"]
 # Opt-in read-only systemd/logind lifecycle evidence; no alternate runtime.
 linux-logind = []
-linux-session-monitor = ["linux-logind", "dep:frd"]
+# The read-only inherited-pipe monitor binary, shared by platform adapters.
+session-monitor = ["dep:frd"]
+linux-session-monitor = ["linux-logind", "session-monitor"]
+# Console identity, switch/logout and sleep evidence, not a screen-lock oracle.
+macos-session-monitor = ["session-monitor", "frd/macos-host"]
 linux-session-events = ["linux-logind", "dep:frd", "dep:asupersync"]
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
 linux-opus = []
@@ -131,7 +135,7 @@ required-features = ["cli"]
 [[bin]]
 name = "fr-session-monitor"
 path = "src/bin/session_monitor.rs"
-required-features = ["linux-session-monitor"]
+required-features = ["session-monitor"]
 
 # Per-lease input injection executor launched by frd (frd never loads Xlib
 # or posts Quartz events itself).

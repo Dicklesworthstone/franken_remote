@@ -341,6 +341,7 @@ fn approval_host(
         session_monitor: Some(frd::session_monitor::Configuration {
             image: super::real_session_lifetime::fixture_image(),
             selection: frd::session_monitor::Selection {
+                platform: frd::session_monitor::protocol::Platform::Linux,
                 session: format!("lockfile-{token}"),
                 uid: rustix::process::geteuid().as_raw(),
                 seat: "seat0".into(),

@@ -129,9 +129,11 @@ pub struct Options {
     /// One explicit host selection, shared by clones but consumed only once.
     pub file_send: Option<crate::native_files::HostSelection>,
     /// The operator's selected local session and its read-only monitor image.
-    /// `Some`: fresh logind evidence is required before binding, and lock,
-    /// logout, switch, suspend or lost evidence ends every share and the run
-    /// with a typed cause (no automatic resume). `None`: the session lifetime
+    /// `Some`: fresh native evidence is required before binding, and logout,
+    /// switch, suspend or lost evidence ends every share and the run with a
+    /// typed cause. Linux additionally consumes the selected logind lock hint;
+    /// macOS console/sleep evidence does not establish screen-lock state.
+    /// No original grant automatically resumes. `None`: the session lifetime
     /// is not observed; the operator is told that locking does not end sharing.
     pub session_monitor: Option<session_monitor::Configuration>,
 }
@@ -1049,7 +1051,8 @@ fn serve_run(
             let mut handled = signals(options.handle_signals);
             let mut signals = Watch::new(&mut handled);
             // Fresh evidence for the selected session before any tailnet I/O
-            // or binding; a locked or unverifiable session shares nothing.
+            // or binding; unverifiable native state shares nothing. Lock
+            // evidence remains specific to the selected platform adapter.
             if let Some(lifetime) = lifetime {
                 let Some(opened) =
                     unless_stopped(session_opened(&broker, lifetime), stop, &mut signals).await

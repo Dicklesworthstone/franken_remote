@@ -45,6 +45,7 @@ fn configuration(mode: &str) -> Configuration {
     Configuration {
         image: image(),
         selection: Selection {
+            platform: protocol::Platform::Linux,
             session: mode.into(),
             uid: 0,
             seat: "seat0".into(),
@@ -194,6 +195,7 @@ fn symlink_and_writable_image_refuse_without_reusing_a_previous_live_epoch() {
 #[test]
 fn independent_fixed_wire_bytes_bind_role_epoch_sequence_and_exact_selection() {
     let s = Selection {
+        platform: protocol::Platform::Linux,
         session: "c1".into(),
         uid: 1000,
         seat: "seat0".into(),

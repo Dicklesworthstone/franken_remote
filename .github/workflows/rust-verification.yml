@@ -461,12 +461,18 @@ jobs:
         uses: ./.github/actions/build-swap
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
+      - name: Check the read-only session monitor against the Apple SDK
+        run: cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/macos_session.m
       - name: Clippy capture worker and input agent (all targets, deny warnings)
-        run: cargo clippy -p fr-native --all-targets --no-default-features --features macos-media,macos-input --locked -- -D warnings
+        run: cargo clippy -p fr-native --all-targets --no-default-features --features macos-media,macos-input,macos-session-monitor --locked -- -D warnings
       - name: Clippy frd macOS host (deny warnings)
         run: cargo clippy -p frd --lib --bins --features macos-host --locked -- -D warnings
       - name: Test display geometry, key mapping and held input state
-        run: cargo test -p fr-native --lib --no-default-features --features macos-media,macos-input --locked macos_
+        run: cargo test -p fr-native --lib --no-default-features --features macos-media,macos-input,macos-session-monitor --locked macos_
+      - name: Test original native session evidence deadlines and framing
+        run: |
+          cargo test -p frd --lib --features macos-host --locked session_monitor::
+          cargo test -p fr-native --bin fr-session-monitor --no-default-features --features macos-session-monitor --locked
       - name: Test the macOS clipboard executor and broker lifecycle
         run: |
           cargo test -p fr-native --bin fr-input-agent --no-default-features --features macos-input --locked clipboard::

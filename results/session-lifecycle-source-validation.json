@@ -1,0 +1,86 @@
+{
+  "scope": "Source and bounded component verification; not a full application, native SDK or live hardware qualification",
+  "toolchain": "nightly-2026-08-31",
+  "base_commit": "7e68729bf7f58725ec0465cc8b6ff3c945e767b2",
+  "results": [
+    {
+      "check": "Original workspace fr-core/fr-wire/fr-media/fr-client all-feature tests",
+      "passed": 1672,
+      "failed": 0
+    },
+    {
+      "check": "Final exact-source shared monitor tests with pinned rustix/getrandom (13 unit + 9 real subprocess/pipe)",
+      "passed": 22,
+      "failed": 0
+    },
+    {
+      "check": "Native lifecycle policy tests from production source",
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "check": "Original native responder tests using actual protocol and monitor types",
+      "passed": 4,
+      "failed": 0
+    },
+    {
+      "check": "Existing portable macOS capture policy C tests",
+      "passed": 21,
+      "failed": 0
+    },
+    {
+      "check": "Strict Linux monitor component Clippy",
+      "result": "passed"
+    },
+    {
+      "check": "Strict aarch64-apple-darwin component Clippy: actual monitor, native Rust boundary and unmodified helper source",
+      "result": "passed; Rust target std checksum verified, no Objective-C/framework link"
+    },
+    {
+      "check": "cargo metadata --locked --no-deps",
+      "result": "passed"
+    },
+    {
+      "check": "UBS changed Rust files",
+      "result": "ran; exit 1 from heuristic findings reviewed in context",
+      "critical_groups": {
+        "build-tool executable selected by local CC environment": 16,
+        "validated native monitor executable path": 1
+      },
+      "notes": "Other warnings concern test assertions/poison checks, bounded allocations and the no-follow read-only image open. Not recorded as a clean scanner exit."
+    }
+  ],
+  "excluded_runtime_tests": [
+    "awaiting_initial_evidence_expires_without_a_child_wakeup",
+    "frd_run_refuses_to_listen_without_fresh_session_evidence"
+  ],
+  "full_application_gates": {
+    "result": "blocked before application compilation",
+    "reason": "Unchanged pinned Asupersync rustc received SIGKILL in three bounded attempts",
+    "last_peak_rss_kib": 2265240,
+    "dependency_revision": "ee72b665ee87f6c811b1631136676fbc31ec0a88"
+  },
+  "not_qualified": [
+    "Objective-C Apple SDK compilation and framework linking",
+    "Physical Mac session switching, logout, sleep and wake",
+    "Graphical screen-lock authority (public console/keybag evidence does not establish it)",
+    "Live two-machine tailnet behavior"
+  ],
+  "source_sha256": {
+    "crates/frd/src/session_monitor.rs": "2fdd10404fa8a9998ee024fecaa18e8a89af60a74d663f3c7cd922849a8f4893",
+    "crates/frd/src/session_monitor/process.rs": "9b4af73a82caf6c0ab752518ae6acb709ca2a87ed93b0ef8d787f4289baf1f17",
+    "crates/frd/src/session_monitor/protocol.rs": "39295ced5a9d0d26a8dc6930faec81dd5870ba420c3fbee3c38866585a4f8425",
+    "crates/frd/src/session_monitor/lifetime_tests.rs": "fb3b1937fc67ac79d2013ce124ae4f0d633fa3caa817e40b43bacbb2e6e05263",
+    "crates/frd/src/host_run.rs": "f70417f4db46ec970dbf6e57d901d8b373800bf0505f6cb8e62111610f273220",
+    "crates/fr-native/src/macos_session.rs": "509ffd6d848f0ad375538a625426332b10fadb44b076ddd605c02b92a0ad78e3",
+    "crates/fr-native/src/macos_session.m": "a50aa0b508c72cd1035047c8573980a1adbbe489bfd103d51344ab856b1eb6a9",
+    "crates/fr-native/src/macos_session_policy.rs": "f312dab4ed0e8b7790bd52831efc29e6a6c44b3e0cd5cfbcced9dcbdc4183eea",
+    "crates/fr-native/src/bin/session_monitor.rs": "f81a4e873003aed35a67790eabb00c05300327d7d67164174647c36b63c20b9e",
+    "crates/fr-native/src/bin/session_monitor/pipe.rs": "e613102478e08f5d7b66bd612b2451dc6d368f4f6fcc4f060336b2af21a518fe"
+  },
+  "tracking": [
+    "fr-m16y",
+    "fr-uvji",
+    "fr-6y4w"
+  ]
+}

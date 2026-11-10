@@ -1,5 +1,46 @@
 # Implementation status
 
+## Native session lifecycle supervision
+
+The shared session monitor now validates executable images without blocking on
+FIFOs, and its host startup wait wakes independently of native progress. Status,
+the original evidence deadline and the last clock sample share one serialization
+point. Negative replies, expiry, clock regression and poisoned state become
+terminal before the process supervisor resumes; later responses cannot revive
+the original owner. This first batch is commit `7e68729` (`fr-m16y`).
+
+The macOS host now requires a read-only native session helper before listening.
+The signed installer builds and installs it, and an absolute `--session-monitor`
+override survives LaunchAgent installation. The helper binds the real inherited
+Security session, UID and console set, observes public console/login state, and
+consumes switch-out, sleep, logout/power-off and protected-data loss as terminal
+signals. An independent pipe thread can report Opening and expire old evidence
+while AppKit initializes or stalls. Positive native reads keep their original
+500 ms deadline on the sleep-inclusive clock. The existing host supervisor
+revokes the original control/clipboard/file owners and stops capture when that
+evidence ends. See [macOS lifecycle scope](docs/macos-host.md#console-session-lifecycle).
+
+This does **not** qualify graphical screen-lock detection. Public console state
+and protected-data availability are not an unlocked-screen guarantee. The CLI
+reports `console_and_sleep_monitored` and states the limit. The implementation
+bead is `fr-uvji`; the unresolved lock authority boundary is `fr-6y4w`.
+
+Validation: 1,672 original-workspace tests passed across `fr-core`, `fr-wire`,
+`fr-media` and `fr-client`. The first commit's exact staged monitor sources passed
+18 focused evidence/process tests, including real subprocess/pipe faults and a
+FIFO; the final platform-aware sources passed 22 with the added protocol cases.
+Ten native lifecycle policy tests and four original responder tests passed.
+Strict component Clippy/type checks also passed for the actual
+`aarch64-apple-darwin` Rust branches, including the native helper binary and the
+checked package launch path, using the exact pinned nightly. These focused
+checks do not constitute a full `frd` or native Mac build. The unchanged pinned
+Asupersync compiler was killed by SIGKILL on three bounded local attempts
+(last observed peak RSS about 2.2 GiB), so full application gates and two
+runtime-dependent monitor tests remain unexecuted locally. Apple SDK compilation,
+physical switching/logout/sleep and live tailnet qualification remain open.
+The retained [source validation record](results/session-lifecycle-source-validation.json)
+names the exact source hashes, tested scopes and excluded gates.
+
 ## macOS host text clipboard and privacy receipts (2026-11-10)
 
 The macOS host now connects default-on controlling clipboard negotiation to a

@@ -1,13 +1,12 @@
 //! Blocking subprocess operations live on this one supervised foreign-call thread.
 use super::{Configuration, Error, OCCUPIED, Shared, Status, now_ns, protocol};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::{
     fs::OpenOptions,
     io::{Read, Write},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     process::{Child, Command, Stdio},
     sync::atomic::Ordering,
     thread,
@@ -152,15 +151,47 @@ fn open_image(path: &std::path::Path) -> Result<std::fs::File, Error> {
     Ok(image)
 }
 
+#[cfg(target_os = "macos")]
+fn native_image_path(
+    image: &std::fs::File,
+    path: &std::path::Path,
+) -> Result<std::path::PathBuf, Error> {
+    // Darwin has no /proc/self/fd executable path. Execute the canonical
+    // installed path only after checking its opened inode and every parent.
+    // Root and the selected desktop user are explicit trust boundaries, as
+    // for the other native roles; this is not protection from that user.
+    let canonical = path.canonicalize().map_err(|_| Error::Image)?;
+    let selected = image.metadata().map_err(|_| Error::Image)?;
+    let checked = open_image(&canonical)?
+        .metadata()
+        .map_err(|_| Error::Image)?;
+    if selected.dev() != checked.dev() || selected.ino() != checked.ino() {
+        return Err(Error::Image);
+    }
+    let uid = rustix::process::geteuid().as_raw();
+    for parent in canonical.ancestors().skip(1) {
+        let metadata = std::fs::symlink_metadata(parent).map_err(|_| Error::Image)?;
+        if !metadata.is_dir() || ![0, uid].contains(&metadata.uid()) || metadata.mode() & 0o022 != 0
+        {
+            return Err(Error::Image);
+        }
+    }
+    Ok(canonical)
+}
+
 pub(super) fn run(configuration: &Configuration, shared: &Shared) -> Result<(), Error> {
-    // Execute the opened ELF image, not a path that could be replaced after the
-    // ownership check. No shell, scripts, PATH, environment or bearer arguments.
+    // Linux executes the opened image, while macOS uses the checked package
+    // path. No shell, PATH, environment or bearer arguments are inherited.
     let launch = || -> Result<Child, Error> {
         let image = open_image(&configuration.image)?;
         if let Status::Stopped(error) = shared.status() {
             return Err(error);
         }
-        Command::new(format!("/proc/self/fd/{}", image.as_raw_fd()))
+        #[cfg(target_os = "linux")]
+        let path = std::path::PathBuf::from(format!("/proc/self/fd/{}", image.as_raw_fd()));
+        #[cfg(target_os = "macos")]
+        let path = native_image_path(&image, &configuration.image)?;
+        Command::new(path)
             .env_clear()
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

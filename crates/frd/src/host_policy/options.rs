@@ -229,9 +229,19 @@ impl RunOptions {
         if options.headless && options.logind_session.is_some() {
             return Err(Error::InvalidArgument);
         }
-        // A seat or monitor image without the selected session selects nothing.
+        // Linux needs the operator's explicit logind selection. On macOS the
+        // helper binds the caller's actual graphical login session natively;
+        // a helper path does not invent a logind identity for it.
         if options.logind_session.is_none()
-            && (options.logind_seat.is_some() || options.session_monitor.is_some())
+            && (options.logind_seat.is_some()
+                || (!cfg!(target_os = "macos") && options.session_monitor.is_some()))
+        {
+            return Err(Error::InvalidArgument);
+        }
+        if options
+            .session_monitor
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
         {
             return Err(Error::InvalidArgument);
         }
@@ -591,12 +601,21 @@ mod tests {
             &["--logind-session"][..],
             &["--logind-session", "c2", "--logind-session", "c3"][..],
             &["--logind-seat", "seat0"][..],
-            &["--session-monitor", "/a"][..],
+            &["--session-monitor", "relative-monitor"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),
                 "{refused:?}"
             );
+        }
+        let native = parse(&["--session-monitor", "/usr/libexec/fr-session-monitor"]);
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                native.unwrap().session_monitor,
+                Some(PathBuf::from("/usr/libexec/fr-session-monitor"))
+            );
+        } else {
+            assert!(matches!(native, Err(Error::InvalidArgument)));
         }
     }
     #[test]

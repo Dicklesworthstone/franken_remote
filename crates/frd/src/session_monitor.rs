@@ -1,10 +1,10 @@
-//! A supervised read-only logind process. It cannot approve or inject anything.
+//! A supervised read-only native-session process. It cannot approve or inject anything.
 //! Parent-created pipes and one immutable local selection bind each process epoch.
 //! Native/IPC work stays off the authority thread; every status check independently
 //! expires original evidence on `CLOCK_BOOTTIME`, including across suspend.
 mod process;
 pub mod protocol;
-pub use protocol::{Selection, State};
+pub use protocol::{Platform, Selection, State};
 use std::{
     path::PathBuf,
     sync::{
@@ -227,6 +227,17 @@ pub struct Monitor {
 impl Monitor {
     pub fn start(configuration: Configuration) -> Result<Self, Error> {
         configuration.selection.validate()?;
+        let expected = if cfg!(target_os = "macos") {
+            Platform::Macos
+        } else {
+            Platform::Linux
+        };
+        if configuration.selection.platform != expected
+            || (expected == Platform::Macos
+                && configuration.selection.uid != rustix::process::geteuid().as_raw())
+        {
+            return Err(Error::Selection);
+        }
         if !configuration.image.is_absolute() {
             return Err(Error::Image);
         }

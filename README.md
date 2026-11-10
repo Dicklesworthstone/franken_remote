@@ -9,7 +9,7 @@ The two binaries are:
 - **`frd`** — FrankenRemoteDaemon, the host-side broker (it loads no X11, codec or audio library itself);
 - **`fr`** — the FrankenRemote client and command-line interface.
 
-Helper processes they launch (all built from `fr-native`): `fr-media-worker` (capture/encode, the sandboxed decoder/presenter, host audio capture), `fr-input-agent` (the per-lease XTest or Quartz executor with its indicator, and the separate `--clipboard` X11 or macOS pasteboard owner), `fr-opus-worker` (the client's restricted Opus decoder) and `fr-session-monitor` (read-only logind evidence for `frd run --logind-session`).
+Helper processes they launch (all built from `fr-native`): `fr-media-worker` (capture/encode, the sandboxed decoder/presenter, host audio capture), `fr-input-agent` (the per-lease XTest or Quartz executor with its indicator, and the separate `--clipboard` X11 or macOS pasteboard owner), `fr-opus-worker` (the client's restricted Opus decoder) and `fr-session-monitor` (read-only logind evidence for `frd run --logind-session`, and required [console/sleep evidence on macOS](docs/macos-host.md#console-session-lifecycle); graphical screen-lock qualification on macOS remains open).
 
 ## What runs today
 

@@ -5,15 +5,44 @@ pub const SELECTION_BYTES: usize = 224;
 pub const QUERY_BYTES: usize = 32;
 pub const REPLY_BYTES: usize = 40;
 
+/// The native evidence source. A macOS login session has no logind name,
+/// seat or X11 display; those fields must never stand in for its OS identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    Linux,
+    Macos,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selection {
+    pub platform: Platform,
     pub session: String,
     pub uid: u32,
     pub seat: String,
     pub display: String,
 }
 impl Selection {
+    /// Select this process user's actual macOS graphical login session. The
+    /// child binds its Security.framework session identity from native reads,
+    /// not from a caller-provided session name or reusable authority token.
+    pub fn macos(uid: u32) -> Self {
+        Self {
+            platform: Platform::Macos,
+            session: String::new(),
+            uid,
+            seat: String::new(),
+            display: String::new(),
+        }
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
+        if self.platform == Platform::Macos {
+            return if self.session.is_empty() && self.seat.is_empty() && self.display.is_empty() {
+                Ok(())
+            } else {
+                Err(Error::Selection)
+            };
+        }
         let name = |s: &str| {
             !s.is_empty()
                 && s.len() <= 64
@@ -42,6 +71,9 @@ impl Selection {
         out[..4].copy_from_slice(b"FRSM");
         out[4] = 1; // Protocol version.
         out[5] = 1; // Read-only session monitor, not input/consent/media.
+        // Zero preserves the original Linux wire image. Unknown platforms
+        // refuse rather than being interpreted as an X11/logind selection.
+        out[6] = u8::from(self.platform == Platform::Macos);
         out[8..24].copy_from_slice(&epoch.to_be_bytes());
         out[24..28].copy_from_slice(&self.uid.to_be_bytes());
         for (i, value) in [&self.session, &self.seat, &self.display]
@@ -54,9 +86,14 @@ impl Selection {
         Ok(out)
     }
     pub fn decode(bytes: &[u8; SELECTION_BYTES]) -> Result<(Self, u128), Error> {
-        if &bytes[..4] != b"FRSM" || bytes[4..8] != [1, 1, 0, 0] || bytes[31] != 0 {
+        if &bytes[..4] != b"FRSM" || bytes[4..6] != [1, 1] || bytes[7] != 0 || bytes[31] != 0 {
             return Err(Error::Protocol);
         }
+        let platform = match bytes[6] {
+            0 => Platform::Linux,
+            1 => Platform::Macos,
+            _ => return Err(Error::Protocol),
+        };
         let epoch = u128::from_be_bytes(bytes[8..24].try_into().map_err(|_| Error::Protocol)?);
         let uid = u32::from_be_bytes(bytes[24..28].try_into().map_err(|_| Error::Protocol)?);
         let mut names = Vec::with_capacity(3);
@@ -76,6 +113,7 @@ impl Selection {
             );
         }
         let selection = Self {
+            platform,
             session: names[0].clone(),
             uid,
             seat: names[1].clone(),
@@ -142,7 +180,8 @@ pub fn check_query(bytes: &[u8; QUERY_BYTES], epoch: u128, sequence: u64) -> Res
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reply {
     pub state: State,
-    /// Original logind-read deadline on this kernel's `CLOCK_BOOTTIME`; never receipt time.
+    /// Original native-read deadline on the shared suspend-aware kernel clock
+    /// (`CLOCK_BOOTTIME` on Linux, `CLOCK_MONOTONIC` on macOS), never receipt time.
     pub until_ns: u64,
 }
 impl Reply {
@@ -173,5 +212,75 @@ impl Reply {
             return Err(Error::Protocol);
         }
         Ok(reply)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_selection_has_an_explicit_platform_and_no_fabricated_linux_identity() {
+        let selected = Selection::macos(501);
+        let bytes = selected.encode(17).unwrap();
+        assert_eq!(&bytes[..8], b"FRSM\x01\x01\x01\x00");
+        assert_eq!(&bytes[24..28], &501_u32.to_be_bytes());
+        assert!(bytes[28..].iter().all(|byte| *byte == 0));
+        assert_eq!(Selection::decode(&bytes), Ok((selected, 17)));
+    }
+
+    #[test]
+    fn a_platform_tag_cannot_reinterpret_another_platforms_selection() {
+        let linux = Selection {
+            platform: Platform::Linux,
+            session: "c2".into(),
+            uid: 501,
+            seat: "seat0".into(),
+            display: ":0".into(),
+        };
+        let mut bytes = linux.encode(17).unwrap();
+        bytes[6] = 1;
+        assert_eq!(Selection::decode(&bytes), Err(Error::Selection));
+        let mut bytes = Selection::macos(501).encode(17).unwrap();
+        bytes[6] = 0;
+        assert_eq!(Selection::decode(&bytes), Err(Error::Selection));
+        for tag in [2, 127, 255] {
+            bytes[6] = tag;
+            assert_eq!(Selection::decode(&bytes), Err(Error::Protocol));
+        }
+    }
+
+    #[test]
+    fn macos_selection_refuses_session_seat_or_display_aliases_and_hidden_padding() {
+        for field in 0..3 {
+            let mut selected = Selection::macos(501);
+            match field {
+                0 => selected.session = "console".into(),
+                1 => selected.seat = "aqua".into(),
+                _ => selected.display = ":0".into(),
+            }
+            assert_eq!(selected.encode(17), Err(Error::Selection));
+        }
+        let mut bytes = Selection::macos(501).encode(17).unwrap();
+        bytes[223] = 1;
+        assert_eq!(Selection::decode(&bytes), Err(Error::Protocol));
+    }
+
+    #[test]
+    fn wrong_platform_refuses_before_starting_any_native_process() {
+        let mut selection = Selection::macos(501);
+        if cfg!(target_os = "macos") {
+            selection.platform = Platform::Linux;
+            selection.session = "c2".into();
+            selection.seat = "seat0".into();
+            selection.display = ":0".into();
+        }
+        assert!(matches!(
+            super::super::Monitor::start(super::super::Configuration {
+                image: "/unprovisioned/fr-session-monitor".into(),
+                selection,
+            }),
+            Err(Error::Selection)
+        ));
     }
 }

@@ -32,13 +32,43 @@ pub(super) fn select_desktop(
     Ok((String::new(), None, None))
 }
 
-/// Refused in [`supported`]; the session lifetime is not observed on macOS.
+/// Always bind the actual graphical login session before serving. A missing
+/// helper is a startup refusal, never a silently unmonitored host. This public
+/// native evidence covers console identity and sleep; it is not qualified
+/// screen-lock evidence (reported separately in the listening profile).
 pub(super) fn session_monitor(
-    _options: &RunOptions,
-    _display: &str,
-    _json: bool,
+    options: &RunOptions,
+    display: &str,
+    json: bool,
 ) -> Result<Option<frd::session_monitor::Configuration>, ExitCode> {
-    Ok(None)
+    use frd::session_monitor::{Configuration, Selection};
+
+    if !display.is_empty() {
+        return Err(run_refusal(
+            json,
+            "invalid_session_selection",
+            "macOS has no X11 session selection",
+            2,
+        ));
+    }
+    let image = options.session_monitor.clone().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("fr-session-monitor")))
+    });
+    let Some(image) = image.filter(|path| path.is_absolute() && path.is_file()) else {
+        return Err(run_refusal(
+            json,
+            "session_monitor_unavailable",
+            "fr-session-monitor not found; build fr-native with --features macos-session-monitor \
+             and install it beside frd or pass --session-monitor /absolute/path/fr-session-monitor",
+            2,
+        ));
+    };
+    Ok(Some(Configuration {
+        image,
+        selection: Selection::macos(rustix::process::geteuid().as_raw()),
+    }))
 }
 
 /// Refused in [`supported`].
