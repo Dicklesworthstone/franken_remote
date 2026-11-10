@@ -7,7 +7,7 @@ use std::{cell::Cell, time::Duration};
 /// A resize cannot keep extending the original cleanup/reopen opportunity.
 const MAX_AGE: Duration = Duration::from_secs(2);
 
-/// Plain, bounded metadata shared with the main-thread AppKit boundary.
+/// Plain, bounded metadata shared with the main-thread `AppKit` boundary.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Sample {
@@ -78,7 +78,7 @@ struct State {
 }
 
 /// Main-thread-only scalar state. Native callbacks never borrow a session or
-/// hold a lock, and no callback can panic from a reentrant RefCell borrow.
+/// hold a lock, and no callback can panic from a reentrant `RefCell` borrow.
 #[derive(Default)]
 pub(crate) struct Intent(Cell<State>);
 
@@ -221,8 +221,8 @@ mod tests {
         intent
     }
 
-    fn at(ms: u64) -> Option<Duration> {
-        Some(Duration::from_millis(ms))
+    fn at(ms: u64) -> Duration {
+        Duration::from_millis(ms)
     }
 
     #[test]
@@ -234,13 +234,13 @@ mod tests {
         assert!(!intent.watching());
         assert!(intent.seal(sample(3, 130, 1440, 930)));
         assert_eq!(
-            intent.take(at(140)),
+            intent.take(Some(at(140))),
             Some(Placement {
                 size: (1440, 930),
                 origin: (-1920, 40),
             })
         );
-        assert_eq!(intent.take(at(140)), None);
+        assert_eq!(intent.take(Some(at(140))), None);
         assert!(!intent.arm(sample(4, 140, 1440, 930)));
     }
 
@@ -249,11 +249,11 @@ mod tests {
         let changed = armed();
         changed.observe(sample(2, 110, 960, 660), false);
         assert!(changed.seal(sample(2, 120, 960, 660)));
-        assert_eq!(changed.take(at(130)).unwrap().size, (960, 660));
+        assert_eq!(changed.take(Some(at(130))).unwrap().size, (960, 660));
         let repaint = armed();
         repaint.observe(sample(1, 110, 960, 660), false);
         assert!(!repaint.seal(sample(1, 120, 960, 660)));
-        assert!(repaint.take(at(130)).is_none());
+        assert!(repaint.take(Some(at(130))).is_none());
     }
 
     #[test]
@@ -261,10 +261,10 @@ mod tests {
         let startup = Intent::default();
         startup.observe(sample(1, 110, 1280, 840), false);
         assert!(!startup.seal(sample(1, 120, 1280, 840)));
-        assert!(startup.take(at(130)).is_none());
+        assert!(startup.take(Some(at(130))).is_none());
         let unconfirmed = armed();
         unconfirmed.observe(sample(2, 110, 1280, 840), false);
-        assert!(unconfirmed.take(at(130)).is_none());
+        assert!(unconfirmed.take(Some(at(130))).is_none());
         let changed_again = armed();
         changed_again.observe(sample(2, 110, 1280, 840), false);
         assert!(!changed_again.seal(sample(3, 120, 1440, 930)));
@@ -291,25 +291,25 @@ mod tests {
         assert!(!intent.changed());
         assert!(!intent.watching());
         assert!(!intent.seal(sample(2, 120, 1280, 840)));
-        assert!(intent.take(at(130)).is_none());
+        assert!(intent.take(Some(at(130))).is_none());
         intent.observe(sample(3, 140, 1440, 930), false);
         assert!(!intent.seal(sample(3, 150, 1440, 930)));
     }
 
     #[test]
     fn cleanup_delay_or_clock_rollback_cannot_extend_a_sealed_receipt() {
-        for now in [at(119), at(2110), at(9999), None] {
+        for now in [Some(at(119)), Some(at(2110)), Some(at(9999)), None] {
             let intent = armed();
             intent.observe(sample(2, 110, 1280, 840), false);
             assert!(intent.seal(sample(2, 120, 1280, 840)));
             assert!(intent.take(now).is_none());
             // A later valid clock cannot retry an already rejected receipt.
-            assert!(intent.take(at(121)).is_none());
+            assert!(intent.take(Some(at(121))).is_none());
         }
         let intent = armed();
         intent.observe(sample(2, 110, 1280, 840), false);
         assert!(intent.seal(sample(2, 120, 1280, 840)));
-        assert!(intent.take(at(2109)).is_some());
+        assert!(intent.take(Some(at(2109))).is_some());
     }
 
     #[test]
@@ -321,7 +321,7 @@ mod tests {
                 assert!(intent.seal(sample(2, 120, 1280, 840)));
             }
             intent.cancel();
-            assert!(intent.take(at(130)).is_none());
+            assert!(intent.take(Some(at(130))).is_none());
             intent.observe(sample(3, 140, 960, 660), false);
             assert!(!intent.seal(sample(3, 150, 960, 660)));
         }
@@ -379,7 +379,7 @@ mod tests {
             let intent = armed();
             intent.observe(invalid, false);
             assert!(!intent.seal(sample(2, 120, 1280, 840)));
-            assert!(intent.take(at(130)).is_none());
+            assert!(intent.take(Some(at(130))).is_none());
         }
     }
 }

@@ -12,9 +12,9 @@ fn text_activity(report: &Report) -> bool {
     report.text_queued != 0 || report.text_refused != 0
 }
 
-fn history(report: &Report) -> crate::ControlHistory {
+/// Display changes: one JSON entry and one sentence per original close.
+fn display_change_history(report: &Report, json: &mut String, text: &mut String) {
     let mut entries = String::new();
-    let mut text = String::new();
     for change in &report.display_change_closes {
         if !entries.is_empty() {
             entries.push(',');
@@ -44,10 +44,15 @@ fn history(report: &Report) -> crate::ControlHistory {
             );
         }
     }
-    let mut json = format!(
+    let _ = write!(
+        json,
         ",\"display_changes\":{},\"display_change_closes\":[{entries}]",
         report.display_changes,
     );
+}
+
+/// Window geometry changes: the original close each one interrupted.
+fn window_resize_history(report: &Report, json: &mut String, text: &mut String) {
     let mut resizes = String::new();
     for change in &report.window_resize_closes {
         if !resizes.is_empty() {
@@ -89,6 +94,13 @@ fn history(report: &Report) -> crate::ControlHistory {
         ",\"window_resizes\":{},\"window_resize_closes\":[{resizes}]",
         report.window_resizes,
     );
+}
+
+fn history(report: &Report) -> crate::ControlHistory {
+    let mut json = String::new();
+    let mut text = String::new();
+    display_change_history(report, &mut json, &mut text);
+    window_resize_history(report, &mut json, &mut text);
     if refused_scroll(report) {
         let _ = write!(
             json,

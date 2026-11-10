@@ -369,11 +369,11 @@ impl Window {
         })
     }
     /// Bind one metadata-only native watcher to this original session. Its
-    /// callback fences input before AppKit can deliver any post-resize event.
+    /// callback fences input before `AppKit` can deliver any post-resize event.
     pub(crate) fn watch_resize(
         &self,
-        intent: std::rc::Rc<crate::macos_resize::Intent>,
-        stop: frd::session_startup::StreamingViewerControl,
+        intent: &std::rc::Rc<crate::macos_resize::Intent>,
+        stop: &frd::session_startup::StreamingViewerControl,
     ) -> Result<(), NativeError> {
         let bridge = Box::new(ResizeBridge {
             intent: intent.clone(),
@@ -777,9 +777,10 @@ unsafe extern "C" fn resize_changed(
     if sample.is_null() {
         bridge.intent.cancel();
     } else {
-        bridge
-            .intent
-            .observe(unsafe { *sample }, bridge.stop.is_stopped());
+        // SAFETY: checked non-null above; native passes its own stack sample,
+        // valid for this same-thread call, and Sample is plain scalar data.
+        let sample = unsafe { *sample };
+        bridge.intent.observe(sample, bridge.stop.is_stopped());
     }
     // Recording a causal receipt is not authority. Stop is terminal even when
     // the sample was malformed or an earlier local failure already vetoed it.

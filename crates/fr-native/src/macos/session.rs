@@ -1146,7 +1146,7 @@ fn service(
         let watched = window
             .borrow()
             .as_ref()
-            .is_some_and(|opened| opened.watch_resize(resize.clone(), stop.clone()).is_ok());
+            .is_some_and(|opened| opened.watch_resize(resize, stop).is_ok());
         if !watched {
             halt(LocalStop::NativeFailure, &mut input, &mut report);
             return;
@@ -2072,6 +2072,8 @@ mod tests {
         ));
         session.intent = Rc::new(RefCell::new(Intent::new(true)));
         session.report.borrow_mut().local_stop = Some(LocalStop::PictureChanged);
+        // `run` records its attempt before any geometry can be observed.
+        session.report.borrow_mut().attempts = 1;
         let initial = crate::macos_resize::Sample {
             revision: 1,
             width: 960.0,
