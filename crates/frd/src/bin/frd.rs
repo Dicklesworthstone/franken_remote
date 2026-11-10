@@ -67,9 +67,10 @@ OPTIONS:
     --observation-indicator PATH  Absolute fr-observation-indicator image: require
                     a live on-desktop Stop sharing window before listening,
                     including for view-only audio. UI loss ends this host run.
-                    Off by default; cannot combine with --input-agent (control
-                    keeps its own mandatory indicator). Build fr-native with
-                    --features linux-input; see docs/observation-indicator.md
+                    macOS always requires it (default: next to frd), including
+                    control hosts; build with --features macos-observation-indicator.
+                    Linux: off by default, view-only hosts, --features linux-input.
+                    See docs/observation-indicator.md
     --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
                     exclusive control after the current admission/approval policy;
                     the agent shows a mandatory local indicator. Probed once at
@@ -766,6 +767,13 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Ok(monitor) => monitor,
         Err(code) => return code,
     };
+    #[cfg(target_os = "macos")]
+    let observation_indicator = match macos_run::observation_indicator(&options, json) {
+        Ok(image) => Some(image),
+        Err(code) => return code,
+    };
+    #[cfg(target_os = "linux")]
+    let observation_indicator = options.observation_indicator.clone();
     let mut run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
@@ -806,7 +814,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         control: run_options.input_agent.is_some(),
         adaptive_capture: run_options.adaptive_capture,
         session_lifetime: run_options.session_monitor.is_some(),
-        observation_indicator: options.observation_indicator.is_some(),
+        observation_indicator: observation_indicator.is_some(),
         encoder,
         video,
     };
@@ -840,14 +848,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         )
         .map_err(|error| (error.code(), error.to_string()))
     } else {
-        match options.observation_indicator.as_deref() {
-            // Refused before startup on macOS (macos_run::supported).
-            #[cfg(not(target_os = "linux"))]
-            Some(_) => Err((
-                "observation_indicator_unavailable",
-                "the observation indicator is an X11 window".to_owned(),
-            )),
-            #[cfg(target_os = "linux")]
+        match observation_indicator.as_deref() {
             Some(image) => frd::host_indicator::run_with_policy_and_encoder(
                 &run_options,
                 &report,

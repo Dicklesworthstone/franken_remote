@@ -58,6 +58,9 @@ session-monitor = ["dep:frd"]
 linux-session-monitor = ["linux-logind", "session-monitor"]
 # Console identity, switch/logout and sleep evidence, not a screen-lock oracle.
 macos-session-monitor = ["session-monitor", "frd/macos-host"]
+# Read-only local Stop sharing surface. The platform features supply its UI.
+observation-indicator = []
+macos-observation-indicator = ["observation-indicator"]
 linux-session-events = ["linux-logind", "dep:frd", "dep:asupersync"]
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
 linux-opus = []
@@ -85,11 +88,11 @@ linux-microphone-playout = ["linux-pipewire-mic", "linux-audio-playout", "linux-
 linux-opus-process = ["linux-opus", "dep:fr-client"]
 linux-audio = ["linux-pulse-playback", "linux-opus-process"]
 linux-displays = ["linux-media"]
-linux-input = ["input-agent"]
+linux-input = ["input-agent", "observation-indicator"]
 # Exact RandR monitor input targets, without the media/FFmpeg worker boundary.
 linux-input-monitors = ["linux-input"]
 linux-clipboard = []
-linux-session-ui = ["dep:frd", "dep:asupersync"]
+linux-session-ui = ["dep:frd", "dep:asupersync", "observation-indicator"]
 # Original Host consent on one locally selected, logind-guarded X11 desktop.
 linux-local-approval = ["linux-session-ui", "linux-logind"]
 linux-viewer-input = ["dep:frd"]
@@ -155,7 +158,7 @@ required-features = ["macos-input"]
 [[bin]]
 name = "fr-observation-indicator"
 path = "src/bin/observation_indicator.rs"
-required-features = ["linux-input"]
+required-features = ["observation-indicator"]
 
 # Host-provided Opus is decoded only in this restricted, per-epoch child.
 [[bin]]

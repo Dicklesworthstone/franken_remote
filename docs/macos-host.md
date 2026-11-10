@@ -18,8 +18,8 @@ scripts/macos/install-host.sh --remote mac-mini     # another Mac, over SSH
 
 The script:
 
-1. builds release `frd`, `fr-media-worker`, `fr-input-agent`, `fr-session-monitor` and the `fr`
-   client here (never on the target);
+1. builds release `frd`, `fr-media-worker`, `fr-input-agent`, `fr-session-monitor`,
+   `fr-observation-indicator` and the `fr` client here (never on the target);
 2. signs each with your Developer ID (`--identity` to choose), the hardened
    runtime, a timestamp and a stable identifier (`com.frankenremote.<name>`);
 3. installs them in `~/Library/Application Support/FrankenRemote/bin` on the
@@ -144,6 +144,29 @@ launchd restarts the agent only after a failed start (`KeepAlive` on
 unsuccessful exit, throttled to 10 s); waiting for a permission is not a
 failure. It starts at every login and stops at logout. Graphical screen-lock
 revocation remains unqualified; the console-session scope is described below.
+
+## Local Stop sharing
+
+Every macOS `frd run` requires the read-only `fr-observation-indicator` beside
+`frd`, or the absolute image selected by `--observation-indicator`. The signed
+installer includes it. View-only hosting uses this surface too; a controlling
+session retains its independent control and clipboard panels.
+
+Before listening, the helper must show **Screen sharing enabled — click to
+stop** on every original display. The panel remains visible while the host
+waits for peers. A local Stop ends the original host and drains its existing
+owners. It is a successful cancellation even during startup, so launchd's
+failure-only restart does not undo that user action. Hidden/lost panels,
+display-set or geometry changes, malformed IPC and expired UI progress refuse
+or end the original run. A new host start is required afterward.
+
+The native event loop and independent command/watchdog worker retain original,
+sleep-inclusive visibility deadlines. A request waits for a completed native
+visibility turn that began after that request arrived; cached evidence cannot
+extend it. No peer approval, capture or input authority lives in this helper.
+The selected desktop user and OS remain trusted. This implementation is source
+and component tested; actual AppKit visibility, physical input and installed-host
+qualification remain pending. See [observation indication](observation-indicator.md).
 
 ## Console-session lifecycle
 

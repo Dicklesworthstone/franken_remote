@@ -1,4 +1,5 @@
-//! Opt-in desktop "Stop sharing" surface around the canonical host run.
+//! Desktop "Stop sharing" surface around the canonical host run.
+//! Explicit on Linux; required by the macOS CLI for every host run.
 //! One read-only child stays visible while this run is enabled, including idle
 //! listening between peers. It must be mapped and responsive BEFORE the host
 //! listener starts. It never approves a peer or changes admission policy.
@@ -9,16 +10,16 @@
 //! host future nor its media/firewall cleanup is cancelled and abandoned.
 pub mod microphone;
 mod process;
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 use crate::{
     host_run::{self, Encoder, Options, Reporter, StopHandle, policy},
     input_process::ProcessLaunch,
 };
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub use process::Error as IndicatorError;
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 use process::{Owner, Status};
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 use std::{
     fmt,
     path::Path,
@@ -31,7 +32,7 @@ use std::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub enum Error {
     Configuration,
     Entropy,
@@ -40,7 +41,7 @@ pub enum Error {
     WatchdogPanicked,
     Cleanup,
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 impl Error {
     pub fn code(&self) -> &'static str {
         match self {
@@ -48,6 +49,7 @@ impl Error {
             Self::Entropy => "entropy_unavailable",
             Self::Indicator(IndicatorError::Busy) => "observation_indicator_busy",
             Self::Indicator(IndicatorError::Expired) => "observation_indicator_evidence_lost",
+            Self::Indicator(IndicatorError::Clock) => "observation_indicator_clock_failed",
             Self::Indicator(IndicatorError::Protocol) => "observation_indicator_protocol",
             Self::Indicator(_) => "observation_indicator_unavailable",
             Self::Host(error) => error.code(),
@@ -56,21 +58,21 @@ impl Error {
         }
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "frd-indicator: {self:?}")
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 impl std::error::Error for Error {}
 
 /// Require the locally installed `fr-observation-indicator` before serving a
-/// view-only host, with optional playback audio. A control-capable host retains
-/// its separate mandatory per-lease indicator and is refused by this slice.
+/// host. macOS also uses it for control-capable hosting; that path retains its
+/// separate per-lease control indicator. Linux keeps its view-only selection.
 /// Missing/unresponsive UI refuses rather than silently disabling the option.
 /// This legacy entry point retains the explicit software encoder profile.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub fn run_with_policy(
     options: &Options,
     report: &Reporter,
@@ -91,7 +93,7 @@ pub fn run_with_policy(
 /// Preserve the local encoder request through the indicator gate. Explicit
 /// automatic hardware selection still requires real startup probes. The UI
 /// never permits software fallback or changes the selected backend later.
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 pub fn run_with_policy_and_encoder(
     options: &Options,
     report: &Reporter,
@@ -103,7 +105,7 @@ pub fn run_with_policy_and_encoder(
     if stop.is_requested() {
         return Ok(());
     }
-    if options.input_agent.is_some() {
+    if cfg!(target_os = "linux") && options.input_agent.is_some() {
         return Err(Error::Configuration);
     }
     let mut bytes = [0; 16];
@@ -132,9 +134,11 @@ pub fn run_with_policy_and_encoder(
         }
     }
 }
-/// Once running, a local UI revocation is a normal stop. Before first readiness
-/// EVERY stopped UI is a refusal: an opening failure must not exit as success.
-#[cfg(target_os = "linux")]
+/// Once running, a local UI revocation is a normal stop. The macOS helper may
+/// also receive a real local Stop before its first Ready reply. That cancels
+/// startup successfully, so launchd's failure-only restart cannot undo the
+/// user's choice. Other opening failures remain refusals.
+#[cfg(host_stack)]
 fn fault(status: Status) -> Option<IndicatorError> {
     match status {
         Status::Opening
@@ -143,7 +147,7 @@ fn fault(status: Status) -> Option<IndicatorError> {
         Status::Stopped(error) => Some(error),
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 fn drive(
     owner: &Owner,
     stop: &StopHandle,
@@ -153,9 +157,20 @@ fn drive(
     loop {
         let status = control.status();
         if let Status::Stopped(error) = status {
+            if cfg!(target_os = "macos") && error == IndicatorError::LocalRevoke {
+                return Ok(());
+            }
             return Err(Error::Indicator(error));
         }
         if stop.is_requested() {
+            // A worker may publish its terminal cause after the status sample
+            // above but before this stop flag is observed. Read it again so a
+            // failed opening cannot masquerade as a successful cancellation.
+            if let Status::Stopped(error) = control.status()
+                && !(cfg!(target_os = "macos") && error == IndicatorError::LocalRevoke)
+            {
+                return Err(Error::Indicator(error));
+            }
             return Ok(());
         }
         if status == Status::Ready {
@@ -193,20 +208,20 @@ fn drive(
         failure.map_or(Ok(()), |error| Err(Error::Indicator(error)))
     })
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 struct Fence<'a>(&'a StopHandle);
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 impl Drop for Fence<'_> {
     fn drop(&mut self) {
         self.0.request();
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 struct Finish<'a> {
     done: &'a AtomicBool,
     stop: &'a StopHandle,
 }
-#[cfg(target_os = "linux")]
+#[cfg(host_stack)]
 impl Drop for Finish<'_> {
     fn drop(&mut self) {
         self.stop.request();
@@ -214,7 +229,7 @@ impl Drop for Finish<'_> {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, host_stack))]
 mod tests {
     use super::*;
     #[test]

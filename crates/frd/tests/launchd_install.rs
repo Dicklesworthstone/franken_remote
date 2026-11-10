@@ -158,6 +158,7 @@ fn installer_owned_and_one_shot_flags_are_not_run_options() {
         &["--once"][..],
         &["--input-agent", "relative/fr-input-agent"][..],
         &["--session-monitor", "relative/fr-session-monitor"][..],
+        &["--observation-indicator", "relative/fr-observation-indicator"][..],
         &["--no-such-flag"][..],
     ] {
         let mut args = vec!["--", "--encoder", "videotoolbox"];
@@ -176,6 +177,8 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
     let port = free_port();
     let agent_path = "/Users/u/Library/Application Support/FrankenRemote/bin/fr-input-agent";
     let monitor_path = "/Users/u/Library/Application Support/FrankenRemote/bin/fr-session-monitor";
+    let indicator_path =
+        "/Users/u/Library/Application Support/FrankenRemote/bin/fr-observation-indicator";
     let install = |approval: &str| {
         home.frd(&[
             "install",
@@ -193,6 +196,8 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
             agent_path,
             "--session-monitor",
             monitor_path,
+            "--observation-indicator",
+            indicator_path,
         ])
     };
     let output = install("none");
@@ -231,6 +236,8 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
             agent_path,
             "--session-monitor",
             monitor_path,
+            "--observation-indicator",
+            indicator_path,
         ]
     );
     // Exactly what frd run's own parser accepts.
@@ -239,6 +246,10 @@ fn install_publishes_a_private_agent_and_uninstall_removes_only_it() {
     assert_eq!(
         parsed.session_monitor.as_deref(),
         Some(Path::new(monitor_path))
+    );
+    assert_eq!(
+        parsed.observation_indicator.as_deref(),
+        Some(Path::new(indicator_path))
     );
     assert!(
         parsed.logind_session.is_none(),

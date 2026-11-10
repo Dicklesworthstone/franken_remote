@@ -1,15 +1,19 @@
 #![forbid(unsafe_code)]
 //! Parent-bound revocation surfaces for an observation cohort or an independent
 //! per-session microphone permission. The selected role never changes in place.
-//! Uses the existing device-attributed X11 indicator. This process has no input
+//! Uses a device-attributed X11 indicator or read-only macOS panels. This process has no input
 //! executor, capture, clipboard, or network-protocol path. A separate initial
 //! approval record selects its one-use device-attributed consent role.
 //! The inherited sockets use a distinct fixed-size protocol; input-executor
 //! records are never accepted. Process exit closes all native UI resources.
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-input", feature = "linux-session-ui")
+))]
 mod linux {
+    pub(crate) use crate::pipe::{read, send};
     use fr_core::{
-        indicator_process::{FRAME_BYTES, Frame, Kind},
+        indicator_process::Kind,
         input_submission::process::{self, Signal},
     };
     use fr_native::{
@@ -17,7 +21,7 @@ mod linux {
         sharing_indicator::{self, LocalIndicator, Status},
     };
     use std::{
-        io::{self, Read, Write},
+        io,
         os::{
             fd::AsFd,
             unix::net::{UnixDatagram, UnixStream},
@@ -54,36 +58,6 @@ mod linux {
             Ok((command, signals))
         })();
         channels.map_or(CHANNEL, |(command, signals)| serve(command, &signals))
-    }
-    pub(crate) fn read(command: &mut UnixStream, budget: Duration) -> Result<Frame, i32> {
-        let until = Instant::now().checked_add(budget).ok_or(CHANNEL)?;
-        let mut bytes = [0; FRAME_BYTES];
-        let mut filled = 0;
-        while filled < bytes.len() {
-            let left = until
-                .checked_duration_since(Instant::now())
-                .filter(|left| !left.is_zero())
-                .ok_or(CHANNEL)?;
-            command.set_read_timeout(Some(left)).map_err(|_| CHANNEL)?;
-            match command.read(&mut bytes[filled..]) {
-                Ok(0) => return Err(CHANNEL),
-                Ok(count) => filled += count,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(_) => return Err(CHANNEL),
-            }
-        }
-        if Instant::now() >= until {
-            return Err(CHANNEL);
-        }
-        Frame::decode(&bytes).map_err(|_| PROTOCOL)
-    }
-    pub(crate) fn send(command: &mut UnixStream, request: Frame, kind: Kind) -> Result<(), i32> {
-        command
-            .set_write_timeout(Some(IDLE_WAIT))
-            .map_err(|_| CHANNEL)?;
-        command
-            .write_all(&request.reply(kind).encode().map_err(|_| PROTOCOL)?)
-            .map_err(|_| CHANNEL)
     }
     fn stopped(signals: &UnixDatagram, revoked: &AtomicBool) -> bool {
         if revoked.load(Ordering::Acquire) {
@@ -206,6 +180,8 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use fr_core::indicator_process::{FRAME_BYTES, Frame};
+        use std::io::Write;
 
         #[test]
         fn fragmented_read_keeps_frame_boundaries_and_rejects_bad_magic() {
@@ -244,13 +220,49 @@ mod linux {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-input", feature = "linux-session-ui")
+))]
 #[path = "observation_indicator/approval.rs"]
 mod approval;
 
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(feature = "linux-input", feature = "linux-session-ui")
+    ),
+    all(target_os = "macos", feature = "macos-observation-indicator"),
+    all(test, unix)
+))]
+#[path = "observation_indicator/pipe.rs"]
+mod pipe;
+
+#[cfg(any(
+    test,
+    all(target_os = "macos", feature = "macos-observation-indicator")
+))]
+#[path = "observation_indicator/role.rs"]
+mod role;
+
+#[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
+#[path = "observation_indicator/macos.rs"]
+mod macos;
+
 fn main() {
-    #[cfg(target_os = "linux")]
+    #[cfg(all(
+        target_os = "linux",
+        any(feature = "linux-input", feature = "linux-session-ui")
+    ))]
     std::process::exit(linux::run());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
+    std::process::exit(macos::run());
+    #[cfg(not(any(
+        all(
+            target_os = "linux",
+            any(feature = "linux-input", feature = "linux-session-ui")
+        ),
+        all(target_os = "macos", feature = "macos-observation-indicator")
+    )))]
     std::process::exit(2);
 }

@@ -51,13 +51,13 @@ if (( ! skip_build )); then
   (cd "$repo" &&
     cargo build --release --locked -p frd --features macos-host --bin frd &&
     cargo build --release --locked -p fr-native \
-      --features macos-media,macos-input,macos-desktop,macos-session-monitor \
-      --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr)
+      --features macos-media,macos-input,macos-desktop,macos-session-monitor,macos-observation-indicator \
+      --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr-observation-indicator --bin fr)
 fi
 
 stage=$(mktemp -d "${TMPDIR:-/tmp}/fr-install.XXXXXX")
-trap 'rm -f "$stage"/frd "$stage"/fr-media-worker "$stage"/fr-input-agent "$stage"/fr-session-monitor "$stage"/fr; rmdir "$stage"' EXIT
-for name in frd fr-media-worker fr-input-agent fr-session-monitor fr; do
+trap 'rm -f "$stage"/frd "$stage"/fr-media-worker "$stage"/fr-input-agent "$stage"/fr-session-monitor "$stage"/fr-observation-indicator "$stage"/fr; rmdir "$stage"' EXIT
+for name in frd fr-media-worker fr-input-agent fr-session-monitor fr-observation-indicator fr; do
   cp "$release/$name" "$stage/$name"
   codesign --force --options runtime --timestamp \
     --identifier "com.frankenremote.$name" --sign "$identity" "$stage/$name"
@@ -82,7 +82,7 @@ set -euo pipefail
 stage=$1; shift
 bin="$HOME/Library/Application Support/FrankenRemote/bin"
 mkdir -p -m 700 "$bin"
-for name in frd fr-media-worker fr-input-agent fr-session-monitor fr; do
+for name in frd fr-media-worker fr-input-agent fr-session-monitor fr-observation-indicator fr; do
   cp "$stage/$name" "$bin/.$name.new"
   chmod 755 "$bin/.$name.new"
   mv -f "$bin/.$name.new" "$bin/$name"
@@ -102,8 +102,8 @@ if [[ -z $remote ]]; then
   zsh -c "$target_side" install "$stage" "${run_args[@]}"
 else
   remote_stage=$(ssh "$remote" 'mktemp -d "${TMPDIR:-/tmp}/fr-install.XXXXXX"')
-  scp -q "$stage"/frd "$stage"/fr-media-worker "$stage"/fr-input-agent "$stage"/fr-session-monitor "$stage"/fr "$remote:$remote_stage/"
+  scp -q "$stage"/frd "$stage"/fr-media-worker "$stage"/fr-input-agent "$stage"/fr-session-monitor "$stage"/fr-observation-indicator "$stage"/fr "$remote:$remote_stage/"
   ssh "$remote" zsh -c "${(q)target_side}" install "${(q)remote_stage}" "${(q@)run_args}"
-  ssh "$remote" "rm -f ${(q)remote_stage}/frd ${(q)remote_stage}/fr-media-worker ${(q)remote_stage}/fr-input-agent ${(q)remote_stage}/fr-session-monitor ${(q)remote_stage}/fr && rmdir ${(q)remote_stage}"
+  ssh "$remote" "rm -f ${(q)remote_stage}/frd ${(q)remote_stage}/fr-media-worker ${(q)remote_stage}/fr-input-agent ${(q)remote_stage}/fr-session-monitor ${(q)remote_stage}/fr-observation-indicator ${(q)remote_stage}/fr && rmdir ${(q)remote_stage}"
 fi
 print "installed ${bin} and the LaunchAgent on ${remote:-this Mac}"

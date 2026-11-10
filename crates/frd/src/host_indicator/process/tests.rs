@@ -266,7 +266,7 @@ fn uncertain_retired_cleanup_cannot_admit_a_replacement() {
 }
 
 #[test]
-#[cfg(all(host_stack, target_os = "linux"))]
+#[cfg(host_stack)]
 #[allow(clippy::too_many_lines)]
 fn real_child_faults_gate_startup_stop_the_original_host_and_drain_before_return() {
     use crate::host_run::StopHandle;

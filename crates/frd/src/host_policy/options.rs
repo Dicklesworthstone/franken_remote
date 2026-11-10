@@ -93,8 +93,9 @@ pub struct RunOptions {
     pub logind_seat: Option<String>,
     /// Absolute `fr-session-monitor` image (default: next to frd).
     pub session_monitor: Option<PathBuf>,
-    /// Optional read-only Stop sharing child, required before listening when
-    /// selected. This slice covers observation-only hosts, with optional audio.
+    /// Absolute read-only Stop sharing image override. macOS requires this
+    /// helper for every host run and defaults next to frd. Linux selects it
+    /// explicitly for observation-only hosts, including optional audio.
     pub observation_indicator: Option<PathBuf>,
 }
 impl RunOptions {
@@ -219,9 +220,13 @@ impl RunOptions {
         options.clipboard = clipboard.unwrap_or(options.input_agent.is_some());
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
-        // Control retains its existing mandatory per-lease indicator. The two
-        // native window lifetimes are not silently combined in this slice.
-        if options.observation_indicator.is_some() && options.input_agent.is_some() {
+        // macOS requires a host-lifetime Stop sharing surface in addition to
+        // the control executor's independent per-lease panel. Linux retains
+        // its explicit view-only observation surface.
+        if !cfg!(target_os = "macos")
+            && options.observation_indicator.is_some()
+            && options.input_agent.is_some()
+        {
             return Err(Error::InvalidArgument);
         }
         // A private Xvfb belongs to no logind session. Watching some other session
@@ -311,7 +316,7 @@ impl RunOptions {
     #[cfg(target_os = "macos")]
     #[must_use]
     pub fn macos_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 6] = [
+        let refusals: [(bool, &str, &str); 5] = [
             (
                 approval == Approval::Local,
                 "local_approval_unavailable",
@@ -326,11 +331,6 @@ impl RunOptions {
                 self.microphone,
                 "microphone_endpoint_unavailable",
                 "--microphone has no macOS backend yet",
-            ),
-            (
-                self.observation_indicator.is_some(),
-                "observation_indicator_unavailable",
-                "--observation-indicator is an X11 window; it has no macOS backend yet",
             ),
             (
                 self.logind_session.is_some(),
@@ -645,12 +645,20 @@ mod tests {
                 "--observation-indicator",
                 "/b",
             ][..],
-            &["--observation-indicator", "/a", "--input-agent", "/b"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),
                 "{refused:?}"
             );
+        }
+        let controlled = parse(&["--observation-indicator", "/a", "--input-agent", "/b"]);
+        if cfg!(target_os = "macos") {
+            let controlled = controlled.unwrap();
+            assert_eq!(controlled.observation_indicator, Some(PathBuf::from("/a")));
+            assert_eq!(controlled.input_agent, Some(PathBuf::from("/b")));
+            assert!(controlled.clipboard);
+        } else {
+            assert!(matches!(controlled, Err(Error::InvalidArgument)));
         }
     }
 }

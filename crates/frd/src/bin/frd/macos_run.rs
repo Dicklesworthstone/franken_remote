@@ -32,6 +32,32 @@ pub(super) fn select_desktop(
     Ok((String::new(), None, None))
 }
 
+/// Every macOS host keeps a local, visible Stop sharing surface, including
+/// view-only and idle listening. The controller's own per-lease indicator is
+/// independent. A missing package helper never becomes invisible hosting.
+pub(super) fn observation_indicator(
+    options: &RunOptions,
+    json: bool,
+) -> Result<std::path::PathBuf, ExitCode> {
+    let image = options.observation_indicator.clone().or_else(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("fr-observation-indicator")))
+    });
+    image
+        .filter(|path| path.is_absolute() && path.is_file())
+        .ok_or_else(|| {
+            run_refusal(
+                json,
+                "observation_indicator_unavailable",
+                "fr-observation-indicator not found; build fr-native with --features \
+                 macos-observation-indicator and install it beside frd or pass \
+                 --observation-indicator /absolute/path/fr-observation-indicator",
+                2,
+            )
+        })
+}
+
 /// Always bind the actual graphical login session before serving. A missing
 /// helper is a startup refusal, never a silently unmonitored host. This public
 /// native evidence covers console identity and sleep; it is not qualified

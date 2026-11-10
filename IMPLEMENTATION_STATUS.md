@@ -1,5 +1,45 @@
 # Implementation status
 
+## Required macOS host Stop sharing surface (2026-11-10)
+
+The macOS CLI now requires a separate read-only `fr-observation-indicator`
+before the original host starts listening. It covers view-only and control-capable
+hosting, including idle waiting between peers. The signed installer builds and
+installs it, and an absolute `--observation-indicator` override survives
+LaunchAgent installation. The controlling session keeps its existing per-lease
+input and clipboard indicators.
+
+The native helper opens a **Screen sharing enabled — click to stop** panel on
+every original display, bounded by the eight-display catalog. AppKit stays on
+the main thread while an independent nonblocking IPC/watchdog worker enforces
+the original opening and visibility deadlines. Each readiness request requires
+a completed native visibility/event turn that began after that request arrived.
+Cached UI evidence, a resumed machine, a late native return or a new display
+cannot extend or revive the old owner.
+
+An attributed local Stop ends the original host and drains its existing owners,
+including if clicked during startup. It produces a successful cancellation so
+launchd's failure-only restart does not undo that action. Native failure remains
+a refusal. The supervisor preserves a final local-revoke datagram across command
+EOF, while malformed framing remains a protocol fault. Uncertain child cleanup
+retains its original capacity and cannot silently start replacement work.
+
+Verification before the executor outage: **18 focused supervisor tests and strict
+Clippy passed**; **17 native evidence-policy, role, pipe and clock tests passed**.
+These include real subprocess/channel behavior but do not prove a native UI.
+The files were subsequently recovered from recorded sources and patches, and
+independently reviewed. Their final formatting/full-build pass is unverified.
+The final Apple Silicon Rust Clippy rerun was interrupted; Objective-C SDK
+compilation, native linking and AppKit/physical-input execution remain
+**not tested**. The full host-runtime build remains blocked locally by the
+unchanged pinned Asupersync compiler memory failure.
+
+This does not qualify graphical screen-lock detection, supply macOS local
+approval, or grant observation/input authority through the indicator itself.
+The desktop user and OS remain trusted. Tracking `fr-hjl0` stays in progress
+for the remaining native and full-runtime gates; `fr-6y4w` retains the separate
+screen-lock gap. See [observation indication](docs/observation-indicator.md).
+
 ## Bounded committed Unicode input (2026-11-10)
 
 The macOS per-lease input executor now prepares and submits complete Unicode

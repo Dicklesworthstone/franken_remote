@@ -84,6 +84,11 @@ pub mod macos_input_state;
 pub mod macos_session;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-session-monitor")))]
 mod macos_session_policy;
+// Visible host-lifetime stop surface; never constructs an input executor.
+#[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
+pub mod macos_observation;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-observation-indicator")))]
+mod macos_observation_policy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_sizing;
 // Invocation consent and native key gestures are portable policy, not AppKit.
@@ -116,6 +121,7 @@ pub mod image_transfer;
     any(
         feature = "linux-media",
         feature = "linux-input",
+        feature = "linux-session-ui",
         feature = "linux-opus-process",
         feature = "linux-microphone-process"
     )
@@ -128,6 +134,7 @@ pub use parent::bind_worker_parent;
     any(
         feature = "linux-media",
         feature = "linux-input",
+        feature = "linux-session-ui",
         feature = "linux-opus-process",
         feature = "linux-microphone-process"
     )
@@ -149,7 +156,8 @@ pub use parent::{ParentUnbound, bind_parent};
             test,
             feature = "macos-input",
             feature = "macos-clipboard",
-            feature = "macos-session-monitor"
+            feature = "macos-session-monitor",
+            feature = "macos-observation-indicator"
         )
     )
 ))]
@@ -211,7 +219,10 @@ pub mod display_picker;
 pub mod logind;
 
 // Positive decisions remain confined to the supervised native session child.
-#[cfg(all(target_os = "linux", feature = "linux-input"))]
+#[cfg(all(
+    target_os = "linux",
+    any(feature = "linux-input", feature = "linux-session-ui")
+))]
 pub mod approval_surface;
 
 #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
