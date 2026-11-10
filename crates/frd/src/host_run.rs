@@ -210,6 +210,50 @@ impl Error {
             Self::EncoderUnavailable(_) => "encoder_unavailable",
         }
     }
+    /// The macOS privacy permission this startup refusal reports missing: the
+    /// input agent's probe refuses `Permission` without Accessibility, and the
+    /// capture worker's probe answers `screen_recording_not_granted`
+    /// (fr-native `media_worker/macos.rs`) without Screen Recording.
+    fn missing_permission(&self) -> Option<Permission> {
+        match self {
+            Self::InputAgentUnavailable(PlatformError::Permission) => {
+                Some(Permission::Accessibility)
+            }
+            Self::EncoderUnavailable(reasons)
+                if reasons == "videotoolbox=screen_recording_not_granted" =>
+            {
+                Some(Permission::ScreenRecording)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A macOS privacy permission that only the person at the Mac can allow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Permission {
+    /// Capture: System Settings > Privacy & Security > Screen Recording.
+    ScreenRecording,
+    /// Control (`--input-agent`): ... > Accessibility.
+    Accessibility,
+}
+impl Permission {
+    /// Stable machine-readable name.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScreenRecording => "screen_recording",
+            Self::Accessibility => "accessibility",
+        }
+    }
+    /// Its name under System Settings > Privacy & Security.
+    #[must_use]
+    pub const fn settings_name(self) -> &'static str {
+        match self {
+            Self::ScreenRecording => "Screen Recording",
+            Self::Accessibility => "Accessibility",
+        }
+    }
 }
 
 /// What a controlled share's lease reports when the selected session stops,
@@ -275,6 +319,13 @@ pub enum Event {
     SourceForcedRetirement,
     CleanupFailed {
         stage: &'static str,
+    },
+    /// A macOS permission this host needs is not allowed yet (macOS showed
+    /// its prompt at the Mac). The host re-checks until it is allowed or the
+    /// host is stopped, instead of exiting; nothing is bound meanwhile.
+    /// Reported once per permission.
+    AwaitingPermission {
+        permission: Permission,
     },
     Stopped,
 }
@@ -378,6 +429,65 @@ fn probe_control(options: &Options) -> Result<Option<Capabilities>, Error> {
     grantable(probed)
         .map(Some)
         .map_err(Error::ControlCapabilityMissing)
+}
+/// Re-check a missing macOS permission this often: every 5 s for the first
+/// minute after the prompt (the person is likely at the Mac), then every 30 s.
+fn permission_recheck(checks: u32) -> Duration {
+    if checks <= 12 {
+        Duration::from_secs(5)
+    } else {
+        Duration::from_secs(30)
+    }
+}
+/// The permission a startup refusal should wait for on this platform: only
+/// macOS has grants a person allows at the machine while the host runs.
+fn awaited_permission(error: &Error) -> Option<Permission> {
+    if cfg!(target_os = "macos") {
+        error.missing_permission()
+    } else {
+        None
+    }
+}
+/// Run a startup probe until it stops reporting a missing permission (see
+/// [`awaited_permission`]). A host started before its grants (a `LaunchAgent`
+/// at first login) then starts the moment they are allowed, rather than
+/// exiting into launchd's restart loop and logging a refusal every 10 s.
+/// Each check is a fresh one-shot probe process; any other result returns at
+/// once. `None`: stopped while waiting.
+fn awaiting_permission<T>(
+    stop: &StopHandle,
+    report: &Reporter,
+    waits_for: impl Fn(&Error) -> Option<Permission>,
+    recheck: impl Fn(u32) -> Duration,
+    mut probe: impl FnMut() -> Result<T, Error>,
+) -> Result<Option<T>, Error> {
+    let mut reported = None;
+    let mut checks: u32 = 0;
+    loop {
+        let error = match probe() {
+            Ok(value) => return Ok(Some(value)),
+            Err(error) => error,
+        };
+        let Some(permission) = waits_for(&error) else {
+            return Err(error);
+        };
+        if reported != Some(permission) {
+            report(Event::AwaitingPermission { permission });
+            reported = Some(permission);
+        }
+        checks = checks.saturating_add(1);
+        let until = std::time::Instant::now() + recheck(checks);
+        loop {
+            let left = until.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || stop.is_requested() {
+                break;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(100)));
+        }
+        if stop.is_requested() {
+            return Ok(None);
+        }
+    }
 }
 /// Resolve the local request before binding anything. Each hardware candidate
 /// must capture and produce an admitted IDR through the canonical worker probe.
@@ -829,7 +939,14 @@ fn run_inner(
     if let Some(approval) = approval {
         approval.validate(options)?;
     }
-    let control = probe_control(options)?;
+    let Some(control) =
+        awaiting_permission(stop, report, awaited_permission, permission_recheck, || {
+            probe_control(options)
+        })?
+    else {
+        report(Event::Stopped);
+        return Ok(());
+    };
     if options.microphone.is_some() {
         selected_offer(
             (
@@ -847,7 +964,12 @@ fn run_inner(
         )
         .map_err(|_| Error::MicrophoneCapabilities)?;
     }
-    let Some(encoder) = select_encoder(options, selection, stop)? else {
+    let Some(encoder) =
+        awaiting_permission(stop, report, awaited_permission, permission_recheck, || {
+            select_encoder(options, selection, stop)
+        })?
+        .flatten()
+    else {
         report(Event::Stopped);
         return Ok(());
     };
@@ -1632,6 +1754,10 @@ impl Share<'_> {
 #[cfg(test)]
 #[path = "host_run/cleanup_tests.rs"]
 mod cleanup_tests;
+
+#[cfg(test)]
+#[path = "host_run/permission_tests.rs"]
+mod permission_tests;
 
 #[cfg(test)]
 mod tests {

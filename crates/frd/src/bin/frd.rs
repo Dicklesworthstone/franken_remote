@@ -462,6 +462,10 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
             Event::CleanupFailed { stage } => {
                 serde_json::json!({"event": "cleanup_failed", "stage": stage})
             }
+            Event::AwaitingPermission { permission } => serde_json::json!({
+                "event": "awaiting_permission",
+                "permission": permission.as_str(),
+            }),
             Event::Stopped => serde_json::json!({"event": "stopped"}),
         };
         println!("{value}");
@@ -544,6 +548,12 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 println!("frd: source cleanup exceeded its deadline; forced retirement confirmed");
             }
             Event::CleanupFailed { stage } => eprintln!("frd: cleanup failed: {stage}"),
+            Event::AwaitingPermission { permission } => println!(
+                "frd: waiting for macOS {name} permission: at this Mac, allow frd in System \
+                 Settings > Privacy & Security > {name}; sharing starts by itself once it \
+                 is allowed",
+                name = permission.settings_name()
+            ),
             Event::Stopped => println!("frd: stopped"),
         }
     }
