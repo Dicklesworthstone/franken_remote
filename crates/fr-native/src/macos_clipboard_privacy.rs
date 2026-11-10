@@ -183,7 +183,10 @@ mod tests {
         let clock = || {
             // Moving clock evaluation before lock acquisition fails this
             // deterministic regression, without a scheduling race or sleep.
-            assert!(matches!(heartbeat.0.try_lock(), Err(TryLockError::WouldBlock)));
+            assert!(matches!(
+                heartbeat.0.try_lock(),
+                Err(TryLockError::WouldBlock)
+            ));
             sample(start, 1)
         };
         assert!(heartbeat.progress_with_clock(clock));
