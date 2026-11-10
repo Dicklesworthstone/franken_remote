@@ -257,16 +257,20 @@ session, for two independent reasons:
   refuses (`ConnectionAddresses`: local and peer may not be equal).
 
 A live check needs the app on a second machine, or a host that serves IPv4.
+The host directory (above) now gives the app every listed machine's
+addresses, so a machine reached through a listing is no longer limited by
+MagicDNS; a machine saved by name alone still is. The directory itself was
+fetched live through `fr_directory_fetch` (19 machines from mac-studio's
+`frd run --directory`, run from a second Mac), but not yet from the app's
+own screen.
 
 ## Not done yet
 
-- Reaching a host that serves only IPv6 when MagicDNS returns only IPv4
-  (for example: a user-entered tailnet IPv6 address stored with the pin, TLS
-  still checked against the name).
 - A live session from the app: first frame time, frame rate and decode time
   are unmeasured (see above).
-- A machine directory (no iOS API; see above).
-- Pixel-precise scrolling and Unicode text (hosts do not grant them yet).
+- Reaching an IPv6-only host saved by name only, without a listing.
+- Pixel-precise scrolling (the app sends line scrolls; macOS hosts now offer
+  pixel scrolls) and Unicode text (hosts do not grant it yet).
 - iPad pointer devices as a real mouse (hover, secondary click), clipboard,
   audio and display switching.
 - Release signing, App Store entitlements and a device-tested build.
