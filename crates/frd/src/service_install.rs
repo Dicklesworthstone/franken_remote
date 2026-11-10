@@ -20,7 +20,7 @@ mod publication;
 mod quoting;
 #[cfg(unix)]
 use std::fs;
-use std::net::TcpListener;
+use std::net::UdpSocket;
 use std::path::PathBuf;
 
 /// Target service manager variant.
@@ -608,12 +608,13 @@ pub fn preflight_check(options: &InstallOptions) -> Result<(), ServiceError> {
         });
     }
 
-    // 2. Check for port collision on localhost.
+    // 2. Check for a port collision on localhost. frd serves QUIC, so only
+    // a UDP holder conflicts; a TCP service on the same number does not.
     if !options.dry_run {
-        match TcpListener::bind(("127.0.0.1", options.service_port)) {
-            Ok(listener) => {
-                // Port is free; close listener immediately.
-                drop(listener);
+        match UdpSocket::bind(("127.0.0.1", options.service_port)) {
+            Ok(socket) => {
+                // Port is free; close the probe immediately.
+                drop(socket);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 return Err(ServiceError::PortConflict {
@@ -949,7 +950,7 @@ mod tests {
         };
         // Bind to no fixed port: the preflight port probe is not under test.
         options.service_port = {
-            let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let probe = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
             probe.local_addr().unwrap().port()
         };
         let first = install(&options).unwrap();
@@ -1113,6 +1114,29 @@ mod tests {
         })
         .unwrap();
         assert_eq!(system.ingress_helper, None);
+    }
+
+    #[test]
+    fn preflight_refuses_a_udp_holder_but_not_a_tcp_service_on_the_port() {
+        let holder = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let mut options = InstallOptions {
+            exec_path: PathBuf::from("/bin/sh"),
+            service_port: port,
+            software_explicit: true,
+            ..InstallOptions::default()
+        };
+        assert_eq!(
+            preflight_check(&options),
+            Err(ServiceError::PortConflict { port })
+        );
+        drop(holder);
+        // QUIC never conflicts with a TCP listener of the same number.
+        let tcp = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        options.service_port = tcp.local_addr().unwrap().port();
+        if UdpSocket::bind(("127.0.0.1", options.service_port)).is_ok() {
+            assert_eq!(preflight_check(&options), Ok(()));
+        }
     }
 
     #[test]

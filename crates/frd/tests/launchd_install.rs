@@ -7,7 +7,7 @@
 
 use std::{
     fs,
-    net::TcpListener,
+    net::UdpSocket,
     os::unix::fs::{DirBuilderExt, MetadataExt},
     path::{Path, PathBuf},
     process::{Command, Output},
@@ -47,7 +47,7 @@ impl Drop for Home {
 }
 
 fn free_port() -> String {
-    let probe = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let probe = UdpSocket::bind(("127.0.0.1", 0)).unwrap();
     probe.local_addr().unwrap().port().to_string()
 }
 
