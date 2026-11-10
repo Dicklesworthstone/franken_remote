@@ -8,7 +8,7 @@ fr robot input NODE_ID --connection-id ID --lease HANDLE --request-id INTEGER
     (--move X,Y | --click BUTTON,X,Y | --modified-click MODIFIER,...,BUTTON,X,Y
      | --drag BUTTON,X1,Y1,X2,Y2 | --modified-drag MODIFIER,...,BUTTON,X1,Y1,X2,Y2
      | --key USB_USAGE | --chord MODIFIER,...,KEY | --scroll X,Y,DX,DY
-     | --modified-scroll MODIFIER,...,X,Y,DX,DY) [--json]
+     | --modified-scroll MODIFIER,...,X,Y,DX,DY | --text-file PATH) [--json]
 
 Find the public connection ID with fr robot session status NODE_ID --json.
 Keep the foreground viewer focused. The explicit automation owner requests one
@@ -16,7 +16,7 @@ control lease and has no reconnect, clipboard, files or native input forwarding.
 --status returns a bounded input observation with all view generations and a
 local comparison lease handle. Ready observations also include input_support:
 signed host-desktop bounds (x,y,width,height) and the original grant's supported
-physical_keys, absolute_pointer, buttons and line_scroll capabilities.
+physical_keys, absolute_pointer, buttons, line_scroll and committed_text capabilities.
 A missing/null input_support from an older owner means unknown support. Expiry
 clears this metadata with the observation's authority handles; it grants nothing
 on its own. Screenshot control_authority carries the same original support.
@@ -66,7 +66,20 @@ Modifiers press in ascending usage order, then the key; releases run in reverse.
 Each of at most ten transitions waits for its own original host receipt. The
 original observation age and request deadline are checked throughout; neither
 is refreshed between keys. Clicks and key taps use the same press/release gates.
-Text, pointer replay, arbitrary batches and persistent held keys are unavailable.
+--text-file reads one explicit regular file containing 1..4096 bytes of UTF-8.
+It preserves the complete content, including whitespace, newlines and combining
+characters. Empty, invalid UTF-8, oversized, symlink and special files refuse
+without sending input. Text content is never a command-line argument or copied
+to the clipboard. The original grant must report committed_text; the current
+macOS host offers it only after its Quartz text preparation probe succeeds.
+Older hosts and physical-key-only hosts keep their other input operations.
+One text action checks the original host ticket before each complete Unicode
+scalar. Partial receipts count the scalars already submitted; a supplementary
+character's UTF-16 pair is indivisible. No suffix is retried after expiry or
+uncertainty. The macOS executor refuses text while it holds remote keys/buttons.
+Quartz submission does not prove an application accepted the text; some apps
+ignore Unicode event strings. No native IME composition is added by this command.
+Pointer replay, arbitrary batches and persistent held keys are unavailable.
 Human keyboard/mouse events are not forwarded in this mode.
 
 Results distinguish confirmed OS submission, partial effects, refusal, and an

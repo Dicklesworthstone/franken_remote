@@ -177,7 +177,7 @@ fn expired_source_and_pending_input_do_not_begin_an_export() {
         max_observation_age_ms: 1000,
         operation: crate::robot_input::Operation::KeyTap { usage: 4 },
     };
-    assert_eq!(shared.locked().submit(request), Ok(None));
+    assert_eq!(shared.locked().submit(&request), Ok(None));
     let mut capture = Box::pin(shared.capture());
     assert!(matches!(
         poll(capture.as_mut()),

@@ -96,7 +96,7 @@ fn receipt(sequence: u64) -> InputResult {
         reason: None,
     }
 }
-fn retained(shared: &Shared, request: Request) -> native::Report {
+fn retained(shared: &Shared, request: &Request) -> native::Report {
     let reply = shared
         .0
         .lock()
@@ -150,8 +150,8 @@ fn unknown_and_expired_observations_consume_the_original_request_without_encodin
         } else {
             Refusal::ObservationUnknown
         };
-        assert_eq!(shared.0.lock().unwrap().submit(request), Err(expected));
-        let refused = retained(&shared, request);
+        assert_eq!(shared.0.lock().unwrap().submit(&request), Err(expected));
+        let refused = retained(&shared, &request);
         assert_eq!(refused.disposition, InputDisposition::Refused);
         assert_eq!(refused.actions_encoded, 0);
         assert_eq!(refused.stage, None);
@@ -159,16 +159,16 @@ fn unknown_and_expired_observations_consume_the_original_request_without_encodin
         let current = snapshot(&shared);
         assert_eq!(current.next_request_id, Some(2));
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             refused
         );
         let changed = Request {
             observation_id: current.observation_id.unwrap(),
-            ..request
+            ..request.clone()
         };
         if changed.observation_id != request.observation_id {
             assert_eq!(
-                shared.0.lock().unwrap().submit(changed),
+                shared.0.lock().unwrap().submit(&changed),
                 Err(Refusal::RequestChanged)
             );
         }
@@ -200,10 +200,10 @@ fn every_changed_view_generation_fences_the_pinned_request_before_encoding() {
         let request = request(&snapshot(&shared), 1);
         shared.0.lock().unwrap().live.as_mut().unwrap().view = changed;
         assert_eq!(
-            shared.0.lock().unwrap().submit(request),
+            shared.0.lock().unwrap().submit(&request),
             Err(Refusal::ViewChanged)
         );
-        let refused = retained(&shared, request);
+        let refused = retained(&shared, &request);
         assert_eq!(refused.actions_encoded, 0);
         assert_eq!(refused.disposition, InputDisposition::Refused);
         assert_eq!(snapshot(&shared).next_request_id, Some(2));
@@ -215,28 +215,28 @@ fn duplicate_pending_requests_keep_their_original_observation_and_cannot_change_
     let shared = fresh();
     let first = snapshot(&shared);
     let request = request(&first, 1);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     encoded(&shared, 1, 0);
     let later = snapshot(&shared);
     assert_ne!(later.observation_id, first.observation_id);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     assert!(!ready(&shared, 1));
     for changed in [
         Request {
             observation_id: later.observation_id.unwrap(),
-            ..request
+            ..request.clone()
         },
         Request {
             max_observation_age_ms: 999,
-            ..request
+            ..request.clone()
         },
         Request {
             operation: Operation::KeyTap { usage: 4 },
-            ..request
+            ..request.clone()
         },
     ] {
         assert_eq!(
-            shared.0.lock().unwrap().submit(changed),
+            shared.0.lock().unwrap().submit(&changed),
             Err(Refusal::RequestChanged)
         );
     }
@@ -258,16 +258,16 @@ fn a_new_status_invalidates_an_unsubmitted_old_pin_without_refreshing_its_id() {
     let latest = snapshot(&shared);
     assert_ne!(old.observation_id, latest.observation_id.unwrap());
     assert_eq!(
-        shared.0.lock().unwrap().submit(old),
+        shared.0.lock().unwrap().submit(&old),
         Err(Refusal::ObservationUnknown)
     );
-    assert_eq!(retained(&shared, old).actions_encoded, 0);
+    assert_eq!(retained(&shared, &old).actions_encoded, 0);
     let refreshed = Request {
         observation_id: latest.observation_id.unwrap(),
-        ..old
+        ..old.clone()
     };
     assert_eq!(
-        shared.0.lock().unwrap().submit(refreshed),
+        shared.0.lock().unwrap().submit(&refreshed),
         Err(Refusal::RequestChanged)
     );
 }
@@ -284,12 +284,12 @@ fn busy_requests_are_retained_and_cannot_execute_after_the_original_finishes() {
         },
         ..request(&snapshot(&shared), 1)
     };
-    assert_eq!(shared.0.lock().unwrap().submit(first), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&first), Ok(None));
     let busy = Request {
         request_id: 2,
-        ..first
+        ..first.clone()
     };
-    let refusal = report(&shared.0.lock().unwrap().submit(busy).unwrap().unwrap());
+    let refusal = report(&shared.0.lock().unwrap().submit(&busy).unwrap().unwrap());
     assert_eq!(refusal.end, native::End::Busy);
     assert_eq!(refusal.actions_encoded, 0);
     assert_eq!(refusal.disposition, InputDisposition::Refused);
@@ -297,11 +297,11 @@ fn busy_requests_are_retained_and_cannot_execute_after_the_original_finishes() {
     encoded(&shared, 1, 0);
     shared.result(ResultEvent::Completed(receipt(0)));
     assert_eq!(
-        retained(&shared, first).disposition,
+        retained(&shared, &first).disposition,
         InputDisposition::Committed
     );
     assert_eq!(
-        report(&shared.0.lock().unwrap().submit(busy).unwrap().unwrap()),
+        report(&shared.0.lock().unwrap().submit(&busy).unwrap().unwrap()),
         refusal
     );
     assert_eq!(snapshot(&shared).next_request_id, Some(3));
@@ -310,7 +310,7 @@ fn busy_requests_are_retained_and_cannot_execute_after_the_original_finishes() {
         ..busy
     };
     assert_eq!(
-        shared.0.lock().unwrap().submit(changed),
+        shared.0.lock().unwrap().submit(&changed),
         Err(Refusal::RequestChanged)
     );
 }
@@ -319,7 +319,7 @@ fn busy_requests_are_retained_and_cannot_execute_after_the_original_finishes() {
 fn only_original_reliable_receipts_advance_a_two_action_request() {
     let shared = fresh();
     let request = request(&snapshot(&shared), 1);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     encoded(&shared, 1, 0);
     for foreign in [
         ResultBinding {
@@ -363,20 +363,20 @@ fn only_original_reliable_receipts_advance_a_two_action_request() {
             .0
             .lock()
             .unwrap()
-            .lookup(State::key(request).unwrap()),
+            .lookup(State::key(&request).unwrap()),
         Ok(None)
     );
     encoded(&shared, 1, 1);
     shared.result(ResultEvent::Duplicate(receipt(0)));
     assert!(!ready(&shared, 1));
     shared.result(ResultEvent::Completed(receipt(1)));
-    let complete = retained(&shared, request);
+    let complete = retained(&shared, &request);
     assert_eq!(complete.disposition, InputDisposition::Committed);
     assert_eq!(complete.actions_encoded, 2);
     assert_eq!(complete.actions_submitted, 2);
     assert_eq!(complete.submitted_operations, 4);
     assert_eq!(
-        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
         complete
     );
     assert!(shared.0.lock().unwrap().pending.is_none());
@@ -387,7 +387,7 @@ fn cancelled_waiters_fence_the_original_owner_and_keep_truthful_effects() {
     for progress in 0..=2 {
         let shared = fresh();
         let request = request(&snapshot(&shared), 1);
-        let mut waiting = Box::pin(shared.submit(request));
+        let mut waiting = Box::pin(shared.submit(&request));
         assert!(poll(waiting.as_mut()).is_pending());
         if progress != 0 {
             encoded(&shared, 1, 0);
@@ -396,7 +396,7 @@ fn cancelled_waiters_fence_the_original_owner_and_keep_truthful_effects() {
             shared.result(ResultEvent::Completed(receipt(0)));
         }
         drop(waiting);
-        let actual = retained(&shared, request);
+        let actual = retained(&shared, &request);
         assert_eq!(
             actual.disposition,
             match progress {
@@ -411,14 +411,17 @@ fn cancelled_waiters_fence_the_original_owner_and_keep_truthful_effects() {
         );
         assert!(!snapshot(&shared).ready);
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             actual
         );
         let next = Request {
             request_id: 2,
-            ..request
+            ..request.clone()
         };
-        assert_eq!(shared.0.lock().unwrap().submit(next), Err(Refusal::Stopped));
+        assert_eq!(
+            shared.0.lock().unwrap().submit(&next),
+            Err(Refusal::Stopped)
+        );
     }
 }
 
@@ -434,7 +437,7 @@ fn dropping_a_completed_waiter_does_not_revoke_the_original_owner() {
         },
         ..request(&snapshot(&shared), 1)
     };
-    let mut waiting = Box::pin(shared.submit(request));
+    let mut waiting = Box::pin(shared.submit(&request));
     assert!(poll(waiting.as_mut()).is_pending());
     encoded(&shared, 1, 0);
     shared.result(ResultEvent::Completed(receipt(0)));
@@ -448,9 +451,9 @@ fn dropping_a_completed_waiter_does_not_revoke_the_original_owner() {
     let next = Request {
         request_id: 2,
         observation_id: fresh.observation_id.unwrap(),
-        ..request
+        ..request.clone()
     };
-    assert_eq!(shared.0.lock().unwrap().submit(next), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&next), Ok(None));
 }
 
 #[test]
@@ -465,23 +468,23 @@ fn late_receipts_refine_cancelled_effects_without_reopening_authority() {
         },
         ..request(&snapshot(&shared), 1)
     };
-    let mut waiting = Box::pin(shared.submit(request));
+    let mut waiting = Box::pin(shared.submit(&request));
     assert!(poll(waiting.as_mut()).is_pending());
     encoded(&shared, 1, 0);
     drop(waiting);
     assert_eq!(
-        retained(&shared, request).disposition,
+        retained(&shared, &request).disposition,
         InputDisposition::UnknownEffect
     );
     shared.result(ResultEvent::Completed(receipt(0)));
-    let late = retained(&shared, request);
+    let late = retained(&shared, &request);
     assert_eq!(late.disposition, InputDisposition::Committed);
     assert_eq!(late.submitted_operations, 2);
     assert!(!snapshot(&shared).ready);
     assert_eq!(
-        shared.0.lock().unwrap().submit(Request {
+        shared.0.lock().unwrap().submit(&Request {
             request_id: 2,
-            ..request
+            ..request.clone()
         }),
         Err(Refusal::Stopped)
     );
@@ -570,10 +573,10 @@ fn wrong_lease_cannot_consume_ids_or_reach_the_original_request() {
     let request = request(&snapshot(&shared), 1);
     let foreign = Request {
         lease: [3; 16],
-        ..request
+        ..request.clone()
     };
     assert_eq!(
-        shared.0.lock().unwrap().submit(foreign),
+        shared.0.lock().unwrap().submit(&foreign),
         Err(Refusal::LeaseMismatch)
     );
     assert_eq!(snapshot(&shared).next_request_id, Some(1));
@@ -582,9 +585,9 @@ fn wrong_lease_cannot_consume_ids_or_reach_the_original_request() {
     let latest = snapshot(&shared);
     let valid = Request {
         observation_id: latest.observation_id.unwrap(),
-        ..request
+        ..request.clone()
     };
-    assert_eq!(shared.0.lock().unwrap().submit(valid), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&valid), Ok(None));
 }
 
 #[test]
@@ -609,7 +612,7 @@ fn initial_zero_generations_and_frame_zero_are_valid_observation_evidence() {
     assert_eq!(first.frame, Some(0));
     assert!(!first.physical_visibility_proven);
     let request = request(&first, 1);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     assert!(ready(&shared, 1));
 }
 
@@ -624,21 +627,21 @@ fn coherent_single_action_receipt_cannot_complete_a_click_or_different_request()
             dx: 0,
             dy: 1,
         },
-        ..click
+        ..click.clone()
     };
-    assert_eq!(shared.0.lock().unwrap().submit(scroll), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&scroll), Ok(None));
     encoded(&shared, 1, 0);
     shared.result(ResultEvent::Completed(receipt(0)));
-    let result = retained(&shared, scroll);
+    let result = retained(&shared, &scroll);
     assert_eq!(result.validate(), Ok(()));
-    assert_eq!(validate_report(result, scroll), Ok(()));
-    assert_eq!(validate_report(result, click), Err(Error::Protocol));
+    assert_eq!(validate_report(result, &scroll), Ok(()));
+    assert_eq!(validate_report(result, &click), Err(Error::Protocol));
     assert_eq!(
         validate_report(
             result,
-            Request {
+            &Request {
                 request_id: 2,
-                ..scroll
+                ..scroll.clone()
             }
         ),
         Err(Error::Protocol)
@@ -655,7 +658,7 @@ fn a_complete_chord_keeps_the_same_owner_and_retains_all_key_receipts() {
         },
         ..request(&snapshot(&shared), 1)
     };
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     for sequence in 0..u64::from(request.operation.count()) {
         encoded(&shared, 1, sequence);
         assert!(!ready(&shared, 1));
@@ -664,7 +667,7 @@ fn a_complete_chord_keeps_the_same_owner_and_retains_all_key_receipts() {
             ..receipt(sequence)
         }));
     }
-    let complete = retained(&shared, request);
+    let complete = retained(&shared, &request);
     assert_eq!(complete.disposition, InputDisposition::Committed);
     assert_eq!(complete.actions_total, 10);
     assert_eq!(complete.actions_submitted, 10);
@@ -674,7 +677,7 @@ fn a_complete_chord_keeps_the_same_owner_and_retains_all_key_receipts() {
     assert!(!state.stopped && !state.ledger.is_closed());
     drop(state);
     assert_eq!(
-        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
         complete
     );
     assert!(snapshot(&shared).ready);
@@ -693,25 +696,25 @@ fn a_large_scroll_waits_for_each_receipt_and_preserves_the_original_result() {
         ..request(&snapshot(&shared), 1)
     };
     assert_eq!(request.operation.count(), 8);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     for sequence in 0..8 {
         encoded(&shared, 1, sequence);
         assert!(!ready(&shared, 1), "never pipeline another wheel action");
         // A repeated command is the same pending request, not eight more actions.
-        assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+        assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
         shared.result(ResultEvent::Completed(InputResult {
             submitted_operations: if sequence == 7 { 33 } else { 65 },
             ..receipt(sequence)
         }));
     }
-    let complete = retained(&shared, request);
+    let complete = retained(&shared, &request);
     assert_eq!(complete.disposition, InputDisposition::Committed);
     assert_eq!(complete.actions_submitted, 8);
     assert_eq!(complete.submitted_operations, 488); // eight positions, 240 wheel pairs
     assert_eq!(complete.unacknowledged_actions, 0);
-    assert_eq!(validate_report(complete, request), Ok(()));
+    assert_eq!(validate_report(complete, &request), Ok(()));
     assert_eq!(
-        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
         complete
     );
     assert!(snapshot(&shared).ready);
@@ -730,7 +733,7 @@ fn interrupted_large_scrolls_keep_the_prefix_and_never_replay_the_remainder() {
             },
             ..request(&snapshot(&shared), 1)
         };
-        let mut waiting = Box::pin(shared.submit(request));
+        let mut waiting = Box::pin(shared.submit(&request));
         assert!(poll(waiting.as_mut()).is_pending());
         for sequence in 0..3 {
             encoded(&shared, 1, sequence);
@@ -750,7 +753,7 @@ fn interrupted_large_scrolls_keep_the_prefix_and_never_replay_the_remainder() {
             }));
         }
         drop(waiting);
-        let result = retained(&shared, request);
+        let result = retained(&shared, &request);
         assert_eq!(result.actions_total, 8);
         assert_eq!(result.actions_encoded, 4);
         assert_eq!(result.actions_submitted, 3);
@@ -766,13 +769,13 @@ fn interrupted_large_scrolls_keep_the_prefix_and_never_replay_the_remainder() {
         );
         assert!(!snapshot(&shared).ready);
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             result
         );
         assert_eq!(
-            shared.0.lock().unwrap().submit(Request {
+            shared.0.lock().unwrap().submit(&Request {
                 request_id: 2,
-                ..request
+                ..request.clone()
             }),
             Err(Refusal::Stopped)
         );
@@ -781,7 +784,7 @@ fn interrupted_large_scrolls_keep_the_prefix_and_never_replay_the_remainder() {
                 submitted_operations: 65,
                 ..receipt(3)
             }));
-            let late = retained(&shared, request);
+            let late = retained(&shared, &request);
             assert_eq!(late.actions_submitted, 4);
             assert_eq!(late.submitted_operations, 260);
             assert_eq!(late.unacknowledged_actions, 0);
@@ -806,7 +809,7 @@ fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases
                 },
                 ..request(&snapshot(&shared), 1)
             };
-            let mut waiting = Box::pin(shared.submit(request));
+            let mut waiting = Box::pin(shared.submit(&request));
             assert!(poll(waiting.as_mut()).is_pending());
             for sequence in 0..u64::from(prefix) {
                 encoded(&shared, 1, sequence);
@@ -828,7 +831,7 @@ fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases
             // Losing the local requester is a terminal fence, including when
             // the previous modifier/key transition has no host receipt.
             drop(waiting);
-            let actual = retained(&shared, request);
+            let actual = retained(&shared, &request);
             assert_eq!(
                 actual.disposition,
                 if missing_receipt {
@@ -847,13 +850,13 @@ fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases
             drop(state);
             assert!(!snapshot(&shared).ready);
             assert_eq!(
-                report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+                report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
                 actual
             );
             assert_eq!(
-                shared.0.lock().unwrap().submit(Request {
+                shared.0.lock().unwrap().submit(&Request {
                     request_id: 2,
-                    ..request
+                    ..request.clone()
                 }),
                 Err(Refusal::Stopped)
             );
@@ -862,14 +865,14 @@ fn partial_or_unknown_chords_retire_the_original_owner_without_resuming_releases
                     submitted_operations: 1,
                     ..receipt(u64::from(prefix))
                 }));
-                let late = retained(&shared, request);
+                let late = retained(&shared, &request);
                 assert_eq!(late.unacknowledged_actions, 0);
                 assert_eq!(late.actions_submitted, prefix + 1);
                 assert!(!snapshot(&shared).ready);
                 assert_eq!(
-                    shared.0.lock().unwrap().submit(Request {
+                    shared.0.lock().unwrap().submit(&Request {
                         request_id: 2,
-                        ..request
+                        ..request.clone()
                     }),
                     Err(Refusal::Stopped)
                 );
@@ -918,10 +921,10 @@ fn either_out_of_bounds_drag_endpoint_refuses_before_the_press_is_encoded() {
             ..drag_request(&shared)
         };
         assert_eq!(
-            shared.0.lock().unwrap().submit(request),
+            shared.0.lock().unwrap().submit(&request),
             Err(Refusal::OutOfBounds)
         );
-        let refused = retained(&shared, request);
+        let refused = retained(&shared, &request);
         assert_eq!(refused.actions_total, 2);
         assert_eq!(refused.actions_encoded, 0);
         assert_eq!(refused.submitted_operations, 0);
@@ -929,7 +932,7 @@ fn either_out_of_bounds_drag_endpoint_refuses_before_the_press_is_encoded() {
         assert!(shared.0.lock().unwrap().pending.is_none());
         assert_eq!(snapshot(&shared).next_request_id, Some(2));
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             refused
         );
         // Fixing coordinates cannot turn the consumed request into another drag.
@@ -941,10 +944,10 @@ fn either_out_of_bounds_drag_endpoint_refuses_before_the_press_is_encoded() {
                 to_x: 798,
                 to_y: 598,
             },
-            ..request
+            ..request.clone()
         };
         assert_eq!(
-            shared.0.lock().unwrap().submit(changed),
+            shared.0.lock().unwrap().submit(&changed),
             Err(Refusal::RequestChanged)
         );
     }
@@ -961,10 +964,10 @@ fn changed_granted_bounds_cannot_reinterpret_an_original_drag() {
     )
     .unwrap();
     assert_eq!(
-        shared.0.lock().unwrap().submit(request),
+        shared.0.lock().unwrap().submit(&request),
         Err(Refusal::ViewChanged)
     );
-    assert_eq!(retained(&shared, request).actions_encoded, 0);
+    assert_eq!(retained(&shared, &request).actions_encoded, 0);
     assert!(shared.0.lock().unwrap().pending.is_none());
 }
 
@@ -972,7 +975,7 @@ fn changed_granted_bounds_cannot_reinterpret_an_original_drag() {
 fn a_drag_waits_for_both_original_receipts_and_fingerprints_each_endpoint() {
     let shared = fresh();
     let request = drag_request(&shared);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     encoded(&shared, 1, 0);
     assert!(!ready(&shared, 1));
     for operation in [
@@ -1013,9 +1016,9 @@ fn a_drag_waits_for_both_original_receipts_and_fingerprints_each_endpoint() {
         },
     ] {
         assert_eq!(
-            shared.0.lock().unwrap().submit(Request {
+            shared.0.lock().unwrap().submit(&Request {
                 operation,
-                ..request
+                ..request.clone()
             }),
             Err(Refusal::RequestChanged)
         );
@@ -1045,7 +1048,7 @@ fn a_drag_waits_for_both_original_receipts_and_fingerprints_each_endpoint() {
     shared.result(ResultEvent::Duplicate(receipt(0)));
     assert!(!ready(&shared, 1));
     shared.result(ResultEvent::Completed(receipt(1)));
-    let complete = retained(&shared, request);
+    let complete = retained(&shared, &request);
     assert_eq!(complete.disposition, InputDisposition::Committed);
     assert_eq!(complete.actions_total, 2);
     assert_eq!(complete.actions_encoded, 2);
@@ -1053,7 +1056,7 @@ fn a_drag_waits_for_both_original_receipts_and_fingerprints_each_endpoint() {
     assert_eq!(complete.submitted_operations, 4);
     assert_eq!(complete.unacknowledged_actions, 0);
     assert_eq!(
-        report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+        report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
         complete
     );
     assert!(snapshot(&shared).ready);
@@ -1067,7 +1070,7 @@ fn cancelled_or_expired_drags_preserve_effects_and_never_resume_the_release() {
     for progress in 0..4 {
         let shared = fresh();
         let request = drag_request(&shared);
-        let mut waiting = Box::pin(shared.submit(request));
+        let mut waiting = Box::pin(shared.submit(&request));
         assert!(poll(waiting.as_mut()).is_pending());
         encoded(&shared, 1, 0);
         if progress != 0 {
@@ -1083,7 +1086,7 @@ fn cancelled_or_expired_drags_preserve_effects_and_never_resume_the_release() {
             state.finish_if_retained();
         }
         drop(waiting);
-        let actual = retained(&shared, request);
+        let actual = retained(&shared, &request);
         assert_eq!(actual.actions_encoded, if progress == 2 { 2 } else { 1 });
         assert_eq!(actual.actions_submitted, u8::from(progress != 0));
         assert_eq!(
@@ -1112,20 +1115,20 @@ fn cancelled_or_expired_drags_preserve_effects_and_never_resume_the_release() {
         }
         assert!(!snapshot(&shared).ready);
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             actual
         );
         assert_eq!(
-            shared.0.lock().unwrap().submit(Request {
+            shared.0.lock().unwrap().submit(&Request {
                 request_id: 2,
-                ..request
+                ..request.clone()
             }),
             Err(Refusal::Stopped)
         );
         if progress == 0 || progress == 2 {
             let sequence = u64::from(progress == 2);
             shared.result(ResultEvent::Completed(receipt(sequence)));
-            assert_eq!(retained(&shared, request).unacknowledged_actions, 0);
+            assert_eq!(retained(&shared, &request).unacknowledged_actions, 0);
             assert!(!snapshot(&shared).ready);
             assert!(shared.0.lock().unwrap().pending.is_none());
         }
@@ -1169,23 +1172,23 @@ fn move_outside_the_original_display_consumes_the_request_before_encoding() {
         let shared = fresh();
         let request = move_request(&shared, x, y);
         assert_eq!(
-            shared.0.lock().unwrap().submit(request),
+            shared.0.lock().unwrap().submit(&request),
             Err(Refusal::OutOfBounds)
         );
-        let refused = retained(&shared, request);
+        let refused = retained(&shared, &request);
         assert_eq!(refused.actions_total, 1);
         assert_eq!(refused.actions_encoded, 0);
         assert_eq!(refused.disposition, InputDisposition::Refused);
         assert!(shared.0.lock().unwrap().pending.is_none());
         assert_eq!(snapshot(&shared).next_request_id, Some(2));
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             refused
         );
         assert_eq!(
-            shared.0.lock().unwrap().submit(Request {
+            shared.0.lock().unwrap().submit(&Request {
                 operation: Operation::Move { x: 0, y: 0 },
-                ..request
+                ..request.clone()
             }),
             Err(Refusal::RequestChanged)
         );
@@ -1197,7 +1200,7 @@ fn move_pins_its_coordinates_observation_and_original_pointer_receipt() {
     for (x, y) in [(-800, -200), (799, 599)] {
         let shared = fresh();
         let request = move_request(&shared, x, y);
-        assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+        assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
         encoded_pointer(&shared, 1, 0);
         for operation in [
             Operation::Move { x: x + 1, y },
@@ -1205,9 +1208,9 @@ fn move_pins_its_coordinates_observation_and_original_pointer_receipt() {
             Operation::Click { button: 1, x, y },
         ] {
             assert_eq!(
-                shared.0.lock().unwrap().submit(Request {
+                shared.0.lock().unwrap().submit(&Request {
                     operation,
-                    ..request
+                    ..request.clone()
                 }),
                 Err(Refusal::RequestChanged)
             );
@@ -1234,13 +1237,13 @@ fn move_pins_its_coordinates_observation_and_original_pointer_receipt() {
         shared.result(ResultEvent::Completed(receipt(0)));
         assert!(!ready(&shared, 1));
         shared.result(ResultEvent::Pointer(pointer_receipt(0)));
-        let complete = retained(&shared, request);
+        let complete = retained(&shared, &request);
         assert_eq!(complete.disposition, InputDisposition::Committed);
         assert_eq!(complete.actions_total, 1);
         assert_eq!(complete.actions_submitted, 1);
         assert_eq!(complete.submitted_operations, 1);
         assert_eq!(
-            report(&shared.0.lock().unwrap().submit(request).unwrap().unwrap()),
+            report(&shared.0.lock().unwrap().submit(&request).unwrap().unwrap()),
             complete
         );
         assert!(shared.0.lock().unwrap().pending.is_none());
@@ -1275,9 +1278,9 @@ fn move_keeps_original_observation_focus_and_display_preconditions() {
                 }
                 _ => unreachable!(),
             }
-            assert_eq!(state.submit(request), Err(refusal));
+            assert_eq!(state.submit(&request), Err(refusal));
         }
-        assert_eq!(retained(&shared, request).actions_encoded, 0);
+        assert_eq!(retained(&shared, &request).actions_encoded, 0);
     }
 }
 
@@ -1285,23 +1288,23 @@ fn move_keeps_original_observation_focus_and_display_preconditions() {
 fn cancelled_move_keeps_unknown_effect_and_a_late_receipt_cannot_restart_owner() {
     let shared = fresh();
     let request = move_request(&shared, 0, 0);
-    assert_eq!(shared.0.lock().unwrap().submit(request), Ok(None));
+    assert_eq!(shared.0.lock().unwrap().submit(&request), Ok(None));
     encoded_pointer(&shared, 1, 0);
     shared.0.lock().unwrap().retire();
-    let cancelled = retained(&shared, request);
+    let cancelled = retained(&shared, &request);
     assert_eq!(cancelled.disposition, InputDisposition::UnknownEffect);
     assert_eq!(cancelled.unacknowledged_actions, 1);
     assert!(!snapshot(&shared).ready);
     shared.result(ResultEvent::Pointer(pointer_receipt(0)));
-    let late = retained(&shared, request);
+    let late = retained(&shared, &request);
     assert_eq!(late.end, cancelled.end);
     assert_eq!(late.disposition, InputDisposition::Committed);
     assert_eq!(late.submitted_operations, 1);
     assert!(!snapshot(&shared).ready);
     assert_eq!(
-        shared.0.lock().unwrap().submit(Request {
+        shared.0.lock().unwrap().submit(&Request {
             request_id: 2,
-            ..request
+            ..request.clone()
         }),
         Err(Refusal::Stopped)
     );
@@ -1372,8 +1375,8 @@ fn modified_gestures_preflight_every_coordinate_before_any_modifier() {
                 operation,
                 ..request(&snapshot(&shared), 1)
             };
-            assert_eq!(shared.locked().submit(request), Err(Refusal::OutOfBounds));
-            let refused = retained(&shared, request);
+            assert_eq!(shared.locked().submit(&request), Err(Refusal::OutOfBounds));
+            let refused = retained(&shared, &request);
             assert_eq!(refused.actions_total, 10);
             assert_eq!(refused.actions_encoded, 0);
             assert_eq!(refused.submitted_operations, 0);
@@ -1381,7 +1384,7 @@ fn modified_gestures_preflight_every_coordinate_before_any_modifier() {
             assert!(shared.locked().pending.is_none());
             assert!(snapshot(&shared).ready);
             assert_eq!(
-                report(&shared.locked().submit(request).unwrap().unwrap()),
+                report(&shared.locked().submit(&request).unwrap().unwrap()),
                 refused
             );
         }
@@ -1407,10 +1410,10 @@ fn modified_gestures_require_the_entire_original_capability_grant() {
             shared.locked().live.as_mut().unwrap().capabilities = capabilities;
             let request = modified_request(&shared, drag);
             assert_eq!(
-                shared.locked().submit(request),
+                shared.locked().submit(&request),
                 Err(Refusal::InputUnavailable)
             );
-            let refused = retained(&shared, request);
+            let refused = retained(&shared, &request);
             assert_eq!(refused.actions_encoded, 0);
             assert_eq!(refused.submitted_operations, 0);
             assert_eq!(refused.disposition, InputDisposition::Refused);
@@ -1420,8 +1423,8 @@ fn modified_gestures_require_the_entire_original_capability_grant() {
         let shared = fresh();
         let request = modified_request(&shared, drag);
         shared.locked().live.as_mut().unwrap().capabilities = Capabilities::default();
-        assert_eq!(shared.locked().submit(request), Err(Refusal::ViewChanged));
-        assert_eq!(retained(&shared, request).actions_encoded, 0);
+        assert_eq!(shared.locked().submit(&request), Err(Refusal::ViewChanged));
+        assert_eq!(retained(&shared, &request).actions_encoded, 0);
     }
 }
 
@@ -1438,24 +1441,24 @@ fn modified_gestures_keep_ten_action_receipts_and_twelve_native_operations() {
     for drag in [false, true] {
         let shared = fresh();
         let request = modified_request(&shared, drag);
-        assert_eq!(shared.locked().submit(request), Ok(None));
+        assert_eq!(shared.locked().submit(&request), Ok(None));
         for sequence in 0..10 {
             encoded(&shared, 1, sequence);
             assert!(
                 !ready(&shared, 1),
                 "each modifier/button needs its own receipt"
             );
-            assert_eq!(shared.locked().submit(request), Ok(None));
+            assert_eq!(shared.locked().submit(&request), Ok(None));
             assert_eq!(
-                shared.locked().submit(Request {
+                shared.locked().submit(&Request {
                     operation: modified_operation(drag, 0b0000_0111),
-                    ..request
+                    ..request.clone()
                 }),
                 Err(Refusal::RequestChanged)
             );
             shared.result(ResultEvent::Completed(modified_receipt(sequence)));
         }
-        let complete = retained(&shared, request);
+        let complete = retained(&shared, &request);
         assert_eq!(complete.actions_total, 10);
         assert_eq!(complete.actions_encoded, 10);
         assert_eq!(complete.actions_submitted, 10);
@@ -1463,9 +1466,9 @@ fn modified_gestures_keep_ten_action_receipts_and_twelve_native_operations() {
         assert_eq!(complete.submitted_operations, 12);
         assert_eq!(complete.unacknowledged_actions, 0);
         assert_eq!(complete.disposition, InputDisposition::Committed);
-        assert_eq!(validate_report(complete, request), Ok(()));
+        assert_eq!(validate_report(complete, &request), Ok(()));
         assert_eq!(
-            report(&shared.locked().submit(request).unwrap().unwrap()),
+            report(&shared.locked().submit(&request).unwrap().unwrap()),
             complete
         );
         assert!(shared.locked().pending.is_none());
@@ -1481,7 +1484,7 @@ fn interrupted_modified_gestures_keep_the_exact_prefix_and_retire_the_owner() {
             for missing_receipt in [false, true] {
                 let shared = fresh();
                 let request = modified_request(&shared, drag);
-                let mut waiting = Box::pin(shared.submit(request));
+                let mut waiting = Box::pin(shared.submit(&request));
                 assert!(poll(waiting.as_mut()).is_pending());
                 for sequence in 0..u64::from(prefix) {
                     encoded(&shared, 1, sequence);
@@ -1498,7 +1501,7 @@ fn interrupted_modified_gestures_keep_the_exact_prefix_and_retire_the_owner() {
                     }));
                 }
                 drop(waiting);
-                let actual = retained(&shared, request);
+                let actual = retained(&shared, &request);
                 assert_eq!(actual.actions_total, 10);
                 assert_eq!(actual.actions_encoded, prefix + 1);
                 assert_eq!(actual.actions_submitted, prefix);
@@ -1515,19 +1518,19 @@ fn interrupted_modified_gestures_keep_the_exact_prefix_and_retire_the_owner() {
                 assert!(!snapshot(&shared).ready);
                 assert!(shared.locked().pending.is_none());
                 assert_eq!(
-                    report(&shared.locked().submit(request).unwrap().unwrap()),
+                    report(&shared.locked().submit(&request).unwrap().unwrap()),
                     actual
                 );
                 assert_eq!(
-                    shared.locked().submit(Request {
+                    shared.locked().submit(&Request {
                         request_id: 2,
-                        ..request
+                        ..request.clone()
                     }),
                     Err(Refusal::Stopped)
                 );
                 if missing_receipt {
                     shared.result(ResultEvent::Completed(modified_receipt(u64::from(prefix))));
-                    let late = retained(&shared, request);
+                    let late = retained(&shared, &request);
                     assert_eq!(late.actions_submitted, prefix + 1);
                     assert_eq!(
                         late.submitted_operations,
@@ -1551,7 +1554,7 @@ fn modified_gesture_expiry_fences_held_modifiers_and_buttons_without_replaying()
         for prefix in [1_u8, 5] {
             let shared = fresh();
             let request = modified_request(&shared, drag);
-            let mut waiting = Box::pin(shared.submit(request));
+            let mut waiting = Box::pin(shared.submit(&request));
             assert!(poll(waiting.as_mut()).is_pending());
             for sequence in 0..u64::from(prefix) {
                 encoded(&shared, 1, sequence);
@@ -1566,7 +1569,7 @@ fn modified_gesture_expiry_fences_held_modifiers_and_buttons_without_replaying()
                 assert!(state.pending.is_none() && state.live.is_none() && state.pinned.is_none());
             }
             drop(waiting);
-            let expired = retained(&shared, request);
+            let expired = retained(&shared, &request);
             assert_eq!(expired.end, native::End::Expired);
             assert_eq!(expired.disposition, InputDisposition::Partial);
             assert_eq!(expired.actions_encoded, prefix);
@@ -1577,7 +1580,7 @@ fn modified_gesture_expiry_fences_held_modifiers_and_buttons_without_replaying()
             );
             assert_eq!(expired.unacknowledged_actions, 0);
             assert_eq!(
-                report(&shared.locked().submit(request).unwrap().unwrap()),
+                report(&shared.locked().submit(&request).unwrap().unwrap()),
                 expired
             );
         }
@@ -1631,14 +1634,14 @@ fn modified_scroll_requires_keys_position_and_wheel_before_any_modifier() {
         let request = modified_scroll_request(&shared);
         if mask == 7 {
             // No button capability is needed by a complete modified scroll.
-            assert_eq!(shared.locked().submit(request), Ok(None));
+            assert_eq!(shared.locked().submit(&request), Ok(None));
             assert_eq!(shared.locked().pending.as_ref().unwrap().encoded, 0);
         } else {
             assert_eq!(
-                shared.locked().submit(request),
+                shared.locked().submit(&request),
                 Err(Refusal::InputUnavailable)
             );
-            let refused = retained(&shared, request);
+            let refused = retained(&shared, &request);
             assert_eq!(refused.actions_encoded, 0);
             assert_eq!(refused.submitted_operations, 0);
             assert_eq!(refused.disposition, InputDisposition::Refused);
@@ -1649,8 +1652,8 @@ fn modified_scroll_requires_keys_position_and_wheel_before_any_modifier() {
     let shared = fresh();
     let request = modified_scroll_request(&shared);
     shared.locked().live.as_mut().unwrap().capabilities = Capabilities::default();
-    assert_eq!(shared.locked().submit(request), Err(Refusal::ViewChanged));
-    assert_eq!(retained(&shared, request).actions_encoded, 0);
+    assert_eq!(shared.locked().submit(&request), Err(Refusal::ViewChanged));
+    assert_eq!(retained(&shared, &request).actions_encoded, 0);
 }
 
 #[test]
@@ -1673,8 +1676,8 @@ fn modified_scroll_refuses_outside_the_original_display_before_pressing_keys() {
             },
             ..modified_scroll_request(&shared)
         };
-        assert_eq!(shared.locked().submit(request), Err(Refusal::OutOfBounds));
-        let refused = retained(&shared, request);
+        assert_eq!(shared.locked().submit(&request), Err(Refusal::OutOfBounds));
+        let refused = retained(&shared, &request);
         assert_eq!(refused.actions_total, 10);
         assert_eq!(refused.actions_encoded, 0);
         assert_eq!(refused.submitted_operations, 0);
@@ -1682,7 +1685,7 @@ fn modified_scroll_refuses_outside_the_original_display_before_pressing_keys() {
         assert!(shared.locked().pending.is_none());
         assert!(snapshot(&shared).ready);
         assert_eq!(
-            report(&shared.locked().submit(request).unwrap().unwrap()),
+            report(&shared.locked().submit(&request).unwrap().unwrap()),
             refused
         );
     }
@@ -1700,26 +1703,26 @@ fn over_budget_modified_scroll_never_enters_the_original_receipt_ledger() {
             dx: -120,
             dy: 120,
         },
-        ..original
+        ..original.clone()
     };
     assert_eq!(invalid.operation.count(), 16);
     assert_eq!(
-        shared.locked().submit(invalid),
+        shared.locked().submit(&invalid),
         Err(Refusal::InvalidRequest)
     );
     assert!(shared.locked().pending.is_none());
     assert_eq!(shared.locked().ledger.consumed_through(), 0);
-    assert_eq!(shared.locked().submit(original), Ok(None));
+    assert_eq!(shared.locked().submit(&original), Ok(None));
 }
 
 #[test]
 fn modified_scroll_retains_ten_receipts_and_all_490_native_operations() {
     let shared = fresh();
     let request = modified_scroll_request(&shared);
-    assert_eq!(shared.locked().submit(request), Ok(None));
+    assert_eq!(shared.locked().submit(&request), Ok(None));
     for (modifiers, dx, dy) in [(2, -120, 120), (1, 120, 120), (1, -120, 119)] {
         assert_eq!(
-            shared.locked().submit(Request {
+            shared.locked().submit(&Request {
                 operation: Operation::ModifiedScroll {
                     modifiers,
                     x: -100,
@@ -1727,7 +1730,7 @@ fn modified_scroll_retains_ten_receipts_and_all_490_native_operations() {
                     dx,
                     dy,
                 },
-                ..request
+                ..request.clone()
             }),
             Err(Refusal::RequestChanged)
         );
@@ -1738,10 +1741,10 @@ fn modified_scroll_retains_ten_receipts_and_all_490_native_operations() {
             !ready(&shared, 1),
             "each key or wheel action needs its own receipt"
         );
-        assert_eq!(shared.locked().submit(request), Ok(None));
+        assert_eq!(shared.locked().submit(&request), Ok(None));
         shared.result(ResultEvent::Completed(modified_scroll_receipt(sequence)));
     }
-    let complete = retained(&shared, request);
+    let complete = retained(&shared, &request);
     assert_eq!(complete.actions_total, 10);
     assert_eq!(complete.actions_encoded, 10);
     assert_eq!(complete.actions_submitted, 10);
@@ -1749,9 +1752,9 @@ fn modified_scroll_retains_ten_receipts_and_all_490_native_operations() {
     assert_eq!(complete.submitted_operations, 490);
     assert_eq!(complete.unacknowledged_actions, 0);
     assert_eq!(complete.disposition, InputDisposition::Committed);
-    assert_eq!(validate_report(complete, request), Ok(()));
+    assert_eq!(validate_report(complete, &request), Ok(()));
     assert_eq!(
-        report(&shared.locked().submit(request).unwrap().unwrap()),
+        report(&shared.locked().submit(&request).unwrap().unwrap()),
         complete
     );
     assert!(shared.locked().pending.is_none());
@@ -1767,7 +1770,7 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
         for missing_receipt in [false, true] {
             let shared = fresh();
             let request = modified_scroll_request(&shared);
-            let mut waiting = Box::pin(shared.submit(request));
+            let mut waiting = Box::pin(shared.submit(&request));
             assert!(poll(waiting.as_mut()).is_pending());
             for sequence in 0..u64::from(prefix) {
                 encoded(&shared, 1, sequence);
@@ -1784,7 +1787,7 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
                 }));
             }
             drop(waiting);
-            let interrupted = retained(&shared, request);
+            let interrupted = retained(&shared, &request);
             assert_eq!(interrupted.actions_total, 10);
             assert_eq!(interrupted.actions_encoded, prefix + 1);
             assert_eq!(interrupted.actions_submitted, prefix);
@@ -1807,13 +1810,13 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
             assert!(!snapshot(&shared).ready);
             assert!(shared.locked().pending.is_none());
             assert_eq!(
-                report(&shared.locked().submit(request).unwrap().unwrap()),
+                report(&shared.locked().submit(&request).unwrap().unwrap()),
                 interrupted
             );
             assert_eq!(
-                shared.locked().submit(Request {
+                shared.locked().submit(&Request {
                     request_id: 2,
-                    ..request
+                    ..request.clone()
                 }),
                 Err(Refusal::Stopped)
             );
@@ -1821,7 +1824,7 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
                 shared.result(ResultEvent::Completed(modified_scroll_receipt(u64::from(
                     prefix,
                 ))));
-                let late = retained(&shared, request);
+                let late = retained(&shared, &request);
                 assert_eq!(late.end, interrupted.end);
                 assert_eq!(late.actions_submitted, prefix + 1);
                 assert_eq!(
@@ -1835,9 +1838,9 @@ fn interrupted_modified_scroll_preserves_key_and_wheel_prefixes_without_resuming
                 );
                 assert!(shared.locked().pending.is_none());
                 assert_eq!(
-                    shared.locked().submit(Request {
+                    shared.locked().submit(&Request {
                         request_id: 2,
-                        ..request
+                        ..request.clone()
                     }),
                     Err(Refusal::Stopped)
                 );
@@ -1851,7 +1854,7 @@ fn modified_scroll_expiry_fences_held_keys_and_keeps_confirmed_wheel_effects() {
     for (prefix, operations) in [(1_u8, 1), (4, 196), (9, 489)] {
         let shared = fresh();
         let request = modified_scroll_request(&shared);
-        let mut waiting = Box::pin(shared.submit(request));
+        let mut waiting = Box::pin(shared.submit(&request));
         assert!(poll(waiting.as_mut()).is_pending());
         for sequence in 0..u64::from(prefix) {
             encoded(&shared, 1, sequence);
@@ -1866,7 +1869,7 @@ fn modified_scroll_expiry_fences_held_keys_and_keeps_confirmed_wheel_effects() {
             assert!(state.pending.is_none() && state.live.is_none() && state.pinned.is_none());
         }
         drop(waiting);
-        let expired = retained(&shared, request);
+        let expired = retained(&shared, &request);
         assert_eq!(expired.end, native::End::Expired);
         assert_eq!(expired.disposition, InputDisposition::Partial);
         assert_eq!(expired.actions_encoded, prefix);
@@ -1874,13 +1877,13 @@ fn modified_scroll_expiry_fences_held_keys_and_keeps_confirmed_wheel_effects() {
         assert_eq!(expired.submitted_operations, operations);
         assert_eq!(expired.unacknowledged_actions, 0);
         assert_eq!(
-            report(&shared.locked().submit(request).unwrap().unwrap()),
+            report(&shared.locked().submit(&request).unwrap().unwrap()),
             expired
         );
         assert_eq!(
-            shared.locked().submit(Request {
+            shared.locked().submit(&Request {
                 request_id: 2,
-                ..request
+                ..request.clone()
             }),
             Err(Refusal::Stopped)
         );
@@ -1921,7 +1924,7 @@ fn status_discloses_only_the_original_grants_signed_bounds_and_capabilities() {
                 .with(Capability::Relative)
                 .with(Capability::PixelScroll)
                 .with(Capability::Text),
-            vec![],
+            vec!["committed_text"],
         ),
     ] {
         let shared = fresh();
@@ -2029,4 +2032,180 @@ fn status_refuses_invalid_bounds_duplicates_noncanonical_and_unknown_capabilitie
     let mut extra = serde_json::to_value(&actual).unwrap();
     extra["input_support"]["bounds"]["z"] = 1.into();
     assert!(serde_json::from_value::<Snapshot>(extra).is_err());
+}
+
+fn text_request(shared: &Shared, source: &str) -> Request {
+    Request {
+        operation: Operation::Text {
+            text: crate::robot_input::text::Text::new(source).unwrap(),
+        },
+        ..request(&snapshot(shared), 1)
+    }
+}
+
+fn text_owner() -> Shared {
+    let shared = fresh();
+    shared.locked().live.as_mut().unwrap().capabilities =
+        fr_core::input_submission::Capabilities::default()
+            .with(fr_core::input_submission::Capability::Text);
+    shared
+}
+
+#[test]
+fn text_requires_the_original_grant_and_keeps_unicode_in_its_request_identity() {
+    let shared = fresh();
+    let refused = text_request(&shared, "e\u{301}🙂");
+    assert_eq!(
+        shared.locked().submit(&refused),
+        Err(Refusal::InputUnavailable)
+    );
+    assert_eq!(retained(&shared, &refused).actions_encoded, 0);
+    assert!(shared.locked().pending.is_none());
+
+    let shared = text_owner();
+    let original = text_request(&shared, "e\u{301}🙂");
+    assert_eq!(shared.locked().submit(&original), Ok(None));
+    for source in ["é🙂", "e\u{301}🙃", "e\u{301}🙂\n"] {
+        let changed = Request {
+            operation: Operation::Text {
+                text: crate::robot_input::text::Text::new(source).unwrap(),
+            },
+            ..original.clone()
+        };
+        assert_ne!(
+            State::key(&changed).unwrap(),
+            State::key(&original).unwrap()
+        );
+        assert_eq!(
+            shared.locked().submit(&changed),
+            Err(Refusal::RequestChanged)
+        );
+    }
+    assert_eq!(shared.locked().submit(&original), Ok(None));
+    encoded(&shared, 1, 0);
+    assert!(!ready(&shared, 1));
+    shared.result(ResultEvent::Completed(InputResult {
+        submitted_operations: 3,
+        ..receipt(0)
+    }));
+    let actual = retained(&shared, &original);
+    assert_eq!(actual.actions_total, 1);
+    assert_eq!(actual.actions_encoded, 1);
+    assert_eq!(actual.actions_submitted, 1);
+    assert_eq!(
+        actual.submitted_operations, 3,
+        "count complete Unicode scalars"
+    );
+    assert_eq!(actual.disposition, InputDisposition::Committed);
+    assert_eq!(validate_report(actual, &original), Ok(()));
+    assert_eq!(
+        report(&shared.locked().submit(&original).unwrap().unwrap()),
+        actual
+    );
+    assert!(shared.locked().pending.is_none());
+}
+
+#[test]
+fn partial_or_uncertain_text_preserves_submitted_scalars_and_never_replays_the_suffix() {
+    use fr_wire::input_result::Reason;
+    for (outcome, reason, expected) in [
+        (
+            InputOutcome::PartiallySubmittedToOs,
+            Reason::TicketExpired,
+            InputDisposition::Partial,
+        ),
+        (
+            InputOutcome::EffectUnknown,
+            Reason::UnknownEffect,
+            InputDisposition::UnknownEffect,
+        ),
+    ] {
+        let shared = text_owner();
+        let original = text_request(&shared, "é🙂remaining");
+        assert_eq!(shared.locked().submit(&original), Ok(None));
+        encoded(&shared, 1, 0);
+        shared.result(ResultEvent::Completed(InputResult {
+            outcome,
+            submitted_operations: 2,
+            unknown_next_operation: outcome == InputOutcome::EffectUnknown,
+            reason: Some(reason),
+            ..receipt(0)
+        }));
+        let actual = retained(&shared, &original);
+        assert_eq!(actual.disposition, expected);
+        assert_eq!(actual.submitted_operations, 2);
+        assert_eq!(actual.actions_encoded, 1);
+        assert_eq!(actual.actions_submitted, 0);
+        assert_eq!(actual.acknowledged_actions, 1);
+        assert_eq!(validate_report(actual, &original), Ok(()));
+        assert_eq!(
+            report(&shared.locked().submit(&original).unwrap().unwrap()),
+            actual
+        );
+        assert!(!snapshot(&shared).ready);
+        assert!(shared.locked().pending.is_none());
+        assert_eq!(
+            shared.locked().submit(&Request {
+                request_id: 2,
+                ..original.clone()
+            }),
+            Err(Refusal::Stopped)
+        );
+    }
+}
+
+#[test]
+fn cancelled_text_keeps_unknown_effect_and_late_evidence_cannot_restart_its_owner() {
+    let shared = text_owner();
+    let original = text_request(&shared, "é🙂");
+    let mut waiting = Box::pin(shared.submit(&original));
+    assert!(poll(waiting.as_mut()).is_pending());
+    encoded(&shared, 1, 0);
+    drop(waiting);
+    let cancelled = retained(&shared, &original);
+    assert_eq!(cancelled.disposition, InputDisposition::UnknownEffect);
+    assert_eq!(cancelled.unacknowledged_actions, 1);
+    assert_eq!(cancelled.submitted_operations, 0);
+    shared.result(ResultEvent::Completed(InputResult {
+        submitted_operations: 2,
+        ..receipt(0)
+    }));
+    let late = retained(&shared, &original);
+    assert_eq!(late.submitted_operations, 2);
+    assert_eq!(late.actions_encoded, 1);
+    assert_eq!(late.unacknowledged_actions, 0);
+    assert!(!snapshot(&shared).ready);
+    assert_eq!(
+        report(&shared.locked().submit(&original).unwrap().unwrap()),
+        late
+    );
+    assert_eq!(
+        shared.locked().submit(&Request {
+            request_id: 2,
+            ..original.clone()
+        }),
+        Err(Refusal::Stopped)
+    );
+}
+
+#[test]
+fn maximum_text_escaping_fits_the_single_bounded_local_request() {
+    let shared = text_owner();
+    let mut original = text_request(
+        &shared,
+        &"\0".repeat(fr_core::input::MAX_COMMITTED_TEXT_BYTES),
+    );
+    original.request_id = u64::MAX;
+    original.observation_id = u64::MAX;
+    original.max_observation_age_ms = 1000;
+    original.lease = [255; 16];
+    let bytes = serde_json::to_vec(&original).unwrap();
+    assert!(bytes.len() <= MAX_REQUEST && u16::try_from(bytes.len()).is_ok());
+    assert!(bytes.len() >= 6 * fr_core::input::MAX_COMMITTED_TEXT_BYTES);
+    let decoded: Request = serde_json::from_slice(&bytes).unwrap();
+    assert!(decoded == original);
+    assert_eq!(
+        State::key(&decoded).unwrap(),
+        State::key(&original).unwrap()
+    );
 }

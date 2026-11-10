@@ -249,6 +249,70 @@ fn numeric_action_bounds_and_unsupported_text_are_refused_before_dispatch() {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn explicit_text_file_preserves_the_original_commit_and_request_preconditions() {
+    let path = text::tests::directory().join("text with spaces");
+    let original = "e\u{301}é漢🙂\r\n\t";
+    std::fs::write(&path, original).unwrap();
+    let mut args = action("--text-file", "selected-path");
+    replace_value(&mut args, "--text-file", path.to_str().unwrap());
+    let request = command(&args).unwrap().request.unwrap();
+    assert_eq!(request.lease, id(LEASE).unwrap());
+    assert_eq!(request.request_id, 9);
+    assert_eq!(request.observation_id, 7);
+    assert_eq!(request.max_observation_age_ms, 250);
+    assert_eq!(request.operation.count(), 1);
+    assert!(request.valid());
+    let Operation::Text { text } = &request.operation else {
+        panic!("a selected commit must stay distinct from physical keys");
+    };
+    assert_eq!(text.as_str(), original);
+    std::fs::write(&path, "later content").unwrap();
+    assert_eq!(text.as_str(), original, "the accepted commit is owned once");
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["operation"]["kind"], "text");
+    assert_eq!(value["operation"]["text"], original);
+    assert!(!value.to_string().contains(path.to_str().unwrap()));
+    let decoded: Request = serde_json::from_value(value).unwrap();
+    assert!(decoded == request);
+}
+
+#[test]
+fn text_file_checks_all_preconditions_and_exclusivity_before_opening_content() {
+    let base = action("--text-file", "/missing/private-selection");
+    for suffix in [
+        "--text-file /second-private-selection",
+        "--move 1,2",
+        "--click 1,1,2",
+        "--key 4",
+        "--chord 224,19",
+        "--scroll 1,2,0,1",
+        "--status",
+        "--unknown-private-option private-content",
+    ] {
+        let mut args = base.clone();
+        args.extend(words(suffix));
+        let error = refused(&args);
+        assert!(!format!("{error:?}").contains("private-"));
+    }
+    for (flag, value) in [
+        ("--connection-id", "invalid"),
+        ("--lease", "00000000000000000000000000000000"),
+        ("--request-id", "0"),
+        ("--observation-id", "0"),
+        ("--max-observation-age-ms", "1001"),
+    ] {
+        let mut args = base.clone();
+        replace_value(&mut args, flag, value);
+        refused(&args);
+    }
+    let failure = command(&base).err().expect("the file does not exist");
+    assert_eq!(failure.code, "invalid_text_file");
+    assert!(!failure.unknown_effect);
+    assert!(!format!("{failure:?}").contains("private-selection"));
+}
+
 #[test]
 fn input_requires_every_original_identity_and_valid_observation_age() {
     for flag in [
@@ -368,13 +432,13 @@ fn wire_requests_and_responses_reject_unknown_fields_and_unbounded_numbers() {
         .unwrap()
         .request
         .unwrap();
-    let mut value = serde_json::to_value(request).unwrap();
+    let mut value = serde_json::to_value(&request).unwrap();
     value["text"] = "private-text".into();
     assert!(serde_json::from_value::<Request>(value).is_err());
-    let mut value = serde_json::to_value(request).unwrap();
+    let mut value = serde_json::to_value(&request).unwrap();
     value["operation"]["repeat"] = 5000.into();
     assert!(serde_json::from_value::<Request>(value).is_err());
-    let mut value = serde_json::to_value(request).unwrap();
+    let mut value = serde_json::to_value(&request).unwrap();
     value["operation"]["button"] = 256.into();
     assert!(serde_json::from_value::<Request>(value).is_err());
     let mut value = serde_json::to_value(Response::Result {
@@ -599,7 +663,7 @@ fn raw_chord_requests_cannot_bypass_modifier_and_key_bounds() {
         .request
         .unwrap();
     for modifiers in 0_u8..=255 {
-        let mut wire = serde_json::to_value(request).unwrap();
+        let mut wire = serde_json::to_value(&request).unwrap();
         wire["operation"]["modifiers"] = modifiers.into();
         let decoded: Request = serde_json::from_value(wire).unwrap();
         assert_eq!(decoded.valid(), (1..=4).contains(&modifiers.count_ones()));
@@ -608,14 +672,14 @@ fn raw_chord_requests_cannot_bypass_modifier_and_key_bounds() {
         }
     }
     for usage in [0, 165, 223, 224, 231, 232, 65535] {
-        let mut wire = serde_json::to_value(request).unwrap();
+        let mut wire = serde_json::to_value(&request).unwrap();
         wire["operation"]["usage"] = usage.into();
         assert!(!serde_json::from_value::<Request>(wire).unwrap().valid());
     }
-    let mut wire = serde_json::to_value(request).unwrap();
+    let mut wire = serde_json::to_value(&request).unwrap();
     wire["operation"]["modifiers"] = 256.into();
     assert!(serde_json::from_value::<Request>(wire).is_err());
-    let mut wire = serde_json::to_value(request).unwrap();
+    let mut wire = serde_json::to_value(&request).unwrap();
     wire["operation"]["repeat"] = 10.into();
     assert!(serde_json::from_value::<Request>(wire).is_err());
 }
@@ -653,7 +717,7 @@ fn drags_preserve_both_signed_endpoints_in_one_bounded_request() {
     let body = serde_json::to_vec(&request).unwrap();
     assert!(body.len() <= 512);
     assert!(serde_json::from_slice::<Request>(&body).unwrap() == request);
-    let value = serde_json::to_value(request).unwrap();
+    let value = serde_json::to_value(&request).unwrap();
     assert_eq!(
         value["operation"],
         serde_json::json!({
@@ -670,7 +734,10 @@ fn drags_preserve_both_signed_endpoints_in_one_bounded_request() {
         ("--chord", "224,4", "key_chord"),
     ] {
         let old = command(&action(flag, value)).unwrap().request.unwrap();
-        assert_eq!(serde_json::to_value(old).unwrap()["operation"]["kind"], tag);
+        assert_eq!(
+            serde_json::to_value(&old).unwrap()["operation"]["kind"],
+            tag
+        );
         assert!(old.operation.drag_points().is_none());
     }
 }
@@ -703,11 +770,11 @@ fn invalid_or_same_point_drags_cannot_become_a_click_or_an_open_held_button() {
         .request
         .unwrap();
     for button in [0, 6, 255] {
-        let mut body = serde_json::to_value(request).unwrap();
+        let mut body = serde_json::to_value(&request).unwrap();
         body["operation"]["button"] = button.into();
         assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
     }
-    let mut same_point = serde_json::to_value(request).unwrap();
+    let mut same_point = serde_json::to_value(&request).unwrap();
     same_point["operation"]["to_x"] = (-100).into();
     same_point["operation"]["to_y"] = 20.into();
     assert!(
@@ -716,7 +783,7 @@ fn invalid_or_same_point_drags_cannot_become_a_click_or_an_open_held_button() {
             .valid()
     );
     for field in ["hold_ms", "steps", "repeat", "text"] {
-        let mut body = serde_json::to_value(request).unwrap();
+        let mut body = serde_json::to_value(&request).unwrap();
         body["operation"][field] = 1.into();
         assert!(serde_json::from_value::<Request>(body).is_err());
     }
@@ -737,7 +804,7 @@ fn move_preserves_one_signed_absolute_point_without_other_input() {
             Some(fr_core::input::DesktopPoint { x, y })
         );
         assert!(request.operation.drag_points().is_none());
-        let wire = serde_json::to_value(request).unwrap();
+        let wire = serde_json::to_value(&request).unwrap();
         assert_eq!(
             wire["operation"],
             serde_json::json!({"kind": "move", "x": x, "y": y})
@@ -823,13 +890,13 @@ fn modified_pointer_commands_preserve_canonical_modifiers_and_signed_coordinates
         assert_eq!(body, serde_json::to_vec(&reordered).unwrap());
         assert!(serde_json::from_slice::<Request>(&body).unwrap() == request);
         assert_eq!(
-            serde_json::to_value(request).unwrap()["operation"]["kind"],
+            serde_json::to_value(&request).unwrap()["operation"]["kind"],
             tag
         );
         assert!(request.operation.pointer(0).is_none());
 
         for modifiers in 0_u8..=255 {
-            let mut body = serde_json::to_value(request).unwrap();
+            let mut body = serde_json::to_value(&request).unwrap();
             body["operation"]["modifiers"] = modifiers.into();
             let decoded: Request = serde_json::from_value(body).unwrap();
             assert_eq!(decoded.valid(), (1..=4).contains(&modifiers.count_ones()));
@@ -842,17 +909,17 @@ fn modified_pointer_commands_preserve_canonical_modifiers_and_signed_coordinates
             }
         }
         for button in [0, 6, 255] {
-            let mut body = serde_json::to_value(request).unwrap();
+            let mut body = serde_json::to_value(&request).unwrap();
             body["operation"]["button"] = button.into();
             assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
         }
         for field in ["modifiers", "button"] {
-            let mut body = serde_json::to_value(request).unwrap();
+            let mut body = serde_json::to_value(&request).unwrap();
             body["operation"][field] = 256.into();
             assert!(serde_json::from_value::<Request>(body).is_err());
         }
         for field in ["hold_ms", "steps", "repeat", "text"] {
-            let mut body = serde_json::to_value(request).unwrap();
+            let mut body = serde_json::to_value(&request).unwrap();
             body["operation"][field] = 1.into();
             assert!(serde_json::from_value::<Request>(body).is_err());
         }
@@ -917,7 +984,7 @@ fn modified_pointer_commands_refuse_invalid_modifiers_and_incomplete_gestures() 
         .unwrap()
         .request
         .unwrap();
-    let mut body = serde_json::to_value(request).unwrap();
+    let mut body = serde_json::to_value(&request).unwrap();
     body["operation"]["to_x"] = (-100).into();
     body["operation"]["to_y"] = 20.into();
     assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
@@ -956,7 +1023,7 @@ fn modified_scroll_commands_preserve_canonical_modifiers_and_signed_points() {
     assert_eq!(body, serde_json::to_vec(&reordered).unwrap());
     let decoded: Request = serde_json::from_slice(&body).unwrap();
     assert!(decoded.valid() && decoded == request);
-    let value = serde_json::to_value(request).unwrap();
+    let value = serde_json::to_value(&request).unwrap();
     assert_eq!(value["operation"]["kind"], "modified_scroll");
     assert_eq!(value["operation"]["modifiers"], 0b1000_1011);
     assert_eq!(value["operation"]["dx"], 32);
@@ -1063,14 +1130,14 @@ fn raw_modified_scroll_rejects_invalid_masks_extra_fields_and_saturated_counts()
         (7, 120, 9),
         (15, 32, 33),
     ] {
-        let mut body = serde_json::to_value(request).unwrap();
+        let mut body = serde_json::to_value(&request).unwrap();
         body["operation"]["modifiers"] = modifiers.into();
         body["operation"]["dx"] = dx.into();
         body["operation"]["dy"] = dy.into();
         assert!(!serde_json::from_value::<Request>(body).unwrap().valid());
     }
     for modifiers in [1, 15, 255] {
-        let mut body = serde_json::to_value(request).unwrap();
+        let mut body = serde_json::to_value(&request).unwrap();
         body["operation"]["modifiers"] = modifiers.into();
         body["operation"]["dx"] = i32::MIN.into();
         body["operation"]["dy"] = i32::MAX.into();
@@ -1078,11 +1145,11 @@ fn raw_modified_scroll_rejects_invalid_masks_extra_fields_and_saturated_counts()
         assert!(!decoded.valid());
         assert_eq!(decoded.operation.count(), u8::MAX);
     }
-    let mut body = serde_json::to_value(request).unwrap();
+    let mut body = serde_json::to_value(&request).unwrap();
     body["operation"]["modifiers"] = 256.into();
     assert!(serde_json::from_value::<Request>(body).is_err());
     for field in ["button", "hold_ms", "repeat", "text"] {
-        let mut body = serde_json::to_value(request).unwrap();
+        let mut body = serde_json::to_value(&request).unwrap();
         body["operation"][field] = 1.into();
         assert!(serde_json::from_value::<Request>(body).is_err());
     }

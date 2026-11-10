@@ -8,6 +8,8 @@ use crate::{Failure, options};
 ))]
 use fr_client::robot::{InputDisposition, input::native::Report};
 use serde::{Deserialize, Serialize};
+#[path = "robot_input/text.rs"]
+pub(crate) mod text;
 
 #[cfg(any(
     target_os = "linux",
@@ -20,9 +22,13 @@ pub(crate) struct Output {
     pub text: String,
     pub exit: u8,
 }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Operation {
+    /// One complete Unicode commit, distinct from keys and clipboard actions.
+    Text {
+        text: text::Text,
+    },
     /// One absolute pointer state; no buttons, keys or scroll are submitted.
     Move {
         x: i32,
@@ -81,9 +87,9 @@ pub(crate) enum Operation {
     },
 }
 impl Operation {
-    pub fn count(self) -> u8 {
-        match self {
-            Self::Move { .. } => 1,
+    pub fn count(&self) -> u8 {
+        match *self {
+            Self::Text { .. } | Self::Move { .. } => 1,
             Self::Scroll { dx, dy, .. } => {
                 // The public request spans up to 120 lines per axis, but one
                 // native wheel action admits at most 32 total steps. A request
@@ -113,8 +119,12 @@ impl Operation {
             }
         }
     }
-    pub fn valid(self) -> bool {
-        match self {
+    pub fn valid(&self) -> bool {
+        match *self {
+            Self::Text { ref text } => {
+                !text.as_str().is_empty()
+                    && text.as_str().len() <= fr_core::input::MAX_COMMITTED_TEXT_BYTES
+            }
             Self::Move { .. } => true,
             Self::Scroll { dx, dy, .. } => {
                 (-120..=120).contains(&dx) && (-120..=120).contains(&dy) && (dx != 0 || dy != 0)
@@ -165,8 +175,8 @@ impl Operation {
     /// vertical order, signs and exact distance without allocating or retaining
     /// an input queue. Later parts still need their original owner's gates.
     #[cfg(any(feature = "linux-desktop", test))]
-    pub fn scroll_lines(self, index: u8) -> Option<(i32, i32)> {
-        let Self::Scroll { dx, dy, .. } = self else {
+    pub fn scroll_lines(&self, index: u8) -> Option<(i32, i32)> {
+        let Self::Scroll { dx, dy, .. } = *self else {
             return None;
         };
         if !self.valid() {
@@ -189,8 +199,8 @@ impl Operation {
     }
     /// Only the first and sole pointer state of an absolute move is encodable.
     #[cfg(any(feature = "linux-desktop", test))]
-    pub fn pointer(self, index: u8) -> Option<fr_core::input::DesktopPoint> {
-        match self {
+    pub fn pointer(&self, index: u8) -> Option<fr_core::input::DesktopPoint> {
+        match *self {
             Self::Move { x, y } if index == 0 => Some(fr_core::input::DesktopPoint { x, y }),
             _ => None,
         }
@@ -202,9 +212,9 @@ impl Operation {
         test
     ))]
     pub fn drag_points(
-        self,
+        &self,
     ) -> Option<(fr_core::input::DesktopPoint, fr_core::input::DesktopPoint)> {
-        match self {
+        match *self {
             Self::Drag {
                 from_x,
                 from_y,
@@ -234,11 +244,11 @@ impl Operation {
         all(target_os = "macos", feature = "macos-desktop"),
         test
     ))]
-    pub fn within_bounds(self, bounds: fr_core::input::InputBounds) -> bool {
+    pub fn within_bounds(&self, bounds: fr_core::input::InputBounds) -> bool {
         if let Some((from, to)) = self.drag_points() {
             return bounds.contains(from) && bounds.contains(to);
         }
-        match self {
+        match *self {
             Self::Move { x, y }
             | Self::Scroll { x, y, .. }
             | Self::ModifiedScroll { x, y, .. }
@@ -256,9 +266,10 @@ impl Operation {
         all(target_os = "macos", feature = "macos-desktop"),
         test
     ))]
-    pub fn supported(self, capabilities: fr_core::input_submission::Capabilities) -> bool {
+    pub fn supported(&self, capabilities: fr_core::input_submission::Capabilities) -> bool {
         use fr_core::input_submission::{Capabilities, Capability};
         let required = match self {
+            Self::Text { .. } => Capabilities::default().with(Capability::Text),
             Self::Move { .. } => Capabilities::default().with(Capability::Absolute),
             Self::Scroll { .. } => Capabilities::default()
                 .with(Capability::Absolute)
@@ -362,7 +373,7 @@ impl Operation {
         Ok(mask)
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 // Keep the explicit request_id spelling in the local JSON contract.
 #[allow(clippy::struct_field_names)]
@@ -374,13 +385,17 @@ pub(crate) struct Request {
     pub operation: Operation,
 }
 impl Request {
-    pub fn valid(self) -> bool {
-        self.lease != [0; 16]
-            && self.request_id != 0
-            && self.observation_id != 0
-            && (1..=1000).contains(&self.max_observation_age_ms)
-            && self.operation.valid()
+    pub fn valid(&self) -> bool {
+        valid_preconditions(
+            self.lease,
+            self.request_id,
+            self.observation_id,
+            self.max_observation_age_ms,
+        ) && self.operation.valid()
     }
+}
+fn valid_preconditions(lease: [u8; 16], request: u64, observation: u64, age: u32) -> bool {
+    lease != [0; 16] && request != 0 && observation != 0 && (1..=1000).contains(&age)
 }
 #[cfg(any(
     target_os = "linux",
@@ -440,6 +455,7 @@ pub(crate) enum InputCapability {
     AbsolutePointer,
     Buttons,
     LineScroll,
+    CommittedText,
 }
 /// Signed host desktop pixels, with exclusive right and bottom edges.
 #[cfg(any(
@@ -496,6 +512,7 @@ impl InputSupport {
                 (InputCapability::AbsolutePointer, Capability::Absolute),
                 (InputCapability::Buttons, Capability::Buttons),
                 (InputCapability::LineScroll, Capability::LineScroll),
+                (InputCapability::CommittedText, Capability::Text),
             ]
             .into_iter()
             .filter_map(|(name, capability)| capabilities.contains(capability).then_some(name))
@@ -512,7 +529,7 @@ impl InputSupport {
             self.bounds.height,
         )
         .is_some()
-            && self.capabilities.len() <= 4
+            && self.capabilities.len() <= 5
             && self.capabilities.windows(2).all(|pair| pair[0] < pair[1])
     }
 }
@@ -724,6 +741,20 @@ fn opening(args: &[String]) -> Result<options::Options, Failure> {
     }
     Ok(parsed)
 }
+/// Resolve one explicit action only after the command's original identities
+/// and observation preconditions have been checked.
+fn selected_operation(
+    operation: Option<Operation>,
+    text_file: Option<&str>,
+) -> Result<Operation, Failure> {
+    match (operation, text_file) {
+        (Some(operation), None) => Ok(operation),
+        (None, Some(path)) => Ok(Operation::Text {
+            text: text::read(path)?,
+        }),
+        _ => Err(usage()),
+    }
+}
 fn command(args: &[String]) -> Result<Command, Failure> {
     bounded(args)?;
     if args.get(0..2).is_none_or(|a| a != ["robot", "input"]) {
@@ -740,6 +771,7 @@ fn command(args: &[String]) -> Result<Command, Failure> {
     let mut observation_id = None;
     let mut max_age = None;
     let mut operation = None;
+    let mut text_file = None;
     let mut status = false;
     let mut json = false;
     let mut seen = std::collections::BTreeSet::new();
@@ -771,10 +803,16 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             "--max-observation-age-ms" => max_age = Some(value.parse().map_err(|_| usage())?),
             "--move" | "--scroll" | "--click" | "--key" | "--chord" | "--drag"
             | "--modified-click" | "--modified-drag" | "--modified-scroll" => {
-                if operation.is_some() {
+                if operation.is_some() || text_file.is_some() {
                     return Err(usage());
                 }
                 operation = Some(Operation::parse(flag, value)?);
+            }
+            "--text-file" => {
+                if operation.is_some() || text_file.is_some() {
+                    return Err(usage());
+                }
+                text_file = Some(value.as_str());
             }
             _ => return Err(usage()),
         }
@@ -785,17 +823,29 @@ fn command(args: &[String]) -> Result<Command, Failure> {
             || observation_id.is_some()
             || max_age.is_some()
             || operation.is_some()
+            || text_file.is_some()
         {
             return Err(usage());
         }
         None
     } else {
+        let lease = lease.ok_or_else(usage)?;
+        let request_id = request_id.ok_or_else(usage)?;
+        let observation_id = observation_id.ok_or_else(usage)?;
+        let max_observation_age_ms = max_age.ok_or_else(usage)?;
+        // Validate the entire command's identity/preconditions before reading
+        // any selected content. An invalid request cannot touch its file.
+        if connection.is_none()
+            || !valid_preconditions(lease, request_id, observation_id, max_observation_age_ms)
+        {
+            return Err(usage());
+        }
         let request = Request {
-            lease: lease.ok_or_else(usage)?,
-            request_id: request_id.ok_or_else(usage)?,
-            observation_id: observation_id.ok_or_else(usage)?,
-            max_observation_age_ms: max_age.ok_or_else(usage)?,
-            operation: operation.ok_or_else(usage)?,
+            lease,
+            request_id,
+            observation_id,
+            max_observation_age_ms,
+            operation: selected_operation(operation, text_file)?,
         };
         if !request.valid() {
             return Err(usage());

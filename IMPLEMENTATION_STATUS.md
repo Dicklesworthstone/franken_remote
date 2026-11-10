@@ -1,5 +1,39 @@
 # Implementation status
 
+## Bounded committed Unicode input (2026-11-10)
+
+The macOS per-lease input executor now prepares and submits complete Unicode
+scalars, including supplementary UTF-16 pairs, under the original ticket and
+view authority. Native event construction/readback must succeed before the
+optional `native-input-text` capability is offered. Each lease repeats that
+probe, and a failed text probe leaves physical keyboard control available.
+Text refuses any remotely held key or button; expiry and uncertain submission
+preserve the submitted prefix and never replay the remaining content.
+
+The Linux foreground robot owner exposes this through `fr robot input
+--text-file PATH`, using the existing connection, lease, request and observation
+handles. One regular, non-symlink UTF-8 file supplies 1..4096 bytes without
+normalization, clipboard fallback or text in process arguments. The original
+owner retains the bounded request only while needed, clears local request
+buffers on drop, and keeps only a fingerprint in its receipt history. The wire
+extension is optional and independently checked before host approval, so
+legacy physical-control peers continue to negotiate normally.
+
+Validation: 312 `fr-wire` tests and 1,121 `fr-client`/`fr-media` tests passed
+after the extension. A limited source diagnostic passed 154 tests for the CLI
+parser, original-owner ledger, scalar policy, file handling, action lowering
+and the host's selected-capability boundary. Its unavailable viewer-control
+type cannot be constructed; it does not exercise runtime or IPC behavior.
+The actual Mac Rust input modules also passed source type checks and strict
+Clippy without replacement FFI implementations, native linking or execution.
+Native event-tap and expired-agent regressions were added but need an actual
+Mac. Full application compilation remains locally blocked by the unchanged
+Asupersync compiler memory failure. Native-window IME capture and application
+acceptance of Quartz Unicode events remain unqualified; a receipt describes
+submission, not proof that the application displayed the text.
+See [committed Unicode input](docs/macos-host.md#committed-unicode-input).
+Tracking: `fr-h80k` (native execution qualification remains open).
+
 ## Session startup and display-sleep fences (2026-11-10)
 
 The macOS library entry point now requires the same-user native session

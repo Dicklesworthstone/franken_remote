@@ -7,8 +7,14 @@ use frd::session_startup::{ControlledViewer, ControlledViewerError};
 use std::time::Instant;
 
 impl Operation {
-    fn action(self, index: u8) -> Option<Action<'static>> {
+    fn committed_text(&self, index: u8) -> Option<&str> {
         match self {
+            Self::Text { text } if index == 0 => Some(text.as_str()),
+            _ => None,
+        }
+    }
+    fn action(&self, index: u8) -> Option<Action<'static>> {
+        match *self {
             Self::Scroll { x, y, .. } => {
                 let (dx, dy) = self.scroll_lines(index)?;
                 Some(Action::Scroll {
@@ -113,7 +119,7 @@ impl Operation {
             _ => None,
         }
     }
-    fn action_with_modifiers(self, modifiers: u8, index: u8) -> Option<Action<'static>> {
+    fn action_with_modifiers(&self, modifiers: u8, index: u8) -> Option<Action<'static>> {
         let held = u8::try_from(modifiers.count_ones()).ok()?;
         let release_start = held.checked_add(self.count())?;
         let total = release_start.checked_add(held)?;
@@ -219,7 +225,10 @@ impl Shared {
             return;
         }
         let binding = viewer.input_result_binding();
-        let encoded = if let Some(position) = pending.request.operation.pointer(pending.encoded) {
+        let encoded = if let Some(text) = pending.request.operation.committed_text(pending.encoded)
+        {
+            viewer.action(Action::Text(text))
+        } else if let Some(position) = pending.request.operation.pointer(pending.encoded) {
             viewer.pointer(position)
         } else if let Some(action) = pending.request.operation.action(pending.encoded) {
             viewer.action(action)
@@ -367,11 +376,34 @@ mod tests {
         }
     }
 
-    fn key_step(operation: Operation, index: u8) -> (u16, KeyTransition) {
+    fn key_step(operation: &Operation, index: u8) -> (u16, KeyTransition) {
         let Some(Action::Key { key, transition }) = operation.action(index) else {
             panic!("a chord emits only bounded physical key transitions");
         };
         (key.usage(), transition)
+    }
+
+    #[test]
+    fn committed_text_lowers_once_without_key_or_pointer_fallback() {
+        use crate::robot_input::text::Text;
+        use fr_core::input_submission::{Capabilities, Capability};
+        let source = "e\u{301}é漢🙂\r\n\t";
+        let operation = Operation::Text {
+            text: Text::new(source).unwrap(),
+        };
+        assert!(operation.valid());
+        assert_eq!(operation.count(), 1);
+        assert_eq!(operation.committed_text(0), Some(source));
+        assert!(operation.supported(Capabilities::default().with(Capability::Text)));
+        assert!(!operation.supported(Capabilities::default().with(Capability::Keys)));
+        for index in 0..=u8::MAX {
+            assert!(operation.action(index).is_none());
+            assert!(operation.pointer(index).is_none());
+            if index != 0 {
+                assert!(operation.committed_text(index).is_none());
+            }
+        }
+        assert!(Operation::KeyTap { usage: 4 }.committed_text(0).is_none());
     }
 
     #[test]
@@ -389,7 +421,7 @@ mod tests {
             (224, KeyTransition::Release),
         ];
         for (index, step) in expected.into_iter().enumerate() {
-            assert_eq!(key_step(chord, u8::try_from(index).unwrap()), step);
+            assert_eq!(key_step(&chord, u8::try_from(index).unwrap()), step);
         }
         assert!(chord.action(6).is_none());
     }
@@ -404,7 +436,7 @@ mod tests {
         assert_eq!(chord.count(), 10);
         let mut held = BTreeSet::new();
         for (index, usage) in expected.into_iter().enumerate() {
-            let (actual, transition) = key_step(chord, u8::try_from(index).unwrap());
+            let (actual, transition) = key_step(&chord, u8::try_from(index).unwrap());
             assert_eq!(actual, usage);
             if index < 5 {
                 assert_eq!(transition, KeyTransition::Press);

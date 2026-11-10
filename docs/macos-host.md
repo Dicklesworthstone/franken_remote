@@ -60,6 +60,46 @@ signature keeps the grants across updates; an unsigned or ad-hoc build would
 need them again after every rebuild. Both entries can be revoked any time in
 System Settings > Privacy & Security.
 
+## Committed Unicode input
+
+The Quartz input executor implements the optional `native-input-text` v1
+capability. Before advertising it, the real agent constructs and reads back
+ASCII, BMP and supplementary Unicode event strings without posting input.
+The per-lease agent repeats that probe. A failed optional probe leaves physical
+key control available.
+
+The existing Linux foreground robot owner exposes this through
+`fr robot input NODE_ID ... --text-file PATH --json`. Start that owner with
+`fr robot session open NODE_ID --foreground --role control --accept-input
+--experimental-native --display only`, retaining the usual native trust and
+worker options. Obtain the exact connection, lease, request and observation
+handles using `fr robot input NODE_ID --connection-id ID --status --json` or
+the matching robot screenshot. Supply those original handles and
+`--max-observation-age-ms` with the text command. The ready status must include
+`committed_text` in `input_support.capabilities`; older and text-incapable hosts
+keep their other input operations.
+
+The selected file must be one regular, non-symlink UTF-8 file of 1..4096 bytes.
+Its content is preserved exactly, including whitespace and combining sequences.
+The CLI reads it once and never puts its content in process arguments, receipts
+or logs. It creates one original input action; no clipboard operation or guessed
+keyboard layout is used. macOS native-window IME capture is still unavailable.
+
+Each complete Unicode scalar receives its original submission-time authority
+check. A supplementary scalar's two UTF-16 units stay together. Both native
+events are prepared before that check; the empty key-up is release-only cleanup.
+The executor refuses text while it holds any remote key or button. Expiry and
+uncertainty retain the exact submitted scalar prefix, fence the original owner
+and never replay the remaining text.
+
+The receipt confirms Quartz submission, not application acceptance. Apple's
+[Unicode event API documentation](https://developer.apple.com/documentation/coregraphics/cgevent/keyboardsetunicodestring(stringlength:unicodestring:))
+notes that some frameworks may ignore the event string and translate the
+virtual key instead. Source tests cover scalar boundaries, optional negotiation,
+file bounds and owner receipts; the native event-tap and expired-agent tests
+still require a Mac with Accessibility permission. Live application typing and
+tailnet execution have not been qualified by the portable tests.
+
 ## Text clipboard
 
 With `--input-agent`, the host enables plain UTF-8 clipboard sharing for the

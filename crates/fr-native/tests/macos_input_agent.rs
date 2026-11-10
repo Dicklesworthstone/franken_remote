@@ -110,6 +110,7 @@ fn implemented() -> Capabilities {
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
         .with(Capability::PixelScroll)
+        .with(Capability::Text)
 }
 
 fn require_access() {
@@ -294,4 +295,44 @@ fn a_lease_ends_on_an_out_of_sequence_request() {
     assert!(matches!(reply, Reply::Ready { epoch: 13, .. }));
     agent.send(3, Request::Cleanup);
     assert_eq!(agent.exit().code(), Some(65));
+}
+
+#[test]
+#[ignore = "shows the control indicator on the real display (no input is posted)"]
+fn committed_text_expiry_consumes_its_preparation_without_posting() {
+    require_access();
+    let (_, bounds) = macos_input::display_bounds().unwrap()[0];
+    let mut agent = Agent::started();
+    assert!(matches!(agent.exchange(1, Request::Hello {
+        epoch: 17, bounds, required: implemented(),
+    }), Reply::Ready { epoch: 17, capabilities, .. } if capabilities.contains(Capability::Text)));
+    let operation = Operation::Text('🙂');
+    assert!(matches!(
+        agent.exchange(2, Request::Prepare(operation)),
+        Reply::Prepared
+    ));
+    assert!(matches!(
+        agent.exchange(
+            3,
+            Request::Submit {
+                operation,
+                not_after_ns: 1,
+            }
+        ),
+        Reply::Expired
+    ));
+    agent
+        .signals
+        .send(&process::encode_signal(Signal::Fence))
+        .unwrap();
+    assert!(matches!(
+        agent.exchange(4, Request::Prepare(operation)),
+        Reply::Fenced
+    ));
+    assert!(matches!(
+        agent.exchange(5, Request::Cleanup),
+        Reply::Cleaned(true)
+    ));
+    assert!(matches!(agent.exchange(6, Request::Stop), Reply::Stopped));
+    assert_eq!(agent.exit().code(), Some(0));
 }

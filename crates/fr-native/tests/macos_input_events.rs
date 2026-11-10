@@ -115,6 +115,12 @@ mod quartz {
         fn CGEventGetFlags(event: *mut c_void) -> u64;
         fn CGEventGetIntegerValueField(event: *mut c_void, field: u32) -> i64;
         fn CGEventGetLocation(event: *mut c_void) -> CGPoint;
+        fn CGEventKeyboardGetUnicodeString(
+            event: *mut c_void,
+            maximum: usize,
+            actual: *mut usize,
+            units: *mut u16,
+        );
         fn CGDisplayBounds(display: u32) -> CGRect;
     }
     #[link(name = "CoreFoundation", kind = "framework")]
@@ -152,6 +158,8 @@ mod quartz {
         points: (i64, i64),
         continuous: i64,
         at: (f64, f64),
+        unicode: [u16; 2],
+        unicode_length: usize,
     }
 
     unsafe extern "C" fn observe(
@@ -171,6 +179,19 @@ mod quartz {
         }
         // SAFETY: `event` is live for this callback.
         let (flags, at) = unsafe { (CGEventGetFlags(event), CGEventGetLocation(event)) };
+        let (mut unicode, mut unicode_length) = ([0; 2], 0);
+        if matches!(kind, KEY_DOWN | KEY_UP) {
+            // SAFETY: the event is live for this callback and both outputs
+            // are writable for the stated capacity. Fixture input only.
+            unsafe {
+                CGEventKeyboardGetUnicodeString(
+                    event,
+                    unicode.len(),
+                    &raw mut unicode_length,
+                    unicode.as_mut_ptr(),
+                );
+            }
+        }
         let seen = Seen {
             kind,
             keycode: field(KEYCODE),
@@ -183,6 +204,8 @@ mod quartz {
             points: (field(POINT_AXIS_1), field(POINT_AXIS_2)),
             continuous: field(CONTINUOUS),
             at: (at.x, at.y),
+            unicode,
+            unicode_length,
         };
         // SAFETY: `info` is the tap thread's sender, alive until after the tap
         // is invalidated on that same thread, which is where this runs.
@@ -291,6 +314,7 @@ mod quartz {
             .with(Capability::Buttons)
             .with(Capability::LineScroll)
             .with(Capability::PixelScroll)
+            .with(Capability::Text)
     }
 
     fn key(usage: u16, transition: KeyTransition) -> Operation {
@@ -347,11 +371,88 @@ mod quartz {
         let (bounds, points) = display();
 
         keys_carry_keycodes_repeat_and_modifier_flags(&tap, bounds);
+        text_preserves_scalars_and_original_authority(&tap, bounds);
         pointer_events_land_on_the_mapped_points(&tap, bounds, points);
         refusals_post_nothing(&tap, bounds);
         cleanup_and_drop_release_what_is_held(&tap, bounds, points);
         a_panic_releases_the_recorded_set_and_exits(&tap);
         println!("macos_input_events: ok");
+    }
+
+    fn text_preserves_scalars_and_original_authority(tap: &Tap, bounds: InputBounds) {
+        let mut pointer = MacPointer::open_exact(bounds, implemented()).unwrap();
+        for scalar in ['a', 'é', '\u{301}', '中', '🙂', '\u{10ffff}'] {
+            let operation = Operation::Text(scalar);
+            pointer.prepare(operation).unwrap();
+            assert_eq!(
+                pointer.submit_checked(operation, |held| {
+                    assert!(held.key(fr_native::macos_input_state::TEXT_KEYCODE));
+                    Ok::<(), ()>(())
+                }),
+                Ok(Submission::Submitted)
+            );
+            let down = tap.next("committed scalar");
+            let up = tap.next("text cleanup");
+            let mut expected = [0; 2];
+            let expected = scalar.encode_utf16(&mut expected);
+            assert_eq!(down.kind, KEY_DOWN);
+            assert_eq!(down.unicode_length, expected.len());
+            assert_eq!(&down.unicode[..down.unicode_length], expected);
+            assert_eq!(down.flags, NON_COALESCED);
+            assert_eq!(up.kind, KEY_UP);
+            assert_eq!(up.keycode, down.keycode);
+            assert_eq!(up.unicode_length, 0);
+            assert!(pointer.native_held().is_empty());
+        }
+        // Text must not become Command-A or release the caller's held A.
+        for usage in [0x04, 0xe3] {
+            post(
+                &mut pointer,
+                "text collision key down",
+                key(usage, KeyTransition::Press),
+            );
+            let _ = tap.next("text collision key down");
+            assert_eq!(
+                pointer.prepare(Operation::Text('é')),
+                Err(PlatformError::Permission)
+            );
+            tap.quiet("text refused while a key was held");
+            post(
+                &mut pointer,
+                "text collision key up",
+                key(usage, KeyTransition::Release),
+            );
+            let _ = tap.next("text collision key up");
+        }
+        let operation = Operation::Text('🙂');
+        pointer.prepare(operation).unwrap();
+        assert_eq!(
+            pointer.submit_checked(operation, |_| Err("expired")),
+            Err("expired")
+        );
+        assert!(pointer.native_held().is_empty());
+        assert_eq!(
+            pointer.submit(operation),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        pointer.prepare(operation).unwrap();
+        pointer.cancel_prepared();
+        assert_eq!(
+            pointer.submit(operation),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        pointer.prepare(operation).unwrap();
+        assert_eq!(
+            pointer.submit(Operation::Text('a')),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        assert_eq!(
+            pointer.submit(operation),
+            Submission::NotSubmitted(PlatformError::Unsupported)
+        );
+        pointer.prepare(operation).unwrap();
+        drop(pointer);
+        tap.quiet("cancelled, changed, expired and abandoned text preparations");
     }
 
     fn keys_carry_keycodes_repeat_and_modifier_flags(tap: &Tap, bounds: InputBounds) {

@@ -32,8 +32,13 @@ pub const LINE_SCROLL_VERSION: u16 = 1;
 /// or permission to convert a pixel event into a line event.
 pub const PIXEL_SCROLL_CAPABILITY: &str = "native-input-pixel-scroll";
 pub const PIXEL_SCROLL_VERSION: u16 = 1;
+/// Optional direct committed-Unicode injection. This is distinct from physical
+/// keys, IME/preedit capture and the clipboard. A host offers it only when its
+/// real per-lease executor implements the scalar submission path.
+pub const TEXT_CAPABILITY: &str = "native-input-text";
+pub const TEXT_VERSION: u16 = 1;
 /// What a controller may ask for under this selection: every operation the
-/// grant exchange carries, each scroll mode only with its own boundary.
+/// grant exchange carries, each scroll mode and text only with its own boundary.
 /// A controller requests `wanted.meet(requestable(selection))`.
 pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities {
     let line_scroll = selection
@@ -42,9 +47,13 @@ pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities
     let pixel_scroll = selection
         .iter()
         .any(|c| c.name == PIXEL_SCROLL_CAPABILITY && c.version == PIXEL_SCROLL_VERSION);
+    let text = selection
+        .iter()
+        .any(|c| c.name == TEXT_CAPABILITY && c.version == TEXT_VERSION);
     CAPS.iter()
         .filter(|&&c| line_scroll || c != Capability::LineScroll)
         .filter(|&&c| pixel_scroll || c != Capability::PixelScroll)
+        .filter(|&&c| text || c != Capability::Text)
         .fold(Capabilities::default(), |set, &c| set.with(c))
 }
 
@@ -53,7 +62,23 @@ pub fn requestable(selection: &[crate::negotiation::Capability]) -> Capabilities
 /// optional diagnostics yield first, then optional bulk sizing/credit (whose
 /// bounded legacy paths remain available). Required capabilities never yield.
 pub fn with_pixel_scroll(
+    offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    with_optional_input(offer, PIXEL_SCROLL_CAPABILITY, PIXEL_SCROLL_VERSION)
+}
+
+/// Explicit direct-text producer or native-executor opt-in. Other clients
+/// keep physical-key behavior and never request text from legacy hosts.
+pub fn with_committed_text(
+    offer: crate::negotiation::Offer,
+) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
+    with_optional_input(offer, TEXT_CAPABILITY, TEXT_VERSION)
+}
+
+fn with_optional_input(
     mut offer: crate::negotiation::Offer,
+    name: &str,
+    version: u16,
 ) -> Result<crate::negotiation::Offer, crate::negotiation::Error> {
     use crate::negotiation::{Capability as Negotiated, Error, MAX_CAPABILITIES};
     offer.validate()?;
@@ -64,12 +89,8 @@ pub fn with_pixel_scroll(
     {
         return Err(Error::RequiredCapability);
     }
-    if let Some(cap) = offer
-        .capabilities
-        .iter()
-        .find(|cap| cap.name == PIXEL_SCROLL_CAPABILITY)
-    {
-        return if cap.version == PIXEL_SCROLL_VERSION && !cap.required {
+    if let Some(cap) = offer.capabilities.iter().find(|cap| cap.name == name) {
+        return if cap.version == version && !cap.required {
             Ok(offer)
         } else {
             Err(Error::RequiredCapability)
@@ -95,8 +116,8 @@ pub fn with_pixel_scroll(
         .try_reserve_exact(1)
         .map_err(|_| Error::Allocation)?;
     offer.capabilities.push(Negotiated {
-        name: PIXEL_SCROLL_CAPABILITY.into(),
-        version: PIXEL_SCROLL_VERSION,
+        name: name.into(),
+        version,
         required: false,
     });
     offer.capabilities.sort_by(|a, b| a.name.cmp(&b.name));

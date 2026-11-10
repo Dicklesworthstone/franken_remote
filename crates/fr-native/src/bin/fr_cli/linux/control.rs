@@ -70,6 +70,14 @@ pub(super) fn policy() -> ControlPolicy {
         capabilities: capabilities(),
     }
 }
+/// Only the explicit foreground robot owner produces committed Unicode. The
+/// actual request intersects this with the peer's negotiated text boundary.
+pub(super) fn automation_policy() -> ControlPolicy {
+    ControlPolicy {
+        capabilities: capabilities().with(Capability::Text),
+        ..policy()
+    }
+}
 pub(super) fn offer(clipboard: bool) -> Offer {
     if clipboard {
         fr_client::native::control_offer_with_clipboard()
@@ -711,6 +719,32 @@ mod tests {
         let policy = policy();
         assert_eq!(policy.sequence, 1);
         assert_eq!(policy.capabilities, caps);
+    }
+    #[test]
+    fn only_explicit_automation_requests_negotiated_committed_text() {
+        use fr_wire::control::{requestable, with_committed_text};
+        let requested = automation_policy().capabilities;
+        assert!(requested.contains(Capability::Text));
+        assert!(!policy().capabilities.contains(Capability::Text));
+        let client = with_committed_text(offer(false)).unwrap();
+        let legacy = offer(false);
+        let selected = client.intersect(&legacy).unwrap();
+        assert!(
+            requested
+                .meet(requestable(&selected.capabilities))
+                .contains(Capability::Keys)
+        );
+        assert!(
+            !requested
+                .meet(requestable(&selected.capabilities))
+                .contains(Capability::Text)
+        );
+        let selected = client.intersect(&client).unwrap();
+        assert!(
+            requested
+                .meet(requestable(&selected.capabilities))
+                .contains(Capability::Text)
+        );
     }
     #[test]
     fn an_active_clipboard_that_retires_names_why() {

@@ -600,6 +600,7 @@ fn control_capabilities() -> Capabilities {
         .with(Capability::Buttons)
         .with(Capability::LineScroll)
         .with(Capability::PixelScroll)
+        .with(Capability::Text)
 }
 
 fn selected_offer(
@@ -643,6 +644,11 @@ fn selected_offer(
     // to a real, probed input operation at the unchanged capability ceiling.
     let offer = if control.is_some_and(|c| c.contains(Capability::PixelScroll)) {
         fr_wire::control::with_pixel_scroll(offer).map_err(|_| serial::Error::Configuration)?
+    } else {
+        offer
+    };
+    let offer = if control.is_some_and(|c| c.contains(Capability::Text)) {
+        fr_wire::control::with_committed_text(offer).map_err(|_| serial::Error::Configuration)?
     } else {
         offer
     };
@@ -2070,12 +2076,11 @@ mod tests {
             Capability::Buttons,
             Capability::LineScroll,
             Capability::PixelScroll,
+            Capability::Text,
         ] {
             assert!(control_capabilities().contains(allowed));
         }
-        for absent in [Capability::Text, Capability::Relative] {
-            assert!(!control_capabilities().contains(absent));
-        }
+        assert!(!control_capabilities().contains(Capability::Relative));
     }
 
     #[test]
@@ -2132,6 +2137,50 @@ mod tests {
         .unwrap();
         let selected = host.intersect(&fr_client::native::control_offer()).unwrap();
         assert!(!requestable(&selected.capabilities).contains(Capability::PixelScroll));
+    }
+
+    #[test]
+    fn committed_text_is_offered_only_for_the_real_probed_executor() {
+        use fr_wire::control::{TEXT_CAPABILITY, requestable, with_committed_text};
+        let client = with_committed_text(fr_client::native::control_offer()).unwrap();
+        for text in [false, true] {
+            let probed = if text {
+                core().with(Capability::Text)
+            } else {
+                core()
+            };
+            let host = selected_offer(
+                (Some(grantable(probed).unwrap()), false, false, false, false),
+                false,
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                host.capabilities.iter().any(|c| c.name == TEXT_CAPABILITY),
+                text
+            );
+            assert_eq!(
+                requestable(&host.intersect(&client).unwrap().capabilities)
+                    .contains(Capability::Text),
+                text
+            );
+            assert!(
+                !requestable(
+                    &host
+                        .intersect(&fr_client::native::control_offer())
+                        .unwrap()
+                        .capabilities
+                )
+                .contains(Capability::Text)
+            );
+        }
+        let observe = selected_offer((None, false, false, false, false), false, false).unwrap();
+        assert!(
+            !observe
+                .capabilities
+                .iter()
+                .any(|c| c.name == TEXT_CAPABILITY)
+        );
     }
 
     #[test]

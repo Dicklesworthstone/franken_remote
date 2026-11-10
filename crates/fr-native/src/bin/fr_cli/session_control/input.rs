@@ -20,8 +20,30 @@ use {
 pub(super) const STATUS: [u8; 8] = *b"FRSC1IS\0";
 pub(super) const SUBMIT: [u8; 8] = *b"FRSC1IA\0";
 const REPLY: [u8; 8] = *b"FRSC1IR\0";
-const MAX_REQUEST: usize = 512;
+// Existing metadata allowance plus worst-case JSON escaping of ONE complete
+// core text action. The remote text bound itself remains unchanged.
+const MAX_REQUEST: usize = 512 + 6 * fr_core::input::MAX_COMMITTED_TEXT_BYTES;
 const MAX_REPLY: usize = 2048;
+
+/// Local framing/fingerprinting buffers can now contain typed content. Clear
+/// their initialized bytes on every return/cancellation path, best effort.
+struct RequestBytes(Vec<u8>);
+impl std::ops::Deref for RequestBytes {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for RequestBytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+impl Drop for RequestBytes {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
 
 /// The client authenticates and compares the exact invocation before sending
 /// anything. No retry, alternate owner, remote dial or fresh input ticket here.
@@ -29,7 +51,7 @@ pub(crate) async fn exchange(
     cx: &Cx,
     target: &str,
     expected: &str,
-    request: Option<Request>,
+    request: Option<&Request>,
 ) -> Result<Response, Error> {
     crate::robot_input::id(expected).map_err(|_| Error::InvalidInstance)?;
     let began = Instant::now();
@@ -37,11 +59,13 @@ pub(crate) async fn exchange(
     if info.instance != expected {
         return Err(Error::WrongOwner);
     }
-    let body = request
-        .map(|r| serde_json::to_vec(&r))
-        .transpose()
-        .map_err(|_| Error::Protocol)?
-        .unwrap_or_default();
+    let body = RequestBytes(
+        request
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|_| Error::Protocol)?
+            .unwrap_or_default(),
+    );
     if body.len() > MAX_REQUEST || request.is_some_and(|r| !r.valid()) {
         return Err(Error::Protocol);
     }
@@ -162,7 +186,7 @@ pub(super) fn validate_snapshot(snapshot: &crate::robot_input::Snapshot) -> Resu
 }
 fn validate_report(
     report: fr_client::robot::input::native::Report,
-    request: Request,
+    request: &Request,
 ) -> Result<(), Error> {
     if report.request_id != request.request_id || report.actions_total != request.operation.count()
     {
@@ -343,8 +367,8 @@ impl State {
             physical_visibility_proven: false,
         }
     }
-    fn key(request: Request) -> Result<RequestKey, Refusal> {
-        let bytes = serde_json::to_vec(&request).map_err(|_| Refusal::InvalidRequest)?;
+    fn key(request: &Request) -> Result<RequestKey, Refusal> {
+        let bytes = RequestBytes(serde_json::to_vec(request).map_err(|_| Refusal::InvalidRequest)?);
         if bytes.len() > MAX_REQUEST {
             return Err(Refusal::InvalidRequest);
         }
@@ -360,7 +384,7 @@ impl State {
             Some(Admission::Started) => Err(Refusal::InvalidRequest),
         }
     }
-    fn submit(&mut self, request: Request) -> Result<Option<Response>, Refusal> {
+    fn submit(&mut self, request: &Request) -> Result<Option<Response>, Refusal> {
         if self
             .stop
             .as_ref()
@@ -427,7 +451,7 @@ impl State {
         match checked {
             Ok(original) => {
                 self.pending = Some(Pending {
-                    request,
+                    request: request.clone(),
                     key,
                     original,
                     encoded: 0,
@@ -539,7 +563,7 @@ impl Shared {
             snapshot: self.locked().status(),
         }
     }
-    async fn submit(&self, request: Request) -> Response {
+    async fn submit(&self, request: &Request) -> Response {
         let key = match State::key(request) {
             Ok(key) => key,
             Err(reason) => return Response::Refused { reason },
@@ -631,14 +655,15 @@ pub(super) async fn respond(
         if length == 0 || length > MAX_REQUEST {
             return Err(Error::Protocol);
         }
-        let mut bytes = [0; MAX_REQUEST];
+        let mut bytes = RequestBytes(vec![0; length]);
         stream
             .read_exact(&mut bytes[..length])
             .await
             .map_err(|_| Error::Protocol)?;
         let request = serde_json::from_slice(&bytes[..length]).map_err(|_| Error::Protocol)?;
+        drop(bytes);
         match shared {
-            Some(shared) => shared.submit(request).await,
+            Some(shared) => shared.submit(&request).await,
             None => Response::Refused {
                 reason: Refusal::Unavailable,
             },

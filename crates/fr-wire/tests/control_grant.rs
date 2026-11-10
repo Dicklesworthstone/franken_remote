@@ -258,7 +258,7 @@ fn line_scroll_is_requestable_only_when_both_peers_selected_it() {
     assert_eq!(wanted.meet(with), wanted);
     assert!(!without.contains(Capability::PixelScroll));
     assert!(!with.contains(Capability::PixelScroll));
-    // Selection only removes unselected scroll modes; every other operation stays
+    // Selection removes unselected scroll/text modes; other operations stay
     // whatever the controller wanted (the host still decides the grant).
     for c in [
         Capability::Keys,
@@ -266,10 +266,46 @@ fn line_scroll_is_requestable_only_when_both_peers_selected_it() {
         Capability::Absolute,
         Capability::Buttons,
         Capability::Relative,
-        Capability::Text,
     ] {
         assert!(without.contains(c) && with.contains(c), "{c:?}");
     }
+}
+
+#[test]
+fn committed_text_is_optional_and_never_inferred_from_keyboard_or_clipboard() {
+    use fr_wire::negotiation::{
+        Capability as Negotiated, NATIVE_PROFILE, Offer, PROFILE_VERSION, Role,
+    };
+    let capability = |name: &str, version| Negotiated {
+        name: name.into(),
+        version,
+        required: false,
+    };
+    for selection in [
+        vec![],
+        vec![capability(GRANT_CAPABILITY, 1)],
+        vec![capability(TEXT_CAPABILITY, 2)],
+        vec![capability("clipboard", 1)],
+    ] {
+        assert!(!requestable(&selection).contains(Capability::Text));
+        assert!(requestable(&selection).contains(Capability::Keys));
+    }
+    let base = Offer {
+        versions: vec![0],
+        profile: NATIVE_PROFILE,
+        profile_version: PROFILE_VERSION,
+        role: Role::RequestControl,
+        limits: L,
+        capabilities: vec![capability(GRANT_CAPABILITY, 1)],
+    };
+    let text = with_committed_text(base.clone()).unwrap();
+    assert!(requestable(&text.capabilities).contains(Capability::Text));
+    assert_eq!(with_committed_text(text.clone()), Ok(text.clone()));
+    assert!(!requestable(&text.intersect(&base).unwrap().capabilities).contains(Capability::Text));
+    assert!(requestable(&text.intersect(&text).unwrap().capabilities).contains(Capability::Text));
+    let both = with_pixel_scroll(text).unwrap();
+    assert!(requestable(&both.capabilities).contains(Capability::Text));
+    assert!(requestable(&both.capabilities).contains(Capability::PixelScroll));
 }
 
 #[test]

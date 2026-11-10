@@ -7,7 +7,10 @@
 use crate::macos_keys;
 use fr_core::{
     input::PointerButton,
-    input_submission::scroll::{LINE, LineScroll},
+    input_submission::{
+        PlatformError,
+        scroll::{LINE, LineScroll},
+    },
 };
 use std::time::{Duration, Instant};
 
@@ -80,6 +83,37 @@ impl Held {
     /// The lowest-numbered held button: a move while it is down is a drag.
     pub fn dragging(&self) -> Option<usize> {
         self.buttons().next()
+    }
+}
+
+/// Quartz needs a virtual key even for an explicitly supplied Unicode value.
+/// Text uses this key only while the remote held set is empty; its key-up is
+/// release-only cleanup, never a second committed character.
+pub const TEXT_KEYCODE: u16 = 0;
+
+/// One complete Unicode scalar, prepared before the final authority check.
+/// A supplementary scalar's surrogate pair is one native string, not two
+/// independently cancellable operations. No Debug: this is typed content.
+pub struct CommittedScalar {
+    units: [u16; 2],
+    length: usize,
+}
+
+impl CommittedScalar {
+    pub fn new(scalar: char, held: Held) -> Result<Self, PlatformError> {
+        // Do not turn text into a shortcut or release an already-held key.
+        // The caller can explicitly release its physical state and submit a
+        // NEW request; this operation never changes or replays that state.
+        if !held.is_empty() {
+            return Err(PlatformError::Permission);
+        }
+        let mut units = [0; 2];
+        let length = scalar.encode_utf16(&mut units).len();
+        Ok(Self { units, length })
+    }
+
+    pub fn units(&self) -> &[u16] {
+        &self.units[..self.length]
     }
 }
 
@@ -163,6 +197,49 @@ pub const fn scroll_pixels(x: i32, y: i32) -> Option<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn committed_scalars_preserve_bmp_supplementary_and_boundary_values() {
+        for (scalar, expected) in [
+            ('\0', &[0][..]),
+            ('é', &[0x00e9][..]),
+            ('\u{d7ff}', &[0xd7ff][..]),
+            ('\u{e000}', &[0xe000][..]),
+            ('\u{ffff}', &[0xffff][..]),
+            ('\u{10000}', &[0xd800, 0xdc00][..]),
+            ('🙂', &[0xd83d, 0xde42][..]),
+            ('\u{10ffff}', &[0xdbff, 0xdfff][..]),
+        ] {
+            let prepared = CommittedScalar::new(scalar, Held::default()).unwrap();
+            assert_eq!(prepared.units(), expected);
+            assert_eq!(
+                char::decode_utf16(prepared.units().iter().copied()).count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn committed_text_never_borrows_a_held_key_modifier_or_button() {
+        for key in [TEXT_KEYCODE, 0x0b, 0x37, 0x38, 0x3c, 127] {
+            let mut held = Held::default();
+            held.set_key(key, true);
+            assert!(matches!(
+                CommittedScalar::new('é', held),
+                Err(PlatformError::Permission)
+            ));
+            assert!(held.key(key));
+        }
+        for button in 0..5 {
+            let mut held = Held::default();
+            held.set_button(button, true);
+            assert!(matches!(
+                CommittedScalar::new('🙂', held),
+                Err(PlatformError::Permission)
+            ));
+            assert!(held.button(button));
+        }
+    }
 
     #[test]
     fn pixel_distances_keep_fractional_units_and_refuse_overflow() {

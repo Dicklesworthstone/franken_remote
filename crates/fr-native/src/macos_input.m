@@ -112,15 +112,20 @@ static _Atomic int32_t route_pid;
 
 void fr_in_route_to_process(int32_t pid) { atomic_store(&route_pid, pid > 0 ? pid : 0); }
 
-// Every event this file creates is posted here.
-static int post(CGEventRef event, uint64_t flags) {
-    if (!event) return FR_IN_UNAVAILABLE;
+// Every event this file creates is posted here. Borrowed form lets a text
+// scalar retain BOTH events across the final Rust authority check.
+static void post_borrowed(CGEventRef event, uint64_t flags) {
     CGEventSetFlags(event, (CGEventFlags)(flags | FR_IN_NONCOALESCED));
     int32_t pid = atomic_load(&route_pid);
     if (pid)
         CGEventPostToPid(pid, event);
     else
         CGEventPost(kCGHIDEventTap, event);
+}
+
+static int post(CGEventRef event, uint64_t flags) {
+    if (!event) return FR_IN_UNAVAILABLE;
+    post_borrowed(event, flags);
     CFRelease(event);
     return FR_IN_OK;
 }
@@ -134,6 +139,63 @@ int fr_in_key(void *source, uint16_t keycode, int down, int repeat, int modifier
     if (modifier) CGEventSetType(event, kCGEventFlagsChanged);
     if (repeat) CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, 1);
     return post(event, flags);
+}
+
+// Prepare one complete Unicode scalar. Rust owns both returned events; no
+// native pointer or text is retained beyond those bounded event objects.
+// Virtual key zero is used only while the owner's remote held set is empty.
+// No layout translation, modifier synthesis or clipboard fallback occurs.
+int fr_in_text_prepare(void *source, const uint16_t *units, size_t count,
+                       void **down, void **up) {
+    if (!down || !up) return FR_IN_INVALID;
+    *down = NULL;
+    *up = NULL;
+    if (!source || !units || (count != 1 && count != 2)) return FR_IN_INVALID;
+    if ((count == 1 && units[0] >= 0xd800 && units[0] <= 0xdfff) ||
+        (count == 2 && !(units[0] >= 0xd800 && units[0] <= 0xdbff &&
+                        units[1] >= 0xdc00 && units[1] <= 0xdfff)))
+        return FR_IN_INVALID;
+    CGEventRef press = CGEventCreateKeyboardEvent((CGEventSourceRef)source, 0, true);
+    CGEventRef release = CGEventCreateKeyboardEvent((CGEventSourceRef)source, 0, false);
+    if (!press || !release) {
+        if (press) CFRelease(press);
+        if (release) CFRelease(release);
+        return FR_IN_UNAVAILABLE;
+    }
+    CGEventKeyboardSetUnicodeString(press, (UniCharCount)count, units);
+    // The release has no committed payload: it only cleans up the key-down.
+    CGEventKeyboardSetUnicodeString(release, 0, NULL);
+    UniChar actual[2] = {0, 0};
+    UniCharCount length = 0, released = 0;
+    CGEventKeyboardGetUnicodeString(press, 2, &length, actual);
+    CGEventKeyboardGetUnicodeString(release, 0, &released, NULL);
+    if (length != count || actual[0] != units[0] ||
+        (count == 2 && actual[1] != units[1]) || released != 0) {
+        CFRelease(press);
+        CFRelease(release);
+        return FR_IN_UNAVAILABLE;
+    }
+    *down = press;
+    *up = release;
+    return FR_IN_OK;
+}
+
+// Both allocations/UTF-16 validation already completed. The caller has just
+// checked the original authority deadline and recorded key zero pessimistically.
+// No fallible work is performed between the two posts: after the positive
+// submission, the empty key-up is unconditional release-only cleanup. Quartz
+// posts have no application-delivery result; success means submitted, not seen.
+int fr_in_text_post(void *down, void *up) {
+    // These private, immutable owners came only from text_prepare. Permission
+    // and display queries run BEFORE Rust's final deadline check, never here.
+    if (!down || !up || down == up) return FR_IN_INVALID;
+    post_borrowed((CGEventRef)down, 0);
+    post_borrowed((CGEventRef)up, 0);
+    return FR_IN_OK;
+}
+
+void fr_in_event_close(void *event) {
+    if (event) CFRelease((CGEventRef)event);
 }
 
 static CGPoint current_location(void) {

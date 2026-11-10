@@ -10,7 +10,7 @@ pub(super) fn run(command: &Command) -> Result<Output, Failure> {
         .handle()
         .try_request_cx_with_budget(Budget::INFINITE)
         .map_err(|_| Failure::new("runtime_unavailable", "Check local runtime resources.", 1))?;
-    let reply = runtime.block_on(input::exchange(&cx,&command.target,&command.connection,command.request)).map_err(|error| {
+    let reply = runtime.block_on(input::exchange(&cx,&command.target,&command.connection,command.request.as_ref())).map_err(|error| {
         let code = match error {
             session_control::Error::NoSession => "no_local_session",
             session_control::Error::WrongOwner => "local_session_changed",

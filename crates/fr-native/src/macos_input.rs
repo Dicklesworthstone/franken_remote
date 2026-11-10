@@ -14,7 +14,9 @@
 //! created and handed to the window server, never that an application saw it.
 use crate::{
     macos_display::{self, MacDisplay},
-    macos_input_state::{Clicks, Held, button_index, scroll_lines, scroll_pixels},
+    macos_input_state::{
+        Clicks, CommittedScalar, Held, TEXT_KEYCODE, button_index, scroll_lines, scroll_pixels,
+    },
     macos_keys,
 };
 use core::{
@@ -64,6 +66,15 @@ unsafe extern "C" {
         modifier: c_int,
         flags: u64,
     ) -> c_int;
+    fn fr_in_text_prepare(
+        source: *mut c_void,
+        units: *const u16,
+        count: usize,
+        down: *mut *mut c_void,
+        up: *mut *mut c_void,
+    ) -> c_int;
+    fn fr_in_text_post(down: *mut c_void, up: *mut c_void) -> c_int;
+    fn fr_in_event_close(event: *mut c_void);
     fn fr_in_location(x: *mut f64, y: *mut f64) -> c_int;
     fn fr_in_move(source: *mut c_void, x: f64, y: f64, held: c_int, flags: u64) -> c_int;
     fn fr_in_button(
@@ -187,7 +198,8 @@ pub fn display_bounds() -> Result<Vec<(u32, InputBounds)>, PlatformError> {
         .collect())
 }
 
-/// What this executor implements. Relative motion and text remain unsupported.
+/// Core operations; optional text is added only by its preparation probe.
+/// Relative motion remains unsupported.
 fn implemented() -> Capabilities {
     Capabilities::default()
         .with(Capability::Keys)
@@ -198,19 +210,93 @@ fn implemented() -> Capabilities {
         .with(Capability::PixelScroll)
 }
 
+/// Exactly two owned Quartz events for ONE scalar. Both are allocated and the
+/// Unicode property is read back before the final authority check. Submission
+/// cannot split a surrogate pair and performs no allocation; the second event
+/// is only the key-up required to clean up the first. No payload diagnostics.
+struct NativeText {
+    down: NonNull<c_void>,
+    up: NonNull<c_void>,
+}
+
+impl NativeText {
+    fn prepare(source: NonNull<c_void>, scalar: &CommittedScalar) -> Result<Self, PlatformError> {
+        let (mut down, mut up) = (core::ptr::null_mut(), core::ptr::null_mut());
+        // SAFETY: the source is owned/live; the UTF-16 slice holds one complete
+        // scalar and remains readable through this call. The glue copies it
+        // into owned events and writes both outputs only after full success.
+        status(unsafe {
+            fr_in_text_prepare(
+                source.as_ptr(),
+                scalar.units().as_ptr(),
+                scalar.units().len(),
+                &raw mut down,
+                &raw mut up,
+            )
+        })?;
+        if let (Some(down), Some(up)) = (NonNull::new(down), NonNull::new(up)) {
+            Ok(Self { down, up })
+        } else {
+            // SAFETY: any non-null output is an owned event from the glue;
+            // null is explicitly accepted by the release function.
+            unsafe {
+                fr_in_event_close(down);
+                fr_in_event_close(up);
+            }
+            Err(PlatformError::Unavailable)
+        }
+    }
+    fn submit(&self) -> c_int {
+        // SAFETY: both retained events remain owned/live until this call
+        // returns. The glue borrows them; Drop releases each exactly once.
+        unsafe { fr_in_text_post(self.down.as_ptr(), self.up.as_ptr()) }
+    }
+}
+
+/// Property construction/readback is checked without posting an event. A
+/// failed optional text probe leaves the independently implemented keys usable.
+fn probed_capabilities(source: NonNull<c_void>) -> Capabilities {
+    let text = ['a', 'é', '🙂'].into_iter().all(|scalar| {
+        CommittedScalar::new(scalar, Held::default())
+            .and_then(|scalar| NativeText::prepare(source, &scalar))
+            .is_ok()
+    });
+    if text {
+        implemented().with(Capability::Text)
+    } else {
+        implemented()
+    }
+}
+
+impl Drop for NativeText {
+    fn drop(&mut self) {
+        // SAFETY: these are the two owned events returned by text_prepare;
+        // post never releases them and this non-cloneable owner releases once.
+        unsafe {
+            fr_in_event_close(self.down.as_ptr());
+            fr_in_event_close(self.up.as_ptr());
+        }
+    }
+}
+
 /// frd's startup probe: the capabilities a lease executor would advertise,
-/// with no event source, indicator or input. `Permission` without the
+/// without posting input or opening an indicator. A temporary event source
+/// checks complete Unicode properties and is then released. `Permission` without the
 /// Accessibility grant (asked for once, see [`request_access`]),
 /// `Unavailable` without a representable display.
 pub fn probe() -> Result<Capabilities, PlatformError> {
     if !access() && !request_access() {
         return Err(PlatformError::Permission);
     }
-    if displays()?.iter().any(|d| desktop_bounds(d).is_some()) {
-        Ok(implemented())
-    } else {
-        Err(PlatformError::Unavailable)
+    if !displays()?.iter().any(|d| desktop_bounds(d).is_some()) {
+        return Err(PlatformError::Unavailable);
     }
+    // SAFETY: no arguments; the temporary source is owned until close below.
+    let source = NonNull::new(unsafe { fr_in_open() }).ok_or(PlatformError::Unavailable)?;
+    let capabilities = probed_capabilities(source);
+    // SAFETY: this is the one owned source; all prepared events are gone.
+    unsafe { fr_in_close(source.as_ptr()) };
+    Ok(capabilities)
 }
 
 /// Publish the executor's current pessimistic held set for the last-resort
@@ -241,12 +327,14 @@ pub struct MacPointer {
     source: NonNull<c_void>,
     display: RawInputDisplay,
     bounds: InputBounds,
+    capabilities: Capabilities,
     held: Held,
     clicks: Clicks,
     /// Where this owner last placed the pointer, in global points. Presses
     /// and scrolls go there: a just-posted move may still be in flight.
     position: Option<(f64, f64)>,
     prepared: Option<Operation>,
+    prepared_text: Option<NativeText>,
 }
 
 // SAFETY: the event source is a Core Foundation object usable from any thread;
@@ -261,7 +349,7 @@ impl MacPointer {
         if !access() {
             return Err(PlatformError::Permission);
         }
-        if !implemented().contains_all(required) {
+        if !implemented().with(Capability::Text).contains_all(required) {
             return Err(PlatformError::Unsupported);
         }
         let display = displays()?
@@ -270,6 +358,12 @@ impl MacPointer {
             .ok_or(PlatformError::GeometryChanged)?;
         // SAFETY: no arguments; the returned source is owned and released once.
         let source = NonNull::new(unsafe { fr_in_open() }).ok_or(PlatformError::Unavailable)?;
+        let capabilities = probed_capabilities(source);
+        if !capabilities.contains_all(required) {
+            // SAFETY: this source has not escaped and all probe events dropped.
+            unsafe { fr_in_close(source.as_ptr()) };
+            return Err(PlatformError::Unsupported);
+        }
         // SAFETY: a scalar query of the user's setting.
         let interval = unsafe { fr_in_double_click_interval() };
         let interval = Duration::try_from_secs_f64(interval.clamp(0.1, 5.0))
@@ -278,15 +372,17 @@ impl MacPointer {
             source,
             display,
             bounds,
+            capabilities,
             held: Held::default(),
             clicks: Clicks::new(interval),
             position: None,
             prepared: None,
+            prepared_text: None,
         })
     }
 
-    pub fn capabilities(&self) -> Capabilities {
-        implemented()
+    pub const fn capabilities(&self) -> Capabilities {
+        self.capabilities
     }
     /// Quartz has a standalone autorepeat key event.
     pub const fn repeat_requires_pair(&self) -> bool {
@@ -318,6 +414,9 @@ impl MacPointer {
                 button,
                 pressed: true,
             }) => pressing.set_button(button_index(button), true),
+            Some(Operation::Text(_)) if self.prepared_text.is_some() => {
+                pressing.set_key(TEXT_KEYCODE, true);
+            }
             _ => {}
         }
         self.held.union(pressing)
@@ -411,6 +510,15 @@ impl MacPointer {
                 scroll_pixels(x, y).ok_or(PlatformError::Unsupported)?;
                 self.action_point().map(drop)
             }
+            Operation::Text(scalar) => {
+                // A native permission query may block; perform it before the
+                // final original-ticket check, with no query between that
+                // check and the prepared positive submission.
+                if !access() {
+                    return Err(PlatformError::Permission);
+                }
+                CommittedScalar::new(scalar, self.held).map(drop)
+            }
             _ => Err(PlatformError::Unsupported),
         }
     }
@@ -496,6 +604,7 @@ impl MacPointer {
                 result
             }
             Operation::Scroll { x, y, unit } => return self.submit_scroll(x, y, unit),
+            Operation::Text(_) => return self.submit_text(),
             _ => return Submission::NotSubmitted(PlatformError::Unsupported),
         };
         match result {
@@ -503,6 +612,28 @@ impl MacPointer {
             // The glue refused before creating an event: nothing was posted.
             Err(PlatformError::Unsupported) => Submission::NotSubmitted(PlatformError::Unsupported),
             Err(_) => Submission::Unknown,
+        }
+    }
+
+    fn submit_text(&mut self) -> Submission {
+        let Some(prepared) = self.prepared_text.take() else {
+            return Submission::NotSubmitted(PlatformError::Unsupported);
+        };
+        // Recorded by final_check before posting, so a panic/parent death in
+        // the down/up interval still owns a release. No pre-existing remote
+        // state was borrowed: preparation required an empty held set.
+        self.held.set_key(TEXT_KEYCODE, true);
+        match prepared.submit() {
+            0 => {
+                self.held.set_key(TEXT_KEYCODE, false);
+                Submission::Submitted
+            }
+            code @ (-1 | -2 | -3 | -9) => {
+                // The narrow glue emits these only BEFORE the first post.
+                self.held.set_key(TEXT_KEYCODE, false);
+                Submission::NotSubmitted(status(code).unwrap_err())
+            }
+            _ => Submission::Unknown,
         }
     }
 
@@ -540,8 +671,12 @@ impl MacPointer {
 
     /// Check the operation now and retain it for `submit_checked`.
     pub fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
-        self.prepared = None;
+        self.cancel_prepared();
         self.prepare_native(op)?;
+        if let Operation::Text(scalar) = op {
+            let scalar = CommittedScalar::new(scalar, self.held)?;
+            self.prepared_text = Some(NativeText::prepare(self.source, &scalar)?);
+        }
         self.prepared = Some(op);
         Ok(())
     }
@@ -556,15 +691,15 @@ impl MacPointer {
         final_check: impl FnOnce(Held) -> Result<(), E>,
     ) -> Result<Submission, E> {
         if self.prepared != Some(op) {
-            self.prepared = None;
+            self.cancel_prepared();
             return Ok(Submission::NotSubmitted(PlatformError::Unsupported));
         }
         if let Err(error) = self.prepare_native(op) {
-            self.prepared = None;
+            self.cancel_prepared();
             return Ok(Submission::NotSubmitted(error));
         }
         if let Err(error) = final_check(self.native_held()) {
-            self.prepared = None;
+            self.cancel_prepared();
             return Err(error);
         }
         self.prepared = None;
@@ -582,12 +717,13 @@ impl MacPointer {
 
     pub fn cancel_prepared(&mut self) {
         self.prepared = None;
+        self.prepared_text = None;
     }
 
     /// Release every key and button this owner holds. True when nothing is
     /// left held; false means native release remains uncertain.
     pub fn cleanup_native(&mut self) -> bool {
-        self.prepared = None;
+        self.cancel_prepared();
         let source = self.source.as_ptr();
         let keys: Vec<u16> = self.held.keys().collect();
         for code in keys {

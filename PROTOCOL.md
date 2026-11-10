@@ -427,6 +427,16 @@ must not make its entire control request fail against an older or line-only
 host. A host whose executor lacks a core operation (keys, repeat, absolute
 pointer, buttons) does not offer control at all.
 
+The independent optional `native-input-text` v1 boundary similarly permits
+`Text` only after both peers select it. A physical-key or clipboard capability
+does not imply text support. The native host offers it only when its actual
+input executor reports the text path; older or text-incapable peers keep their
+other input operations. A complete commit uses the existing 4096-byte UTF-8
+bound and original action identity. Its submitted-operation count is complete
+Unicode scalars, including a supplementary scalar as one operation. The final
+authority check precedes each scalar; partial or uncertain results never
+authorize replay of the original commit or its remaining suffix.
+
 Precise scrolling preserves signed 16.16 logical native scroll distances. A
 display's backing scale and the fitted video rectangle do not scale these
 distances. macOS maps AppKit's precise `scrollingDeltaX/Y` directly to this

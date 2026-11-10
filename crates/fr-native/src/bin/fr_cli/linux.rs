@@ -430,7 +430,11 @@ fn connect(
         None
     };
     let mode = if connection.control {
-        Mode::ControlCapable(control::policy())
+        Mode::ControlCapable(if automation {
+            control::automation_policy()
+        } else {
+            control::policy()
+        })
     } else {
         Mode::Observe
     };
@@ -506,6 +510,15 @@ fn connect(
             fr_wire::audio_up::with_microphone(offer).map_err(|_| Failure::new(
                 "microphone_capability_limit",
                 "This microphone combination exceeds the fixed native capability limit; reduce the explicitly selected optional file/audio features before connecting.",
+                2,
+            ))?
+        } else {
+            offer
+        };
+        let offer = if automation {
+            fr_wire::control::with_committed_text(offer).map_err(|_| Failure::new(
+                "text_capability_limit",
+                "The explicit automation profile cannot fit its bounded committed-text capability offer.",
                 2,
             ))?
         } else {

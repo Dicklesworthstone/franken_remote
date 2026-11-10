@@ -20,12 +20,14 @@ pub(super) enum Error {
 /// The local executor's broader probe cannot upgrade a peer's selected modes.
 pub(super) struct Selected {
     pixels: bool,
+    text: bool,
 }
 
 impl Selected {
     pub(super) fn new(selection: &Selection) -> Self {
         Self {
             pixels: control::requestable(&selection.capabilities).contains(Capability::PixelScroll),
+            text: control::requestable(&selection.capabilities).contains(Capability::Text),
         }
     }
 
@@ -48,6 +50,7 @@ impl Selected {
             .capabilities
             .contains(Capability::PixelScroll)
             && !self.pixels
+            || request.target.capabilities.contains(Capability::Text) && !self.text
         {
             return Err(Error::NotNegotiated);
         }
@@ -165,6 +168,30 @@ mod tests {
                 Ok(request)
             );
         }
+    }
+
+    #[test]
+    fn committed_text_requires_its_exact_selection_before_approval() {
+        let request = request(Capability::Text);
+        let bytes = bytes(request);
+        for marker in [
+            None,
+            Some((control::TEXT_CAPABILITY, 2)),
+            Some((control::PIXEL_SCROLL_CAPABILITY, 1)),
+        ] {
+            assert_eq!(
+                selected(marker).decode(&bytes, request.parent, &ProtocolLimits::ABSOLUTE),
+                Err(Error::NotNegotiated)
+            );
+        }
+        assert_eq!(
+            selected(Some((control::TEXT_CAPABILITY, control::TEXT_VERSION))).decode(
+                &bytes,
+                request.parent,
+                &ProtocolLimits::ABSOLUTE
+            ),
+            Ok(request)
+        );
     }
 
     #[test]
