@@ -86,8 +86,9 @@ client binary, at 60-80 ms of CPU per read and three reads per renewal. A whole
 `fr inspect` (three reads, process start included) now takes about 12 ms of
 CPU. Neither transport can check which process accepted the connection: if
 Tailscale is not listening, a local process that binds the port would receive
-the token and could answer with false metadata. macOS host operations
-(admission, certificates) still refuse until a macOS host exists. Destination
+the token and could answer with false metadata. The macOS host (`frd run`
+with `macos-host`) reads viewer admission and its certificate through the
+same endpoint. Destination
 identity does not confer observation or input authority or establish
 desktop/codec readiness.
 
@@ -129,9 +130,8 @@ stream is decoded by VideoToolbox into IOSurfaces and drawn by Metal into a
 `CAMetalLayer`, the remote cursor is a blended Metal quad, and AppKit input
 reaches `frd`'s input path. `frd`'s `Worker` presents through an in-process
 `LocalPresenter` rather than a child process. The tailnet lookups use the
-loopback `LocalAPI` backend described above (status/WhoIs/status); host
-admission and certificate operations still refuse on macOS until a macOS host
-exists. Options not implemented here are
+loopback `LocalAPI` backend described above (status/WhoIs/status). Options
+not implemented here are
 refused by name ([details](docs/native-client-cli.md#macos-desktop-client)).
 
 Live on 2026-11-08 from the owner's Mac (macOS 27, Tailscale 1.104.1) to ts2
