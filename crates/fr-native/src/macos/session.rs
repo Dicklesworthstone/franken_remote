@@ -1093,14 +1093,12 @@ fn service(
                 report.text_refused = report.text_refused.saturating_add(1);
                 Ok(false)
             };
-            match admitted {
-                Ok(admitted) => Some((context, admitted)),
-                Err(()) => {
-                    intent.invalidate();
-                    halt(LocalStop::NativeFailure, &mut input, &mut report);
-                    return;
-                }
-            }
+            let Ok(admitted) = admitted else {
+                intent.invalidate();
+                halt(LocalStop::NativeFailure, &mut input, &mut report);
+                return;
+            };
+            Some((context, admitted))
         }
         Ok(TextTaken::Refused { context }) => {
             report.text_refused = report.text_refused.saturating_add(1);

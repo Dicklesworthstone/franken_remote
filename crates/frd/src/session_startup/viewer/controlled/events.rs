@@ -700,6 +700,7 @@ impl ControlledViewer {
         }
         result
     }
+    #[allow(clippy::too_many_lines)] // One captured event's ordered fences: view, age, suspension, send.
     fn dispatch_one(&mut self, receiver: &mut Receiver) -> Result<(), super::Error> {
         let at = self.check_inner()?;
         // The receiver is temporarily outside `self.events`: publish directly

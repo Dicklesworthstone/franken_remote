@@ -854,7 +854,7 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
         sessionUnavailableReported = YES;
         // Reuse the original native source's terminal focus-loss path. A wake
         // notification never clears this flag or restores this window's input.
-        [self windowDidResignKey:nil];
+        [self loseFocus];
     }
 }
 
@@ -1304,6 +1304,11 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
 }
 - (void)windowDidResignKey:(NSNotification *)note {
     (void)note;
+    [self loseFocus];
+}
+// The terminal focus-loss path: AppKit's resign-key notification and an
+// unavailable session both end held input here.
+- (void)loseFocus {
     if (nativeStopPending) return;
     [self stopNativeInput:@"Text cancelled: the window lost focus."];
     buttons = 0;  // the session releases everything it holds remotely
