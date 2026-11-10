@@ -30,10 +30,10 @@ fn pki() -> &'static Path {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let dir = std::env::temp_dir().join(format!("fr-cert-{}-{stamp}",std::process::id()));
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
-        openssl(&dir, &["req","-x509","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-nodes","-keyout","ca.key","-out","ca.pem","-days","2","-subj","/CN=Ephemeral FR certificate fixture","-addext","basicConstraints=critical,CA:TRUE"]);
+        openssl(&dir, &["req","-x509","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-pkeyopt","ec_param_enc:named_curve","-nodes","-keyout","ca.key","-out","ca.pem","-days","2","-subj","/CN=Ephemeral FR certificate fixture","-addext","basicConstraints=critical,CA:TRUE"]);
         for name in ["one", "two", "wrong", "expired"] {
             let key = format!("{name}.key"); let csr = format!("{name}.csr"); let pem = format!("{name}.pem");
-            openssl(&dir, &["req","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-nodes","-keyout",&key,"-out",&csr,"-subj","/CN=Fixture leaf"]);
+            openssl(&dir, &["req","-newkey","ec","-pkeyopt","ec_paramgen_curve:P-256","-pkeyopt","ec_param_enc:named_curve","-nodes","-keyout",&key,"-out",&csr,"-subj","/CN=Fixture leaf"]);
             let host = if name == "wrong" { "wrong.fixture.ts.net" } else { HOST };
             std::fs::write(dir.join("extensions"), format!("subjectAltName=DNS:{host}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")).unwrap();
             if name == "expired" {
@@ -42,7 +42,7 @@ fn pki() -> &'static Path {
                 std::fs::write(dir.join("ca.cnf"), format!("[ca]\ndefault_ca=fixture\n[fixture]\ndatabase=index\nserial=serial\nnew_certs_dir=.\ncertificate=ca.pem\nprivate_key=ca.key\ndefault_md=sha256\npolicy=subject\n[subject]\ncommonName=supplied\n[leaf]\nsubjectAltName=DNS:{HOST}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")).unwrap();
                 openssl(&dir, &["ca","-batch","-config","ca.cnf","-in",&csr,"-startdate","20200101000000Z","-enddate","20200102000000Z","-out",&pem,"-notext","-extensions","leaf"]);
             } else {
-                openssl(&dir, &["x509","-req","-in",&csr,"-CA","ca.pem","-CAkey","ca.key","-CAcreateserial","-days","2","-extfile","extensions","-out",&pem]);
+                openssl(&dir, &["x509","-req","-sha256","-in",&csr,"-CA","ca.pem","-CAkey","ca.key","-CAcreateserial","-days","2","-extfile","extensions","-out",&pem]);
             }
         }
         openssl(&dir, &["x509","-in","ca.pem","-outform","DER","-out","ca.der"]);

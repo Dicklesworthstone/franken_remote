@@ -43,11 +43,11 @@ fn pki() -> &'static Path {
         use std::os::unix::fs::DirBuilderExt;
         let dir = std::env::temp_dir().join(format!("fr-dial-{}-{}", std::process::id(), super::super::wall_now().unwrap()));
         std::fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
-        openssl(&dir, &["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=Ephemeral dial test CA", "-addext", "basicConstraints=critical,CA:TRUE"]);
+        openssl(&dir, &["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=Ephemeral dial test CA", "-addext", "basicConstraints=critical,CA:TRUE"]);
         for (label, name) in [("leaf", "remote.fixture.ts.net"), ("wrong", "wrong.fixture.ts.net")] {
-            openssl(&dir, &["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", &format!("{label}.key"), "-out", &format!("{label}.csr"), "-subj", "/CN=Ephemeral dial leaf"]);
+            openssl(&dir, &["req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-pkeyopt", "ec_param_enc:named_curve", "-nodes", "-keyout", &format!("{label}.key"), "-out", &format!("{label}.csr"), "-subj", "/CN=Ephemeral dial leaf"]);
             std::fs::write(dir.join("ext"), format!("subjectAltName=DNS:{name}\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n")).unwrap();
-            openssl(&dir, &["x509", "-req", "-in", &format!("{label}.csr"), "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-days", "2", "-extfile", "ext", "-out", &format!("{label}.pem")]);
+            openssl(&dir, &["x509", "-req", "-sha256", "-in", &format!("{label}.csr"), "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-days", "2", "-extfile", "ext", "-out", &format!("{label}.pem")]);
             openssl(&dir, &["x509", "-in", &format!("{label}.pem"), "-outform", "DER", "-out", &format!("{label}.der")]);
             openssl(&dir, &["pkcs8", "-topk8", "-nocrypt", "-in", &format!("{label}.key"), "-outform", "DER", "-out", &format!("{label}.key.der")]);
         }
