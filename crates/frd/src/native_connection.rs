@@ -159,6 +159,9 @@ enum Route {
     Named {
         client: NamedClient,
         pin: Arc<Mutex<Option<HostPin>>>,
+        /// Dial the pin's addresses instead of resolving the name
+        /// ([`Client::named_at`]).
+        direct: bool,
     },
 }
 /// Read-only access to a named client's pin (see [`Client::pin_watch`]).
@@ -225,6 +228,26 @@ impl Client {
             route: Route::Named {
                 client,
                 pin: Arc::new(Mutex::new(pin)),
+                direct: false,
+            },
+        })
+    }
+    /// A named client that dials `pin`'s own tailnet addresses instead of
+    /// resolving the name: for a machine listed by an authenticated host
+    /// directory. The certificate must still be valid for exactly the pin's
+    /// name, and every attempt dials only the pinned addresses.
+    pub fn named_at(
+        pin: HostPin,
+        roots: Vec<Certificate>,
+        handshake_timeout: Duration,
+    ) -> Result<Self, Error> {
+        let client = NamedClient::new(pin.name().clone(), roots, handshake_timeout)
+            .map_err(Error::Tailnet)?;
+        Ok(Self {
+            route: Route::Named {
+                client,
+                pin: Arc::new(Mutex::new(Some(pin))),
+                direct: true,
             },
         })
     }
@@ -242,6 +265,30 @@ impl Client {
             Route::Installed { .. } => None,
             Route::Named { pin, .. } => Some(PinWatch(pin.clone())),
         }
+    }
+    /// [`Self::run`] for a [`Client::named`] or [`Client::named_at`] client:
+    /// one attempt to its one destination, under its pin. An
+    /// installed-daemon client refuses.
+    pub fn run_named<'a, T: 'a, F, A>(
+        &'a mut self,
+        cx: Cx,
+        cfg: Configuration,
+        offer: Offer,
+        application: A,
+    ) -> impl Future<Output = Result<T, Error>> + 'a
+    where
+        F: Future<Output = T> + 'a,
+        A: FnOnce(Viewer) -> F + 'a,
+    {
+        self.run_checked(
+            cx.clone(),
+            cx,
+            Destination::Named,
+            cfg,
+            offer,
+            None,
+            application,
+        )
     }
     /// Discover, authenticate and run ONE viewer in a dedicated session Cx.
     /// The application receives the existing Viewer only after the canonical
@@ -345,18 +392,33 @@ impl Client {
                         )
                         .await
                     }
-                    (Route::Named { client, pin }, Destination::Named) => {
+                    (
+                        Route::Named {
+                            client,
+                            pin,
+                            direct,
+                        },
+                        Destination::Named,
+                    ) => {
                         // Named destinations prefer IPv6 then IPv4 like the
                         // installed route's Automatic; no explicit family.
                         if cfg.family != AddressFamily::Automatic {
                             return Err(Error::InvalidConfiguration);
                         }
                         let current = pin.lock().map_err(|_| Error::InvalidConfiguration)?.clone();
-                        let connected = client
-                            .dial(&cx, cfg.port, current.as_ref())
-                            .map_err(Error::Tailnet)?
-                            .await
-                            .map_err(Error::Tailnet)?;
+                        let connected = if *direct {
+                            let at = current.as_ref().ok_or(Error::InvalidConfiguration)?;
+                            client
+                                .dial_pinned(&cx, cfg.port, at)
+                                .map_err(Error::Tailnet)?
+                                .await
+                        } else {
+                            client
+                                .dial(&cx, cfg.port, current.as_ref())
+                                .map_err(Error::Tailnet)?
+                                .await
+                        }
+                        .map_err(Error::Tailnet)?;
                         let (observed, native) = connected.into_parts();
                         // Every later attempt of this client must match it.
                         *pin.lock().map_err(|_| Error::InvalidConfiguration)? = Some(observed);

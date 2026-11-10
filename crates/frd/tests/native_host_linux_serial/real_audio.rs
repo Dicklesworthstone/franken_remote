@@ -386,6 +386,7 @@ fn options(
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     }
 }

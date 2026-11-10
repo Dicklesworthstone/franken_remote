@@ -77,6 +77,14 @@ fn message(message: Refused) -> Option<Failure> {
             "host_tailnet_membership_unverifiable",
             "The host could not verify tailnet membership. Check installed Tailscale metadata and local sharing scope; do not bypass identity checks.",
         ),
+        Reason::DirectoryDisabled => (
+            "host_directory_disabled",
+            "The host does not list tailnet machines. Its operator can enable it with frd run --directory; no session was started.",
+        ),
+        Reason::DirectoryUnavailable => (
+            "host_directory_unavailable",
+            "The host could not read its tailnet directory now. Check its Tailscale status and retry; no session was started.",
+        ),
     };
     Some(failure(code, next))
 }

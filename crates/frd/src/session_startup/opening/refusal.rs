@@ -38,6 +38,8 @@ fn reason(phase: Phase, observation_only: bool, error: Error) -> Option<Reason> 
         Error::Expired if phase == Phase::Approval => Reason::ApprovalExpired,
         Error::Expired => Reason::Expired,
         Error::Order => Reason::InvalidState,
+        Error::DirectoryDisabled => Reason::DirectoryDisabled,
+        Error::DirectoryUnavailable => Reason::DirectoryUnavailable,
         Error::Admission(fr_tailnet::Error::TailnetMembershipUnverifiable) => {
             Reason::TailnetMembershipUnverifiable
         }
@@ -57,7 +59,7 @@ fn reason(phase: Phase, observation_only: bool, error: Error) -> Option<Reason> 
     })
 }
 
-fn fence(host: &mut Host) {
+pub(super) fn fence(host: &mut Host) {
     host.phase = Phase::Closed;
     host.approval.store(RETIRED, Ordering::Release);
     if let Some(authority) = &mut host.authority {
@@ -88,7 +90,7 @@ pub(super) async fn report(host: &mut Host, error: Error) {
     host.close();
 }
 
-async fn send(host: &mut Host, reason: Reason) -> Result<(), Error> {
+pub(super) async fn send(host: &mut Host, reason: Reason) -> Result<(), Error> {
     let cx = &host.cx;
     let started = now(cx)?;
     if started < host.last {

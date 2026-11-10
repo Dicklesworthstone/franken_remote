@@ -523,6 +523,7 @@ impl Daemon {
             microphone: None,
             files,
             file_send: None,
+            directory: false,
             session_monitor,
         };
         let events = Arc::new(Mutex::new(Vec::new()));

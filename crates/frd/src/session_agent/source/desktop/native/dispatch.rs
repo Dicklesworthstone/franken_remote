@@ -108,6 +108,8 @@ fn peer_session(error: &crate::session_startup::Error) -> bool {
         | E::Clock => false,
         E::InspectionComplete
         | E::InspectionAbandoned
+        | E::DirectoryDisabled
+        | E::DirectoryUnavailable
         | E::ReferenceRecovery(_)
         | E::DecoderStartup(_)
         | E::Clipboard(_)

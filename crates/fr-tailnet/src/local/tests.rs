@@ -1407,6 +1407,7 @@ fn fixture_sharing_matrix_matrix() {
 
 // Linux's two-status `peer_target` schedule; macOS's status/WhoIs/status
 // lookup over the same socket transport is covered in `macos_socket`.
+mod directory;
 #[cfg(target_os = "macos")]
 mod macos_socket;
 #[cfg(target_os = "linux")]

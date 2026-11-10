@@ -122,7 +122,8 @@ final class RemoteSession: ObservableObject, InputSink {
         var out: FrHandle = 0
         let status: Int32 = host.name.withCString { name in
             func start(_ pin: UnsafePointer<CChar>?) -> Int32 {
-                var config = FrConfig(host: name, port: host.port, control: control, pin: pin)
+                var config = FrConfig(host: name, port: host.port, control: control,
+                                      direct: host.dialsDirectly, pin: pin)
                 return fr_session_start(&config, &out)
             }
             if let pin = host.pin {

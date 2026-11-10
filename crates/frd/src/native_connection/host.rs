@@ -81,6 +81,8 @@ pub struct Server {
     // It observes the original credential lifetime after a session is cancelled.
     credential_clock: Option<Cx>,
     last_observation_closure: Option<ObservationClosure>,
+    /// `frd run --directory`: answer admitted viewers' directory requests.
+    directory: bool,
 }
 impl fmt::Debug for Server {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -100,7 +102,18 @@ impl Server {
             live_policy: None,
             credential_clock: None,
             last_observation_closure: None,
+            directory: false,
         }
+    }
+
+    /// Opt in to serving the tailnet directory (`frd run --directory`) to
+    /// viewers this host already admits: the host and the viewer's own
+    /// untagged machines, from the installed daemon. Off by default; it never
+    /// starts capture or approval and grants nothing.
+    #[must_use]
+    pub const fn with_directory(mut self, enabled: bool) -> Self {
+        self.directory = enabled;
+        self
     }
 
     /// Last completed observation report attempt, separately from the original
@@ -193,6 +206,7 @@ impl Server {
             .map(crate::session_startup::closure_reporting::Reporting::new)
             .unzip();
         let run_api = self.api.clone();
+        let directory = self.directory;
         let bound_addresses = listener.local_addresses();
         let identity = self.identity.clone();
         let clock = cx.clone();
@@ -338,6 +352,9 @@ impl Server {
                     Admission::new(run_api.clone(), cx.clone(), proof).map_err(Error::Tailnet)?;
                 let mut host = Host::from_admitted(native, admission, request.session)
                     .map_err(Error::Session)?;
+                if directory {
+                    host.serve_directory().map_err(Error::Session)?;
+                }
                 let gate = inside.clone();
                 let stop = cx.clone();
                 host.retain_connection_checks(

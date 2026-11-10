@@ -152,6 +152,8 @@ pub enum Kind {
     QualityDecision = 0x0083,
     ClockProbe = 0x0084,
     ClockReply = 0x0085,
+    DirectoryRequest = 0x0086,
+    DirectoryListing = 0x0087,
 }
 impl Kind {
     pub(crate) const fn initial(self) -> bool {
@@ -163,6 +165,8 @@ impl Kind {
                 | Self::Refused
                 | Self::ApprovalRequired
                 | Self::SessionOpened
+                | Self::DirectoryRequest
+                | Self::DirectoryListing
         )
     }
     fn parse(value: u16) -> Result<Self, WireError> {
@@ -226,6 +230,8 @@ impl Kind {
             0x0083 => Ok(Self::QualityDecision),
             0x0084 => Ok(Self::ClockProbe),
             0x0085 => Ok(Self::ClockReply),
+            0x0086 => Ok(Self::DirectoryRequest),
+            0x0087 => Ok(Self::DirectoryListing),
             _ => Err(WireError::UnsupportedKind),
         }
     }
@@ -288,7 +294,9 @@ impl Kind {
             | Self::StageMetrics
             | Self::QualityDecision
             | Self::ClockProbe
-            | Self::ClockReply => None,
+            | Self::ClockReply
+            | Self::DirectoryRequest
+            | Self::DirectoryListing => None,
         }
     }
 }

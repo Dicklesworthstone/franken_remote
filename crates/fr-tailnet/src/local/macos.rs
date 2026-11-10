@@ -173,6 +173,7 @@ impl LocalApi {
                 .get_or_init(|| Arc::new(AtomicBool::new(false)))
                 .clone(),
             certificate_busy: Arc::new(AtomicBool::new(false)),
+            directory_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
         }
     }

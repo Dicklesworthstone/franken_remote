@@ -27,10 +27,12 @@ fr-wire.workspace = true
 # default so the workspace build's frd features are unchanged.
 frd = { workspace = true, optional = true }
 fr-transport = { workspace = true, optional = true }
+# The directory fetch's result document for Swift (`fr_directory_fetch`).
+serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
-session = ["dep:frd", "dep:fr-transport"]
+session = ["dep:frd", "dep:fr-transport", "dep:serde_json"]
 macos-session = ["session", "frd/macos-viewer"]
 
 [lints.rust]

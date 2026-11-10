@@ -257,6 +257,7 @@ fn shipped_fr_displays_negotiates_with_frd_run() {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -436,6 +437,7 @@ fn frd_run_keeps_serving_sequential_viewers_and_departing_inspections() {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -551,6 +553,7 @@ fn frd_run_expires_a_connected_viewer_that_stops_answering_renewal() {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));

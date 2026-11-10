@@ -105,6 +105,10 @@ pub struct Config {
     pub port: u16,
     pub pin: Option<HostPin>,
     pub control: bool,
+    /// Dial `pin`'s own addresses instead of resolving `host`: a machine
+    /// listed by a host's tailnet directory (`fr_directory_fetch`). The pin
+    /// is required and names `host`; TLS still verifies exactly that name.
+    pub direct: bool,
 }
 
 /// The granted producer frd owns for this session (see `NativeCapture`).
@@ -492,8 +496,14 @@ fn run(shared: &Arc<Shared>, config: Config) {
         return finish(shared, end::INTERNAL, Some("InvalidTrustStore".into()));
     };
     let control = config.control;
-    let Ok(mut client) = Client::named(config.host, config.pin, roots, Duration::from_secs(5))
-    else {
+    let client = match (config.direct, config.pin) {
+        (true, Some(pin)) if pin.name() == &config.host => {
+            Client::named_at(pin, roots, Duration::from_secs(5))
+        }
+        (true, _) => return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into())),
+        (false, pin) => Client::named(config.host, pin, roots, Duration::from_secs(5)),
+    };
+    let Ok(mut client) = client else {
         return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
     let Some(watch) = client.pin_watch() else {
@@ -552,7 +562,6 @@ fn run(shared: &Arc<Shared>, config: Config) {
 /// Content-free classification for the app's message. The exact typed
 /// failure stays available as `fr_session_copy_detail`.
 fn classify(failure: Failure, closed: bool) -> u32 {
-    use fr_tailnet::Error as T;
     use frd::native_connection::Error as C;
     // Cancellation or a served session's end after this app's own close is
     // the orderly end it asked for. A refused connection keeps its reason.
@@ -566,19 +575,26 @@ fn classify(failure: Failure, closed: bool) -> u32 {
     }
     match failure {
         Failure::Cancelled => end::CANCELLED,
-        Failure::Connection(C::Tailnet(error)) => match error {
-            T::NameUnresolved => end::NAME_UNRESOLVED,
-            T::OutsideTailnet => end::OUTSIDE_TAILNET,
-            T::IdentityChanged => end::IDENTITY_CHANGED,
-            // The pinned stack reports a refused server certificate as a
-            // failed native handshake (fr-tailnet's named tests).
-            T::NativeHandshake | T::PeerCertificateRejected => end::TLS_REFUSED,
-            T::HandshakeTimeout | T::NativeRouteIo | T::NativeBind | T::Timeout => end::UNREACHABLE,
-            _ => end::SESSION_FAILED,
-        },
+        Failure::Connection(C::Tailnet(error)) => tailnet_end(error),
         Failure::Connection(C::Session(_)) => end::HOST_REFUSED,
         Failure::Observation(_) => end::SESSION_FAILED,
         _ => end::INTERNAL,
+    }
+}
+
+/// The app's end code for a failed named connection (sessions and the
+/// directory fetch alike).
+pub(crate) const fn tailnet_end(error: fr_tailnet::Error) -> u32 {
+    use fr_tailnet::Error as T;
+    match error {
+        T::NameUnresolved => end::NAME_UNRESOLVED,
+        T::OutsideTailnet => end::OUTSIDE_TAILNET,
+        T::IdentityChanged => end::IDENTITY_CHANGED,
+        // The pinned stack reports a refused server certificate as a
+        // failed native handshake (fr-tailnet's named tests).
+        T::NativeHandshake | T::PeerCertificateRejected => end::TLS_REFUSED,
+        T::HandshakeTimeout | T::NativeRouteIo | T::NativeBind | T::Timeout => end::UNREACHABLE,
+        _ => end::SESSION_FAILED,
     }
 }
 

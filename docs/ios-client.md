@@ -58,10 +58,34 @@ The app is built on exactly those two, plus checks of its own:
    authority for who the phone is; frd's policy decides what it may do.
 
 **The machine list.** Tailscale offers no way for another iOS app to list the
-tailnet's machines, so the app shows only the machines the user added (from
-the name the Tailscale app displays) and never a made-up list. `HostDirectory`
-in `Core/HostStore.swift` is the seam for a real directory later (for example
-the Tailscale API with a user-issued read-only key); none ships today.
+tailnet's machines, so a FrankenRemote host lists them instead. A host started
+with `frd run --directory` answers an admitted viewer with itself and that
+viewer's own untagged machines, from its own Tailscale LocalAPI
+(PROTOCOL_DIRECTORY.md). The app asks its most recently used saved machines in
+turn (at most three, `TailnetDirectory` behind the `HostDirectory` seam in
+`Core/HostStore.swift`) and shows the first listing under "Machines on your
+tailnet (via <machine>)", or that machine's typed refusal ("doesn't list
+machines", "couldn't read its Tailscale status", "can't list machines yet")
+or why it was unreachable. It never shows an entry the host did not send.
+
+A listed machine opens directly: its entry carries a pin of exactly the
+addresses the host listed (`fr-pin-v1 <name> <addresses>`), and the session
+(`FrConfig.direct`) dials those addresses without the resolver, IPv6 first.
+MagicDNS may answer only one family while frd serves only the other (a Mac
+with IPv4 forwarding serves only IPv6); the listing has both. TLS still
+verifies the certificate for exactly the listed name, and that machine's own
+frd still admits the phone by WhoIs and policy. The machine's port is the
+app's default port (frd's 8443 unless changed in Settings).
+
+`fr_directory_fetch(config, context, done)` runs one fetch on its own thread
+(at most four at once) and calls `done` exactly once with a JSON document:
+`{"status":"ok","via","truncated","machines":[{"name","node_id","os","online",
+"serving","ipv4","ipv6","pin"}]}`, `{"status":"refused","via","reason"}` with
+the refusal's stable name (`directory_disabled`, `directory_unavailable`,
+`required_capability` from an older host...), or `{"status":"failed","via",
+"end","detail"}` with an `FR_END_*` code. Debug builds accept
+`-FRDirectory <machine.tailnet.ts.net>`: save that machine if new, fetch, and
+print a content-free summary (counts only).
 
 ### The named dialer (`fr-tailnet::named`)
 

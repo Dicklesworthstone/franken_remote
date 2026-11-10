@@ -312,6 +312,7 @@ fn fr_connect_presents_real_host_pixels_through_frd_run() {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -412,6 +413,7 @@ fn fr_connect_names_a_host_capture_refusal_as_host_failure() {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));

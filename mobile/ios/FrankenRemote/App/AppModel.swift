@@ -8,8 +8,15 @@ import SwiftUI
 final class AppModel: ObservableObject {
     let store: HostStore
     let settings: AppSettings
-    /// No machine directory exists on iOS today (see `HostDirectory`).
-    let directory: HostDirectory? = nil
+    /// Lists the user's machines through a saved FrankenRemote host
+    /// (`frd run --directory`); see `HostDirectory`.
+    let directory: HostDirectory
+    /// The newest directory answer (nil before the first, or with no saved
+    /// machine to ask).
+    @Published private(set) var listing: DirectoryResult?
+    /// The saved machine being asked right now.
+    @Published private(set) var listingFrom: String?
+    private var listingTask: Task<Void, Never>?
 
     @Published private(set) var session: RemoteSession?
     /// A host whose session the app closed when it went to the background.
@@ -22,9 +29,10 @@ final class AppModel: ObservableObject {
     private var subscriptions: Set<AnyCancellable> = []
     private var lastPath: String?
 
-    init(store: HostStore, settings: AppSettings) {
+    init(store: HostStore, settings: AppSettings, directory: HostDirectory = TailnetDirectory()) {
         self.store = store
         self.settings = settings
+        self.directory = directory
         monitor.pathUpdateHandler = { [weak self] path in
             let online = path.status == .satisfied
             let kind: String
@@ -84,6 +92,57 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Saved machines to ask for the directory, most recently used first: at
+    /// most three, never a machine that itself came from a directory.
+    nonisolated static func directoryCandidates(_ hosts: [SavedHost]) -> [SavedHost] {
+        Array(hosts.filter { $0.direct != true }
+            .sorted { ($0.lastConnected ?? .distantPast, $1.name) > ($1.lastConnected ?? .distantPast, $0.name) }
+            .prefix(3))
+    }
+
+    /// Ask the saved machines in turn until one lists. With none listing,
+    /// the most recent machine's answer stays (its refusal or failure).
+    func refreshDirectory() async {
+        listingTask?.cancel()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let candidates = Self.directoryCandidates(self.store.hosts)
+            guard !candidates.isEmpty else {
+                self.listing = nil
+                return
+            }
+            var first: DirectoryResult?
+            for host in candidates {
+                if Task.isCancelled { return }
+                self.listingFrom = host.name
+                let result = await self.directory.fetch(from: host)
+                if Task.isCancelled { return }
+                if case .listed = result {
+                    self.listing = result
+                    self.listingFrom = nil
+                    return
+                }
+                first = first ?? result
+            }
+            self.listing = first
+            self.listingFrom = nil
+        }
+        listingTask = task
+        await task.value
+    }
+
+    /// Open a session to a machine a host listed, at its listed addresses.
+    func connect(_ machine: DirectoryMachine, control: Bool) {
+        // A listed machine's own port is unknown: the app's default for frd.
+        let port = UInt16(exactly: settings.defaultPort).flatMap { $0 == 0 ? nil : $0 }
+            ?? UInt16(AppSettings.frdDefaultPort)
+        guard let host = machine.host(port: port) else {
+            startError = "FrankenRemote can't open \(machine.machine): its name isn't a MagicDNS machine name."
+            return
+        }
+        connect(host, control: control)
+    }
+
     func disconnect() {
         session?.close()
         session = nil
@@ -134,6 +193,30 @@ extension AppModel {
                 connect(store.host(host.id) ?? host, control: arguments.contains("-FRControl"))
             } else {
                 print("fr-debug: -FRConnect name refused")
+            }
+        }
+        if let name = value("-FRDirectory") {
+            // Save the machine if new, then ask it for the directory and
+            // print a content-free summary (no names or addresses).
+            let port = value("-FRPort").flatMap(UInt16.init) ?? UInt16(settings.defaultPort)
+            let normalized = HostStore.normalize(name)
+            if store.hosts.first(where: { $0.name == normalized }) == nil,
+               store.add(name, port: port) == nil {
+                print("fr-debug: -FRDirectory name refused")
+            }
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                await self.refreshDirectory()
+                switch self.listing {
+                case .listed(_, let machines, let truncated):
+                    print("fr-directory status=ok machines=\(machines.count) online=\(machines.filter(\.online).count) with_ipv6=\(machines.filter { $0.ipv6 != nil }.count) dialable=\(machines.filter { $0.pin != nil }.count) truncated=\(truncated)")
+                case .refused(_, let refusal):
+                    print("fr-directory status=refused reason=\(refusal)")
+                case .failed(_, let end, let detail):
+                    print("fr-directory status=failed end=\(end) detail=\(detail)")
+                case nil:
+                    print("fr-directory status=none")
+                }
             }
         }
         if arguments.contains("-FRStatsLog") {

@@ -244,6 +244,13 @@ from the installed Tailscale:
 
 The Mac App Store Tailscale is not supported.
 
+With `--directory` (after `--` at install), `frd` also answers a viewer it
+already admits with a list of this Mac and that viewer's own untagged
+machines, read from the same Tailscale: name, node ID, OS, online flag and
+tailnet addresses. The iOS app shows them under "Machines on your tailnet".
+It starts no capture or approval and grants nothing; it is off by default
+(PROTOCOL_DIRECTORY.md).
+
 ## Address families
 
 macOS has no per-connection firewall rule here. `frd` serves an address

@@ -146,6 +146,7 @@ fn indicator_stops_a_share(label: &str, local_stop: impl FnOnce(&str, u64)) {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -253,6 +254,7 @@ fn a_local_stop_tells_the_view_only_viewer_the_host_is_stopping() {
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: None,
     };
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -338,6 +340,7 @@ fn approval_host(
         microphone: None,
         files: None,
         file_send: None,
+        directory: false,
         session_monitor: Some(frd::session_monitor::Configuration {
             image: super::real_session_lifetime::fixture_image(),
             selection: frd::session_monitor::Selection {

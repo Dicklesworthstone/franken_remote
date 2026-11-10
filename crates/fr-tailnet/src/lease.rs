@@ -121,6 +121,20 @@ impl Admission {
     pub fn revoke(&self) {
         self.lease.revoke();
     }
+    /// The tailnet directory this admitted viewer may see: the host and the
+    /// viewer's own untagged machines (`crate::directory`). One bounded
+    /// status read under the live proof; a failed read leaves the admission
+    /// as it was, and a proof that ended meanwhile refuses the result.
+    pub async fn directory(&self) -> Result<crate::Directory, Error> {
+        let proof = {
+            let mut s = self.lease.state.lock().map_err(|_| Error::Revoked)?;
+            self.lease.live(&mut s)?;
+            s.proof.clone()
+        };
+        let directory = self.lease.api.directory(&self.lease.cx, &proof).await?;
+        self.lease.check()?;
+        Ok(directory)
+    }
     /// Revalidate before the existing deadline. Any failure stops this admission.
     /// Permission changes also end it: neither privilege escalation nor downgrade
     /// is silently applied to an already granted controller/observation session.

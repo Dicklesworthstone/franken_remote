@@ -148,7 +148,7 @@ impl RecordStream {
         if self.binding == 0
             && !matches!(
                 u16::from_be_bytes([h[6], h[7]]),
-                0x0001..=0x0004 | 0x0010 | 0x0011 | 0x001d | 0x001e
+                0x0001..=0x0004 | 0x0010 | 0x0011 | 0x001d | 0x001e | 0x0086 | 0x0087
             )
         {
             return Err(WireError::UnsupportedKind);
@@ -164,8 +164,13 @@ impl RecordStream {
             let fixed = match u16::from_be_bytes([h[6], h[7]]) {
                 0x001d => Some(crate::inspection::REQUEST_BYTES - HEADER_BYTES),
                 0x001e => Some(crate::inspection::CLOSED_BYTES - HEADER_BYTES),
+                0x0086 => Some(crate::directory::REQUEST_BYTES - HEADER_BYTES),
                 _ => None,
             };
+            // A directory listing has a bounded payload and no extension area.
+            if u16::from_be_bytes([h[6], h[7]]) == 0x0087 && word(20) != 0 {
+                return Err(WireError::InvalidExtension);
+            }
             if fixed.is_some_and(|n| usize::try_from(word(12)) != Ok(n) || word(20) != 0) {
                 return Err(WireError::InvalidValue);
             }

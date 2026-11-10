@@ -33,4 +33,10 @@ pub mod session;
     feature = "session",
     any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
 ))]
+pub mod directory;
+
+#[cfg(all(
+    feature = "session",
+    any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
+))]
 pub mod ffi;

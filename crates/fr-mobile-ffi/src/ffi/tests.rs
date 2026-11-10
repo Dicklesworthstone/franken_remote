@@ -85,6 +85,7 @@ fn struct_layouts_match_the_headers_static_assertions() {
     assert_eq!(size_of::<FrConfig>(), 24);
     assert_eq!(offset_of!(FrConfig, port), 8);
     assert_eq!(offset_of!(FrConfig, control), 10);
+    assert_eq!(offset_of!(FrConfig, direct), 11);
     assert_eq!(offset_of!(FrConfig, pin), 16);
 }
 
@@ -121,6 +122,7 @@ fn config(host: &CString, port: u16, pin: Option<&CString>) -> FrConfig {
         host: host.as_ptr(),
         port,
         control: false,
+        direct: false,
         pin: pin.map_or(core::ptr::null(), |p| p.as_ptr()),
     }
 }
@@ -159,6 +161,11 @@ fn a_bad_start_is_refused_and_writes_no_handle() {
             config(&host, 0, None),
             config(&host, 18443, Some(&other_pin)),
             config(&host, 18443, Some(&malformed)),
+            // A direct dial needs the pin it dials.
+            FrConfig {
+                direct: true,
+                ..config(&host, 18443, None)
+            },
         ] {
             assert_eq!(
                 fr_session_start(&raw const refused, &raw mut out),
@@ -167,6 +174,119 @@ fn a_bad_start_is_refused_and_writes_no_handle() {
             assert_eq!(out, 0);
         }
     }
+}
+
+/// Collects `fr_directory_fetch` results.
+struct Results(Mutex<Vec<String>>);
+unsafe extern "C" fn collect(context: *mut c_void, json: *const c_char) {
+    // SAFETY: the tests pass a `Results` that outlives the fetch, and the
+    // fetch passes a NUL-terminated string valid during this call.
+    let (results, text) = unsafe { (&*context.cast::<Results>(), CStr::from_ptr(json)) };
+    results
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(text.to_str().unwrap().to_owned());
+}
+/// Wait (bounded) for exactly one result, then make sure no second arrives.
+fn one_result(results: &Results, within: Duration) -> serde_json::Value {
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        if !results.0.lock().unwrap().is_empty() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let seen = results.0.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    serde_json::from_str(&seen[0]).unwrap()
+}
+
+#[test]
+fn a_bad_directory_fetch_is_refused_and_never_calls_back() {
+    let host = CString::new("mac.tailtest.ts.net").unwrap();
+    let other_pin = CString::new("fr-pin-v1 other.tailtest.ts.net 100.64.0.9").unwrap();
+    let bad_host = CString::new("mac.example.com").unwrap();
+    let results = Results(Mutex::new(Vec::new()));
+    let context = (&raw const results).cast_mut().cast::<c_void>();
+    // SAFETY: valid or NULL pointers per the contract; `results` outlives
+    // every call (none may call back).
+    unsafe {
+        assert_eq!(
+            fr_directory_fetch(core::ptr::null(), context, Some(collect)),
+            FR_INVALID
+        );
+        let good = config(&host, 18443, None);
+        assert_eq!(
+            fr_directory_fetch(&raw const good, context, None),
+            FR_INVALID
+        );
+        for refused in [
+            config(&bad_host, 18443, None),
+            config(&host, 0, None),
+            config(&host, 18443, Some(&other_pin)),
+            FrConfig {
+                direct: true,
+                ..config(&host, 18443, None)
+            },
+        ] {
+            assert_eq!(
+                fr_directory_fetch(&raw const refused, context, Some(collect)),
+                FR_INVALID
+            );
+        }
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(results.0.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_directory_fetch_from_an_unresolvable_name_reports_that_once() {
+    let host = CString::new("fr-ios-directory.tail00000.ts.net").unwrap();
+    let results = Results(Mutex::new(Vec::new()));
+    let fetch = config(&host, 18443, None);
+    // SAFETY: valid pointers; `results` outlives the bounded wait below.
+    let status = unsafe {
+        fr_directory_fetch(
+            &raw const fetch,
+            (&raw const results).cast_mut().cast(),
+            Some(collect),
+        )
+    };
+    assert_eq!(status, FR_OK);
+    let value = one_result(&results, Duration::from_secs(20));
+    assert_eq!(value["status"], "failed");
+    assert_eq!(value["via"], "fr-ios-directory.tail00000.ts.net");
+    assert_eq!(value["end"], end::NAME_UNRESOLVED);
+    assert!(value.get("machines").is_none(), "nothing invented");
+}
+
+#[test]
+fn a_direct_directory_fetch_dials_the_pin_and_never_the_resolver() {
+    // The same unresolvable name, pinned to a tailnet address where nothing
+    // answers: a direct fetch must try that address (unreachable), never
+    // resolve the name (which would end NAME_UNRESOLVED as above).
+    let host = CString::new("fr-ios-direct.tail00000.ts.net").unwrap();
+    let pin = CString::new("fr-pin-v1 fr-ios-direct.tail00000.ts.net 100.64.0.1").unwrap();
+    let results = Results(Mutex::new(Vec::new()));
+    let fetch = FrConfig {
+        direct: true,
+        ..config(&host, 9, Some(&pin))
+    };
+    // SAFETY: valid pointers; `results` outlives the bounded wait below.
+    let status = unsafe {
+        fr_directory_fetch(
+            &raw const fetch,
+            (&raw const results).cast_mut().cast(),
+            Some(collect),
+        )
+    };
+    assert_eq!(status, FR_OK);
+    let value = one_result(&results, Duration::from_secs(40));
+    assert_eq!(value["status"], "failed", "{value}");
+    assert_ne!(value["end"], end::NAME_UNRESOLVED, "{value}");
+    assert_eq!(value["end"], end::UNREACHABLE, "{value}");
 }
 
 #[test]

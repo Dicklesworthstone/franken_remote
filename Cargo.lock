@@ -624,6 +624,7 @@ dependencies = [
  "fr-transport",
  "fr-wire",
  "frd",
+ "serde_json",
 ]
 
 [[package]]

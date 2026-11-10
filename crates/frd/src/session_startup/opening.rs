@@ -3,6 +3,7 @@
 use super::{Approval, Error, Host, HostSession, Role};
 use std::{future::Future, time::Duration};
 
+mod directory;
 mod inspection;
 mod refusal;
 
@@ -37,7 +38,12 @@ impl Host {
             if let Err(error) = state.negotiate(network_turn).await {
                 if let Some(host) = &mut state.host {
                     if error == Error::InspectionComplete {
-                        return Err(match inspection::report(host).await {
+                        let report = if host.directory == super::DirectoryUse::Requested {
+                            directory::report(host).await
+                        } else {
+                            inspection::report(host).await
+                        };
+                        return Err(match report {
                             Ok(()) => Error::InspectionComplete,
                             Err(error) => inspection::terminal_error(error),
                         });

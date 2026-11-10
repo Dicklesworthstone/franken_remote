@@ -122,7 +122,7 @@ impl Viewer {
         let startup = self.startup.as_mut().ok_or(Error::Closed)?;
         let transport = self.transport.as_mut().ok_or(Error::Closed)?;
         startup.tick(current).map_err(Error::ClientStartup)?;
-        if startup.is_inspected() {
+        if startup.is_inspected() || startup.is_listed() {
             return Ok(());
         }
         if transport.receive_ended(self.routes.inbound)? {
@@ -186,6 +186,35 @@ impl Viewer {
             },
         )?;
         if consumed.get() {
+            startup
+                .receive(&bytes[..len], now(&self.cx)?)
+                .map_err(Error::ClientStartup)?;
+        }
+        // Directory listing records are already bounded and ordered by the
+        // startup owner; take every ready one now (at most the record bound).
+        for _ in 0..fr_wire::directory::MAX_RECORDS {
+            if !startup.is_listing() {
+                break;
+            }
+            let consumed = Cell::new(false);
+            let mut len = 0;
+            transport.receive_ready(
+                &self.cx,
+                || now(&self.cx).is_ok_and(|n| n < until),
+                |_| !consumed.get(),
+                |route, record| {
+                    if route != Route::Stream(self.routes.inbound) || record.len() > bytes.len() {
+                        return Err(());
+                    }
+                    bytes[..record.len()].copy_from_slice(record);
+                    len = record.len();
+                    consumed.set(true);
+                    Ok(Disposition::Consumed)
+                },
+            )?;
+            if !consumed.get() {
+                break;
+            }
             startup
                 .receive(&bytes[..len], now(&self.cx)?)
                 .map_err(Error::ClientStartup)?;
@@ -286,6 +315,40 @@ impl Viewer {
                         .map_err(Error::ClientStartup)?;
                     self.close();
                     return Ok(result);
+                }
+            }
+        }
+    }
+    /// Ask the host for its tailnet directory (`frd run --directory`): the
+    /// original offer must carry the required directory marker
+    /// (`fr_client::native::directory_offer`). Consumes the owner at CALL
+    /// time, even unpolled. Never selects a session, notifies approval, or
+    /// creates native workers. Success is the host's complete listing; a
+    /// refusal arrives typed (`DirectoryDisabled`, `DirectoryUnavailable`, or
+    /// `RequiredCapability` from a host without the directory).
+    pub fn fetch_directory(
+        mut self,
+    ) -> impl Future<Output = Result<fr_wire::directory::Listing, Error>> {
+        let prepared = now(&self.cx).and_then(|at| {
+            self.startup
+                .as_mut()
+                .ok_or(Error::Closed)?
+                .begin_directory(at)
+                .map_err(Error::ClientStartup)
+        });
+        async move {
+            prepared?;
+            loop {
+                self.drive(Duration::from_millis(10)).await?;
+                if self.startup.as_ref().is_some_and(Startup::is_listed) {
+                    let listing = self
+                        .startup
+                        .take()
+                        .ok_or(Error::Closed)?
+                        .finish_directory(now(&self.cx)?)
+                        .map_err(Error::ClientStartup)?;
+                    self.close();
+                    return Ok(listing);
                 }
             }
         }

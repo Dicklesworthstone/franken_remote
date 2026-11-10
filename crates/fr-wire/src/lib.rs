@@ -15,6 +15,7 @@ pub mod clock;
 pub mod closure;
 pub mod cursor;
 pub mod decoder;
+pub mod directory;
 pub mod display;
 pub mod files;
 pub mod held_state;

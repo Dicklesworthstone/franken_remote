@@ -158,6 +158,12 @@ OPTIONS:
                     Normally bounded at 200 ms; a slower --fps remains fixed.
                     Codec settings stay fixed. Per-viewer feedback applies to control.
                     Off by default; see ADAPTIVE_CAPTURE.md
+    --directory     Answer an admitted viewer's request for this host's tailnet
+                    directory: this machine and that viewer's own untagged
+                    machines (name, node ID, OS, online, tailnet addresses),
+                    from the installed Tailscale daemon. Grants nothing and
+                    starts no capture or approval. Off by default; see
+                    PROTOCOL_DIRECTORY.md
     --bitrate BPS   Encoder target bits per second, integer 10000..200000000
                     (default 8000000). Not a hard network ceiling or automatic
                     adaptation. See docs/video-rate-controls.md
@@ -415,6 +421,7 @@ struct Profile {
     adaptive_capture: bool,
     session_lifetime: bool,
     observation_indicator: bool,
+    directory: bool,
     encoder: frd::host_run::EncoderSelection,
     video: frd::host_run::video::Profile,
 }
@@ -439,6 +446,7 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 "controlled_adaptive_capture": profile.adaptive_capture && profile.control,
                 "shared_adaptive_capture": profile.adaptive_capture,
                 "observation_indicator": profile.observation_indicator,
+                "directory": profile.directory,
                 "encoder_selection": profile.encoder.as_str(),
                 "video_fps_limit": profile.video.fps(),
                 "encoder_bitrate_target_bps": profile.video.bitrate(),
@@ -505,6 +513,11 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                 if profile.adaptive_capture {
                     println!(
                         "frd: adaptive raw-capture cadence enabled for controlling and shared viewing sessions; codec settings stay fixed"
+                    );
+                }
+                if profile.directory {
+                    println!(
+                        "frd: admitted viewers may list this machine and their own untagged tailnet machines (--directory)"
                     );
                 }
                 if profile.encoder.is_hardware() {
@@ -808,6 +821,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         microphone,
         files,
         file_send,
+        directory: options.directory,
         session_monitor,
     };
     let profile = Profile {
@@ -815,6 +829,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         adaptive_capture: run_options.adaptive_capture,
         session_lifetime: run_options.session_monitor.is_some(),
         observation_indicator: observation_indicator.is_some(),
+        directory: run_options.directory,
         encoder,
         video,
     };

@@ -30,6 +30,10 @@ pub enum Reason {
     Expired = 13,
     HostUnavailable = 14,
     TailnetMembershipUnverifiable = 15,
+    /// The host does not serve its tailnet directory (`frd run --directory`).
+    DirectoryDisabled = 16,
+    /// The host serves a directory but could not read it from Tailscale now.
+    DirectoryUnavailable = 17,
 }
 impl Reason {
     fn parse(value: u16) -> Result<Self, WireError> {
@@ -49,6 +53,8 @@ impl Reason {
             13 => Self::Expired,
             14 => Self::HostUnavailable,
             15 => Self::TailnetMembershipUnverifiable,
+            16 => Self::DirectoryDisabled,
+            17 => Self::DirectoryUnavailable,
             _ => return Err(WireError::InvalidValue),
         })
     }

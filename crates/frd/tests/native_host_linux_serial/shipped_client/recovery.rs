@@ -39,6 +39,7 @@ impl Hosted {
             microphone: None,
             files: None,
             file_send: None,
+            directory: false,
             session_monitor: None,
         };
         let events = Arc::new(Mutex::new(Vec::new()));

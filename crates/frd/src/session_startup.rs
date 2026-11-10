@@ -15,7 +15,7 @@ use fr_transport::quic::{
     self, ConnectionBinding, ControlRoutes, Disposition, Policy, QuicRecords, Route,
 };
 use fr_wire::{
-    inspection,
+    directory, inspection,
     negotiation::{self, ControlBinding, Message, Offer, Role, Selection},
 };
 use std::{
@@ -115,11 +115,18 @@ pub enum Error {
     ClockSynchronization,
     Cancelled,
     RemoteClosed(fr_wire::closure::Closed),
-    /// A required capability inspection ended without creating a session.
+    /// A required capability inspection, or a tailnet directory request,
+    /// ended without creating a session.
     InspectionComplete,
     /// A recognized inspection ended before its terminal exchange completed.
     /// The original peer is closed; an independent listener may accept again.
     InspectionAbandoned,
+    /// A viewer asked for the tailnet directory, which this host does not
+    /// serve (`frd run --directory` is off). Reported as `DirectoryDisabled`.
+    DirectoryDisabled,
+    /// The directory could not be read or sent now; reported as
+    /// `DirectoryUnavailable`. No session or authority was created.
+    DirectoryUnavailable,
     Closed,
 }
 impl Error {
@@ -369,6 +376,17 @@ enum Phase {
     Detached,
 }
 
+/// The tailnet directory on one connection (`frd run --directory`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectoryUse {
+    /// Not served here: a request is refused `DirectoryDisabled`.
+    Off,
+    /// Served if this viewer asks (local opt-in, before `ClientHello`).
+    Served,
+    /// This viewer asked: the connection is a terminal directory probe.
+    Requested,
+}
+
 /// One startup, one connection, one admission refresh owner, one pending record.
 /// Its caller must continue `drive` while waiting for consent or network traffic.
 /// No detached tasks are spawned. Dropping an active drive is terminal.
@@ -379,7 +397,11 @@ pub struct Host {
     routes: ControlRoutes,
     config: Configuration,
     intersection: Option<Offer>,
+    /// A terminal probe: capability inspection or the tailnet directory.
     inspection: bool,
+    directory: DirectoryUse,
+    #[cfg(test)]
+    directory_fixture: Option<Result<fr_tailnet::Directory, fr_tailnet::Error>>,
     created: u64,
     selected: Option<Selection>,
     authority: Option<SessionAuthority>,
@@ -442,6 +464,9 @@ impl Host {
             config,
             intersection: None,
             inspection: false,
+            directory: DirectoryUse::Off,
+            #[cfg(test)]
+            directory_fixture: None,
             created: current,
             selected: None,
             authority: Some(authority),
@@ -476,6 +501,16 @@ impl Host {
     }
     pub fn is_complete(&self) -> bool {
         self.phase == Phase::Complete
+    }
+    /// Serve this connection's tailnet directory if its viewer asks (local
+    /// opt-in, `frd run --directory`). Only before `ClientHello`; it grants
+    /// nothing and changes no other negotiation.
+    pub fn serve_directory(&mut self) -> Result<(), Error> {
+        if self.phase != Phase::Hello || self.len != 0 || self.intersection.is_some() {
+            return Err(Error::Order);
+        }
+        self.directory = DirectoryUse::Served;
+        Ok(())
     }
     fn check(&mut self) -> Result<u64, Error> {
         if matches!(self.phase, Phase::Closed | Phase::Detached) {
@@ -564,8 +599,20 @@ impl Host {
         self.phase = Phase::Bind;
         Ok(())
     }
+    /// A directory probe's one request; the listing is sent by the terminal
+    /// opening path (`opening::directory`), never as a session.
+    fn consume_directory_request(&self, bytes: &[u8]) -> Result<(), Error> {
+        if !self.intersection.as_ref().is_some_and(directory::requested) {
+            return Err(Error::Order);
+        }
+        directory::decode_request(bytes, self.maximum).map_err(negotiation::Error::from)?;
+        Err(Error::InspectionComplete)
+    }
     fn consume(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.check()?;
+        if self.phase == Phase::Selection && self.directory == DirectoryUse::Requested {
+            return self.consume_directory_request(bytes);
+        }
         if self.phase == Phase::Selection && self.inspection {
             if !self
                 .intersection
@@ -584,12 +631,22 @@ impl Host {
             negotiation::decode(bytes, self.maximum, self.routes.inbound.binding)?,
         ) {
             (Phase::Hello, Message::ClientHello(offer)) => {
-                self.inspection = inspection::requested(&offer);
+                let listing = directory::requested(&offer);
+                self.inspection = listing || inspection::requested(&offer);
                 if self.inspection {
-                    self.until = self
-                        .until
-                        .min(self.created.saturating_add(inspection::MAX_DURATION_US));
+                    let budget = if listing {
+                        directory::MAX_DURATION_US
+                    } else {
+                        inspection::MAX_DURATION_US
+                    };
+                    self.until = self.until.min(self.created.saturating_add(budget));
                     self.check()?;
+                }
+                if listing {
+                    if self.directory != DirectoryUse::Served {
+                        return Err(Error::DirectoryDisabled);
+                    }
+                    self.directory = DirectoryUse::Requested;
                 }
                 // Observation-only shared service never silently downgrades a
                 // controller or exposes approval/capabilities for that intent.
@@ -600,7 +657,9 @@ impl Host {
                     .as_ref()
                     .ok_or(Error::Closed)?
                     .check(&self.cx, offer.role)?;
-                let intersection = if self.inspection {
+                let intersection = if listing {
+                    directory::intersect(&self.config.offer, &offer)?
+                } else if self.inspection {
                     inspection::intersect(&self.config.offer, &offer)?
                 } else {
                     self.config.offer.intersect(&offer)?

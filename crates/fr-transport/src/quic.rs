@@ -202,7 +202,10 @@ impl Messages {
             Self::AudioControl => matches!(kind, 0x0060 | 0x0063),
             Self::AudioReplies => matches!(kind, 0x0061 | 0x0063),
             Self::Negotiation => {
-                matches!(kind, 0x0001..=0x0004 | 0x0010 | 0x0011 | 0x001d | 0x001e)
+                matches!(
+                    kind,
+                    0x0001..=0x0004 | 0x0010 | 0x0011 | 0x001d | 0x001e | 0x0086 | 0x0087
+                )
             }
             Self::SessionControl => {
                 matches!(
@@ -1618,11 +1621,15 @@ fn validate_record(
     }
     // The bootstrap family has two additional exact terminal forms, not a
     // general zero-binding session-close route. No other reason, extension,
-    // nonzero session, or cleanup/effect claim can cross this family.
+    // nonzero session, or cleanup/effect claim can cross this family. The
+    // terminal directory adds one exact request and structurally checked,
+    // extension-free listing records.
     if messages == Messages::Negotiation {
         match u16::from_be_bytes([bytes[6], bytes[7]]) {
             0x001d => fr_wire::inspection::decode_request(bytes, maximum),
             0x001e => fr_wire::inspection::decode_closed(bytes, maximum),
+            0x0086 => fr_wire::directory::decode_request(bytes, maximum),
+            0x0087 => fr_wire::directory::check_record(bytes, maximum),
             _ => Ok(()),
         }
         .map_err(|_| Error::Malformed)?;

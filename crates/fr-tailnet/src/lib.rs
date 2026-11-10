@@ -10,6 +10,10 @@
 //! an explicit app-capability alternative. It never infers membership from names,
 //! routed prefixes, reachability, or missing authority evidence.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+mod directory;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+pub use directory::{Directory, DirectoryNode, MAX_NODES as MAX_DIRECTORY_NODES};
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod discovery;
 mod expiry;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]

@@ -43,6 +43,23 @@ pub fn inspection_offer() -> Result<Offer, fr_wire::negotiation::Error> {
     fr_wire::inspection::prepare_offer(inspection)
 }
 
+/// Ask the host for its tailnet directory (`frd run --directory`): the same
+/// protocol-understanding profile as inspection, all optional, plus the
+/// required directory marker. Nothing is observed or controlled; a host
+/// without the directory refuses typed (`DirectoryDisabled`), and an older
+/// host refuses the unknown required marker.
+pub fn directory_offer() -> Result<Offer, fr_wire::negotiation::Error> {
+    let mut directory = control_offer_with_duplex(true, true);
+    directory.role = Role::Observe;
+    directory
+        .capabilities
+        .retain(|capability| capability.name != receiver_metrics::CAPABILITY);
+    for capability in &mut directory.capabilities {
+        capability.required = false;
+    }
+    fr_wire::directory::prepare_offer(directory)
+}
+
 /// The observation profile plus the OPTIONAL host playback downlink. Only an
 /// explicit local request (`fr connect --audio`) uses this offer; the host
 /// still decides (its own local enable) and a host without audio simply omits

@@ -31,7 +31,9 @@ Reason assignments are independent of the input-receipt reason namespace:
 4 required capability unavailable; 5 invalid limits; 6 invalid selection;
 7 permission denied; 8 local approval denied; 9 approval expired;
 10 control unavailable; 11 resource limit; 12 invalid state; 13 expired;
-14 host unavailable; 15 tailnet membership unverifiable.
+14 host unavailable; 15 tailnet membership unverifiable; 16 directory
+disabled; 17 directory unavailable (both only answering a tailnet directory
+request, [PROTOCOL_DIRECTORY.md](PROTOCOL_DIRECTORY.md)).
 
 ## Independent fixtures
 

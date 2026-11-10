@@ -165,6 +165,12 @@ impl FromStr for HostPin {
     }
 }
 impl HostPin {
+    /// A pin for addresses learned from an authenticated source (a host's
+    /// tailnet directory) rather than the resolver: tailnet addresses only,
+    /// at most four, sorted and unique.
+    pub fn from_addresses(name: HostName, addresses: Vec<IpAddr>) -> Result<Self, Error> {
+        Self::new(name, addresses)
+    }
     fn new(name: HostName, mut addresses: Vec<IpAddr>) -> Result<Self, Error> {
         addresses.sort_unstable();
         addresses.dedup();
@@ -307,6 +313,43 @@ impl NamedClient {
                             sorted
                         },
                     }),
+                    native,
+                })
+        })
+    }
+
+    /// Dial `pin`'s own addresses without the resolver: for a destination
+    /// whose exact tailnet addresses came from an authenticated directory
+    /// (`MagicDNS` may answer only one family, and a host may serve only the
+    /// other). TLS still verifies the certificate for exactly this name; only
+    /// tailnet addresses (all a pin can hold) are dialed, IPv6 first with
+    /// one IPv4 alternative. The slot is claimed at CALL time.
+    pub fn dial_pinned<'a>(
+        &'a self,
+        cx: &'a Cx,
+        port: u16,
+        pin: &'a HostPin,
+    ) -> Result<impl Future<Output = Result<NamedConnection, Error>> + 'a, Error> {
+        if port == 0 {
+            return Err(Error::InvalidEndpoint);
+        }
+        if pin.name != self.destination {
+            return Err(Error::InvalidPolicy);
+        }
+        let started = now(cx)?;
+        let duration = u64::try_from(self.timeout.as_micros()).map_err(|_| Error::InvalidPolicy)?;
+        let end = started.checked_add(duration).ok_or(Error::Clock)?;
+        self.busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::Busy)?;
+        let slot = Slot(self.busy.clone());
+        Ok(async move {
+            let _slot = slot;
+            let addresses = checked_addresses(pin.addresses.iter().copied())?;
+            self.dial_resolved(cx, &addresses, port, started, end)
+                .await
+                .map(|native| NamedConnection {
+                    pin: pin.clone(),
                     native,
                 })
         })

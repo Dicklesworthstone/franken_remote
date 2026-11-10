@@ -349,6 +349,8 @@ and sends `BindingAccepted` on that binding before any further session work.
 | 0x001c | BindingAccepted | V→H / control | C | Exact offered binding ID; successful bounded installation; not decoder readiness |
 | 0x001d | CloseRequest | V→H / control | C | Scope (control release or session close), reason; current session; idempotent, cannot expand authority |
 | 0x001e | Closed | H→V / control | C | Final reason, cleanup stage and bounded outstanding-effect summary; Z, after ordered teardown; absence means unknown closure |
+| 0x0086 | DirectoryRequest | V→H / control, binding 0 | 28 B | Only with the required `native-tailnet-directory` v1 marker on an Observe offer, once, after HostCapabilities; replaces SelectedConfiguration; never a session, approval or grant ([PROTOCOL_DIRECTORY.md](PROTOCOL_DIRECTORY.md)) |
+| 0x0087 | DirectoryListing | H→V / control, binding 0 | C; 64 records / 128 KiB | Consecutive sequenced records, host first then the viewer's own untagged machines (name, node ID, OS, online, tailnet IPv4/IPv6), at most 256, final/truncated flags; only to an admitted viewer of a `--directory` host, else `DirectoryDisabled`/`DirectoryUnavailable` refusal |
 
 Observation/control challenge cadence starts at one second; provisional
 deadlines start at three seconds on the host monotonic authority clock. A

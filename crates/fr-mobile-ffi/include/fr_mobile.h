@@ -81,6 +81,8 @@ typedef struct FrConfig {
     const char *_Nonnull host;      /* NUL-terminated MagicDNS name */
     uint16_t port;                  /* frd's port, nonzero */
     bool control;                   /* control-capable session */
+    bool direct;                    /* dial the pin's addresses, no resolver
+                                       (a directory machine); needs pin */
     const char *_Nullable pin;      /* pin saved from an earlier session */
 } FrConfig;
 
@@ -161,6 +163,22 @@ bool fr_session_stats(FrHandle session, FrStats *_Nullable out);
 
 int32_t fr_session_close(FrHandle session);
 int32_t fr_session_free(FrHandle session);
+
+/*
+ * Tailnet directory (frd run --directory, PROTOCOL_DIRECTORY.md): ask the
+ * host in config for itself and this user's own untagged machines.
+ * config->control is ignored. On FR_OK, done is called exactly once, on
+ * another thread, with a JSON document valid only during the call:
+ *   {"status":"ok","via":NAME,"truncated":BOOL,"machines":[{"name","node_id",
+ *    "os","online","serving","ipv4","ipv6","pin"}]}  (absent values: null)
+ *   {"status":"refused","via":NAME,"reason":"directory_disabled"|...}
+ *   {"status":"failed","via":NAME,"end":FR_END_*,"detail":TYPED_FAILURE}
+ * A machine's pin opens it with FrConfig.direct. Otherwise (FR_INVALID,
+ * FR_BUSY) done is never called. context must stay valid until done returns.
+ */
+typedef void (*FrDirectoryDone)(void *_Nullable context, const char *_Nonnull json);
+int32_t fr_directory_fetch(const FrConfig *_Nullable config, void *_Nullable context,
+                           FrDirectoryDone _Nullable done);
 
 #ifdef __cplusplus
 }

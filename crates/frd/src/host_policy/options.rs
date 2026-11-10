@@ -49,6 +49,10 @@ pub struct RunOptions {
     /// Local encoder target bits/s; absent retains 8,000,000. Not a hard
     /// instantaneous transport ceiling or an automatic bandwidth estimate.
     pub bitrate: Option<u32>,
+    /// `--directory`: answer admitted viewers' tailnet directory requests
+    /// (this host plus the viewer's own untagged machines). Off by default;
+    /// it grants nothing and never starts capture or approval.
+    pub directory: bool,
     /// Local opt-in to measured raw-capture pacing for a controlling session.
     /// Requires `input_agent`; an observer-first shared source keeps fixed cadence.
     pub adaptive_capture: bool,
@@ -138,6 +142,13 @@ impl RunOptions {
             }
             if flag == "--clipboard" || flag == "--no-clipboard" {
                 set(&mut clipboard, flag == "--clipboard")?;
+                continue;
+            }
+            if flag == "--directory" {
+                if options.directory {
+                    return Err(Error::InvalidArgument);
+                }
+                options.directory = true;
                 continue;
             }
             if flag == "--adaptive-capture" {
@@ -616,6 +627,24 @@ mod tests {
             );
         } else {
             assert!(matches!(native, Err(Error::InvalidArgument)));
+        }
+    }
+    #[test]
+    fn the_directory_is_an_explicit_once_only_opt_in() {
+        assert!(!parse(&[]).unwrap().directory);
+        let on = parse(&["--directory", "--approval", "local"]).unwrap();
+        assert!(on.directory && on.input_agent.is_none());
+        assert_eq!(on.approval, Some(Approval::Local));
+        for refused in [
+            &["--directory", "--directory"][..],
+            &["--directory", "yes"][..],
+            &["--directory=true"][..],
+            &["--no-directory"][..],
+        ] {
+            assert!(
+                matches!(parse(refused), Err(Error::InvalidArgument)),
+                "{refused:?}"
+            );
         }
     }
     #[test]

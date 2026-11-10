@@ -71,6 +71,8 @@ pub struct LocalApi {
     origin: Arc<()>,
     busy: Arc<AtomicBool>,
     certificate_busy: Arc<AtomicBool>,
+    /// One directory read at a time per API owner.
+    directory_busy: Arc<AtomicBool>,
     daemon_uid: u32,
 }
 impl fmt::Debug for LocalApi {
@@ -112,6 +114,7 @@ impl LocalApi {
             origin: Arc::new(()),
             busy: Arc::new(AtomicBool::new(false)),
             certificate_busy: Arc::new(AtomicBool::new(false)),
+            directory_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
         })
     }
@@ -251,6 +254,38 @@ impl LocalApi {
             return Err(Error::KeyExpired);
         }
         Ok(permission)
+    }
+    /// The directory this admitted viewer may see (`crate::directory`): one
+    /// bounded status read, only while `proof` is live, before and after.
+    /// Never a substitute for admission and never cached.
+    pub(crate) async fn directory(
+        &self,
+        cx: &Cx,
+        proof: &Authorization,
+    ) -> Result<crate::Directory, Error> {
+        self.check(cx, proof, proof.addresses())?;
+        if self
+            .directory_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(Error::Busy);
+        }
+        let _lookup = Lookup(self.directory_busy.clone());
+        let (body, _) = Box::pin(bounded(
+            cx,
+            proof.policy.lookup_timeout,
+            self.query(
+                cx,
+                LocalQuery::Status { peers: true },
+                metadata::STATUS_BYTES,
+            ),
+        ))
+        .await?;
+        let status = crate::directory::Status::parse(&body)?;
+        let directory = crate::directory::select(&status, proof.identity.directory_scope())?;
+        self.check(cx, proof, proof.addresses())?;
+        Ok(directory)
     }
     async fn status(&self, cx: &Cx) -> Result<(Status, SourceIdentity), Error> {
         let (body, process) = self

@@ -58,14 +58,14 @@ struct MachinePickerView: View {
                 } footer: {
                     Text("Add a machine by its Tailscale MagicDNS name, like mac-studio.tail1234.ts.net (Tailscale app → the machine → its name). This device must be connected to the same tailnet, and the machine must be running FrankenRemote.")
                 }
-                if model.directory == nil {
-                    Section {
-                        Text("Tailscale doesn't let other apps list your tailnet's machines on iOS, so FrankenRemote shows only the machines you add.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
+                if !store.hosts.isEmpty {
+                    DirectorySection(listing: model.listing, asking: model.listingFrom) { machine, control in
+                        model.connect(machine, control: control)
                     }
                 }
             }
+            .refreshable { await model.refreshDirectory() }
+            .task(id: store.hosts.map(\.name)) { await model.refreshDirectory() }
             .navigationTitle("FrankenRemote")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -104,6 +104,129 @@ struct MachinePickerView: View {
         store.hosts.sorted {
             ($0.lastConnected ?? .distantPast, $1.title) > ($1.lastConnected ?? .distantPast, $0.title)
         }
+    }
+}
+
+/// The machines a saved host listed from its Tailscale (`frd run
+/// --directory`): only what it sent, its refusal, or why it was unreachable.
+private struct DirectorySection: View {
+    let listing: DirectoryResult?
+    let asking: String?
+    let connect: (DirectoryMachine, Bool) -> Void
+
+    var body: some View {
+        Section {
+            if let asking, listing == nil {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Asking \(label(asking)) for your machines…")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            switch listing {
+            case .listed(_, let machines, _):
+                ForEach(machines) { machine in
+                    DirectoryRow(machine: machine, connect: connect)
+                }
+            case .refused(let via, let refusal):
+                Label(refusal.message(via: label(via)), systemImage: "list.bullet.rectangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case .failed(let via, let end, _):
+                Label("Couldn't ask \(label(via)) for your machines: \(SessionEnd(code: end).title.lowercased()).",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            case nil:
+                EmptyView()
+            }
+        } header: {
+            if case .listed(let via, _, _) = listing {
+                Text("Machines on your tailnet (via \(label(via)))")
+            } else {
+                Text("Machines on your tailnet")
+            }
+        } footer: {
+            if case .listed(_, _, let truncated) = listing {
+                Text(truncated
+                     ? "Listed by that machine from its Tailscale: your own machines only. Some could not be listed."
+                     : "Listed by that machine from its Tailscale: your own machines only.")
+            } else if asking == nil, listing == nil {
+                Text("A saved machine running FrankenRemote with --directory lists the rest of your machines here.")
+            }
+        }
+    }
+
+    private func label(_ name: String) -> String {
+        String(name.split(separator: ".").first ?? Substring(name))
+    }
+}
+
+private struct DirectoryRow: View {
+    let machine: DirectoryMachine
+    let connect: (DirectoryMachine, Bool) -> Void
+
+    var body: some View {
+        Button {
+            connect(machine, true)
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: symbol)
+                    .font(.title2)
+                    .foregroundStyle(machine.online ? AnyShapeStyle(.tint) : AnyShapeStyle(.secondary))
+                    .frame(width: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(machine.machine).font(.headline)
+                        if machine.serving {
+                            Text("this host")
+                                .font(.caption2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(.quaternary, in: Capsule())
+                        }
+                    }
+                    Text(details).font(.caption).foregroundStyle(.secondary)
+                        .lineLimit(1).truncationMode(.middle)
+                    if let addresses {
+                        Text(addresses).font(.caption2.monospaced()).foregroundStyle(.secondary)
+                            .lineLimit(1).truncationMode(.middle)
+                    }
+                }
+                Spacer()
+                Circle()
+                    .fill(machine.online ? Color.green : Color.secondary.opacity(0.4))
+                    .frame(width: 8, height: 8)
+                    .accessibilityLabel(machine.online ? "Online" : "Offline")
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(machine.pin == nil)
+        .contextMenu {
+            Button { connect(machine, true) } label: { Label("View and control", systemImage: "cursorarrow.rays") }
+            Button { connect(machine, false) } label: { Label("View only", systemImage: "eye") }
+        }
+    }
+
+    private var symbol: String {
+        switch machine.os.lowercased() {
+        case "ios": return "iphone"
+        case "android": return "smartphone"
+        case "macos": return "desktopcomputer"
+        case "windows", "linux": return "pc"
+        default: return "server.rack"
+        }
+    }
+
+    private var details: String {
+        let state = machine.online ? "online" : "offline"
+        return machine.os.isEmpty ? "\(machine.name) · \(state)" : "\(machine.os) · \(state)"
+    }
+
+    private var addresses: String? {
+        let listed = [machine.ipv4, machine.ipv6].compactMap { $0 }
+        return listed.isEmpty ? nil : listed.joined(separator: "  ")
     }
 }
 

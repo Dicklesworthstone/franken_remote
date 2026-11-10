@@ -19,6 +19,7 @@ _Static_assert(offsetof(FrCursor, visible) == 24, "FrCursor layout");
 _Static_assert(sizeof(FrConfig) == 24, "FrConfig size");
 _Static_assert(offsetof(FrConfig, port) == 8, "FrConfig layout");
 _Static_assert(offsetof(FrConfig, control) == 10, "FrConfig layout");
+_Static_assert(offsetof(FrConfig, direct) == 11, "FrConfig layout");
 _Static_assert(offsetof(FrConfig, pin) == 16, "FrConfig layout");
 _Static_assert(sizeof(bool) == 1, "C bool is Rust bool");
 _Static_assert(sizeof(FrHandle) == 8, "FrHandle is u64");

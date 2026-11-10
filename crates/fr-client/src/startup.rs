@@ -4,6 +4,8 @@
 //! after admission, and `bound` only after installing the exact control pair.
 use fr_core::ids::RemoteSessionId;
 use fr_wire::{
+    Kind,
+    directory::{self, Assembler, Listing},
     inspection,
     negotiation::{self, ControlBinding, Message, Offer, Selection},
 };
@@ -44,6 +46,9 @@ enum Phase {
     InspectionClose,
     InspectionClosed,
     Inspected,
+    DirectoryRequest,
+    DirectoryListing,
+    Listed,
     Closed,
 }
 /// Metadata only. Neither this value nor a successful `BindingAccepted` is a
@@ -78,6 +83,9 @@ pub struct Startup {
     approval: Option<ApprovalNotice>,
     inspection: bool,
     inspected: Option<Offer>,
+    directory: bool,
+    assembler: Option<Assembler>,
+    listed: Option<Listing>,
     created_us: u64,
     phase: Phase,
     bytes: [u8; negotiation::MAX_RECORD],
@@ -110,6 +118,9 @@ impl Startup {
             approval: None,
             inspection: false,
             inspected: None,
+            directory: false,
+            assembler: None,
+            listed: None,
             created_us: now_us,
             phase: Phase::Hello,
             bytes: [0; negotiation::MAX_RECORD],
@@ -138,6 +149,25 @@ impl Startup {
         self.until_us = self
             .until_us
             .min(self.created_us.saturating_add(inspection::MAX_DURATION_US));
+        self.tick(now_us)
+    }
+    /// Arm a terminal directory request before the original `ClientHello` is
+    /// sent; the offer must carry the required directory marker. The budget
+    /// includes time parked since this owner's creation.
+    pub fn begin_directory(&mut self, now_us: u64) -> Result<(), Error> {
+        self.tick(now_us)?;
+        if self.phase != Phase::Hello
+            || self.inspection
+            || self.directory
+            || !directory::requested(&self.offer)
+        {
+            self.close();
+            return Err(Error::Order);
+        }
+        self.directory = true;
+        self.until_us = self
+            .until_us
+            .min(self.created_us.saturating_add(directory::MAX_DURATION_US));
         self.tick(now_us)
     }
     /// Never refreshed by polling, packet arrival, or approval notifications.
@@ -179,6 +209,7 @@ impl Startup {
             (Phase::Selection, true) => Phase::Open,
             (Phase::Ack, true) => Phase::Complete,
             (Phase::InspectionClose, true) => Phase::InspectionClosed,
+            (Phase::DirectoryRequest, true) => Phase::DirectoryListing,
             _ => {
                 self.close();
                 return Err(Error::Order);
@@ -206,6 +237,9 @@ impl Startup {
             self.phase = Phase::Inspected;
             return Ok(());
         }
+        if self.phase == Phase::DirectoryListing {
+            return self.receive_listing(bytes);
+        }
         let message = negotiation::decode(bytes, self.maximum, 0)?;
         match (self.phase, message) {
             (Phase::Capabilities, Message::HostCapabilities(host)) => {
@@ -220,6 +254,17 @@ impl Startup {
                         .map_err(negotiation::Error::from)?;
                     self.inspected = Some(host);
                     self.phase = Phase::InspectionClose;
+                    return Ok(());
+                }
+                if self.directory {
+                    if !directory::requested(&host) {
+                        return Err(negotiation::Error::RequiredCapability.into());
+                    }
+                    self.maximum = (host.limits.max_control_message_bytes() as usize)
+                        .min(negotiation::MAX_RECORD);
+                    self.len = directory::encode_request(self.maximum, &mut self.bytes)
+                        .map_err(negotiation::Error::from)?;
+                    self.phase = Phase::DirectoryRequest;
                     return Ok(());
                 }
                 let selection = host.select()?;
@@ -273,6 +318,29 @@ impl Startup {
                 self.phase = Phase::Bind;
             }
             _ => return Err(Error::Order),
+        }
+        Ok(())
+    }
+    /// One directory listing record, in order; the final one completes it.
+    fn receive_listing(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        if bytes.get(6..8) != Some(&(Kind::DirectoryListing as u16).to_be_bytes()[..]) {
+            // The only other record is the host's typed refusal.
+            negotiation::decode(bytes, self.maximum, 0)?;
+            return Err(Error::Order);
+        }
+        let assembler = self.assembler.get_or_insert_with(Assembler::default);
+        if assembler
+            .push(bytes, self.maximum)
+            .map_err(negotiation::Error::from)?
+        {
+            let listing = self
+                .assembler
+                .take()
+                .ok_or(Error::Order)?
+                .finish()
+                .map_err(negotiation::Error::from)?;
+            self.listed = Some(listing);
+            self.phase = Phase::Listed;
         }
         Ok(())
     }
@@ -340,6 +408,21 @@ impl Startup {
         }
         self.inspected.take().ok_or(Error::Order)
     }
+    /// Waiting for (more) directory listing records.
+    pub fn is_listing(&self) -> bool {
+        self.phase == Phase::DirectoryListing && self.len == 0
+    }
+    /// True only after the host's complete listing (its final record).
+    pub fn is_listed(&self) -> bool {
+        self.phase == Phase::Listed
+    }
+    pub fn finish_directory(mut self, now_us: u64) -> Result<Listing, Error> {
+        self.tick(now_us)?;
+        if self.phase != Phase::Listed {
+            return Err(Error::Order);
+        }
+        self.listed.take().ok_or(Error::Order)
+    }
     pub fn close(&mut self) {
         self.phase = Phase::Closed;
         self.len = 0;
@@ -347,6 +430,8 @@ impl Startup {
         self.selection = None;
         self.approval = None;
         self.inspected = None;
+        self.assembler = None;
+        self.listed = None;
         self.bytes.fill(0);
     }
 }

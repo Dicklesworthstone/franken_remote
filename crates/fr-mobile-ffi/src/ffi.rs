@@ -9,15 +9,19 @@
 //! session and returns `FR_STALE` (or nothing); it never reaches freed
 //! memory. Any thread may call any function, concurrently.
 use crate::{
+    directory,
     session::{Config, InputResult, Session},
     video::FrameInfo,
 };
 use core::ffi::{c_char, c_void};
 use fr_tailnet::{HostName, HostPin};
 use std::{
-    ffi::CStr,
+    ffi::{CStr, CString},
     str::FromStr,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 pub const FR_OK: i32 = 0;
@@ -95,6 +99,9 @@ pub struct FrConfig {
     /// Request control once the first picture is on screen (still requires
     /// `fr_session_request_control`); false opens a view-only session.
     pub control: bool,
+    /// Dial the pin's own addresses instead of resolving `host`: for a
+    /// machine listed by a host's tailnet directory. Requires `pin`.
+    pub direct: bool,
     /// NUL-terminated pin from an earlier connection to the same name, or
     /// NULL for a first connection.
     pub pin: *const c_char,
@@ -220,21 +227,9 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         return FR_INVALID;
     };
     // SAFETY: forwarded contract.
-    let Some(host) = (unsafe { text(config.host) }).and_then(|h| HostName::parse(h).ok()) else {
+    let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
     };
-    let pin = if config.pin.is_null() {
-        None
-    } else {
-        // SAFETY: forwarded contract.
-        match unsafe { text(config.pin) }.map(HostPin::from_str) {
-            Some(Ok(pin)) if pin.name() == &host => Some(pin),
-            _ => return FR_INVALID,
-        }
-    };
-    if config.port == 0 {
-        return FR_INVALID;
-    }
     // Claim a slot before starting any thread.
     if lookup_free_slots() == 0 {
         return FR_BUSY;
@@ -244,6 +239,7 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         port: config.port,
         pin,
         control: config.control,
+        direct: config.direct,
     }) else {
         return FR_BUSY;
     };
@@ -253,6 +249,111 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
     };
     // SAFETY: `out` is non-null and writable per contract.
     unsafe { out.write(handle) };
+    FR_OK
+}
+
+/// The checked name, pin and port of `config`: a valid name, a pin (when
+/// given) for exactly that name, required when `direct`, and a nonzero port.
+///
+/// # Safety
+/// The strings `config` points to are NULL or NUL-terminated.
+unsafe fn destination(config: &FrConfig) -> Option<(HostName, Option<HostPin>)> {
+    // SAFETY: forwarded contract.
+    let host = HostName::parse(unsafe { text(config.host) }?).ok()?;
+    let pin = if config.pin.is_null() {
+        None
+    } else {
+        // SAFETY: forwarded contract.
+        let pin = HostPin::from_str(unsafe { text(config.pin) }?).ok()?;
+        if pin.name() != &host {
+            return None;
+        }
+        Some(pin)
+    };
+    (config.port != 0 && (pin.is_some() || !config.direct)).then_some((host, pin))
+}
+
+/// Most directory fetches in flight at once.
+pub const MAX_FETCHES: usize = 4;
+static FETCHES: AtomicUsize = AtomicUsize::new(0);
+
+/// Called once with a fetch's JSON result (valid only during the call).
+pub type FrDirectoryDone = Option<unsafe extern "C" fn(context: *mut c_void, json: *const c_char)>;
+
+/// The app's callback and its context, moved to the fetch thread.
+struct Done {
+    context: *mut c_void,
+    call: unsafe extern "C" fn(*mut c_void, *const c_char),
+}
+// SAFETY: `fr_directory_fetch`'s contract: `context` may be used from any
+// thread until `call` returns, and `call` is safe to invoke from any thread.
+unsafe impl Send for Done {}
+
+/// Releases a fetch slot when its thread ends (or never started).
+struct Fetching;
+impl Drop for Fetching {
+    fn drop(&mut self) {
+        FETCHES.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Ask `config`'s host for its tailnet directory (`frd run --directory`):
+/// the host itself and this user's own untagged machines. `config.control`
+/// is ignored. On `FR_OK`, `done` is called exactly once, on another
+/// thread, with a NUL-terminated JSON document (docs/ios-client.md) valid
+/// only during the call; on any other status it is never called.
+///
+/// # Safety
+/// `config` is NULL or valid, its strings NULL or NUL-terminated. `context`
+/// may be used from any thread until `done` returns, and `done` (when not
+/// NULL) is safe to call from any thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_directory_fetch(
+    config: *const FrConfig,
+    context: *mut c_void,
+    done: FrDirectoryDone,
+) -> i32 {
+    // SAFETY: NULL or valid per contract.
+    let (Some(config), Some(call)) = (unsafe { config.as_ref() }, done) else {
+        return FR_INVALID;
+    };
+    // SAFETY: forwarded contract.
+    let Some((host, pin)) = (unsafe { destination(config) }) else {
+        return FR_INVALID;
+    };
+    let request = directory::Request {
+        host,
+        port: config.port,
+        pin,
+        direct: config.direct,
+    };
+    if FETCHES
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+            (n < MAX_FETCHES).then_some(n + 1)
+        })
+        .is_err()
+    {
+        return FR_BUSY;
+    }
+    let slot = Fetching;
+    let done = Done { context, call };
+    let spawned = std::thread::Builder::new()
+        .name("fr-directory".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let _slot = slot;
+            let done = done;
+            // JSON never holds a NUL (serde escapes it); fall back to an
+            // internal failure rather than skip the one callback.
+            let json = CString::new(directory::fetch(request)).unwrap_or_else(|_| {
+                CString::from(c"{\"status\":\"failed\",\"end\":10,\"detail\":\"Internal\"}")
+            });
+            // SAFETY: per this function's contract; the string outlives the call.
+            unsafe { (done.call)(done.context, json.as_ptr()) };
+        });
+    if spawned.is_err() {
+        return FR_BUSY;
+    }
     FR_OK
 }
 

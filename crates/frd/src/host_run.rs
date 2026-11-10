@@ -128,6 +128,10 @@ pub struct Options {
     pub files: Option<crate::native_files::Directory>,
     /// One explicit host selection, shared by clones but consumed only once.
     pub file_send: Option<crate::native_files::HostSelection>,
+    /// `--directory`: answer an admitted viewer's tailnet directory request
+    /// (this host and that viewer's own untagged machines, read from the
+    /// installed daemon). Off by default; grants nothing, starts no capture.
+    pub directory: bool,
     /// The operator's selected local session and its read-only monitor image.
     /// `Some`: fresh native evidence is required before binding, and logout,
     /// switch, suspend or lost evidence ends every share and the run with a
@@ -1472,7 +1476,8 @@ impl Share<'_> {
                     .map_err(Error::Ingress)?,
             );
         }
-        let mut server = Server::new(self.api.clone(), self.identity.clone());
+        let mut server = Server::new(self.api.clone(), self.identity.clone())
+            .with_directory(self.options.directory);
         if let Some(policy) = self.policy {
             server = server.with_live_policy(policy.clone());
         }
@@ -2414,6 +2419,7 @@ mod tests {
             microphone: None,
             files: None,
             file_send: None,
+            directory: false,
             session_monitor: cfg!(target_os = "macos").then(|| session_monitor::Configuration {
                 image: PathBuf::from("/unprovisioned/fr-session-monitor"),
                 selection: session_monitor::Selection::macos(rustix::process::geteuid().as_raw()),

@@ -12,6 +12,13 @@ struct SavedHost: Codable, Identifiable, Equatable, Hashable {
     /// (`fr-pin-v1 ...`); a later resolution elsewhere is refused.
     var pin: String?
     var lastConnected: Date?
+    /// Dial the pin's addresses instead of resolving the name: a machine a
+    /// host's tailnet directory listed (absent in hosts saved before the
+    /// directory existed).
+    var direct: Bool?
+
+    /// A direct dial needs the pin it dials.
+    var dialsDirectly: Bool { direct == true && pin != nil }
 
     /// The machine label of the name (`mac-studio` in
     /// `mac-studio.tail1234.ts.net`).
@@ -136,18 +143,127 @@ final class HostStore: ObservableObject {
 /// A source of machines beyond the ones the user typed.
 ///
 /// Tailscale's iOS app gives other apps no way to list the tailnet's
-/// machines (no LocalAPI, no shared container), so the app ships with no
-/// directory and never shows a made-up list. A real directory (for example
-/// the Tailscale API with a user-issued read-only token) can implement this
-/// and appear in the picker.
+/// machines (no LocalAPI, no shared container). A FrankenRemote host can:
+/// `frd run --directory` answers an admitted viewer with the host itself and
+/// that viewer's own untagged machines, read from the host's Tailscale
+/// (PROTOCOL_DIRECTORY.md). The app asks a machine the user already saved,
+/// and never shows a made-up list.
 protocol HostDirectory {
-    var title: String { get }
-    func machines() async throws -> [DirectoryMachine]
+    func fetch(from host: SavedHost) async -> DirectoryResult
 }
 
-struct DirectoryMachine: Identifiable, Equatable {
-    var id: String { name }
+/// One machine a host listed.
+struct DirectoryMachine: Identifiable, Equatable, Hashable, Decodable {
+    var id: String { nodeID }
     /// `<machine>.<tailnet>.ts.net`.
     var name: String
+    /// Tailscale's stable node ID.
+    var nodeID: String
+    /// Tailscale's OS label (`macOS`, `linux`, `windows`, `iOS`...); may be empty.
+    var os: String
     var online: Bool
+    /// The host that answered.
+    var serving: Bool
+    var ipv4: String?
+    var ipv6: String?
+    /// `fr-pin-v1 <name> <listed addresses>`; nil when the app cannot dial it
+    /// by name.
+    var pin: String?
+
+    enum CodingKeys: String, CodingKey {
+        case name, nodeID = "node_id", os, online, serving, ipv4, ipv6, pin
+    }
+
+    /// The machine label of the name.
+    var machine: String { String(name.split(separator: ".").first ?? Substring(name)) }
+
+    /// A host to open a session to: the listed addresses, dialed directly,
+    /// with TLS still checked for exactly this name. Nil without a pin.
+    func host(port: UInt16) -> SavedHost? {
+        guard let pin, port != 0 else { return nil }
+        return SavedHost(id: UUID(), name: name, port: port, nickname: nil, pin: pin,
+                         lastConnected: nil, direct: true)
+    }
+}
+
+/// Why a host did not list its machines.
+enum DirectoryRefusal: Equatable {
+    /// The host does not serve a directory (`frd run --directory` is off).
+    case disabled
+    /// The host could not read its Tailscale status just now.
+    case unavailable
+    /// The host's FrankenRemote predates the directory.
+    case unsupported
+    /// The host's policy did not admit this device.
+    case denied
+    case other(String)
+
+    init(reason: String) {
+        switch reason {
+        case "directory_disabled": self = .disabled
+        case "directory_unavailable": self = .unavailable
+        case "required_capability", "unsupported_version", "unsupported_profile": self = .unsupported
+        case "permission_denied", "tailnet_membership_unverifiable": self = .denied
+        default: self = .other(reason)
+        }
+    }
+
+    func message(via host: String) -> String {
+        switch self {
+        case .disabled:
+            return "\(host) doesn't list machines. Start FrankenRemote there with --directory to see your other machines here."
+        case .unavailable:
+            return "\(host) couldn't read its Tailscale status just now. Pull to refresh."
+        case .unsupported:
+            return "\(host) runs a FrankenRemote that can't list machines yet. Update it to see your other machines here."
+        case .denied:
+            return "\(host) didn't admit this device, so it listed nothing."
+        case .other:
+            return "\(host) refused to list machines."
+        }
+    }
+}
+
+/// One directory fetch's outcome, decoded from the Rust core's JSON
+/// (`fr_directory_fetch`). Nothing is filled in that the host did not send.
+enum DirectoryResult: Equatable {
+    case listed(via: String, machines: [DirectoryMachine], truncated: Bool)
+    case refused(via: String, DirectoryRefusal)
+    /// `FR_END_*` and the typed failure's name.
+    case failed(via: String, end: UInt32, detail: String)
+
+    var via: String {
+        switch self {
+        case .listed(let via, _, _), .refused(let via, _), .failed(let via, _, _): return via
+        }
+    }
+
+    private struct Document: Decodable {
+        var status: String
+        var via: String
+        var truncated: Bool?
+        var machines: [DirectoryMachine]?
+        var reason: String?
+        var end: UInt32?
+        var detail: String?
+    }
+
+    /// Nil for anything but a complete, known document.
+    static func parse(_ json: String) -> DirectoryResult? {
+        guard let data = json.data(using: .utf8),
+              let doc = try? JSONDecoder().decode(Document.self, from: data) else { return nil }
+        switch doc.status {
+        case "ok":
+            guard let machines = doc.machines, let truncated = doc.truncated else { return nil }
+            return .listed(via: doc.via, machines: machines, truncated: truncated)
+        case "refused":
+            guard let reason = doc.reason else { return nil }
+            return .refused(via: doc.via, DirectoryRefusal(reason: reason))
+        case "failed":
+            guard let end = doc.end else { return nil }
+            return .failed(via: doc.via, end: end, detail: doc.detail ?? "")
+        default:
+            return nil
+        }
+    }
 }

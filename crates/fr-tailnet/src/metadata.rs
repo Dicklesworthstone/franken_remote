@@ -166,10 +166,12 @@ pub(crate) struct Status {
 }
 /// Installed daemons answer `status?peers=false` with an explicit `"Peer": null`
 /// (serde's `default` covers only a missing field), so null is an empty map.
-fn peers<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Peer>, D::Error> {
-    struct Peers;
-    impl<'de> Visitor<'de> for Peers {
-        type Value = BTreeMap<String, Peer>;
+pub(crate) fn peers<'de, D: Deserializer<'de>, P: Deserialize<'de>>(
+    d: D,
+) -> Result<BTreeMap<String, P>, D::Error> {
+    struct Peers<P>(std::marker::PhantomData<P>);
+    impl<'de, P: Deserialize<'de>> Visitor<'de> for Peers<P> {
+        type Value = BTreeMap<String, P>;
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             f.write_str("bounded peer map or null")
         }
@@ -193,7 +195,7 @@ fn peers<'de, D: Deserializer<'de>>(d: D) -> Result<BTreeMap<String, Peer>, D::E
             Ok(map)
         }
     }
-    d.deserialize_option(Peers)
+    d.deserialize_option(Peers(std::marker::PhantomData))
 }
 #[derive(Deserialize)]
 pub(crate) struct Node {
@@ -277,6 +279,23 @@ pub(crate) struct Identity {
     peer: Peer,
     version: Text<128>,
     tailnet: Tailnet,
+}
+
+impl Identity {
+    /// Who a directory read is for: the admitted host and viewer node IDs,
+    /// and the viewer's user unless the viewer is tagged (owning nothing).
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    pub(crate) fn directory_scope(&self) -> crate::directory::Scope<'_> {
+        crate::directory::Scope {
+            host: &self.host.id.0,
+            viewer: &self.peer.id.0,
+            user: if tags(self.peer.tags.as_ref()).is_empty() {
+                self.peer.user
+            } else {
+                0
+            },
+        }
+    }
 }
 
 fn valid_key(s: &str) -> bool {
