@@ -117,3 +117,50 @@ fn releasing_control_closes_the_session_and_stops_any_pending_request() {
     other.set_visible(false);
     assert!(!other.close.load(Ordering::SeqCst));
 }
+
+#[test]
+fn a_submitted_picture_counts_as_shown_once_the_app_has_drawn_it() {
+    use fr_media::access_unit::FrameId;
+    let picture = |raw, stage| {
+        Some(Presentation {
+            frame: FrameId::from_raw(raw),
+            stage,
+        })
+    };
+    let submitted = |raw| picture(raw, PresentationStage::SubmittedToCompositor);
+    let shared = Shared::new();
+    shared.set_visible(true);
+    let mut pending = None;
+    // Planted race: frd submits picture 7 before the Metal pass draws it.
+    // Checking only at submission (the old rule) never saw a drawn picture.
+    assert_eq!(shown(&shared, &mut pending, submitted(7)), None);
+    assert_eq!(shown(&shared, &mut pending, None), None);
+    shared.frames.mark_drawn(7);
+    assert_eq!(shown(&shared, &mut pending, None), Some(7));
+    assert_eq!(shown(&shared, &mut pending, None), None, "reported once");
+    // A newer submission replaces an undrawn one.
+    assert_eq!(shown(&shared, &mut pending, submitted(8)), None);
+    assert_eq!(shown(&shared, &mut pending, submitted(9)), None);
+    shared.frames.mark_drawn(8);
+    assert_eq!(shown(&shared, &mut pending, None), None);
+    shared.frames.mark_drawn(9);
+    assert_eq!(shown(&shared, &mut pending, None), Some(9));
+    // A picture the app drew before frd's callback counts at once.
+    shared.frames.mark_drawn(10);
+    assert_eq!(shown(&shared, &mut pending, submitted(10)), Some(10));
+    // Decoded-only pictures and a hidden view never count.
+    assert_eq!(
+        shown(
+            &shared,
+            &mut pending,
+            picture(11, PresentationStage::DecodedOnly)
+        ),
+        None
+    );
+    shared.frames.mark_drawn(11);
+    assert_eq!(shown(&shared, &mut pending, None), None);
+    assert_eq!(shown(&shared, &mut pending, submitted(12)), None);
+    shared.set_visible(false);
+    shared.frames.mark_drawn(12);
+    assert_eq!(shown(&shared, &mut pending, None), None);
+}

@@ -257,6 +257,26 @@ session, for two independent reasons:
   refuses (`ConnectionAddresses`: local and peer may not be equal).
 
 A live check needs the app on a second machine, or a host that serves IPv4.
+
+### Live session (2026-11-10)
+
+The simulator on mac-studio against a Linux host that serves IPv4
+(`thinkstation2`: frd at a678fc10, private Xvfb 1920x1080 with moving
+content, NVENC HEVC, the host's default 30 fps limit and 8 Mbit/s),
+view-only, launched with `-FRConnect thinkstation2.<tailnet>.ts.net
+-FRStatsLog`:
+
+- first view 2.27 s after launch, including name resolution, QUIC/TLS and
+  the first IDR;
+- 26-28 fps sustained against the host's 30 fps limit, every picture drawn
+  (`drawn_frame` within two of `presented`) over 30 s;
+- decode 2.1-3.3 ms per picture (VideoToolbox, simulator);
+- text sharp at 0.63x fit down to 11 px; 9 px still legible.
+
+The first run found a bug: the app stayed on "Opening the screen…" over a
+moving picture. A picture counted as seen only if the Metal pass had drawn
+it by the time frd's callback received it, which never happens; it now stays
+pending until the app reports it drawn.
 The host directory (above) now gives the app every listed machine's
 addresses, so a machine reached through a listing is no longer limited by
 MagicDNS; a machine saved by name alone still is. The directory itself was
@@ -266,8 +286,8 @@ own screen.
 
 ## Not done yet
 
-- A live session from the app: first frame time, frame rate and decode time
-  are unmeasured (see above).
+- Control from the app in a live session (touch to pointer, keys) and a
+  60 fps host; the live session above is view-only, in the simulator.
 - Reaching an IPv6-only host saved by name only, without a listing.
 - Pixel-precise scrolling (the app sends line scrolls; macOS hosts now offer
   pixel scrolls) and Unicode text (hosts do not grant it yet).

@@ -736,15 +736,23 @@ impl LocalPresenter for Presenter {
 
 /// A presented frame counts as seen only once the app drew it (or a later
 /// one) into a presented drawable while the view was visible.
-fn shown(shared: &Shared, frame: Option<Presentation>) -> Option<u64> {
-    let frame = frame?;
-    if frame.stage != PresentationStage::SubmittedToCompositor
-        || !shared.visible.load(Ordering::SeqCst)
-    {
+/// frd hands a submitted picture to the session callback before the app's
+/// Metal pass has drawn it, then calls again with `None` after every network
+/// turn. Keep the newest submitted picture pending until the app reports it
+/// (or a later one) drawn, and report it once. A newer submission replaces
+/// it: frd's view tracker accepts visibility of its newest picture only.
+fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>) -> Option<u64> {
+    let visible = shared.visible.load(Ordering::SeqCst);
+    if let Some(frame) = frame {
+        *pending = (frame.stage == PresentationStage::SubmittedToCompositor && visible)
+            .then(|| frame.frame.as_raw());
+    }
+    let id = (*pending)?;
+    if !visible || shared.frames.drawn() < id {
         return None;
     }
-    let id = frame.frame.as_raw();
-    (shared.frames.drawn() >= id).then_some(id)
+    *pending = None;
+    Some(id)
 }
 
 /// The primary display: the one at the desktop origin, else the first.
@@ -902,6 +910,7 @@ impl Application for Mobile {
                 shared.events.state(state::VIEWING, attempt_number);
             }
         };
+        let mut pending = None;
         let outcome = if self.control {
             let mut mapped = false;
             let mut last_shown = None;
@@ -913,7 +922,7 @@ impl Application for Mobile {
                     shared.events.state(state::CLOSING, attempt_number);
                     return Ok(ControlFlow::Break(fr_wire::closure::Reason::Requested));
                 }
-                let fresh = shown(&shared, frame).filter(|f| last_shown != Some(*f));
+                let fresh = shown(&shared, &mut pending, frame).filter(|f| last_shown != Some(*f));
                 match state {
                     InteractiveViewerState::Viewing(view) => {
                         let Some(frame) = fresh.or(last_shown) else {
@@ -986,7 +995,7 @@ impl Application for Mobile {
         } else {
             observer
                 .serve_until(move |frame| {
-                    if shown(&shared, frame).is_some() {
+                    if shown(&shared, &mut pending, frame).is_some() {
                         announce_view(&shared);
                     }
                     Ok(if shared.close.load(Ordering::SeqCst) {
