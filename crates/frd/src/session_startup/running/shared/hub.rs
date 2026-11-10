@@ -90,12 +90,11 @@ pub struct Statistics {
     pub failed: u64,
 }
 
-// One gate per hub. Its observation variant passes clippy's size threshold
-// only on macOS (the macOS desktop client builds this module too).
-#[cfg_attr(target_os = "macos", allow(clippy::large_enum_variant))]
+// One gate per hub, so boxing the observation (several times the opening
+// variant's size, on every platform and feature set) costs one allocation.
 enum Gate {
     Opening { cx: Cx, until: u64 },
-    Observing(ObservationControl),
+    Observing(Box<ObservationControl>),
 }
 impl Gate {
     fn check(&self) -> Result<(), Error> {
@@ -149,7 +148,7 @@ impl Receipt {
             control.revoke();
             return Err(Error::Closed);
         }
-        *gate = Gate::Observing(control);
+        *gate = Gate::Observing(Box::new(control));
         *state = State::Starting;
         Ok(())
     }
@@ -236,7 +235,7 @@ impl Admission {
         }
         let reservation = self.reserve(
             session.binding(),
-            Gate::Observing(session.original_observation()),
+            Gate::Observing(Box::new(session.original_observation())),
             State::Starting,
         )?;
         let receipt = reservation.receipt.clone();
@@ -391,7 +390,9 @@ impl Hub {
         let parent = first.session.binding();
         let receipt = Arc::new(Receipt {
             parent,
-            gate: Mutex::new(Gate::Observing(first.session.original_observation())),
+            gate: Mutex::new(Gate::Observing(Box::new(
+                first.session.original_observation(),
+            ))),
             state: Mutex::new(State::Serving),
         });
         let first_entropy = entropy.clone();

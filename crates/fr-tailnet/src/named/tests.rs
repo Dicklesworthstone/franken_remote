@@ -207,7 +207,10 @@ fn a_family_the_pin_never_saw_is_admitted_and_recorded_but_a_pinned_one_must_mat
     let v4_only = pin(&["100.64.0.2"]);
     let both = ips(&["fd7a:115c:a1e0::2", "100.64.0.2"]);
     let observed = v4_only.admits(&name, &both).unwrap();
-    assert_eq!(observed.addresses(), ips(&["100.64.0.2", "fd7a:115c:a1e0::2"]));
+    assert_eq!(
+        observed.addresses(),
+        ips(&["100.64.0.2", "fd7a:115c:a1e0::2"])
+    );
     // An unchanged answer records the pin as it was.
     assert_eq!(
         v4_only.admits(&name, &ips(&["100.64.0.2"])).unwrap(),
@@ -228,9 +231,7 @@ fn a_family_the_pin_never_saw_is_admitted_and_recorded_but_a_pinned_one_must_mat
         ips(&["100.64.0.2", "fd7a:115c:a1e0::2"])
     );
     assert_eq!(
-        v6_only
-            .admits(&name, &ips(&["fd7a:115c:a1e0::9"]))
-            .err(),
+        v6_only.admits(&name, &ips(&["fd7a:115c:a1e0::9"])).err(),
         Some(Error::IdentityChanged)
     );
 }

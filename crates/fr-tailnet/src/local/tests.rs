@@ -1420,7 +1420,10 @@ mod outbound;
 #[test]
 fn a_renewal_waits_for_another_lookup_instead_of_failing_busy() {
     let (s, w) = fixtures();
-    let server = Server::responses(&[&s, &w, &s, &s, &w, &s, &s, &w, &s], Duration::from_millis(15));
+    let server = Server::responses(
+        &[&s, &w, &s, &s, &w, &s, &s, &w, &s],
+        Duration::from_millis(15),
+    );
     run_async!(cx, {
         let proof = server
             .client

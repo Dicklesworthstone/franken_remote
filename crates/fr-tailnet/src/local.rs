@@ -25,6 +25,7 @@ use crate::{
     metadata::{self, Status, WhoIs},
 };
 use asupersync::{cx::Cx, http::h1::Request};
+use asupersync::{time::sleep, types::Time};
 use std::{
     fmt,
     path::{Path, PathBuf},
@@ -34,7 +35,6 @@ use std::{
     },
     time::Duration,
 };
-use asupersync::{time::sleep, types::Time};
 // The fixtures below (`tests`) import these through `super::*`; the clock
 // and pulse that used them moved to `crate::profile`.
 #[cfg(test)]
@@ -154,8 +154,14 @@ impl LocalApi {
         addresses: ConnectionAddresses,
         policy: GrantPolicy,
     ) -> Result<Authorization, Error> {
-        self.authorize(cx, addresses, policy, AdmissionProfile::AppCapability, false)
-            .await
+        self.authorize(
+            cx,
+            addresses,
+            policy,
+            AdmissionProfile::AppCapability,
+            false,
+        )
+        .await
     }
 
     /// One admission lookup at a time per API owner (process-wide for the
@@ -316,8 +322,8 @@ impl LocalApi {
         Ok(permission)
     }
     /// The directory this admitted viewer may see (`crate::directory`): one
-    /// bounded status read, only while `proof` is live, before and after.
-    /// Never a substitute for admission and never cached.
+    /// bounded status read; `proof` must be live both when it starts and
+    /// when it ends. Never a substitute for admission and never cached.
     pub(crate) async fn directory(
         &self,
         cx: &Cx,

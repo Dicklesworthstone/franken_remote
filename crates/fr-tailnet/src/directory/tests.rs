@@ -117,7 +117,10 @@ fn only_the_host_and_the_viewers_own_untagged_machines_are_listed() {
             "trj.tail1f21e.ts.net",
         ]
     );
-    assert!(directory.truncated, "an own machine that cannot be listed is a gap");
+    assert!(
+        directory.truncated,
+        "an own machine that cannot be listed is a gap"
+    );
     let host = &directory.nodes[0];
     assert!(host.serving && host.online);
     assert_eq!(host.node_id, "nHOST");
