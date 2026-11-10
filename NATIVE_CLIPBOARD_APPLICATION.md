@@ -38,6 +38,30 @@ Full Cargo/session execution remains blocked locally by shared storage and
 memory exhaustion. Focused native checks are separate evidence; new CLI and
 session regressions are retained for execution on a provisioned builder.
 
+## Publication receipts after a local privacy stop
+
+The host clipboard process keeps a validated, content-free publication receipt
+when its independent Off signal arrives after the OS result. A known
+`SubmittedToOs` or `NotSubmitted` remains that exact result; cancellation does
+not turn a known external effect into uncertainty. `UnknownEffect` remains
+unknown. Retention applies only to a `Published` reply for the original
+`Publish` request after framing, sequence and revision validation.
+
+The original process is poisoned before that receipt is returned. Further
+requests cannot reach the child, read text is discarded after a privacy stop,
+and no publication is retried. A privacy stop before the request's first possible
+write reports definitive non-submission; a lost response after an attempted write
+remains uncertain. Native cleanup still kills and reaps the original child. A receipt reports OS submission, never application paste.
+
+The native process dispatcher separates bounded request handling from the OS
+backend, preserving the original X11 submission gate. Its socket tests cover Unicode, declared limits, malformed input, sequence
+fencing, expired/uncertain publication, private read cancellation and cleanup.
+Parent-side regression tests use the existing explicit protocol child and
+deterministically stop privacy after a validated reply; they do not simulate
+native clipboard effects as hardware evidence. These new tests were authored
+and source-reviewed with the execution workspace unavailable; execution and
+native-platform qualification remain separate gates.
+
 ## Application ownership
 
 The public Linux `NativePublisher` and `NativeObserver` owners now accept

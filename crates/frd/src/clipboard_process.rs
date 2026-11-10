@@ -226,13 +226,31 @@ impl RemoteClipboard {
             return Err(());
         }
         let result = self.round_trip(request, payload, timeout);
-        // The child may close its signal socket immediately after a terminal
-        // refusal or orderly Stop reply. Preserve that bounded typed result;
-        // it contains no text and never authorizes another native operation.
-        let terminal = matches!(&result, Ok((Reply::Refused(_) | Reply::Stopped, None)));
-        if result.is_err() || (!terminal && self.privacy.as_ref().is_none_or(Monitor::stopped)) {
+        self.finish_exchange(request, result)
+    }
+    /// Adjudicate one already validated reply against the independent privacy
+    /// fence. A completed publication is external-effect evidence, not renewed
+    /// permission: stopping after the OS call cannot erase its known result.
+    fn finish_exchange(
+        &mut self,
+        request: Request,
+        result: Result<(Reply, Option<RemoteText>), ()>,
+    ) -> Result<(Reply, Option<RemoteText>), ()> {
+        // round_trip has checked framing, sequence and revision. Only a reply
+        // to THIS Publish can preserve its content-free publication receipt.
+        // ReadText and setup acknowledgements never survive a privacy stop.
+        let receipt = matches!(&result, Ok((Reply::Refused(_) | Reply::Stopped, None)))
+            || matches!(
+                (request, &result),
+                (Request::Publish { .. }, Ok((Reply::Published { .. }, None)))
+            );
+        if result.is_err() || self.privacy.as_ref().is_none_or(Monitor::stopped) {
+            // Fence first, even when retaining an irreversible effect's result.
+            // No next read, publication, retry or cleanup request may reach it.
             self.poison();
-            return Err(());
+            if !receipt {
+                return Err(());
+            }
         }
         result
     }
@@ -356,6 +374,10 @@ impl ClipboardSink for RemoteClipboard {
             // until the core's guard cancels it.
             return Publication::NotSubmitted(PlatformError::Unavailable);
         };
+        // round_trip advances this sequence immediately before its first
+        // possible write. An unchanged sequence proves that no publication
+        // request entered the channel; after that point a lost reply is uncertain.
+        let before = self.sequence;
         match self.exchange(
             Request::Publish {
                 stamp,
@@ -369,8 +391,15 @@ impl ClipboardSink for RemoteClipboard {
                 self.poison();
                 Publication::UnknownEffect
             }
-            // Timed out or lost: the ownership call may have been entered.
-            Err(()) => Publication::UnknownEffect,
+            Err(()) => {
+                self.poison();
+                if self.sequence == before {
+                    Publication::NotSubmitted(PlatformError::Unavailable)
+                } else {
+                    // A write was attempted: the OS call may have been entered.
+                    Publication::UnknownEffect
+                }
+            }
         }
     }
     fn cancel_prepared(&mut self) {

@@ -346,3 +346,5 @@ fn the_native_off_switch_fences_the_original_owner_during_a_blocked_prepare() {
     assert!(line(&log, "PRIVACY-STOP").is_some());
     assert!(line(&log, "PUBLISH ").is_none());
 }
+
+mod receipts;
