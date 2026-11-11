@@ -477,14 +477,14 @@ async fn media_path(cx: Cx, lose_final_picture: bool, discovered: bool) {
         Box::pin(discovered_source(&cx)).await
     } else {
         let source = Source::new(&cx).await;
-        let link = Link::selected(&cx, &source).await;
+        let link = Box::pin(Link::selected(&cx, &source)).await;
         (source, link)
     };
     #[cfg(not(feature = "linux-displays"))]
     let (mut source, mut link) = {
         assert!(!discovered);
         let source = Source::new(&cx).await;
-        let link = Link::selected(&cx, &source).await;
+        let link = Box::pin(Link::selected(&cx, &source)).await;
         (source, link)
     };
     let color = source.paint(3);

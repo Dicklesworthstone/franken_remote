@@ -10,7 +10,7 @@ use fr_wire::{
 use std::ops::ControlFlow;
 
 async fn streaming(c: &Cx, h: &Cx) -> (HostSession, StreamingViewer, SendCache) {
-    let (mut host, mut viewer) = observing_pair(c, h, capabilities()).await;
+    let (mut host, mut viewer) = Box::pin(observing_pair(c, h, capabilities())).await;
     let (_, vm) = media_pair(&mut host, &mut viewer, c, h).await;
     let cfg = vm
         .receiver_config(&viewer.transport, ReceivePolicy::default())

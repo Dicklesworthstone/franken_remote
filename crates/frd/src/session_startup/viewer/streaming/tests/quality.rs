@@ -160,7 +160,7 @@ async fn turn(pair: &mut Pair, c: &Cx) -> Result<(), Error> {
 #[test]
 fn authenticated_quality_reports_do_not_change_media_or_input_evidence() {
     run(|c, h| async move {
-        let mut pair = pair(&c, &h, true).await;
+        let mut pair = Box::pin(pair(&c, &h, true)).await;
         let usage = pair.receiver.budget_usage();
         let state = pair.receiver.state();
         let handle = pair
@@ -211,7 +211,7 @@ fn authenticated_quality_reports_do_not_change_media_or_input_evidence() {
 fn current_quality_handle_cannot_outlive_cancellation_close_or_its_original_owner() {
     for ending in 0..3 {
         run(move |c, h| async move {
-            let mut pair = pair(&c, &h, true).await;
+            let mut pair = Box::pin(pair(&c, &h, true)).await;
             let handle = pair
                 .quality
                 .as_ref()
@@ -243,7 +243,7 @@ fn current_quality_handle_cannot_outlive_cancellation_close_or_its_original_owne
 fn an_unselected_or_foreign_quality_report_is_a_named_terminal_protocol_refusal() {
     for selected in [false, true] {
         run(move |c, h| async move {
-            let mut pair = pair(&c, &h, selected).await;
+            let mut pair = Box::pin(pair(&c, &h, selected)).await;
             let mut binding = pair.binding;
             if selected {
                 binding.display += 1;

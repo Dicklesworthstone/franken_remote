@@ -155,14 +155,14 @@ struct Fixture {
     stops: u32,
 }
 async fn fixture(c: &Cx, h: &Cx) -> Fixture {
-    fixture_with_policy(
+    Box::pin(fixture_with_policy(
         c,
         h,
         quic::Policy {
             critical_send_records: 1,
             ..quic::Policy::default()
         },
-    )
+    ))
     .await
 }
 async fn fixture_with_policy(c: &Cx, h: &Cx, policy: quic::Policy) -> Fixture {

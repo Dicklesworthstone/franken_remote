@@ -129,6 +129,7 @@ fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream()
                 server(p)
             })
             .unwrap();
+        let started = std::time::Instant::now();
         let (client, server) = Box::pin(support::both(
             timeout(
                 cx.now(),
@@ -138,6 +139,10 @@ fn discovers_unknown_peer_completes_real_tls_and_delivers_authenticated_stream()
             accept,
         ))
         .await;
+        // The discovered Initial starts the handshake. Waiting for its retransmission
+        // costs at least the client's 1.5 s handshake PTO.
+        let elapsed = started.elapsed();
+        assert!(elapsed < Duration::from_millis(1_400), "{elapsed:?}");
         let (mut client, mut server) = (client.unwrap().unwrap(), server.unwrap());
         assert_eq!(calls.get(), 1);
         assert_eq!(server.local_addr(), address);

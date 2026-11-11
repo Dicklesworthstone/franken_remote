@@ -38,7 +38,11 @@ struct Peer {
     frames: Vec<u64>,
 }
 impl Peer {
-    async fn new(rt: &Runtime, id: u128) -> Self {
+    // Boxed once here: the peer's future exceeds clippy's large_futures bound.
+    fn new(rt: &Runtime, id: u128) -> std::pin::Pin<Box<impl Future<Output = Self> + '_>> {
+        Box::pin(Self::open(rt, id))
+    }
+    async fn open(rt: &Runtime, id: u128) -> Self {
         let cx = Cx::current().unwrap();
         let mut link = Link::new(&cx, id).await;
         let media = link.media(&cx).await;

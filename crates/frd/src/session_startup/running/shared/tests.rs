@@ -137,7 +137,17 @@ struct Member {
     pending_decode: Option<(fr_media::delivery::ReceivedPicture, u64)>,
     nonce: u128,
 }
-async fn sessions(
+// Boxed once here: the pair's future exceeds clippy's large_futures bound
+// (16 KiB), so every caller would otherwise need its own Box::pin.
+fn sessions<'a>(
+    rt: &'a Runtime,
+    id: u128,
+    role: Role,
+    extra: &'a [&'a str],
+) -> std::pin::Pin<Box<impl Future<Output = (Cx, Cx, HostSession, ViewerSession)> + 'a>> {
+    Box::pin(open_sessions(rt, id, role, extra))
+}
+async fn open_sessions(
     rt: &Runtime,
     id: u128,
     role: Role,

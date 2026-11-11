@@ -84,7 +84,10 @@ fn closure_reporting_before_session_opened_is_unarmed_and_never_sends_a_session_
         let (mut host, mut viewer) = pair(&c, &h, false).await;
         host.retain_observation_reporting(configuration).unwrap();
         host.close();
-        assert_eq!(reporting.finish(ClosedReason::HostFailure).await, None);
+        assert_eq!(
+            Box::pin(reporting.finish(ClosedReason::HostFailure)).await,
+            None
+        );
         assert!(!host.is_complete());
         assert!(!viewer.is_complete());
         viewer.close();

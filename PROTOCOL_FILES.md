@@ -52,8 +52,8 @@ not automatic synchronization or permission to browse remote paths.
 
 Profile 3 (`ATP_PORTABLE_DIRECTORY_ENTRIES`) preserves nested empty directories
 using the pinned ATP `TransferManifest` and its existing structural metadata.
-This profile uses Asupersync 0.6.0 at the repository's existing revision
-`ee72b665ee87f6c811b1631136676fbc31ec0a88`; it adds no dependency or alternate
+This profile uses Asupersync 0.6.2 at the repository's pinned revision
+`079214d3f8617656721eef2f3454d3b98ef80ed2`; it adds no dependency or alternate
 hashing/transfer implementation.
 The sender selects it only when the selected tree needs explicit directory
 entries. Ordinary content-only trees and an empty selected root retain profile 2.

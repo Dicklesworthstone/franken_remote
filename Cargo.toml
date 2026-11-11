@@ -22,13 +22,17 @@ repository = "https://github.com/Dicklesworthstone/franken_remote"
 # Pinned to an immutable upstream Git revision, never the mutable sibling
 # checkout. Published 0.5.0 sends each TLS handshake segment as ONE datagram,
 # so a real Tailscale (Let's Encrypt) certificate chain (~3.6 KB flight) can
-# never complete a live handshake; ee72b665e (on asupersync main, 2026-10-09)
-# carries 82b3e34b3, which splits Handshake-level CRYPTO into packet-sized
-# datagrams. This exact revision completed live tailnet sessions on 2026-10-12.
-# Owner approval for a Git pin while 0.6.0 is unpublished: 2026-10-12
+# never complete a live handshake; 82b3e34b3 (on asupersync main since
+# 2026-10-09) splits Handshake-level CRYPTO into packet-sized datagrams.
+# 079214d3f (asupersync main, 2026-11-11; previously ee72b665e) adds three FR
+# transport fixes: accept_with_initial (the host's cold accept no longer waits
+# out the client's 1.5 s handshake PTO), a plain ACK for window-update-only
+# packets (idle peers stop answering each other's ACKs), and a typed
+# ServerCertificateRejected for a refused server certificate.
+# Owner approval for a Git pin while 0.6.x is unpublished: 2026-10-12
 # ("do everything you think is advisable"). Return to a crates.io release
-# once one contains the fix. Selecting this revision does not qualify transport.
-asupersync = { version = "=0.6.0", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "ee72b665ee87f6c811b1631136676fbc31ec0a88", default-features = false }
+# once one contains these fixes. Selecting this revision does not qualify transport.
+asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "079214d3f8617656721eef2f3454d3b98ef80ed2", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }

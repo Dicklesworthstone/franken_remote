@@ -114,8 +114,8 @@ Asupersync's kqueue reactor is gated to macOS and the BSDs; on iOS the
 runtime silently fell back to a polling path. Measured on the iOS simulator:
 500 UDP round trips took 1.72 s unpatched and 21.5 ms with kqueue. The fix is
 upstream-only: add `target_os = "ios"` beside `target_os = "macos"` in the
-reactor's platform lists, 7 sites in `src/runtime/reactor/mod.rs` and 5 in
-`src/runtime/reactor/macos.rs` (pinned revision ee72b665). Until it lands the
+reactor's platform lists, 6 sites in `src/runtime/reactor/mod.rs` and 5 in
+`src/runtime/reactor/macos.rs` (pinned revision 079214d3f). Until it lands the
 iOS build uses a patched copy through an untracked cargo config
 (`FR_CARGO_CONFIG` for `mobile/ios/scripts/build-rust.sh`); the workspace pin
 is unchanged.

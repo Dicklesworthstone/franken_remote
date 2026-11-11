@@ -508,13 +508,12 @@ fn the_exact_name_under_a_trusted_root_completes_a_real_handshake() {
     );
 }
 
-// The pinned Asupersync reports the client's own certificate refusal as a
-// generic fatal handshake alert (`read_hs_fatal_alert`), which
-// `profile::handshake_error` maps to `NativeHandshake`. The distinct
-// `PeerCertificateRejected` needs the unlanded upstream certificate-code
-// change; these tests pin today's exact value, and the positive control above
-// (same fixture, right name and root) proves the refusal is the certificate.
-const CERTIFICATE_REFUSAL: Error = Error::NativeHandshake;
+// Since asupersync f7b674c83 the client's own certificate refusal arrives as
+// `ServerCertificateRejected`, which `profile::handshake_error` maps to
+// `PeerCertificateRejected`; before it, a generic fatal alert gave
+// `NativeHandshake`. The positive control above (same fixture, right name and
+// root) proves the refusal is the certificate.
+const CERTIFICATE_REFUSAL: Error = Error::PeerCertificateRejected;
 
 #[test]
 fn another_name_under_the_trusted_root_is_refused() {

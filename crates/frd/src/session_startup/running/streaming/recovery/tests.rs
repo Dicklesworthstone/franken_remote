@@ -193,7 +193,7 @@ async fn fixture_with_input(
         crate::input_quic::NegotiatedInput,
     )>,
 ) {
-    let (mut host, mut viewer) = pair(c, h, role, enabled, metrics, input).await;
+    let (mut host, mut viewer) = Box::pin(pair(c, h, role, enabled, metrics, input)).await;
     if input {
         host.enable_clock_sync().unwrap();
         viewer

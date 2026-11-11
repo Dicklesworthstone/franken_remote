@@ -184,9 +184,7 @@ async fn exercise(c: Cx, h: Cx, end: End) {
     assert_eq!(revoked.cleanup, CleanupStage::Fenced);
     assert_eq!(revoked.effects, EffectStage::Unknown);
     assert_eq!(
-        closed
-            .finish(fr_wire::closure::ClosedReason::HostFailure)
-            .await,
+        Box::pin(closed.finish(fr_wire::closure::ClosedReason::HostFailure)).await,
         None,
         "actual granted custody supersedes the pre-grant closure consumer"
     );

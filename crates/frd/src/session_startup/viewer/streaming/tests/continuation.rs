@@ -213,7 +213,7 @@ fn exercise(scenario: Scenario) {
             version: fr_wire::receiver_metrics::VERSION,
             required: true,
         });
-        let (mut host, mut viewer) = observing_pair(&c, &h, caps).await;
+        let (mut host, mut viewer) = Box::pin(observing_pair(&c, &h, caps)).await;
         let (hm, vm) = media_pair(&mut host, &mut viewer, &c, &h).await;
         let original_connection = host.io().unwrap().0.binding();
         let budget = if scenario == Scenario::NoOffer {

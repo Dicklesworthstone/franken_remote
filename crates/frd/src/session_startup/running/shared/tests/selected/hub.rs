@@ -77,16 +77,30 @@ async fn together<T>(hub: &mut Hub, publisher: &mut Publisher, work: impl Future
 // A healthy remote peer must continue consuming its original connection while
 // another peer performs a slower, rate-limited join. Pausing it intentionally
 // trips the existing per-viewer reference deadline; that is not a hub failure.
+// The peer stops between turns, never inside one: dropping a turn mid-drive
+// closes that viewer's session (SessionDrive), which is not what this models.
+// On a quiet connection a turn often waits inside its drive when `work` ends.
 async fn with_client<T>(peer: &mut Member, work: impl Future<Output = T>) -> T {
+    let stop = std::cell::Cell::new(false);
     let mut service = Box::pin(async {
-        loop {
+        while !stop.get() {
             client_turn(peer).await;
         }
     });
     let mut work = Box::pin(work);
+    let mut output = None;
     poll_fn(|cx| {
-        assert!(service.as_mut().poll(cx).is_pending());
-        work.as_mut().poll(cx)
+        if output.is_none()
+            && let std::task::Poll::Ready(value) = work.as_mut().poll(cx)
+        {
+            output = Some(value);
+            stop.set(true);
+        }
+        if service.as_mut().poll(cx).is_pending() {
+            return std::task::Poll::Pending;
+        }
+        assert!(stop.get(), "the peer's service ended before the work");
+        std::task::Poll::Ready(output.take().expect("work finished"))
     })
     .await
 }

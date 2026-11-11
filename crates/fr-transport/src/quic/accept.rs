@@ -6,10 +6,9 @@
 //! the host must independently enforce protected tailnet ingress and `LocalAPI`
 //! admission before exposing any application operation.
 //!
-//! The pinned upstream single-connection API cannot take a consumed Initial.
-//! Consequently the discovery datagram is discarded and the canonical handshake
-//! processes its retransmission. This costs an Initial PTO; it is not a new QUIC
-//! implementation, Retry protocol, lossless demultiplexer or multi-client server.
+//! The discovery datagram is handed to the canonical handshake, which starts from
+//! it. This is not a new QUIC implementation, Retry protocol, lossless demultiplexer
+//! or multi-client server.
 //! A bounded set of exact local addresses may compete for the same ONE incoming
 //! connection. Discovery polls them fairly under one aggregate budget; only the
 //! selected socket enters TLS. Success transfers it to the authenticated owner;
@@ -370,16 +369,16 @@ impl Listener {
                 // Recheck AFTER the receive: a ready packet is not permission
                 // to accept after the original acquisition budget expired.
                 remaining(cx, until, Error::InitialTimeout)?;
-                if let Some(packet) = packets.first()
+                if let Some(packet) = packets.into_iter().next()
                     && let Some((dcid, scid)) = initial(&packet.data)
                     && dcid != local_cid
                     && scid != local_cid
                 {
-                    candidate = Some((index, packet.src_addr, dcid, scid));
+                    candidate = Some((index, packet.src_addr, dcid, scid, packet));
                     break;
                 }
             }
-            let (index, peer, dcid, scid) = candidate.ok_or(Error::InitialBudget)?;
+            let (index, peer, dcid, scid, first) = candidate.ok_or(Error::InitialBudget)?;
             let endpoint = endpoints.swap_remove(index);
             let local = endpoint.local_addr();
             // Capacity remains ONE. No unused socket can acquire another peer
@@ -392,7 +391,10 @@ impl Listener {
             remaining(cx, until, Error::HandshakeTimeout)?;
             let connection = timeout_at(
                 Time::from_nanos(until),
-                NativeQuicUdpConnection::accept(
+                // The handshake starts from the Initial already read for discovery.
+                // Otherwise every connect waits out the client's 1.5 s handshake PTO
+                // for its retransmission.
+                NativeQuicUdpConnection::accept_with_initial(
                     cx,
                     endpoint,
                     driver,
@@ -400,6 +402,7 @@ impl Listener {
                     local_cid,
                     native_configuration(),
                     ALPN,
+                    first,
                 ),
             )
             .await

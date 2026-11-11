@@ -221,7 +221,10 @@ fn queued_grant_closure_before_broker_finish_has_only_the_original_lease_report(
                     "before broker.finish"
                 );
                 assert!(acquisition.active.is_none());
-                assert_eq!(closed.finish(ClosedReason::HostFailure).await, None);
+                assert_eq!(
+                    Box::pin(closed.finish(ClosedReason::HostFailure)).await,
+                    None
+                );
                 let done = Cell::new(false);
                 let mut records = Vec::new();
                 let (delivery, ()) = Box::pin(support::both(
