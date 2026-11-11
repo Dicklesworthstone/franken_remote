@@ -4,8 +4,12 @@
 
 use std::{cell::Cell, time::Duration};
 
+/// The seal and the reopen must follow the latest native change this closely.
+/// A live drag holds `AppKit`'s tracking loop until mouse-up, so a bound from
+/// the first change ended every drag slower than this instead of reopening.
+const FRESH: Duration = Duration::from_secs(2);
 /// A resize cannot keep extending the original cleanup/reopen opportunity.
-const MAX_AGE: Duration = Duration::from_secs(2);
+const MAX_AGE: Duration = Duration::from_secs(30);
 
 /// Plain, bounded metadata shared with the main-thread `AppKit` boundary.
 #[repr(C)]
@@ -79,8 +83,19 @@ struct State {
     original: Option<Checked>,
     pending: Option<Checked>,
     began: Option<Duration>,
+    /// The latest observed change; the seal's sample does not move it.
+    latest: Option<Duration>,
     sealed: bool,
     cancelled: bool,
+}
+
+impl State {
+    fn timely(&self, now: Duration) -> bool {
+        let within = |since: Option<Duration>, bound| {
+            since.is_some_and(|since| now.checked_sub(since).is_some_and(|age| age < bound))
+        };
+        within(self.latest, FRESH) && within(self.began, MAX_AGE)
+    }
 }
 
 /// Main-thread-only scalar state. Native callbacks never borrow a session or
@@ -139,6 +154,7 @@ impl Intent {
             return;
         }
         state.began.get_or_insert(current.observed);
+        state.latest = Some(current.observed);
         state.pending = Some(current);
         self.0.set(state);
     }
@@ -158,12 +174,7 @@ impl Intent {
                     && pending.placement == current.placement
                     && current.observed >= pending.observed
             })
-            && state.began.is_some_and(|began| {
-                current
-                    .observed
-                    .checked_sub(began)
-                    .is_some_and(|age| age < MAX_AGE)
-            });
+            && state.timely(current.observed);
         if valid {
             state.sealed = true;
             // Preserve the final event-domain observation so a regressing
@@ -188,10 +199,7 @@ impl Intent {
     pub(crate) fn take(&self, now: Option<Duration>) -> Option<Placement> {
         let state = self.0.get();
         let timely = now.is_some_and(|now| {
-            state.pending.is_some_and(|pending| now >= pending.observed)
-                && state
-                    .began
-                    .is_some_and(|began| now.checked_sub(began).is_some_and(|age| age < MAX_AGE))
+            state.pending.is_some_and(|pending| now >= pending.observed) && state.timely(now)
         });
         let result = (state.sealed && !state.cancelled && timely)
             .then(|| state.pending.map(|sample| sample.placement))
@@ -308,11 +316,49 @@ mod tests {
     }
 
     #[test]
-    fn original_deadline_and_clock_regressions_remain_terminal() {
-        let intent = armed();
-        intent.observe(sample(2, 110, 1280, 840), false);
-        intent.observe(sample(3, 2000, 1440, 930), false);
-        assert!(!intent.seal(sample(3, 2110, 1440, 930)));
+    fn a_slow_drag_reopens_when_it_ends_but_a_stale_or_endless_one_does_not() {
+        // A 3 s drag: AppKit reports sizes throughout and returns at mouse-up.
+        let slow = armed();
+        for (revision, ms, width) in [
+            (2, 110, 1000),
+            (3, 1500, 1100),
+            (4, 2900, 1200),
+            (5, 3100, 1285),
+        ] {
+            slow.observe(sample(revision, ms, width, 840), false);
+        }
+        assert!(slow.seal(sample(5, 3150, 1285, 840)));
+        assert_eq!(slow.take(Some(at(3300))).unwrap().size, (1285, 840));
+        // Sealed or taken 2 s after the latest change is too late.
+        let stale = armed();
+        stale.observe(sample(2, 110, 1280, 840), false);
+        stale.observe(sample(3, 2000, 1440, 930), false);
+        assert!(!stale.seal(sample(3, 4000, 1440, 930)));
+        let late_take = armed();
+        late_take.observe(sample(2, 110, 1280, 840), false);
+        late_take.observe(sample(3, 2000, 1440, 930), false);
+        assert!(late_take.seal(sample(3, 2110, 1440, 930)));
+        assert!(late_take.take(Some(at(4000))).is_none());
+        // Changes that keep coming cannot extend the receipt past MAX_AGE.
+        let endless = armed();
+        for step in 0..=30 {
+            endless.observe(
+                sample(u64::from(step) + 2, 110 + step * 1000, 1280 + step, 840),
+                false,
+            );
+        }
+        assert!(!endless.seal(sample(32, 30_120, 1310, 840)));
+        for (now, reopens) in [(30_109, true), (30_110, false)] {
+            let long = armed();
+            long.observe(sample(2, 110, 1280, 840), false);
+            long.observe(sample(3, 29_000, 1440, 930), false);
+            assert!(long.seal(sample(3, 29_050, 1440, 930)));
+            assert_eq!(long.take(Some(at(now))).is_some(), reopens);
+        }
+    }
+
+    #[test]
+    fn clock_and_revision_regressions_remain_terminal() {
         for late in [sample(3, 109, 1280, 840), sample(1, 120, 1280, 840)] {
             let intent = armed();
             intent.observe(sample(2, 110, 1280, 840), false);

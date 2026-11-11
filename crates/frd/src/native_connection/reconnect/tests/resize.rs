@@ -7,6 +7,8 @@ fn only_precise_resize_interruptions_reach_the_local_receipt_hook() {
     for failure in [
         Failure::Cancelled,
         Failure::Connection(ConnectionError::Cancelled),
+        // A drag held the main thread past the 1 s admission validity.
+        Failure::Connection(ConnectionError::Tailnet(fr_tailnet::Error::Expired)),
         Failure::Observation(ObserverError::Application),
         Failure::Observation(ObserverError::Session(S::Cancelled)),
         Failure::Observation(ObserverError::Session(S::Transport(
@@ -44,6 +46,9 @@ fn only_precise_resize_interruptions_reach_the_local_receipt_hook() {
         Failure::Clock,
         Failure::AttemptLimit,
         Failure::Connection(ConnectionError::Tailnet(fr_tailnet::Error::Revoked)),
+        Failure::Connection(ConnectionError::Tailnet(fr_tailnet::Error::IdentityChanged)),
+        Failure::Connection(ConnectionError::Tailnet(fr_tailnet::Error::KeyExpired)),
+        Failure::Connection(ConnectionError::Tailnet(fr_tailnet::Error::Clock)),
         Failure::Observation(ObserverError::Expired),
         Failure::Observation(ObserverError::Order),
         Failure::Observation(ObserverError::Streaming(StreamingViewerError::Transport(

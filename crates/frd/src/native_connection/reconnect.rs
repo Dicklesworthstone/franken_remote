@@ -640,12 +640,20 @@ fn failed_attempt_terminal<A: Application>(
 /// separately checked local resize receipt, successful cleanup and live
 /// supervisor are also required. Protocol, permission, native I/O uncertainty,
 /// ordinary geometry absence and arbitrary codec failures stay terminal.
+///
+/// A lapsed tailnet admission is included: a live window drag holds the
+/// viewer's main thread (and so the admission renewal) until mouse-up, so a
+/// drag longer than the 1 s admission validity ends the original attempt with
+/// `Expired` rather than `Cancelled`. The fresh attempt repeats `LocalAPI`
+/// admission; revocation, identity change and key expiry stay terminal.
 pub fn resize_interrupted(failure: Failure) -> bool {
     use crate::session_startup::{ControlledViewerError as C, Error as S};
     matches!(
         failure,
         Failure::Cancelled
-            | Failure::Connection(ConnectionError::Cancelled)
+            | Failure::Connection(
+                ConnectionError::Cancelled | ConnectionError::Tailnet(fr_tailnet::Error::Expired)
+            )
             | Failure::Observation(
                 ObserverError::Application
                     | ObserverError::Session(

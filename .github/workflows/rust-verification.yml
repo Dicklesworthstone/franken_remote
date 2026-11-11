@@ -443,6 +443,7 @@ jobs:
         run: |
           cargo test -p fr-native --lib --features macos-desktop --locked macos_control::
           cargo test -p fr-native --lib --features macos-desktop --locked macos_sizing::
+          cargo test -p fr-native --lib --features macos-desktop --locked macos_resize::
           cargo test -p fr-native --lib --features macos-desktop --locked macos_text::
           cargo test -p fr-native --lib --features macos-desktop --locked macos_input_receipts::
           cargo test -p fr-native --lib --features macos-desktop --locked macos::session::tests::
