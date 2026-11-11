@@ -112,6 +112,22 @@ impl Authority {
             }
         }
     }
+    /// The last publication clock must not wait on a projection/policy lock
+    /// after sampling local time. Contention refuses this file operation.
+    pub(crate) fn try_sample(&self, local_us: u64) -> Result<HostInstant, Refusal> {
+        match &self.source {
+            AuthoritySource::Host(_) => Ok(HostInstant::from_micros(local_us)),
+            AuthoritySource::Controller(authority) => {
+                authority.try_sample(fr_client::input::ClientInstant(local_us))
+            }
+        }
+    }
+    fn is_revoked(&self) -> bool {
+        match &self.source {
+            AuthoritySource::Host(monitor) => monitor.is_revoked(),
+            AuthoritySource::Controller(authority) => authority.is_revoked(),
+        }
+    }
     /// The authority deadline file receipt is held to; see `standing`.
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         match &self.source {
@@ -224,6 +240,11 @@ impl fmt::Display for Error {
     }
 }
 impl std::error::Error for Error {}
+impl From<receive::Error> for Error {
+    fn from(error: receive::Error) -> Self {
+        Self::Storage(error)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Progress {
@@ -474,7 +495,10 @@ impl HostReceiver {
     }
 
     /// Flush/verify FIRST, then resample authority and permission immediately
-    /// before rename. There is no policy lock across disk work. After rename,
+    /// before EVERY rename/link attempt, including keep-both retries. Resample
+    /// after authority-lock waits against the bound just checked. The clock
+    /// must not itself wait on policy locks (the worker uses `try_sample`).
+    /// There is no policy lock across disk work. After publication,
     /// committed effects are always returned even if cancellation arrives while
     /// the directory is being synced. No automatic retry or receipt fabrication.
     pub fn complete(
@@ -489,18 +513,45 @@ impl HostReceiver {
         self.charge(RECORD_COST)?;
         let mut active = self.active.take().expect("active checked");
         active.file.verify().map_err(Error::Storage)?;
-        let now = clock();
-        self.check(now)?;
-        if now >= active.deadline {
-            self.closed = true;
-            return Err(Error::Expired);
-        }
-        let publication = active.file.publish().map_err(Error::Storage)?;
+        let publication = active
+            .file
+            .publish_checked(|| self.publication_check(active.deadline, &mut clock))?;
         Ok(Receipt {
             id,
             bytes: active.size,
             publication,
         })
+    }
+
+    fn publication_check(
+        &mut self,
+        transfer_until: HostInstant,
+        clock: &mut impl FnMut() -> HostInstant,
+    ) -> Result<(), Error> {
+        let authority_until = self.check(clock())?;
+        // `check` may wait for the original input owner's policy lock. No
+        // second policy lock follows this fresh clock and atomic revoke check;
+        // a renewal cannot extend the already checked publication attempt.
+        let now = clock();
+        let error = if now < self.last_time {
+            Some(Error::Clock)
+        } else if !self.permission.is_approved() {
+            Some(Error::Permission)
+        } else if self.authority.is_revoked() {
+            Some(Error::Authority(Refusal::Revoked))
+        } else if now >= transfer_until {
+            Some(Error::Expired)
+        } else if now >= authority_until {
+            Some(Error::Authority(Refusal::ExpiredAtBoundary))
+        } else {
+            None
+        };
+        if let Some(error) = error {
+            self.closed = true;
+            return Err(error);
+        }
+        self.advance(now);
+        Ok(())
     }
 
     /// Service idle expiry as well as incoming records. The disk worker must
@@ -548,35 +599,42 @@ impl HostReceiver {
             Err(Error::NoTransfer)
         }
     }
-    fn check(&mut self, now: HostInstant) -> Result<(), Error> {
+    fn check(&mut self, now: HostInstant) -> Result<HostInstant, Error> {
         if self.closed {
             return Err(Error::Closed);
         }
-        let error = if now < self.last_time {
-            Some(Error::Clock)
+        let checked = if now < self.last_time {
+            Err(Error::Clock)
         } else if !self.permission.is_approved() {
-            Some(Error::Permission)
-        } else if let Err(error) = self.authority.deadline(now) {
-            Some(Error::Authority(error))
-        } else if self
-            .active
-            .as_ref()
-            .is_some_and(|active| now >= active.deadline)
-        {
-            Some(Error::Expired)
+            Err(Error::Permission)
         } else {
-            None
+            self.authority
+                .deadline(now)
+                .map_err(Error::Authority)
+                .and_then(|until| {
+                    if self
+                        .active
+                        .as_ref()
+                        .is_some_and(|active| now >= active.deadline)
+                    {
+                        Err(Error::Expired)
+                    } else {
+                        Ok(until)
+                    }
+                })
         };
-        if let Some(error) = error {
+        let until = checked.inspect_err(|_| {
             self.closed = true;
-            return Err(error);
-        }
+        })?;
+        self.advance(now);
+        Ok(until)
+    }
+    fn advance(&mut self, now: HostInstant) {
         let elapsed = now.as_micros() - self.last_time.as_micros();
         self.tokens = (self.tokens
             + u128::from(elapsed) * u128::from(self.policy.bytes_per_second))
         .min(u128::from(self.policy.burst_bytes) * MICRO);
         self.last_time = now;
-        Ok(())
     }
     fn charge(&mut self, bytes: u64) -> Result<(), Error> {
         let cost = u128::from(bytes) * MICRO;

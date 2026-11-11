@@ -447,14 +447,24 @@ impl PendingDirectory {
     /// original entry paths and ATP Merkle root were verified BEFORE renaming;
     /// choosing a conflict basename never changes or reinterprets that evidence.
     /// Each candidate is one no-replace rename relative to the pinned directory.
-    pub fn publish_named(mut self) -> Result<PublishedDirectory, Error> {
+    pub fn publish_named(self) -> Result<PublishedDirectory, Error> {
+        self.publish_named_checked(|| Ok(()))
+    }
+
+    /// Check the original authority after preparing each destination, including
+    /// every keep-both retry. No check runs after the whole tree is committed.
+    pub fn publish_named_checked<E: From<Error>>(
+        mut self,
+        mut check: impl FnMut() -> Result<(), E>,
+    ) -> Result<PublishedDirectory, E> {
         if self.state != State::Verified {
-            return Err(Error::Retired);
+            return Err(Error::Retired.into());
         }
         self.state = State::Failed;
         let original = self.destination.clone();
         let mut attempt = 0;
         loop {
+            check()?;
             match fs::renameat_with(
                 &self.reservation.root.fd,
                 self.directories[0].name.as_str(),
@@ -470,8 +480,8 @@ impl PendingDirectory {
                     self.destination = conflict_name(&original, self.nonce, attempt);
                     attempt += 1;
                 }
-                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict),
-                Err(error) => return Err(error.into()),
+                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict.into()),
+                Err(error) => return Err(Error::from(error).into()),
             }
         }
         // A successful rename commits the ENTIRE tree. Even a failed root sync

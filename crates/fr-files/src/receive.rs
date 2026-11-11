@@ -429,14 +429,27 @@ impl PendingFile {
     /// the receiving UI. Names are intentionally absent from `Debug` and wire
     /// diagnostics. A keep-both policy does not weaken the original ATP integrity
     /// check: verify the advertised manifest BEFORE choosing a conflict name.
-    pub fn publish_named(mut self) -> Result<PublishedFile, Error> {
+    pub fn publish_named(self) -> Result<PublishedFile, Error> {
+        self.publish_named_checked(|| Ok(()))
+    }
+
+    /// Recheck the original owner immediately before EACH publication attempt.
+    /// A keep-both collision may have waited in the filesystem; it is not
+    /// authority to try another name. The gate runs after candidate preparation
+    /// and outside filesystem/authority locks. A successful publication is never
+    /// rechecked or converted into a refusal after the committed effect.
+    pub fn publish_named_checked<E: From<Error>>(
+        mut self,
+        mut check: impl FnMut() -> Result<(), E>,
+    ) -> Result<PublishedFile, E> {
         if self.state != State::Verified {
-            return Err(Error::Retired);
+            return Err(Error::Retired.into());
         }
         self.state = State::Failed;
         let original = self.destination.clone();
         let mut attempt = 0;
         loop {
+            check()?;
             match self
                 .staging
                 .publish(self.reservation.root.fd.as_fd(), self.destination.as_str())
@@ -449,8 +462,8 @@ impl PendingFile {
                     self.destination = conflict_name(&original, self.nonce, attempt);
                     attempt += 1;
                 }
-                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict),
-                Err(error) => return Err(error.into()),
+                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict.into()),
+                Err(error) => return Err(Error::from(error).into()),
             }
         }
         // After publication succeeds, cleanup MUST NOT unlink this destination even
@@ -547,11 +560,15 @@ impl PendingObject {
             Self::Directory(d) => d.verify(),
         }
     }
-    pub(crate) fn publish(self) -> Result<Publication, Error> {
+    pub(crate) fn publish_checked<E: From<Error>>(
+        self,
+        check: impl FnMut() -> Result<(), E>,
+    ) -> Result<Publication, E> {
         match self {
-            Self::File(f) => f.publish(),
-            Self::Directory(d) => d.publish(),
+            Self::File(f) => f.publish_named_checked(check),
+            Self::Directory(d) => d.publish_named_checked(check),
         }
+        .map(|published| published.publication())
     }
     pub(crate) fn cancel(self) -> Result<(), Error> {
         match self {

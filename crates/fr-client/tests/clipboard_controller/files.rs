@@ -144,3 +144,43 @@ fn file_handoff_cannot_outlive_drop_stop_or_replacement_of_original_controller()
         assert_eq!(authority.sample(client(1)), Err(Refusal::Revoked));
     }
 }
+
+#[test]
+fn publication_clock_keeps_the_original_projection_cursor_and_terminal_fences() {
+    let mut input = accepted();
+    ready(&mut input, 0, 0);
+    let authority = receive(&mut input, 0).unwrap();
+    assert!(!authority.is_revoked());
+    let before = authority.sample(client(10)).unwrap();
+    input.tick(client(20)).unwrap();
+    let final_sample = authority.try_sample(client(11)).unwrap();
+    assert!(final_sample >= before);
+    assert!(final_sample.as_micros() < C);
+    authority.deadline(final_sample).unwrap();
+    // Both sample methods share one ordered consumer; trying to reuse an older
+    // timestamp cannot obtain a different publication clock.
+    assert!(authority.try_sample(client(9)).is_err());
+    assert!(authority.is_revoked());
+    assert!(authority.sample(client(21)).is_err());
+    input.tick(client(22)).unwrap();
+    assert!(input.stopped().is_none());
+}
+
+#[test]
+fn publication_clock_never_extends_suspended_or_dropped_file_authority() {
+    let mut input = accepted();
+    ready(&mut input, 0, 0);
+    let authority = receive(&mut input, 0).unwrap();
+    input.tick(client(1_500_001)).unwrap();
+    assert!(input.suspended_since().is_some());
+    authority.try_sample(client(1_500_002)).unwrap();
+    assert!(authority.try_sample(client(3_000_001)).is_err());
+    assert!(authority.is_revoked());
+
+    let mut input = accepted();
+    ready(&mut input, 0, 0);
+    let authority = receive(&mut input, 0).unwrap();
+    drop(input);
+    assert!(authority.is_revoked());
+    assert_eq!(authority.try_sample(client(1)), Err(Refusal::Revoked));
+}

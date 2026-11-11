@@ -107,10 +107,22 @@ impl Shared {
     // Every native-stage clock callback also checks parent cancellation. In
     // particular, cancellation during fsync is fenced at the final rename gate.
     fn sample(&self) -> HostInstant {
+        self.sample_for(false)
+    }
+    fn publication_sample(&self) -> HostInstant {
+        self.sample_for(true)
+    }
+    fn sample_for(&self, publication: bool) -> HostInstant {
         if self.cx.checkpoint().is_err() {
             self.permission.revoke();
         }
-        if let Ok(now) = self.authority.sample(self.clock.now().as_nanos() / 1000) {
+        let local = self.clock.now().as_nanos() / 1000;
+        let sample = if publication {
+            self.authority.try_sample(local)
+        } else {
+            self.authority.sample(local)
+        };
+        if let Ok(now) = sample {
             self.last_sample.store(now.as_micros(), Ordering::Release);
             now
         } else {
@@ -478,12 +490,12 @@ fn execute(
                     .write(binding, id, offset, data, || shared.sample())
                     .map(Completion::Written),
                 None => receiver
-                    .complete(binding, id, || shared.sample())
+                    .complete(binding, id, || shared.publication_sample())
                     .map(Completion::Published),
             }
         }
         Command::Complete(id) => receiver
-            .complete(binding, id, || shared.sample())
+            .complete(binding, id, || shared.publication_sample())
             .map(Completion::Published),
         Command::Cancel(id) => receiver.cancel(binding, id).map(|()| Completion::Cancelled),
     }

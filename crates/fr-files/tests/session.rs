@@ -1,4 +1,6 @@
 #![cfg(target_os = "linux")]
+#[path = "session/publication.rs"]
+mod publication;
 use asupersync::atp::object::ContentId;
 use fr_core::{
     authority::{AuthorityError, AuthorityPolicy, ControlStatus, SessionAuthority},

@@ -88,6 +88,54 @@ fn empty_root_is_verified_and_published() {
     assert!(scratch.0.join("project").is_dir());
     assert_eq!(fs::read_dir(scratch.0.join("project")).unwrap().count(), 0);
 }
+
+#[test]
+fn whole_tree_publication_rechecks_each_conflict_and_cleans_an_unpublished_tree() {
+    use fr_files::receive::ConflictPolicy;
+    for refuse in [true, false] {
+        let scratch = Scratch::new();
+        let root = scratch
+            .open()
+            .with_conflict_policy(ConflictPolicy::KeepBoth);
+        fs::create_dir(scratch.0.join("project")).unwrap();
+        fs::write(scratch.0.join("project/original"), b"keep").unwrap();
+        let mut pending = root.begin_directory(manifest(&[("a", b"new")])).unwrap();
+        pending.write_entry(0, 0, b"new").unwrap();
+        pending.verify().unwrap();
+        let mut attempts = 0;
+        let result = pending.publish_named_checked(|| {
+            attempts += 1;
+            if refuse && attempts == 2 {
+                Err(Error::Retired)
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            fs::read(scratch.0.join("project/original")).unwrap(),
+            b"keep"
+        );
+        if refuse {
+            assert!(matches!(result, Err(Error::Retired)));
+            assert_eq!(scratch.entries(), 1);
+            // Whole-tree cleanup returned the original reservation.
+            root.begin_directory(manifest(&[]))
+                .unwrap()
+                .cancel()
+                .unwrap();
+        } else {
+            let receipt = result.unwrap();
+            assert!(receipt.was_renamed());
+            assert_eq!(receipt.publication(), Publication::Durable);
+            assert_eq!(
+                fs::read(scratch.0.join(receipt.name()).join("a")).unwrap(),
+                b"new"
+            );
+            assert_eq!(scratch.entries(), 2);
+        }
+    }
+}
 #[test]
 fn cancel_and_corrupt_entry_reclaim_the_entire_private_tree() {
     let scratch = Scratch::new();

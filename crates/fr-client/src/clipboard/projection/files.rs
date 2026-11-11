@@ -47,6 +47,13 @@ impl ControllerAuthority {
             state.stopped.store(true, Ordering::Release);
         }
     }
+    /// Lock-free lifetime fence for a publication whose policy was just checked.
+    /// This does not replace the clock, readiness or lease checks.
+    pub fn is_revoked(&self) -> bool {
+        self.state
+            .upgrade()
+            .is_none_or(|state| state.stopped.load(Ordering::Acquire))
+    }
     /// Sample a trusted CLIENT monotonic clock in the original host's domain.
     /// The disk owner calls this before every external stage, including the
     /// final rename gate. Wire timestamps and newly constructed IDs are not clocks.
@@ -57,6 +64,32 @@ impl ControllerAuthority {
             .map_err(|_| Refusal::Revoked)?;
         self.deadline(at)?;
         Ok(at)
+    }
+    /// Project a final native clock without waiting for either policy lock.
+    /// Used after blocking publication authorization: a busy owner refuses the
+    /// attempt instead of spending its already sampled lifetime in a lock wait.
+    /// This updates the SAME consumer cursor and never renews its lease proof.
+    pub fn try_sample(&self, now: ClientInstant) -> Result<HostInstant, Refusal> {
+        let state = self.state.upgrade().ok_or(Refusal::Revoked)?;
+        let mut cursor = self
+            .cursor
+            .try_lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        let mut metadata = state
+            .inner
+            .try_lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        let (host, local) = state
+            .sample_cursor_locked(now, &mut cursor, &mut metadata, false, false)
+            .map_err(|_| {
+                state.stopped.store(true, Ordering::Release);
+                Refusal::Revoked
+            })?;
+        if local.0 >= metadata.local_until || host.as_micros() >= metadata.host_until {
+            state.stopped.store(true, Ordering::Release);
+            return Err(Refusal::Authority(AuthorityError::LeaseExpired));
+        }
+        Ok(host)
     }
     /// Validate this consumer's exact sample. Concurrent input-owner updates may
     /// tighten the decision, never extend an in-flight file's fixed lifetime.
@@ -138,5 +171,91 @@ impl Owner {
             lease: self.state.binding.lease,
             channel,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clipboard::projection::Metadata;
+    use fr_core::{
+        clipboard::Binding,
+        ids::{HostBootId, OsSessionId},
+    };
+    use fr_media::freshness::{ClockCorrelation, ClockPolicy, ClockSample};
+    use std::sync::atomic::AtomicBool;
+
+    fn owner() -> Owner {
+        let parent = ControlBinding {
+            id: 1,
+            host_boot: HostBootId::from_raw(1),
+            os_session: OsSessionId::from_raw(2),
+            remote_session: RemoteSessionId::from_raw(3),
+        };
+        Owner {
+            attached: false,
+            state: Arc::new(State {
+                stopped: AtomicBool::new(false),
+                binding: Binding {
+                    session: parent.remote_session,
+                    lease: InputLeaseId::from_raw(4),
+                },
+                parent,
+                display_channel: 2,
+                input_channel: 3,
+                inner: Mutex::new(Metadata {
+                    receiver: None,
+                    clock: ClockCorrelation::new(
+                        ClockSample {
+                            host_boot: parent.host_boot,
+                            client_sent_us: 0,
+                            client_received_us: 100,
+                            host_sample_us: 0,
+                        },
+                        ClockPolicy {
+                            drift_ppm: 0,
+                            ..ClockPolicy::default()
+                        },
+                    )
+                    .unwrap(),
+                    last_client: 100,
+                    last_host: 100,
+                    host_until: 1_000_000,
+                    local_until: 1_000_000,
+                    mapped: true,
+                    view_until: Some(10_000),
+                    obligations_until: 1_000_000,
+                    last_view_until: Some(10_000),
+                    paused_since: None,
+                    resume_ticket: false,
+                    reference_recovery: false,
+                }),
+            }),
+        }
+    }
+
+    #[test]
+    fn final_projection_never_waits_on_either_original_policy_mutex() {
+        for cursor in [true, false] {
+            let mut owner = owner();
+            let authority = owner.attach_files(5, ClientInstant(100)).unwrap();
+            let cursor_guard = cursor.then(|| authority.cursor.lock().unwrap());
+            let state_guard = (!cursor).then(|| owner.state.inner.lock().unwrap());
+            let other = authority.clone();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                tx.send(other.try_sample(ClientInstant(101))).unwrap();
+            });
+            let result = rx.recv_timeout(std::time::Duration::from_secs(5));
+            // Release before asserting: a regressed blocking implementation
+            // cannot leave a hung test thread behind after the failure.
+            drop(cursor_guard);
+            drop(state_guard);
+            worker.join().unwrap();
+            assert_eq!(result.unwrap(), Err(Refusal::AuthorityUnavailable));
+            assert!(!authority.is_revoked());
+            // Refusing one boundary creates no new projection or owner epoch.
+            authority.try_sample(ClientInstant(102)).unwrap();
+        }
     }
 }

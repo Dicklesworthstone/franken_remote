@@ -83,3 +83,55 @@ fn exhausted_conflict_candidates_fail_bounded_without_changing_existing_entries(
         Ok(Publication::Durable)
     );
 }
+
+#[test]
+fn checked_publication_reclaims_staging_when_a_conflict_retry_loses_permission() {
+    let scratch = Scratch::new();
+    let root = scratch
+        .open()
+        .with_conflict_policy(ConflictPolicy::KeepBoth);
+    fs::write(scratch.0.join("item"), b"existing").unwrap();
+    let pending = verified(&root, "item", b"private incoming");
+    let mut calls = 0;
+    let result = pending.publish_named_checked(|| {
+        calls += 1;
+        if calls == 2 {
+            Err(Error::Retired)
+        } else {
+            Ok(())
+        }
+    });
+    assert!(matches!(result, Err(Error::Retired)));
+    assert_eq!(calls, 2);
+    assert_eq!(scratch.entries(), 1);
+    assert_eq!(fs::read(scratch.0.join("item")).unwrap(), b"existing");
+    assert_eq!(
+        verified(&root, "other", b"x").publish(),
+        Ok(Publication::Durable)
+    );
+}
+
+#[test]
+fn first_publication_refusal_has_no_effect_and_success_has_no_post_commit_gate() {
+    let scratch = Scratch::new();
+    let root = scratch.open();
+    assert!(matches!(
+        verified(&root, "item", b"secret").publish_named_checked(|| Err(Error::Retired)),
+        Err(Error::Retired)
+    ));
+    assert_eq!(scratch.entries(), 0);
+    let mut calls = 0;
+    let published = verified(&root, "item", b"secret")
+        .publish_named_checked(|| {
+            calls += 1;
+            if calls == 1 {
+                Ok(())
+            } else {
+                Err(Error::Retired)
+            }
+        })
+        .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(published.publication(), Publication::Durable);
+    assert_eq!(fs::read(scratch.0.join("item")).unwrap(), b"secret");
+}

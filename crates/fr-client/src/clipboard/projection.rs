@@ -448,12 +448,22 @@ impl State {
     ) -> Result<(HostInstant, ClientInstant), Error> {
         let mut c = cursor.lock().map_err(|_| Error::Stopped)?;
         let mut m = self.inner.lock().map_err(|_| Error::Stopped)?;
+        self.sample_cursor_locked(now, &mut c, &mut m, require_view, concurrent)
+    }
+    fn sample_cursor_locked(
+        &self,
+        now: ClientInstant,
+        c: &mut Cursor,
+        m: &mut Metadata,
+        require_view: bool,
+        concurrent: bool,
+    ) -> Result<(HostInstant, ClientInstant), Error> {
         if !concurrent && now.0 < c.sampled_client {
             return self.failure(Error::Clock);
         }
         let sampled_client = now.0.max(c.sampled_client);
         let local = sampled_client.max(c.client).max(m.last_client);
-        self.lifecycle(&mut m, local)?;
+        self.lifecycle(m, local)?;
         let rolling = c.host.checked_add(local - c.client).ok_or(Error::Clock)?;
         let base = m
             .last_host
@@ -476,7 +486,7 @@ impl State {
             client: local,
             host,
         };
-        self.ready_at(&mut m, local, host, require_view)?;
+        self.ready_at(m, local, host, require_view)?;
         Ok((HostInstant::from_micros(host), ClientInstant(local)))
     }
     fn lifecycle(&self, m: &mut Metadata, local: u64) -> Result<(), Error> {

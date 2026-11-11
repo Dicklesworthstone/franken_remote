@@ -78,6 +78,39 @@ idle timeout, exact rate backpressure, and cleanup independent of desktop input.
 The test clocks deliberately place events at boundaries; these are not live
 Tailscale, kernel-timeout, multi-GB resumption, or transport-saturation claims.
 
+### Final publication authority, including conflict retries
+
+Every atomic publication attempt now rechecks the original controller and file
+permission, including each explicitly selected keep-both filename candidate.
+A failed rename may consume time; its earlier check cannot authorize the next
+candidate. Both regular files and complete staged directory trees use this
+same gate. Refusal drops the unpublished staging owner without replacing an
+existing destination or returning a committed receipt.
+
+The gate samples time again after the original authority's policy lock has
+been released. It checks that fresh sample against the authority deadline
+just observed and the transfer's immutable deadline, then checks the original
+owner's atomic revocation fence and file permission. A concurrent renewal
+cannot extend that attempt's checked lifetime. On the receiving controller,
+the final sample uses the original clock-projection cursor with nonblocking
+policy locks; contention refuses file publication instead of waiting with an
+aging timestamp. It does not create a new projection, owner, lease, or transfer.
+No policy lock spans a filesystem operation. Once publication succeeds, a
+later cancellation or directory-sync failure cannot erase the actual effect.
+
+The new regressions cover a real policy-lock wait crossing exact lease expiry,
+its still-valid counterpart, final-sample permission loss/revocation/clock
+regression, expiry and permission loss between keep-both candidates, directory
+cleanup, and successful publication without a post-effect refusal. On
+2026-11-11, the full `fr-client` clipboard-controller integration target passed
+32 tests, including the new projection regressions; the additional unit test
+holding each original policy mutex passed. Strict Clippy also passed for all
+`fr-client` targets and features. The new `fr-files` filesystem
+regressions remain **blocked**: two pinned-toolchain check attempts were killed
+while compiling unchanged Asupersync `ee72b665`, before reaching this crate.
+Workspace formatting passed. These source and component results do not claim
+a complete runtime build or live file-transfer qualification.
+
 ## Nonblocking disk worker
 
 `fr_files::worker::spawn` runs the existing `HostReceiver` on one supervised
