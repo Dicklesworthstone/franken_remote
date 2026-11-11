@@ -135,6 +135,7 @@ const CLICK_SLOP: f64 = 4.0;
 /// Click counting for posted presses: Quartz trusts the click state an event
 /// carries, so a double click is two presses of one button within the
 /// double-click interval and a few points of each other.
+#[derive(Clone)]
 pub struct Clicks {
     interval: Duration,
     last: Option<(usize, Instant, (f64, f64), i64)>,

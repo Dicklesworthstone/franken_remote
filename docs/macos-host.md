@@ -60,6 +60,29 @@ signature keeps the grants across updates; an unsigned or ad-hoc build would
 need them again after every rebuild. Both entries can be revoked any time in
 System Settings > Privacy & Security.
 
+## Input at the final authority boundary
+
+The Quartz input agent prepares each complete keyboard, pointer, button and
+scroll event before its final original-deadline and revoke check. Native event
+allocation, display validation, pointer queries and event-property setup may
+block; none can consume an already-checked action lifetime and then post the
+action. After authorization, the agent posts only the event it already owns.
+An expired or revoked action releases that event without posting or retrying it.
+
+Pointer-query failure refuses the action instead of inventing a position at the
+display origin. Cancelled button preparation does not advance double-click
+state. Held-state cleanup retains possibly submitted presses and releases only
+this owner's state; a completed release is removed from that state only after
+native submission succeeds. This does not make Quartz submission an application
+acknowledgment or eliminate OS changes racing an already-posted event.
+
+`macos_input_preparation` exercises the production Rust owner with a clearly
+identified deterministic FFI test boundary on non-Mac builders. It checks
+prepare/check/post ordering, expired preparation, refusal, retained coordinates,
+click state and release custody. It does not test Quartz, Accessibility or the
+native display server; `macos_input_events` and real Mac session qualification
+remain separate requirements.
+
 ## Committed Unicode input
 
 The Quartz input executor implements the optional `native-input-text` v1

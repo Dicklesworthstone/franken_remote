@@ -112,15 +112,32 @@ static _Atomic int32_t route_pid;
 
 void fr_in_route_to_process(int32_t pid) { atomic_store(&route_pid, pid > 0 ? pid : 0); }
 
-// Every event this file creates is posted here. Borrowed form lets a text
-// scalar retain BOTH events across the final Rust authority check.
-static void post_borrowed(CGEventRef event, uint64_t flags) {
-    CGEventSetFlags(event, (CGEventFlags)(flags | FR_IN_NONCOALESCED));
+// A complete event reaches the OS without a native allocation, pointer read
+// or property mutation after Rust's final original-authority check.
+static void post_ready(CGEventRef event) {
     int32_t pid = atomic_load(&route_pid);
     if (pid)
         CGEventPostToPid(pid, event);
     else
         CGEventPost(kCGHIDEventTap, event);
+}
+
+static void post_borrowed(CGEventRef event, uint64_t flags) {
+    CGEventSetFlags(event, (CGEventFlags)(flags | FR_IN_NONCOALESCED));
+    post_ready(event);
+}
+
+static int prepared(CGEventRef event, uint64_t flags, void **out) {
+    if (!event) return FR_IN_UNAVAILABLE;
+    CGEventSetFlags(event, (CGEventFlags)(flags | FR_IN_NONCOALESCED));
+    *out = event;
+    return FR_IN_OK;
+}
+
+int fr_in_event_post(void *event) {
+    if (!event) return FR_IN_INVALID;
+    post_ready((CGEventRef)event);
+    return FR_IN_OK;
 }
 
 static int post(CGEventRef event, uint64_t flags) {
@@ -132,13 +149,27 @@ static int post(CGEventRef event, uint64_t flags) {
 
 // `modifier`: the key is a held modifier, so the window server must see a
 // flags change (`flags` is the state after it), as hardware produces.
-int fr_in_key(void *source, uint16_t keycode, int down, int repeat, int modifier, uint64_t flags) {
-    if (!source) return FR_IN_INVALID;
+int fr_in_key_prepare(void *source, uint16_t keycode, int down, int repeat, int modifier,
+                       uint64_t flags, void **out) {
+    if (!out) return FR_IN_INVALID;
+    *out = NULL;
+    if (!source || keycode >= 128) return FR_IN_INVALID;
     CGEventRef event = CGEventCreateKeyboardEvent((CGEventSourceRef)source, keycode, down != 0);
     if (!event) return FR_IN_UNAVAILABLE;
     if (modifier) CGEventSetType(event, kCGEventFlagsChanged);
     if (repeat) CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, 1);
-    return post(event, flags);
+    return prepared(event, flags, out);
+}
+
+// Release-only cleanup calls the combined form after authority has ended.
+int fr_in_key(void *source, uint16_t keycode, int down, int repeat, int modifier, uint64_t flags) {
+    if (down || repeat) return FR_IN_INVALID;
+    void *event = NULL;
+    int result = fr_in_key_prepare(source, keycode, down, repeat, modifier, flags, &event);
+    if (result) return result;
+    result = fr_in_event_post(event);
+    CFRelease((CGEventRef)event);
+    return result;
 }
 
 // Prepare one complete Unicode scalar. Rust owns both returned events; no
@@ -175,6 +206,8 @@ int fr_in_text_prepare(void *source, const uint16_t *units, size_t count,
         CFRelease(release);
         return FR_IN_UNAVAILABLE;
     }
+    CGEventSetFlags(press, (CGEventFlags)FR_IN_NONCOALESCED);
+    CGEventSetFlags(release, (CGEventFlags)FR_IN_NONCOALESCED);
     *down = press;
     *up = release;
     return FR_IN_OK;
@@ -189,8 +222,8 @@ int fr_in_text_post(void *down, void *up) {
     // These private, immutable owners came only from text_prepare. Permission
     // and display queries run BEFORE Rust's final deadline check, never here.
     if (!down || !up || down == up) return FR_IN_INVALID;
-    post_borrowed((CGEventRef)down, 0);
-    post_borrowed((CGEventRef)up, 0);
+    post_ready((CGEventRef)down);
+    post_ready((CGEventRef)up);
     return FR_IN_OK;
 }
 
@@ -198,16 +231,21 @@ void fr_in_event_close(void *event) {
     if (event) CFRelease((CGEventRef)event);
 }
 
-static CGPoint current_location(void) {
+static int current_location(CGPoint *out) {
     CGEventRef now = CGEventCreate(NULL);
-    CGPoint at = now ? CGEventGetLocation(now) : CGPointZero;
-    if (now) CFRelease(now);
-    return at;
+    if (!now) return FR_IN_UNAVAILABLE;
+    CGPoint at = CGEventGetLocation(now);
+    CFRelease(now);
+    if (!isfinite(at.x) || !isfinite(at.y)) return FR_IN_UNAVAILABLE;
+    *out = at;
+    return FR_IN_OK;
 }
 
 int fr_in_location(double *x, double *y) {
     if (!x || !y) return FR_IN_INVALID;
-    CGPoint at = current_location();
+    CGPoint at;
+    int result = current_location(&at);
+    if (result) return result;
     *x = at.x;
     *y = at.y;
     return FR_IN_OK;
@@ -236,29 +274,36 @@ static void mouse_types(int button, CGEventType *down, CGEventType *up, CGEventT
 
 // Move to (x, y) global points. `held` is the lowest-numbered button this
 // executor holds (-1 for none): a move with a button down is a drag.
-int fr_in_move(void *source, double x, double y, int held, uint64_t flags) {
-    if (!source || held < -1 || held > 4) return FR_IN_INVALID;
+int fr_in_move_prepare(void *source, double x, double y, int held, uint64_t flags, void **out) {
+    if (!out) return FR_IN_INVALID;
+    *out = NULL;
+    if (!source || held < -1 || held > 4 || !isfinite(x) || !isfinite(y)) return FR_IN_INVALID;
     CGEventType type = kCGEventMouseMoved, down, up;
     CGMouseButton button = kCGMouseButtonLeft;
     if (held >= 0) {
         mouse_types(held, &down, &up, &type);
         button = (CGMouseButton)held;
     }
-    CGPoint from = current_location(), to = CGPointMake(x, y);
+    CGPoint from, to = CGPointMake(x, y);
+    int result = current_location(&from);
+    if (result) return result;
     CGEventRef event = CGEventCreateMouseEvent((CGEventSourceRef)source, type, to, button);
     if (!event) return FR_IN_UNAVAILABLE;
     // Applications that track relative motion read these, as from a mouse.
     CGEventSetIntegerValueField(event, kCGMouseEventDeltaX, (int64_t)lround(to.x - from.x));
     CGEventSetIntegerValueField(event, kCGMouseEventDeltaY, (int64_t)lround(to.y - from.y));
     if (held >= 2) CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, held);
-    return post(event, flags);
+    return prepared(event, flags, out);
 }
 
 // A press or release at (x, y): where this executor last placed the pointer,
 // since a just-posted move may not have reached the window server yet.
-int fr_in_button(void *source, int button, int pressed, int64_t clicks, double x, double y,
-                 uint64_t flags) {
-    if (!source || button < 0 || button > 4 || clicks < 1) return FR_IN_INVALID;
+int fr_in_button_prepare(void *source, int button, int pressed, int64_t clicks, double x, double y,
+                         uint64_t flags, void **out) {
+    if (!out) return FR_IN_INVALID;
+    *out = NULL;
+    if (!source || button < 0 || button > 4 || clicks < 1 || !isfinite(x) || !isfinite(y))
+        return FR_IN_INVALID;
     CGEventType down, up, dragged;
     mouse_types(button, &down, &up, &dragged);
     CGEventRef event = CGEventCreateMouseEvent((CGEventSourceRef)source, pressed ? down : up,
@@ -266,33 +311,40 @@ int fr_in_button(void *source, int button, int pressed, int64_t clicks, double x
     if (!event) return FR_IN_UNAVAILABLE;
     CGEventSetIntegerValueField(event, kCGMouseEventClickState, clicks);
     if (button >= 2) CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, button);
-    return post(event, flags);
+    return prepared(event, flags, out);
 }
 
-// Whole lines: positive `lines_y` scrolls up, positive `lines_x` left (Quartz).
-int fr_in_scroll(void *source, int32_t lines_y, int32_t lines_x, double x, double y,
+// Release-only cleanup does not acquire fresh authority or move the pointer
+// using a new query. The caller supplies its retained known position.
+int fr_in_button(void *source, int button, int pressed, int64_t clicks, double x, double y,
                  uint64_t flags) {
-    if (!source) return FR_IN_INVALID;
-    CGEventRef event = CGEventCreateScrollWheelEvent2((CGEventSourceRef)source,
-                                                      kCGScrollEventUnitLine, 2, lines_y, lines_x, 0);
-    if (!event) return FR_IN_UNAVAILABLE;
-    CGEventSetLocation(event, CGPointMake(x, y));
-    return post(event, flags);
+    if (pressed) return FR_IN_INVALID;
+    void *event = NULL;
+    int result = fr_in_button_prepare(source, button, pressed, clicks, x, y, flags, &event);
+    if (result) return result;
+    result = fr_in_event_post(event);
+    CFRelease((CGEventRef)event);
+    return result;
 }
 
-// Logical native scroll distance, signed 16.16. The constructor takes whole
-// pixels; the documented fixed-point fields retain the fractional component.
-// Neither the source's line scale nor the display backing scale is applied.
-int fr_in_pixel_scroll(void *source, int32_t fixed_y, int32_t fixed_x, double x, double y,
-                       uint64_t flags) {
-    if (!source) return FR_IN_INVALID;
+// Whole lines or signed 16.16 logical pixels. Both retain exactly the native
+// distance without display scaling; positive values mean up/left (Quartz).
+int fr_in_scroll_prepare(void *source, int32_t delta_y, int32_t delta_x, double x, double y,
+                         int pixels, uint64_t flags, void **out) {
+    if (!out) return FR_IN_INVALID;
+    *out = NULL;
+    if (!source || (pixels != 0 && pixels != 1) || !isfinite(x) || !isfinite(y))
+        return FR_IN_INVALID;
     CGEventRef event = CGEventCreateScrollWheelEvent2((CGEventSourceRef)source,
-        kCGScrollEventUnitPixel, 2, fixed_y / 65536, fixed_x / 65536, 0);
+        pixels ? kCGScrollEventUnitPixel : kCGScrollEventUnitLine, 2,
+        pixels ? delta_y / 65536 : delta_y, pixels ? delta_x / 65536 : delta_x, 0);
     if (!event) return FR_IN_UNAVAILABLE;
-    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis1, fixed_y);
-    CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis2, fixed_x);
+    if (pixels) {
+        CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis1, delta_y);
+        CGEventSetIntegerValueField(event, kCGScrollWheelEventFixedPtDeltaAxis2, delta_x);
+    }
     CGEventSetLocation(event, CGPointMake(x, y));
-    return post(event, flags);
+    return prepared(event, flags, out);
 }
 
 double fr_in_double_click_interval(void) { return [NSEvent doubleClickInterval]; }
@@ -315,32 +367,42 @@ static int is_modifier(uint16_t keycode) {
 }
 
 // Release every recorded key and button once per process, on a fresh source
-// so it never races the executor's own. Returns 1 when this call released.
+// so it never races the executor's own. Returns 1 only when all release posts
+// were submitted; 0 means already attempted or incomplete/unknown cleanup.
 int fr_in_emergency_release(void) {
     if (atomic_flag_test_and_set(&releasing)) return 0;
     CGEventSourceRef source = new_source();
     if (!source) return 0;
+    BOOL complete = YES;
     uint64_t keys[2] = {atomic_load(&held_keys[0]), atomic_load(&held_keys[1])};
     for (uint16_t keycode = 0; keycode < 128; keycode++) {
         if (!(keys[keycode / 64] & (1ULL << (keycode % 64)))) continue;
         CGEventRef event = CGEventCreateKeyboardEvent(source, keycode, false);
-        if (!event) continue;
+        if (!event) {
+            complete = NO;
+            continue;
+        }
         if (is_modifier(keycode)) CGEventSetType(event, kCGEventFlagsChanged);
         post(event, 0);
     }
     uint32_t buttons = atomic_load(&held_buttons);
-    CGPoint at = current_location();
-    for (int button = 0; button < 5; button++) {
+    CGPoint at;
+    int location = buttons ? current_location(&at) : FR_IN_OK;
+    if (location != FR_IN_OK) complete = NO;
+    for (int button = 0; location == FR_IN_OK && button < 5; button++) {
         if (!(buttons & (1u << button))) continue;
         CGEventType down, up, dragged;
         mouse_types(button, &down, &up, &dragged);
         CGEventRef event = CGEventCreateMouseEvent(source, up, at, (CGMouseButton)button);
-        if (!event) continue;
+        if (!event) {
+            complete = NO;
+            continue;
+        }
         if (button >= 2) CGEventSetIntegerValueField(event, kCGMouseEventButtonNumber, button);
         post(event, 0);
     }
     CFRelease(source);
-    return 1;
+    return complete ? 1 : 0;
 }
 
 // The macOS form of Linux's parent-death signal: the expected parent's exit

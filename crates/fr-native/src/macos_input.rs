@@ -66,6 +66,15 @@ unsafe extern "C" {
         modifier: c_int,
         flags: u64,
     ) -> c_int;
+    fn fr_in_key_prepare(
+        source: *mut c_void,
+        keycode: u16,
+        down: c_int,
+        repeat: c_int,
+        modifier: c_int,
+        flags: u64,
+        out: *mut *mut c_void,
+    ) -> c_int;
     fn fr_in_text_prepare(
         source: *mut c_void,
         units: *const u16,
@@ -74,9 +83,17 @@ unsafe extern "C" {
         up: *mut *mut c_void,
     ) -> c_int;
     fn fr_in_text_post(down: *mut c_void, up: *mut c_void) -> c_int;
+    fn fr_in_event_post(event: *mut c_void) -> c_int;
     fn fr_in_event_close(event: *mut c_void);
     fn fr_in_location(x: *mut f64, y: *mut f64) -> c_int;
-    fn fr_in_move(source: *mut c_void, x: f64, y: f64, held: c_int, flags: u64) -> c_int;
+    fn fr_in_move_prepare(
+        source: *mut c_void,
+        x: f64,
+        y: f64,
+        held: c_int,
+        flags: u64,
+        out: *mut *mut c_void,
+    ) -> c_int;
     fn fr_in_button(
         source: *mut c_void,
         button: c_int,
@@ -86,21 +103,25 @@ unsafe extern "C" {
         y: f64,
         flags: u64,
     ) -> c_int;
-    fn fr_in_scroll(
+    fn fr_in_button_prepare(
         source: *mut c_void,
-        lines_y: i32,
-        lines_x: i32,
+        button: c_int,
+        pressed: c_int,
+        clicks: i64,
         x: f64,
         y: f64,
         flags: u64,
+        out: *mut *mut c_void,
     ) -> c_int;
-    fn fr_in_pixel_scroll(
+    fn fr_in_scroll_prepare(
         source: *mut c_void,
-        fixed_y: i32,
-        fixed_x: i32,
+        delta_y: i32,
+        delta_x: i32,
         x: f64,
         y: f64,
+        pixels: c_int,
         flags: u64,
+        out: *mut *mut c_void,
     ) -> c_int;
     fn fr_in_double_click_interval() -> f64;
     fn fr_in_record(keys_low: u64, keys_high: u64, buttons: u32);
@@ -277,6 +298,49 @@ impl Drop for NativeText {
             fr_in_event_close(self.up.as_ptr());
         }
     }
+}
+
+/// A complete immutable Quartz event, constructed before the final authority
+/// check. Posting performs no native allocation, pointer query or property
+/// mutation; cancellation releases the event without submitting it.
+struct NativeEvent(NonNull<c_void>);
+
+impl NativeEvent {
+    fn prepare(construct: impl FnOnce(*mut *mut c_void) -> c_int) -> Result<Self, PlatformError> {
+        let mut raw = core::ptr::null_mut();
+        let result = status(construct(&raw mut raw));
+        if let Err(error) = result {
+            // SAFETY: any output is owned by this call; null is accepted. The
+            // native boundary normally leaves it null on every refusal.
+            unsafe { fr_in_event_close(raw) };
+            return Err(error);
+        }
+        NonNull::new(raw)
+            .map(Self)
+            .ok_or(PlatformError::Unavailable)
+    }
+
+    fn submit(&self) -> c_int {
+        // SAFETY: the original prepared event is owned until Drop; the native
+        // call borrows it solely to post it and never frees or mutates it.
+        unsafe { fr_in_event_post(self.0.as_ptr()) }
+    }
+}
+
+impl Drop for NativeEvent {
+    fn drop(&mut self) {
+        // SAFETY: exactly one owned event, returned by a preparation call.
+        unsafe { fr_in_event_close(self.0.as_ptr()) };
+    }
+}
+
+/// State advances only after this exact event is submitted. In particular,
+/// constructing or cancelling a button event must not consume a double click.
+struct PreparedEvent {
+    event: NativeEvent,
+    held: Held,
+    position: Option<(f64, f64)>,
+    clicks: Clicks,
 }
 
 /// frd's startup probe: the capabilities a lease executor would advertise,
@@ -523,95 +587,128 @@ impl MacPointer {
         }
     }
 
-    fn submit_native(&mut self, op: Operation) -> Submission {
+    /// Build the exact event and its prospective bookkeeping before checking
+    /// the original deadline. All native queries and allocations finish here.
+    fn prepare_event(&self, op: Operation) -> Result<PreparedEvent, PlatformError> {
         let source = self.source.as_ptr();
-        let result = match op {
+        let mut held = self.held;
+        let mut position = self.position;
+        let mut clicks = self.clicks.clone();
+        let event = match op {
             Operation::Key { key, transition } => {
-                let Some(code) = macos_keys::keycode(key.usage()) else {
-                    return Submission::NotSubmitted(PlatformError::Unsupported);
-                };
-                let modifier = macos_keys::modifier(code).is_some();
-                let mut after = self.held;
+                let code = macos_keys::keycode(key.usage()).ok_or(PlatformError::Unsupported)?;
                 match transition {
-                    // Held from before the call: the release set stays pessimistic.
-                    KeyTransition::Press => {
-                        after.set_key(code, true);
-                        self.held = after;
-                    }
-                    KeyTransition::Release => after.set_key(code, false),
+                    KeyTransition::Press => held.set_key(code, true),
+                    KeyTransition::Release => held.set_key(code, false),
                     KeyTransition::Repeat => {}
                 }
-                // A modifier's own event carries the state after it.
-                let flags = after.flags();
-                // SAFETY: the owned live source; scalar arguments.
-                let result = status(unsafe {
-                    fr_in_key(
-                        source,
-                        code,
-                        c_int::from(transition != KeyTransition::Release),
-                        c_int::from(transition == KeyTransition::Repeat),
-                        c_int::from(modifier),
-                        flags,
-                    )
-                });
-                if result.is_ok() {
-                    self.held = after;
-                }
-                result
+                NativeEvent::prepare(|out| {
+                    // SAFETY: the original owned source and one writable
+                    // output; scalar arguments describe one complete event.
+                    unsafe {
+                        fr_in_key_prepare(
+                            source,
+                            code,
+                            c_int::from(transition != KeyTransition::Release),
+                            c_int::from(transition == KeyTransition::Repeat),
+                            c_int::from(macos_keys::modifier(code).is_some()),
+                            held.flags(),
+                            out,
+                        )
+                    }
+                })?
             }
             Operation::Absolute(point) => {
                 let (x, y) = self.to_points(point);
-                let held = self
-                    .held
+                position = Some((x, y));
+                let dragging = held
                     .dragging()
                     .and_then(|i| c_int::try_from(i).ok())
                     .unwrap_or(-1);
-                // SAFETY: the owned live source; scalar arguments.
-                let result = status(unsafe { fr_in_move(source, x, y, held, self.held.flags()) });
-                if result.is_ok() {
-                    self.position = Some((x, y));
-                }
-                result
+                NativeEvent::prepare(|out| {
+                    // SAFETY: the owned source, checked target coordinates
+                    // and one writable output for the retained mouse event.
+                    unsafe { fr_in_move_prepare(source, x, y, dragging, held.flags(), out) }
+                })?
             }
             Operation::Button { button, pressed } => {
                 let index = button_index(button);
-                let (x, y) = match self.action_point() {
-                    Ok(point) => point,
-                    Err(error) => return Submission::NotSubmitted(error),
-                };
-                let clicks = if pressed {
-                    self.held.set_button(index, true);
-                    self.clicks.press(index, Instant::now(), (x, y))
+                let (x, y) = self.action_point()?;
+                let count = if pressed {
+                    clicks.press(index, Instant::now(), (x, y))
                 } else {
-                    self.clicks.release(index)
+                    clicks.release(index)
                 };
-                let number = c_int::try_from(index).unwrap_or(0);
-                // SAFETY: the owned live source; scalar arguments.
-                let result = status(unsafe {
-                    fr_in_button(
-                        source,
-                        number,
-                        c_int::from(pressed),
-                        clicks,
-                        x,
-                        y,
-                        self.held.flags(),
-                    )
-                });
-                if result.is_ok() && !pressed {
-                    self.held.set_button(index, false);
-                }
-                result
+                held.set_button(index, pressed);
+                let number = c_int::try_from(index).map_err(|_| PlatformError::Unsupported)?;
+                NativeEvent::prepare(|out| {
+                    // SAFETY: all pointer reads are complete; the owned source
+                    // and scalar state prepare exactly one owned button event.
+                    unsafe {
+                        fr_in_button_prepare(
+                            source,
+                            number,
+                            c_int::from(pressed),
+                            count,
+                            x,
+                            y,
+                            held.flags(),
+                            out,
+                        )
+                    }
+                })?
             }
-            Operation::Scroll { x, y, unit } => return self.submit_scroll(x, y, unit),
-            Operation::Text(_) => return self.submit_text(),
-            _ => return Submission::NotSubmitted(PlatformError::Unsupported),
+            Operation::Scroll { x, y, unit } => {
+                let (vertical, horizontal) = match unit {
+                    ScrollUnit::Lines => scroll_lines(x, y),
+                    ScrollUnit::Pixels => scroll_pixels(x, y),
+                }
+                .ok_or(PlatformError::Unsupported)?;
+                let (px, py) = self.action_point()?;
+                NativeEvent::prepare(|out| {
+                    // SAFETY: checked units and coordinates, one live source
+                    // and a writable output for the complete scroll event.
+                    unsafe {
+                        fr_in_scroll_prepare(
+                            source,
+                            vertical,
+                            horizontal,
+                            px,
+                            py,
+                            c_int::from(unit == ScrollUnit::Pixels),
+                            held.flags(),
+                            out,
+                        )
+                    }
+                })?
+            }
+            _ => return Err(PlatformError::Unsupported),
         };
-        match result {
-            Ok(()) => Submission::Submitted,
-            // The glue refused before creating an event: nothing was posted.
-            Err(PlatformError::Unsupported) => Submission::NotSubmitted(PlatformError::Unsupported),
-            Err(_) => Submission::Unknown,
+        Ok(PreparedEvent {
+            event,
+            held,
+            position,
+            clicks,
+        })
+    }
+
+    fn submit_event(&mut self, prepared: PreparedEvent) -> Submission {
+        // Do not retire a release from the cleanup set until posting succeeds.
+        // New presses were also recorded by final_check before this call.
+        let original_held = self.held;
+        self.held = original_held.union(prepared.held);
+        match prepared.event.submit() {
+            0 => {
+                self.held = prepared.held;
+                self.position = prepared.position;
+                self.clicks = prepared.clicks;
+                Submission::Submitted
+            }
+            -1 => {
+                self.held = original_held;
+                Submission::NotSubmitted(PlatformError::Unsupported)
+            }
+            _ => Submission::Unknown,
         }
     }
 
@@ -634,38 +731,6 @@ impl MacPointer {
                 Submission::NotSubmitted(status(code).unwrap_err())
             }
             _ => Submission::Unknown,
-        }
-    }
-
-    fn submit_scroll(&self, x: i32, y: i32, unit: ScrollUnit) -> Submission {
-        let delta = match unit {
-            ScrollUnit::Lines => scroll_lines(x, y),
-            ScrollUnit::Pixels => scroll_pixels(x, y),
-        };
-        let Some((vertical, horizontal)) = delta else {
-            return Submission::NotSubmitted(PlatformError::Unsupported);
-        };
-        let (px, py) = match self.action_point() {
-            Ok(point) => point,
-            Err(error) => return Submission::NotSubmitted(error),
-        };
-        let source = self.source.as_ptr();
-        // SAFETY: the owned live source; scalar arguments. The caller consumed
-        // this operation's preparation and original final authority check.
-        let result = status(unsafe {
-            match unit {
-                ScrollUnit::Lines => {
-                    fr_in_scroll(source, vertical, horizontal, px, py, self.held.flags())
-                }
-                ScrollUnit::Pixels => {
-                    fr_in_pixel_scroll(source, vertical, horizontal, px, py, self.held.flags())
-                }
-            }
-        });
-        match result {
-            Ok(()) => Submission::Submitted,
-            Err(PlatformError::Unsupported) => Submission::NotSubmitted(PlatformError::Unsupported),
-            Err(_) => Submission::Unknown,
         }
     }
 
@@ -694,6 +759,21 @@ impl MacPointer {
             self.cancel_prepared();
             return Ok(Submission::NotSubmitted(PlatformError::Unsupported));
         }
+        // Preparation crossed an IPC boundary. Construct the exact event,
+        // then revalidate its original target: a constructor may itself stall
+        // across a display change. The final original-ticket check MUST follow
+        // all native work; after it, only this retained event may be submitted.
+        let event = if matches!(op, Operation::Text(_)) {
+            None
+        } else {
+            match self.prepare_event(op) {
+                Ok(event) => Some(event),
+                Err(error) => {
+                    self.cancel_prepared();
+                    return Ok(Submission::NotSubmitted(error));
+                }
+            }
+        };
         if let Err(error) = self.prepare_native(op) {
             self.cancel_prepared();
             return Ok(Submission::NotSubmitted(error));
@@ -703,7 +783,10 @@ impl MacPointer {
             return Err(error);
         }
         self.prepared = None;
-        Ok(self.submit_native(op))
+        Ok(match event {
+            Some(event) => self.submit_event(event),
+            None => self.submit_text(),
+        })
     }
 
     /// Submit a retained release without a further authority decision:

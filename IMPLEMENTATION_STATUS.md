@@ -1,5 +1,34 @@
 # Implementation status
 
+## macOS input checks after native event preparation (2026-11-11)
+
+The live Quartz input owner now constructs and retains each complete keyboard,
+pointer, button and scroll event before its final original-deadline/revoke check.
+It revalidates the selected native target after construction, then posts the
+retained event without another pointer query, allocation or property mutation.
+A stalled constructor can no longer spend an already-checked input lifetime.
+Text event properties are prepared before that boundary as well.
+
+Failed pointer queries refuse instead of substituting an origin coordinate.
+Cancelled preparation preserves click counts and the last submitted position;
+confirmed refusals preserve the original held set, while uncertain submissions
+retain their release obligations. Cleanup remains release-only and reports
+incomplete native release when required pointer evidence is unavailable.
+
+**Passed:** 25 pinned-toolchain tests of the actual Rust owner and its policy
+modules against an explicitly deterministic FFI test boundary, plus strict
+Clippy. Ten new cases cover ordering, expiry, native target change, failure,
+coordinates, click state and cleanup. Three primary regressions were also run
+against the unchanged preceding source and failed there, including a stalled
+constructor incorrectly returning `Submitted` after its deadline.
+
+**Blocked/not tested:** the unchanged pinned Asupersync dependency was killed
+with SIGKILL during full-workspace metadata compilation. These component checks
+do not compile the full application or validate the Objective-C boundary.
+Apple SDK compilation, real Quartz event tests and a live Mac session remain
+required under `fr-udyh`; this is not a native capability qualification.
+See [the Mac host input boundary](docs/macos-host.md#input-at-the-final-authority-boundary).
+
 ## Native Mac file selections on the original upload (2026-11-10)
 
 The macOS client now accepts `--control --file-drop` and provides a local
