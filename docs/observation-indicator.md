@@ -118,6 +118,18 @@ checks the single native-I/O worker while the host runs. Readiness expires at
 250 milliseconds from the corresponding request's start, not reply arrival;
 partial I/O, scheduling delay and time asleep consume the same budget. Native
 event-worker progress is checked separately from its earlier mapped state.
+On Linux the watcher parks on a `CLOCK_BOOTTIME` timer armed with that exact
+absolute deadline and a separate bounded notification descriptor. System sleep
+consumes this same clock; waking does not restart a relative timeout. Renewals
+retain their request-based bounds, shorter evidence deadlines wake the watcher,
+and terminal events or host completion wake it before joining. Notifications
+remain pending across the state-check/wait race. Any clock or wait failure stops
+the original host. On macOS the watcher keeps its existing 5 ms maximum recheck
+interval until a suspend-inclusive native deadline wait is qualified; its
+observation safety does not depend on a longer relative condition-variable sleep.
+Kernel-descriptor and original-owner regression tests exercise expiry, renewals,
+and notification races. They do not qualify actual suspend/resume, native
+visibility, or idle CPU on a live workstation.
 
 Closing/revoking the UI, a child exit, a malformed reply or expired liveness
 requests the ORIGINAL host's cooperative stop. No subsequent sharing session or

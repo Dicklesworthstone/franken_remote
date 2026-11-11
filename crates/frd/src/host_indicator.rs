@@ -182,25 +182,21 @@ fn drive(
     thread::scope(|scope| {
         // Unwind stops the ORIGINAL host and releases the watcher before the
         // scope joins it. No runtime coordinator is moved onto a smaller stack.
-        let _finish = Finish { done: &done, stop };
+        let _finish = Finish {
+            done: &done,
+            stop,
+            control: &control,
+        };
         let watcher = scope.spawn(|| {
             // A watcher panic also requests host stop before its thread exits.
             let _fence = Fence(stop);
-            let mut failure = None;
-            while !done.load(Ordering::Acquire) {
-                let status = control.status();
-                if let Some(error) = fault(status) {
-                    failure.get_or_insert(error);
-                }
-                if matches!(status, Status::Stopped(_)) {
-                    stop.request();
-                }
-                thread::sleep(Duration::from_millis(5));
-            }
-            failure
+            control
+                .wait_for_stop(&done)
+                .and_then(|error| fault(Status::Stopped(error)))
         });
         let result = serve().map_err(Error::Host);
         done.store(true, Ordering::Release);
+        control.wake_watcher();
         let failure = watcher.join().map_err(|_| Error::WatchdogPanicked);
         // Preserve a failed host teardown even if native liveness also failed.
         result?;
@@ -220,12 +216,14 @@ impl Drop for Fence<'_> {
 struct Finish<'a> {
     done: &'a AtomicBool,
     stop: &'a StopHandle,
+    control: &'a process::Control,
 }
 #[cfg(host_stack)]
 impl Drop for Finish<'_> {
     fn drop(&mut self) {
         self.stop.request();
         self.done.store(true, Ordering::Release);
+        self.control.wake_watcher();
     }
 }
 

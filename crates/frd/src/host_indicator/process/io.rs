@@ -281,6 +281,9 @@ raise SystemExit(0)
                 until: deadline(now, OPEN_BUDGET).unwrap(),
                 last: now,
             }),
+            changed: std::sync::Condvar::new(),
+            #[cfg(target_os = "linux")]
+            watcher_wake: crate::host_indicator::process::watcher::Wake::new().unwrap(),
             native_wake: crate::native_wait::Wake::new().unwrap(),
         };
         let (child, command, signals) = crate::session_ui_process::spawn(&launch).unwrap();

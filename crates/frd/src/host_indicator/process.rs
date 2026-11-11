@@ -4,11 +4,13 @@
 mod io;
 #[cfg(test)]
 mod tests;
+#[cfg(target_os = "linux")]
+mod watcher;
 use crate::input_process::ProcessLaunch;
 use std::{
     fmt,
     sync::{
-        Arc, Mutex, MutexGuard,
+        Arc, Condvar, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
@@ -155,9 +157,23 @@ struct Shared {
     // a peer callback, another authority, or native work under this mutex.
     on_stop: Box<dyn Fn() + Send + Sync>,
     state: Mutex<State>,
+    changed: Condvar,
+    #[cfg(target_os = "linux")]
+    watcher_wake: watcher::Wake,
     native_wake: crate::native_wait::Wake,
 }
 impl Shared {
+    fn notify_watcher(&self) -> bool {
+        self.changed.notify_all();
+        #[cfg(target_os = "linux")]
+        {
+            self.watcher_wake.signal()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|poisoned| {
             let mut state = poisoned.into_inner();
@@ -169,6 +185,7 @@ impl Shared {
         {
             self.state().stop(error);
         }
+        let _ = self.notify_watcher();
         self.native_wake.signal();
         // Store the cause BEFORE waking the original host. Otherwise startup
         // could mistake this native refusal for an unrelated normal stop.
@@ -184,6 +201,7 @@ impl Shared {
             state.status
         };
         if matches!(status, Status::Stopped(_)) {
+            let _ = self.notify_watcher();
             self.native_wake.signal();
             // The original stop has been requested before callers observe a
             // terminal return, even when THEY detect a worker's missed deadline.
@@ -198,14 +216,23 @@ impl Shared {
         }
     }
     fn ready(&self, issued: u64) -> Result<(), Error> {
-        let result = {
+        let (result, shortened) = {
             let mut state = self.state();
+            let previous_until = state.until;
             if let Status::Stopped(error) = state.status {
-                Err(error)
+                (Err(error), false)
             } else {
-                state.ready_at(issued, now_ns())
+                let result = state.ready_at(issued, now_ns());
+                // A first Check shortens the opening budget. Later successful
+                // replies normally extend it: the watcher may keep sleeping
+                // until its old deadline and then re-read the current one.
+                (result, state.until < previous_until)
             }
         };
+        if (shortened || result.is_err()) && !self.notify_watcher() && result.is_ok() {
+            self.stop(Error::Unavailable);
+            return Err(Error::Unavailable);
+        }
         if result.is_err() {
             self.native_wake.signal();
             (self.on_stop)();
@@ -221,6 +248,76 @@ impl Control {
     }
     pub fn stop(&self) {
         self.0.stop(Error::Stopped);
+    }
+    /// Park the independent watcher until the original UI evidence expires,
+    /// its owner publishes a terminal event, or the containing host finishes.
+    /// Renewals never move a wait's own clock backwards or revive terminal UI.
+    #[cfg(any(host_stack, test))]
+    pub(super) fn wait_for_stop(&self, finished: &AtomicBool) -> Option<Error> {
+        if finished.load(Ordering::Acquire) {
+            return None;
+        }
+        #[cfg(target_os = "linux")]
+        let Ok(deadline) = watcher::Deadline::new() else {
+            self.0.stop(Error::Unavailable);
+            return match self.0.status() {
+                Status::Stopped(error) => Some(error),
+                Status::Opening | Status::Ready => Some(Error::Unavailable),
+            };
+        };
+        let mut state = self.0.state();
+        loop {
+            if finished.load(Ordering::Acquire) {
+                return None;
+            }
+            match state.check_at(now_ns()) {
+                Ok(_) => {}
+                Err(error) => {
+                    drop(state);
+                    // Publish the original cause and stop the host without
+                    // holding this lock, exactly as a polling check does.
+                    self.0.stop(error);
+                    return Some(error);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let until = state.until;
+                drop(state);
+                let result = deadline.wait(&self.0.watcher_wake, until);
+                state = self.0.state();
+                if result.is_err() {
+                    state.stop(Error::Unavailable);
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                // A relative condvar clock can stop during system sleep.
+                // Preserve the existing 5 ms detection bound until this
+                // platform has a qualified suspend-inclusive kernel wait.
+                let remaining =
+                    Duration::from_nanos(state.until - state.last).min(Duration::from_millis(5));
+                state = match self.0.changed.wait_timeout(state, remaining) {
+                    Ok((state, _)) => state,
+                    Err(poisoned) => {
+                        let (mut state, _) = poisoned.into_inner();
+                        state.stop(Error::Panicked);
+                        state
+                    }
+                };
+            }
+        }
+    }
+    /// Pair the external completion flag with this same mutex for the condvar
+    /// fallback. Linux retains the notification counter across that race.
+    #[cfg(any(host_stack, test))]
+    pub(super) fn wake_watcher(&self) {
+        let state = self.0.state();
+        let notified = self.0.notify_watcher();
+        drop(state);
+        if !notified {
+            self.0.stop(Error::Unavailable);
+        }
     }
 }
 impl fmt::Debug for Control {
@@ -260,6 +357,11 @@ impl Owner {
             on_stop();
             Error::Unavailable
         })?;
+        #[cfg(target_os = "linux")]
+        let watcher_wake = watcher::Wake::new().map_err(|_| {
+            on_stop();
+            Error::Unavailable
+        })?;
         if let Err(error) = claim(capacity) {
             on_stop();
             return Err(error);
@@ -271,6 +373,9 @@ impl Owner {
                 until,
                 last: now,
             }),
+            changed: Condvar::new(),
+            #[cfg(target_os = "linux")]
+            watcher_wake,
             native_wake,
         });
         let running = shared.clone();

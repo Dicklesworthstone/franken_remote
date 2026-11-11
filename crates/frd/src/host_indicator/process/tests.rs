@@ -5,6 +5,8 @@ use fr_core::indicator_process::{Frame, Kind};
 use std::time::Instant;
 static CHILDREN: Mutex<()> = Mutex::new(());
 
+mod watcher;
+
 fn opening(now: u64) -> State {
     State {
         status: Status::Opening,
@@ -175,6 +177,9 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
                 );
             }),
             state: Mutex::new(opening(now_ns().unwrap())),
+            changed: std::sync::Condvar::new(),
+            #[cfg(target_os = "linux")]
+            watcher_wake: crate::host_indicator::process::watcher::Wake::new().unwrap(),
             native_wake: crate::native_wait::Wake::new().unwrap(),
         }
     });
@@ -189,6 +194,9 @@ fn poisoned_ready_evidence_stops_the_original_host_and_preserves_its_cause() {
     let shared = Shared {
         on_stop: Box::new(move || original.store(true, Ordering::Release)),
         state: Mutex::new(opening(now_ns().unwrap())),
+        changed: std::sync::Condvar::new(),
+        #[cfg(target_os = "linux")]
+        watcher_wake: crate::host_indicator::process::watcher::Wake::new().unwrap(),
         native_wake: crate::native_wait::Wake::new().unwrap(),
     };
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -215,6 +223,9 @@ fn dropping_a_stopped_owner_retains_its_original_cleanup_worker() {
     let shared = Arc::new(Shared {
         on_stop: Box::new(move || original.store(true, Ordering::Release)),
         state: Mutex::new(opening(now_ns().unwrap())),
+        changed: std::sync::Condvar::new(),
+        #[cfg(target_os = "linux")]
+        watcher_wake: crate::host_indicator::process::watcher::Wake::new().unwrap(),
         native_wake: crate::native_wait::Wake::new().unwrap(),
     });
     let (release, waiting) = std::sync::mpsc::sync_channel(0);
