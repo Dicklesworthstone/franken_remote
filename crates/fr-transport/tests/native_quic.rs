@@ -1615,3 +1615,113 @@ fn a_peer_that_stops_acknowledging_still_closes_the_connection_in_bounded_time()
         }
     });
 }
+
+/// The native read has completed before the final authorization callback. Hold
+/// that callback past the delivery bound to model a preempted sender between
+/// authenticated I/O completion and its post-I/O deadline check. The ACK is real
+/// UDP/TLS traffic; no send state or timestamp is manufactured for this test.
+async fn pause_after_native_read(acknowledge: bool) {
+    use std::cell::Cell;
+
+    let cx = Cx::current().unwrap();
+    let mut p = pair(&cx, Policy::default()).await;
+    let route = Route::Stream(p.host_routes[1]);
+    let packet = recovery_packet(2, 100);
+    let admitted = clock(&cx);
+    p.server
+        .send(&cx, route, &packet, admitted + 1_000_000, || true)
+        .unwrap();
+    // Flush the complete record before parking a separate receive operation.
+    // A zero-wait native turn does not read the peer's socket traffic.
+    p.server.drive(&cx, Duration::ZERO, || true).await.unwrap();
+    assert_eq!(p.server.usage().retained_send_records, 1);
+    let armed = Cell::new(false);
+    let resumed_checks = Cell::new(0);
+    let paused = Cell::new(false);
+    let mut parked = false;
+    let mut received = 0;
+    for _ in 0..20 {
+        let mut turn = pin!(p.server.drive(&cx, Duration::from_millis(100), || {
+            if armed.get() {
+                let count = resumed_checks.get() + 1;
+                resumed_checks.set(count);
+                if count == 2 {
+                    // In a resumed poll, the first check precedes native I/O
+                    // and the second follows its successful completion.
+                    let end = admitted + MAX_DELIVERY_ALLOWANCE_US + 50_000;
+                    let remaining = end.saturating_sub(clock(&cx));
+                    std::thread::sleep(Duration::from_micros(remaining));
+                    paused.set(true);
+                }
+            }
+            true
+        }));
+        let first = std::future::poll_fn(|task| Poll::Ready(turn.as_mut().poll(task))).await;
+        if let Poll::Ready(result) = first {
+            result.unwrap();
+            continue;
+        }
+        parked = true;
+        if acknowledge {
+            // Drive through delayed ACKs; application delivery alone does not
+            // prove the peer flushed an acknowledgement.
+            let ack_until = clock(&cx) + 50_000;
+            while clock(&cx) < ack_until {
+                p.client
+                    .drive(&cx, Duration::from_millis(1), || true)
+                    .await
+                    .unwrap();
+                p.client
+                    .receive(
+                        &cx,
+                        || true,
+                        |_, bytes| {
+                            assert_eq!(bytes, packet);
+                            received += 1;
+                            Ok(Disposition::Consumed)
+                        },
+                    )
+                    .unwrap();
+            }
+            assert_eq!(received, 1, "peer must receive before sender resumes");
+        }
+        armed.set(true);
+        let result = std::future::poll_fn(|task| {
+            // A spurious wake or an internal native yield must not spend the
+            // post-I/O hook before the operation actually completes.
+            resumed_checks.set(0);
+            turn.as_mut().poll(task)
+        })
+        .await;
+        assert!(paused.get(), "I/O did not reach its final boundary");
+        assert!(clock(&cx) >= admitted + MAX_DELIVERY_ALLOWANCE_US);
+        assert_eq!(
+            result,
+            if acknowledge {
+                Ok(())
+            } else {
+                Err(Error::Expired)
+            }
+        );
+        break;
+    }
+    assert!(parked, "the sender never reached its native receive wait");
+    assert_eq!(p.server.is_closed(), !acknowledge);
+    if acknowledge {
+        assert_eq!(p.server.usage().retained_send_records, 0);
+        // The same original connection remains usable, not merely unclosed.
+        measure_path(&cx, &mut p, route).await;
+        assert!(!p.server.is_closed());
+        assert_eq!(p.server.usage().retained_send_records, 0);
+    }
+}
+
+#[test]
+fn authenticated_ack_is_retired_before_a_delayed_post_io_deadline_check() {
+    runtime().block_on(Box::pin(pause_after_native_read(true)));
+}
+
+#[test]
+fn completed_io_without_an_ack_still_expires_at_the_original_delivery_bound() {
+    runtime().block_on(Box::pin(pause_after_native_read(false)));
+}

@@ -1013,6 +1013,12 @@ impl QuicRecords {
         .await;
         let native = held.release();
         self.finish_native_io(native, result)?;
+        // This completed operation may have authenticated the last ACK of an
+        // epoch. Retire that custody before sampling the clock again: a local
+        // scheduling pause after successful I/O is not a missed peer deadline.
+        // No expired operation is resumed here; the pre-I/O boundary, original
+        // delivery deadlines and synchronous tick/send/receive gates still apply.
+        self.retire_acknowledged_epochs()?;
         self.check(cx, authorize)?;
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         if native.connection().state() != QuicConnectionState::Established
@@ -1022,6 +1028,11 @@ impl QuicRecords {
             self.close();
             return Err(peer.map_or(Error::Closed, Error::PeerClosed));
         }
+        Ok(())
+    }
+
+    fn retire_acknowledged_epochs(&mut self) -> Result<(), Error> {
+        let native = self.native.as_mut().ok_or(Error::Closed)?;
         // Retire only this epoch, not records waiting for the next batch.
         // Bulk filling does not delay retirement: exact native emptiness plus
         // no queued member is sufficient even inside the short fill window.
