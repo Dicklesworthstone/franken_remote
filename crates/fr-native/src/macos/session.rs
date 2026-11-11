@@ -580,6 +580,9 @@ pub struct Session {
     epoch: u128,
     title: String,
     fit_window: Option<(u32, u32)>,
+    /// The stated 1:1 box (pixels) and the screen's pixels per point: a
+    /// scaled picture's window opens at picture pixels / scale.
+    picture_box: Option<((u32, u32), u32)>,
     placement: Option<Placement>,
     resize: Rc<ResizeIntent>,
     window: WindowSlot,
@@ -637,6 +640,7 @@ impl Session {
             epoch,
             title,
             fit_window: None,
+            picture_box: None,
             placement: None,
             resize: Rc::default(),
             window: Rc::default(),
@@ -668,6 +672,13 @@ impl Session {
     #[must_use]
     pub fn with_fit_window(mut self, fit: Option<(u32, u32)>) -> Self {
         self.fit_window = fit;
+        self
+    }
+    /// The box this viewer stated (`scaled-picture`, pixels) and the screen's
+    /// pixels per point, so a scaled picture's window opens 1:1.
+    #[must_use]
+    pub fn with_picture_box(mut self, picture_box: Option<((u32, u32), u32)>) -> Self {
+        self.picture_box = picture_box;
         self
     }
     /// Choose from the original approved catalog on every new attempt.
@@ -1479,6 +1490,7 @@ impl Application for Session {
             .ok_or(ObserverError::InvalidConfiguration)?;
         let title = self.title.clone();
         let fit_window = self.fit_window;
+        let picture_box = self.picture_box;
         let placement = self.placement;
         let control = self.control;
         let choose = &mut self.choose;
@@ -1493,9 +1505,21 @@ impl Application for Session {
         let native_started = self.native_started.clone();
         let opening = viewer.observe_with_renderer(
             move |display, _original| async move {
+                let native = (display.pixel_width, display.pixel_height);
+                // A scaling host sends the largest picture inside the stated
+                // box; open its window at one point per `scale` pixels so it
+                // is drawn 1:1. Otherwise the remote's logical size applies.
+                let (pixels, logical) = picture_box
+                    .and_then(|(within, scale)| {
+                        let expected = display.picture(Some(within)).ok()?;
+                        let points =
+                            crate::macos_sizing::scaled_picture_points(native, expected, scale)?;
+                        Some((expected, points))
+                    })
+                    .unwrap_or((native, (display.logical_width, display.logical_height)));
                 let points = crate::macos_sizing::sharing_points_with_selections(
-                    (display.pixel_width, display.pixel_height),
-                    (display.logical_width, display.logical_height),
+                    pixels,
+                    logical,
                     fit_window,
                     file_directions,
                     clipboard_requested,

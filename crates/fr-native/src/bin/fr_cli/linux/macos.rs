@@ -178,6 +178,7 @@ fn connect_selected(
     let choose = Box::new(move |catalog: &fr_wire::display::Catalog| {
         display.select(catalog).map(Some).ok_or(())
     });
+    let picture_box = picture_box(connection);
     let mut session = Session::new(
         connection.control.then(ControlPolicy::default),
         ObserverPolicy::default(),
@@ -186,6 +187,7 @@ fn connect_selected(
         format!("FrankenRemote: {}", selected.node),
     )
     .with_fit_window(connection.fit_window)
+    .with_picture_box(picture_box)
     .with_files(selected_files)
     .clipboard(connection.control && connection.clipboard);
     if display == DisplayChoice::Choose {
@@ -198,10 +200,10 @@ fn connect_selected(
         } else {
             AddressFamily::Automatic
         },
-        // Pixels beyond this screen would be captured, encoded, sent and
-        // decoded only to be scaled away; a host that can scale sends
-        // pictures that fit it, at 1:1 when the window fills the screen.
-        picture: fr_native::macos::main_screen_pixels(),
+        // Pixels beyond what the window shows would be captured, encoded,
+        // sent and decoded only to be scaled away; a host that can scale
+        // sends the largest picture that fits, drawn 1:1.
+        picture: picture_box.map(|(within, _)| within),
         ..Default::default()
     };
     let policy = reconnect::Policy {
@@ -489,6 +491,23 @@ fn finish_result(
         }
     }
     Ok(out)
+}
+
+/// The largest picture the viewer window shows 1:1, in pixels, with the
+/// screen's pixels per point: the visible main screen below the title bar,
+/// the 44-point sharing strip and (when controlling) the 76-point text
+/// composer, inside any `--fit` ceiling. `None` keeps native pictures.
+fn picture_box(connection: &Connection) -> Option<((u32, u32), u32)> {
+    let reserved = 44 + if connection.control { 76 } else { 0 };
+    let ((width, height), scale) = fr_native::macos::window_box(reserved)?;
+    let (width, height) = match connection.fit_window {
+        Some((fit_width, fit_height)) => (
+            width.min(fit_width.checked_mul(scale)?),
+            height.min(fit_height.checked_sub(reserved)?.checked_mul(scale)?),
+        ),
+        None => (width, height),
+    };
+    (width.min(height) >= 64).then_some(((width, height), scale))
 }
 
 fn display_choice_failure(error: fr_native::macos::picker::Error) -> Failure {

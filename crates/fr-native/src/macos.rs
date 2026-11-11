@@ -62,7 +62,12 @@ struct RawEvent {
 
 unsafe extern "C" {
     fn fr_mac_app_init() -> c_int;
-    fn fr_mac_main_screen_pixels(width: *mut u32, height: *mut u32) -> c_int;
+    fn fr_mac_window_box(
+        reserved: u32,
+        width: *mut u32,
+        height: *mut u32,
+        scale: *mut u32,
+    ) -> c_int;
     fn fr_mac_event_time() -> f64;
     #[allow(clippy::too_many_arguments)]
     fn fr_mac_window_new(
@@ -217,15 +222,18 @@ pub fn initialize_application() -> Result<(), NativeError> {
     status(unsafe { fr_mac_app_init() })
 }
 
-/// The main screen's current size in its own pixels (a Retina screen's
-/// backing pixels): the largest picture this viewer can show 1:1. `None` when
-/// Core Graphics reports no usable main display.
-pub fn main_screen_pixels() -> Option<(u32, u32)> {
-    let (mut width, mut height) = (0, 0);
-    // SAFETY: two writable scalars the glue fills synchronously; Core Graphics
-    // display queries are thread-safe and retain nothing.
-    let status = unsafe { fr_mac_main_screen_pixels(&raw mut width, &raw mut height) };
-    (status == 0).then_some((width, height))
+/// The largest picture a new viewer window on the main screen shows 1:1:
+/// the visible screen below the title bar and `reserved` points of native
+/// controls, in the screen's pixels (a Retina screen's backing pixels), with
+/// its whole pixels per point. `None` off the main thread or without a usable
+/// main screen.
+pub fn window_box(reserved: u32) -> Option<((u32, u32), u32)> {
+    let (mut width, mut height, mut scale) = (0, 0, 0);
+    // SAFETY: three writable scalars the glue fills synchronously; it refuses
+    // a non-main thread before touching AppKit.
+    let status =
+        unsafe { fr_mac_window_box(reserved, &raw mut width, &raw mut height, &raw mut scale) };
+    (status == 0).then_some(((width, height), scale))
 }
 
 /// Native uptime in the same domain as the original `NSEvent.timestamp`.

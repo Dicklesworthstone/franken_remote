@@ -1700,18 +1700,29 @@ int fr_mac_app_init(void) {
     return FR_MAC_OK;
 }
 
-// The main display's current size in its own pixels, from Core Graphics alone
-// (no window, any thread): the largest picture this viewer shows 1:1.
-int fr_mac_main_screen_pixels(uint32_t *width, uint32_t *height) {
-    if (!width || !height) return FR_MAC_INVALID;
-    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
-    if (!mode) return FR_MAC_GEOMETRY;
-    size_t w = CGDisplayModeGetPixelWidth(mode), h = CGDisplayModeGetPixelHeight(mode);
-    CGDisplayModeRelease(mode);
-    if (w < 64 || h < 64 || w > UINT32_MAX || h > UINT32_MAX) return FR_MAC_GEOMETRY;
-    *width = (uint32_t)w;
-    *height = (uint32_t)h;
-    return FR_MAC_OK;
+// The main screen's area a new viewer window can fill without being shrunk:
+// whole points of the visible frame below the 28-point title bar and
+// `reserved` points of native controls, in the screen's pixels, plus its
+// whole pixels per point. fr_mac_window_new keeps a picture of at most this
+// many points at its exact size, so this is the largest picture shown 1:1.
+// Main thread (AppKit screens).
+int fr_mac_window_box(uint32_t reserved, uint32_t *width, uint32_t *height, uint32_t *scale) {
+    if (!width || !height || !scale) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    @autoreleasepool {
+        NSScreen *screen = NSScreen.mainScreen;
+        if (!screen) return FR_MAC_GEOMETRY;
+        double s = screen.backingScaleFactor;
+        if (!(s >= 1 && s <= 4) || s != floor(s)) return FR_MAC_GEOMETRY;
+        NSRect visible = screen.visibleFrame;
+        double w = floor(visible.size.width) * s;
+        double h = floor(visible.size.height - 28 - (double)reserved) * s;
+        if (!(w >= 64 && h >= 64 && w <= UINT32_MAX && h <= UINT32_MAX)) return FR_MAC_GEOMETRY;
+        *width = (uint32_t)w;
+        *height = (uint32_t)h;
+        *scale = (uint32_t)s;
+        return FR_MAC_OK;
+    }
 }
 
 // NSEvent timestamps and systemUptime use the same monotonic boot-time domain.

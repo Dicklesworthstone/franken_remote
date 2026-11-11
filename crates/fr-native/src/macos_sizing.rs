@@ -44,6 +44,20 @@ pub(crate) fn points(
     ))
 }
 
+/// The window points that show a scaled picture 1:1 on a screen with `scale`
+/// pixels per point, or `None` when the expected picture is the display's
+/// native size (the remote's logical size then applies). `expected` is what a
+/// scaling host sends for the viewer's stated box; a host that cannot scale
+/// sends native pixels instead, which the renderer fits into the same window.
+pub(crate) fn scaled_picture_points(
+    native: (u32, u32),
+    expected: (u32, u32),
+    scale: u32,
+) -> Option<(u32, u32)> {
+    (expected != native && scale > 0 && expected.0 > 0 && expected.1 > 0)
+        .then(|| (expected.0.div_ceil(scale), expected.1.div_ceil(scale)))
+}
+
 /// Reserve display choice and file controls in the original content ceiling.
 /// The native strip is 44 points high, with 136 points for Change Display,
 /// one 230-point cell per file direction, 184 for clipboard and 16 outer padding.
@@ -130,7 +144,27 @@ pub(crate) fn sharing_points_with_selections(
 
 #[cfg(test)]
 mod tests {
-    use super::{points, sharing_points, sharing_points_with_selections, sharing_points_with_text};
+    use super::{
+        points, scaled_picture_points, sharing_points, sharing_points_with_selections,
+        sharing_points_with_text,
+    };
+
+    #[test]
+    fn a_scaled_picture_opens_at_one_point_per_pixel_group() {
+        // A 5K catalog entry scaled for a 1x screen: one point per pixel.
+        assert_eq!(
+            scaled_picture_points((5120, 2880), (1754, 986), 1),
+            Some((1754, 986))
+        );
+        // For a 2x screen: half, and never smaller than the picture.
+        assert_eq!(
+            scaled_picture_points((5120, 2880), (3024, 1700), 2),
+            Some((1512, 850))
+        );
+        // A native picture keeps the remote's logical size.
+        assert_eq!(scaled_picture_points((1920, 1080), (1920, 1080), 2), None);
+        assert_eq!(scaled_picture_points((5120, 2880), (1920, 1080), 0), None);
+    }
 
     #[test]
     fn native_selection_button_and_both_cancel_controls_fit_inside_the_same_ceiling() {
