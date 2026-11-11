@@ -645,9 +645,35 @@ mod tests {
     use super::*;
     use fr_core::clipboard::Endpoint;
     use std::sync::{
-        Arc,
+        Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
+
+    /// One private board at a time in this process. Run on parallel test
+    /// threads, these tests intermittently saw changes they did not make on
+    /// their own unique boards (`LocalChanged`, `NoText`, `UnknownEffect`): 5 of 400
+    /// runs on macOS 27, none of 400 run serially. Production opens only the
+    /// general board, from its one owner thread.
+    static NATIVE: Mutex<()> = Mutex::new(());
+
+    /// The board drops before the lock is released.
+    struct Board {
+        owner: MacClipboard,
+        _serial: MutexGuard<'static, ()>,
+    }
+
+    impl core::ops::Deref for Board {
+        type Target = MacClipboard;
+        fn deref(&self) -> &MacClipboard {
+            &self.owner
+        }
+    }
+
+    impl core::ops::DerefMut for Board {
+        fn deref_mut(&mut self) -> &mut MacClipboard {
+            &mut self.owner
+        }
+    }
 
     fn stamp(sequence: u64) -> Stamp {
         Stamp {
@@ -657,8 +683,13 @@ mod tests {
         }
     }
 
-    fn board(gate: impl Fn(Option<HostInstant>) -> bool + Send + Sync + 'static) -> MacClipboard {
-        MacClipboard::open_board(&ProtocolLimits::ABSOLUTE, Box::new(gate), true).unwrap()
+    fn board(gate: impl Fn(Option<HostInstant>) -> bool + Send + Sync + 'static) -> Board {
+        let serial = NATIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        Board {
+            owner: MacClipboard::open_board(&ProtocolLimits::ABSOLUTE, Box::new(gate), true)
+                .unwrap(),
+            _serial: serial,
+        }
     }
 
     fn copy(owner: &mut MacClipboard, bytes: &[u8]) {
@@ -699,8 +730,9 @@ mod tests {
         owner.watch().unwrap();
         for (sequence, text) in [(1, "λ\0\n🦀"), (2, "")] {
             let original = stamp(sequence);
+            let revision = owner.revision();
             owner
-                .prepare_for_revision(text, original, owner.revision())
+                .prepare_for_revision(text, original, revision)
                 .unwrap();
             assert_eq!(
                 owner.publish_until(text, original, HostInstant::from_micros(100)),
