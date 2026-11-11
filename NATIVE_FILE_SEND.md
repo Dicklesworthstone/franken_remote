@@ -311,6 +311,14 @@ they do not negotiate another file lane or renew authority. Each submitted
 selection has a fresh status/cancellation handle and an absolute submission-time
 deadline. Earlier receipts remain available after later failures.
 
+Concurrent selection and owner service retain that submission-time deadline.
+The intake samples its clock again after acquiring the state mutex, so a newer
+owner sample during lock contention is not mistaken for clock rollback. The
+fresh sample checks the unchanged deadline: waiting for the mutex cannot extend
+the selection's lifetime, occupy its pending slot after expiry, or replace an
+earlier selection's control and receipts. Actual clock regression still refuses
+the request.
+
 If a stale view suspends source admission after a selection was accepted, its
 Cancel request and original submission deadline still run on ordinary owner
 turns. Either retires the queued selection and releases its descriptors without

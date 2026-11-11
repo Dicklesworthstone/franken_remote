@@ -87,6 +87,13 @@ impl SendIntake {
     /// sender policy cannot be changed by another request, and a full slot is a
     /// refusal, never a replacement of selected descriptors or publication data.
     pub fn submit(&self, request: SendRequest) -> Result<SendControl, Error> {
+        self.submit_with_clock(request, || self.now())
+    }
+    fn submit_with_clock(
+        &self,
+        request: SendRequest,
+        mut clock: impl FnMut() -> Result<u64, Error>,
+    ) -> Result<SendControl, Error> {
         let p = request.policy;
         let original = self.0.policy;
         if p.max_file_bytes != original.max_file_bytes
@@ -98,18 +105,26 @@ impl SendIntake {
         {
             return Err(Error::Limits);
         }
-        let now = self.now()?;
-        let until_us = now
+        let submitted = clock()?;
+        let until_us = submitted
             .checked_add(u64::try_from(request.lifetime.as_micros()).map_err(|_| Error::Limits)?)
             .ok_or(Error::Clock)?;
         let mut state = self.lock();
         if state.closed || self.0.cx.is_cancel_requested() {
             return Err(Error::Closed);
         }
-        if now < state.last {
+        // Another owner may advance `last` while this submission waits for the
+        // mutex. Order a fresh sample under the SAME lock instead of treating
+        // the earlier submission timestamp as a clock regression. Waiting can
+        // spend the original lifetime, never restart it at this later sample.
+        let now = clock()?;
+        if now < submitted || now < state.last {
             return Err(Error::Clock);
         }
         state.last = now;
+        if now >= until_us {
+            return Err(Error::Expired);
+        }
         if !state.ready || state.pending.is_some() {
             return Err(Error::Busy);
         }
@@ -134,13 +149,19 @@ impl SendIntake {
     /// cannot extend this request's original lifetime or retain cancelled files.
     /// The returned request has never entered a sender or started a disk worker.
     pub(crate) fn take_terminal(&self) -> Option<(Pending, Error)> {
+        self.take_terminal_with_clock(|| self.now())
+    }
+    fn take_terminal_with_clock(
+        &self,
+        mut clock: impl FnMut() -> Result<u64, Error>,
+    ) -> Option<(Pending, Error)> {
         let mut state = self.lock();
         let pending = state.pending.as_ref()?;
         let until = pending.until_us;
         let reason = if pending.control.cancel_requested() {
             Some(Error::Cancelled)
         } else {
-            match self.now() {
+            match clock() {
                 Err(error) => Some(error),
                 Ok(now) if now < state.last => Some(Error::Clock),
                 Ok(now) => {
