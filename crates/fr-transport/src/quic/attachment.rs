@@ -584,11 +584,13 @@ impl QuicRecords {
             // A server must not send MAX_STREAM_DATA for a client stream that
             // the client has not opened yet. BindingAccepted is that barrier.
             if role == StreamRole::Client {
+                let window =
+                    record_limit::receive_window(d.role, allowance, self.policy.stream_window);
                 let actual = n
                     .connection_mut()
-                    .configure_stream_receive_window(cx, inbound.stream, allowance)
+                    .configure_stream_receive_window(cx, inbound.stream, window)
                     .map_err(|_| Error::Native)?;
-                if actual > allowance {
+                if actual > window {
                     return Err(Error::InvalidPolicy);
                 }
             }
@@ -1024,18 +1026,19 @@ impl MediaChannel {
         if self.host && self.phase == Phase::Ticket && !self.receive_armed {
             let result = (|| {
                 let grant = self.grant.ok_or(Error::WrongRoute)?;
+                let window = record_limit::receive_window(
+                    self.descriptor.role,
+                    grant.byte_allowance,
+                    q.policy.stream_window,
+                );
                 let actual = q
                     .native
                     .as_mut()
                     .ok_or(Error::Closed)?
                     .connection_mut()
-                    .configure_stream_receive_window(
-                        cx,
-                        self.pair.inbound.stream,
-                        grant.byte_allowance,
-                    )
+                    .configure_stream_receive_window(cx, self.pair.inbound.stream, window)
                     .map_err(|_| Error::Native)?;
-                if actual > grant.byte_allowance {
+                if actual > window {
                     return Err(Error::InvalidPolicy);
                 }
                 Ok(())

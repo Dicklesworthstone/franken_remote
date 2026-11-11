@@ -20,9 +20,10 @@ the viewer's local role allowance before issuing its ticket, allowing asymmetric
 endpoint budgets to interoperate within the smaller bound.
 
 Configuration, input, recovery, video and audio limits do not grow. Recovery
-still fits both its bulk forward and critical reverse pools. No aggregate queue
-budget, stream credit, retransmission accounting, priority, item lifetime or
-first-byte deadline is increased. This is not a new retry or reconnect path.
+still fits both its bulk forward and critical reverse pools. The bulk-record
+capability does not increase aggregate queue budgets, native stream credit,
+retransmission accounting, priority, item lifetimes or first-byte deadlines.
+This is not a new retry or reconnect path.
 
 The text clipboard still permits at most 16,384 payload bytes per chunk and
 1,048,576 bytes per item. With default policies, a one-MiB item takes 64 chunks
@@ -30,6 +31,43 @@ plus Begin/Commit (66 records), instead of 130 smaller chunks plus Begin/Commit
 (132 records). This is an executed record-count comparison, not a bandwidth or
 WAN latency measurement. Publication remains commit-only; an original-owner
 revocation before Commit prevents publication and releases retained item data.
+
+## Clipboard receive window
+
+The clipboard's native receive window uses each endpoint's existing
+`Policy::stream_window` (at most 65,536 bytes), independently of its negotiated
+per-record maximum. This applies to legacy and bulk-record selections.
+Previously, both viewer reservation and host ticket arming configured that
+window from the record grant. A legacy 8,192-byte grant therefore permitted
+roughly one chunk per receive-credit round trip even when the clipboard bridge
+had admitted eight bounded records.
+
+This is a local flow-control choice, not another wire capability.
+[`native-attachment-credit`](NATIVE_ATTACHMENT_CREDIT.md) defines
+`byte_allowance` as a maximum **record**, including when asymmetric policies
+narrow the final grant. The route and framing still enforce that exact grant.
+A smaller endpoint retains its own smaller native window, and every other role
+retains its previous window calculation. The connection receive cap remains at
+most 524,288 bytes; per-record allocation, sender byte/record budgets, priority,
+first-byte expiry and original item/authority deadlines are unchanged. An idle
+clipboard consumer does not read merely to return credit.
+
+The real UDP/TLS regressions in
+`crates/fr-transport/tests/media_attachment/clipboard/bulk/window.rs` consume
+the fixture's initial credit before parking the application reader. They cover
+eight legacy records in one bounded flight, modern bulk records, both directions,
+narrowed grants and asymmetric local windows. A further record remains
+incomplete until reads return credit; oversized records still refuse before
+changing usage. These are transport fixtures, not OS clipboard or WAN
+qualification.
+
+**2026-11-11 scoped validation:** the exact `record_limit.rs` production module,
+its unchanged child tests and actual `fr-core`/`fr-wire` dependencies passed
+**12 tests**, including the new local-window assertion and existing one-MiB
+Unicode owner/framing cases in both directions. Strict Clippy and pinned
+rustfmt passed. Execution of the new native UDP/TLS regressions and full
+`frd`/OS/WAN qualification remains pending; these component results do not
+establish one-MiB transfer completion on a live connection.
 
 ## Executed qualification
 

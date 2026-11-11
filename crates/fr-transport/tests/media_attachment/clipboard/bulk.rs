@@ -7,6 +7,8 @@ use fr_core::limits::LimitOverrides;
 
 #[path = "bulk/recovery.rs"]
 mod recovery;
+#[path = "bulk/window.rs"]
+mod window;
 
 async fn link(cx: &Cx, host: Policy, client: Policy) -> Link {
     let (c, h) = support::native_pair(cx, "localhost", ALPN).await;

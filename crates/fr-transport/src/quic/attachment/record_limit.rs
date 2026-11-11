@@ -1,5 +1,5 @@
-//! The same role-specific ceiling applies before reservation and promotion.
-//! This calculation never allocates, changes credit, or grants authority.
+//! Role-specific record ceilings and bounded native receive windows.
+//! These calculations never allocate, alter native state, or grant authority.
 use fr_core::limits::ProtocolLimits;
 use fr_wire::{attachment::MediaRole, input::MAX_INPUT_RECORD_BYTES};
 
@@ -62,10 +62,52 @@ pub(super) fn negotiated_maximum(
     )
 }
 
+/// The clipboard may keep several bounded records in flight. Its grant limits
+/// each record, not the entire reliable stream window. Using that record ceiling
+/// as native credit serialized legacy 8 KiB chunks at roughly one per round trip.
+/// Both reservation and ticket arming keep the endpoint's existing policy cap;
+/// framing, negotiated records, aggregate receive credit and lifetimes are
+/// unchanged. Other roles retain their existing window calculation.
+pub(super) fn receive_window(role: MediaRole, allowance: u64, stream_window: u64) -> u64 {
+    if role == MediaRole::Clipboard {
+        stream_window
+    } else {
+        allowance
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use fr_core::limits::LimitOverrides;
+
+    #[test]
+    fn clipboard_window_is_local_even_when_the_record_grant_is_narrower() {
+        for (allowance, window) in [
+            (8192, 65_536),
+            (4096, 65_536),
+            (8192, 16_384),
+            (4096, 4096),
+            (65_536, 65_536),
+        ] {
+            assert_eq!(
+                receive_window(MediaRole::Clipboard, allowance, window),
+                window
+            );
+            for role in [
+                MediaRole::Configuration,
+                MediaRole::Recovery,
+                MediaRole::Video,
+                MediaRole::Input,
+                MediaRole::Files,
+                MediaRole::FilesDownload,
+                MediaRole::AudioDown,
+                MediaRole::AudioUp,
+            ] {
+                assert_eq!(receive_window(role, allowance, window), allowance);
+            }
+        }
+    }
 
     #[test]
     fn bulk_uses_its_own_pool_and_retains_every_other_role_bound() {
