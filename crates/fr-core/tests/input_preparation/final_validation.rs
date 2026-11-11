@@ -119,7 +119,9 @@ fn final_native_validation_precedes_the_successful_clock_and_original_deadline()
             )
             .unwrap(),
     );
-    assert_eq!(readings, [0, 100_000]);
+    // Admission, policy authorization after native validation, then the final
+    // unlocked sample after any policy-lock contention.
+    assert_eq!(readings, [0, 100_000, 100_000]);
     assert_eq!(result.outcome, InputOutcome::SubmittedToOs);
     assert_eq!(result.submitted_operations, 1);
     assert_eq!(sink.authorizations, 1);

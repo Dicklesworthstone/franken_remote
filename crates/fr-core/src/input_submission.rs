@@ -354,8 +354,8 @@ pub enum Refusal {
     Platform(PlatformError),
     UnknownEffect,
     AuthorityUnavailable,
-    /// The executor's own final clock check found the submission deadline
-    /// passed; no native call was made. Never transparently retried.
+    /// The final clock check found the original submission deadline passed;
+    /// no native call was made. Never transparently retried.
     ExpiredAtBoundary,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -822,7 +822,7 @@ impl InputSession {
             Ok(())
         }
     }
-    /// Final authorization, returning the exclusive deadline for this exact
+    /// Policy authorization, returning the exclusive deadline for this exact
     /// submission (ticket, lease, observation and bounded view, whichever is
     /// earliest). A separate executor must not submit at or after it.
     fn check(
@@ -847,6 +847,28 @@ impl InputSession {
         self.authority.with_time(&mut self.clock, now, |a, at| {
             a.submission_deadline(self.lease, credentials.ticket, at)
         })
+    }
+    fn check_submission(
+        &mut self,
+        credentials: InputCredentials,
+        clock: &mut impl FnMut() -> HostInstant,
+    ) -> Result<HostInstant, Refusal> {
+        let until = self.check(credentials, clock())?;
+        // Policy-lock contention can outlive the pre-lock clock sample even
+        // when no policy writer advances its serialized time. Sample again
+        // AFTER releasing every lock, preserving this exact exclusive deadline:
+        // another policy check could block again or replace the original cap.
+        let sampled = clock();
+        if sampled < self.clock {
+            self.revoke();
+            return Err(Refusal::Authority(AuthorityError::ClockRegression));
+        }
+        self.clock = sampled;
+        self.check_active()?;
+        if sampled >= until {
+            return Err(Refusal::ExpiredAtBoundary);
+        }
+        Ok(until)
     }
     fn require(&self, cap: Capability) -> Result<(), Refusal> {
         if self.capabilities.contains(cap) {
@@ -933,7 +955,9 @@ impl Attempt<'_, '_> {
         };
         let previous_wheel = self.owner.wheel;
         let result = prepared.0.submit_authorized(op, &mut || {
-            let until = self.owner.check(self.request.credentials, clock())?;
+            let until = self
+                .owner
+                .check_submission(self.request.credentials, clock)?;
             self.track(op, true);
             self.uncertain = true;
             Ok(until)

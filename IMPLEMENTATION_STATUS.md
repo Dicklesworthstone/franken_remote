@@ -1,5 +1,36 @@
 # Implementation status
 
+## Input expiry after authority-lock contention (2026-11-11)
+
+The shared `InputSession` now resamples its original host clock after policy
+authorization has released every authority lock. It compares that sample with
+the exact exclusive deadline returned by authorization, without acquiring
+another policy lock or renewing the action. Input that expires while waiting
+for policy access is refused before any native submission or speculative held
+press. Clock regression fences the owner; revocation during the final sample is
+also checked. Partial receipts, duplicate suppression and release-only cleanup
+remain intact.
+
+Six new deterministic cases hold the actual shared authority mutex on another
+thread while advancing the clock. They cover exact-deadline refusal, a
+still-valid wait, a partial repeat without replay, held-key cleanup, clock
+regression and final revocation. Five regressions fail on the preceding source;
+the still-valid positive control passes there.
+
+**Passed:** the pinned Cargo suite for `fr-core`, `fr-wire`, `fr-media` and
+`fr-client`: 1,689 tests, zero failures; all-target compiler checks for those
+four crates and strict Clippy also passed. The focused preparation suite was
+rerun after test-only lint corrections: 17 passed. Workspace formatting, docs
+links and whitespace checks passed. UBS reported four pre-existing
+identifier-comparison false positives and test-only warnings; review found no
+new production issue, but this limited scan is not a native qualification.
+
+**Blocked/not tested:** the full all-feature workspace check was killed while
+compiling the unchanged pinned Asupersync dependency. The subsequent full test
+attempt was interrupted under resource pressure before tests ran. Portable
+policy tests do not qualify native OS timing or a complete remote session.
+Full-workspace and native qualification remain outstanding under `fr-fr2q`.
+
 ## macOS input checks after native event preparation (2026-11-11)
 
 The live Quartz input owner now constructs and retains each complete keyboard,

@@ -123,7 +123,11 @@ impl Process<'_> {
             .wait(
                 PollFd::new(
                     &self.command,
-                    if writing { PollFlags::OUT } else { PollFlags::IN },
+                    if writing {
+                        PollFlags::OUT
+                    } else {
+                        PollFlags::IN
+                    },
                 ),
                 Some(PollFd::new(&self.signals, PollFlags::IN)),
                 remaining,

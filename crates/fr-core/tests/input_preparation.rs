@@ -6,13 +6,21 @@ use fr_core::{
     input_submission::*,
     time::HostInstant,
 };
+use std::{
+    cell::Cell,
+    rc::Rc,
+    sync::{Arc, Mutex},
+};
 
+#[path = "input_preparation/authority_wait.rs"]
+mod authority_wait;
 #[path = "input_preparation/final_validation.rs"]
 mod final_validation;
 
 #[derive(Default)]
 struct Sink {
     prepared: Option<Operation>,
+    preparations: Rc<Cell<usize>>,
     effects: Vec<Operation>,
     cancelled: usize,
     panic_prepare: bool,
@@ -21,6 +29,7 @@ struct Sink {
 impl InputSink for Sink {
     fn prepare(&mut self, op: Operation) -> Result<(), PlatformError> {
         self.prepared = Some(op);
+        self.preparations.set(self.preparations.get() + 1);
         assert!(!self.panic_prepare, "injected preparation panic");
         Ok(())
     }
@@ -40,6 +49,10 @@ impl InputSink for Sink {
     }
 }
 fn setup() -> (InputSession, InputCredentials) {
+    let (owner, credentials, _) = setup_shared();
+    (owner, credentials)
+}
+fn setup_shared() -> (InputSession, InputCredentials, Arc<Mutex<SessionAuthority>>) {
     let session = RemoteSessionId::from_raw(1);
     let lease = InputLeaseId::from_raw(2);
     let ticket = InputTicketId::from_raw(3);
@@ -61,8 +74,9 @@ fn setup() -> (InputSession, InputCredentials) {
             recovery: RecoveryGeneration::INITIAL,
         },
     };
-    let owner = InputSession::new(
-        a,
+    let shared = Arc::new(Mutex::new(a));
+    let owner = InputSession::from_shared_authority(
+        shared.clone(),
         c,
         InputBounds::new(DesktopPoint { x: 0, y: 0 }, 320, 240).unwrap(),
         Capabilities::default()
@@ -71,7 +85,7 @@ fn setup() -> (InputSession, InputCredentials) {
         HostInstant::ORIGIN,
     )
     .unwrap();
-    (owner, c)
+    (owner, c, shared)
 }
 fn request(c: InputCredentials, sequence: u64, transition: KeyTransition) -> InputRequest<'static> {
     InputRequest {
@@ -164,12 +178,18 @@ fn expiry_between_repeat_release_and_press_reports_partial_without_replay() {
             HostInstant::ORIGIN
         })
         .unwrap();
-    let mut checks = 0;
+    let preparations = sink.preparations.clone();
     let r = receipt(
         owner
             .dispatch(request(c, 1, KeyTransition::Repeat), &mut sink, || {
-                checks += 1;
-                HostInstant::from_micros(if checks == 3 { 1_000_000 } else { 0 })
+                // The first press and repeat's release have completed. Expire
+                // during preparation of the re-press, independently of how
+                // many clock samples the final authorization requires.
+                HostInstant::from_micros(if preparations.get() == 3 {
+                    1_000_000
+                } else {
+                    0
+                })
             })
             .unwrap(),
     );

@@ -73,6 +73,14 @@ its fence, indicator and monotonic deadline check through `submit_checked`.
 Its emergency release snapshot includes any physical codes refreshed by this
 preparation. A refusal consumes the preparation and makes no native input call.
 
+The shared owner samples its host clock again after policy authorization has
+released every authority lock. This accounts for time spent waiting for policy
+access, even when no policy writer advances its clock. That last sample must
+precede the original exclusive submission deadline; neither lock contention nor
+revalidation renews it. Clock regression and a concurrent revoke refuse the
+action before speculative held-state tracking. Previously submitted operations
+keep their partial receipt and release-only cleanup; the action is not replayed.
+
 The blocking native checks finish before that final authorization/clock sample.
 No server grab or blocking preflight follows it. As elsewhere in this adapter,
 local pointer movement and X11
