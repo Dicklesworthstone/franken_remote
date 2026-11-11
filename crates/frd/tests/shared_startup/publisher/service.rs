@@ -158,12 +158,22 @@ fn slow_native_completion_does_not_trigger_catchup_captures() {
             Box::pin(both(source, network)).await.0,
             Err(PublishError::Closed)
         );
-        assert_eq!(times.len(), 3);
-        // The exact native fixture sleeps 50ms. The configured interval follows
-        // completion instead of issuing two overdue operations back-to-back.
-        // Measured gaps are 99.4-101.3 ms; an exact 100 ms floor failed on
-        // sub-millisecond timer jitter, while catch-up would show about 50 ms.
-        assert!(times.windows(2).all(|w| w[1] - w[0] >= 90_000), "{times:?}");
+        // The viewers leave after presenting frame 3. A fourth capture, which
+        // starts once both have taken frame 3's records, may complete first.
+        assert!((3..=4).contains(&times.len()), "{times:?}");
+        // The exact native fixture sleeps 50 ms, as long as the interval, and
+        // one capture is in flight at a time. Serialized 50 ms captures
+        // complete at least 50 ms apart with or without catch-up, so the
+        // Cadence unit tests check that no missed slot is owed. Here no two
+        // complete closer than the interval.
+        assert!(times.windows(2).all(|w| w[1] - w[0] >= 45_000), "{times:?}");
+        // The second capture starts as soon as both viewers have taken the
+        // first picture's records: about 54 ms after the first completed.
+        // Waiting for the next whole slot instead gave 99.4-101.3 ms here,
+        // half the configured rate. The later gaps (about 95 ms) are this
+        // fixture's: its viewers accept later pictures' records only about
+        // 40 ms after capture.
+        assert!(times[1] - times[0] < 75_000, "{times:?}");
         stop_cohort(&mut cohort, &cx).await;
     });
 }

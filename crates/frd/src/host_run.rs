@@ -765,6 +765,14 @@ impl StopHandle {
 /// that stop the service. Peer outcomes neither count nor reset the run.
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
+/// Encoded pictures one shared source may hold at once, across its viewers.
+/// Each sent picture stays cached for repair until its reference horizon
+/// (250 ms), so a source producing N pictures/s holds about N/4 of them plus
+/// the one being captured. Eight capped every source near 30 pictures/s,
+/// whatever its size. 32 is each viewer's own send-cache limit and covers
+/// 120 fps; the 32 MiB byte budget still bounds the memory.
+const SHARED_POOL_PICTURES: usize = 32;
+
 const MAX_GEOMETRY_RESTARTS: u8 = 5;
 const GEOMETRY_RESTART_WINDOW_NS: u64 = 30_000_000_000;
 
@@ -1618,8 +1626,12 @@ impl Share<'_> {
                 Ok(Setup {
                     control,
                     launch,
-                    pool: SharedFramePool::new(ProtocolLimits::ABSOLUTE, 32 * 1024 * 1024, 8)
-                        .map_err(|_| ())?,
+                    pool: SharedFramePool::new(
+                        ProtocolLimits::ABSOLUTE,
+                        32 * 1024 * 1024,
+                        SHARED_POOL_PICTURES,
+                    )
+                    .map_err(|_| ())?,
                 })
             })
         }
@@ -1873,6 +1885,22 @@ mod permission_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shared_pool_holds_a_whole_repair_horizon_of_pictures_at_120_fps() {
+        let policy = fr_media::delivery::SendPolicy::default();
+        let in_flight = 120 * policy.reference_horizon_micros / 1_000_000 + 1;
+        assert!(u64::try_from(SHARED_POOL_PICTURES).unwrap() >= in_flight);
+        assert!(SHARED_POOL_PICTURES <= policy.max_cached_pictures);
+        assert!(
+            SharedFramePool::new(
+                ProtocolLimits::ABSOLUTE,
+                32 * 1024 * 1024,
+                SHARED_POOL_PICTURES
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn geometry_restarts_are_bounded_independently_of_peer_and_fault_outcomes() {

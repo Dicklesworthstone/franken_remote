@@ -307,9 +307,15 @@ impl Entry {
 impl Members {
     /// Provisional senders occupy bounded slots, never count as healthy capture
     /// demand, and cannot bypass physical or per-subscriber logical byte credit.
+    ///
+    /// A capture proceeds when any healthy viewer has credit and refuses those
+    /// without it as slow. With `wait_for_all` it proceeds only when every
+    /// viewer has credit and refuses none: the cadenced service passes it
+    /// while the others may still be handing over the previous picture.
     pub(super) fn capture_credit(
         &mut self,
         prepared: &PreparedSharedCapture<'_>,
+        wait_for_all: bool,
     ) -> Result<(usize, Option<u64>), Error> {
         self.tick()?;
         let mut refused = 0;
@@ -360,7 +366,15 @@ impl Members {
         if self.closed {
             return Err(Error::Closed);
         }
-        if !healthy_credit {
+        if !healthy_credit
+            || wait_for_all
+                && self.entries.iter().zip(ready).any(|(entry, ready)| {
+                    !ready
+                        && entry
+                            .as_ref()
+                            .is_some_and(|e| e.failure.is_none() && !e.fenced())
+                })
+        {
             return Err(Error::Media(MediaError::Backpressure));
         }
         for (entry, ready) in self.entries.iter_mut().zip(ready) {

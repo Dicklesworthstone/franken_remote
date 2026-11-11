@@ -108,6 +108,11 @@ struct Members {
     audio: fr_media::audio_delivery::AudioRing,
     /// Current fixed-size state copied only from the original adaptive source.
     quality: Option<super::quality_decision::Point>,
+    /// Advances whenever a viewer's connection task admits records to its
+    /// transport, which may return the source's capture credit.
+    credit_epoch: u64,
+    /// The source service, while it waits for that after a turn without credit.
+    credit_waiter: Option<std::task::Waker>,
 }
 impl Members {
     /// Fanout happens only after native effects have been recorded by the source.
@@ -293,6 +298,8 @@ impl Publisher {
                 cursor: fr_media::cursor::HostCursor::new(),
                 audio: fr_media::audio_delivery::AudioRing::new(),
                 quality: None,
+                credit_epoch: 0,
+                credit_waiter: None,
             })),
         })
     }
@@ -421,7 +428,7 @@ impl Publisher {
         };
         async move {
             let mut operation = operation;
-            let result = operation.publisher.capture_inner().await;
+            let result = operation.publisher.capture_inner(false).await;
             // A successful capture can also retire its last recipient. End
             // native ownership immediately, not on an unrelated later packet.
             let closed = operation
@@ -443,7 +450,8 @@ impl Publisher {
             result
         }
     }
-    async fn capture_inner(&mut self) -> Result<CaptureReport, Error> {
+    /// `wait_for_all`: see `Members::capture_credit`.
+    async fn capture_inner(&mut self, wait_for_all: bool) -> Result<CaptureReport, Error> {
         let owner = {
             let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
             members.tick()?;
@@ -458,7 +466,7 @@ impl Publisher {
             .map_err(Error::Media)?;
         let (refused, join_until) = {
             let mut members = self.members.lock().map_err(|_| Error::Poisoned)?;
-            let admitted = members.capture_credit(&prepared)?;
+            let admitted = members.capture_credit(&prepared, wait_for_all)?;
             if let Some(adaptive) = &mut self.adaptive {
                 adaptive.observe_receivers(&members)?;
             }
@@ -746,6 +754,16 @@ impl Subscriber {
             members.close(Error::Media(error));
         }
         members.stop_if_empty();
+        let waiter = if result.as_ref().is_ok_and(|report| report.accepted > 0) {
+            members.credit_epoch = members.credit_epoch.wrapping_add(1);
+            members.credit_waiter.take()
+        } else {
+            None
+        };
+        drop(members);
+        if let Some(waker) = waiter {
+            waker.wake();
+        }
         result
     }
     /// One record on this viewer's audio-down reply lane (`AudioConfigured`
