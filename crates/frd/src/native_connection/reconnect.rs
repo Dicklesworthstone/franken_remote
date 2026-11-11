@@ -521,6 +521,7 @@ impl Client {
                                     attempt: attempt + 1,
                                 },
                             )?;
+                            reopen_pause(&cx, &mut clock, policy, application, attempt).await?;
                             continue;
                         }
                     }
@@ -563,6 +564,7 @@ impl Client {
                                         attempt: attempt + 1,
                                     },
                                 )?;
+                                reopen_pause(&cx, &mut clock, policy, application, attempt).await?;
                                 continue;
                             }
                             notify(application, Status::Completed { attempt })?;
@@ -1044,6 +1046,31 @@ fn after(at: Time, duration: Duration) -> Result<Time, Failure> {
             .checked_add(u64::try_from(duration.as_nanos()).map_err(|_| Failure::Clock)?)
             .ok_or(Failure::Clock)?,
     ))
+}
+/// Before a reopened attempt dials, wait as long as before a first retry.
+/// frd's serial host binds its next listener only after the closed attempt's
+/// transport has retired, plus its own 250 ms cooldown. A dial that arrives
+/// earlier loses its Initial, and the next attempt then stalled for about
+/// 20 s against mac-studio (fr-w4yu). A reopen whose seal waited ~0.55 s
+/// first (full screen) connected at once.
+async fn reopen_pause<A: Application>(
+    cx: &Cx,
+    clock: &mut Clock,
+    policy: Policy,
+    application: &mut A,
+    attempt: u8,
+) -> Result<(), Failure> {
+    let until = after(clock.live(cx)?, policy.delay(1))?;
+    if let Err(failure) = guarded(cx, clock, async {
+        sleep_until(until).await;
+        Ok(())
+    })
+    .await
+    {
+        let _ = notify(application, Status::Stopped { attempt, failure });
+        return Err(failure);
+    }
+    Ok(())
 }
 const WAKE: Duration = Duration::from_millis(10);
 async fn guarded<T>(

@@ -45,6 +45,8 @@ struct App {
     decisions: u8,
     reopens: u8,
     report: Option<Closed>,
+    reopening_at: Option<std::time::Instant>,
+    reopen_gaps: Vec<Duration>,
 }
 impl Application for App {
     type Output = ();
@@ -167,6 +169,12 @@ impl Application for App {
         if let Status::Connecting { attempt } = status {
             assert_eq!(self.cleaned + 1, attempt, "new owner before cleanup");
             self.report = None;
+            if let Some(at) = self.reopening_at.take() {
+                self.reopen_gaps.push(at.elapsed());
+            }
+        }
+        if let Status::Reopening { .. } = status {
+            self.reopening_at = Some(std::time::Instant::now());
         }
         self.events.push(status);
         match (self.mode, status) {
@@ -289,6 +297,8 @@ async fn scenario(
         decisions: 0,
         reopens,
         report: None,
+        reopening_at: None,
+        reopen_gaps: vec![],
     };
     let (opened, closed) = (app.opened.clone(), app.closed.clone());
     let client_done = done.clone();
@@ -393,6 +403,16 @@ fn explicit_reopens_work_with_one_automatic_attempt_and_fresh_connection_owners(
             .any(|s| matches!(s, Status::Reconnecting { .. }))
     );
     assert_eq!(app.events.last(), Some(&Status::Completed { attempt: 3 }));
+    // Each reopened attempt waits the first retry delay (10 ms here) before
+    // it dials, so the host can bind its next listener (fr-w4yu).
+    assert_eq!(app.reopen_gaps.len(), 2);
+    assert!(
+        app.reopen_gaps
+            .iter()
+            .all(|gap| *gap >= Duration::from_millis(10)),
+        "{:?}",
+        app.reopen_gaps
+    );
 }
 
 #[test]
