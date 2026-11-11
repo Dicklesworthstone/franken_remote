@@ -6,9 +6,10 @@ import os, select, socket, struct, sys, time
 
 MODE = "@MODE@"
 LOG = "@LOG@"
-FENCE = b"FRIF\x01\x01" + bytes(10)
-LOCAL_REVOKE = b"FRIF\x01\x02" + bytes(10)
-INDICATOR_FAILED = b"FRIF\x01\x03" + bytes(10)
+FENCE = b"FRIF\x02\x01" + bytes(10)
+LOCAL_REVOKE = b"FRIF\x02\x02" + bytes(10)
+INDICATOR_FAILED = b"FRIF\x02\x03" + bytes(10)
+INPUT_CLOCK = time.CLOCK_BOOTTIME if sys.platform == "linux" else time.CLOCK_MONOTONIC
 
 def log(line):
     with open(LOG, "a") as f:
@@ -46,7 +47,7 @@ def read(n):
     return b
 
 def reply(seq, kind, body=b""):
-    os.write(0, b"FRIA" + bytes([1, kind, 0, 0]) + struct.pack(">Q", seq) + body.ljust(48, b"\0"))
+    os.write(0, b"FRIA" + bytes([2, kind, 0, 0]) + struct.pack(">Q", seq) + body.ljust(48, b"\0"))
 
 NAMES = {1: "KEY", 2: "ABS", 3: "BUTTON", 4: "REL", 5: "SCROLL", 6: "WHEEL", 7: "TEXT"}
 expected = 1
@@ -54,7 +55,7 @@ prepared = None
 try:
     while True:
         h = read(64)
-        if h[:4] != b"FRIA" or h[4] != 1 or h[6:8] != b"\0\0":
+        if h[:4] != b"FRIA" or h[4] != 2 or h[6:8] != b"\0\0":
             log("BADFRAME")
             sys.exit(5)
         kind, seq, body = h[5], struct.unpack(">Q", h[8:16])[0], h[16:]
@@ -103,7 +104,7 @@ try:
                 log("SUBMIT-FENCED " + name)
                 reply(seq, 0x89)
                 continue
-            if time.monotonic_ns() >= not_after:
+            if time.clock_gettime_ns(INPUT_CLOCK) >= not_after:
                 log("SUBMIT-EXPIRED " + name)
                 reply(seq, 0x88)
                 continue

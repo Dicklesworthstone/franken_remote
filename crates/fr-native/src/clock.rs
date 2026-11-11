@@ -1,7 +1,6 @@
-//! Raw `CLOCK_MONOTONIC` for the out-of-process input executor's final check.
-//! The broker translates its authority deadline into this clock domain (the
-//! Asupersync wall-clock timer ticks at the same rate); it is never wall time.
-//! On macOS it includes sleep, unlike std's `Instant` (`CLOCK_UPTIME_RAW`).
+//! Explicit kernel clock domains for private native process boundaries.
+//! Input uses suspend-inclusive time; existing audio, microphone and clipboard
+//! protocols retain their separate raw monotonic clock. Neither is wall time.
 use core::ffi::{c_int, c_long};
 
 #[repr(C)]
@@ -12,29 +11,50 @@ struct Timespec {
 unsafe extern "C" {
     fn clock_gettime(clock: c_int, now: *mut Timespec) -> c_int;
 }
-/// `CLOCK_MONOTONIC`: the clock frd's deadline translation reads (Linux UAPI
-/// 1; Darwin `<time.h>` 6, which counts across sleep on both sides alike).
+/// `CLOCK_MONOTONIC` (Linux UAPI 1; Darwin `<time.h>` 6). Darwin's includes
+/// sleep, unlike std's `Instant` (`CLOCK_UPTIME_RAW`); Linux's excludes it.
 #[cfg(target_os = "linux")]
 const CLOCK_MONOTONIC: c_int = 1;
 #[cfg(target_os = "macos")]
 const CLOCK_MONOTONIC: c_int = 6;
 
+/// Linux `CLOCK_BOOTTIME` includes suspend. On Darwin the existing monotonic
+/// domain already does so. These are the version-2 input IPC clock domains.
+#[cfg(target_os = "linux")]
+const INPUT_AUTHORITY_CLOCK: c_int = 7;
+#[cfg(target_os = "macos")]
+const INPUT_AUTHORITY_CLOCK: c_int = CLOCK_MONOTONIC;
+
+/// Final input submission time, including any sleep while an original command
+/// was queued or its native preflight was blocked. Never replace this with
+/// Linux `CLOCK_MONOTONIC` or `Instant`: neither includes suspended time.
+pub fn input_authority_ns() -> Option<u64> {
+    clock_ns(INPUT_AUTHORITY_CLOCK)
+}
+
 /// Nanoseconds since an arbitrary per-boot origin. `None` never happens on a
 /// supported kernel; callers treat it as "deadline unknown", i.e. expired.
 pub fn monotonic_ns() -> Option<u64> {
+    clock_ns(CLOCK_MONOTONIC)
+}
+
+fn clock_ns(clock: c_int) -> Option<u64> {
     let mut now = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
     // SAFETY: valid clock id and a writable, correctly laid out timespec that
     // lives across the call; the kernel/vDSO retains no pointer.
-    if unsafe { clock_gettime(CLOCK_MONOTONIC, &raw mut now) } != 0 {
+    if unsafe { clock_gettime(clock, &raw mut now) } != 0 {
         return None;
     }
+    let nanos = u64::try_from(now.tv_nsec)
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000)?;
     u64::try_from(now.tv_sec)
         .ok()?
         .checked_mul(1_000_000_000)?
-        .checked_add(u64::try_from(now.tv_nsec).ok()?)
+        .checked_add(nanos)
 }
 
 /// Translate an original local instant to the same-boot child clock. Sampling
@@ -69,6 +89,30 @@ pub(crate) fn local_instant(at_ns: u64) -> Option<std::time::Instant> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn input_clock_reads_the_platform_suspend_inclusive_kernel_domain() {
+        // This executes the actual platform clock, not a simulated suspend.
+        // Correlation/suspend semantics are tested separately in fr-core.
+        #[cfg(target_os = "linux")]
+        let expected = 7; // Linux UAPI CLOCK_BOOTTIME, required by input IPC v2.
+        #[cfg(target_os = "macos")]
+        let expected = 6; // Darwin CLOCK_MONOTONIC includes sleep.
+        assert_eq!(super::INPUT_AUTHORITY_CLOCK, expected);
+        let before = super::clock_ns(expected).unwrap();
+        let input = super::input_authority_ns().unwrap();
+        let after = super::clock_ns(expected).unwrap();
+        assert!(before <= input && input <= after);
+    }
+
+    #[test]
+    fn input_clock_cannot_lag_the_existing_monotonic_protocol_clock() {
+        let monotonic = super::monotonic_ns().unwrap();
+        let input = super::input_authority_ns().unwrap();
+        // Linux's BOOTTIME adds suspended time to MONOTONIC. Darwin uses the
+        // same suspend-inclusive clock for both private profiles.
+        assert!(input >= monotonic);
+    }
+
     #[cfg(feature = "linux-microphone-process")]
     #[test]
     fn process_handoffs_only_shorten_original_instants() {

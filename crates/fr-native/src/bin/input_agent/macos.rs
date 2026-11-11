@@ -7,9 +7,9 @@
 //! `--parent-pid`, the command stream on stdin and the signal datagram socket
 //! on stdout. It holds no lease, ticket, nonce, peer identity or network
 //! socket: frd's `InputSession` makes every authority decision and sends a
-//! `CLOCK_MONOTONIC` deadline. Before every event it re-checks that no fence
-//! arrived, that the indicator was not used and that the deadline has not
-//! passed; after a fence or local revoke only release-only cleanup, Cleanup
+//! suspend-inclusive `CLOCK_MONOTONIC` deadline. Before every event it re-checks
+//! that no fence arrived, that the indicator was not used and that the deadline
+//! has not passed; after a fence or local revoke only release-only cleanup, Cleanup
 //! and Stop are accepted. EOF, Stop or a protocol violation releases what it
 //! holds before exiting; a panic or the parent's exit releases the recorded
 //! held set in the glue.
@@ -299,7 +299,7 @@ impl Executor {
             if *fenced || revoked.load(Ordering::Acquire) {
                 return Err(Reply::Fenced);
             }
-            if clock::monotonic_ns().is_none_or(|now| now >= not_after_ns) {
+            if clock::input_authority_ns().is_none_or(|now| now >= not_after_ns) {
                 return Err(Reply::Expired);
             }
             Ok(())

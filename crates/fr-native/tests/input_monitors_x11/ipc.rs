@@ -70,7 +70,7 @@ impl Agent {
         reply
     }
     fn submit(&mut self, operation: Operation) -> Reply {
-        let not_after_ns = fr_native::clock::monotonic_ns()
+        let not_after_ns = fr_native::clock::input_authority_ns()
             .unwrap()
             .checked_add(1_000_000_000)
             .unwrap();

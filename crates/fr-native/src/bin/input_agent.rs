@@ -7,7 +7,7 @@
 //! stdout. It owns the X11 connection for exactly one lease and holds no lease,
 //! ticket, nonce, peer identity or network socket: frd's canonical
 //! `InputSession` performs every authority check and sends only a derived
-//! `CLOCK_MONOTONIC` deadline.
+//! suspend-inclusive input deadline (`CLOCK_BOOTTIME` on Linux).
 //!
 //! For the whole lease it shows the remote-CONTROL sharing indicator (plan
 //! 15.2); only a real-device (non-XTEST) click or key on it, or closing/hiding
@@ -333,7 +333,7 @@ mod linux {
                 if *fenced || revoked.load(Ordering::Acquire) {
                     return Err(Reply::Fenced);
                 }
-                if clock::monotonic_ns().is_none_or(|now| now >= not_after_ns) {
+                if clock::input_authority_ns().is_none_or(|now| now >= not_after_ns) {
                     return Err(Reply::Expired);
                 }
                 Ok(())

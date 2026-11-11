@@ -91,6 +91,32 @@ application isolation boundary. The selected desktop user and X server remain
 trusted. Existing root-size, native-monitor format and capability bounds apply;
 seamless hotplug and in-place target switching remain unavailable.
 
+### Input deadlines across system suspend
+
+The separate input executor checks positive submissions against a clock that
+includes system suspend: `CLOCK_BOOTTIME` on Linux and `CLOCK_MONOTONIC` on
+macOS. The broker retains one conservative correlation between that clock and
+its runtime clock before the original executor factory can wait for its native
+thread or launch a child. Each translated
+deadline is capped by both that original correlation and a fresh sample. A
+runtime clock that pauses during sleep therefore cannot give an old action a
+new lifetime when the broker translates it after wake. A command already in the
+private IPC queue also expires while the machine sleeps.
+
+The final check still follows native event preparation and requires a clock
+reading strictly before the original exclusive deadline. Missing or regressed
+clock evidence, arithmetic overflow, expired work and mismatched private IPC
+versions refuse submission. The private input protocol is version 2; a broker
+and executor from different protocol generations cannot interpret one another's
+deadline origins. Release-only cleanup remains available after expiry and
+does not replay a press or other positive action.
+
+The deterministic clock tests model suspend both before deadline translation
+and after a command has been prepared. A real kernel-clock check verifies the
+selected Linux clock domain. Those checks do not establish physical
+suspend/resume behavior, graphical-session lock handling, or native XTest and
+Quartz effects; those require their existing platform qualification lanes.
+
 The native regression `input_monitors_x11` uses real RandR monitors and XTest on
 private Xvfb servers, with an independent Xlib observer. It exercises nonzero
 horizontal and vertical origins, actual button/wheel event coordinates, crop and

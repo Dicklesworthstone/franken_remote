@@ -69,6 +69,13 @@ block; none can consume an already-checked action lifetime and then post the
 action. After authorization, the agent posts only the event it already owns.
 An expired or revoked action releases that event without posting or retrying it.
 
+Deadline translation retains the original executor's correlation to Darwin's
+sleep-inclusive clock. It cannot give a pre-suspend action more time after the
+runtime wakes. The same clock is checked after native event preparation; the
+private input protocol rejects mixed broker/executor versions. See
+[input deadlines across suspend](../NATIVE_INPUT.md#input-deadlines-across-system-suspend)
+for the clock boundary and qualification limits.
+
 Pointer-query failure refuses the action instead of inventing a position at the
 display origin. Cancelled button preparation does not advance double-click
 state. Held-state cleanup retains possibly submitted presses and releases only

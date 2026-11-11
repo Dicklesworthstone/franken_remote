@@ -9,9 +9,11 @@
 //! fence reaches the executor while a request is in flight.
 //!
 //! No lease, ticket, nonce, session identity or peer data crosses: only the
-//! derived exclusive deadline, translated into the executor's raw
-//! `CLOCK_MONOTONIC` nanoseconds. Decoding authorizes nothing, and every
-//! reserved byte and unused body byte must be zero. Debug hides operations.
+//! derived exclusive deadline on the executor's suspend-inclusive clock:
+//! `CLOCK_BOOTTIME` on Linux and `CLOCK_MONOTONIC` on macOS. The original
+//! executor's clock correlation cannot be renewed after suspend. Decoding
+//! authorizes nothing, and every reserved byte and unused body byte must be
+//! zero. Debug hides operations.
 use super::{Capabilities, Operation, PlatformError, Submission};
 use crate::{
     input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, PointerButton, ScrollUnit},
@@ -22,7 +24,10 @@ use core::fmt;
 
 pub const MAGIC: [u8; 4] = *b"FRIA";
 pub const SIGNAL_MAGIC: [u8; 4] = *b"FRIF";
-pub const VERSION: u8 = 1;
+// Version 1 used Linux CLOCK_MONOTONIC, which excludes suspend. Reject mixed
+// parent/child generations before exchanging input: the changed clock origin
+// must never turn an old executor's deadline into extra authority lifetime.
+pub const VERSION: u8 = 2;
 pub const FRAME_BYTES: usize = 64;
 pub const SIGNAL_BYTES: usize = 16;
 const HEADER_BYTES: usize = 16;
@@ -55,7 +60,7 @@ pub enum Request {
     },
     Prepare(Operation),
     /// Submit the matching prepared operation only while the executor's own
-    /// `CLOCK_MONOTONIC` reading is strictly before `not_after_ns`.
+    /// suspend-inclusive clock reading is strictly before `not_after_ns`.
     Submit {
         operation: Operation,
         not_after_ns: u64,
@@ -164,6 +169,48 @@ pub fn not_after_ns(monotonic_ns: u64, now: HostInstant, until: HostInstant) -> 
         return None;
     }
     monotonic_ns.checked_add(remaining.checked_mul(1_000)?)
+}
+
+/// One immutable correlation for an original input executor. Its runtime
+/// clock may stop during sleep; its native submission clock must not. Sampling
+/// the native clock FIRST and the runtime clock second makes this a conservative
+/// ceiling for every later deadline, including when sleep occurs before the
+/// broker translates a queued action. Rebuilding the correlation after sleep
+/// would renew that action's remaining lifetime.
+pub struct DeadlineClock {
+    original_ns: u64,
+    original: HostInstant,
+}
+
+impl DeadlineClock {
+    pub const fn new(original_ns: u64, original: HostInstant) -> Self {
+        Self {
+            original_ns,
+            original,
+        }
+    }
+
+    /// Translate an unchanged original authority deadline. A fresh native
+    /// sample precedes `now` and can only shorten the original correlation's
+    /// bound, less one runtime tick for microsecond rounding. An expired,
+    /// regressed or unrepresentable clock admits no submit.
+    pub fn not_after_ns(
+        &self,
+        native_ns: u64,
+        now: HostInstant,
+        until: HostInstant,
+    ) -> Option<u64> {
+        if native_ns < self.original_ns || now < self.original {
+            return None;
+        }
+        let original = not_after_ns(self.original_ns, self.original, until)?;
+        let sampled = not_after_ns(native_ns, now, until)?;
+        // host_now floors runtime nanoseconds to microseconds. The native
+        // sample can fall in that same tick, so include one full tick rather
+        // than depending on the sampling gap to absorb the rounding error.
+        let deadline = original.min(sampled).checked_sub(1_000)?;
+        (native_ns < deadline).then_some(deadline)
+    }
 }
 
 pub fn encode_request(sequence: u64, request: Request) -> Result<[u8; FRAME_BYTES], CodecError> {

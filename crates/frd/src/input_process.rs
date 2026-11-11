@@ -5,7 +5,8 @@
 //! submit order stay on the existing native input thread; only the SINK moves
 //! behind a private socketpair to a child owning the X11 connection for exactly
 //! one lease. Before every native call the child re-checks the fence, its local
-//! sharing indicator and the deadline derived from frd's final check.
+//! sharing indicator and the suspend-inclusive deadline derived from frd's
+//! final check under the original executor's immutable clock correlation.
 //!
 //! A timed-out, mismatched or malformed exchange is `Unknown`: the channel is
 //! poisoned, the child's process group is killed, nothing is resent, and native
@@ -170,8 +171,9 @@ impl fmt::Debug for Fence {
 /// building it spawns nothing. The child revalidates exact bounds and the
 /// required capabilities before replying Ready; nothing is injected during
 /// initialization. Pass `RemoteSink::native_cleanup` as the native cleanup.
-/// `cx` must carry the production wall-clock timer: deadlines are translated
-/// into the child's `CLOCK_MONOTONIC`, which ticks at the same rate.
+/// `cx` must carry the production wall-clock timer. One original correlation
+/// caps translation into the child's suspend-inclusive input clock; a paused
+/// runtime clock cannot renew an action's lifetime after sleep.
 pub fn factory(
     launch: ProcessLaunch,
     cx: Cx,
@@ -179,7 +181,15 @@ pub fn factory(
     required: Capabilities,
     fence: Fence,
 ) -> impl FnOnce() -> Result<RemoteSink, PlatformError> + Send + 'static {
-    move || RemoteSink::start(&launch, cx, bounds, required, &fence)
+    // Establish the original correlation before this factory can wait for its
+    // native thread. Sampling only when the thread starts would hide suspend
+    // during that queue wait. Construction still spawns no process or input.
+    let deadline_clock: Result<process::DeadlineClock, PlatformError> = (|| {
+        let original_ns = input_authority_ns().ok_or(PlatformError::Unavailable)?;
+        let original = input_watchdog::host_now(&cx).map_err(|_| PlatformError::Unavailable)?;
+        Ok(process::DeadlineClock::new(original_ns, original))
+    })();
+    move || RemoteSink::start(&launch, cx, bounds, required, &fence, deadline_clock)
 }
 
 /// What the child will still accept. Both refusal states admit only
@@ -209,6 +219,7 @@ pub struct RemoteSink {
     command: UnixStream,
     signals: Arc<UnixDatagram>,
     cx: Cx,
+    deadline_clock: process::DeadlineClock,
     sequence: u64,
     capabilities: Capabilities,
     repeat_pairs: bool,
@@ -232,11 +243,12 @@ impl RemoteSink {
         bounds: InputBounds,
         required: Capabilities,
         fence: &Fence,
+        deadline_clock: Result<process::DeadlineClock, PlatformError>,
     ) -> Result<Self, PlatformError> {
         if fence.is_signalled() {
             return Err(PlatformError::Permission);
         }
-        input_watchdog::host_now(&cx).map_err(|_| PlatformError::Unavailable)?;
+        let deadline_clock = deadline_clock?;
         let (child, command, signals) = spawn(launch)?;
         let signals = Arc::new(signals);
         // Custody first: every failure below kills and reaps this child.
@@ -245,6 +257,7 @@ impl RemoteSink {
             command,
             signals: signals.clone(),
             cx,
+            deadline_clock,
             sequence: 0,
             capabilities: Capabilities::default(),
             repeat_pairs: true,
@@ -361,10 +374,10 @@ impl RemoteSink {
         }
     }
     fn deadline(&self, until: HostInstant) -> Option<u64> {
-        // Monotonic FIRST, then the runtime clock: the translation errs early.
-        let monotonic = monotonic_ns()?;
+        // This sample can shorten, never replace the original correlation.
+        let native = input_authority_ns()?;
         let now = input_watchdog::host_now(&self.cx).ok()?;
-        process::not_after_ns(monotonic, now, until)
+        self.deadline_clock.not_after_ns(native, now, until)
     }
 }
 impl InputSink for RemoteSink {
@@ -611,13 +624,28 @@ pub(crate) fn kill_group(child: &Child) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
 }
-/// Raw `CLOCK_MONOTONIC` nanoseconds, the same clock the child checks.
+/// Suspend-inclusive input clock, shared with the version-2 native executor.
+fn input_authority_ns() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    let clock = rustix::time::ClockId::Boottime;
+    #[cfg(not(target_os = "linux"))]
+    let clock = rustix::time::ClockId::Monotonic;
+    clock_ns(clock)
+}
+/// Raw `CLOCK_MONOTONIC` nanoseconds for the separate clipboard IPC profile.
+/// Its existing clock domain is independent of version-2 input deadlines.
 pub(crate) fn monotonic_ns() -> Option<u64> {
-    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+    clock_ns(rustix::time::ClockId::Monotonic)
+}
+fn clock_ns(clock: rustix::time::ClockId) -> Option<u64> {
+    let now = rustix::time::clock_gettime(clock);
+    let nanos = u64::try_from(now.tv_nsec)
+        .ok()
+        .filter(|nanos| *nanos < 1_000_000_000)?;
     u64::try_from(now.tv_sec)
         .ok()?
         .checked_mul(1_000_000_000)?
-        .checked_add(u64::try_from(now.tv_nsec).ok()?)
+        .checked_add(nanos)
 }
 
 #[cfg(test)]
