@@ -90,6 +90,10 @@ typedef struct FrConfig {
     bool direct;                    /* dial the pin's addresses, no resolver
                                        (a directory machine); needs pin */
     const char *_Nullable pin;      /* pin saved from an earlier session */
+    uint32_t picture_width;         /* this screen's pixels, longer side */
+    uint32_t picture_height;        /* first; 0, 0 = host's native pixels.
+                                       A Mac host then sends pictures that
+                                       fit; each axis 0 or at least 64 */
 } FrConfig;
 
 typedef struct FrEvent {

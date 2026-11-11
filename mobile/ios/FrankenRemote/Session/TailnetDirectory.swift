@@ -12,7 +12,8 @@ struct TailnetDirectory: HostDirectory {
             let status: Int32 = host.name.withCString { name in
                 func start(_ pin: UnsafePointer<CChar>?) -> Int32 {
                     var config = FrConfig(host: name, port: host.port, control: false,
-                                          direct: host.dialsDirectly, pin: pin)
+                                          direct: host.dialsDirectly, pin: pin,
+                                          picture_width: 0, picture_height: 0)
                     return fr_directory_fetch(&config, context, { context, json in
                         guard let context else { return }
                         // Balances passRetained: the core calls back exactly once.

@@ -105,6 +105,11 @@ pub struct FrConfig {
     /// NUL-terminated pin from an earlier connection to the same name, or
     /// NULL for a first connection.
     pub pin: *const c_char,
+    /// The largest picture this device shows 1:1 (its screen's pixels), or
+    /// 0, 0 for the host's native pixels. A host that can scale (a Mac) then
+    /// sends pictures that fit inside. Each axis is 0 or at least 64.
+    pub picture_width: u32,
+    pub picture_height: u32,
 }
 
 #[repr(C)]
@@ -231,6 +236,13 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
     let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
     };
+    let picture = match (config.picture_width, config.picture_height) {
+        (0, 0) => None,
+        (width, height) if width.min(height) >= fr_wire::display::picture::MIN_BOX_PIXELS => {
+            Some((width, height))
+        }
+        _ => return FR_INVALID,
+    };
     // Refuse early when every slot is taken (registering the started
     // session below still refuses if another start won the last slot).
     if lookup_free_slots() == 0 {
@@ -242,6 +254,7 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         pin,
         control: config.control,
         direct: config.direct,
+        picture,
     }) else {
         return FR_BUSY;
     };

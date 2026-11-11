@@ -1,6 +1,7 @@
 import Combine
 import Network
 import SwiftUI
+import UIKit
 
 /// App-wide state: saved hosts, settings, the one live session, the network
 /// path, and the reconnect offer after the app returns to the foreground.
@@ -122,10 +123,24 @@ final class AppModel: ObservableObject {
         starting = nil
     }
 
+    /// This device's screen in its own pixels, longer side first (a desktop
+    /// is landscape): the largest picture it shows 1:1. A Mac host then
+    /// sends pictures that fit instead of its full 5K. 0, 0 when unknown.
+    private static func screenPixels() -> (width: UInt32, height: UInt32) {
+        let screen = UIApplication.shared.connectedScenes
+            .compactMap { ($0 as? UIWindowScene)?.screen }
+            .first
+        guard let bounds = screen?.nativeBounds,
+              min(bounds.width, bounds.height) >= 64 else { return (0, 0) }
+        return (UInt32(max(bounds.width, bounds.height)),
+                UInt32(min(bounds.width, bounds.height)))
+    }
+
     private func start(_ host: SavedHost, control: Bool) {
         do {
             let next = try RemoteSession(host: host, control: control,
-                                         requestControl: control && settings.controlOnConnect)
+                                         requestControl: control && settings.controlOnConnect,
+                                         screen: Self.screenPixels())
             next.$observedPin
                 .compactMap { $0 }
                 .sink { [weak self] pin in self?.store.recordPin(pin, for: host.id) }

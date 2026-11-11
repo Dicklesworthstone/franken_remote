@@ -67,7 +67,8 @@ final class HostStoreTests: XCTestCase {
     func testTheRustCoreRefusesASessionForAnInvalidNameWithoutStartingOne() {
         var out: FrHandle = 0
         let status: Int32 = "not-a-tailnet-name.example".withCString { name in
-            var config = FrConfig(host: name, port: 8443, control: false, direct: false, pin: nil)
+            var config = FrConfig(host: name, port: 8443, control: false, direct: false, pin: nil,
+                                  picture_width: 0, picture_height: 0)
             return fr_session_start(&config, &out)
         }
         XCTAssertEqual(status, FR_INVALID)

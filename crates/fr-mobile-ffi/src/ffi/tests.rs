@@ -83,11 +83,13 @@ fn struct_layouts_match_the_headers_static_assertions() {
     assert_eq!(offset_of!(FrStats, end), 48);
     assert_eq!(size_of::<FrCursor>(), 32);
     assert_eq!(offset_of!(FrCursor, visible), 24);
-    assert_eq!(size_of::<FrConfig>(), 24);
+    assert_eq!(size_of::<FrConfig>(), 32);
     assert_eq!(offset_of!(FrConfig, port), 8);
     assert_eq!(offset_of!(FrConfig, control), 10);
     assert_eq!(offset_of!(FrConfig, direct), 11);
     assert_eq!(offset_of!(FrConfig, pin), 16);
+    assert_eq!(offset_of!(FrConfig, picture_width), 24);
+    assert_eq!(offset_of!(FrConfig, picture_height), 28);
 }
 
 #[test]
@@ -125,6 +127,8 @@ fn config(host: &CString, port: u16, pin: Option<&CString>) -> FrConfig {
         control: false,
         direct: false,
         pin: pin.map_or(core::ptr::null(), |p| p.as_ptr()),
+        picture_width: 0,
+        picture_height: 0,
     }
 }
 
@@ -165,6 +169,16 @@ fn a_bad_start_is_refused_and_writes_no_handle() {
             // A direct dial needs the pin it dials.
             FrConfig {
                 direct: true,
+                ..config(&host, 18443, None)
+            },
+            // A picture box is both axes or neither, each at least 64.
+            FrConfig {
+                picture_width: 2868,
+                ..config(&host, 18443, None)
+            },
+            FrConfig {
+                picture_width: 2868,
+                picture_height: 63,
                 ..config(&host, 18443, None)
             },
         ] {

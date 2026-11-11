@@ -123,7 +123,10 @@ final class RemoteSession: ObservableObject, InputSink {
         case invalid, busy, other(Int32)
     }
 
-    init(host: SavedHost, control: Bool, requestControl: Bool) throws {
+    /// `screen`: this device's pixels, longer side first (the largest picture
+    /// it shows 1:1), or 0, 0 for the host's native pixels.
+    init(host: SavedHost, control: Bool, requestControl: Bool,
+         screen: (width: UInt32, height: UInt32) = (0, 0)) throws {
         self.host = host
         self.controlCapable = control
         self.wantsControl = control && requestControl
@@ -131,7 +134,9 @@ final class RemoteSession: ObservableObject, InputSink {
         let status: Int32 = host.name.withCString { name in
             func start(_ pin: UnsafePointer<CChar>?) -> Int32 {
                 var config = FrConfig(host: name, port: host.port, control: control,
-                                      direct: host.dialsDirectly, pin: pin)
+                                      direct: host.dialsDirectly, pin: pin,
+                                      picture_width: screen.width,
+                                      picture_height: screen.height)
                 return fr_session_start(&config, &out)
             }
             if let pin = host.pin {

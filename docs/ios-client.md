@@ -151,6 +151,13 @@ then reaches VideoToolbox (`src/vt_decode.c`, system frameworks only). A
 refused record never reaches VideoToolbox; a decode failure closes that
 decoder and recovery comes from a new IDR.
 
+The app states its screen's pixels when it starts a session
+(`FrConfig.picture_width`/`picture_height`, longer side first). A Mac host
+that can scale then sends the largest picture that fits instead of its native
+pixels (`scaled-picture`, PROTOCOL_NEGOTIATION.md): a 5120x2880 desktop
+arrives as 2350x1320 on a 2868x1320 iPhone. A Linux host still sends its
+native pixels.
+
 The app's Metal view runs at the display's refresh rate (120 Hz on ProMotion
 iPhones: the app's Info.plist sets `CADisableMinimumFrameDurationOnPhone`)
 and draws only when a new picture, the geometry or the cursor changed. It

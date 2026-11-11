@@ -141,6 +141,9 @@ pub struct Config {
     /// listed by a host's tailnet directory (`fr_directory_fetch`). The pin
     /// is required and names `host`; TLS still verifies exactly that name.
     pub direct: bool,
+    /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
+    /// keeps the host's native pixels.
+    pub picture: Option<(u32, u32)>,
 }
 
 /// The granted producer frd owns for this session (see `NativeCapture`).
@@ -597,6 +600,7 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let mut app = Mobile::new(shared.clone(), control, local, epoch, watch);
     let cfg = Configuration {
         port: config.port,
+        picture: config.picture,
         ..Configuration::default()
     };
     let policy = reconnect::Policy {

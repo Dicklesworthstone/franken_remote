@@ -121,7 +121,8 @@ final class DirectoryTests: XCTestCase {
     func testTheCoreRefusesABadFetchWithoutCallingBack() {
         // A direct fetch without a pin is invalid; the callback must not run.
         let status: Int32 = "mac.tailtest.ts.net".withCString { name in
-            var config = FrConfig(host: name, port: 8443, control: false, direct: true, pin: nil)
+            var config = FrConfig(host: name, port: 8443, control: false, direct: true, pin: nil,
+                                  picture_width: 0, picture_height: 0)
             return fr_directory_fetch(&config, nil, { _, _ in fatalError("called back") })
         }
         XCTAssertEqual(status, FR_INVALID)
