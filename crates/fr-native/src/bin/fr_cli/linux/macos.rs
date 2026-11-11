@@ -16,6 +16,8 @@ mod files;
 mod history;
 #[path = "macos_host_choice.rs"]
 mod host_choice;
+#[path = "macos_media.rs"]
+mod media;
 use super::{
     Failure, Shutdown, failure, lapse, read_roots, refusal, robot, session_control, tailnet,
 };
@@ -310,9 +312,13 @@ fn finish(
         }
         error
     });
-    clipboard::finish(
-        &report.clipboard,
-        history::finish(report, result, json),
+    media::finish(
+        report,
+        clipboard::finish(
+            &report.clipboard,
+            history::finish(report, result, json),
+            json,
+        ),
         json,
     )
 }

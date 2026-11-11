@@ -1160,6 +1160,8 @@ impl Drop for HevcDecoder {
     }
 }
 
+#[path = "macos/cadence.rs"]
+pub mod cadence;
 mod clipboard;
 #[path = "macos/files.rs"]
 pub mod files;

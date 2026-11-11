@@ -37,7 +37,10 @@ mod macos_completion;
 #[cfg(feature = "linux-desktop")]
 #[path = "linux/microphone.rs"]
 mod microphone;
-#[cfg(feature = "linux-desktop")]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "linux/quality.rs"]
 mod quality;
 #[path = "linux/refusal.rs"]
@@ -1310,7 +1313,10 @@ fn completion_with_lease(
 /// handshakes, and the presented source-age upper bound at admitted reports as
 /// 10 ms bucket edges (p50/p95). Counts and bounds only; not visibility,
 /// delivery or latency proof.
-#[cfg(feature = "linux-desktop")]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 fn media_json(media: Option<&frd::session_startup::ViewerStatistics>) -> String {
     media.map_or_else(
         || "null".to_owned(),

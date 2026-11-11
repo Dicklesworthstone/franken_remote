@@ -125,6 +125,18 @@ control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
 stops the original session locally before any other input from that native
 batch can be forwarded.
 
+Every Mac completion record also includes `last_attempt_media` (the same object
+as the Linux client, described under the stopped completions below) and
+`frame_intervals`, the gaps between consecutive locally submitted pictures
+within each attempt. `frame_intervals` reports `gaps`,
+`submitted_per_second_mean`, `p50_ms_at_most` / `p95_ms_at_most` /
+`p99_ms_at_most` (upper edges of 1 ms buckets; past 250 ms, the exact
+longest gap), `max_ms`, `over_50ms` and `over_250ms`. The values are `null`
+until two pictures arrive in one window. Both objects are also included in
+failure JSON, including the `cancelled` record that Ctrl-C produces. A
+submission is not a displayed refresh. An unchanged host screen sends fewer
+pictures, so judge smoothness on moving content.
+
 The Mac client offers precise trackpad scrolling through the independent
 optional `native-input-pixel-scroll` v1 capability. A Mac host offers it only
 after its actual input-agent probe reports `PixelScroll`; existing Linux and

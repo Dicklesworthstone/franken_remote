@@ -124,6 +124,11 @@ pub struct Report {
     pub attempts: u8,
     pub opened: u32,
     pub presented: u64,
+    /// Gaps between consecutive local submissions within each attempt.
+    pub frame_intervals: super::cadence::FrameCadence,
+    /// The last attempt's decoder, recovery and presented-age statistics,
+    /// sampled before its observer closes.
+    pub media: Option<frd::session_startup::ViewerStatistics>,
     pub hardware_decode: Option<bool>,
     pub approval_requested: bool,
     pub control_requested: bool,
@@ -1590,9 +1595,20 @@ impl Application for Session {
             self.close_cx.clone().or_else(Cx::current),
         );
         let count = report.clone();
-        let frames = move |frame: Option<Presentation>| {
+        // Per attempt: the gap before a reopened window's first picture is
+        // not a frame interval.
+        let mut previous: Option<std::time::Instant> = None;
+        let mut frames = move |frame: Option<Presentation>| {
             if frame.is_some() {
-                count.borrow_mut().presented += 1;
+                let now = std::time::Instant::now();
+                let mut report = count.borrow_mut();
+                report.presented += 1;
+                if let Some(previous) = previous.replace(now) {
+                    let gap = now.saturating_duration_since(previous).as_micros();
+                    report
+                        .frame_intervals
+                        .record(u64::try_from(gap).unwrap_or(u64::MAX));
+                }
             }
         };
         let outcome = match control {
@@ -1822,6 +1838,7 @@ impl Application for Session {
                             .disconnect_outcome()
                             .or_else(|| control.map(|outcome| outcome.exchange));
                         report.lease_revocation = control.and_then(|outcome| outcome.revocation);
+                        report.media = Some(observer.statistics());
                     }
                     self.terminal = self.terminal.or_else(|| reported_terminal(observer));
                     observer.close();
