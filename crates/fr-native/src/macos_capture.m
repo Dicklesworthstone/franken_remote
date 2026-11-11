@@ -253,7 +253,8 @@ int fr_cap_bind_parent(int32_t expected) {
     CVPixelBufferRef latest;   // newest complete frame, retained
     FrCapSource source;        // positive source evidence, protected by lock
     uint64_t encoded;          // source.picture at the last successful encode
-    uint64_t live_checked;     // CLOCK_MONOTONIC_RAW of the last positive native live check, or 0
+    FrCapLive live;            // native permission/display answers (CLOCK_MONOTONIC_RAW), under lock
+    dispatch_source_t live_refresh; // keeps `live` fresh off the request path; cancelled at free
     SCContentFilter *filter;
     SCStreamConfiguration *configuration;
     uint64_t verification_requests;
@@ -727,9 +728,50 @@ static int open_session(FrCapture *c, uint32_t fps, uint32_t bitrate,
     return FR_CAP_OK;
 }
 
-static int open_capture(uint32_t display_id, uint32_t width, uint32_t height, uint32_t fps,
+// One native Screen Recording and display check, recorded under the capture
+// lock. `stamp` is taken before the calls (CLOCK_MONOTONIC_RAW).
+static int live_check(FrCapture *c, uint64_t stamp) {
+    int status = CGPreflightScreenCaptureAccess() ? fr_cap_display_check(&c->display)
+                                                  : FR_CAP_PERMISSION;
+    os_unfair_lock_lock(&c->lock);
+    fr_cap_live_record(&c->live, stamp, status == FR_CAP_OK);
+    os_unfair_lock_unlock(&c->lock);
+    return status;
+}
+
+// Both checks are synchronous round trips to tccd and WindowServer, slow when
+// either is busy. A timer on its own queue asks every FR_CAP_LIVE_REFRESH_NS
+// while the stream runs, so a request normally finds a positive answer within
+// FR_CAP_LIVE_REUSE_NS and does not wait for either service. Without the timer
+// (no queue or source), requests check for themselves as before.
+static void start_live_refresh(FrCapture *c) {
+    dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(
+        DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+    dispatch_queue_t queue = dispatch_queue_create("fr.capture.live", attr);
+    if (!queue) return;
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    if (!timer) return;
+    __weak FrCapture *weak = c;
+    dispatch_source_set_event_handler(timer, ^{
+      @autoreleasepool {
+          FrCapture *capture = weak;
+          if (!capture) return;
+          os_unfair_lock_lock(&capture->lock);
+          BOOL stopped = capture->stopped || capture->source.exhausted;
+          os_unfair_lock_unlock(&capture->lock);
+          if (!stopped) live_check(capture, clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW));
+      }
+    });
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 0),
+                              FR_CAP_LIVE_REFRESH_NS, 5 * NSEC_PER_MSEC);
+    c->live_refresh = timer;
+    dispatch_resume(timer);
+}
+
+static int open_capture(const FrCapDisplay *expected, uint32_t width, uint32_t height, uint32_t fps,
                         uint32_t bitrate, const FrCapOpenDeadline *deadline,
                         FrCapSetupLease *lease, void **out) {
+    uint32_t display_id = expected->display_id;
     @autoreleasepool {
         SCShareableContent *content = nil;
         int status = shareable(deadline, lease, &content);
@@ -746,6 +788,9 @@ static int open_capture(uint32_t display_id, uint32_t width, uint32_t height, ui
         status = describe(display_id, &c->display);
         if (!open_live(deadline)) return FR_CAP_TIMEOUT;
         if (status) return status;
+        // Every later check compares against this description, so it must be
+        // the caller's: a display that changed since its catalog is refused.
+        if (!same_display(expected, &c->display)) return FR_CAP_GEOMETRY;
         c->width = width;
         c->height = height;
         c->output = dispatch_semaphore_create(0);
@@ -832,13 +877,14 @@ static int open_capture(uint32_t display_id, uint32_t width, uint32_t height, ui
             return opening_abandon(opening, deadline,
                                    !live ? FR_CAP_GEOMETRY : started ? FR_CAP_TIMEOUT : FR_CAP_PERMISSION);
         opening_release(opening);
+        start_live_refresh(c);
     }
     return FR_CAP_OK;
 }
 
-int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate,
-                void **out) {
-    if (!out || width < 16 || height < 16 || (width | height) & 1 || fps < 1 || fps > 240 ||
+int fr_cap_open(const FrCapDisplay *expected, uint32_t width, uint32_t height, uint32_t fps,
+                uint32_t bitrate, void **out) {
+    if (!out || !expected || width < 16 || height < 16 || (width | height) & 1 || fps < 1 || fps > 240 ||
         bitrate == 0)
         return FR_CAP_INVALID;
     *out = NULL;
@@ -856,7 +902,7 @@ int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t f
     FrCapSetupLease *lease = nil;
     int status = setup_lock(&deadline, &lease);
     if (status) return status;
-    return open_capture(display_id, width, height, fps, bitrate, &deadline, lease, out);
+    return open_capture(expected, width, height, fps, bitrate, &deadline, lease, out);
 }
 
 // Low-latency rate control skips a picture that would overrun its budget,
@@ -871,19 +917,17 @@ int fr_cap_request_access(void) { return CGRequestScreenCaptureAccess() ? 1 : 0;
 
 // The stream's own stop is read on every call. The native permission and
 // display checks reuse a positive answer for FR_CAP_LIVE_REUSE_NS, stamped
-// before the calls on a clock that counts system sleep.
+// before the calls on a clock that counts system sleep; usually the refresher
+// recorded it. Otherwise this request checks for itself.
 static int capture_live(FrCapture *c) {
     os_unfair_lock_lock(&c->lock);
     BOOL stopped = c->stopped || c->source.exhausted;
+    uint64_t positive = c->live.positive;
     os_unfair_lock_unlock(&c->lock);
     if (stopped) return FR_CAP_GEOMETRY;
     uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
-    if (fr_cap_live_reusable(c->live_checked, now)) return FR_CAP_OK;
-    c->live_checked = 0;
-    if (!CGPreflightScreenCaptureAccess()) return FR_CAP_PERMISSION;
-    int status = fr_cap_display_check(&c->display);
-    if (status == FR_CAP_OK) c->live_checked = now;
-    return status;
+    if (fr_cap_live_reusable(positive, now)) return FR_CAP_OK;
+    return live_check(c, now);
 }
 
 static BOOL source_current(FrCapture *c, uint64_t source_epoch) {
@@ -1077,6 +1121,10 @@ void fr_cap_free(void *handle) {
     if (!handle) return;
     @autoreleasepool {
         FrCapture *c = (__bridge_transfer FrCapture *)handle;
+        if (c->live_refresh) {
+            dispatch_source_cancel(c->live_refresh);
+            c->live_refresh = nil;
+        }
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         [c->stream stopCaptureWithCompletionHandler:^(NSError *e) {
           (void)e;

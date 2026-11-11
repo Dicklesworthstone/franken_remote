@@ -362,6 +362,39 @@ static void a_positive_live_check_stands_for_at_most_its_bound(void) {
     assert(fr_cap_live_reusable(UINT64_MAX - 1, UINT64_MAX));
 }
 
+static void a_refusal_outranks_every_answer_that_began_before_it(void) {
+    FrCapLive live = {0, 0};
+    // Positive answers only move forward.
+    fr_cap_live_record(&live, 100, true);
+    assert(live.positive == 100);
+    fr_cap_live_record(&live, 90, true);
+    assert(live.positive == 100);
+    fr_cap_live_record(&live, 0, true);
+    assert(live.positive == 100);
+    // A refusal clears the positive answer that began before it ...
+    fr_cap_live_record(&live, 150, false);
+    assert(live.positive == 0 && live.refused == 150);
+    assert(!fr_cap_live_reusable(live.positive, 151));
+    // ... and a slower positive check that began before the refusal cannot
+    // restore an answer once the refusal is recorded.
+    fr_cap_live_record(&live, 140, true);
+    fr_cap_live_record(&live, 150, true);
+    assert(live.positive == 0);
+    // A refusal recorded late cannot clear an answer that began after it.
+    fr_cap_live_record(&live, 200, true);
+    assert(live.positive == 200);
+    fr_cap_live_record(&live, 120, false);
+    assert(live.positive == 200 && live.refused == 150);
+    fr_cap_live_record(&live, 200, false);
+    assert(live.positive == 0 && live.refused == 200);
+    // A check that began after the refusal stands again: access came back.
+    fr_cap_live_record(&live, 201, true);
+    assert(live.positive == 201);
+    assert(fr_cap_live_reusable(live.positive, 201 + FR_CAP_LIVE_REUSE_NS - 1));
+    // The refresher's period leaves room for one round trip in the bound.
+    assert(FR_CAP_LIVE_REFRESH_NS < FR_CAP_LIVE_REUSE_NS);
+}
+
 int main(void) {
     deadline_has_exact_monotonic_boundaries();
     deadline_refuses_zero_and_overflow_without_wrapping();
@@ -385,6 +418,7 @@ int main(void) {
     each_verification_has_one_cancellable_result();
     encoded_allocation_is_bounded_before_append();
     a_positive_live_check_stands_for_at_most_its_bound();
-    puts("22 macOS capture policy tests passed");
+    a_refusal_outranks_every_answer_that_began_before_it();
+    puts("23 macOS capture policy tests passed");
     return 0;
 }

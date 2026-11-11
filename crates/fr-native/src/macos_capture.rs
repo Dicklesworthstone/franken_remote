@@ -36,7 +36,7 @@ struct RawDisplay {
 unsafe extern "C" {
     fn fr_cap_displays(out: *mut RawDisplay, capacity: usize, count: *mut usize) -> c_int;
     fn fr_cap_open(
-        display_id: u32,
+        expected: *const RawDisplay,
         width: u32,
         height: u32,
         fps: u32,
@@ -96,7 +96,8 @@ impl MacDisplay {
     }
 
     /// `GeometryChanged` once the display is gone or its mode or placement
-    /// differs from this description. Core Graphics only; cheap.
+    /// differs from this description. Core Graphics queries, each a round
+    /// trip to the window server: slow when it is busy.
     pub fn check(&self) -> Result<(), NativeError> {
         let raw = self.raw();
         // SAFETY: a readable description for the duration of the call.
@@ -177,8 +178,11 @@ pub struct MacCapture {
 const ENCODE_TIMEOUT_MS: u32 = 1500;
 
 impl MacCapture {
+    /// Capture `display` as described: the open is refused with
+    /// `GeometryChanged` if its mode or placement no longer match, and every
+    /// later live check compares against this same description.
     pub fn open(
-        display: u32,
+        display: &MacDisplay,
         config: CodecConfiguration,
         limits: ProtocolLimits,
         fps: u32,
@@ -202,10 +206,12 @@ impl MacCapture {
             .map_err(|_| NativeError::Allocation)?;
         buffer.resize(capacity, 0);
         let mut raw = core::ptr::null_mut();
-        // SAFETY: plain values and a writable out pointer.
+        let expected = display.raw();
+        // SAFETY: a readable description for the call, plain values and a
+        // writable out pointer.
         status(unsafe {
             fr_cap_open(
-                display,
+                &raw const expected,
                 g.crop_width(),
                 g.crop_height(),
                 fps,

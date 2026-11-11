@@ -144,7 +144,12 @@ impl Share {
         only_if_changed: bool,
     ) -> Result<Captured, Error> {
         // A changed display would be scaled into the old size: refuse instead.
-        self.display.check().map_err(native)?;
+        // The native capture checks this display's mode and placement on
+        // entry, after selecting a picture and before publishing it, against
+        // the description taken at open (equal to `self.display`: Ready
+        // follows a check of it). Those checks keep the documented 100 ms
+        // reuse; repeating an uncached WindowServer query here cost ~3 ms per
+        // picture on a busy host.
         self.capture
             .capture(frame, observed, force_idr, only_if_changed)
             .map_err(native)
@@ -194,7 +199,7 @@ fn discover(
                     .ok_or(Error::GeometryChanged)?;
                 display.check().map_err(native)?;
                 let capture = MacCapture::open(
-                    display.id,
+                    &display,
                     c.codec()?,
                     c.limits()?,
                     u32::from(c.fps),
@@ -256,7 +261,7 @@ fn probe_encoder(
         generation: fr_core::ids::CodecConfigurationGeneration::INITIAL,
     };
     let mut capture = MacCapture::open(
-        main.id,
+        main,
         configuration.codec()?,
         configuration.limits()?,
         60,

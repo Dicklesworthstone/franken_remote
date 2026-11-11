@@ -213,4 +213,30 @@ static inline bool fr_cap_live_reusable(uint64_t checked, uint64_t now) {
     return checked != 0 && now >= checked && now - checked < FR_CAP_LIVE_REUSE_NS;
 }
 
+// A background refresher and the requests themselves both check, and both
+// record each answer under the capture lock, stamped before its calls.
+// `positive` is the stamp of the newest positive answer, or 0. A refusal
+// clears every positive answer stamped at or before it, and a positive answer
+// that finishes later can never restore one of those. A newer positive answer
+// (its calls began after the refusal's) may stand again: access was given back.
+typedef struct {
+    uint64_t positive;
+    uint64_t refused;
+} FrCapLive;
+
+static inline void fr_cap_live_record(FrCapLive *live, uint64_t stamp, bool positive) {
+    if (!positive) {
+        if (stamp > live->refused) live->refused = stamp;
+        if (live->positive <= live->refused) live->positive = 0;
+    } else if (stamp != 0 && stamp > live->refused && stamp > live->positive) {
+        live->positive = stamp;
+    }
+}
+
+// How often the refresher asks. A positive answer is then at most this old
+// plus one round trip when a request reads it, inside FR_CAP_LIVE_REUSE_NS
+// unless tccd or WindowServer answer slower than the difference; the request
+// then checks for itself, as before.
+#define FR_CAP_LIVE_REFRESH_NS 50000000ull
+
 #endif

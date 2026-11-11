@@ -107,6 +107,33 @@ Measured on 2026-11-10 on the M5 Ultra at 5120×2880 under load 28–48:
   `VTCompressionSessionEncodeFrame` at this size (~27.5 ms), with one encode in
   flight.
 
+Since 2026-11-11 the requests rarely make these calls themselves. While the
+stream runs, a timer on the worker's own queue (`fr.capture.live`) checks
+every **50 ms** (`FR_CAP_LIVE_REFRESH_NS`) and records the answer under the
+capture lock. A request uses a positive answer younger than 100 ms, as before,
+and checks for itself only when none is that fresh, for example when tccd or
+WindowServer answer slowly. Both writers follow one rule
+(`fr_cap_live_record`): a refusal clears every positive answer stamped at or
+before it, and a slower positive check that began before the refusal cannot
+restore one. The 100 ms bound is unchanged.
+
+The open compares the display it describes with the caller's catalog entry and
+refuses a display that changed. Every later check compares against that
+description, so the worker no longer repeats an uncached display query for each
+picture.
+
+Measured on 2026-11-11 on the M5 Ultra at 5120×2880 under load 20–42, swapping
+only the installed worker between live view-only sessions from a Mac mini
+(interleaved; the old worker was built from the same tree):
+- Worker main thread, sampled for 15 s during a session: tccd and WindowServer
+  calls fell from 14.7% of its time (6.3% `TCCAccessPreflight`, 8.4%
+  `SLSDisplayStatusQuery`) to 0. The encode is now 71% of it.
+- Submitted pictures/s: old 19.2–19.9 (3 sessions), new 20.2–21.2
+  (6 sessions); `frame_intervals` p95 at most 73–76 ms, then 65–77 ms.
+- Three old-worker sessions failed to start, two with a QUIC handshake timeout
+  and one with `Preparation(Expired)`. Those are the known start failures under
+  load. They are not attributed to either worker.
+
 ## A static screen remains usable through real verification
 
 Apple defines Idle as an unchanged source event; it does not promise periodic
