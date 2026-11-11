@@ -486,6 +486,11 @@ jobs:
           cargo test -p fr-native --bin fr-session-monitor --no-default-features --features macos-session-monitor --locked
       - name: Test original observation indicator supervision and framing
         run: |
+          # Five of these tests start /usr/bin/python3 fixture children inside
+          # the indicator's 3 s open budget, and on this runner all five ran
+          # out of it while passing locally. Time one launch first: it warms
+          # the Xcode python3 shim and shows whether a cold launch is slow.
+          time /usr/bin/python3 -c pass
           cargo test -p frd --lib --features macos-host --locked host_indicator::
           cargo test -p fr-native --bin fr-observation-indicator --no-default-features --features macos-observation-indicator --locked
       - name: Test the macOS clipboard executor and broker lifecycle
