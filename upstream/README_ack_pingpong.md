@@ -1,7 +1,17 @@
-# asupersync: ACK ping-pong between bounded-window peers (prototype, NOT for merge)
+# asupersync: ACK ping-pong between bounded-window peers (landed as fa43c85f4)
 
-Status: prototype for the owner. Pushing to asupersync needs owner approval,
-and one FrankenRemote namespace test regressed with it (below).
+Status: landed on asupersync main as fa43c85f4 (2026-11-11). FrankenRemote
+pins 079214d3f, which contains it, since dcb31f51. The diff below is the
+October prototype, kept as the record.
+
+- The hub late-joins failure under Evidence was a test-harness bug: the
+  harness dropped a peer's turn mid-drive, which closes that viewer. Quiet
+  idle connections made it fail every run. Fixed in dcb31f51.
+- The namespace clipboard regression under Evidence is still unresolved. On
+  trj (2026-11-11), that test failed at both pins in all four runs with
+  `clipboard_receive_expired`, not `clipboard_item_expired`. The October
+  symptom (`clipboard_ended`) did not appear, but a test that fails on both
+  arms cannot show whether the fix changes it.
 
 ## Finding (FrankenRemote, ts1 namespace, 2026-10-16)
 
