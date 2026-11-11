@@ -66,6 +66,7 @@ pub fn now_ns() -> Result<u64, Error> {
 struct Shared {
     evidence: Mutex<Evidence>,
     waker: Mutex<Option<Waker>>,
+    native_wake: crate::native_wait::Wake,
 }
 /// Status and its original time bounds have one serialization point. In
 /// particular, accepting a reply cannot refresh an expiry or overwrite a clock
@@ -157,6 +158,7 @@ impl Shared {
     }
     fn stop(&self, error: Error) {
         self.evidence().stop(error);
+        self.native_wake.signal();
         self.wake();
     }
     fn status(&self) -> Status {
@@ -170,6 +172,7 @@ impl Shared {
         let status = evidence.status;
         drop(evidence);
         if matches!(status, Status::Stopped(_)) {
+            self.native_wake.signal();
             self.wake();
         }
         status
@@ -195,6 +198,9 @@ impl Shared {
                 .and_then(|now| evidence.accept(reply, sent, now))
         };
         drop(evidence);
+        if result.is_err() {
+            self.native_wake.signal();
+        }
         self.wake();
         result
     }
@@ -264,6 +270,7 @@ impl Monitor {
         }
         let now = now_ns()?;
         let until = now.checked_add(OPEN_NS).ok_or(Error::Clock)?;
+        let native_wake = crate::native_wait::Wake::new().map_err(|_| Error::Spawn)?;
         OCCUPIED
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
@@ -274,6 +281,7 @@ impl Monitor {
                 last_ns: now,
             }),
             waker: Mutex::new(None),
+            native_wake,
         });
         let inside = shared.clone();
         let worker = thread::Builder::new()

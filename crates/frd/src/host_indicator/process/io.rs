@@ -1,17 +1,20 @@
 //! One native-I/O thread, private socketpairs and the read-only UI protocol.
-use super::{
-    CHECK_BUDGET, CHECK_INTERVAL, Error, ProcessLaunch, Role, Shared, TURN, deadline, now_ns,
-};
+#[cfg(test)]
+use super::TURN;
+use super::{CHECK_BUDGET, CHECK_INTERVAL, Error, ProcessLaunch, Role, Shared, deadline, now_ns};
 use crate::input_process::kill_group;
 use fr_core::{
     indicator_process::{FRAME_BYTES, Frame, Kind},
     input_submission::process::{self, Signal},
 };
+use rustix::event::{PollFd, PollFlags};
+#[cfg(test)]
+use std::thread;
 use std::{
     io::{self, Read, Write},
     os::unix::net::{UnixDatagram, UnixStream},
     process::Child,
-    thread,
+    time::Duration,
 };
 
 pub(super) fn run(launch: &ProcessLaunch, shared: &Shared, role: Role) -> Result<(), Error> {
@@ -89,7 +92,7 @@ impl Process<'_> {
                     Err(error) if retry(&error) => {}
                     Err(_) => return Err(self.failure(Error::Unavailable)),
                 }
-                thread::sleep(TURN);
+                self.wait(false, next)?;
             }
         }
     }
@@ -110,6 +113,25 @@ impl Process<'_> {
         // Drain that terminal record before classifying generic child loss.
         // Existing terminal evidence still wins; this never revives the owner.
         self.check().err().unwrap_or(fallback)
+    }
+    fn wait(&self, writing: bool, until: u64) -> Result<(), Error> {
+        self.check()?;
+        let until = until.min(self.shared.state().until);
+        let remaining = Duration::from_nanos(until.saturating_sub(now_ns()?));
+        self.shared
+            .native_wake
+            .wait(
+                PollFd::new(
+                    &self.command,
+                    if writing { PollFlags::OUT } else { PollFlags::IN },
+                ),
+                Some(PollFd::new(&self.signals, PollFlags::IN)),
+                remaining,
+            )
+            .map_err(|_| self.failure(Error::Unavailable))?;
+        // Terminal evidence has priority over command readiness, including
+        // local revoke arriving while a response or write was in progress.
+        self.check()
     }
     fn reply(&self, request: Frame, bytes: &[u8]) -> Result<(), Error> {
         match response(request, bytes) {
@@ -152,7 +174,7 @@ impl Process<'_> {
                     return self.reply(request, &input);
                 }
             }
-            thread::sleep(TURN);
+            self.wait(output < bytes.len(), until)?;
         }
     }
     fn finish(&mut self) -> Result<(), Error> {
@@ -255,6 +277,7 @@ raise SystemExit(0)
                 until: deadline(now, OPEN_BUDGET).unwrap(),
                 last: now,
             }),
+            native_wake: crate::native_wait::Wake::new().unwrap(),
         };
         let (child, command, signals) = crate::session_ui_process::spawn(&launch).unwrap();
         let mut owner = Process {

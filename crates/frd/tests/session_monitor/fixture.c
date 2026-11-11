@@ -31,6 +31,10 @@ int main(void) {
    r[37]=(unsigned char)code;
    if(!strcmp(mode,"wrong")) r[19]^=1;
    if(!strcmp(mode,"sequence")) r[27]^=1;
+   if(!strcmp(mode,"partial")) {
+     if(write(1,r,7)!=7) return 0;
+     raise(SIGSTOP);
+   }
    if(!strcmp(mode,"split")) {
      for(int i=0;i<40;i++) {if(write(1,r+i,1)!=1) return 0; usleep(500);}
    } else if(write(1,r,sizeof(r))!=sizeof(r)) return 0;

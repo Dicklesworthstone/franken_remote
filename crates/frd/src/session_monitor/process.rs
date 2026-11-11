@@ -1,18 +1,19 @@
 //! Blocking subprocess operations live on this one supervised foreign-call thread.
 use super::{Configuration, Error, OCCUPIED, Shared, Status, now_ns, protocol};
+use rustix::event::{PollFd, PollFlags};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 #[cfg(target_os = "linux")]
 use std::os::fd::AsRawFd;
+#[cfg(test)]
+use std::thread;
 use std::{
     fs::OpenOptions,
     io::{Read, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
     process::{Child, Command, Stdio},
     sync::atomic::Ordering,
-    thread,
     time::Duration,
 };
-const TURN: Duration = Duration::from_millis(5);
 
 fn live(shared: &Shared, child: &mut Child) -> Result<(), Error> {
     if let Status::Stopped(error) = shared.status() {
@@ -23,6 +24,24 @@ fn live(shared: &Shared, child: &mut Child) -> Result<(), Error> {
     }
     Ok(())
 }
+fn wait(shared: &Shared, child: &mut Child, writing: bool, until: u64) -> Result<(), Error> {
+    live(shared, child)?;
+    let until = until.min(shared.evidence().until_ns);
+    let remaining = Duration::from_nanos(until.saturating_sub(now_ns()?));
+    let command = if writing {
+        PollFd::new(child.stdin.as_ref().ok_or(Error::Pipe)?, PollFlags::OUT)
+    } else {
+        PollFd::new(child.stdout.as_ref().ok_or(Error::Pipe)?, PollFlags::IN)
+    };
+    shared
+        .native_wake
+        .wait(command, None, remaining)
+        .map_err(|_| Error::Pipe)?;
+    // Readiness, a timeout or an interrupted poll cannot extend evidence or
+    // override a concurrent stop. The original owner decides before more IPC.
+    live(shared, child)
+}
+
 fn exchange(
     shared: &Shared,
     child: &mut Child,
@@ -30,6 +49,7 @@ fn exchange(
     answer: &mut [u8],
 ) -> Result<(), Error> {
     let sent = now_ns()?;
+    let until = sent.checked_add(250_000_000).ok_or(Error::Clock)?;
     let mut written = 0;
     let mut read = 0;
     while written < query.len() || read < answer.len() {
@@ -37,7 +57,7 @@ fn exchange(
             return Err(error);
         }
         // Every individual IPC transaction is bounded, including initial setup.
-        if now_ns()?.saturating_sub(sent) >= 250_000_000 {
+        if now_ns()? >= until {
             return Err(Error::Pipe);
         }
         if written < query.len() {
@@ -71,8 +91,7 @@ fn exchange(
             }
         }
         if written != query.len() || read != answer.len() {
-            live(shared, child)?;
-            thread::sleep(TURN);
+            wait(shared, child, written != query.len(), until)?;
         }
     }
     Ok(())
@@ -120,9 +139,22 @@ fn serve(configuration: &Configuration, shared: &Shared, child: &mut Child) -> R
         sequence = sequence.checked_add(1).ok_or(Error::Protocol)?;
         // No queued heartbeats. During the idle interval, process death and local
         // cancellation are checked independently of the next native response.
-        while now_ns()?.saturating_sub(sent) < 50_000_000 {
+        let next = sent.checked_add(50_000_000).ok_or(Error::Clock)?;
+        while now_ns()? < next {
             live(shared, child)?;
-            thread::sleep(TURN);
+            // The protocol has one reply per query. Extra bytes are not queued
+            // for the next sequence, nor allowed to turn readiness into a spin.
+            match child.stdout.as_mut().ok_or(Error::Pipe)?.read(&mut [0]) {
+                Ok(0) => return Err(Error::Pipe),
+                Ok(_) => return Err(Error::Protocol),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return Err(Error::Pipe),
+            }
+            wait(shared, child, false, next)?;
         }
     }
 }

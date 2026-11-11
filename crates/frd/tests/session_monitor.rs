@@ -137,7 +137,7 @@ fn locked_child_report_is_terminal_even_while_process_and_pipe_are_healthy() {
 #[test]
 fn stopped_or_dead_native_process_does_not_hold_host_authority_or_prevent_reaping() {
     let _serial = SERIAL.lock().unwrap();
-    for mode in ["hang", "exit"] {
+    for mode in ["hang", "partial", "exit"] {
         let start = Instant::now();
         let mut m = Monitor::start(configuration(mode)).unwrap();
         let c = m.control();

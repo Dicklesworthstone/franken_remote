@@ -13,6 +13,7 @@ fn shared(status: Status, last_ns: u64, until_ns: u64) -> Shared {
             last_ns,
         }),
         waker: Mutex::new(None),
+        native_wake: crate::native_wait::Wake::new().unwrap(),
     }
 }
 

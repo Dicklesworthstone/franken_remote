@@ -18,6 +18,7 @@ use std::{
 const OPEN_BUDGET: Duration = Duration::from_secs(3);
 const CHECK_BUDGET: Duration = Duration::from_millis(250);
 const CHECK_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(test)]
 const TURN: Duration = Duration::from_millis(5);
 
 /// The original observation-indicator budget includes suspend. In particular,
@@ -154,6 +155,7 @@ struct Shared {
     // a peer callback, another authority, or native work under this mutex.
     on_stop: Box<dyn Fn() + Send + Sync>,
     state: Mutex<State>,
+    native_wake: crate::native_wait::Wake,
 }
 impl Shared {
     fn state(&self) -> MutexGuard<'_, State> {
@@ -167,6 +169,7 @@ impl Shared {
         {
             self.state().stop(error);
         }
+        self.native_wake.signal();
         // Store the cause BEFORE waking the original host. Otherwise startup
         // could mistake this native refusal for an unrelated normal stop.
         // No mutex is held during the callback or any ensuing native cleanup.
@@ -181,6 +184,7 @@ impl Shared {
             state.status
         };
         if matches!(status, Status::Stopped(_)) {
+            self.native_wake.signal();
             // The original stop has been requested before callers observe a
             // terminal return, even when THEY detect a worker's missed deadline.
             (self.on_stop)();
@@ -203,6 +207,7 @@ impl Shared {
             }
         };
         if result.is_err() {
+            self.native_wake.signal();
             (self.on_stop)();
         }
         result
@@ -251,6 +256,10 @@ impl Owner {
         let (now, until) = timing.inspect_err(|_| {
             on_stop();
         })?;
+        let native_wake = crate::native_wait::Wake::new().map_err(|_| {
+            on_stop();
+            Error::Unavailable
+        })?;
         if let Err(error) = claim(capacity) {
             on_stop();
             return Err(error);
@@ -262,6 +271,7 @@ impl Owner {
                 until,
                 last: now,
             }),
+            native_wake,
         });
         let running = shared.clone();
         let worker = thread::Builder::new()

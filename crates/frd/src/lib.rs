@@ -122,6 +122,10 @@ pub mod ingress_helper;
 #[cfg(native_stack)]
 mod session_ui_process;
 
+// Readiness waits for supervised native children, woken by their original stop.
+#[cfg(native_stack)]
+mod native_wait;
+
 // Executable test fixture images, shared with the integration tests.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 #[path = "../tests/support/executable.rs"]

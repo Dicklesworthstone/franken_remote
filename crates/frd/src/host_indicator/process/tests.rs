@@ -175,6 +175,7 @@ fn failure_cause_is_available_without_a_lock_before_waking_the_host() {
                 );
             }),
             state: Mutex::new(opening(now_ns().unwrap())),
+            native_wake: crate::native_wait::Wake::new().unwrap(),
         }
     });
     shared.stop(Error::Unavailable);
@@ -188,6 +189,7 @@ fn poisoned_ready_evidence_stops_the_original_host_and_preserves_its_cause() {
     let shared = Shared {
         on_stop: Box::new(move || original.store(true, Ordering::Release)),
         state: Mutex::new(opening(now_ns().unwrap())),
+        native_wake: crate::native_wait::Wake::new().unwrap(),
     };
     let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let mut state = shared.state.lock().unwrap();
@@ -213,6 +215,7 @@ fn dropping_a_stopped_owner_retains_its_original_cleanup_worker() {
     let shared = Arc::new(Shared {
         on_stop: Box::new(move || original.store(true, Ordering::Release)),
         state: Mutex::new(opening(now_ns().unwrap())),
+        native_wake: crate::native_wait::Wake::new().unwrap(),
     });
     let (release, waiting) = std::sync::mpsc::sync_channel(0);
     let worker = thread::spawn(move || {
@@ -308,6 +311,10 @@ while True:
         checks += 1
         if mode == 'stall' or (mode == 'later-stall' and checks > 1):
             time.sleep(30)
+        if mode == 'partial-check':
+            data[5] = 129
+            s.sendall(data[:7])
+            time.sleep(30)
         if mode in ('revoke', 'revoke-exit') and checks > 1:
             socket.socket(fileno=1).send(bytes([@SIGNAL@]))
             if mode == 'revoke-exit':
@@ -342,6 +349,7 @@ while True:
         "wrong-epoch",
         "missing",
         "never-ready",
+        "partial-check",
         "refused",
         "exit",
         "stall",
@@ -419,11 +427,11 @@ while True:
                 "{mode}"
             );
         }
-        if mode == "never-ready" {
+        if matches!(mode, "never-ready" | "partial-check") {
             assert_eq!(
                 result,
                 Err(super::super::Error::Indicator(Error::Expired)),
-                "opening deadline is enforced independently of child progress"
+                "original request deadline is enforced independently of child progress"
             );
         }
         if matches!(mode, "missing" | "refused") {
