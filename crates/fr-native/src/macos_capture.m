@@ -152,7 +152,13 @@ static int shareable(const FrCapOpenDeadline *deadline, FrCapSetupLease *lease,
     discovery->done = dispatch_semaphore_create(0);
     if (!discovery->done) return FR_CAP_ALLOCATION;
     if (!open_live(deadline)) return FR_CAP_TIMEOUT;
-    [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *c, NSError *e) {
+    // Only the displays are used, and the stream's filter excludes no
+    // windows. Asking for on-screen windows alone keeps the window server
+    // from listing every window: on mac-studio under load ~25, 306 windows
+    // took 101 ms on average and 64 took 44 ms, over 12 interleaved calls.
+    [SCShareableContent getShareableContentExcludingDesktopWindows:YES
+                                               onScreenWindowsOnly:YES
+                                                 completionHandler:^(SCShareableContent *c, NSError *e) {
       @autoreleasepool {
           // Keep the lease through this callback even if an expired caller
           // has already returned. The ordinary caller retains it across the
