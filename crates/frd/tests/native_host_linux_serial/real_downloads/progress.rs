@@ -10,18 +10,23 @@ sig(x.XInternAtom, W, D, c.c_char_p, I)
 sig(x.XGetWindowProperty, I, D, W, W, L, L, I, W, c.POINTER(W), c.POINTER(I),
     c.POINTER(W), c.POINTER(W), c.POINTER(c.c_void_p))
 sig(x.XTranslateCoordinates, I, D, W, W, I, I, c.POINTER(I), c.POINTER(I), c.POINTER(W))
+class Gone(Exception):
+    pass
 def rectangle(window):
     a, rx, ry, child = A(), I(), I(), W()
-    assert x.XGetWindowAttributes(d, window, c.byref(a)) and a.map_state == 2
+    if not x.XGetWindowAttributes(d, window, c.byref(a)) or a.map_state != 2:
+        raise Gone()
     assert a.root == root
-    assert x.XTranslateCoordinates(d, window, root, 0, 0, c.byref(rx), c.byref(ry),
-        c.byref(child))
+    if not x.XTranslateCoordinates(d, window, root, 0, 0, c.byref(rx), c.byref(ry),
+            c.byref(child)):
+        raise Gone()
     return rx.value - a.bw, ry.value - a.bw, a.w + 2 * a.bw, a.h + 2 * a.bw
 def property32(window, name):
     typ, fmt, count, rest, data = W(), I(), W(), W(), c.c_void_p()
     atom = x.XInternAtom(d, name, 0)
-    assert x.XGetWindowProperty(d, window, atom, 0, 16, 0, 0, c.byref(typ),
-        c.byref(fmt), c.byref(count), c.byref(rest), c.byref(data)) == 0
+    if x.XGetWindowProperty(d, window, atom, 0, 16, 0, 0, c.byref(typ),
+            c.byref(fmt), c.byref(count), c.byref(rest), c.byref(data)) != 0:
+        raise Gone()
     if not data.value:
         return []
     try:
@@ -29,25 +34,35 @@ def property32(window, name):
         return list(c.cast(data, c.POINTER(W))[:count.value])
     finally:
         x.XFree(data)
+def describe(window):
+    parent = property32(window, b"WM_TRANSIENT_FOR")
+    hints = property32(window, b"WM_HINTS")
+    assert len(parent) == 1
+    nonfocus = len(hints) >= 2 and hints[0] & 1 and hints[1] == 0
+    px, py, pw, ph = rectangle(window)
+    vx, vy, vw, vh = rectangle(parent[0])
+    _, _, sw, sh = rectangle(root)
+    assert 0 <= px and 0 <= py and px + pw <= sw and py + ph <= sh
+    assert px + pw <= vx or vx + vw <= px or py + ph <= vy or vy + vh <= py, \
+        "the optional panel must not obscure the original input surface"
+    return parent[0], nonfocus
 def command(cmd):
     if cmd[0] == "panel":
         panels = mapped(TITLE)
         assert len(panels) <= 1, "one panel for the original receive consent"
+        if panels:
+            window = panels[0][0]
+            try:
+                parent, nonfocus = describe(window)
+            except Gone:
+                # Closed while being read: that is no panel, but a panel that
+                # is still mapped must be readable.
+                assert not mapped(TITLE), "a mapped panel could not be read"
+                panels = []
         if not panels:
             say("PANEL", "none")
             return
-        window = panels[0][0]
-        parent = property32(window, b"WM_TRANSIENT_FOR")
-        hints = property32(window, b"WM_HINTS")
-        assert len(parent) == 1
-        nonfocus = len(hints) >= 2 and hints[0] & 1 and hints[1] == 0
-        px, py, pw, ph = rectangle(window)
-        vx, vy, vw, vh = rectangle(parent[0])
-        _, _, sw, sh = rectangle(root)
-        assert 0 <= px and 0 <= py and px + pw <= sw and py + ph <= sh
-        assert px + pw <= vx or vx + vw <= px or py + ph <= vy or vy + vh <= py, \
-            "the optional panel must not obscure the original input surface"
-        say("PANEL", window, parent[0], "nonfocus" if nonfocus else "invalid")
+        say("PANEL", window, parent, "nonfocus" if nonfocus else "invalid")
     elif cmd[0] == "focus":
         focused, revert = W(), I()
         x.XGetInputFocus(d, c.byref(focused), c.byref(revert))
