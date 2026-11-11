@@ -705,6 +705,9 @@ fn killed_child_is_a_native_failure_and_the_seat_stays_occupied() {
 const VICTIM: &str = "FR_INPUT_EMERGENCY_VICTIM";
 fn victim(display: &str, fault: &str) -> ! {
     let mut native = X11Pointer::open(display).unwrap();
+    if fault != "abort-unprotected" {
+        emergency::install(display).unwrap();
+    }
     for op in [
         Operation::Absolute(DesktopPoint { x: 250, y: 250 }),
         Operation::Button {
@@ -720,7 +723,6 @@ fn victim(display: &str, fault: &str) -> ! {
         assert_eq!(native.submit(op), Submission::Submitted);
     }
     if fault != "abort-unprotected" {
-        emergency::install(display).unwrap();
         emergency::record(native.native_held());
         assert!(!emergency::recorded().is_empty());
     }

@@ -70,6 +70,7 @@ impl Keyboard {
         {
             return Err(PlatformError::Unavailable);
         }
+        crate::input::emergency::forget_repeat(h.code);
         self.held[index] = None;
         Ok(())
     }
@@ -119,6 +120,9 @@ impl Keyboard {
                 down: false,
             });
             self.prepared = Some((key, transition));
+            // The XKB call can fail through a process-global Xlib handler
+            // before preparation returns to publish its held snapshot.
+            crate::input::emergency::remember_repeat(code, repeat);
             // Reversible preparation, never a press. The core guard restores it
             // when authority expires during this round trip or preparation unwinds.
             if self.repeat(code, 0)? {

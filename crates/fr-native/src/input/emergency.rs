@@ -6,8 +6,9 @@
 //! buttons still held: the X server does not release them when the client
 //! disappears. `install` opens a SECOND, dedicated connection before any input
 //! and installs process-global Xlib error/I/O-error handlers plus a panic hook.
-//! Each path releases the recorded (pessimistic) held set on that connection,
-//! then EXITS; nothing continues, retries or reports success upward. If the X
+//! Each path releases the recorded (pessimistic) held set and restores the
+//! original per-key repeat settings on that connection, then EXITS; nothing
+//! continues, retries or reports success upward. If the X
 //! server itself is gone nothing can be released; the broker sees EOF and
 //! keeps the lease's Seat as uncertain.
 //!
@@ -23,7 +24,7 @@ use std::{
     ptr,
     sync::{
         MutexGuard, TryLockError,
-        atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicPtr, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -53,10 +54,18 @@ unsafe extern "C" {
         delay: c_ulong,
     ) -> c_int;
 }
+unsafe extern "C" {
+    fn fr_key_down(display: *mut c_void, code: c_uint) -> c_int;
+    fn fr_key_repeat(display: *mut c_void, code: c_uint, mode: c_int) -> c_int;
+}
 
 static DISPLAY: AtomicPtr<c_void> = AtomicPtr::new(ptr::null_mut());
 static KEYS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static BUTTONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+// 0 = no pending restoration, 1 = originally disabled, 2 = originally enabled.
+// Separate from KEYS: preflight changes repeat before a press or held snapshot,
+// and a failed restoration must survive even after the key has been released.
+static REPEAT: [AtomicU8; 256] = [const { AtomicU8::new(0) }; 256];
 static RELEASING: AtomicBool = AtomicBool::new(false);
 
 /// Install once per process, after opening the executor's `X11Pointer` on the
@@ -143,8 +152,30 @@ pub fn recorded() -> NativeHeld {
     }
 }
 
+/// Journal the original setting BEFORE the owner's first XKB mutation. Only
+/// the installed executor uses this process-global fallback; ordinary in-process
+/// native owners retain their own cleanup state without publishing here.
+pub(crate) fn remember_repeat(code: u8, enabled: bool) {
+    if !DISPLAY.load(Ordering::Acquire).is_null() {
+        // Never replace the original with a possibly already suppressed value.
+        let _ = REPEAT[usize::from(code)].compare_exchange(
+            0,
+            1 + u8::from(enabled),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Forget only after native restoration was verified. A later local change
+/// belongs to the local user and must not be overwritten by emergency cleanup.
+pub(crate) fn forget_repeat(code: u8) {
+    REPEAT[usize::from(code)].store(0, Ordering::Release);
+}
+
 /// One attempt per process: release every recorded code on the dedicated
-/// connection and synchronize. Returns whether every release was accepted.
+/// connection, restore pending repeat settings, and synchronize. Returns
+/// whether every release and restoration was accepted.
 fn release() -> bool {
     if RELEASING.swap(true, Ordering::AcqRel) {
         return false;
@@ -167,6 +198,23 @@ fn release() -> bool {
     for code in held.buttons.codes().filter(|code| *code != 0) {
         // SAFETY: as above, for recorded physical button codes only.
         accepted &= unsafe { XTestFakeButtonEvent(connection, u32::from(code), 0, 0) } != 0;
+    }
+    for (code, original) in (8u8..=255).zip(&REPEAT[8..]) {
+        let saved = original.load(Ordering::Acquire);
+        if saved != 0 {
+            // SAFETY: query the same validated key on the dedicated live
+            // connection after its release. A failed release must not enable
+            // server repeats of a key that may still be held.
+            if unsafe { fr_key_down(connection, u32::from(code)) } != 0 {
+                accepted = false;
+                continue;
+            }
+            let mode = c_int::from(saved - 1);
+            // SAFETY: dedicated live connection, validated XKB keycode, and
+            // the original mode recorded before suppression. The round trip
+            // verifies restoration AFTER all preceding release requests.
+            accepted &= unsafe { fr_key_repeat(connection, u32::from(code), mode) } == mode;
+        }
     }
     // SAFETY: dedicated live connection; orders server processing.
     unsafe {
