@@ -21,6 +21,14 @@ impl MediaChannel {
         cx: &Cx,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<bool, Error> {
+        self.retire_files_if_peer_cancelled_dyn(q, cx, &mut authorize)
+    }
+    fn retire_files_if_peer_cancelled_dyn(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, Error> {
         // Foreign objects must not mutate either owner before being refused.
         if !q.is_bound_to(&self.connection)
             || (!self.host && self.files_direction != Direction::ToController)
@@ -35,7 +43,7 @@ impl MediaChannel {
             let Some(index) = self.cancelled_files_reservation(q)? else {
                 return Ok(false);
             };
-            self.check_parent(q, cx, &mut authorize)?;
+            self.check_parent(q, cx, authorize)?;
             // q.check already retires ACTIVE pairs. The proven final ARMED
             // Files reservation takes the same native/buffer/credit cleanup.
             if !q.attachments[index].retired() {

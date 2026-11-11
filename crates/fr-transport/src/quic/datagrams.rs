@@ -198,7 +198,7 @@ impl PendingDatagrams {
     pub(super) fn receive_one(
         &mut self,
         current: u64,
-        handler: &mut impl FnMut(Route, &[u8], DatagramReceipt) -> Result<Disposition, ()>,
+        handler: &mut super::DatagramHandler<'_>,
     ) -> Result<usize, Error> {
         self.expire(current);
         for _ in 0..MAX_DATAGRAMS {

@@ -457,7 +457,10 @@ jobs:
   # so capture and injected input are qualified live, never here.
   macos-native-host:
     runs-on: macos-15
-    timeout-minutes: 60
+    # frd's library tests are one large test crate; on this 7 GB runner its
+    # compile pages. Every frd --lib step below shares one feature set, so the
+    # test executable is compiled once.
+    timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -492,6 +495,6 @@ jobs:
       - name: Test the macOS LaunchAgent installer and service publication
         run: |
           cargo test -p frd --features macos-host --locked --test launchd_install
-          cargo test -p frd --lib --locked service_install
+          cargo test -p frd --lib --features macos-host --locked service_install
       - name: Test the macOS fr client's command line (macos-desktop)
         run: cargo test -p fr-native --features macos-desktop --locked --bin fr

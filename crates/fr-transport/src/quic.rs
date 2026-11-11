@@ -80,6 +80,14 @@ const MAX_QUEUED_DATAGRAMS: usize = 128;
 /// Keep a turn bounded while allowing queued bulk records to use available
 /// congestion credit without one idle receive timeout per 900-byte prefix.
 const TURN_SEND_PREFIXES: usize = 8;
+
+// Record handlers below the public receive API take these erased forms, so
+// each receive body compiles once instead of once per caller closure type.
+type DatagramHandler<'a> = dyn FnMut(Route, &[u8], DatagramReceipt) -> Result<Disposition, ()> + 'a;
+type RecordHandler<'a> =
+    dyn FnMut(Route, &[u8], Option<DatagramReceipt>) -> Result<Disposition, ()> + 'a;
+type StreamHandler<'a> = dyn FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a;
+
 /// Upper bound from the pinned native 1200-byte protected packet profile:
 /// short-header byte + maximal CID (20) + PN (4) + AEAD (16) + DATAGRAM (9).
 /// The actual peer-negotiated DATAGRAM limit can be lower and remains enforced
@@ -695,7 +703,10 @@ impl QuicRecords {
                 (bytes + s.bytes, records + s.records)
             })
     }
-    fn check(&mut self, cx: &Cx, authorize: &mut impl FnMut() -> bool) -> Result<u64, Error> {
+    // Callback parameters below the public API are `&mut dyn`: frd threads one
+    // authority closure through several generic layers, and a generic body here
+    // was compiled once per distinct closure type (21,980 copies of check alone).
+    fn check(&mut self, cx: &Cx, authorize: &mut dyn FnMut() -> bool) -> Result<u64, Error> {
         if self.is_closed() {
             return Err(Error::Closed);
         }
@@ -781,7 +792,6 @@ impl QuicRecords {
     /// taking precedence even when the record callback also refuses. Previously
     /// admitted bytes are never retracted, replayed, or given a fresh deadline.
     /// Callers must retain the same absolute send-by across backpressure retries.
-    #[allow(clippy::too_many_lines)]
     pub fn send_prepared<E>(
         &mut self,
         cx: &Cx,
@@ -791,7 +801,26 @@ impl QuicRecords {
         mut authorize: impl FnMut() -> bool,
         mut prepared: impl FnMut() -> Result<(), E>,
     ) -> Result<SendAdmission<E>, Error> {
-        let current = self.check(cx, &mut authorize)?;
+        self.send_prepared_dyn(
+            cx,
+            route,
+            bytes,
+            send_by_micros,
+            &mut authorize,
+            &mut prepared,
+        )
+    }
+    #[allow(clippy::too_many_lines)]
+    fn send_prepared_dyn<E>(
+        &mut self,
+        cx: &Cx,
+        route: Route,
+        bytes: &[u8],
+        send_by_micros: u64,
+        authorize: &mut dyn FnMut() -> bool,
+        prepared: &mut dyn FnMut() -> Result<(), E>,
+    ) -> Result<SendAdmission<E>, Error> {
+        let current = self.check(cx, authorize)?;
         if current >= send_by_micros {
             return Err(Error::Expired);
         }
@@ -848,7 +877,7 @@ impl QuicRecords {
         }
         if let Err(refusal) = prepared() {
             // A record callback cannot conceal cancellation or connection loss.
-            self.check(cx, &mut authorize)?;
+            self.check(cx, authorize)?;
             return Ok(SendAdmission::Refused(refusal));
         }
         let mut storage = Vec::new();
@@ -868,7 +897,7 @@ impl QuicRecords {
                 .map_err(|_| Error::Allocation)?;
         }
         let record_check = prepared();
-        let current = self.check(cx, &mut authorize)?;
+        let current = self.check(cx, authorize)?;
         if let Err(refusal) = record_check {
             return Ok(SendAdmission::Refused(refusal));
         }
@@ -1291,7 +1320,7 @@ impl QuicRecords {
         &mut self,
         current: u64,
         remaining: &mut usize,
-        handler: &mut impl FnMut(Route, &[u8], DatagramReceipt) -> Result<Disposition, ()>,
+        handler: &mut DatagramHandler<'_>,
     ) -> Result<usize, Error> {
         if self.pending_datagrams.receive_one(current, handler)? != 0 {
             return Ok(1);
@@ -1357,9 +1386,9 @@ impl QuicRecords {
     fn receive_inner(
         &mut self,
         cx: &Cx,
-        authorize: &mut impl FnMut() -> bool,
-        ready: &mut impl FnMut(Route) -> bool,
-        handler: &mut impl FnMut(Route, &[u8], Option<DatagramReceipt>) -> Result<Disposition, ()>,
+        authorize: &mut dyn FnMut() -> bool,
+        ready: &mut dyn FnMut(Route) -> bool,
+        handler: &mut RecordHandler<'_>,
     ) -> Result<usize, Error> {
         let mut count = 0;
         let mut datagram_budget = TURN_RECORDS;
@@ -1416,8 +1445,8 @@ impl QuicRecords {
         which: usize,
         current: u64,
         cx: &Cx,
-        ready: &mut impl FnMut(Route) -> bool,
-        handler: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
+        ready: &mut dyn FnMut(Route) -> bool,
+        handler: &mut StreamHandler<'_>,
     ) -> Result<usize, Error> {
         let mut count = 0;
         let s = &mut self.inbound[which];

@@ -664,7 +664,17 @@ impl QuicRecords {
         role: MediaRole,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<MediaChannel, Error> {
-        let current = self.check(cx, &mut authorize)?;
+        self.offer_media_role_dyn(cx, scope, request, role, &mut authorize)
+    }
+    fn offer_media_role_dyn(
+        &mut self,
+        cx: &Cx,
+        scope: ChannelScope<'_>,
+        request: ChannelRequest,
+        role: MediaRole,
+        authorize: &mut dyn FnMut() -> bool,
+    ) -> Result<MediaChannel, Error> {
+        let current = self.check(cx, authorize)?;
         validate_scope(self, &scope)?;
         validate_role(&scope, role)?;
         if self.role()? != StreamRole::Server || request.ticket.0 == 0 {
@@ -712,7 +722,7 @@ impl QuicRecords {
         );
         owner.grant = Some(grant);
         owner.stage(Message::Binding(descriptor))?;
-        owner.check(self, cx, &mut authorize)?;
+        owner.check(self, cx, authorize)?;
         Ok(owner)
     }
     /// Install a received descriptor only from the session's authenticated,
@@ -725,7 +735,17 @@ impl QuicRecords {
         timeout: Duration,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<MediaChannel, Error> {
-        let current = self.check(cx, &mut authorize)?;
+        self.accept_media_channel_dyn(cx, scope, bytes, timeout, &mut authorize)
+    }
+    fn accept_media_channel_dyn(
+        &mut self,
+        cx: &Cx,
+        scope: ChannelScope<'_>,
+        bytes: &[u8],
+        timeout: Duration,
+        authorize: &mut dyn FnMut() -> bool,
+    ) -> Result<MediaChannel, Error> {
+        let current = self.check(cx, authorize)?;
         validate_scope(self, &scope)?;
         if self.role()? != StreamRole::Client {
             return Err(Error::WrongRoute);
@@ -767,7 +787,7 @@ impl QuicRecords {
             allowance,
         );
         owner.stage(Message::Accepted(d.binding.parent.id))?;
-        owner.check(self, cx, &mut authorize)?;
+        owner.check(self, cx, authorize)?;
         Ok(owner)
     }
 }
@@ -903,7 +923,7 @@ impl MediaChannel {
         &mut self,
         q: &mut QuicRecords,
         cx: &Cx,
-        authorize: &mut impl FnMut() -> bool,
+        authorize: &mut dyn FnMut() -> bool,
     ) -> Result<u64, Error> {
         let result = (|| {
             let now = self.check_parent(q, cx, authorize)?;
@@ -924,7 +944,7 @@ impl MediaChannel {
         &mut self,
         q: &mut QuicRecords,
         cx: &Cx,
-        authorize: &mut impl FnMut() -> bool,
+        authorize: &mut dyn FnMut() -> bool,
     ) -> Result<u64, Error> {
         let now = q.check(cx, authorize)?;
         if !q.is_bound_to(&self.connection) || self.phase == Phase::Closed {
@@ -989,7 +1009,15 @@ impl MediaChannel {
         cx: &Cx,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<bool, Error> {
-        self.check(q, cx, &mut authorize)?;
+        self.transmit_dyn(q, cx, &mut authorize)
+    }
+    fn transmit_dyn(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, Error> {
+        self.check(q, cx, authorize)?;
         if self.host && self.phase == Phase::Offer && self.earlier_offer_pending(q) {
             return Ok(false);
         }
@@ -1033,7 +1061,7 @@ impl MediaChannel {
             Route::Stream(route),
             &self.pending[..self.len],
             self.until,
-            &mut authorize,
+            &mut *authorize,
         ) {
             Ok(()) => {
                 if self.host && self.phase == Phase::Offer {
@@ -1071,7 +1099,15 @@ impl MediaChannel {
         cx: &Cx,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        self.check(q, cx, &mut authorize)?;
+        self.dispatch_dyn(q, cx, &mut authorize)
+    }
+    fn dispatch_dyn(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
+    ) -> Result<(), Error> {
+        self.check(q, cx, authorize)?;
         let incoming = match (self.host, self.phase) {
             (true, Phase::BindingAck) | (false, Phase::Ticket) => self.control.inbound,
             (true, Phase::Attach) | (false, Phase::Attached) => self.pair.inbound,
@@ -1082,7 +1118,7 @@ impl MediaChannel {
         let mut failure = None;
         let result = q.receive_ready(
             cx,
-            &mut authorize,
+            &mut *authorize,
             |r| ready.get() && r == Route::Stream(incoming),
             |_, bytes| {
                 ready.set(false);
@@ -1122,7 +1158,7 @@ impl MediaChannel {
             q.close();
             return Err(e);
         }
-        self.check(q, cx, &mut authorize)?;
+        self.check(q, cx, authorize)?;
         Ok(())
     }
     fn received(&mut self, bytes: &[u8], binding: u32) -> Result<(), Error> {
@@ -1198,14 +1234,22 @@ impl MediaChannel {
     }
     /// Complete in place, after the ACK's old stream bytes are staged. Retained
     /// native retransmission bytes keep their original deadlines and charges.
-    #[allow(clippy::too_many_lines)]
     pub fn finish(
         &mut self,
         q: &mut QuicRecords,
         cx: &Cx,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<Option<AttachedChannel>, Error> {
-        self.check(q, cx, &mut authorize)?;
+        self.finish_dyn(q, cx, &mut authorize)
+    }
+    #[allow(clippy::too_many_lines)]
+    fn finish_dyn(
+        &mut self,
+        q: &mut QuicRecords,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<AttachedChannel>, Error> {
+        self.check(q, cx, authorize)?;
         if self.phase == Phase::Complete {
             return Ok(self.result);
         }
@@ -1291,7 +1335,7 @@ impl MediaChannel {
                 .iter()
                 .position(|r| r.route == self.pair.outbound)
                 .ok_or(Error::WrongRoute)?;
-            q.check(cx, &mut authorize)?;
+            q.check(cx, authorize)?;
             for r in &mut q.streams {
                 if *r == self.pair.outbound {
                     *r = outbound;
