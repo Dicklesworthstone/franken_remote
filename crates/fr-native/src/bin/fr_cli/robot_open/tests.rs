@@ -19,11 +19,10 @@ const NATIVE: &str = "--experimental-native --display only --worker /fixture/fr-
 
 #[test]
 fn robot_open_never_invokes_interactive_file_selection() {
-    let failure = match parse(&words(&format!(
+    let Err(failure) = parse(&words(&format!(
         "robot session open n-host --foreground --role control {NATIVE} --choose-files"
-    ))) {
-        Ok(_) => panic!("robot must not open a native file picker"),
-        Err(failure) => failure,
+    ))) else {
+        panic!("robot must not open a native file picker")
     };
     assert_eq!(failure.code, "invalid_arguments");
 }

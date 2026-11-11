@@ -17,7 +17,7 @@ fn initial_file_choice_preserves_control_target_and_independent_permissions() {
         panic!("connection");
     };
     assert!(connection.choose_host && connection.control && connection.upload.choose_files);
-    assert!(connection.upload.paths.is_empty());
+    assert_eq!(connection.upload.paths, Vec::<std::path::PathBuf>::new());
     assert!(connection.upload.file_drop && connection.upload.file_commands && connection.uploads());
     assert!(connection.receive.is_some());
     assert_eq!(connection.display, DisplayChoice::Choose);
@@ -50,9 +50,8 @@ fn file_choice_refuses_viewing_ambiguous_sources_and_duplicate_flags() {
         ),
         ("hosts --choose-files", "invalid_arguments"),
     ] {
-        let failure = match parsed(arguments) {
-            Ok(_) => panic!("unexpected choice: {arguments}"),
-            Err(failure) => failure,
+        let Err(failure) = parsed(arguments) else {
+            panic!("unexpected choice: {arguments}")
         };
         assert_eq!(failure.code, code, "{arguments}");
     }
