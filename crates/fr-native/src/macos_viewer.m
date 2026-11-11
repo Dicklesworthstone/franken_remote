@@ -435,6 +435,7 @@ typedef struct {
     uint64_t revision;
     double width, height, x, y, observed;
     int32_t eligible;
+    int32_t full_screen;
 } FrMacResizeSample;
 typedef void (*FrResizeChanged)(void *, const FrMacResizeSample *);
 typedef void (*FrResizeRelease)(void *);
@@ -609,6 +610,12 @@ static BOOL fr_any_key(const BOOL *keys) {
     CGSize resizeDrawable;
     double resizeScale;
     BOOL resizeSealed;
+    // AppKit is animating into or out of full screen. `fullScreenFenced`: this
+    // transition stopped the original attempt and its settled size is not yet
+    // reported. Each fence or settle is one more sample revision
+    // (`fullScreenBumps`), even when no drawable size changed.
+    BOOL fullScreenMoving, fullScreenFenced;
+    uint64_t fullScreenBumps;
 }
 - (void)push:(FrMacEvent)event;
 - (void)layout;
@@ -961,7 +968,7 @@ static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, si
 static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     FrMacResizeSample sample = {0};
     os_unfair_lock_lock(&owner->renderer->geometryLock);
-    sample.revision = owner->renderer->geometry.revision;
+    sample.revision = owner->renderer->geometry.revision + owner->fullScreenBumps;
     BOOL sameSource = !owner->resizeContext ||
         (owner->renderer->geometry.sourceWidth == owner->resizeSourceWidth &&
          owner->renderer->geometry.sourceHeight == owner->resizeSourceHeight);
@@ -974,7 +981,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     sample.x = origin.x;
     sample.y = origin.y;
     sample.observed = NSProcessInfo.processInfo.systemUptime;
-    sample.eligible = sameSource && !owner->nativeStopPending && !owner->overflow &&
+    sample.full_screen = (window.styleMask & NSWindowStyleMaskFullScreen) ? 1 : 0;
+    sample.eligible = sameSource && !owner->fullScreenMoving && !owner->nativeStopPending &&
+        !owner->overflow &&
         !owner->textActive && !owner->textPending && !owner->displayChangeAt &&
         // Native polling pauses at an undelivered sharing action. That is not
         // a complete final event turn: a queued close/focus/escape may follow.
@@ -1499,7 +1508,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     }
     double scale = window ? window.backingScaleFactor : 1;
     [renderer resizeTo:view.bounds.size scale:scale];
-    if (resizeContext && resizeChanged) {
+    // No geometry is reported while AppKit animates full screen: the start
+    // already fenced the original, and only the settled size is a receipt.
+    if (resizeContext && resizeChanged && !fullScreenMoving && !fullScreenFenced) {
         FrMacResizeSample sample = fr_resize_sample(self);
         if (sample.revision != resizeRevision) {
             os_unfair_lock_lock(&renderer->geometryLock);
@@ -1535,6 +1546,10 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 }
 - (void)windowDidResignKey:(NSNotification *)note {
     (void)note;
+    // A fenced full-screen move already stopped the original attempt; key and
+    // Space changes while AppKit animates it are not a user's focus change.
+    // The settled sample still requires the key, visible, active-Space window.
+    if (fullScreenFenced) return;
     [self loseFocus];
 }
 // The terminal focus-loss path: AppKit's resign-key notification and an
@@ -1567,10 +1582,78 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 }
 - (void)windowDidChangeOcclusionState:(NSNotification *)note {
     (void)note;
+    if (fullScreenFenced) {
+        [self fullScreenSettle];
+        return;
+    }
     if (!window.isVisible || window.isMiniaturized || !window.isOnActiveSpace ||
         !(window.occlusionState & NSWindowOcclusionStateVisible)) {
         [self windowDidResignKey:note];
     }
+}
+// Full screen moves the window to its own Space and resizes it over an
+// animation. A bound watcher gets one sample at the start (the old size at a
+// new revision: Rust stops the original before any input can map through the
+// moving geometry) and one when it has settled and is shown; the seal waits in
+// between (fr_mac_window_full_screen).
+- (void)fullScreenWillMove {
+    if (fullScreenMoving) return;
+    FrMacResizeSample sample = fr_resize_sample(self);
+    fullScreenMoving = YES;
+    if (!resizeContext || !resizeChanged || resizeSealed || nativeStopPending) return;
+    fullScreenBumps++;
+    sample.revision++;
+    resizeRevision = sample.revision;
+    fullScreenFenced = YES;
+    resizeChanged(resizeContext, &sample);
+}
+- (void)fullScreenDidMove {
+    if (!fullScreenMoving) return;
+    fullScreenMoving = NO;
+    [self layout];
+    [self fullScreenSettle];
+}
+// AppKit's did-enter/exit arrives before the window is shown on its new
+// Space; its occlusion notification follows. Report the settled size then.
+// A transition that failed back to the old size is still a new receipt.
+- (void)fullScreenSettle {
+    if (!fullScreenFenced || fullScreenMoving ||
+        !(window.occlusionState & NSWindowOcclusionStateVisible))
+        return;
+    fullScreenFenced = NO;
+    if (!resizeContext || !resizeChanged || resizeSealed) return;
+    fullScreenBumps++;
+    FrMacResizeSample sample = fr_resize_sample(self);
+    os_unfair_lock_lock(&renderer->geometryLock);
+    resizeScale = renderer->geometry.scale;
+    resizeDrawable = renderer->geometry.drawable;
+    os_unfair_lock_unlock(&renderer->geometryLock);
+    resizeRevision = sample.revision;
+    resizeChanged(resizeContext, &sample);
+}
+- (void)windowWillEnterFullScreen:(NSNotification *)note {
+    (void)note;
+    [self fullScreenWillMove];
+}
+- (void)windowWillExitFullScreen:(NSNotification *)note {
+    (void)note;
+    [self fullScreenWillMove];
+}
+- (void)windowDidEnterFullScreen:(NSNotification *)note {
+    (void)note;
+    [self fullScreenDidMove];
+}
+- (void)windowDidExitFullScreen:(NSNotification *)note {
+    (void)note;
+    [self fullScreenDidMove];
+}
+- (void)windowDidFailToEnterFullScreen:(NSWindow *)failed {
+    (void)failed;
+    [self fullScreenDidMove];
+}
+- (void)windowDidFailToExitFullScreen:(NSWindow *)failed {
+    (void)failed;
+    [self fullScreenDidMove];
 }
 
 // Returns YES when AppKit should still receive the event.
@@ -2221,7 +2304,8 @@ int fr_mac_window_state(void *handle, uint32_t *width, uint32_t *height, int *ke
     FrRenderer *r = owner->renderer;
     os_unfair_lock_lock(&r->geometryLock);
     CGRect f = r->geometry.fit;
-    *geometry_current = r->submittedPicture && r->submittedRevision == r->geometry.revision;
+    *geometry_current = r->submittedPicture && r->submittedRevision == r->geometry.revision &&
+                        !owner->fullScreenMoving && !owner->fullScreenFenced;
     os_unfair_lock_unlock(&r->geometryLock);
     *width = f.size.width >= 1 ? (uint32_t)f.size.width : 0;
     *height = f.size.height >= 1 ? (uint32_t)f.size.height : 0;
@@ -2245,9 +2329,10 @@ int fr_mac_window_resize_bind(void *handle, void *context, FrResizeChanged chang
     if (owner->resizeContext) return FR_MAC_INVALID;
     FrMacResizeSample sample = fr_resize_sample(owner);
     os_unfair_lock_lock(&owner->renderer->geometryLock);
+    uint64_t revision = sample.revision - owner->fullScreenBumps;
     BOOL current = owner->renderer->submittedPicture &&
-        owner->renderer->submittedRevision == sample.revision &&
-        owner->renderer->geometry.revision == sample.revision;
+        owner->renderer->submittedRevision == revision &&
+        owner->renderer->geometry.revision == revision;
     owner->resizeSourceWidth = owner->renderer->geometry.sourceWidth;
     owner->resizeSourceHeight = owner->renderer->geometry.sourceHeight;
     owner->resizeDrawable = owner->renderer->geometry.drawable;
@@ -2268,9 +2353,27 @@ int fr_mac_window_resize_seal(void *handle, FrMacResizeSample *sample) {
     if (!handle || !sample) return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
-    if (!owner->resizeContext || owner->resizeSealed) return FR_MAC_UNAVAILABLE;
+    if (!owner->resizeContext || owner->resizeSealed || owner->fullScreenMoving ||
+        owner->fullScreenFenced)
+        return FR_MAC_UNAVAILABLE;
     *sample = fr_resize_sample(owner);
     owner->resizeSealed = YES;
+    return FR_MAC_OK;
+}
+
+// Whether AppKit is still animating this window into or out of full screen
+// (or a fenced transition has not reported its shown, settled size yet);
+// with `enter`, first take a NEW window (no watcher yet) into full screen.
+int fr_mac_window_full_screen(void *handle, int enter, int *moving) {
+    if (!handle || !moving || (enter != 0 && enter != 1)) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (enter) {
+        if (owner->resizeContext) return FR_MAC_INVALID;
+        if (!(owner->window.styleMask & NSWindowStyleMaskFullScreen) && !owner->fullScreenMoving)
+            [owner->window toggleFullScreen:nil];
+    }
+    *moving = owner->fullScreenMoving || owner->fullScreenFenced ? 1 : 0;
     return FR_MAC_OK;
 }
 

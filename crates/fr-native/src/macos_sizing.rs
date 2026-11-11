@@ -59,13 +59,21 @@ pub struct WindowBox {
 impl WindowBox {
     /// The box for a window whose content (strips included) is at most `fit`
     /// points, never beyond the screen's: the `--fit` ceiling, then each
-    /// resized window. `None` when less than 64 pixels remain on an axis.
+    /// resized window. A `full_screen` window's `fit` was measured in full
+    /// screen, where no title bar, menu bar or Dock takes room, so the
+    /// windowed screen ceiling does not apply to it. `None` when less than 64
+    /// pixels remain on an axis.
     #[must_use]
-    pub fn within(self, fit: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    pub fn within(self, fit: Option<(u32, u32)>, full_screen: bool) -> Option<(u32, u32)> {
+        let ceiling = if full_screen {
+            (u32::MAX, u32::MAX)
+        } else {
+            self.pixels
+        };
         let (width, height) = match fit {
             Some((width, height)) => (
-                self.pixels.0.min(width.saturating_mul(self.scale)),
-                self.pixels.1.min(
+                ceiling.0.min(width.saturating_mul(self.scale)),
+                ceiling.1.min(
                     height
                         .saturating_sub(self.reserved)
                         .saturating_mul(self.scale),
@@ -190,29 +198,37 @@ mod tests {
             scale: 1,
             reserved: 44,
         };
-        assert_eq!(screen.within(None), Some((1920, 933)));
+        assert_eq!(screen.within(None, false), Some((1920, 933)));
         // A window resized to 1200x744 points shows 1200x700 below the strip.
-        assert_eq!(screen.within(Some((1200, 744))), Some((1200, 700)));
+        assert_eq!(screen.within(Some((1200, 744)), false), Some((1200, 700)));
         // Larger than the screen: the screen's box.
-        assert_eq!(screen.within(Some((4000, 3000))), Some((1920, 933)));
+        assert_eq!(screen.within(Some((4000, 3000)), false), Some((1920, 933)));
+        // In full screen the whole 1920x1080 content is the window's: the
+        // picture is 1920x1036 above the strip, past the windowed ceiling.
+        assert_eq!(screen.within(Some((1920, 1080)), true), Some((1920, 1036)));
+        // A full-screen window smaller than the screen (a notch or a menu bar
+        // kept shown) states what it measured.
+        assert_eq!(screen.within(Some((1920, 1050)), true), Some((1920, 1006)));
         // A Retina screen with the text composer reserved.
         let retina = WindowBox {
             pixels: (3024, 1700),
             scale: 2,
             reserved: 120,
         };
-        assert_eq!(retina.within(Some((800, 620))), Some((1600, 1000)));
+        assert_eq!(retina.within(Some((800, 620)), false), Some((1600, 1000)));
+        assert_eq!(retina.within(Some((1512, 982)), true), Some((3024, 1724)));
         // Too small for a picture: no box, native pictures.
-        assert_eq!(screen.within(Some((1200, 107))), None);
-        assert_eq!(screen.within(Some((63, 700))), None);
-        assert_eq!(screen.within(Some((1200, 40))), None);
+        assert_eq!(screen.within(Some((1200, 107)), false), None);
+        assert_eq!(screen.within(Some((63, 700)), false), None);
+        assert_eq!(screen.within(Some((1200, 40)), false), None);
+        assert_eq!(screen.within(Some((1200, 40)), true), None);
         assert_eq!(
             WindowBox {
                 pixels: (1920, 933),
                 scale: 2,
                 reserved: 44,
             }
-            .within(Some((u32::MAX, 744))),
+            .within(Some((u32::MAX, 744)), false),
             Some((1920, 933))
         );
     }

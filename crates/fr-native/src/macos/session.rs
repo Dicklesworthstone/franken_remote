@@ -686,7 +686,10 @@ impl Session {
     /// The box the next attempt states: the window's part of the screen's.
     #[must_use]
     pub fn stated_picture(&self) -> Option<(u32, u32)> {
-        self.picture_box?.within(self.fit_window)
+        let full_screen = self
+            .placement
+            .is_some_and(|placement| placement.full_screen);
+        self.picture_box?.within(self.fit_window, full_screen)
     }
     /// Choose from the original approved catalog on every new attempt.
     #[must_use]
@@ -737,7 +740,21 @@ impl Session {
             return;
         };
         opened.poll(Duration::ZERO, &mut events);
-        if let Some(reason) = terminal_event(&events) {
+        let mut terminal = terminal_event(&events);
+        // A full-screen transition fenced the original at its start; its
+        // final size exists only once AppKit has finished animating. Pump the
+        // window (events discarded, terminal ones kept) for at most this long.
+        let settling = std::time::Instant::now();
+        while terminal.is_none()
+            && self.resize.changed()
+            && opened.full_screen_moving().unwrap_or(false)
+            && settling.elapsed() < FULL_SCREEN_SETTLE
+        {
+            events.clear();
+            opened.poll(Duration::from_millis(10), &mut events);
+            terminal = terminal_event(&events);
+        }
+        if let Some(reason) = terminal {
             self.resize.cancel();
             let mut report = self.report.borrow_mut();
             if report
@@ -942,6 +959,10 @@ fn terminal_event(events: &[WindowEvent]) -> Option<LocalStop> {
         None
     }
 }
+
+/// The longest a resize seal waits for `AppKit` to finish a full-screen
+/// animation (about 0.5-0.8 s), inside the resize receipt's 2 s bound.
+const FULL_SCREEN_SETTLE: Duration = Duration::from_millis(1500);
 
 /// Drain the window's events, deliver them to a granted session, and stop
 /// control (or the session) on the local conditions frd requires.
@@ -1527,7 +1548,8 @@ impl Application for Session {
                 // is drawn 1:1. Otherwise the remote's logical size applies.
                 let (pixels, logical) = picture_box
                     .and_then(|screen| {
-                        let within = screen.within(fit_window)?;
+                        let full_screen = placement.is_some_and(|placement| placement.full_screen);
+                        let within = screen.within(fit_window, full_screen)?;
                         let expected = display.picture(Some(within)).ok()?;
                         let points = crate::macos_sizing::scaled_picture_points(
                             native,
@@ -1559,6 +1581,9 @@ impl Application for Session {
                 .map_err(|_| ())?;
                 if let Some(placement) = placement {
                     opened.place(placement).map_err(|_| ())?;
+                    if placement.full_screen {
+                        opened.enter_full_screen().map_err(|_| ())?;
+                    }
                 }
                 clipboard_ui.borrow_mut().install(&opened).map_err(|_| ())?;
                 if let Some(ingress) = file_ui.borrow().file_drop_ingress() {
@@ -2123,6 +2148,10 @@ mod tests {
     }
 
     fn resized_session() -> Session {
+        resized_session_to(1280.0, 840.0, 0)
+    }
+
+    fn resized_session_to(width: f64, height: f64, full_screen: i32) -> Session {
         // Policy fixture only; no window, native owner, host or grant exists.
         let mut session = failed_startup(false);
         session.started = false;
@@ -2143,13 +2172,15 @@ mod tests {
             y: 80.0,
             observed: 0.1,
             eligible: 1,
+            full_screen: 0,
         };
         assert!(session.resize.arm(initial));
         let changed = crate::macos_resize::Sample {
             revision: 2,
-            width: 1280.0,
-            height: 840.0,
+            width,
+            height,
             observed: 0.11,
+            full_screen,
             ..initial
         };
         session.resize.observe(changed, false);
@@ -2189,6 +2220,43 @@ mod tests {
         assert_eq!(
             Application::picture(&mut resized_session(), 2, Some((1920, 1080))),
             Some((1920, 1080))
+        );
+    }
+
+    #[test]
+    fn a_full_screen_window_states_the_whole_screen_on_the_reopened_attempt() {
+        // mac-mini-old: the windowed ceiling is 1920x933; full screen is
+        // 1920x1080 points with no title bar, menu bar or Dock.
+        let screen = crate::macos::WindowBox {
+            pixels: (1920, 933),
+            scale: 1,
+            reserved: 44,
+        };
+        let mut session = resized_session_to(1920.0, 1080.0, 1).with_picture_box(Some(screen));
+        assert_eq!(
+            session.window_resize_action(
+                reconnect::Failure::Cancelled,
+                Some(Duration::from_millis(130))
+            ),
+            Some(LocalLayoutChange::WindowResize),
+        );
+        assert!(session.placement.unwrap().full_screen);
+        assert_eq!(
+            Application::picture(&mut session, 2, Some((1920, 933))),
+            Some((1920, 1036))
+        );
+        // Leaving full screen states the windowed box again.
+        let mut windowed = resized_session_to(1582.0, 931.0, 0).with_picture_box(Some(screen));
+        assert_eq!(
+            windowed.window_resize_action(
+                reconnect::Failure::Cancelled,
+                Some(Duration::from_millis(130))
+            ),
+            Some(LocalLayoutChange::WindowResize),
+        );
+        assert_eq!(
+            Application::picture(&mut windowed, 2, Some((1920, 933))),
+            Some((1582, 887))
         );
     }
 

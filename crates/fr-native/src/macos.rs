@@ -159,6 +159,7 @@ unsafe extern "C" {
         sample: *mut crate::macos_resize::Sample,
     ) -> c_int;
     fn fr_mac_window_place(window: *mut c_void, x: i32, y: i32) -> c_int;
+    fn fr_mac_window_full_screen(window: *mut c_void, enter: c_int, moving: *mut c_int) -> c_int;
     fn fr_mac_window_set_resizable(window: *mut c_void, resizable: c_int) -> c_int;
     fn fr_mac_window_renderer(window: *mut c_void) -> *mut c_void;
     fn fr_mac_surface_offscreen(width: u32, height: u32, out: *mut *mut c_void) -> c_int;
@@ -443,6 +444,23 @@ impl Window {
         // SAFETY: live main-thread owner and one writable scalar receipt.
         status(unsafe { fr_mac_window_resize_seal(self.raw.as_ptr(), &raw mut sample) })?;
         Ok(sample)
+    }
+
+    /// Whether `AppKit` is still animating this window into or out of full
+    /// screen. Its final size is only known when this is false.
+    pub(crate) fn full_screen_moving(&self) -> Result<bool, NativeError> {
+        let mut moving = 0;
+        // SAFETY: live main-thread window and one writable scalar.
+        status(unsafe { fr_mac_window_full_screen(self.raw.as_ptr(), 0, &raw mut moving) })?;
+        Ok(moving != 0)
+    }
+
+    /// Ask `AppKit` to take this NEW window into full screen, as the window it
+    /// replaces was. A window already in full screen is left as it is.
+    pub(crate) fn enter_full_screen(&self) -> Result<(), NativeError> {
+        let mut moving = 0;
+        // SAFETY: live main-thread window and one writable scalar.
+        status(unsafe { fr_mac_window_full_screen(self.raw.as_ptr(), 1, &raw mut moving) })
     }
 
     pub(crate) fn place(

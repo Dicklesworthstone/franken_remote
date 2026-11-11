@@ -18,6 +18,8 @@ pub(crate) struct Sample {
     pub(crate) y: f64,
     pub(crate) observed: f64,
     pub(crate) eligible: i32,
+    /// 1 when the window is in full screen, else 0.
+    pub(crate) full_screen: i32,
 }
 
 /// Local window points, not drawable pixels or remote input coordinates.
@@ -25,6 +27,8 @@ pub(crate) struct Sample {
 pub(crate) struct Placement {
     pub(crate) size: (u32, u32),
     pub(crate) origin: (i32, i32),
+    /// The new window enters full screen, as the old one ended.
+    pub(crate) full_screen: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -38,6 +42,7 @@ impl Sample {
     fn checked(self) -> Option<Checked> {
         if self.revision == 0
             || self.eligible != 1
+            || !(0..=1).contains(&self.full_screen)
             || !self.width.is_finite()
             || !self.height.is_finite()
             || !(1.0..=8192.0).contains(&self.width)
@@ -59,6 +64,7 @@ impl Sample {
         let placement = Placement {
             size: (self.width.floor() as u32, self.height.floor() as u32),
             origin: (self.x.round() as i32, self.y.round() as i32),
+            full_screen: self.full_screen == 1,
         };
         Some(Checked {
             revision: self.revision,
@@ -208,6 +214,7 @@ mod tests {
             y: 40.0,
             observed: f64::from(ms) / 1000.0,
             eligible: 1,
+            full_screen: 0,
         }
     }
 
@@ -238,10 +245,40 @@ mod tests {
             Some(Placement {
                 size: (1440, 930),
                 origin: (-1920, 40),
+                full_screen: false,
             })
         );
         assert_eq!(intent.take(Some(at(140))), None);
         assert!(!intent.arm(sample(4, 140, 1440, 930)));
+    }
+
+    #[test]
+    fn a_full_screen_window_reopens_in_full_screen_and_a_reversed_transition_does_not() {
+        let full = |revision, ms| Sample {
+            full_screen: 1,
+            x: 0.0,
+            y: 0.0,
+            ..sample(revision, ms, 1920, 1080)
+        };
+        // The window fences at the transition's start (a new revision at the
+        // old size) and reports the settled full-screen size afterwards.
+        let entered = armed();
+        entered.observe(sample(2, 110, 960, 660), false);
+        entered.observe(full(3, 800), true);
+        assert!(entered.seal(full(3, 820)));
+        assert_eq!(
+            entered.take(Some(at(900))),
+            Some(Placement {
+                size: (1920, 1080),
+                origin: (0, 0),
+                full_screen: true,
+            })
+        );
+        // Leaving full screen before the seal is a different placement.
+        let reversed = armed();
+        reversed.observe(full(2, 800), false);
+        assert!(!reversed.seal(sample(2, 820, 1920, 1080)));
+        assert!(reversed.take(Some(at(900))).is_none());
     }
 
     #[test]
@@ -341,6 +378,14 @@ mod tests {
             },
             Sample {
                 eligible: 2,
+                ..base
+            },
+            Sample {
+                full_screen: 2,
+                ..base
+            },
+            Sample {
+                full_screen: -1,
                 ..base
             },
             Sample {
