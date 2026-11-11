@@ -245,7 +245,10 @@ fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
     for (mode, expected) in [
         ("opening", Error::OpeningExpired),
         ("stale", Error::EvidenceExpired),
-        ("exit", Error::ProcessExited),
+        // A monitor that dies before its first answer. ("exit" answers Active
+        // once before exiting: that is fresh evidence, and the monitor may
+        // accept it before it observes the exit.)
+        ("vanish", Error::ProcessExited),
     ] {
         let options = Options {
             socket: Some(PathBuf::from("/nonexistent/tailscaled.sock")),
@@ -277,10 +280,10 @@ fn frd_run_refuses_to_listen_without_fresh_session_evidence() {
         let started = Instant::now();
         let result = host_run::run(&options, &report, &Arc::new(StopHandle::default()));
         let error = result.unwrap_err();
-        // "exit" may surface as the closed pipe or the reaped process.
+        // "vanish" may surface as the closed pipe or the reaped process.
         assert!(
             error == host_run::Error::SessionMonitor(expected)
-                || (mode == "exit" && error == host_run::Error::SessionMonitor(Error::Pipe)),
+                || (mode == "vanish" && error == host_run::Error::SessionMonitor(Error::Pipe)),
             "{mode}: {error:?}"
         );
         assert_eq!(error.code(), "session_monitor_unavailable");

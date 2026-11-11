@@ -492,6 +492,10 @@ fn native_repeat_expiry_between_release_and_press_is_partial_not_replayed() {
     );
     o.wait_events(1);
     let mut checks = 0;
+    // Clock reads for a repeat: 1 is admission; each native operation's
+    // authorization then samples twice, under the policy lock and again after
+    // releasing it (fr-core check_submission). 2-3 authorize the release and
+    // 4-5 the press, so read 4 expires the original between the two.
     let r = completed(send(
         &mut owner,
         &mut native,
@@ -500,9 +504,10 @@ fn native_repeat_expiry_between_release_and_press_is_partial_not_replayed() {
         key(KeyTransition::Repeat),
         || {
             checks += 1;
-            HostInstant::from_micros(if checks == 3 { 1_000_000 } else { 0 })
+            HostInstant::from_micros(if checks == 4 { 1_000_000 } else { 0 })
         },
     ));
+    assert_eq!(checks, 4);
     assert_eq!(r.outcome, InputOutcome::PartiallySubmittedToOs);
     assert_eq!(r.submitted_operations, 1);
     assert_eq!(o.wait_events(1), [(3, u32::from(code), false)]);

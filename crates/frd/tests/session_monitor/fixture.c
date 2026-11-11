@@ -15,6 +15,8 @@ int main(void) {
  unsigned char selection[224], q[32], r[40]; readall(selection,sizeof(selection));
  char mode[65]={0}; memcpy(mode,selection+32,selection[28]);
  if(!strcmp(mode,"hang")) raise(SIGSTOP);
+ /* Dies after the selection, before answering any query: no evidence at all. */
+ if(!strcmp(mode,"vanish")) return 0;
  /* "lockfile-TOKEN": Active until the test creates /tmp/fr-sm-lock-TOKEN, then Locked. */
  char marker[96]={0}; int lockfile=!strncmp(mode,"lockfile-",9);
  if(lockfile && snprintf(marker,sizeof(marker),"/tmp/fr-sm-lock-%s",mode+9)>=(int)sizeof(marker)) return 6;
