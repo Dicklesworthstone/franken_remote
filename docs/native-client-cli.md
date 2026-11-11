@@ -506,9 +506,16 @@ fence remains terminal, including when switching applications; the picker does
 not weaken input or clipboard readiness to stay open during control. Later
 uploads still use the explicit drop, copied-file or local-command workflows below.
 
-Portable selection-lifecycle and parser regressions accompany this source.
-Native AppKit compilation and actual picker-to-tailnet upload qualification require
-a macOS SDK and runtime; the implementation alone is not a native support claim.
+Exact production chooser-policy and shared URI/inbox tests pass **13/13**.
+An isolated harness passes **62/62** actual production options and robot-module
+tests, including the new picker grammar and robot refusal. It links the real
+compiled core/wire/media/client crates and uses verbatim production CLI records
+and platform constants. Strict Clippy also passes for the chooser policy and
+Rust FFI boundary. These are component checks; full native CLI compilation and
+the Linux before-runtime refusal test remain blocked by SIGKILL while compiling
+the unchanged pinned Asupersync dependency. Native AppKit compilation and actual
+picker-to-tailnet upload qualification require a macOS SDK and runtime. No native
+support claim follows from these component results.
 
 ### Native macOS file selections
 

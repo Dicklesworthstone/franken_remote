@@ -678,26 +678,88 @@ impl super::StreamingViewer {
         // A drive ends on its callback's first refusal: report that, not the
         // transport's bare Handler error.
         let named = |error| refused.take().unwrap_or(error);
+        // The controller owns native capture, optional-lane cleanup and the
+        // original action/receipt ledger. Keep it in the stream across every
+        // await: recovery failure or abandonment must fence it, never replace
+        // those retained owners with a Closed peer and a false NotStarted.
+        let mut parts = ReplacementParts {
+            presenter: &mut self.presenter,
+            receiver: &mut self.receiver,
+            recovery: &mut self.recovery,
+            feedback: &mut self.feedback,
+            presentation: &mut self.presentation,
+            quality: &mut self.quality,
+            statistics: &mut self.statistics,
+        };
+        if let super::Peer::Control(viewer) = &mut self.peer {
+            let previous = match viewer.take_media_for_recovery(report_cursor) {
+                Ok(previous) => previous,
+                Err(error) => {
+                    viewer.close();
+                    return Err(Error::Control(error));
+                }
+            };
+            let (media, receipt) = resume(
+                Link {
+                    parent: Parent::Control(viewer, result),
+                    audio: self.audio.as_mut(),
+                    quality: parts.quality.as_mut(),
+                    refused: &refused,
+                },
+                previous,
+                parts.recovery.as_mut().ok_or(Error::Closed)?,
+                parts.presenter,
+                parts.receiver,
+                ui,
+                other,
+                &refused,
+            )
+            .await
+            .map_err(named)?;
+            let presentation = parts.reinstall(
+                viewer.session_mut(),
+                &media,
+                &receipt,
+                feedback_sent,
+                presentation_sent,
+            )?;
+            if let Err(error) = viewer.install_recovered_media(media, parts.receiver) {
+                viewer.close();
+                return Err(Error::Control(error));
+            }
+            // follow_recovery installed an EMPTY presentation tracker. The
+            // handshake consumed the first recovered IDR outside serve's
+            // normal decode loop, so move its actual completion into that
+            // tracker BEFORE exposing the frame to a visibility callback.
+            // This does not call visible(), renew a ticket, or reset either
+            // the original display deadline or the source observation.
+            let submitted = receipt.stage == crate::media::PresentationStage::SubmittedToCompositor;
+            if let Err(error) = viewer.decoded(receipt.decoded, submitted) {
+                viewer.close();
+                return Err(Error::Control(error));
+            }
+            return Ok(presentation);
+        }
         match std::mem::replace(&mut self.peer, super::Peer::Closed) {
             super::Peer::Observe { mut session, media } => {
                 let (media, receipt) = resume(
                     Link {
                         parent: Parent::Observe(&mut session),
                         audio: self.audio.as_mut(),
-                        quality: self.quality.as_mut(),
+                        quality: parts.quality.as_mut(),
                         refused: &refused,
                     },
                     media,
-                    self.recovery.as_mut().ok_or(Error::Closed)?,
-                    &mut self.presenter,
-                    &mut self.receiver,
+                    parts.recovery.as_mut().ok_or(Error::Closed)?,
+                    parts.presenter,
+                    parts.receiver,
                     ui,
                     other,
                     &refused,
                 )
                 .await
                 .map_err(named)?;
-                let presentation = self.reinstall(
+                let presentation = parts.reinstall(
                     &mut session,
                     &media,
                     &receipt,
@@ -705,57 +767,6 @@ impl super::StreamingViewer {
                     presentation_sent,
                 )?;
                 self.peer = super::Peer::Observe { session, media };
-                Ok(presentation)
-            }
-            super::Peer::Control(mut viewer) => {
-                let previous = match viewer.take_media_for_recovery(report_cursor) {
-                    Ok(previous) => previous,
-                    Err(error) => {
-                        viewer.close();
-                        return Err(Error::Control(error));
-                    }
-                };
-                let (media, receipt) = resume(
-                    Link {
-                        parent: Parent::Control(&mut viewer, result),
-                        audio: self.audio.as_mut(),
-                        quality: self.quality.as_mut(),
-                        refused: &refused,
-                    },
-                    previous,
-                    self.recovery.as_mut().ok_or(Error::Closed)?,
-                    &mut self.presenter,
-                    &mut self.receiver,
-                    ui,
-                    other,
-                    &refused,
-                )
-                .await
-                .map_err(named)?;
-                let presentation = self.reinstall(
-                    viewer.session_mut(),
-                    &media,
-                    &receipt,
-                    feedback_sent,
-                    presentation_sent,
-                )?;
-                if let Err(error) = viewer.install_recovered_media(media, &self.receiver) {
-                    viewer.close();
-                    return Err(Error::Control(error));
-                }
-                // follow_recovery installed an EMPTY presentation tracker. The
-                // handshake consumed the first recovered IDR outside serve's
-                // normal decode loop, so move its actual completion into that
-                // tracker BEFORE exposing the frame to a visibility callback.
-                // This does not call visible(), renew a ticket, or reset either
-                // the original display deadline or the source observation.
-                let submitted =
-                    receipt.stage == crate::media::PresentationStage::SubmittedToCompositor;
-                if let Err(error) = viewer.decoded(receipt.decoded, submitted) {
-                    viewer.close();
-                    return Err(Error::Control(error));
-                }
-                self.peer = super::Peer::Control(viewer);
                 Ok(presentation)
             }
             super::Peer::Viewing {
@@ -768,27 +779,27 @@ impl super::StreamingViewer {
                     Link {
                         parent: Parent::Viewing(&mut session, &mut viewing),
                         audio: self.audio.as_mut(),
-                        quality: self.quality.as_mut(),
+                        quality: parts.quality.as_mut(),
                         refused: &refused,
                     },
                     media,
-                    self.recovery.as_mut().ok_or(Error::Closed)?,
-                    &mut self.presenter,
-                    &mut self.receiver,
+                    parts.recovery.as_mut().ok_or(Error::Closed)?,
+                    parts.presenter,
+                    parts.receiver,
                     ui,
                     other,
                     &refused,
                 )
                 .await
                 .map_err(named)?;
-                let presentation = self.reinstall(
+                let presentation = parts.reinstall(
                     &mut session,
                     &media,
                     &receipt,
                     feedback_sent,
                     presentation_sent,
                 )?;
-                viewing.finish_recovery(&session, &media, &self.receiver, receipt)?;
+                viewing.finish_recovery(&session, &media, parts.receiver, receipt)?;
                 self.peer = super::Peer::Viewing {
                     session,
                     media,
@@ -802,6 +813,21 @@ impl super::StreamingViewer {
             }
         }
     }
+}
+
+/// Disjoint borrows of the stream's existing generation owners. Keeping the
+/// peer separate lets a controlled recovery borrow its original controller in
+/// place, including while rebuilding the recovered feedback and presentation.
+struct ReplacementParts<'a> {
+    presenter: &'a mut Presenter,
+    receiver: &'a mut ReceivePipeline,
+    recovery: &'a mut Option<Box<recovery_control::Receiver>>,
+    feedback: &'a mut Option<feedback::ViewerFeedback>,
+    presentation: &'a mut Option<super::ViewerPresentation>,
+    quality: &'a mut Option<super::quality::ViewerQuality>,
+    statistics: &'a mut super::Statistics,
+}
+impl ReplacementParts<'_> {
     /// New-generation report, feedback and presentation owners: only lifetime
     /// counters cross the recovery, never old evidence.
     fn reinstall(
@@ -817,7 +843,7 @@ impl super::StreamingViewer {
                 &session.transport,
                 session.routes,
                 session.opened.binding,
-                &self.receiver,
+                self.receiver,
             )
             .map_err(Error::Recovery)?;
         report
@@ -829,7 +855,7 @@ impl super::StreamingViewer {
             media.binding(),
         )
         .map_err(Error::Feedback)?;
-        self.feedback = setup
+        *self.feedback = setup
             .map(|s| {
                 feedback::ViewerFeedback::new(
                     &s,
@@ -839,10 +865,10 @@ impl super::StreamingViewer {
             })
             .transpose()
             .map_err(Error::Feedback)?;
-        if let Some(feedback) = &mut self.feedback {
+        if let Some(feedback) = self.feedback.as_mut() {
             feedback.sent = feedback_sent;
         }
-        self.presentation = super::ViewerPresentation::attach(
+        *self.presentation = super::ViewerPresentation::attach(
             &session.opened.selection,
             session.opened.binding,
             media.binding(),
@@ -851,10 +877,10 @@ impl super::StreamingViewer {
             now(&session.cx).map_err(Error::Session)?,
         )
         .map_err(Error::PresentedState)?;
-        if let Some(presentation) = &mut self.presentation {
+        if let Some(presentation) = self.presentation.as_mut() {
             presentation.sent = presentation_sent;
         }
-        if let Some(quality) = &mut self.quality {
+        if let Some(quality) = self.quality.as_mut() {
             quality
                 .rebind(
                     &session.opened.selection,
@@ -866,9 +892,9 @@ impl super::StreamingViewer {
             quality.set_lifetime(self.receiver.receiver_lifetime());
         }
         self.presenter
-            .check_stream(&session.transport, media, &self.receiver)
+            .check_stream(&session.transport, media, self.receiver)
             .map_err(Error::Media)?;
-        self.recovery = Some(Box::new(report));
+        *self.recovery = Some(Box::new(report));
         self.statistics.presented(receipt.stage);
         self.statistics.recovered_streams = self.statistics.recovered_streams.saturating_add(1);
         Ok(Presentation {

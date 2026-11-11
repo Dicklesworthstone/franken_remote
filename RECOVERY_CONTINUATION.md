@@ -85,6 +85,21 @@ then dependent frames continue in the ordinary receive/decode loop. A poisoned
 or uncertain in-flight native decoder remains terminal; this path does not reuse
 such a process or synthesize a successful decode.
 
+## Controller custody after failed recovery
+
+A granted controller remains stored in `StreamingViewer` throughout recovery;
+the replacement borrows it in place. A failed recovery or an abandoned pending
+offer wait fences that same controller while retaining its original action
+receipts, unresolved-action ledger, native input capture and optional file and
+microphone cleanup owners. Detaching old media does not detach those owners.
+
+Native capture stays `Pending` until the original producer confirms completion.
+An expired cleanup wait retains the handle for another bounded collection; it
+cannot become `NotStarted` merely because video recovery ended. This preserves
+the cleanup evidence required before another native viewing attempt can begin.
+Neither local cleanup nor preserved action receipts prove remote held-state
+release.
+
 ## Verification scope
 
 The continuation tests exercise `StreamingViewer::serve` itself against a real
@@ -95,6 +110,23 @@ a changed native configuration, and local stop during the recovery wait. The
 peer services real selective-repair requests before abandoning the reference
 chain; leaving those old reliable records blocked is not a valid renewal test.
 These are protocol/ownership/IPC checks, not native HEVC or hardware qualification.
+
+The `recovery_custody` regression sources exercise both an application failure
+inside recovery and abandonment of a polled next-offer wait. They use the real
+controlled TLS/UDP loop and an acknowledged action receipt, then check retained
+native capture custody, timeout, subsequent collection and the same receipt after
+cleanup. Codec output, input effects and capture completion are explicit
+fixtures. Formatting and whitespace checks pass; execution results for these
+new regressions are blocked. The unchanged, exactly pinned Asupersync dependency
+was killed with `SIGKILL` during Rust metadata compilation, both with one compiler
+job and with a subsequent lower-memory compiler configuration. Compilation did
+not reach `frd`, so these new regressions have **not been compiled or executed**.
+Source review does not substitute for those runtime checks or native cleanup
+qualification.
+
+```bash
+cargo test -p frd --lib recovery_custody --locked -- --test-threads=1
+```
 
 The 2026-10-26 pre-request-viewing regressions are in
 `crates/frd/src/session_startup/running/streaming/recovery/tests/viewing.rs`.

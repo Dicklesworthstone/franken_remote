@@ -3,6 +3,7 @@
 use super::*;
 
 mod host_revocation;
+mod recovery_custody;
 mod revocation;
 
 #[test]
