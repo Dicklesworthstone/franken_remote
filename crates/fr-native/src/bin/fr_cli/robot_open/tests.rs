@@ -18,6 +18,17 @@ fn connection(options: options::Options) -> Connection {
 const NATIVE: &str = "--experimental-native --display only --worker /fixture/fr-media-worker";
 
 #[test]
+fn robot_open_never_invokes_interactive_file_selection() {
+    let failure = match parse(&words(&format!(
+        "robot session open n-host --foreground --role control {NATIVE} --choose-files"
+    ))) {
+        Ok(_) => panic!("robot must not open a native file picker"),
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.code, "invalid_arguments");
+}
+
+#[test]
 fn foreground_view_uses_the_real_connection_without_creating_control_or_auxiliary_lanes() {
     let options = parsed(&format!(
         "robot session open n-host --foreground --role view {NATIVE} --json"

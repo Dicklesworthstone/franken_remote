@@ -525,6 +525,7 @@ fn build_opus_process() {
 fn build_macos_viewer() {
     println!("cargo:rerun-if-changed=src/macos_viewer.m");
     println!("cargo:rerun-if-changed=src/macos_picker.m");
+    println!("cargo:rerun-if-changed=src/macos_file_picker.m");
     if env::var_os("CARGO_FEATURE_MACOS_DESKTOP").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {
@@ -541,6 +542,7 @@ fn build_macos_viewer() {
     for (source, object) in [
         ("src/macos_viewer.m", "macosviewer.o"),
         ("src/macos_picker.m", "macospicker.o"),
+        ("src/macos_file_picker.m", "macosfilepicker.o"),
     ] {
         assert!(
             Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
@@ -569,6 +571,7 @@ fn build_macos_viewer() {
             .arg(out.join("libfrmacosviewer.a"))
             .arg(out.join("macosviewer.o"))
             .arg(out.join("macospicker.o"))
+            .arg(out.join("macosfilepicker.o"))
             .status()
             .unwrap()
             .success()

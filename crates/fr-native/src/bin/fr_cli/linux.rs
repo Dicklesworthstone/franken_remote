@@ -261,6 +261,14 @@ pub(super) fn run_automation(options: &Options) -> Result<String, Failure> {
 }
 #[allow(clippy::too_many_lines)]
 fn run_mode(options: &Options, automation: bool) -> Result<String, Failure> {
+    #[cfg(not(all(target_os = "macos", feature = "macos-desktop")))]
+    if matches!(&options.command, Command::Connect(connection) if connection.upload.choose_files) {
+        return Err(Failure::new(
+            "file_picker_unavailable",
+            "--choose-files requires the native macOS desktop build; use --send PATH or --file-drop on this platform. No connection was opened.",
+            2,
+        ));
+    }
     if let Command::SavedHosts(saved) = &options.command
         && let Some(text) = super::saved_hosts::local(saved, options.json)?
     {
@@ -1627,6 +1635,17 @@ fn control_history(progress: &Progress, control: &control::Counters) -> crate::C
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unavailable_file_picker_refuses_before_runtime_or_socket_setup() {
+        let options = crate::options::parse(
+            &"connect n-host --control --experimental-native --display only --choose-files --socket /not-a-real-tailnet/socket"
+                .split_whitespace().map(str::to_owned).collect::<Vec<_>>(),
+        ).unwrap();
+        let failure = run(&options).unwrap_err();
+        assert_eq!(failure.code, "file_picker_unavailable");
+        assert_eq!(failure.exit, 2);
+    }
     #[test]
     fn native_offer_contains_no_control_clipboard_or_audio_capability() {
         let offer = offer();
@@ -2399,6 +2418,7 @@ mod tests {
             microphone: None,
             upload: crate::options::UploadOptions {
                 paths: Vec::new(),
+                choose_files: false,
                 file_drop: false,
                 file_commands: false,
             },

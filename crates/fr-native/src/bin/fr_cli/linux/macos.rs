@@ -10,6 +10,8 @@
 //! local upload commands use the original controlled file lanes.
 #[path = "macos_clipboard.rs"]
 mod clipboard;
+#[path = "macos_file_choice.rs"]
+mod file_choice;
 #[path = "macos_files.rs"]
 mod files;
 #[path = "macos_history.rs"]
@@ -36,6 +38,15 @@ fn unsupported(option: &'static str) -> Failure {
 
 /// Refuse every option this path does not implement, before any network I/O.
 fn check(connection: &Connection) -> Result<(), Failure> {
+    if connection.upload.choose_files
+        && (!connection.control || !connection.upload.paths.is_empty())
+    {
+        return Err(Failure::new(
+            "file_choice_invalid",
+            "Use --choose-files only with --control and without --send paths.",
+            2,
+        ));
+    }
     if !connection.control && !connection.upload.paths.is_empty() {
         return Err(Failure::new(
             "send_requires_control",
@@ -66,6 +77,7 @@ fn check(connection: &Connection) -> Result<(), Failure> {
     }
     let directions = u32::from(
         !connection.upload.paths.is_empty()
+            || connection.upload.choose_files
             || connection.upload.file_commands
             || connection.upload.file_drop,
     ) + u32::from(connection.receive.is_some());
@@ -117,9 +129,17 @@ pub(super) fn connect(
         ));
     }
     check(connection)?;
-    // Pin the user's explicit sources and destination before AppKit, host
-    // lookup or network I/O. These choices belong to one original control.
-    let selected_files = files::select(connection)?;
+    // The explicit native choice runs before host lookup or connection startup.
+    // It never changes the active viewer's terminal focus-loss policy. Pin its
+    // sources through the same original upload owner as --send after the panel
+    // has confirmed cleanup; cancellation opens no connection.
+    let chosen = if connection.upload.choose_files {
+        Some(file_choice::select(runtime, cx, shutdown, stopped)?)
+    } else {
+        None
+    };
+    let selected_files = files::select(connection, chosen.as_deref())?;
+    drop(chosen);
     let pending = files::Summary::capture(&selected_files);
     let pending_clipboard = ClipboardReport {
         requested: connection.control && connection.clipboard,

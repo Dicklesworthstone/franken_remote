@@ -7,8 +7,21 @@ use crate::{
 };
 use fr_native::macos::files::{Files, Status};
 
-pub(super) fn select(connection: &Connection) -> Result<Files, Failure> {
-    let upload = upload::select(&connection.upload.paths)?;
+pub(super) fn select(
+    connection: &Connection,
+    chosen: Option<&[std::path::PathBuf]>,
+) -> Result<Files, Failure> {
+    // A native choice is never a fallback for explicit paths, or vice versa.
+    if connection.upload.choose_files != chosen.is_some()
+        || chosen.is_some_and(|paths| paths.is_empty() || !connection.upload.paths.is_empty())
+    {
+        return Err(Failure::new(
+            "file_choice_invalid",
+            "The original local file choice is missing or ambiguous. Start a new connection with one explicit selection.",
+            2,
+        ));
+    }
+    let upload = upload::select(chosen.unwrap_or(&connection.upload.paths))?;
     let download = connection
         .receive
         .as_ref()

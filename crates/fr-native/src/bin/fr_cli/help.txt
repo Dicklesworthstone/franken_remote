@@ -23,8 +23,9 @@ fr connect NODE_ID --view-only|--control --experimental-native
     [--trust-roots /absolute/ca-roots.pem] [--by-name] [--x-display :0]
     [--socket PATH] [--port 8443] [--ipv6]
     [--attempts 1..32] [--fit WIDTHxHEIGHT] [--no-clipboard]
-    [--capture-system-shortcuts] [--send /absolute/file-or-directory]...
-    [--file-drop] [--file-commands] [--receive /absolute/private-directory]
+    [--capture-system-shortcuts] [--choose-files|--send PATH...]
+    [--file-drop] [--file-commands]
+    [--receive /absolute/private-directory]
     [--receive-conflict reject|keep-both] [--receive-max-file-bytes N]
     [--receive-max-session-bytes N]
     [--audio [--audio-server /absolute/pulse/native] [--audio-sink NAME]
@@ -117,6 +118,9 @@ An incomplete transfer unable to stop independently closes the connection.
 View-only never accesses clipboard.
 
 Files:
+On macOS, --choose-files opens a native picker before connecting: up to 8 local
+files/folders for the original --control upload, instead of --send paths.
+Cancel/timeout opens no connection; reconnect never repeats the choice.
 --send PATH needs --control and host frd run --files DIR: up to 8 regular files
 or portable directory roots, in order. Symlinks/special files/existing names
 refuse; empty items survive. The upload panel separates progress/receipts: Pause /

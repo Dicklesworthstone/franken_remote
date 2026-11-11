@@ -1207,6 +1207,8 @@ impl Drop for HevcDecoder {
 #[path = "macos/cadence.rs"]
 pub mod cadence;
 mod clipboard;
+#[path = "macos/file_picker.rs"]
+pub mod file_picker;
 #[path = "macos/files.rs"]
 pub mod files;
 #[path = "macos/picker.rs"]

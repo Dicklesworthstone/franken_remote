@@ -8,6 +8,9 @@ pub use doctor::{DoctorOptions, NativeDoctorOptions};
 mod receive;
 pub use receive::ReceiveOptions;
 #[cfg(test)]
+#[path = "options/file_choice_tests.rs"]
+mod file_choice_tests;
+#[cfg(test)]
 #[path = "options/host_choice_tests.rs"]
 mod host_choice_tests;
 #[path = "options/hosts.rs"]
@@ -169,7 +172,10 @@ pub struct Connection {
 #[cfg(any(feature = "linux-desktop", test))]
 impl Connection {
     pub fn uploads(&self) -> bool {
-        self.upload.file_drop || self.upload.file_commands || !self.upload.paths.is_empty()
+        self.upload.choose_files
+            || self.upload.file_drop
+            || self.upload.file_commands
+            || !self.upload.paths.is_empty()
     }
 }
 #[allow(dead_code)]
@@ -177,6 +183,9 @@ pub struct UploadOptions {
     /// `--send PATH` (repeatable, with `--control` only): files or directories
     /// explicitly selected for the original upload. Empty selects no source.
     pub paths: Vec<PathBuf>,
+    /// `--choose-files`: a native local picker before any connection opens.
+    /// Its explicit selection becomes this original upload, never a reconnect choice.
+    pub choose_files: bool,
     /// `--file-drop`: explicitly allow a first local Copy drop after control
     /// without requiring an initial --send. Reconnect never re-enables it.
     pub file_drop: bool,
@@ -782,6 +791,7 @@ fn parse_command(
     let mut fit_window = None;
     let (mut saved, mut hosts_file) = (false, None);
     let mut send = Vec::new();
+    let mut choose_files = false;
     let mut file_drop = false;
     let mut file_commands = false;
     let mut receive = None;
@@ -862,6 +872,7 @@ fn parse_command(
             "--port" if remote => port = next_port(args, &mut index)?,
             "--attempts" if connect => attempts = next_parsed(args, &mut index)?,
             "--send" if connect => send.push(next_path(args, &mut index)?),
+            "--choose-files" if connect => choose_files = true,
             "--file-drop" if connect => file_drop = true,
             "--file-commands" if connect => file_commands = true,
             "--receive" if connect => receive = Some(next_path(args, &mut index)?),
@@ -946,6 +957,20 @@ fn parse_command(
         } else {
             None
         };
+        if choose_files && !control {
+            return Err(Failure::new(
+                "file_choice_requires_control",
+                "--choose-files requires --control. The local selection is sent only on that original control lease.",
+                2,
+            ));
+        }
+        if choose_files && !send.is_empty() {
+            return Err(Failure::new(
+                "file_choice_conflicts_with_send",
+                "Choose either --choose-files or explicit --send paths for the initial upload.",
+                2,
+            ));
+        }
         if !send.is_empty() && !control {
             return Err(Failure::new(
                 "send_requires_control",
@@ -1025,6 +1050,7 @@ fn parse_command(
                 microphone,
                 upload: UploadOptions {
                     paths: send,
+                    choose_files,
                     file_drop,
                     file_commands,
                 },

@@ -51,7 +51,7 @@ pub(super) fn parse(args: &[String]) -> Result<options::Options, Failure> {
     // are not silently added to this existing robot command translator.
     if args[7..]
         .iter()
-        .any(|arg| matches!(arg.as_str(), "--saved" | "--hosts-file"))
+        .any(|arg| matches!(arg.as_str(), "--saved" | "--hosts-file" | "--choose-files"))
     {
         return Err(usage());
     }

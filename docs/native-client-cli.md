@@ -473,6 +473,43 @@ dependency, before it reached the new runtime integration. Native macOS
 builds and a real two-direction transfer/cancel/reconnect run remain required;
 the earlier viewer evidence above does not qualify this extension.
 
+### Choose initial files in the native macOS picker
+
+With a `macos-desktop` build, `--choose-files` opens the system file picker
+**before any host lookup, remote connection or control request**:
+
+```sh
+fr connect NODE_ID --control --choose-files --experimental-native --display only
+```
+
+Choose one to eight local files or directories, then confirm **Use selection**.
+The picker uses one original 120-second choice budget. Cancellation, sleep or
+session loss, invalid selection, an unserviced completion older than two seconds,
+an overflowing native event turn, or incomplete picker cleanup prevents connection
+startup. No filenames or paths are included in error output.
+
+After the native panel closes, the existing upload boundary opens and pins each
+source descriptor exactly as it does for `--send`. Symbolic links, special files,
+unreadable sources and duplicate destination names retain their existing typed
+refusals. File contents become available only to the original separately admitted
+upload on the granted control lease; viewing reconnects do not choose or send
+files again. The host still opts in with `--files DIR`.
+
+`--choose-files` requires `--control` and excludes initial `--send` paths. It may
+accompany `--choose-host`, `--receive`, `--file-drop` and `--file-commands`; each
+keeps its own existing consent and limits. Robot commands refuse interactive
+selection. Linux returns `file_picker_unavailable` before runtime or socket setup;
+use its existing explicit `--send` or `--file-drop` path.
+
+This chooser runs before the viewer exists. The active Mac viewer's focus-loss
+fence remains terminal, including when switching applications; the picker does
+not weaken input or clipboard readiness to stay open during control. Later
+uploads still use the explicit drop, copied-file or local-command workflows below.
+
+Portable selection-lifecycle and parser regressions accompany this source.
+Native AppKit compilation and actual picker-to-tailnet upload qualification require
+a macOS SDK and runtime; the implementation alone is not a native support claim.
+
 ### Native macOS file selections
 
 `--control --file-drop` explicitly enables later native uploads on the original
