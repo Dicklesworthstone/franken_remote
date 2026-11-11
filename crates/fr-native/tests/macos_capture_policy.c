@@ -349,6 +349,19 @@ static void encoded_allocation_is_bounded_before_append(void) {
     assert(fr_cap_nal_fits(SIZE_MAX - 5, 1, SIZE_MAX));
 }
 
+static void a_positive_live_check_stands_for_at_most_its_bound(void) {
+    // Never checked: always ask the system.
+    assert(!fr_cap_live_reusable(0, 0));
+    assert(!fr_cap_live_reusable(0, 5));
+    assert(fr_cap_live_reusable(1000, 1000));
+    assert(fr_cap_live_reusable(1000, 1000 + FR_CAP_LIVE_REUSE_NS - 1));
+    assert(!fr_cap_live_reusable(1000, 1000 + FR_CAP_LIVE_REUSE_NS));
+    // A clock regression cannot stretch an old answer.
+    assert(!fr_cap_live_reusable(1000, 999));
+    assert(!fr_cap_live_reusable(UINT64_MAX, 0));
+    assert(fr_cap_live_reusable(UINT64_MAX - 1, UINT64_MAX));
+}
+
 int main(void) {
     deadline_has_exact_monotonic_boundaries();
     deadline_refuses_zero_and_overflow_without_wrapping();
@@ -371,6 +384,7 @@ int main(void) {
     exhausted_invalidation_identity_never_restarts();
     each_verification_has_one_cancellable_result();
     encoded_allocation_is_bounded_before_append();
-    puts("21 macOS capture policy tests passed");
+    a_positive_live_check_stands_for_at_most_its_bound();
+    puts("22 macOS capture policy tests passed");
     return 0;
 }

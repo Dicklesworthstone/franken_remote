@@ -201,4 +201,16 @@ static inline bool fr_cap_nal_fits(size_t current, size_t payload, size_t capaci
            payload <= capacity - current - 4;
 }
 
+// Screen Recording access and the display's mode/placement are synchronous
+// round trips to tccd and WindowServer (measured ~20 ms per picture at three
+// checks each). A positive answer younger than this bound stands for the
+// next checks; a refusal is never kept, and the stream's own stop is checked
+// on every call. So revocation or a mode change is seen within 100 ms.
+#define FR_CAP_LIVE_REUSE_NS 100000000ull
+
+// `checked` is the monotonic time of the last positive native check, or 0.
+static inline bool fr_cap_live_reusable(uint64_t checked, uint64_t now) {
+    return checked != 0 && now >= checked && now - checked < FR_CAP_LIVE_REUSE_NS;
+}
+
 #endif

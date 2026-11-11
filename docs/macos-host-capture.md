@@ -82,6 +82,31 @@ generation under the same lock used by invalidation. Generation exhaustion is
 terminal. A new selection or new verification capture can recover from a gap
 that occurred before that operation started.
 
+## Permission and display checks
+
+Every request reads the stream's own stop flag, which macOS sets when it ends
+the stream, for example after a revoked permission or a lost display. The
+worker also checks Screen Recording access (`CGPreflightScreenCaptureAccess`,
+a synchronous call to tccd) and the display's mode and placement (a
+WindowServer query): on entry, after a picture is selected, and before a
+result is published. A positive answer younger than **100 ms**
+(`FR_CAP_LIVE_REUSE_NS`) stands for the next checks. It is stamped before the
+calls, on a clock that counts system sleep. A refusal is never kept. A revoked
+permission or a changed display mode is therefore refused within 100 ms.
+
+Measured on 2026-11-10 on the M5 Ultra at 5120×2880 under load 28–48:
+- Before the change, the three checks ran for every picture and took about a
+  third of the worker's time.
+- With the change, the worker's per-request time fell from a 71–82 ms mean to
+  a 43–47 ms mean (scratch timing harness, 150 requests per run, 5 interleaved
+  rounds).
+- Live view-only sessions from a Mac mini rose from 11.3–12.1 to 18.2–18.8
+  submitted pictures/s (`frame_intervals` p50 at most 83–85 ms, then 51–53 ms;
+  3 interleaved rounds).
+- The remaining per-picture time is mostly the synchronous
+  `VTCompressionSessionEncodeFrame` at this size (~27.5 ms), with one encode in
+  flight.
+
 ## A static screen remains usable through real verification
 
 Apple defines Idle as an unchanged source event; it does not promise periodic

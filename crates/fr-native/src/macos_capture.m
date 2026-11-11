@@ -253,6 +253,7 @@ int fr_cap_bind_parent(int32_t expected) {
     CVPixelBufferRef latest;   // newest complete frame, retained
     FrCapSource source;        // positive source evidence, protected by lock
     uint64_t encoded;          // source.picture at the last successful encode
+    uint64_t live_checked;     // CLOCK_MONOTONIC_RAW of the last positive native live check, or 0
     SCContentFilter *filter;
     SCStreamConfiguration *configuration;
     uint64_t verification_requests;
@@ -868,13 +869,21 @@ int fr_cap_open(uint32_t display_id, uint32_t width, uint32_t height, uint32_t f
 // is recorded; otherwise this only reports. Called by the startup probe only.
 int fr_cap_request_access(void) { return CGRequestScreenCaptureAccess() ? 1 : 0; }
 
+// The stream's own stop is read on every call. The native permission and
+// display checks reuse a positive answer for FR_CAP_LIVE_REUSE_NS, stamped
+// before the calls on a clock that counts system sleep.
 static int capture_live(FrCapture *c) {
     os_unfair_lock_lock(&c->lock);
     BOOL stopped = c->stopped || c->source.exhausted;
     os_unfair_lock_unlock(&c->lock);
     if (stopped) return FR_CAP_GEOMETRY;
+    uint64_t now = clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    if (fr_cap_live_reusable(c->live_checked, now)) return FR_CAP_OK;
+    c->live_checked = 0;
     if (!CGPreflightScreenCaptureAccess()) return FR_CAP_PERMISSION;
-    return fr_cap_display_check(&c->display);
+    int status = fr_cap_display_check(&c->display);
+    if (status == FR_CAP_OK) c->live_checked = now;
+    return status;
 }
 
 static BOOL source_current(FrCapture *c, uint64_t source_epoch) {
@@ -1055,8 +1064,9 @@ int fr_cap_set_bitrate(void *handle, uint32_t bitrate) {
 }
 
 // FR_CAP_OK while the stream runs on an unchanged display; FR_CAP_GEOMETRY
-// once it stopped or the display's mode or placement changed (the capture
-// system would otherwise go on scaling the new mode into the old size).
+// once it stopped, or within FR_CAP_LIVE_REUSE_NS of the display's mode or
+// placement changing (the capture system would otherwise go on scaling the
+// new mode into the old size).
 int fr_cap_check(void *handle) {
     if (!handle) return FR_CAP_INVALID;
     FrCapture *c = (__bridge FrCapture *)handle;
