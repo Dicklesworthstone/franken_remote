@@ -1,7 +1,7 @@
 use super::*;
 use std::{
     fs as disk,
-    os::unix::fs::{DirBuilderExt, symlink},
+    os::unix::fs::{DirBuilderExt, PermissionsExt, symlink},
     path::PathBuf,
 };
 
@@ -86,4 +86,112 @@ fn a_substituted_stage_name_is_neither_published_nor_deleted() {
         disk::read(&pending).unwrap(),
         b"a different file now owns this name"
     );
+}
+
+// Reproduce statat's lookup/metadata race with real inodes: retain the original
+// descriptor, atomically replace its directory entry, then inspect the now
+// unlinked old inode. Only the first snapshot is interposed; every retry reads
+// the actual destination through the production no-follow directory handle.
+fn replaced_unit(root: &Root, replacement: &Path) -> (OwnedFd, File) {
+    let unit = root.0.join("frd.service");
+    disk::write(&unit, b"original complete service").unwrap();
+    let original = File::open(&unit).unwrap();
+    disk::rename(replacement, &unit).unwrap();
+    assert_eq!(fs::fstat(&original).unwrap().st_nlink, 0);
+    (directory(&root.0, false).unwrap().unwrap(), original)
+}
+
+#[test]
+fn a_raced_away_unit_requires_a_fresh_safe_destination_snapshot() {
+    let root = Root::new();
+    let replacement = root.0.join("complete-replacement");
+    disk::write(&replacement, b"new complete service").unwrap();
+    let (dir, original) = replaced_unit(&root, &replacement);
+    let mut reads = 0;
+    let result = inspect_destination(|| {
+        reads += 1;
+        if reads == 1 {
+            fs::fstat(&original)
+        } else {
+            fs::statat(&dir, "frd.service", AtFlags::SYMLINK_NOFOLLOW)
+        }
+    });
+
+    assert_eq!(result, Ok(true));
+    assert_eq!(reads, 2);
+    assert_eq!(
+        disk::read(root.0.join("frd.service")).unwrap(),
+        b"new complete service"
+    );
+}
+
+#[test]
+fn a_raced_away_unit_can_be_absent_but_an_unlinked_snapshot_never_suffices() {
+    let root = Root::new();
+    let unit = root.0.join("frd.service");
+    disk::write(&unit, b"removed complete service").unwrap();
+    let original = File::open(&unit).unwrap();
+    disk::remove_file(&unit).unwrap();
+    let dir = directory(&root.0, false).unwrap().unwrap();
+    assert_eq!(fs::fstat(&original).unwrap().st_nlink, 0);
+    let mut reads = 0;
+    assert_eq!(
+        inspect_destination(|| {
+            reads += 1;
+            if reads == 1 {
+                fs::fstat(&original)
+            } else {
+                fs::statat(&dir, "frd.service", AtFlags::SYMLINK_NOFOLLOW)
+            }
+        }),
+        Ok(false)
+    );
+    assert_eq!(reads, 2);
+
+    let mut reads = 0;
+    assert_eq!(
+        inspect_destination(|| {
+            reads += 1;
+            fs::fstat(&original)
+        }),
+        Err(ServiceError::UnsafeUnitPath)
+    );
+    assert_eq!(reads, DESTINATION_SNAPSHOTS);
+    assert!(!unit.exists());
+}
+
+#[test]
+fn revalidation_refuses_an_unsafe_replacement_without_a_further_retry() {
+    for kind in ["symlink", "hardlink", "writable"] {
+        let root = Root::new();
+        let victim = root.0.join("unrelated-file");
+        disk::write(&victim, b"preserved unrelated bytes").unwrap();
+        let replacement = root.0.join("unsafe-replacement");
+        match kind {
+            "symlink" => symlink(&victim, &replacement).unwrap(),
+            "hardlink" => disk::hard_link(&victim, &replacement).unwrap(),
+            "writable" => {
+                disk::write(&replacement, b"shared-writable service").unwrap();
+                disk::set_permissions(&replacement, disk::Permissions::from_mode(0o666)).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let (dir, original) = replaced_unit(&root, &replacement);
+        let mut reads = 0;
+        assert_eq!(
+            inspect_destination(|| {
+                reads += 1;
+                if reads == 1 {
+                    fs::fstat(&original)
+                } else {
+                    fs::statat(&dir, "frd.service", AtFlags::SYMLINK_NOFOLLOW)
+                }
+            }),
+            Err(ServiceError::UnsafeUnitPath),
+            "{kind}"
+        );
+        assert_eq!(reads, 2, "{kind}");
+        assert_eq!(disk::read(&victim).unwrap(), b"preserved unrelated bytes");
+        assert!(disk::symlink_metadata(root.0.join("frd.service")).is_ok());
+    }
 }

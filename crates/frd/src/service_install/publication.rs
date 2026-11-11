@@ -15,6 +15,7 @@ use std::{
 };
 
 const TEMP_PREFIX: &str = ".frd-unit-pending-";
+const DESTINATION_SNAPSHOTS: usize = 16;
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -146,19 +147,36 @@ fn trusted_directory(dir: &OwnedFd, final_directory: bool) -> Result<(), Service
 }
 
 fn destination(dir: &OwnedFd, name: &OsStr) -> Result<bool, ServiceError> {
-    match fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat)
-            if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
-                && stat.st_uid == geteuid().as_raw()
-                && stat.st_mode & 0o022 == 0
-                && stat.st_nlink == 1 =>
-        {
-            Ok(true)
+    inspect_destination(|| fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW))
+}
+
+fn inspect_destination(
+    mut snapshot: impl FnMut() -> rustix::io::Result<fs::Stat>,
+) -> Result<bool, ServiceError> {
+    for _ in 0..DESTINATION_SNAPSHOTS {
+        match snapshot() {
+            Ok(stat)
+                if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+                    && stat.st_uid == geteuid().as_raw()
+                    && stat.st_mode & 0o022 == 0 =>
+            {
+                match stat.st_nlink {
+                    1 => return Ok(true),
+                    // A concurrent atomic replacement can unlink the inode
+                    // after statat resolves its name but before it samples the
+                    // metadata. That old inode is not evidence about the new
+                    // destination. Inspect the same no-follow path again;
+                    // never accept an unlinked inode or an unsafe replacement.
+                    0 => {}
+                    _ => return Err(ServiceError::UnsafeUnitPath),
+                }
+            }
+            Ok(_) => return Err(ServiceError::UnsafeUnitPath),
+            Err(rustix::io::Errno::NOENT) => return Ok(false),
+            Err(e) => return Err(io_error("inspect the existing service definition", e)),
         }
-        Ok(_) => Err(ServiceError::UnsafeUnitPath),
-        Err(rustix::io::Errno::NOENT) => Ok(false),
-        Err(e) => Err(io_error("inspect the existing service definition", e)),
     }
+    Err(ServiceError::UnsafeUnitPath)
 }
 
 struct Stage<'a> {
