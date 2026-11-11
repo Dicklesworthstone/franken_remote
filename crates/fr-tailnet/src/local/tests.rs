@@ -1465,8 +1465,12 @@ fn a_renewal_that_never_gets_the_credit_times_out_inside_its_budget() {
     let (s, w) = fixtures();
     let server = Server::fixture(&s, &w, false);
     run_async!(cx, {
+        // The proof keeps this budget, and the first authorization spends it
+        // on three fixture queries. 30 ms was too little for those on CI's
+        // macOS runner (Timeout at the first unwrap, 2 of 4 runs on 11-11).
+        let budget = Duration::from_millis(250);
         let policy = GrantPolicy {
-            lookup_timeout: Duration::from_millis(30),
+            lookup_timeout: budget,
             ..Default::default()
         };
         let proof = server
@@ -1485,8 +1489,8 @@ fn a_renewal_that_never_gets_the_credit_times_out_inside_its_budget() {
                 .unwrap_err(),
             Error::Timeout
         );
-        assert!(started.elapsed() >= Duration::from_millis(30));
-        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(started.elapsed() >= budget);
+        assert!(started.elapsed() < budget + Duration::from_millis(750));
         assert_eq!(server.client.renewing.load(Ordering::Acquire), 0);
         assert_eq!(server.calls.load(Ordering::SeqCst), 3);
         server.client.busy.store(false, Ordering::Release);
