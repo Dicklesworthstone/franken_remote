@@ -409,9 +409,19 @@ async fn exercise(c: Cx, h: Cx, cleanup: Cx, case: Case, delay: u64, hold: u64) 
                         |state, event| {
                             match state {
                                 ViewerControlState::Requesting(pending) => {
-                                    pending
+                                    // Without consent the request only ends by expiry, and on
+                                    // a loaded runner its deadline can pass between serve's
+                                    // own check and this callback. Serve then ends it.
+                                    match pending
                                         .confirm_mapping(request.parent, request.target.view)
-                                        .unwrap();
+                                    {
+                                        Err(
+                                            crate::session_startup::viewer::streaming::Error::Control(
+                                                crate::session_startup::viewer::controlled::Error::Expired,
+                                            ),
+                                        ) => return Ok(()),
+                                        mapped => mapped.unwrap(),
+                                    }
                                     if let Some(frame) = pending.presentation()
                                         && visible != Some(frame.frame)
                                         && !matches!(case, Case::PresentedNoVisibility)
