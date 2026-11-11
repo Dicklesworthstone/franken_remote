@@ -580,9 +580,10 @@ pub struct Session {
     epoch: u128,
     title: String,
     fit_window: Option<(u32, u32)>,
-    /// The stated 1:1 box (pixels) and the screen's pixels per point: a
-    /// scaled picture's window opens at picture pixels / scale.
-    picture_box: Option<((u32, u32), u32)>,
+    /// The screen's 1:1 box: each attempt states the part its window (the
+    /// fit ceiling, then each resized window) shows, and a scaled picture's
+    /// window opens at picture pixels / scale.
+    picture_box: Option<crate::macos::WindowBox>,
     placement: Option<Placement>,
     resize: Rc<ResizeIntent>,
     window: WindowSlot,
@@ -674,12 +675,18 @@ impl Session {
         self.fit_window = fit;
         self
     }
-    /// The box this viewer stated (`scaled-picture`, pixels) and the screen's
-    /// pixels per point, so a scaled picture's window opens 1:1.
+    /// The screen's 1:1 box (`crate::macos::window_box`). Each attempt
+    /// states the part of it the window shows (`scaled-picture`), so a
+    /// scaling host sends a picture drawn 1:1, also after a resize.
     #[must_use]
-    pub fn with_picture_box(mut self, picture_box: Option<((u32, u32), u32)>) -> Self {
+    pub fn with_picture_box(mut self, picture_box: Option<crate::macos::WindowBox>) -> Self {
         self.picture_box = picture_box;
         self
+    }
+    /// The box the next attempt states: the window's part of the screen's.
+    #[must_use]
+    pub fn stated_picture(&self) -> Option<(u32, u32)> {
+        self.picture_box?.within(self.fit_window)
     }
     /// Choose from the original approved catalog on every new attempt.
     #[must_use]
@@ -1387,6 +1394,15 @@ fn attach(
 
 impl Application for Session {
     type Output = ();
+    // The same window part the renderer below opens 1:1. A resize reopen
+    // replaced `fit_window` with the new window's size before this attempt.
+    fn picture(&mut self, _attempt: u8, original: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        if self.picture_box.is_some() {
+            self.stated_picture()
+        } else {
+            original
+        }
+    }
     fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
         let available = self
             .files
@@ -1510,10 +1526,14 @@ impl Application for Session {
                 // box; open its window at one point per `scale` pixels so it
                 // is drawn 1:1. Otherwise the remote's logical size applies.
                 let (pixels, logical) = picture_box
-                    .and_then(|(within, scale)| {
+                    .and_then(|screen| {
+                        let within = screen.within(fit_window)?;
                         let expected = display.picture(Some(within)).ok()?;
-                        let points =
-                            crate::macos_sizing::scaled_picture_points(native, expected, scale)?;
+                        let points = crate::macos_sizing::scaled_picture_points(
+                            native,
+                            expected,
+                            screen.scale,
+                        )?;
                         Some((expected, points))
                     })
                     .unwrap_or((native, (display.logical_width, display.logical_height)));
@@ -2138,6 +2158,38 @@ mod tests {
             ..changed
         }));
         session
+    }
+
+    #[test]
+    fn a_resized_window_states_its_own_box_on_the_reopened_attempt() {
+        // mac-mini-old's screen box: 1920x1080 at 1x with the Dock shown.
+        let screen = crate::macos::WindowBox {
+            pixels: (1920, 933),
+            scale: 1,
+            reserved: 44,
+        };
+        let mut session = resized_session().with_picture_box(Some(screen));
+        assert_eq!(
+            Application::picture(&mut session, 1, Some((1920, 933))),
+            Some((1920, 933))
+        );
+        assert_eq!(
+            session.window_resize_action(
+                reconnect::Failure::Cancelled,
+                Some(Duration::from_millis(130))
+            ),
+            Some(LocalLayoutChange::WindowResize),
+        );
+        // The 1280x840-point window shows 1280x796 below the sharing strip.
+        assert_eq!(
+            Application::picture(&mut session, 2, Some((1920, 933))),
+            Some((1280, 796))
+        );
+        // Without a screen box, the configured box is kept.
+        assert_eq!(
+            Application::picture(&mut resized_session(), 2, Some((1920, 1080))),
+            Some((1920, 1080))
+        );
     }
 
     #[test]

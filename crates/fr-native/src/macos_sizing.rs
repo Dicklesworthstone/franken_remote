@@ -44,6 +44,39 @@ pub(crate) fn points(
     ))
 }
 
+/// The largest picture new viewer windows on the main screen show 1:1, and
+/// how a later window size maps to one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowBox {
+    /// The visible screen below the title bar and the strips, in pixels.
+    pub pixels: (u32, u32),
+    /// Whole pixels per point.
+    pub scale: u32,
+    /// Points of native strips below the picture (sharing, text composer).
+    pub reserved: u32,
+}
+
+impl WindowBox {
+    /// The box for a window whose content (strips included) is at most `fit`
+    /// points, never beyond the screen's: the `--fit` ceiling, then each
+    /// resized window. `None` when less than 64 pixels remain on an axis.
+    #[must_use]
+    pub fn within(self, fit: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        let (width, height) = match fit {
+            Some((width, height)) => (
+                self.pixels.0.min(width.saturating_mul(self.scale)),
+                self.pixels.1.min(
+                    height
+                        .saturating_sub(self.reserved)
+                        .saturating_mul(self.scale),
+                ),
+            ),
+            None => self.pixels,
+        };
+        (width.min(height) >= 64).then_some((width, height))
+    }
+}
+
 /// The window points that show a scaled picture 1:1 on a screen with `scale`
 /// pixels per point, or `None` when the expected picture is the display's
 /// native size (the remote's logical size then applies). `expected` is what a
@@ -145,9 +178,44 @@ pub(crate) fn sharing_points_with_selections(
 #[cfg(test)]
 mod tests {
     use super::{
-        points, scaled_picture_points, sharing_points, sharing_points_with_selections,
+        WindowBox, points, scaled_picture_points, sharing_points, sharing_points_with_selections,
         sharing_points_with_text,
     };
+
+    #[test]
+    fn the_box_follows_the_window_up_to_the_screen() {
+        // mac-mini-old: 1920x1080 at 1x, Dock shown, view-only.
+        let screen = WindowBox {
+            pixels: (1920, 933),
+            scale: 1,
+            reserved: 44,
+        };
+        assert_eq!(screen.within(None), Some((1920, 933)));
+        // A window resized to 1200x744 points shows 1200x700 below the strip.
+        assert_eq!(screen.within(Some((1200, 744))), Some((1200, 700)));
+        // Larger than the screen: the screen's box.
+        assert_eq!(screen.within(Some((4000, 3000))), Some((1920, 933)));
+        // A Retina screen with the text composer reserved.
+        let retina = WindowBox {
+            pixels: (3024, 1700),
+            scale: 2,
+            reserved: 120,
+        };
+        assert_eq!(retina.within(Some((800, 620))), Some((1600, 1000)));
+        // Too small for a picture: no box, native pictures.
+        assert_eq!(screen.within(Some((1200, 107))), None);
+        assert_eq!(screen.within(Some((63, 700))), None);
+        assert_eq!(screen.within(Some((1200, 40))), None);
+        assert_eq!(
+            WindowBox {
+                pixels: (1920, 933),
+                scale: 2,
+                reserved: 44,
+            }
+            .within(Some((u32::MAX, 744))),
+            Some((1920, 933))
+        );
+    }
 
     #[test]
     fn a_scaled_picture_opens_at_one_point_per_pixel_group() {

@@ -50,6 +50,54 @@ fn selected(app: &mut impl Application, original: &Offer) -> Result<Offer, Failu
     super::super::offer::prepare(app, 2, original)
 }
 
+struct Boxed(App, Option<(u32, u32)>);
+impl Application for Boxed {
+    type Output = ();
+    fn picture(&mut self, _: u8, _: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        self.1
+    }
+    async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
+        self.0.run(attempt, viewer).await
+    }
+    async fn cleanup(&mut self, cx: &Cx, deadline: Deadline) -> Result<(), CallbackError> {
+        self.0.cleanup(cx, deadline).await
+    }
+    fn status(&mut self, status: Status) -> Result<(), CallbackError> {
+        self.0.status(status)
+    }
+}
+
+#[test]
+fn each_attempt_states_its_own_picture_box_and_an_unusable_one_keeps_native() {
+    use super::super::offer::picture;
+    let original = Some((1920, 1080));
+    assert_eq!(picture(&mut App::new(), 2, original), original);
+    assert_eq!(picture(&mut App::new(), 2, None), None);
+    // A resized window states its new box, larger or smaller.
+    assert_eq!(
+        picture(&mut Boxed(App::new(), Some((1200, 700))), 2, original),
+        Some((1200, 700))
+    );
+    assert_eq!(
+        picture(&mut Boxed(App::new(), Some((2560, 1400))), 3, original),
+        Some((2560, 1400))
+    );
+    assert_eq!(picture(&mut Boxed(App::new(), None), 2, original), None);
+    // Below the minimum on either axis: native pictures, not a failed attempt.
+    assert_eq!(
+        picture(&mut Boxed(App::new(), Some((1200, 63))), 2, original),
+        None
+    );
+    assert_eq!(
+        picture(&mut Boxed(App::new(), Some((63, 700))), 2, original),
+        None
+    );
+    assert_eq!(
+        picture(&mut Boxed(App::new(), Some((64, 64))), 2, original),
+        Some((64, 64))
+    );
+}
+
 #[test]
 fn default_preserves_the_offer_and_optional_removal_keeps_every_required_entry() {
     let original = baseline();

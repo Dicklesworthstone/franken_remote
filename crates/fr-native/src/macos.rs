@@ -222,18 +222,24 @@ pub fn initialize_application() -> Result<(), NativeError> {
     status(unsafe { fr_mac_app_init() })
 }
 
+pub use crate::macos_sizing::WindowBox;
+
 /// The largest picture a new viewer window on the main screen shows 1:1:
 /// the visible screen below the title bar and `reserved` points of native
 /// controls, in the screen's pixels (a Retina screen's backing pixels), with
 /// its whole pixels per point. `None` off the main thread or without a usable
 /// main screen.
-pub fn window_box(reserved: u32) -> Option<((u32, u32), u32)> {
+pub fn window_box(reserved: u32) -> Option<WindowBox> {
     let (mut width, mut height, mut scale) = (0, 0, 0);
     // SAFETY: three writable scalars the glue fills synchronously; it refuses
     // a non-main thread before touching AppKit.
     let status =
         unsafe { fr_mac_window_box(reserved, &raw mut width, &raw mut height, &raw mut scale) };
-    (status == 0).then_some(((width, height), scale))
+    (status == 0).then_some(WindowBox {
+        pixels: (width, height),
+        scale,
+        reserved,
+    })
 }
 
 /// Native uptime in the same domain as the original `NSEvent.timestamp`.

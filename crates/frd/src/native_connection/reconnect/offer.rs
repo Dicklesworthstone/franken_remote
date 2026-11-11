@@ -31,3 +31,17 @@ pub(super) fn prepare(
     }
     Ok(selected)
 }
+
+/// This attempt's stated picture box. One the host could not accept (an axis
+/// below the minimum) keeps native pictures instead of failing the attempt.
+pub(super) fn picture(
+    application: &mut impl Application,
+    attempt: u8,
+    original: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    application
+        .picture(attempt, original)
+        .filter(|(width, height)| {
+            (*width).min(*height) >= fr_wire::display::picture::MIN_BOX_PIXELS
+        })
+}

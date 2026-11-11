@@ -163,6 +163,14 @@ pub trait Application {
     fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
         Ok(original.clone())
     }
+    /// The picture box (`scaled-picture`, pixels) this attempt states, chosen
+    /// with the offer. `original` is the configured box. A viewer whose window
+    /// changed size states the new window's box when it reopens. A box with an
+    /// axis below the minimum keeps native pictures. The default keeps the
+    /// original.
+    fn picture(&mut self, _attempt: u8, original: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        original
+    }
     fn run(
         &mut self,
         attempt: u8,
@@ -386,6 +394,10 @@ impl Client {
                             cx: session.clone(),
                             inner: Box::pin(async {
                                 let selected_offer = offer::prepare(application, attempt, &offer)?;
+                                let cfg = Configuration {
+                                    picture: offer::picture(application, attempt, cfg.picture),
+                                    ..cfg
+                                };
                                 cx.checkpoint().map_err(|_| Failure::Cancelled)?;
                                 session.checkpoint().map_err(|_| Failure::Cancelled)?;
                                 // The named route pins inside the client
