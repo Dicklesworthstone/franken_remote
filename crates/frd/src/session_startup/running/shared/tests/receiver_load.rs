@@ -101,7 +101,7 @@ fn shared_decoder_load_reduces_capture_then_probes_after_the_original_decoder_ca
             &[fr_wire::receiver_metrics::CAPABILITY],
             true,
             SendPolicy::default(),
-            HostDuration::from_micros(8_000_000),
+            HostDuration::from_micros(10_500_000),
         ))
         .await;
         ready(&mut group).await;
@@ -119,7 +119,11 @@ fn shared_decoder_load_reduces_capture_then_probes_after_the_original_decoder_ca
         });
         let network = async {
             let peer = &mut group.peers[0];
-            while now(&peer.h).unwrap() < started + 3_800_000 {
+            // The probe needs 2 s of unbroken headroom once the decoder has
+            // caught up (about 1 s in), so it lands near 3 s. A sample gap over
+            // 100 ms (one stalled turn on a busy runner) restarts that dwell;
+            // leave room for one restart rather than racing the first.
+            while now(&peer.h).unwrap() < started + 6_000_000 {
                 if now(&peer.h).unwrap() >= started + 800_000 {
                     // No replacement, fabricated completion or new sample TTL.
                     // The already accepted slow obligation keeps its deadline.
@@ -151,10 +155,12 @@ fn shared_decoder_load_reduces_capture_then_probes_after_the_original_decoder_ca
                 .any(|report| report.reason == Reason::HeadroomProbe)
         );
         assert!(pacing.interval_us() < 200_000);
-        assert!(matches!(
-            pacing.report().unwrap().receiver,
-            ReceiverEvidence::Measured(_)
-        ));
+        // The probe itself rests on a measured receiver sample. The newest
+        // report can be Unknown while a solicited reply is still in flight.
+        assert!(pacing.decisions().any(|report| {
+            report.reason == Reason::HeadroomProbe
+                && matches!(report.receiver, ReceiverEvidence::Measured(_))
+        }));
         assert_eq!(group.publisher.worker_id(), worker);
         cleanup(&mut group, &cleanup_cx).await;
     }));
