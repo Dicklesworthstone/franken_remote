@@ -707,6 +707,12 @@ fn request(
     })
 }
 
+/// Whether this host's capture can encode a smaller picture than its display
+/// (`scaled-picture`): the macOS capture scales in hardware before it encodes.
+fn scales_pictures(encoder: Encoder) -> bool {
+    encoder.backend() == fr_media::worker::Backend::VideoToolbox
+}
+
 /// Pick the only display, or the one at the desktop origin when several exist.
 fn choose(
     catalog: &Catalog,
@@ -1775,6 +1781,9 @@ impl Share<'_> {
         );
         let audio = self.options.audio.is_some();
         let adaptive_capture = self.options.adaptive_capture;
+        // ScreenCaptureKit scales in hardware, so a VideoToolbox host can send
+        // a viewer pictures sized for its screen. Other captures stay native.
+        let scales = scales_pictures(encoder);
         let report = self.report.clone();
         let stop = self.stop.clone();
         let source_epoch = epoch.clone();
@@ -1800,6 +1809,11 @@ impl Share<'_> {
                         )?;
                         if require_approval {
                             approval::require(&mut request);
+                        }
+                        if scales {
+                            request.session.offer =
+                                fr_wire::display::picture::with_capability(request.session.offer)
+                                    .map_err(|_| serial::Error::Configuration)?;
                         }
                         Ok(request)
                     },

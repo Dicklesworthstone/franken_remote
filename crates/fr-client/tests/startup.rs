@@ -257,3 +257,50 @@ fn diagnostics_do_not_print_pending_capabilities_binding_or_approval_identity() 
         "Opened([negotiated metadata, not input authority])"
     );
 }
+#[test]
+fn a_stated_picture_is_selected_only_from_a_host_that_offers_scaled_pictures() {
+    use fr_wire::display::picture;
+    let viewer = picture::with_capability(offer()).unwrap();
+    let run = |host: Offer| {
+        let mut c = Startup::new(viewer.clone(), 10, 10_000).unwrap();
+        c.state_picture((1920, 1080), 10).unwrap();
+        c.sent(11).unwrap();
+        c.receive(&bytes(&Message::HostCapabilities(host)), 12)
+            .unwrap();
+        let Message::SelectedConfiguration(selection) =
+            negotiation::decode(c.pending(12).unwrap().unwrap(), 4096, 0).unwrap()
+        else {
+            panic!("no selection");
+        };
+        selection
+    };
+    // A host that scales gets the box with the capability.
+    let scaled = run(picture::with_capability(offer()).unwrap());
+    assert_eq!(scaled.picture, Some((1920, 1080)));
+    assert!(picture::selected(&scaled.capabilities));
+    // A host without it gets today's selection: no capability, no box bytes.
+    let legacy = run(offer());
+    assert_eq!(legacy, offer().select().unwrap());
+    // The SessionOpened echo must carry the same box.
+    let mut c = Startup::new(viewer.clone(), 10, 10_000).unwrap();
+    c.state_picture((1920, 1080), 10).unwrap();
+    c.sent(11).unwrap();
+    let host = picture::with_capability(offer()).unwrap();
+    c.receive(&bytes(&Message::HostCapabilities(host.clone())), 12)
+        .unwrap();
+    c.sent(13).unwrap();
+    let mut changed = host.select_picture(Some((1920, 1080))).unwrap();
+    changed.picture = Some((3840, 2160));
+    let reply = Message::SessionOpened {
+        binding: binding(),
+        selection: changed,
+        observation_until_us: 17,
+    };
+    assert!(c.receive(&bytes(&reply), 14).is_err());
+    // Stating a box needs the capability in the original offer, before hello.
+    let mut plain = Startup::new(offer(), 10, 10_000).unwrap();
+    assert_eq!(plain.state_picture((1920, 1080), 10), Err(Error::Order));
+    let mut late = Startup::new(viewer, 10, 10_000).unwrap();
+    late.sent(11).unwrap();
+    assert_eq!(late.state_picture((1920, 1080), 11), Err(Error::Order));
+}

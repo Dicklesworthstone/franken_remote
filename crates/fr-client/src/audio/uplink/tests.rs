@@ -99,6 +99,7 @@ fn selection() -> Selection {
         role: Role::RequestControl,
         limits: ProtocolLimits::ABSOLUTE,
         capabilities,
+        picture: None,
     }
 }
 fn profile() -> Profile {

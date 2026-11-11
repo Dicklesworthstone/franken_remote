@@ -823,6 +823,11 @@ impl Presenter {
         self.binding.revoke();
         self.worker.abort();
     }
+    /// The installed decoder's picture size (coded crop width, height): what
+    /// the host encodes for this view, native or a scaled picture.
+    pub fn picture(&self) -> (u32, u32) {
+        (self.configuration.width, self.configuration.height)
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.worker.id()
     }

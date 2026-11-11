@@ -149,6 +149,7 @@ fn only_selected_version_and_original_view_session_can_enable_feedback() {
         role: Role::Observe,
         limits: ProtocolLimits::ABSOLUTE,
         capabilities: vec![],
+        picture: None,
     };
     assert!(Setup::selected(&selected, b.parent, b).unwrap().is_none());
     selected.capabilities.push(Capability {
@@ -217,6 +218,7 @@ fn shared_sample_keeps_installed_media_scope_and_original_query_expiry() {
             version: wire::VERSION,
             required: false,
         }],
+        picture: None,
     };
     let cfg = Setup::selected(&selected, parent, view).unwrap().unwrap();
     assert_eq!(cfg.media_view, view);

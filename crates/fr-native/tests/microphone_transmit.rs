@@ -65,6 +65,7 @@ fn selection() -> Selection {
         role: Role::RequestControl,
         limits: authority::L,
         capabilities,
+        picture: None,
     }
 }
 fn transmitter(server: &Path) -> (InputClient, Transmitter, Instant) {

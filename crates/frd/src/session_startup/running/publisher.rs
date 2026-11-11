@@ -758,8 +758,10 @@ async fn bootstrap(
     let display = selected
         .display(host.io().map_err(|e| budget.fail(Error::Session(e)))?.0)
         .map_err(|e| budget.fail(Error::Display(e)))?;
-    let configuration =
+    let mut configuration =
         configure(display).map_err(|()| budget.fail(Error::InvalidConfiguration))?;
+    crate::display_selection::fit_picture(&mut configuration, display, host.selection().picture)
+        .map_err(|()| budget.fail(Error::InvalidConfiguration))?;
     budget.remaining()?;
     policy
         .streaming

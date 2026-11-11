@@ -102,6 +102,9 @@ pub struct Statistics {
     /// after closure as historical diagnostics. Recovery clears this snapshot;
     /// no report means unknown. Neither bitrate field measures delivered bytes.
     pub last_host_quality_decision: Option<fr_wire::quality_decision::Decision>,
+    /// The current decoder's picture size once a picture was decoded: the
+    /// display's native pixels or a scaled picture (`scaled-picture`).
+    pub picture: Option<(u32, u32)>,
 }
 impl Statistics {
     fn presented(&mut self, stage: PresentationStage) {
@@ -730,6 +733,7 @@ impl StreamingViewer {
                 .quality
                 .as_ref()
                 .and_then(quality::ViewerQuality::last),
+            picture: (self.statistics.decoded > 0).then(|| self.presenter.picture()),
             ..self.statistics
         }
     }

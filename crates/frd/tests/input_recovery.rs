@@ -73,6 +73,7 @@ fn selection(recovery: bool) -> Selection {
         role: Role::RequestControl,
         limits: LIMITS,
         capabilities,
+        picture: None,
     }
 }
 fn now(cx: &Cx) -> u64 {

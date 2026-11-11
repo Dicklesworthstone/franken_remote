@@ -225,3 +225,142 @@ fn an_offer_holds_at_most_max_capabilities_and_a_larger_one_is_refused() {
     over.capabilities = caps(MAX_CAPABILITIES + 1);
     assert_eq!(over.validate(), Err(Error::Invalid));
 }
+
+fn scaled_picture() -> Capability {
+    Capability {
+        name: fr_wire::display::picture::CAPABILITY.into(),
+        version: fr_wire::display::picture::VERSION,
+        required: false,
+    }
+}
+fn scaled_host() -> Offer {
+    fr_wire::display::picture::with_capability(offer()).unwrap()
+}
+#[test]
+fn a_stated_picture_travels_only_with_the_scaled_picture_capability() {
+    // A host that offers scaled pictures: the viewer's box rides after the
+    // capabilities, in both SelectedConfiguration and SessionOpened.
+    let host = scaled_host();
+    assert!(host.capabilities.contains(&scaled_picture()));
+    let selection = host.select_picture(Some((1920, 1080))).unwrap();
+    assert_eq!(selection.picture, Some((1920, 1080)));
+    assert!(selection.capabilities.contains(&scaled_picture()));
+    selection.check_against(&host).unwrap();
+    let plain = host.select().unwrap();
+    assert_eq!(plain.picture, None);
+    assert!(!plain.capabilities.contains(&scaled_picture()));
+    plain.check_against(&host).unwrap();
+    let with = encode(&Message::SelectedConfiguration(selection.clone()));
+    let without = encode(&Message::SelectedConfiguration(plain.clone()));
+    // Eight bytes for the box plus the capability entry itself.
+    let entry = 4 + fr_wire::display::picture::CAPABILITY.len() + 3;
+    assert_eq!(with.len(), without.len() + entry + 8);
+    assert_eq!(&with[with.len() - 8..], &[0, 0, 7, 128, 0, 0, 4, 56]);
+    for m in [
+        Message::SelectedConfiguration(selection.clone()),
+        Message::SessionOpened {
+            binding: ControlBinding {
+                id: 1,
+                host_boot: HostBootId::from_raw(1),
+                os_session: OsSessionId::from_raw(2),
+                remote_session: RemoteSessionId::from_raw(3),
+            },
+            selection: selection.clone(),
+            observation_until_us: 44,
+        },
+    ] {
+        let bytes = encode(&m);
+        assert_eq!(n::decode(&bytes, MAX_RECORD, 0), Ok(m.clone()));
+        for end in 0..bytes.len() {
+            assert!(n::decode(&bytes[..end], MAX_RECORD, 0).is_err(), "{end}");
+        }
+    }
+    // A host without the capability never receives the extra bytes: the
+    // viewer's box is dropped, and the selection is byte-identical to today's.
+    let legacy = offer().select_picture(Some((1920, 1080))).unwrap();
+    assert_eq!(legacy, offer().select().unwrap());
+    assert_eq!(legacy.picture, None);
+    // A box larger than the protocol's dimension bound is clamped to it.
+    let huge = host.select_picture(Some((20_000, 9_000))).unwrap();
+    assert_eq!(huge.picture, Some((8192, 8192)));
+}
+#[test]
+fn a_selection_box_must_match_its_capability_and_stay_in_bounds() {
+    let host = scaled_host();
+    let good = host.select_picture(Some((1920, 1080))).unwrap();
+    // Capability without a box, box without the capability, and boxes outside
+    // [64, max_dimension_pixels] are all invalid selections.
+    let mut missing = good.clone();
+    missing.picture = None;
+    let mut stray = host.select().unwrap();
+    stray.picture = Some((1920, 1080));
+    let mut tiny = good.clone();
+    tiny.picture = Some((63, 1080));
+    let mut wide = good.clone();
+    wide.picture = Some((1920, ProtocolLimits::ABSOLUTE.max_dimension_pixels() + 1));
+    for bad in [missing, stray, tiny, wide] {
+        assert_eq!(bad.validate(), Err(Error::Invalid));
+        let mut out = vec![0; MAX_RECORD];
+        assert!(n::encode(&Message::SelectedConfiguration(bad), MAX_RECORD, &mut out).is_err());
+    }
+    // A decoder that sees the capability requires the eight box bytes, and a
+    // decoded box below the minimum is refused.
+    let bytes = encode(&Message::SelectedConfiguration(good.clone()));
+    let mut short = bytes[..bytes.len() - 8].to_vec();
+    let length = u32::from_be_bytes(short[12..16].try_into().unwrap()) - 8;
+    short[12..16].copy_from_slice(&length.to_be_bytes());
+    assert!(n::decode(&short, MAX_RECORD, 0).is_err());
+    let mut small = bytes.clone();
+    let at = small.len() - 4;
+    small[at..].copy_from_slice(&63_u32.to_be_bytes());
+    assert_eq!(n::decode(&small, MAX_RECORD, 0), Err(Error::Invalid));
+    // A viewer may not select the capability from a host that lacks it.
+    assert!(good.check_against(&offer()).is_err());
+}
+#[test]
+fn a_full_offer_yields_quality_diagnostics_before_skipping_scaled_pictures() {
+    let mut full = offer();
+    full.capabilities = (0..MAX_CAPABILITIES)
+        .map(|i| Capability {
+            name: format!("cap-{i:02}"),
+            version: 1,
+            required: false,
+        })
+        .collect();
+    // Full of other optional capabilities: unchanged, pictures stay native.
+    assert_eq!(
+        fr_wire::display::picture::with_capability(full.clone()),
+        Ok(full.clone())
+    );
+    full.capabilities[0] = Capability {
+        name: fr_wire::quality_decision::CAPABILITY.into(),
+        version: fr_wire::quality_decision::VERSION,
+        required: false,
+    };
+    full.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    let added = fr_wire::display::picture::with_capability(full).unwrap();
+    assert_eq!(added.capabilities.len(), MAX_CAPABILITIES);
+    assert!(added.capabilities.contains(&scaled_picture()));
+    assert!(
+        !added
+            .capabilities
+            .iter()
+            .any(|cap| cap.name == fr_wire::quality_decision::CAPABILITY)
+    );
+    // Adding it twice is idempotent; a required or other-version entry refuses.
+    let host = scaled_host();
+    assert_eq!(
+        fr_wire::display::picture::with_capability(host.clone()),
+        Ok(host)
+    );
+    let mut required = offer();
+    required.capabilities.push(Capability {
+        required: true,
+        ..scaled_picture()
+    });
+    required.capabilities.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(
+        fr_wire::display::picture::with_capability(required),
+        Err(Error::RequiredCapability)
+    );
+}

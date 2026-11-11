@@ -1326,8 +1326,12 @@ fn media_json(media: Option<&frd::session_startup::ViewerStatistics>) -> String 
                     .quantile_upper_us(permille)
                     .map_or_else(|| "null".to_owned(), |us| (us / 1000).to_string())
             };
+            let (picture_width, picture_height) = m.picture.map_or_else(
+                || ("null".to_owned(), "null".to_owned()),
+                |(width, height)| (width.to_string(), height.to_string()),
+            );
             format!(
-                "{{\"decoded\":{},\"repair_requests\":{},\"recovered_streams\":{},\"presented_age_reports\":{},\"presented_age_p50_ms_at_most\":{},\"presented_age_p95_ms_at_most\":{}{}}}",
+                "{{\"decoded\":{},\"repair_requests\":{},\"recovered_streams\":{},\"presented_age_reports\":{},\"presented_age_p50_ms_at_most\":{},\"presented_age_p95_ms_at_most\":{},\"picture_width\":{picture_width},\"picture_height\":{picture_height}{}}}",
                 m.decoded,
                 m.repair_requests,
                 m.recovered_streams,
@@ -2164,7 +2168,7 @@ mod tests {
                 recovered_streams: 1,
                 ..Default::default()
             };
-            let expected = "\"last_attempt_media\":{\"decoded\":41,\"repair_requests\":3,\"recovered_streams\":1,\"presented_age_reports\":0,\"presented_age_p50_ms_at_most\":null,\"presented_age_p95_ms_at_most\":null,\"host_quality_decisions_received\":0,\"last_host_quality_decision\":null}";
+            let expected = "\"last_attempt_media\":{\"decoded\":41,\"repair_requests\":3,\"recovered_streams\":1,\"presented_age_reports\":0,\"presented_age_p50_ms_at_most\":null,\"presented_age_p95_ms_at_most\":null,\"picture_width\":null,\"picture_height\":null,\"host_quality_decisions_received\":0,\"last_host_quality_decision\":null}";
             for progress in [
                 Progress {
                     media: Some(media),

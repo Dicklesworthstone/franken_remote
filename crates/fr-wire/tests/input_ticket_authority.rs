@@ -111,6 +111,7 @@ fn selection() -> Selection {
         role: Role::RequestControl,
         limits: LIMITS,
         capabilities,
+        picture: None,
     }
 }
 

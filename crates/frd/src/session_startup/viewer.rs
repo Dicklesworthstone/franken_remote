@@ -286,6 +286,18 @@ impl Viewer {
             Ok(())
         }
     }
+    /// State the largest picture this viewer can show 1:1 (its screen's pixel
+    /// width and height) before startup sends its offer, which must already
+    /// carry `scaled-picture`. A host that scales then sends pictures that fit
+    /// inside; other hosts keep native pictures.
+    pub fn state_picture(&mut self, within: (u32, u32)) -> Result<(), Error> {
+        let at = now(&self.cx)?;
+        self.startup
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .state_picture(within, at)
+            .map_err(Error::ClientStartup)
+    }
     /// Inspect only the mutually advertised capability intersection and limits.
     /// The original offer must contain the required inspection marker. This
     /// consumes the owner at CALL time, including when its future is unpolled;

@@ -57,6 +57,10 @@ pub struct Configuration {
     pub family: AddressFamily,
     pub startup_timeout: Duration,
     pub transport: Policy,
+    /// The largest picture (pixel width, height) this viewer can show 1:1,
+    /// usually its screen's. A host that can scale sends pictures that fit
+    /// inside instead of the display's native pixels. `None` keeps native.
+    pub picture: Option<(u32, u32)>,
 }
 impl Default for Configuration {
     fn default() -> Self {
@@ -65,6 +69,7 @@ impl Default for Configuration {
             family: AddressFamily::Automatic,
             startup_timeout: Duration::from_secs(30),
             transport: Policy::default(),
+            picture: None,
         }
     }
 }
@@ -78,6 +83,9 @@ impl Configuration {
             || self.startup_timeout > Duration::from_secs(60)
             || self.transport.stream_window != 65_536
             || self.transport.connection_window != 524_288
+            || self.picture.is_some_and(|(width, height)| {
+                width.min(height) < fr_wire::display::picture::MIN_BOX_PIXELS
+            })
         {
             return Err(Error::InvalidConfiguration);
         }
@@ -478,6 +486,15 @@ fn join_viewer(
     cfg: Configuration,
 ) -> Result<Viewer, Error> {
     cfg.validate()?;
+    // Scaled pictures are optional: a full offer keeps native pictures.
+    let offer = match cfg.picture {
+        Some(_) => fr_wire::display::picture::with_capability(offer)
+            .map_err(|_| Error::InvalidConfiguration)?,
+        None => offer,
+    };
+    let picture = cfg
+        .picture
+        .filter(|_| fr_wire::display::picture::selected(&offer.capabilities));
     let mut viewer = Viewer::new(
         cx.clone(),
         native,
@@ -486,6 +503,9 @@ fn join_viewer(
         cfg.startup_timeout,
     )
     .map_err(Error::Session)?;
+    if let Some(within) = picture {
+        viewer.state_picture(within).map_err(Error::Session)?;
+    }
     viewer
         .retain_connection_check(check)
         .map_err(Error::Session)?;

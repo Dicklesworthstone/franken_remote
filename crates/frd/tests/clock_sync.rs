@@ -48,6 +48,7 @@ fn selection() -> Selection {
             version: clock::VERSION,
             required: true,
         }],
+        picture: None,
     }
 }
 fn approved(cx: Cx) -> ObservationControl {

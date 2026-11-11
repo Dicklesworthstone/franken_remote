@@ -78,6 +78,7 @@ impl fmt::Debug for ApprovalNotice {
 }
 pub struct Startup {
     offer: Offer,
+    picture: Option<(u32, u32)>,
     selection: Option<Selection>,
     opened: Option<Opened>,
     approval: Option<ApprovalNotice>,
@@ -113,6 +114,7 @@ impl Startup {
             (offer.limits.max_control_message_bytes() as usize).min(negotiation::MAX_RECORD);
         let mut this = Self {
             offer,
+            picture: None,
             selection: None,
             opened: None,
             approval: None,
@@ -135,6 +137,22 @@ impl Startup {
             &mut this.bytes,
         )?;
         Ok(this)
+    }
+    /// State the largest picture this viewer can show 1:1 (its screen's pixel
+    /// width and height), before the original `ClientHello` is sent. The offer
+    /// must already carry `scaled-picture`. A host that also offers it then
+    /// encodes pictures that fit inside; any other host keeps native pictures.
+    pub fn state_picture(&mut self, within: (u32, u32), now_us: u64) -> Result<(), Error> {
+        self.tick(now_us)?;
+        if self.phase != Phase::Hello
+            || self.picture.is_some()
+            || !fr_wire::display::picture::selected(&self.offer.capabilities)
+        {
+            self.close();
+            return Err(Error::Order);
+        }
+        self.picture = Some(within);
+        Ok(())
     }
     /// Arm terminal inspection before the original `ClientHello` is sent. The
     /// caller must have prepared its required marker in that original offer.
@@ -267,7 +285,7 @@ impl Startup {
                     self.phase = Phase::DirectoryRequest;
                     return Ok(());
                 }
-                let selection = host.select()?;
+                let selection = host.select_picture(self.picture)?;
                 self.maximum = (selection.limits.max_control_message_bytes() as usize)
                     .min(negotiation::MAX_RECORD);
                 self.len = negotiation::encode(

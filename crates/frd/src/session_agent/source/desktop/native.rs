@@ -478,6 +478,14 @@ where
     S: FnOnce(&Catalog) -> Result<(Select, Configuration), ()> + Send,
     L: FnMut(&mut SessionAgent, &mut Context<'_>) -> Result<LocalAction, ()> + Send,
 {
+    // The shared source's one picture size is chosen for this first viewer.
+    let within = session.selection().picture;
+    let select = move |catalog: &Catalog| {
+        let (choice, mut configuration) = select(catalog)?;
+        let display = catalog.selected(choice).map_err(|_| ())?;
+        crate::display_selection::fit_picture(&mut configuration, display, within)?;
+        Ok((choice, configuration))
+    };
     let completed = AtomicBool::new(false);
     let mut network = Box::pin(async {
         while !completed.load(Ordering::Acquire) {

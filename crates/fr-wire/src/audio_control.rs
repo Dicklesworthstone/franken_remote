@@ -55,6 +55,7 @@ mod tests {
             role,
             limits: ProtocolLimits::ABSOLUTE,
             capabilities,
+            picture: None,
         }
     }
     #[test]

@@ -37,7 +37,7 @@ it neither reserves a seat nor creates an input lease, readiness or ticket.
 |---|---|
 | ClientHello 0x0001 | versions, profile:u8, profile_version:u16, role:u8, limits, capabilities, nonce_present:u8=0 |
 | HostCapabilities 0x0002 | same offer layout; implemented intersection contains only app version 0; nonce_present=0 |
-| SelectedConfiguration 0x0003 | version:u16, profile:u8, profile_version:u16, role:u8, limits, capabilities |
+| SelectedConfiguration 0x0003 | version:u16, profile:u8, profile_version:u16, role:u8, limits, capabilities, then picture_width:u32, picture_height:u32 only when `scaled-picture` v1 is selected |
 | ApprovalRequired 0x0010 | request_remote_session:16 bytes, host_deadline_us:u64, role:u8 |
 | SessionOpened 0x0011 | host_boot:16, os_session:16, remote_session:16, control_binding:u32, six absent-option bytes, channel:u8=1, direction:u8=0, selected configuration, observation_until_us:u64 |
 | BindingAccepted 0x001c | binding:u32, equal to the nonzero record-header binding |
@@ -65,6 +65,16 @@ constraints. A selection can omit optional capabilities, but cannot add new
 ones, change versions, erase required flags, silently change role, or raise a
 limit. The viewer independently checks HostCapabilities against its original
 offer, and SessionOpened must acknowledge its exact selection.
+
+`scaled-picture` v1 is optional. A host offers it only when its capture can
+scale (macOS ScreenCaptureKit with VideoToolbox). A viewer that selects it
+states the largest picture it can show 1:1, each axis in 64..=max_dimension;
+the selection is invalid with the capability and no box, or a box and no
+capability. The host then encodes `Display::picture(box)`: native pixels when
+they fit, otherwise the widest canonical picture inside the box (an even width
+below native and the even height derived from it). A viewer that selected it
+accepts native or any canonical picture of the display, so a later viewer of a
+shared source takes the picture its first viewer asked for.
 
 Capabilities must be advertised by the qualified owning implementation. Merely
 encoding a name here is not proof that a codec, transport or input adapter works.

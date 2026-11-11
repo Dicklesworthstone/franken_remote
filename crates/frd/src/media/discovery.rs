@@ -72,8 +72,7 @@ impl DiscoveredSource {
             .check_capture(q, &self.control, &self.discovery.catalog())
             .map_err(|_| Error::InvalidFrame)?;
         configuration.codec()?;
-        if (configuration.width, configuration.height)
-            != (display.pixel_width, display.pixel_height)
+        if !selected.accepts_picture(configuration.width, configuration.height)
             || configuration.max_access_unit_bytes
                 > selected.limits().max_encoded_access_unit_bytes()
         {
@@ -149,9 +148,9 @@ impl DiscoveredSource {
         let display = catalog.selected(choice).map_err(|_| Error::InvalidFrame)?;
         configuration.codec()?;
         configuration.limits()?;
-        if (configuration.width, configuration.height)
-            != (display.pixel_width, display.pixel_height)
-        {
+        // A local share sizes its picture for its first viewer: native, or a
+        // canonical scaled picture that viewer asked for.
+        if !display.is_picture(configuration.width, configuration.height) {
             return Err(Error::InvalidFrame);
         }
         // Capture the native budget at CALL time, not the first future poll,

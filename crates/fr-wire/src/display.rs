@@ -13,6 +13,7 @@ use fr_core::{
     limits::ProtocolLimits,
 };
 
+pub mod picture;
 pub mod tracker;
 pub use tracker::{
     DisplayCatalogTracker, DisplayStreamState, DisplayTargetController, HostMonitorDescriptor,

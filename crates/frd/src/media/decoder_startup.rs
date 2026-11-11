@@ -73,7 +73,9 @@ pub struct Setup {
     replies: StreamRoute,
     timeout_micros: u64,
     until: u64,
-    required_display: Option<(u32, u32)>,
+    required_display: Option<fr_wire::display::Display>,
+    /// The session selected scaled pictures (`scaled-picture`).
+    scaled: bool,
 }
 impl Setup {
     pub fn new(
@@ -102,6 +104,7 @@ impl Setup {
             timeout_micros: u64::try_from(timeout.as_micros()).map_err(|_| Error::Expired)?,
             until: u64::MAX,
             required_display: None,
+            scaled: selection.picture.is_some(),
         })
     }
     /// Carry the ORIGINAL local recovery deadline through channel attachment
@@ -111,12 +114,21 @@ impl Setup {
         self.until = self.until.min(until_micros);
         self
     }
-    pub(crate) fn require_display(mut self, width: u32, height: u32) -> Result<Self, Error> {
+    /// Bind startup to `display`'s pictures: its native size, or, when this
+    /// session selected scaled pictures, any canonical scaled picture of it.
+    pub(crate) fn require_display(
+        mut self,
+        display: fr_wire::display::Display,
+    ) -> Result<Self, Error> {
         self.limits
-            .validate_coded_dimensions(width, height)
+            .validate_coded_dimensions(display.pixel_width, display.pixel_height)
             .map_err(|_| Error::UnsupportedConfiguration)?;
-        self.required_display = Some((width, height));
+        self.required_display = Some(display);
         Ok(self)
+    }
+    fn accepts(&self, width: u32, height: u32) -> bool {
+        self.required_display
+            .is_none_or(|display| display.accepts_picture(self.scaled, width, height))
     }
 }
 impl fmt::Debug for Setup {
@@ -271,10 +283,7 @@ fn admit(bytes: &[u8], setup: &Setup) -> Result<(Configuration, DecoderRecord), 
     else {
         return Err(Error::WrongState);
     };
-    if setup
-        .required_display
-        .is_some_and(|g| g != (c.crop_width, c.crop_height))
-    {
+    if !setup.accepts(c.crop_width, c.crop_height) {
         return Err(Error::UnsupportedConfiguration);
     }
     let cfg = Configuration {
@@ -353,10 +362,7 @@ impl Host {
         {
             return Err(Error::InvalidRoutes);
         }
-        if setup
-            .required_display
-            .is_some_and(|g| g != (cfg.width, cfg.height))
-        {
+        if !setup.accepts(cfg.width, cfg.height) {
             return Err(Error::UnsupportedConfiguration);
         }
         let unit = update.view()?;

@@ -81,7 +81,9 @@ pub fn decode_catalog(bytes: &[u8], limits: &ProtocolLimits) -> Result<Catalog, 
     Catalog::new(revision, &entries, limits).map_err(|_| Error::Malformed)
 }
 /// Retain the selected catalog revision and handle with the exact codec setup.
-/// Full-display geometry is checked against the worker-owned catalog before FFI.
+/// Full-display geometry is checked against the worker-owned catalog before FFI:
+/// the picture is the display's native size or one of its canonical scaled
+/// pictures (`fr_wire::display::picture`), which only a scaling capture uses.
 pub fn encode_configuration(
     config: Configuration,
     selected: Select,
@@ -90,7 +92,7 @@ pub fn encode_configuration(
     let display = catalog
         .selected(selected)
         .map_err(|_| Error::GeometryChanged)?;
-    if config.width != display.pixel_width || config.height != display.pixel_height {
+    if !display.is_picture(config.width, config.height) {
         return Err(Error::GeometryChanged);
     }
     let mut body = config.encode()?;

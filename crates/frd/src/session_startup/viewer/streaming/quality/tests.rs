@@ -47,6 +47,7 @@ fn selection() -> Selection {
             })
             .collect(),
         limits: ProtocolLimits::ABSOLUTE,
+        picture: None,
     }
 }
 fn receiver() -> ViewerQuality {

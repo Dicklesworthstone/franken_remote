@@ -20,6 +20,21 @@ use fr_wire::{
 use std::{cell::Cell, fmt, time::Duration};
 
 const MAX_TIMEOUT_US: u64 = 60_000_000;
+
+/// Size a native-size request for the viewer's stated box (`scaled-picture`):
+/// the largest canonical picture of the display inside it. Without a box, or
+/// when the display already fits, the picture stays native. Only a host whose
+/// capture scales offers the capability, so only it ever sees a box.
+pub(crate) fn fit_picture(
+    configuration: &mut fr_media::worker::Configuration,
+    display: Display,
+    within: Option<(u32, u32)>,
+) -> Result<(), ()> {
+    if (configuration.width, configuration.height) == (display.pixel_width, display.pixel_height) {
+        (configuration.width, configuration.height) = display.picture(within).map_err(|_| ())?;
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Configuration,
@@ -517,7 +532,7 @@ impl SelectedDisplay {
         }
         media
             .decoder_setup(q, timeout)
-            .and_then(|s| s.require_display(self.display.pixel_width, self.display.pixel_height))
+            .and_then(|s| s.require_display(self.display))
             .map_err(Error::Decoder)
     }
     pub(crate) fn check_capture(
@@ -542,5 +557,66 @@ impl SelectedDisplay {
     }
     pub fn limits(&self) -> ProtocolLimits {
         self.life.selection.limits
+    }
+    /// Whether a picture of `width` x `height` may carry this display: its
+    /// native size, or a canonical scaled picture when this session selected
+    /// scaled pictures.
+    pub fn accepts_picture(&self, width: u32, height: u32) -> bool {
+        let scaled = self.life.selection.picture.is_some();
+        self.display.accepts_picture(scaled, width, height)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fr_core::ids::DisplayGeometryGeneration;
+    use fr_media::worker::{Backend, Configuration};
+
+    fn studio() -> Display {
+        Display {
+            handle: 1,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            x: 0,
+            y: 0,
+            pixel_width: 5120,
+            pixel_height: 2880,
+            logical_width: 2560,
+            logical_height: 1440,
+            scale_numerator: 2,
+            scale_denominator: 1,
+            rotation: 0,
+        }
+    }
+
+    fn request(width: u32, height: u32) -> Configuration {
+        Configuration {
+            width,
+            height,
+            fps: 60,
+            backend: Backend::VideoToolbox,
+            bitrate: 20_000_000,
+            max_access_unit_bytes: 4 * 1024 * 1024,
+            generation: CodecConfigurationGeneration::INITIAL,
+        }
+    }
+
+    #[test]
+    fn a_native_request_shrinks_to_the_viewers_box_and_nothing_else_changes() {
+        let mut fitted = request(5120, 2880);
+        fit_picture(&mut fitted, studio(), Some((1920, 1080))).unwrap();
+        assert_eq!((fitted.width, fitted.height), (1920, 1080));
+        assert_eq!(fitted.bitrate, request(0, 0).bitrate);
+        let mut native = request(5120, 2880);
+        fit_picture(&mut native, studio(), None).unwrap();
+        assert_eq!((native.width, native.height), (5120, 2880));
+        // A request already sized by someone else (a discovery choice) is kept.
+        let mut chosen = request(2560, 1440);
+        fit_picture(&mut chosen, studio(), Some((1920, 1080))).unwrap();
+        assert_eq!((chosen.width, chosen.height), (2560, 1440));
+        assert_eq!(
+            fit_picture(&mut request(5120, 2880), studio(), Some((32, 32))),
+            Err(())
+        );
     }
 }

@@ -77,6 +77,7 @@ pub fn selection() -> Selection {
         role: fr_wire::negotiation::Role::RequestControl,
         limits: authority::L,
         capabilities,
+        picture: None,
     }
 }
 fn binding(id: u32) -> Binding {

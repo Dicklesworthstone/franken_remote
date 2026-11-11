@@ -112,6 +112,7 @@ mod tests {
             role: Role::RequestControl,
             limits: ProtocolLimits::ABSOLUTE,
             capabilities,
+            picture: None,
         }
     }
 

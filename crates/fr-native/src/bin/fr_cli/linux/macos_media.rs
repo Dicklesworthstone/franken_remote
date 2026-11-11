@@ -65,8 +65,11 @@ fn media_text(report: &Report) -> String {
                 media.presented_age.reports(),
             )
         });
+    let picture = media.picture.map_or_else(String::new, |(width, height)| {
+        format!(" Pictures {width}x{height}.")
+    });
     format!(
-        " Media (last attempt): {} decoded, {} repair request(s), {} recovered stream(s).{age}{}",
+        " Media (last attempt): {} decoded, {} repair request(s), {} recovered stream(s).{picture}{age}{}",
         media.decoded,
         media.repair_requests,
         media.recovered_streams,

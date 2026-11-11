@@ -198,6 +198,10 @@ fn connect_selected(
         } else {
             AddressFamily::Automatic
         },
+        // Pixels beyond this screen would be captured, encoded, sent and
+        // decoded only to be scaled away; a host that can scale sends
+        // pictures that fit it, at 1:1 when the window fills the screen.
+        picture: fr_native::macos::main_screen_pixels(),
         ..Default::default()
     };
     let policy = reconnect::Policy {

@@ -1700,6 +1700,20 @@ int fr_mac_app_init(void) {
     return FR_MAC_OK;
 }
 
+// The main display's current size in its own pixels, from Core Graphics alone
+// (no window, any thread): the largest picture this viewer shows 1:1.
+int fr_mac_main_screen_pixels(uint32_t *width, uint32_t *height) {
+    if (!width || !height) return FR_MAC_INVALID;
+    CGDisplayModeRef mode = CGDisplayCopyDisplayMode(CGMainDisplayID());
+    if (!mode) return FR_MAC_GEOMETRY;
+    size_t w = CGDisplayModeGetPixelWidth(mode), h = CGDisplayModeGetPixelHeight(mode);
+    CGDisplayModeRelease(mode);
+    if (w < 64 || h < 64 || w > UINT32_MAX || h > UINT32_MAX) return FR_MAC_GEOMETRY;
+    *width = (uint32_t)w;
+    *height = (uint32_t)h;
+    return FR_MAC_OK;
+}
+
 // NSEvent timestamps and systemUptime use the same monotonic boot-time domain.
 // Return the current value separately so a queued key retains its original age.
 double fr_mac_event_time(void) {

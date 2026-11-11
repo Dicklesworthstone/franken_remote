@@ -98,6 +98,10 @@ pub struct Selection {
     pub role: Role,
     pub limits: ProtocolLimits,
     pub capabilities: Vec<Capability>,
+    /// The largest picture (pixel width, height) the viewer can show 1:1.
+    /// Present exactly when `scaled-picture` is selected
+    /// ([`crate::display::picture`]); the host's pictures then fit inside it.
+    pub picture: Option<(u32, u32)>,
 }
 /// Only the initial connection-control tuple. Display, geometry, codec,
 /// recovery, viewport and input lease are explicitly absent, not zero aliases.
@@ -235,18 +239,37 @@ impl Offer {
         })
     }
     pub fn select(&self) -> Result<Selection, Error> {
+        self.select_picture(None)
+    }
+    /// Select this host intersection, stating `picture` (the largest picture
+    /// the viewer can show 1:1) when the host offered scaled pictures. Without
+    /// a picture, or from a host without them, the optional capability is
+    /// omitted from the selection and every picture stays native.
+    pub fn select_picture(&self, picture: Option<(u32, u32)>) -> Result<Selection, Error> {
         self.validate()?;
         if !self.versions.contains(&0) {
             return Err(Error::Version);
         }
-        Ok(Selection {
+        let scaled = crate::display::picture::selected(&self.capabilities);
+        let picture = picture.filter(|_| scaled).map(|(width, height)| {
+            let most = self.limits.max_dimension_pixels();
+            (width.min(most), height.min(most))
+        });
+        let mut capabilities = self.capabilities.clone();
+        if picture.is_none() {
+            capabilities.retain(|cap| cap.name != crate::display::picture::CAPABILITY);
+        }
+        let selection = Selection {
             version: 0,
             profile: self.profile,
             profile_version: self.profile_version,
             role: self.role,
             limits: self.limits,
-            capabilities: self.capabilities.clone(),
-        })
+            capabilities,
+            picture,
+        };
+        selection.validate()?;
+        Ok(selection)
     }
     /// Verify a received host intersection against the original client offer.
     pub fn check_host(&self, host: &Self) -> Result<(), Error> {
@@ -285,7 +308,22 @@ impl Selection {
             return Err(Error::Profile);
         }
         valid_limits(self.limits)?;
-        valid_caps(&self.capabilities)
+        valid_caps(&self.capabilities)?;
+        let scaled = crate::display::picture::selected(&self.capabilities);
+        match self.picture {
+            None if !scaled => Ok(()),
+            Some((width, height))
+                if scaled
+                    && [width, height].iter().all(|&axis| {
+                        (crate::display::picture::MIN_BOX_PIXELS
+                            ..=self.limits.max_dimension_pixels())
+                            .contains(&axis)
+                    }) =>
+            {
+                Ok(())
+            }
+            _ => Err(Error::Invalid),
+        }
     }
     pub fn check_against(&self, offer: &Offer) -> Result<(), Error> {
         self.validate()?;
@@ -379,7 +417,7 @@ fn offer_bytes(o: &Offer) -> usize {
     4 + o.versions.len() * 2 + 4 + LIMIT_BYTES + caps_bytes(&o.capabilities) + 1
 }
 fn selection_bytes(s: &Selection) -> usize {
-    6 + LIMIT_BYTES + caps_bytes(&s.capabilities)
+    6 + LIMIT_BYTES + caps_bytes(&s.capabilities) + if s.picture.is_some() { 8 } else { 0 }
 }
 fn write_offer(w: &mut Writer<'_>, o: &Offer) -> Result<(), Error> {
     w.u32(u32::try_from(o.versions.len()).map_err(|_| Error::Version)?)?;
@@ -427,17 +465,28 @@ fn write_selection(w: &mut Writer<'_>, s: &Selection) -> Result<(), Error> {
     w.u16(s.profile_version)?;
     w.u8(s.role.byte())?;
     write_limits(w, s.limits)?;
-    write_caps(w, &s.capabilities)
+    write_caps(w, &s.capabilities)?;
+    // Only a selection with `scaled-picture` carries these eight bytes, so a
+    // peer that never offered the capability never sees them.
+    if let Some((width, height)) = s.picture {
+        w.u32(width)?;
+        w.u32(height)?;
+    }
+    Ok(())
 }
 fn read_selection(r: &mut Reader<'_>) -> Result<Selection, Error> {
-    let s = Selection {
+    let mut s = Selection {
         version: r.u16()?,
         profile: r.u8()?,
         profile_version: r.u16()?,
         role: Role::read(r)?,
         limits: read_limits(r)?,
         capabilities: read_caps(r)?,
+        picture: None,
     };
+    if crate::display::picture::selected(&s.capabilities) {
+        s.picture = Some((r.u32()?, r.u32()?));
+    }
     s.validate()?;
     Ok(s)
 }
