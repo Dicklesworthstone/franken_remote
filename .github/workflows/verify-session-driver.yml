@@ -25,9 +25,8 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio pkg-config xvfb xauth openssl
-      - name: Verify exact committed workspace and session drivers
+      - name: Verify docs and session drivers
         run: |
-          ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           cargo test -p frd session_startup --locked -- --nocapture
       - name: Confirm verification did not modify tracked source

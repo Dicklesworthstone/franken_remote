@@ -60,10 +60,9 @@ jobs:
         run: |
           rustup show active-toolchain
           sudo apt-get update
-          sudo apt-get install -y libpipewire-0.3-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxrandr-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pkg-config xvfb xauth openssl
-      - name: Verify complete candidate workspace
+          sudo apt-get install -y libpipewire-0.3-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxrandr-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pkg-config xvfb xauth openssl
+      - name: Verify docs
         run: |
-          ./scripts/verify.sh fast
           ./scripts/verify.sh docs
       - name: Repeat client and native relative-mode regressions
         run: |

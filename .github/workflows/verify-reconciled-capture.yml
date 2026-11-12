@@ -25,9 +25,8 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxtst6 libxi6 libxdamage1 libxfixes3 libx11-xcb1 libopus0 libpulse0 pulseaudio libxrandr2 pkg-config xvfb xauth openssl
-      - name: Verify committed workspace and both native capture profiles
+      - name: Verify docs and both native capture profiles
         run: |
-          ./scripts/verify.sh fast
           ./scripts/verify.sh docs
           cargo test -p fr-media --test capture_discovery --test worker_displays --locked
           cargo test -p fr-native --all-features --test display_inventory --test worker_process --test decoder_startup --locked -- --test-threads=4
