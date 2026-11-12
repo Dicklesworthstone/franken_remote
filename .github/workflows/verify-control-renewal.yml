@@ -28,4 +28,7 @@ jobs:
       - name: Verify docs and native control renewal
         run: |
           ./scripts/verify.sh docs
+          cargo test -p fr-core --test shared_control --locked
+          cargo test -p fr-native --features linux-input-agent --test input_quic --locked control -- --test-threads=4
+          cargo test -p frd --test input_quic_lifecycle --locked -- --test-threads=4
           git diff --exit-code

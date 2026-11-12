@@ -28,4 +28,6 @@ jobs:
       - name: Verify docs and native input renewal
         run: |
           ./scripts/verify.sh docs
+          cargo test -p fr-core --test ticket_renewal --locked
+          cargo test -p fr-native --features linux-input-agent --test input_quic --locked ticket -- --test-threads=4
           git diff --exit-code

@@ -28,4 +28,6 @@ jobs:
       - name: Verify docs and real X11 QUIC reconciliation
         run: |
           ./scripts/verify.sh docs
+          cargo test -p fr-native --features linux-input-agent --test input_quic --locked held -- --test-threads=4
+          cargo test -p fr-core -p fr-wire --locked held
           git diff --exit-code

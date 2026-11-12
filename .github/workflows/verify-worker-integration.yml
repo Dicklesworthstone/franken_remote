@@ -42,3 +42,5 @@ jobs:
       - name: Verify docs and supervised media processes
         run: |
           ./scripts/verify.sh docs
+          cargo test -p fr-native --features linux-media --test supervised_media --locked
+          cargo test -p frd --test worker_supervision --locked -- --test-threads=4

@@ -29,4 +29,5 @@ jobs:
       - name: Verify docs and native clock exchanges
         run: |
           ./scripts/verify.sh docs
+          cargo test -p frd --test clock_sync --locked -- --test-threads=4
           git diff --exit-code
