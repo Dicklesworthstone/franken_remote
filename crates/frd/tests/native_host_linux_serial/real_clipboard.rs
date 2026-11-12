@@ -568,9 +568,13 @@ fn a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_contr
     let parked = ParkedClipboard::start(&s.client);
     let late = unique("host item awaiting the original viewer worker");
     host.copy(&late);
-    // No outgoing viewer item exists. Its exact completion below can therefore
-    // name HandoffExpired only after this incoming Begin was actually admitted
-    // and its immutable local bound crossed; an idle parked worker cannot pass.
+    // No outgoing viewer item exists. The parked worker holds this item's
+    // Begin in the bridge's one handoff slot, so its next record waits complete
+    // in the transport. That record's 2 s lifetime from its first byte ends
+    // before Begin's 3 s handoff bound (NATIVE_CLIPBOARD_TRANSPORT.md, "Stalled
+    // clipboard receive records"). The completion below therefore names receive
+    // expiry, which needs records of this item actually received here; an idle
+    // parked worker with nothing incoming cannot pass.
     assert!(
         eventually(Duration::from_secs(15), || clipboard_children() == 0),
         "the expired lane did not retire its original host child: {}",
@@ -616,7 +620,7 @@ fn a_copy_that_outlives_its_deadline_on_a_slow_path_ends_the_clipboard_not_contr
         "only the initial host item was published: {report}"
     );
     assert_eq!(
-        report["clipboard_ended"], "clipboard_item_expired",
+        report["clipboard_ended"], "clipboard_receive_expired",
         "{report}"
     );
     drop((host, viewer));
