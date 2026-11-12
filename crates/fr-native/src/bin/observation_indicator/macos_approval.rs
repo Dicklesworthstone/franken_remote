@@ -33,13 +33,42 @@ pub(crate) fn run(mut command: UnixStream, signals: UnixDatagram, hello: Frame) 
     }
     let controlling = role.requests_control();
     let control = Control::opening();
+    let mut time = Time(0);
+    let Some(opening_until) = time.sample().ok().and_then(|now| now.checked_add(OPEN_NS)) else {
+        return CHANNEL;
+    };
+    let context = crate::approval_context::read(&mut command, hello, || {
+        if fenced(&signals)?
+            || time.sample()? >= opening_until
+            || control.status() != Status::Opening
+        {
+            Err(REFUSED)
+        } else {
+            Ok(())
+        }
+    });
+    let details = match context.and_then(|context| context.details(hello).map_err(|_| PROTOCOL)) {
+        Ok(details) => details,
+        Err(error) => {
+            control.cancel();
+            return error;
+        }
+    };
     let responder = control.clone();
     let worker = thread::Builder::new()
         .name("fr-approval-ipc".into())
         .spawn(move || {
-            let code = serve(&mut command, &signals, &responder, role, hello)
-                .err()
-                .unwrap_or(0);
+            let code = serve(
+                &mut command,
+                &signals,
+                &responder,
+                role,
+                hello,
+                time,
+                opening_until,
+            )
+            .err()
+            .unwrap_or(0);
             responder.cancel();
             // This child owns no input or effects. Process death removes its exact
             // UI even if native destruction is stuck; the parent still must reap it.
@@ -49,7 +78,7 @@ pub(crate) fn run(mut command: UnixStream, signals: UnixDatagram, hello: Frame) 
         control.cancel();
         return CHANNEL;
     };
-    let mut surface = Surface::open(control.clone(), controlling).ok();
+    let mut surface = Surface::open(control.clone(), controlling, &details).ok();
     while matches!(control.status(), Status::Opening | Status::Shown) {
         if let Some(surface) = &mut surface {
             surface.turn(Duration::from_millis(20));
@@ -109,13 +138,14 @@ fn serve(
     control: &Control,
     mut role: Approval,
     hello: Frame,
+    mut time: Time,
+    opening_until: u64,
 ) -> Result<(), i32> {
-    let mut time = Time(0);
     let floor = time.sample()?;
     let mut stage = Stage::Await {
         request: hello,
         floor,
-        until: floor.checked_add(OPEN_NS).ok_or(CHANNEL)?,
+        until: opening_until,
         stopping: false,
     };
     loop {

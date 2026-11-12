@@ -132,11 +132,28 @@ installer script's existing `--approval none --sharing own-user` default is
 unchanged; the explicit command above selects local approval. This prompt does
 not establish graphical screen-lock detection.
 
-Both Mac prompt roles disclose that locally enabled playback audio can include
-other applications and displays. The original approval IPC carries the requested
-view/control role; this conditional notice does not claim audio is enabled in
-every request. The operator must still explicitly select `--audio`, and the
-viewer must negotiate it. No microphone capability follows from that choice.
+The Mac prompt identifies the authenticated Tailscale node by its complete
+stable ID, with the installed daemon's device alias when available. The alias
+is a display label; the node ID distinguishes devices with the same name.
+The prompt also shows the original requested role and the negotiated playback
+audio, clipboard, file-send, file-receive and microphone capabilities. Playback
+audio explicitly includes other applications and displays when selected. The
+operator must enable it with `--audio`, and the viewer must negotiate it;
+that choice never enables a microphone.
+
+These details are an immutable snapshot of the original authenticated admission
+and negotiation. A bounded private record binds them to the exact prompt's
+opening kind, sequence and epoch. Missing, malformed, mismatched or unsafe text
+refuses before a window opens. The helper copies the complete disclosure and
+checks that it fits; it cannot approve a clipped or partly off-screen prompt.
+The local request reference is a display-only ordinal, not a session nonce,
+attachment token or new approval capability.
+
+The initial display catalog and monitor selection still occur after approval.
+The prompt states that ordering and identifies the host login desktop as its
+scope; it does not promise approval tied to a preselected monitor. Control can
+affect the wider login desktop. Binding consent to a specific preselected
+monitor remains separate work.
 
 ## Original lifetimes, not reusable approvals
 
@@ -195,13 +212,18 @@ exercise parent machinery, not physical-device positive consent or real tailnet
 admission. The native X11 bridge has separate checks; those do not qualify this
 complete Rust/host/client integration. Portable Mac policy and protocol-role
 tests cover original gesture, source filtering, interrupted gestures, deadlines,
-refusal and fixed role/sequence binding. Apple-target Rust metadata checks do
-not exercise AppKit, physical input or the window server.
+refusal, bounded disclosure parsing and fixed role/sequence binding. Tailnet
+fixtures exercise the actual admission owner and the source of its presentation
+metadata; they are not live Tailscale qualification. Apple-target Rust metadata
+checks do not exercise AppKit, physical input or the window server. The existing
+native audio/consent CI lane also compiles the Objective-C against the Apple SDK
+and builds, links and runs strict Clippy on the actual consent helper.
 
 Useful focused checks are also included in the existing CI lane:
 
 ```sh
 cargo test -p fr-core indicator_process --locked
+cargo test -p fr-tailnet --lib approval --locked
 cargo test -p frd --lib desktop_approval --locked
 cargo test -p frd --lib host_run::approval --locked
 cargo test -p frd --lib host_run::policy --locked

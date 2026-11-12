@@ -34,13 +34,15 @@ pub(crate) struct Approval {
 }
 impl Approval {
     pub(crate) fn open(frame: Frame) -> Option<Self> {
-        (matches!(frame.kind, Kind::ApproveView | Kind::ApproveControl)
-            && frame.sequence == 1
+        (matches!(
+            frame.kind,
+            Kind::ApproveViewDetails | Kind::ApproveControlDetails
+        ) && frame.sequence == 1
             && frame.epoch != 0)
             .then_some(Self {
                 epoch: frame.epoch,
                 next: Some(2),
-                control: frame.kind == Kind::ApproveControl,
+                control: frame.kind == Kind::ApproveControlDetails,
             })
     }
 
@@ -86,6 +88,8 @@ mod tests {
             Kind::OpenMicrophone,
             Kind::ApproveView,
             Kind::ApproveControl,
+            Kind::ApproveViewDetails,
+            Kind::ApproveControlDetails,
             Kind::ApprovalCheck,
             Kind::Ready,
             Kind::Allowed,
@@ -170,7 +174,10 @@ mod tests {
 
     #[test]
     fn native_consent_intent_is_fixed_by_the_original_request() {
-        for (kind, controlling) in [(Kind::ApproveView, false), (Kind::ApproveControl, true)] {
+        for (kind, controlling) in [
+            (Kind::ApproveViewDetails, false),
+            (Kind::ApproveControlDetails, true),
+        ] {
             let original = Frame { kind, ..open() };
             let mut role = Approval::open(original).unwrap();
             assert_eq!(role.requests_control(), controlling);
@@ -225,6 +232,8 @@ mod tests {
         for kind in [
             Kind::Open,
             Kind::Check,
+            Kind::ApproveView,
+            Kind::ApproveControl,
             Kind::ApprovalCheck,
             Kind::Stop,
             Kind::Ready,

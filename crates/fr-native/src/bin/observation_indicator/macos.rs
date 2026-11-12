@@ -47,7 +47,10 @@ pub(crate) fn run() -> i32 {
         Ok(frame) => frame,
         Err(code) => return code,
     };
-    if matches!(hello.kind, Kind::ApproveView | Kind::ApproveControl) {
+    if matches!(
+        hello.kind,
+        Kind::ApproveViewDetails | Kind::ApproveControlDetails
+    ) {
         return crate::macos_approval::run(command, signals, hello);
     }
     let Some(role) = Observation::open(hello) else {

@@ -47,6 +47,7 @@ static uint64_t uptime_ns(NSTimeInterval seconds) {
 @property(nonatomic, strong) NSWindow *window;
 @property(nonatomic, strong) FrApprovalView *view;
 @property(nonatomic, strong) id<NSObject> activity;
+@property(nonatomic, copy) NSString *details;
 @property(nonatomic) BOOL control;
 @property(nonatomic) uint32_t state;
 @property(nonatomic) uint64_t ready;
@@ -64,6 +65,27 @@ static NSRect allow_rect(NSRect bounds) {
 static NSRect deny_rect(NSRect bounds) {
     return NSMakeRect(NSMaxX(bounds) - 340, 24, 150, 42);
 }
+static NSRect details_rect(void) {
+    return NSMakeRect(28, 100, 624, 264);
+}
+static NSDictionary *details_attributes(void) {
+    NSMutableParagraphStyle *paragraph = [NSMutableParagraphStyle new];
+    paragraph.lineBreakMode = NSLineBreakByCharWrapping;
+    return @{
+        NSFontAttributeName : [NSFont monospacedSystemFontOfSize:13 weight:NSFontWeightRegular],
+        NSForegroundColorAttributeName : NSColor.labelColor,
+        NSParagraphStyleAttributeName : paragraph,
+    };
+}
+static BOOL details_fit(NSString *details) {
+    if (!details.length) return NO;
+    NSRect area = details_rect();
+    NSRect needed = [details boundingRectWithSize:NSMakeSize(area.size.width, CGFLOAT_MAX)
+        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+        attributes:details_attributes()];
+    return isfinite(needed.size.width) && isfinite(needed.size.height) &&
+           needed.size.width <= area.size.width && needed.size.height <= area.size.height;
+}
 
 @implementation FrApprovalView
 - (BOOL)acceptsFirstMouse:(NSEvent *)event {
@@ -80,16 +102,17 @@ static NSRect deny_rect(NSRect bounds) {
         NSFontAttributeName : [NSFont systemFontOfSize:20 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName : NSColor.labelColor,
     };
-    NSDictionary *body = @{
-        NSFontAttributeName : [NSFont systemFontOfSize:13],
-        NSForegroundColorAttributeName : NSColor.secondaryLabelColor,
-    };
     NSString *title = self.owner.control ? @"Allow remote control?" : @"Allow desktop viewing?";
-    [title drawInRect:NSMakeRect(28, 170, 444, 32) withAttributes:heading];
-    NSString *detail = self.owner.control
-        ? @"A verified device requests this desktop and remote control.\nLocally enabled clipboard and file sharing may follow.\nEnabled playback audio may include other apps/displays."
-        : @"A verified device requests a view of this desktop.\nThis request does not grant keyboard or pointer control.\nEnabled playback audio may include other apps/displays.";
-    [detail drawInRect:NSMakeRect(28, 88, 444, 72) withAttributes:body];
+    [title drawInRect:NSMakeRect(28, 376, 624, 32) withAttributes:heading];
+    // All details come from the original private context, never an event or
+    // a client-authored request label. Refuse instead of clipping disclosure.
+    if (!details_fit(self.owner.details)) {
+        self.owner.state = FR_AP_FAILED;
+        return;
+    }
+    [self.owner.details drawWithRect:details_rect()
+        options:NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+        attributes:details_attributes()];
     for (NSUInteger i = 0; i < 2; ++i) {
         NSRect rect = i ? allow_rect(self.bounds) : deny_rect(self.bounds);
         [(i ? NSColor.controlAccentColor : NSColor.controlColor) setFill];
@@ -129,9 +152,9 @@ static NSRect deny_rect(NSRect bounds) {
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; }
 - (NSString *)accessibilityLabel {
-    return self.owner.control
-        ? @"Allow remote control? Locally enabled playback audio may include other apps and displays. Click Allow to accept, or press Escape to deny."
-        : @"Allow desktop viewing? Locally enabled playback audio may include other apps and displays. Click Allow to accept, or press Escape to deny.";
+    NSString *title = self.owner.control ? @"Allow remote control?" : @"Allow desktop viewing?";
+    return [NSString stringWithFormat:@"%@\n%@\nClick Allow to accept, or press Escape to deny.",
+        title, self.owner.details];
 }
 - (BOOL)accessibilityPerformCancel {
     [self.owner deny:nil];
@@ -143,8 +166,10 @@ static NSRect deny_rect(NSRect bounds) {
 @implementation FrApprovalOwner
 - (BOOL)visible {
     NSWindow *window = self.window;
-    return window && window.contentView == self.view && self.view.window == window &&
-           NSEqualRects(self.view.bounds, NSMakeRect(0, 0, 500, 240)) &&
+    NSScreen *screen = window.screen;
+    return window && screen && NSContainsRect(screen.visibleFrame, window.frame) &&
+           window.contentView == self.view && self.view.window == window &&
+           NSEqualRects(self.view.bounds, NSMakeRect(0, 0, 680, 440)) &&
            self.view.drawn && window.isVisible && window.isOnActiveSpace &&
            !window.isMiniaturized && !NSApp.isHidden && NSApp.isActive &&
            window.isKeyWindow && (window.occlusionState & NSWindowOcclusionStateVisible);
@@ -216,9 +241,17 @@ static NSRect deny_rect(NSRect bounds) {
 }
 @end
 
-int fr_ap_open(uint32_t control, void **out) {
-    if (!pthread_main_np() || occupied || !out || control > 1 ||
+int fr_ap_open(uint32_t control, const uint8_t *details, size_t details_len, void **out) {
+    if (!pthread_main_np() || occupied || !out || control > 1 || !details ||
+        !details_len || details_len > 1024 ||
         getuid() == 0 || getuid() != geteuid()) return -1;
+    BOOL visible_text = NO;
+    for (size_t i = 0; i < details_len; ++i) {
+        uint8_t byte = details[i];
+        if ((byte < 0x20 || byte > 0x7e) && byte != '\n') return -1;
+        if (byte > 0x20 && byte <= 0x7e) visible_text = YES;
+    }
+    if (!visible_text) return -1;
     *out = NULL;
     occupied = YES;
     @autoreleasepool {
@@ -226,7 +259,12 @@ int fr_ap_open(uint32_t control, void **out) {
         int result = -1;
         @try {
           do {
+            // Copy before creating any UI. No borrowed Rust storage escapes,
+            // and an unrepresentable or oversized disclosure never maps a UI.
+            owner.details = [[NSString alloc] initWithBytes:details length:details_len
+                encoding:NSASCIIStringEncoding];
             [NSApplication sharedApplication];
+            if (!details_fit(owner.details)) break;
             [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
             [NSApp finishLaunching];
             owner.control = control != 0;
@@ -236,15 +274,16 @@ int fr_ap_open(uint32_t control, void **out) {
             NSScreen *screen = NSScreen.mainScreen;
             if (!screen || !owner.activity) break;
             NSRect available = screen.visibleFrame;
-            NSRect frame = NSMakeRect(round(NSMidX(available) - 250),
-                                      round(NSMidY(available) - 120), 500, 240);
+            NSRect frame = NSMakeRect(round(NSMidX(available) - 340),
+                                      round(NSMidY(available) - 220), 680, 440);
             if (!NSContainsRect(available, frame)) break;
             owner.window = [[NSWindow alloc]
                 initWithContentRect:frame
                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                             backing:NSBackingStoreBuffered defer:NO];
-            owner.view = [[FrApprovalView alloc] initWithFrame:NSMakeRect(0, 0, 500, 240)];
-            if (!owner.window || !owner.view) break;
+            owner.view = [[FrApprovalView alloc] initWithFrame:NSMakeRect(0, 0, 680, 440)];
+            if (!owner.window || !owner.view ||
+                !NSContainsRect(available, owner.window.frame)) break;
             owner.view.owner = owner;
             owner.window.contentView = owner.view;
             owner.window.delegate = owner;

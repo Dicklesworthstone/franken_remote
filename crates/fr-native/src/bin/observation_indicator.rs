@@ -245,6 +245,13 @@ mod pipe;
 #[path = "observation_indicator/role.rs"]
 mod role;
 
+#[cfg(any(
+    all(test, unix),
+    all(target_os = "macos", feature = "macos-observation-indicator")
+))]
+#[path = "observation_indicator/approval_context.rs"]
+mod approval_context;
+
 #[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
 #[path = "observation_indicator/macos.rs"]
 mod macos;

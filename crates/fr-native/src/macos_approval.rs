@@ -16,9 +16,24 @@ use std::{
 };
 
 unsafe extern "C" {
-    fn fr_ap_open(control: u32, out: *mut *mut c_void) -> i32;
+    fn fr_ap_open(
+        control: u32,
+        details: *const u8,
+        details_len: usize,
+        out: *mut *mut c_void,
+    ) -> i32;
     fn fr_ap_pump(owner: *mut c_void, wait_ms: u32, observation: *mut Native) -> i32;
     fn fr_ap_close(owner: *mut c_void) -> i32;
+}
+
+const MAX_DETAILS_BYTES: usize = 1024;
+
+fn valid_details(details: &str) -> bool {
+    details.len() <= MAX_DETAILS_BYTES
+        && details.bytes().any(|byte| byte.is_ascii_graphic())
+        && details
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() || matches!(byte, b' ' | b'\n'))
 }
 
 struct Shared {
@@ -85,15 +100,24 @@ pub struct Surface {
     _main_thread: PhantomData<Rc<()>>,
 }
 impl Surface {
-    pub fn open(control: Control, request_control: bool) -> Result<Self, Status> {
-        if control.status() != Status::Opening {
+    pub fn open(control: Control, request_control: bool, details: &str) -> Result<Self, Status> {
+        if control.status() != Status::Opening || !valid_details(details) {
             control.cancel();
             return Err(Status::Refused);
         }
         let mut owner = core::ptr::null_mut();
-        // SAFETY: one scalar intent and writable output. Native verifies the
-        // main thread, owns the AppKit graph and retains no Rust pointer.
-        let result = unsafe { fr_ap_open(u32::from(request_control), &raw mut owner) };
+        // SAFETY: bounded validated ASCII and writable output remain live
+        // throughout this call. Native verifies the main thread, copies the
+        // complete text before opening, and retains no Rust pointer. It refuses
+        // a prompt whose full disclosure cannot fit in the visible surface.
+        let result = unsafe {
+            fr_ap_open(
+                u32::from(request_control),
+                details.as_ptr(),
+                details.len(),
+                &raw mut owner,
+            )
+        };
         let Some(owner) = NonNull::new(owner).filter(|_| result == 0) else {
             control.cancel();
             return Err(Status::Refused);
@@ -137,5 +161,28 @@ impl Drop for Surface {
         } else {
             self.control.cancel();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn macos_approval_details_reject_hidden_controls_and_unbounded_text() {
+        for text in [
+            "",
+            " \n ",
+            "Device\rName",
+            "Device\tName",
+            "Device\0Name",
+            "\u{1b}[2J",
+            "\u{202e}Device",
+        ] {
+            assert!(!valid_details(text));
+        }
+        assert!(valid_details("Verified node: n123\nPlayback audio: off"));
+        assert!(valid_details(&"a".repeat(MAX_DETAILS_BYTES)));
+        assert!(!valid_details(&"a".repeat(MAX_DETAILS_BYTES + 1)));
     }
 }

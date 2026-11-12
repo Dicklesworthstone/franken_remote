@@ -30,6 +30,7 @@ use std::{
 };
 
 mod admission_refresh;
+mod approval_context;
 mod clipboard;
 pub(crate) mod closure_reporting;
 mod native_control;
@@ -206,6 +207,7 @@ pub struct Approval {
     state: Weak<AtomicU8>,
     cx: Cx,
     deadline: u64,
+    attribution: Option<Arc<approval_context::Attribution>>,
 }
 impl fmt::Debug for Approval {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -221,6 +223,12 @@ impl Approval {
     /// inspection nor pending-state inspection grants observation or control.
     pub const fn role(&self) -> Role {
         self.role
+    }
+    /// Display-only immutable attribution from this original admitted peer.
+    /// A copied context cannot decide, renew, or retarget this capability.
+    pub fn context(&self) -> Result<fr_core::indicator_process::approval::Context, Error> {
+        self.check_pending()?;
+        self.attribution.as_ref().ok_or(Error::Order)?.context()
     }
     /// Check the original one-use capability without making a decision or
     /// extending its budget. Native consent UIs use this while no packets arrive.
@@ -408,6 +416,7 @@ pub struct Host {
     phase: Phase,
     role: Role,
     approval: Arc<AtomicU8>,
+    attribution: Option<Arc<approval_context::Attribution>>,
     bytes: [u8; negotiation::MAX_RECORD],
     len: usize,
     maximum: usize,
@@ -473,6 +482,7 @@ impl Host {
             phase: Phase::Hello,
             role: Role::Observe,
             approval: Arc::new(AtomicU8::new(0)),
+            attribution: None,
             bytes: [0; negotiation::MAX_RECORD],
             len: 0,
             maximum,
@@ -493,6 +503,7 @@ impl Host {
                 state: Arc::downgrade(&self.approval),
                 cx: self.cx.clone(),
                 deadline: self.until,
+                attribution: self.attribution.clone(),
             },
         )
     }
@@ -682,6 +693,10 @@ impl Host {
                     .mark_capabilities_checked()
                     .map_err(|_| Error::Authority)?;
                 if self.config.require_approval {
+                    self.attribution = Some(Arc::new(approval_context::Attribution::new(
+                        self.peer.as_ref().ok_or(Error::Closed)?,
+                        self.selected.as_ref().ok_or(Error::Order)?,
+                    )?));
                     self.authority
                         .as_mut()
                         .ok_or(Error::Closed)?

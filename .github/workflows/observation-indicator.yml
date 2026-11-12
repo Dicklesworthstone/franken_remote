@@ -7,6 +7,7 @@ on:
       - 'crates/fr-core/**'
       - 'crates/frd/**'
       - 'crates/fr-native/**'
+      - 'crates/fr-tailnet/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
@@ -45,6 +46,8 @@ jobs:
           sudo apt-get install -y libx11-dev libxcb1-dev libxtst6 libxi6 libxrandr2 xvfb xauth xfonts-base pkg-config
       - name: Fixed-size read-only IPC regressions
         run: cargo test -p fr-core indicator_process --locked
+      - name: Attribute consent to the original authenticated admission
+        run: cargo test -p fr-tailnet --lib approval --locked
       - name: Original host lifetime and real subprocess regressions
         run: |
           cargo test -p frd --lib host_indicator --locked
@@ -56,6 +59,7 @@ jobs:
       - name: Original desktop consent and unchanged active-session deadlines
         run: |
           cargo test -p frd --lib desktop_approval --locked
+          cargo test -p frd --lib approval_context --locked
           cargo test -p frd --lib host_run::approval --locked
           cargo test -p frd --lib host_run::policy --locked
           cargo test -p frd --lib consent_budget --locked

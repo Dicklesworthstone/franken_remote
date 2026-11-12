@@ -14,13 +14,13 @@ use fr_core::{
 use fr_wire::negotiation::{ControlBinding, Role};
 use std::sync::atomic::AtomicU8;
 
-fn runtime() -> Runtime {
+pub(super) fn runtime() -> Runtime {
     RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
         .build()
         .unwrap()
 }
-fn original(cx: &Cx, role: Role) -> (Approval, Arc<AtomicU8>) {
+pub(super) fn original(cx: &Cx, role: Role) -> (Approval, Arc<AtomicU8>) {
     let state = Arc::new(AtomicU8::new(WAITING));
     (
         Approval {
@@ -34,16 +34,71 @@ fn original(cx: &Cx, role: Role) -> (Approval, Arc<AtomicU8>) {
             state: Arc::downgrade(&state),
             cx: cx.clone(),
             deadline: session_startup::now(cx).unwrap() + 2_000_000,
+            attribution: Some(Arc::new(
+                session_startup::approval_context::Attribution::new(
+                    &session_startup::Peer::Fixture {
+                        alive: Arc::new(AtomicBool::new(true)),
+                        until: u64::MAX,
+                        control: role == Role::RequestControl,
+                    },
+                    &fr_wire::negotiation::Selection {
+                        version: 0,
+                        profile: 1,
+                        profile_version: 0,
+                        role,
+                        limits: fr_core::limits::ProtocolLimits::ABSOLUTE,
+                        capabilities: Vec::new(),
+                        picture: None,
+                    },
+                )
+                .unwrap(),
+            )),
         },
         state,
     )
 }
-fn shared(original: Approval) -> Shared {
+pub(super) fn shared(original: Approval) -> Shared {
     Shared {
         original,
         cancelled: AtomicBool::new(false),
         started: Instant::now(),
     }
+}
+
+#[test]
+fn attribution_is_immutable_and_cannot_revive_or_retarget_original_consent() {
+    let rt = runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let (old, old_state) = original(&cx, Role::Observe);
+    let context = old.context().unwrap();
+    assert_eq!(old.clone().context(), Ok(context.clone()));
+    let (replacement, replacement_state) = original(&cx, Role::Observe);
+    assert_eq!(old.binding(), replacement.binding());
+    assert_ne!(
+        context,
+        replacement.context().unwrap(),
+        "a new original has a new local UI ordinal"
+    );
+    old.decide(false).unwrap();
+    assert_eq!(old.context(), Err(session_startup::Error::Order));
+    assert!(old.decide(true).is_err());
+    assert_eq!(old_state.load(Ordering::Acquire), DENIED);
+    assert_eq!(replacement_state.load(Ordering::Acquire), WAITING);
+    let hello = Frame {
+        kind: Kind::ApproveViewDetails,
+        sequence: 1,
+        epoch: 29,
+    };
+    assert!(
+        context.details(hello).is_ok(),
+        "retained labels are display-only, not a live capability"
+    );
+    assert!(replacement.check_pending().is_ok());
+    drop(replacement_state);
+    assert_eq!(replacement.context(), Err(session_startup::Error::Closed));
+    let (mut expired, _state) = original(&cx, Role::Observe);
+    expired.deadline = session_startup::now(&cx).unwrap();
+    assert_eq!(expired.context(), Err(session_startup::Error::Expired));
 }
 
 #[test]
@@ -167,6 +222,15 @@ while True:
     expected = @ROLE@ if n == 1 else 6
     if data[:4] != b'FRIV' or data[5] != expected:
         raise SystemExit(1)
+    if n == 1 and @CONTEXT@:
+        details = bytearray()
+        while len(details) < 432:
+            part = s.recv(432-len(details))
+            if not part:
+                raise SystemExit(1)
+            details.extend(part)
+        if details[:4] != b'FRAC' or details[5] != data[5] or details[8:32] != data[8:32]:
+            raise SystemExit(1)
     if mode == 'exit':
         raise SystemExit(0)
     if mode == 'stall' and n > 1:
@@ -207,9 +271,26 @@ while True:
                 &path,
                 CHILD
                     .replace("@MODE@", mode)
-                    .replace("@ROLE@", if role == Role::Observe { "4" } else { "5" }),
+                    .replace(
+                        "@ROLE@",
+                        match (cfg!(target_os = "macos"), role) {
+                            (true, Role::Observe) => "9",
+                            (true, Role::RequestControl) => "10",
+                            (false, Role::Observe) => "4",
+                            (false, Role::RequestControl) => "5",
+                        },
+                    )
+                    .replace(
+                        "@CONTEXT@",
+                        if cfg!(target_os = "macos") {
+                            "True"
+                        } else {
+                            "False"
+                        },
+                    ),
             );
-            let launch = ProcessLaunch::new(&path, ":0", None, 29).unwrap();
+            let display = if cfg!(target_os = "macos") { "" } else { ":0" };
+            let launch = ProcessLaunch::new(&path, display, None, 29).unwrap();
             let mut prompt = Prompt::start(approval, launch).unwrap();
             let until = Instant::now() + Duration::from_secs(5);
             if mode == "allow" {
@@ -231,7 +312,7 @@ while True:
                     "native reply alone does not approve"
                 );
                 let (other, other_state) = original(&cx, role);
-                let other_launch = ProcessLaunch::new(&path, ":0", None, 30).unwrap();
+                let other_launch = ProcessLaunch::new(&path, display, None, 30).unwrap();
                 assert!(matches!(
                     Prompt::start(other, other_launch),
                     Err(Error::Busy)

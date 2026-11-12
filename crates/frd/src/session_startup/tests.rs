@@ -269,7 +269,10 @@ fn denied_dropped_and_expired_approval_handles_cannot_authorize_equal_id_replace
             }
         }
         let old = host.approval().unwrap();
+        let attribution = old.context().unwrap();
+        assert_eq!(host.approval().unwrap().context(), Ok(attribution));
         old.decide(false).unwrap();
+        assert_eq!(old.context(), Err(Error::Order));
         assert_eq!(host.tick(), Err(Error::Denied));
         assert!(!alive.load(Ordering::Acquire));
         assert!(host.finish().is_err());
@@ -283,6 +286,7 @@ fn denied_dropped_and_expired_approval_handles_cannot_authorize_equal_id_replace
             state: Arc::downgrade(&Arc::new(AtomicU8::new(WAITING))),
             cx: cx.clone(),
             deadline: u64::MAX,
+            attribution: None,
         };
         assert_eq!(local.decide(true), Err(Error::Closed));
         let state = Arc::new(AtomicU8::new(WAITING));
@@ -292,6 +296,7 @@ fn denied_dropped_and_expired_approval_handles_cannot_authorize_equal_id_replace
             state: Arc::downgrade(&state),
             cx: cx.clone(),
             deadline: now(&cx).unwrap(),
+            attribution: None,
         };
         assert_eq!(local.decide(true), Err(Error::Expired));
     });

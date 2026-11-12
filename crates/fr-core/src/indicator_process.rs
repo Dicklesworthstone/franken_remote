@@ -1,8 +1,11 @@
 //! Private session-UI IPC over inherited socketpairs. Observation indication
 //! and one-use approval are different locally selected child roles. Neither
-//! carries input operations, paths, text, or network authority. A UI decision
+//! carries input operations, paths, or network authority. Approval attribution
+//! uses a separate bounded display-only context, never arbitrary UI text. A UI decision
 //! is not a grant: the parent must recheck its ORIGINAL pending capability.
 use core::fmt;
+
+pub mod approval;
 
 pub const FRAME_BYTES: usize = 32;
 const MAGIC: [u8; 4] = *b"FRIV";
@@ -19,6 +22,8 @@ pub enum Kind {
     ApprovalCheck = 6,
     OpenMicrophone = 7,
     CheckMicrophone = 8,
+    ApproveViewDetails = 9,
+    ApproveControlDetails = 10,
     Ready = 129,
     Stopped = 130,
     Refused = 131,
@@ -37,6 +42,8 @@ impl Kind {
                 | Self::ApprovalCheck
                 | Self::OpenMicrophone
                 | Self::CheckMicrophone
+                | Self::ApproveViewDetails
+                | Self::ApproveControlDetails
         )
     }
     const fn parse(value: u8) -> Result<Self, Error> {
@@ -49,6 +56,8 @@ impl Kind {
             6 => Ok(Self::ApprovalCheck),
             7 => Ok(Self::OpenMicrophone),
             8 => Ok(Self::CheckMicrophone),
+            9 => Ok(Self::ApproveViewDetails),
+            10 => Ok(Self::ApproveControlDetails),
             129 => Ok(Self::Ready),
             130 => Ok(Self::Stopped),
             131 => Ok(Self::Refused),
@@ -127,7 +136,11 @@ impl Frame {
             )
             | (Kind::Stop, Kind::Stopped | Kind::Refused)
             | (
-                Kind::ApproveView | Kind::ApproveControl | Kind::ApprovalCheck,
+                Kind::ApproveView
+                | Kind::ApproveControl
+                | Kind::ApproveViewDetails
+                | Kind::ApproveControlDetails
+                | Kind::ApprovalCheck,
                 Kind::Ready | Kind::Refused | Kind::Allowed | Kind::Denied,
             ) => Ok(self.kind),
             _ => Err(Error),
@@ -160,6 +173,8 @@ mod tests {
             Kind::ApprovalCheck,
             Kind::OpenMicrophone,
             Kind::CheckMicrophone,
+            Kind::ApproveViewDetails,
+            Kind::ApproveControlDetails,
             Kind::Allowed,
             Kind::Denied,
         ] {

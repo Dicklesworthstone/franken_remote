@@ -282,6 +282,12 @@ pub(crate) struct Identity {
 }
 
 impl Identity {
+    pub(crate) fn approval_labels(&self) -> (&str, Option<&str>) {
+        (
+            &self.peer.id.0,
+            self.peer.dns_name.as_ref().map(|name| name.0.as_str()),
+        )
+    }
     /// Who a directory read is for: the admitted host and viewer node IDs,
     /// and the viewer's user unless the viewer is tagged (owning nothing).
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]

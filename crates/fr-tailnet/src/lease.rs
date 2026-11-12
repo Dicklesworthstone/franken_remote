@@ -14,6 +14,29 @@ struct State {
     last_us: u64,
 }
 
+/// Display-only attribution copied from the original live admission proof.
+/// Neither these labels nor a retained snapshot can authorize a new request.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ApprovalIdentity {
+    node_id: String,
+    dns_name: Option<String>,
+}
+impl fmt::Debug for ApprovalIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ApprovalIdentity([verified display labels])")
+    }
+}
+impl ApprovalIdentity {
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+    /// An authenticated daemon alias, not an independently verified hostname
+    /// or a substitute for the stable node ID. The UI must validate rendering.
+    pub fn dns_name(&self) -> Option<&str> {
+        self.dns_name.as_deref()
+    }
+}
+
 /// Shared checks, not independent authority copies. Check this immediately at
 /// each effect/packet admission. Cloning a lease cannot extend its deadline.
 #[derive(Clone)]
@@ -68,6 +91,19 @@ impl Lease {
     }
     pub fn addresses(&self) -> ConnectionAddresses {
         self.addresses
+    }
+    /// Inspect only this admission's original, currently live identity. No
+    /// discovery read, reverse lookup, caller label, or new permission is used.
+    pub fn approval_identity(&self) -> Result<ApprovalIdentity, Error> {
+        let mut s = self.state.lock().map_err(|_| Error::Revoked)?;
+        if !self.live(&mut s)?.observe() {
+            return Err(Error::CapabilityDenied);
+        }
+        let (node_id, dns_name) = s.proof.identity.approval_labels();
+        Ok(ApprovalIdentity {
+            node_id: node_id.to_owned(),
+            dns_name: dns_name.map(str::to_owned),
+        })
     }
     /// Local lifecycle stop. Never waits for `LocalAPI`, a media worker or input.
     pub fn revoke(&self) {

@@ -29,7 +29,7 @@ pub use outbound::{TargetLease, TargetOwner};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
 mod lease;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
-pub use lease::{Admission, Lease};
+pub use lease::{Admission, ApprovalIdentity, Lease};
 #[path = "local/endpoint.rs"]
 pub mod endpoint;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]

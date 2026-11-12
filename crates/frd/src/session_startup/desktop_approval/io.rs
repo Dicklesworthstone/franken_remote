@@ -4,7 +4,10 @@ use crate::{
     input_process::{ProcessLaunch, kill_group},
     session_ui_process,
 };
-use fr_core::indicator_process::{FRAME_BYTES, Frame, Kind};
+use fr_core::indicator_process::{
+    FRAME_BYTES, Frame, Kind,
+    approval::{CONTEXT_BYTES, Context},
+};
 use fr_wire::negotiation::Role;
 use std::{
     io::{self, Read, Write},
@@ -56,9 +59,11 @@ impl Process<'_> {
         }
     }
     fn serve(&mut self, epoch: u128) -> Result<bool, Error> {
-        let kind = match self.shared.original.role() {
-            Role::Observe => Kind::ApproveView,
-            Role::RequestControl => Kind::ApproveControl,
+        let kind = opening_kind(self.shared.original.role());
+        let context = if cfg!(target_os = "macos") {
+            Some(self.shared.original.context().map_err(Error::Original)?)
+        } else {
+            None
         };
         let mut request = Frame {
             kind,
@@ -71,7 +76,10 @@ impl Process<'_> {
             .checked_add(OPEN_BUDGET)
             .ok_or(Error::Expired)?;
         loop {
-            if let Some(decision) = self.exchange(request, until)? {
+            let opening = (request.sequence == 1)
+                .then_some(context.as_ref())
+                .flatten();
+            if let Some(decision) = self.exchange(request, opening, until)? {
                 return Ok(decision);
             }
             let next = Instant::now()
@@ -96,8 +104,14 @@ impl Process<'_> {
                 .ok_or(Error::Expired)?;
         }
     }
-    fn exchange(&mut self, request: Frame, until: Instant) -> Result<Option<bool>, Error> {
-        let output = request.encode().map_err(|_| Error::Protocol)?;
+    fn exchange(
+        &mut self,
+        request: Frame,
+        context: Option<&Context>,
+        until: Instant,
+    ) -> Result<Option<bool>, Error> {
+        let (output, length) = opening_bytes(request, context)?;
+        let output = &output[..length];
         let (mut written, mut filled) = (0, 0);
         let mut input = [0; FRAME_BYTES];
         loop {
@@ -143,6 +157,36 @@ impl Process<'_> {
         Ok(())
     }
 }
+fn opening_kind(role: Role) -> Kind {
+    match (cfg!(target_os = "macos"), role) {
+        (true, Role::Observe) => Kind::ApproveViewDetails,
+        (true, Role::RequestControl) => Kind::ApproveControlDetails,
+        (false, Role::Observe) => Kind::ApproveView,
+        (false, Role::RequestControl) => Kind::ApproveControl,
+    }
+}
+fn opening_bytes(
+    request: Frame,
+    context: Option<&Context>,
+) -> Result<([u8; FRAME_BYTES + CONTEXT_BYTES], usize), Error> {
+    let attributed = matches!(
+        request.kind,
+        Kind::ApproveViewDetails | Kind::ApproveControlDetails
+    );
+    if attributed != context.is_some() {
+        return Err(Error::Protocol);
+    }
+    let mut output = [0; FRAME_BYTES + CONTEXT_BYTES];
+    output[..FRAME_BYTES].copy_from_slice(&request.encode().map_err(|_| Error::Protocol)?);
+    if let Some(context) = context {
+        output[FRAME_BYTES..]
+            .copy_from_slice(&context.encode(request).map_err(|_| Error::Protocol)?);
+        Ok((output, FRAME_BYTES + CONTEXT_BYTES))
+    } else {
+        Ok((output, FRAME_BYTES))
+    }
+}
+
 impl Drop for Process<'_> {
     fn drop(&mut self) {
         let _ = self.finish();
@@ -159,7 +203,11 @@ pub(super) fn response(request: Frame, bytes: &[u8]) -> Result<Option<bool>, Err
     // or attach an answer from the input executor's protocol.
     if !matches!(
         request.kind,
-        Kind::ApproveView | Kind::ApproveControl | Kind::ApprovalCheck
+        Kind::ApproveView
+            | Kind::ApproveControl
+            | Kind::ApproveViewDetails
+            | Kind::ApproveControlDetails
+            | Kind::ApprovalCheck
     ) {
         return Err(Error::Protocol);
     }
@@ -169,5 +217,99 @@ pub(super) fn response(request: Frame, bytes: &[u8]) -> Result<Option<bool>, Err
         Ok(Kind::Denied) => Ok(Some(false)),
         Ok(Kind::Refused) => Err(Error::Unavailable),
         _ => Err(Error::Protocol),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fr_core::indicator_process::approval::Features;
+
+    #[test]
+    fn attributed_open_requires_complete_context_before_any_reply_is_interpretable() {
+        let context = Context::new("nPeer", Some("peer.example"), Features::PLAYBACK, 1).unwrap();
+        let request = Frame {
+            kind: Kind::ApproveViewDetails,
+            sequence: 1,
+            epoch: 9,
+        };
+        assert_eq!(opening_bytes(request, None), Err(Error::Protocol));
+        for kind in [
+            Kind::ApproveView,
+            Kind::ApproveControl,
+            Kind::Open,
+            Kind::ApprovalCheck,
+        ] {
+            assert_eq!(
+                opening_bytes(Frame { kind, ..request }, Some(&context)),
+                Err(Error::Protocol)
+            );
+        }
+        let (bytes, count) = opening_bytes(request, Some(&context)).unwrap();
+        assert_eq!(count, FRAME_BYTES + CONTEXT_BYTES);
+        assert_eq!(Frame::decode(&bytes[..FRAME_BYTES]), Ok(request));
+        assert_eq!(
+            Context::decode(request, &bytes[FRAME_BYTES..count]),
+            Ok(context)
+        );
+        assert_eq!(
+            opening_bytes(
+                Frame {
+                    sequence: 2,
+                    ..request
+                },
+                Some(&Context::new("nPeer", None, Features::NONE, 1).unwrap())
+            ),
+            Err(Error::Protocol)
+        );
+    }
+
+    #[test]
+    fn actual_attributed_exchange_writes_exact_original_context_before_ready() {
+        let rt = super::super::tests::runtime();
+        let cx = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
+        let (original, _state) = super::super::tests::original(&cx, Role::Observe);
+        let shared = super::super::tests::shared(original);
+        let (command, mut child) = UnixStream::pair().unwrap();
+        let (signals, _signal_peer) = UnixDatagram::pair().unwrap();
+        command.set_nonblocking(true).unwrap();
+        signals.set_nonblocking(true).unwrap();
+        let context =
+            Context::new("nExactPeer", Some("peer.example"), Features::PLAYBACK, 2).unwrap();
+        let original_context = context.clone();
+        let request = Frame {
+            kind: Kind::ApproveViewDetails,
+            sequence: 1,
+            epoch: 9,
+        };
+        let peer = thread::spawn(move || {
+            child
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let mut header = [0; FRAME_BYTES];
+            child.read_exact(&mut header).unwrap();
+            assert_eq!(Frame::decode(&header), Ok(request));
+            let mut bytes = [0; CONTEXT_BYTES];
+            child.read_exact(&mut bytes).unwrap();
+            assert_eq!(Context::decode(request, &bytes), Ok(original_context));
+            for fragment in request.reply(Kind::Ready).encode().unwrap().chunks(3) {
+                child.write_all(fragment).unwrap();
+            }
+        });
+        let mut process = Process {
+            child: None,
+            command,
+            signals,
+            shared: &shared,
+        };
+        assert_eq!(
+            process.exchange(request, Some(&context), Instant::now() + REPLY_BUDGET),
+            Ok(None)
+        );
+        peer.join().unwrap();
+        assert!(
+            shared.original.check_pending().is_ok(),
+            "readiness and display labels are not consent"
+        );
     }
 }
