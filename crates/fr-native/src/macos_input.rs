@@ -399,6 +399,7 @@ pub struct MacPointer {
     position: Option<(f64, f64)>,
     prepared: Option<Operation>,
     prepared_text: Option<NativeText>,
+    permission_lost: bool,
 }
 
 // SAFETY: the event source is a Core Foundation object usable from any thread;
@@ -442,11 +443,17 @@ impl MacPointer {
             position: None,
             prepared: None,
             prepared_text: None,
+            permission_lost: false,
         })
     }
 
     pub const fn capabilities(&self) -> Capabilities {
         self.capabilities
+    }
+    /// Observed Accessibility loss permanently retires this original input
+    /// owner. A later OS permission grant requires a fresh authority owner.
+    pub const fn permission_lost(&self) -> bool {
+        self.permission_lost
     }
     /// Quartz has a standalone autorepeat key event.
     pub const fn repeat_requires_pair(&self) -> bool {
@@ -523,8 +530,17 @@ impl MacPointer {
         }
     }
 
-    fn prepare_native(&self, op: Operation) -> Result<(), PlatformError> {
+    fn prepare_native(&mut self, op: Operation) -> Result<(), PlatformError> {
         if !op.is_release() {
+            // Accessibility can be revoked after this owner starts or while
+            // an IPC request/native constructor is in flight. Check every
+            // positive operation without prompting. This query may block, so
+            // it must precede the final original-ticket check; release-only
+            // cleanup remains available after permission is lost.
+            if self.permission_lost || !access() {
+                self.permission_lost = true;
+                return Err(PlatformError::Permission);
+            }
             self.validate_target()?;
         }
         match op {
@@ -574,15 +590,7 @@ impl MacPointer {
                 scroll_pixels(x, y).ok_or(PlatformError::Unsupported)?;
                 self.action_point().map(drop)
             }
-            Operation::Text(scalar) => {
-                // A native permission query may block; perform it before the
-                // final original-ticket check, with no query between that
-                // check and the prepared positive submission.
-                if !access() {
-                    return Err(PlatformError::Permission);
-                }
-                CommittedScalar::new(scalar, self.held).map(drop)
-            }
+            Operation::Text(scalar) => CommittedScalar::new(scalar, self.held).map(drop),
             _ => Err(PlatformError::Unsupported),
         }
     }

@@ -59,6 +59,10 @@ struct State {
     live: usize,
     now: u64,
     constructor_time: u64,
+    access_time: u64,
+    access_queries: usize,
+    access_denied: bool,
+    revoke_access_on_create: bool,
     fail_create: bool,
     fail_location: bool,
     post_result: i32,
@@ -80,6 +84,7 @@ fn construct(event: Event, out: *mut *mut c_void) -> i32 {
         s.steps.push(Step::Construct(event.kind));
         s.now += s.constructor_time;
         s.display_changed |= s.change_display_on_create;
+        s.access_denied |= s.revoke_access_on_create;
         // SAFETY: the production owner supplies one writable out pointer.
         unsafe { *out = core::ptr::null_mut() };
         if s.fail_create {
@@ -230,6 +235,180 @@ fn a_display_change_during_native_construction_refuses_the_original_target() {
 }
 
 #[test]
+fn missing_accessibility_refuses_every_new_positive_preparation() {
+    for op in positives().into_iter().chain([Operation::Text('🦀')]) {
+        let mut pointer = open();
+        state(|s| s.access_denied = true);
+        assert_eq!(pointer.prepare(op), Err(PlatformError::Permission));
+        assert!(pointer.native_held().is_empty());
+        drop(pointer);
+        state(|s| {
+            assert!(s.posted.is_empty());
+            assert_eq!(s.live, 0);
+            assert!(
+                !s.steps.iter().any(|s| matches!(s, Step::Construct(_))),
+                "permission refusal must not invent an event or cleanup press"
+            );
+        });
+    }
+}
+
+#[test]
+fn accessibility_revoked_after_preparation_consumes_the_original_operation() {
+    for op in positives().into_iter().chain([Operation::Text('🦀')]) {
+        let mut pointer = open();
+        pointer.prepare(op).unwrap();
+        state(|s| s.access_denied = true);
+        assert_eq!(
+            pointer.submit_checked(op, |_| panic!("native permission was revoked")),
+            Ok::<_, ()>(Submission::NotSubmitted(PlatformError::Permission))
+        );
+        assert!(pointer.native_held().is_empty());
+        state(|s| s.access_denied = false);
+        assert_eq!(
+            pointer.submit(op),
+            Submission::NotSubmitted(PlatformError::Unsupported),
+            "restored permission cannot replay the refused preparation"
+        );
+        assert!(pointer.permission_lost());
+        assert_eq!(
+            pointer.prepare(op),
+            Err(PlatformError::Permission),
+            "restored OS permission cannot revive the original input lease"
+        );
+        drop(pointer);
+        state(|s| {
+            assert!(s.posted.is_empty());
+            assert_eq!(s.live, 0, "both retained text events must also retire");
+        });
+    }
+}
+
+#[test]
+fn accessibility_revoked_during_native_construction_refuses_the_positive_event() {
+    for op in positives() {
+        let mut pointer = open();
+        pointer.prepare(op).unwrap();
+        state(|s| s.revoke_access_on_create = true);
+        assert_eq!(
+            pointer.submit_checked(op, |_| panic!("native permission was revoked")),
+            Ok::<_, ()>(Submission::NotSubmitted(PlatformError::Permission))
+        );
+        assert!(pointer.native_held().is_empty());
+        drop(pointer);
+        state(|s| {
+            assert!(s.posted.is_empty());
+            assert_eq!(s.live, 0);
+        });
+    }
+}
+
+#[test]
+fn a_stalled_accessibility_query_spends_the_original_submission_deadline() {
+    for op in positives().into_iter().chain([Operation::Text('🦀')]) {
+        let mut pointer = open();
+        pointer.prepare(op).unwrap();
+        state(|s| s.access_time = 100);
+        assert_eq!(pointer.submit_checked(op, |_| check()), Err("expired"));
+        assert!(pointer.native_held().is_empty());
+        drop(pointer);
+        state(|s| {
+            assert!(s.posted.is_empty());
+            assert_eq!(s.live, 0);
+            assert!(s.steps.contains(&Step::Check));
+        });
+    }
+}
+
+#[test]
+fn revoked_accessibility_refuses_repeat_but_keeps_release_cleanup_available() {
+    let mut pointer = open();
+    let button = Operation::Button {
+        button: PointerButton::Primary,
+        pressed: true,
+    };
+    for op in [press(), button] {
+        pointer.prepare(op).unwrap();
+        assert_eq!(
+            pointer.submit_checked(op, |_| check()),
+            Ok(Submission::Submitted)
+        );
+    }
+    let held = pointer.native_held().words();
+    let repeat = Operation::Key {
+        key: PhysicalKey::new(0x04).unwrap(),
+        transition: KeyTransition::Repeat,
+    };
+    pointer.prepare(repeat).unwrap();
+    state(|s| s.access_denied = true);
+    assert_eq!(
+        pointer.submit_checked(repeat, |_| panic!("repeat is still a positive operation")),
+        Ok::<_, ()>(Submission::NotSubmitted(PlatformError::Permission))
+    );
+    assert_eq!(pointer.native_held().words(), held);
+    let queries = state(|s| s.access_queries);
+    let release = Operation::Key {
+        key: PhysicalKey::new(0x04).unwrap(),
+        transition: KeyTransition::Release,
+    };
+    pointer.prepare(release).unwrap();
+    assert_eq!(pointer.submit(release), Submission::Submitted);
+    assert!(
+        pointer.cleanup_native(),
+        "the held button still needs a release"
+    );
+    assert!(pointer.native_held().is_empty());
+    drop(pointer);
+    state(|s| {
+        assert_eq!(
+            s.access_queries, queries,
+            "cleanup must not wait on permission"
+        );
+        assert_eq!(s.posted.len(), 4, "two presses, two releases, no repeat");
+        assert_eq!(s.live, 0);
+    });
+}
+
+#[test]
+fn a_request_level_permission_refusal_does_not_revoke_native_permission() {
+    let mut pointer = open();
+    pointer.prepare(press()).unwrap();
+    assert_eq!(
+        pointer.submit_checked(press(), |_| check()),
+        Ok(Submission::Submitted)
+    );
+    assert_eq!(
+        pointer.prepare(Operation::Text('x')),
+        Err(PlatformError::Permission)
+    );
+    assert!(
+        !pointer.permission_lost(),
+        "text cannot borrow a held physical key"
+    );
+    let release = Operation::Key {
+        key: PhysicalKey::new(0x04).unwrap(),
+        transition: KeyTransition::Release,
+    };
+    pointer.prepare(release).unwrap();
+    assert_eq!(pointer.submit(release), Submission::Submitted);
+    pointer.prepare(Operation::Text('x')).unwrap();
+    assert_eq!(
+        pointer.submit_checked(Operation::Text('x'), |_| check()),
+        Ok(Submission::Submitted)
+    );
+    assert!(!pointer.permission_lost());
+    drop(pointer);
+    state(|s| {
+        assert_eq!(
+            s.posted.len(),
+            4,
+            "key down/up and committed scalar down/up"
+        );
+        assert_eq!(s.live, 0);
+    });
+}
+
+#[test]
 fn confirmed_post_refusal_preserves_only_the_original_held_state() {
     let mut pointer = open();
     pointer.prepare(press()).unwrap();
@@ -367,8 +546,17 @@ struct Display {
     origin_x: f64,
     origin_y: f64,
 }
-boundary!(fr_in_access() -> i32 { query(); 1 });
-boundary!(fr_in_request_access() -> i32 { query(); 1 });
+boundary!(fr_in_access() -> i32 {
+    query();
+    state(|s| {
+        s.now += s.access_time;
+        s.access_queries += 1;
+        i32::from(!s.access_denied)
+    })
+});
+boundary!(fr_in_request_access() -> i32 {
+    panic!("submission must never open an Accessibility permission prompt")
+});
 boundary!(fr_in_display_check(_display: *const Display) -> i32 {
     query();
     state(|s| if s.display_changed { -5 } else { 0 })
