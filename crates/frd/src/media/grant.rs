@@ -20,6 +20,7 @@ impl ObservationControl {
             self.cx.clone(),
             AdmissionGate {
                 tailnet: self.admission.clone(),
+                ..AdmissionGate::default()
             },
         ))
     }

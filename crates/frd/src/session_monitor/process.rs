@@ -26,7 +26,7 @@ fn live(shared: &Shared, child: &mut Child) -> Result<(), Error> {
 }
 fn wait(shared: &Shared, child: &mut Child, writing: bool, until: u64) -> Result<(), Error> {
     live(shared, child)?;
-    let until = until.min(shared.evidence().until_ns);
+    let until = until.min(shared.deadline()?);
     let remaining = Duration::from_nanos(until.saturating_sub(now_ns()?));
     let command = if writing {
         PollFd::new(child.stdin.as_ref().ok_or(Error::Pipe)?, PollFlags::OUT)

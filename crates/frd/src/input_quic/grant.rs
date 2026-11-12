@@ -158,7 +158,13 @@ impl GrantBroker {
         if input_routes.results.maximum < ticket_bytes(ticket_profile) {
             return Err(Error::InvalidRoutes);
         }
-        let (cx, admission) = observation.input_origin().map_err(Error::Media)?;
+        let (cx, mut admission) = observation.input_origin().map_err(Error::Media)?;
+        // Admission and final grant-send checks retain the same irreversible
+        // local lifetime as the native owner, including before it is launched.
+        admission.seat = Some(seat.clone());
+        if !admission.permitted() {
+            return Err(Error::Stopped);
+        }
         if let Some(lease) = &admission.tailnet {
             let endpoints = lease.addresses();
             if connection.addresses().map_err(Error::Transport)?

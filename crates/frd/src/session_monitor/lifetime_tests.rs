@@ -5,8 +5,12 @@ use std::time::Duration;
 
 const START: u64 = 1_000_000_000;
 
+mod retirement;
+
 fn shared(status: Status, last_ns: u64, until_ns: u64) -> Shared {
     Shared {
+        terminal: AtomicU16::new(0),
+        input: OnceLock::new(),
         evidence: Mutex::new(Evidence {
             status,
             until_ns,
@@ -38,7 +42,7 @@ fn assert_terminal(shared: &Shared, error: Error) {
         Err(error)
     );
     shared.stop(Error::Stopped);
-    assert_eq!(shared.evidence().status, Status::Stopped(error));
+    assert_eq!(shared.terminal(), Some(error));
 }
 
 #[test]

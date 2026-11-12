@@ -311,6 +311,26 @@ async fn accepted(c: Cx, h: Cx, delay: u64, synchronized: bool) {
 fn real_broker_grant_is_bound_to_input_without_inventing_presentation() {
     run(|c, h| accepted(c, h, 0, false));
 }
+
+#[test]
+fn retired_seat_ends_the_original_grant_broker_before_native_admission() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture(&c, &h)).await;
+        assert_eq!(
+            f.broker.service(f.host.io().unwrap().0, Some(target())),
+            Ok(Event::Idle)
+        );
+        assert!(!f.host.io().unwrap().0.is_closed());
+        f.seat.retire(StopReason::AuthorityEnded);
+        assert_eq!(
+            f.broker.service(f.host.io().unwrap().0, Some(target())),
+            Err(crate::input_quic::grant::Error::Stopped)
+        );
+        assert!(f.broker.request().is_none());
+        assert!(!f.seat.is_occupied());
+        assert_eq!(f.seat.retirement_reason(), Some(StopReason::AuthorityEnded));
+    });
+}
 #[test]
 fn delayed_local_approval_keeps_observation_and_clock_alive() {
     run(|c, h| accepted(c, h, 1_100_000, false));

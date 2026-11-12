@@ -405,6 +405,43 @@ fn control_stop_fences_an_in_flight_submit_and_hands_off_after_cleanup() {
     assert!(lines.iter().any(|l| l == "CLEANUP"));
 }
 
+/// Exercise the original process fence from a lifecycle owner, with no host
+/// service future present to translate that event into an input stop. Only the
+/// independent input Driver runs; the child is a protocol fixture, not Quartz.
+#[cfg(target_os = "linux")]
+pub(crate) fn entered_submit_stopped_by(seat: &Seat, reason: StopReason, stop: impl FnOnce(&Path)) {
+    let (mut agent, running, log) = start("fence-wait", seat);
+    agent
+        .submit(&bytes(0, press()), InputDelivery::Reliable)
+        .unwrap();
+    eventually(|| {
+        transcript(&log)
+            .iter()
+            .any(|line| line.starts_with("WAITING"))
+    });
+    stop(&log);
+    let result = receipt(&mut agent);
+    assert_eq!(result.outcome, InputOutcome::CancelledBeforeSubmission);
+    assert_eq!(result.submitted_operations, 0);
+    assert_eq!(agent.control().reason(), Some(reason));
+    let shutdown = running.finish();
+    assert_eq!(shutdown.reason, reason);
+    assert!(shutdown.handoff_safe(), "{shutdown:?}");
+    assert!(!seat.is_occupied());
+    let lines = transcript(&log);
+    assert!(lines.iter().any(|line| line == "FENCE"), "{lines:?}");
+    assert!(
+        lines.iter().any(|line| line.starts_with("SUBMIT-FENCED")),
+        "{lines:?}"
+    );
+    assert!(
+        lines.iter().all(|line| !line.starts_with("EFFECT")),
+        "{lines:?}"
+    );
+    assert!(lines.iter().any(|line| line == "CLEANUP"));
+    assert!(lines.iter().any(|line| line == "STOP"));
+}
+
 /// An indicator that ends without the local user (native failure, mapping
 /// expiry) is a native failure of the executor, never reported as the user's
 /// local revoke (fr-load-ends-cuqi).

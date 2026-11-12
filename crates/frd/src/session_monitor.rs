@@ -4,14 +4,15 @@
 //! expires original evidence on `CLOCK_BOOTTIME`, including across suspend.
 mod process;
 pub mod protocol;
+use crate::{input_agent::Seat, input_watchdog::StopReason};
 pub use protocol::{Platform, Selection, State};
 use std::{
     future::Future,
     path::PathBuf,
     pin::Pin,
     sync::{
-        Arc, Mutex, MutexGuard,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard, OnceLock,
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     task::{Context, Poll, Waker},
     thread::{self, JoinHandle},
@@ -40,6 +41,64 @@ pub enum Error {
     Native(State),
     Cleanup,
 }
+impl Error {
+    // Private, in-memory first-cause representation, never an IPC/wire code.
+    // One compare-exchange records the complete cause before any mutex wait.
+    const fn terminal_code(self) -> u16 {
+        match self {
+            Self::Selection => 1,
+            Self::Image => 2,
+            Self::Busy => 3,
+            Self::Spawn => 4,
+            Self::Clock => 5,
+            Self::Protocol => 6,
+            Self::Pipe => 7,
+            Self::ProcessExited => 8,
+            Self::OpeningExpired => 9,
+            Self::EvidenceExpired => 10,
+            Self::Stopped => 11,
+            Self::Cleanup => 12,
+            Self::Native(state) => 0x100 + state as u16,
+        }
+    }
+
+    const fn from_terminal(code: u16) -> Option<Self> {
+        Some(match code {
+            0 => return None,
+            1 => Self::Selection,
+            2 => Self::Image,
+            3 => Self::Busy,
+            4 => Self::Spawn,
+            5 => Self::Clock,
+            6 => Self::Protocol,
+            7 => Self::Pipe,
+            8 => Self::ProcessExited,
+            9 => Self::OpeningExpired,
+            10 => Self::EvidenceExpired,
+            11 => Self::Stopped,
+            12 => Self::Cleanup,
+            0x100 => Self::Native(State::Opening),
+            0x101 => Self::Native(State::Active),
+            0x102 => Self::Native(State::Locked),
+            0x103 => Self::Native(State::Inactive),
+            0x104 => Self::Native(State::Suspending),
+            0x105 => Self::Native(State::SessionUnavailable),
+            0x106 => Self::Native(State::IdentityChanged),
+            0x107 => Self::Native(State::ServiceUnavailable),
+            0x108 => Self::Native(State::UnsupportedSession),
+            0x109 => Self::Native(State::EvidenceExpired),
+            0x10a => Self::Native(State::Failed),
+            _ => Self::Protocol,
+        })
+    }
+
+    const fn input_stop_reason(self) -> StopReason {
+        match self {
+            Self::Native(State::Locked | State::Suspending) => StopReason::Suspended,
+            _ => StopReason::AuthorityEnded,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Opening,
@@ -67,13 +126,18 @@ pub fn now_ns() -> Result<u64, Error> {
         .ok_or(Error::Clock)
 }
 struct Shared {
+    terminal: AtomicU16,
+    // Exactly one local run's seat, bound before any grant. OnceLock::get never
+    // waits for a registrar; a racing registrar rechecks terminal after set.
+    input: OnceLock<Seat>,
     evidence: Mutex<Evidence>,
     waker: Mutex<Option<Waker>>,
     native_wake: crate::native_wait::Wake,
 }
-/// Status and its original time bounds have one serialization point. In
-/// particular, accepting a reply cannot refresh an expiry or overwrite a clock
-/// regression discovered by another reader between separate checks.
+/// Positive evidence and its original time bounds have one serialization point.
+/// Terminal causes have an earlier, independent atomic latch so a native stop
+/// never waits for this mutex. No positive reply can replace that terminal latch
+/// or refresh expiry/clock regression discovered under this evidence lock.
 struct Evidence {
     status: Status,
     until_ns: u64,
@@ -139,12 +203,26 @@ impl Evidence {
     }
 }
 impl Shared {
+    fn terminal(&self) -> Option<Error> {
+        Error::from_terminal(self.terminal.load(Ordering::Acquire))
+    }
+
+    fn latch(&self, error: Error) -> Error {
+        let code = error.terminal_code();
+        let first = self
+            .terminal
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire)
+            .err()
+            .unwrap_or(code);
+        Error::from_terminal(first).unwrap_or(Error::Protocol)
+    }
+
     fn evidence(&self) -> MutexGuard<'_, Evidence> {
         match self.evidence.lock() {
             Ok(evidence) => evidence,
             Err(poisoned) => {
                 let mut evidence = poisoned.into_inner();
-                evidence.stop(Error::Protocol);
+                evidence.status = Status::Stopped(self.latch(Error::Protocol));
                 evidence
             }
         }
@@ -159,26 +237,58 @@ impl Shared {
             w.wake();
         }
     }
-    fn stop(&self, error: Error) {
-        self.evidence().stop(error);
+    fn stop(&self, error: Error) -> Error {
+        let error = self.latch(error);
+        // Do not wait for evidence, admission, native work or a task wake before
+        // reaching the actual input authority and its installed process fence.
+        if let Some(seat) = self.input.get() {
+            seat.retire(error.input_stop_reason());
+        }
         self.native_wake.signal();
         self.wake();
+        error
     }
     fn status(&self) -> Status {
         self.status_with(now_ns)
     }
     fn status_with(&self, clock: impl FnOnce() -> Result<u64, Error>) -> Status {
+        if let Some(error) = self.terminal() {
+            return Status::Stopped(self.stop(error));
+        }
         let mut evidence = self.evidence();
-        if !matches!(evidence.status, Status::Stopped(_)) {
+        if let Some(error) = self.terminal() {
+            evidence.status = Status::Stopped(error);
+        } else if !matches!(evidence.status, Status::Stopped(_)) {
             let _ = evidence.check(clock());
         }
-        let status = evidence.status;
+        let status = match evidence.status {
+            Status::Stopped(error) => Status::Stopped(self.latch(error)),
+            status => status,
+        };
         drop(evidence);
-        if matches!(status, Status::Stopped(_)) {
-            self.native_wake.signal();
-            self.wake();
+        if let Some(error) = self.terminal() {
+            return Status::Stopped(self.stop(error));
         }
         status
+    }
+
+    /// A wait may use the original bound only after terminal/poisoned evidence
+    /// has reached the input fence. No native wait holds the evidence mutex.
+    fn deadline(&self) -> Result<u64, Error> {
+        if let Some(error) = self.terminal() {
+            return Err(self.stop(error));
+        }
+        let until = {
+            let evidence = self.evidence();
+            if let Status::Stopped(error) = evidence.status {
+                self.latch(error);
+            }
+            evidence.until_ns
+        };
+        match self.terminal() {
+            Some(error) => Err(self.stop(error)),
+            None => Ok(until),
+        }
     }
     fn accept(&self, reply: protocol::Reply, sent: u64) -> Result<(), Error> {
         self.accept_with(reply, sent, now_ns)
@@ -189,8 +299,19 @@ impl Shared {
         sent: u64,
         clock: impl FnOnce() -> Result<u64, Error>,
     ) -> Result<(), Error> {
+        if let Some(error) = self.terminal() {
+            return Err(self.stop(error));
+        }
+        // These replies can only end authority. They must not queue behind a
+        // concurrent evidence reader, nor lose their cause to a later clock or
+        // cleanup failure. Opening still needs the serialized phase check.
+        if !matches!(reply.state, State::Opening | State::Active) {
+            return Err(self.stop(Error::Native(reply.state)));
+        }
         let mut evidence = self.evidence();
-        let result = if let Status::Stopped(error) = evidence.status {
+        let result = if let Some(error) = self.terminal() {
+            Err(error)
+        } else if let Status::Stopped(error) = evidence.status {
             Err(error)
         } else {
             // Clock sampling, previous-expiry validation and reply publication
@@ -200,9 +321,12 @@ impl Shared {
                 .check(clock())
                 .and_then(|now| evidence.accept(reply, sent, now))
         };
+        if let Err(error) = result {
+            evidence.status = Status::Stopped(self.latch(error));
+        }
         drop(evidence);
-        if result.is_err() {
-            self.native_wake.signal();
+        if let Some(error) = self.terminal() {
+            return Err(self.stop(error));
         }
         self.wake();
         result
@@ -216,6 +340,25 @@ impl Control {
     }
     pub fn stop(&self) {
         self.0.stop(Error::Stopped);
+    }
+
+    /// Bind the one exact native-input seat before any grant. A terminal
+    /// monitor immediately retires a late registration; replacing the seat is
+    /// refused and retires the supplied replacement without touching custody.
+    pub(crate) fn bind_input(&self, seat: &Seat) -> Result<(), Error> {
+        if let Err(other) = self.0.input.set(seat.clone())
+            && !self.0.input.get().is_some_and(|old| old.same_owner(&other))
+        {
+            other.retire(StopReason::AuthorityEnded);
+            return Err(Error::Selection);
+        }
+        match self.status() {
+            Status::Opening | Status::Active if seat.retirement_reason().is_some() => {
+                Err(Error::Stopped)
+            }
+            Status::Opening | Status::Active => Ok(()),
+            Status::Stopped(error) => Err(error),
+        }
     }
     pub fn register(&self, task: &Context<'_>) {
         let mut w = self
@@ -278,6 +421,8 @@ impl Monitor {
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| Error::Busy)?;
         let shared = Arc::new(Shared {
+            terminal: AtomicU16::new(0),
+            input: OnceLock::new(),
             evidence: Mutex::new(Evidence {
                 status: Status::Opening,
                 until_ns: until,

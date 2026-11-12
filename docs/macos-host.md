@@ -75,6 +75,13 @@ block; none can consume an already-checked action lifetime and then post the
 action. After authorization, the agent posts only the event it already owns.
 An expired or revoked action releases that event without posting or retrying it.
 
+Every positive operation also rechecks Accessibility permission without
+prompting, after native preparation and before the final deadline check. An
+observed loss permanently retires the original native input owner; restoring
+the OS permission cannot revive its lease or replay a retained operation.
+Release-only cleanup of its held keys and buttons remains available. A stalled
+permission query spends the original action budget.
+
 Deadline translation retains the original executor's correlation to Darwin's
 sleep-inclusive clock. It cannot give a pre-suspend action more time after the
 runtime wakes. The same clock is checked after native event preparation; the
@@ -243,6 +250,15 @@ file lanes, and stop observation/capture. It reports a typed cause such as
 `session_inactive`, `session_suspending`, `session_ended`,
 `session_identity_changed` or `session_evidence_lost`. The normal service manager
 may start a new host process; no prior remote input lease is restored.
+
+The original monitor binds the host run's exact input Seat before any grant.
+Publishing a terminal event permanently retires that Seat and reaches the
+active input process fence directly, before waiting for a broker poll or a
+contended evidence/admission lock. Pending grants, control renewal and final
+native submission retain the same retirement gate. Late registration and
+completed cleanup cannot reopen it. The original driver still owns held-input
+release, native destruction and receipts; fencing alone does not certify
+cleanup or roll back an operation already submitted.
 
 **Graphical screen-lock detection remains unqualified.** Public CoreGraphics
 console properties contain no documented lock flag. Protected-data availability

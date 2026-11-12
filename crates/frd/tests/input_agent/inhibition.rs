@@ -176,3 +176,109 @@ fn abandoning_consent_does_not_clear_uncertain_native_cleanup() {
     let guard = seat.inhibit().unwrap();
     assert!(!guard.is_ready(), "another prompt must still wait/refuse");
 }
+
+#[test]
+fn permanent_retirement_releases_held_input_and_retains_the_completed_receipt() {
+    let rt = runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let seat = Seat::default();
+    let effects = trace();
+    let native = effects.clone();
+    let (entered, waiting) = mpsc::sync_channel(1);
+    let (resume, blocked) = mpsc::sync_channel(1);
+    let (mut agent, driver) = seat
+        .start(
+            cx.clone(),
+            session(&cx, 3_000_000),
+            route(),
+            move || {
+                let mut sink = Sink::new(native);
+                sink.drop_block = Some((entered, blocked));
+                Ok(sink)
+            },
+            clean,
+        )
+        .unwrap();
+    agent
+        .submit(&bytes(0, key(true)), InputDelivery::Reliable)
+        .unwrap();
+    let first = submitted(reply(&mut agent));
+    assert_eq!(first.outcome, InputOutcome::SubmittedToOs);
+    seat.retire(StopReason::AuthorityEnded);
+    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert!(
+        !effects.held.load(Ordering::Acquire),
+        "the held key was released"
+    );
+    assert!(seat.is_occupied(), "native destruction still owns the seat");
+    assert_eq!(agent.control().reason(), Some(StopReason::AuthorityEnded));
+    assert_eq!(
+        agent.submit(&bytes(1, key(true)), InputDelivery::Reliable),
+        Err(Error::Stopped)
+    );
+    resume.send(()).unwrap();
+    assert!(rt.block_on(driver).handoff_safe());
+    assert!(
+        !seat.is_occupied(),
+        "cleanup completed without reopening authority"
+    );
+    assert_eq!(effects.effects.lock().unwrap().len(), 2);
+    assert_eq!(first.submitted_operations, 1, "cleanup is not rollback");
+    assert_eq!(seat.retirement_reason(), Some(StopReason::AuthorityEnded));
+    assert!(matches!(
+        seat.clone().start(
+            cx.clone(),
+            session(&cx, 3_000_000),
+            route(),
+            || -> Result<Sink, PlatformError> { panic!("retired seat relaunched") },
+            clean,
+        ),
+        Err(Error::SeatInhibited)
+    ));
+}
+
+#[test]
+fn permanent_retirement_preserves_an_earlier_control_reason_and_uncertain_cleanup() {
+    let rt = runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    let seat = Seat::default();
+    let effects = trace();
+    effects.clean.store(false, Ordering::Release);
+    let native = effects.clone();
+    let (mut agent, driver) = seat
+        .start(
+            cx.clone(),
+            session(&cx, 3_000_000),
+            route(),
+            move || Ok(Sink::new(native)),
+            clean,
+        )
+        .unwrap();
+    agent
+        .submit(&bytes(0, key(true)), InputDelivery::Reliable)
+        .unwrap();
+    let first = submitted(reply(&mut agent));
+    agent.control().stop(StopReason::LocalRevoke);
+    seat.retire(StopReason::AuthorityEnded);
+    eventually(|| agent.status().cleanup.is_some());
+    assert_eq!(agent.control().reason(), Some(StopReason::LocalRevoke));
+    assert_eq!(seat.retirement_reason(), Some(StopReason::AuthorityEnded));
+    assert!(seat.is_occupied());
+    drop(driver);
+    eventually(|| effects.drops.load(Ordering::Acquire) == 1);
+    assert!(
+        seat.is_occupied(),
+        "abandonment cannot certify native cleanup"
+    );
+    assert_eq!(first.submitted_operations, 1);
+    assert!(matches!(
+        seat.start(
+            cx.clone(),
+            session(&cx, 3_000_000),
+            route(),
+            || -> Result<Sink, PlatformError> { panic!("uncertain retired seat relaunched") },
+            clean,
+        ),
+        Err(Error::SeatInhibited)
+    ));
+}

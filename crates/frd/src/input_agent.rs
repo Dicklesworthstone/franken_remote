@@ -105,6 +105,7 @@ impl Seat {
             native_cleanup,
             AdmissionGate {
                 tailnet: Some(admission),
+                ..AdmissionGate::default()
             },
         )
     }
@@ -117,7 +118,7 @@ impl SeatReservation {
         route: Route,
         factory: F,
         native_cleanup: C,
-        admission: AdmissionGate,
+        mut admission: AdmissionGate,
     ) -> Result<(Agent, Driver), Error>
     where
         S: InputSink + 'static,
@@ -129,6 +130,10 @@ impl SeatReservation {
         // Register before spawning: an approval barrier either sees and fences
         // this exact owner or invalidates its pre-existing reservation.
         self.seat.install(self.epoch, &control)?;
+        // Keep the original seat in every later admission copy, including the
+        // moved control renewer. A retirement racing registration is checked
+        // again before native initialization and after every native preparation.
+        admission.seat = Some(self.seat.clone());
         #[cfg(native_stack)]
         let input_scope = {
             // Only the immutable session/view are retained. This does not issue
@@ -366,16 +371,27 @@ struct Mailbox {
 pub(crate) struct AdmissionGate {
     #[cfg(native_stack)]
     pub(crate) tailnet: Option<fr_tailnet::Lease>,
+    pub(crate) seat: Option<Seat>,
 }
 impl AdmissionGate {
-    // Off Linux there is no tailnet lease field to consult.
-    #[cfg_attr(not(native_stack), allow(clippy::unused_self))]
+    #[cfg(native_stack)]
     pub(crate) fn permitted(&self) -> bool {
-        #[cfg(native_stack)]
-        if let Some(lease) = &self.tailnet {
-            return lease.control().is_ok();
+        self.stop_reason().is_none()
+    }
+
+    fn stop_reason(&self) -> Option<StopReason> {
+        if let Some(reason) = self.seat.as_ref().and_then(Seat::retirement_reason) {
+            return Some(reason);
         }
-        true
+        #[cfg(native_stack)]
+        if self
+            .tailnet
+            .as_ref()
+            .is_some_and(|lease| lease.control().is_err())
+        {
+            return Some(StopReason::AuthorityEnded);
+        }
+        None
     }
 }
 struct Shared {
@@ -387,8 +403,8 @@ impl Shared {
     fn check_admission(&self) {
         // Only a finite in-memory gate is checked here; no LocalAPI I/O or
         // mailbox lock. Revocation precedes waking/draining the native owner.
-        if !self.admission.permitted() {
-            self.control.stop(StopReason::AuthorityEnded);
+        if let Some(reason) = self.admission.stop_reason() {
+            self.control.stop(reason);
         }
     }
     fn lock(&self) -> std::sync::MutexGuard<'_, Mailbox> {
@@ -849,6 +865,20 @@ fn native_loop<S: InputSink, F: FnOnce() -> Result<S, PlatformError>, C: FnMut(&
     mut native_cleanup: C,
     shared: &Shared,
 ) -> Exit {
+    shared.check_admission();
+    if shared.control.is_stopped() {
+        if shared.lock().outstanding {
+            shared.reply(Reply::CancelledBeforeStart);
+        }
+        return Exit {
+            cleanup: Some(Cleanup {
+                submitted_releases: 0,
+                remaining: 0,
+            }),
+            native_clean: true,
+            panicked: false,
+        };
+    }
     let mut sink = match factory() {
         Ok(s) => s,
         Err(error) => {

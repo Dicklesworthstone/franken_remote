@@ -1086,6 +1086,12 @@ fn serve_run(
 ) -> Result<(), Error> {
     // One Seat per run: an uncertain release keeps later control refused.
     let seat = Seat::default();
+    // The read-only monitor independently fences entered native input, even
+    // while this host future is waiting or has not been polled again. The same
+    // seat remains permanently retired through the original cleanup path.
+    if let Some(lifetime) = lifetime {
+        lifetime.bind_input(&seat).map_err(Error::SessionMonitor)?;
+    }
     let runtime = RuntimeBuilder::new()
         .worker_threads(2)
         .enable_platform_reactor(true)
