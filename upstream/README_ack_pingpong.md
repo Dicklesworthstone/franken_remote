@@ -1,7 +1,8 @@
 # asupersync: ACK ping-pong between bounded-window peers (landed as fa43c85f4)
 
 Status: landed on asupersync main as fa43c85f4 (2026-11-11). FrankenRemote
-pins 079214d3f, which contains it, since dcb31f51. The diff below is the
+has pinned revisions that contain it since dcb31f51 (079214d3f, then
+becc05376). The diff below is the
 October prototype, kept as the record.
 
 - The hub late-joins failure under Evidence was a test-harness bug: the

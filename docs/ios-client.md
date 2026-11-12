@@ -110,15 +110,15 @@ unchanged.
 
 ### Asupersync on iOS
 
-Asupersync's kqueue reactor is gated to macOS and the BSDs; on iOS the
-runtime silently fell back to a polling path. Measured on the iOS simulator:
-500 UDP round trips took 1.72 s unpatched and 21.5 ms with kqueue. The fix is
-upstream-only: add `target_os = "ios"` beside `target_os = "macos"` in the
-reactor's platform lists, 6 sites in `src/runtime/reactor/mod.rs` and 5 in
-`src/runtime/reactor/macos.rs` (pinned revision 079214d3f). Until it lands the
-iOS build uses a patched copy through an untracked cargo config
-(`FR_CARGO_CONFIG` for `mobile/ios/scripts/build-rust.sh`); the workspace pin
-is unchanged.
+Before becc05376, Asupersync gated its kqueue reactor to macOS and the BSDs.
+On iOS the runtime fell back to timer-paced polling, re-polling every socket
+each millisecond. Measured on the iOS simulator: 500 UDP round trips took
+1.72 s that way and 21.5 ms with kqueue. While parked for 1 s on one receive,
+the process spent 41.5-42.4 ms of CPU before the fix and 0.64-0.86 ms after.
+becc05376 (the workspace pin) adds `target_os = "ios"` beside
+`target_os = "macos"` in the reactor's platform lists, so the iOS build uses
+the pinned revision as is. `FR_CARGO_CONFIG` (for
+`mobile/ios/scripts/build-rust.sh`) stays available for a local `[patch]`.
 
 ## The C ABI
 
@@ -269,8 +269,7 @@ xcodebuild -project FrankenRemote.xcodeproj -scheme FrankenRemote \
 ```
 
 Requirements: Xcode with the iOS SDK, the workspace's Rust toolchain with the
-`aarch64-apple-ios` and `aarch64-apple-ios-sim` targets, and (until the
-Asupersync change lands) the patched Asupersync through `FR_CARGO_CONFIG`.
+`aarch64-apple-ios` and `aarch64-apple-ios-sim` targets.
 Device installs need the user's own signing team.
 
 The unit tests (`cargo test`, `xcodebuild test`) cover the decoder, the ABI,
