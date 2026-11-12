@@ -481,6 +481,22 @@ impl Bridge {
         }
         Ok(())
     }
+    /// Take the worker's next item when a send slot is free and no accepted
+    /// handoff still waits to release the outbox. A contended lock retries on
+    /// a later turn.
+    fn take_handoff(&mut self) -> Result<(), Error> {
+        if self.pending.is_none()
+            && !self.release_outbox
+            && self.inflight.iter().any(Option::is_none)
+        {
+            match self.shared.outbox.try_lock() {
+                Ok(mut outbox) => self.pending = outbox.item.take(),
+                Err(std::sync::TryLockError::WouldBlock) => {}
+                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
+            }
+        }
+        Ok(())
+    }
     /// Bounded network turn. Native work happens only in `Worker::step`/`WorkerSeed::spawn`;
     /// dispatch callbacks copy one bounded record with a fixed ingress deadline.
     pub fn service(
@@ -502,16 +518,7 @@ impl Bridge {
             return Ok(state);
         }
         self.release_handoff()?;
-        if self.pending.is_none()
-            && !self.release_outbox
-            && self.inflight.iter().any(Option::is_none)
-        {
-            match self.shared.outbox.try_lock() {
-                Ok(mut outbox) => self.pending = outbox.item.take(),
-                Err(std::sync::TryLockError::WouldBlock) => {}
-                Err(std::sync::TryLockError::Poisoned(_)) => return Err(Error::Poisoned),
-            }
-        }
+        self.take_handoff()?;
         if let Err(reason) = self.admission() {
             let state = self.on_refusal(q, reason)?;
             turn.complete();

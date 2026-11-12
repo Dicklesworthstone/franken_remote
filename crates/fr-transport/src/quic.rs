@@ -769,7 +769,7 @@ impl QuicRecords {
     /// admission: a record already past it is refused. An admitted reliable
     /// record must then be staged and acknowledged by max(send-by, admission +
     /// [`delivery_allowance_us`] for this path). Between settled native I/O
-    /// operations, expiry retires an ACTIVE Clipboard, Files or FilesDownload
+    /// operations, expiry retires an ACTIVE Clipboard, Files or `FilesDownload`
     /// pair; other retained expiry closes the connection. Expiry during native
     /// I/O always closes it. A late acknowledgement is a slow path, not a stale
     /// record: receivers judge

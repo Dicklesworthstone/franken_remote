@@ -352,12 +352,12 @@ fn expired_queued_file_offer_preserves_the_original_controller_and_input() {
                 while now(&c).unwrap() < refreshed {
                     drive(&mut state, &c, &h, &mut n, &mut t).await;
                 }
-                let expired = SendError::Transport(quic::Error::SendExpired);
-                assert_eq!(state.viewer.file_send_failure(), Some(expired));
+                let send_failure = SendError::Transport(quic::Error::SendExpired);
+                assert_eq!(state.viewer.file_send_failure(), Some(send_failure));
                 let receipt = state.viewer.file_result().unwrap();
                 assert_eq!(
                     receipt.outcome,
-                    Outcome::InterruptedBeforePublication(expired)
+                    Outcome::InterruptedBeforePublication(send_failure)
                 );
                 assert_eq!(state.viewer.try_finish_file_send_cleanup(), Some(Ok(())));
                 assert_eq!(fs::read_dir(&destination.0).unwrap().count(), 0);

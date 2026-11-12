@@ -205,7 +205,10 @@ fn expired_retained_payload_cleans_real_staging_and_preserves_the_original_contr
         assert!(f.client.send_expired(&f.link.c));
         assert!(!f.client.receive_expired(&f.link.c));
         retire_remote_receiver(&mut f, &cx).await;
-        assert!(super::super::receive_cleanup::staged_handles(&f.path).is_empty());
+        assert_eq!(
+            super::super::receive_cleanup::staged_handles(&f.path),
+            [] as [std::path::PathBuf; 0]
+        );
         assert_eq!(fs::read_dir(&f.path).unwrap().count(), 1);
         assert!(!f.path.join("received").exists());
         assert!(!f.path.join("retry").exists());
