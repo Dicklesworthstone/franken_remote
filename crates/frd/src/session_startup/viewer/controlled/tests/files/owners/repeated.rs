@@ -145,10 +145,12 @@ fn selections_on_the_original_lane(deferred: bool) {
                     .unwrap()
                     .request()
                     .unwrap();
-                expired.lifetime = Duration::from_micros(1);
+                // Admitted, then expired while queued: the intake refuses a
+                // request already past its deadline at submit (6cc7114c).
+                expired.lifetime = Duration::from_millis(10);
                 let late = intake.submit(expired).unwrap();
                 asupersync::time::sleep_until(asupersync::types::Time::from_nanos(
-                    (now(&c).unwrap() + 2_000) * 1000,
+                    (now(&c).unwrap() + 20_000) * 1000,
                 ))
                 .await;
                 viewer.viewer(&mut state.viewer);

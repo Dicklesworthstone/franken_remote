@@ -121,10 +121,12 @@ fn idle_host_lane_sends_later_batches_without_replaying_handles_or_extending_a_d
                 );
 
                 let mut request = selected(&source, "late");
-                request.lifetime = Duration::from_micros(1);
+                // Admitted, then expired while queued: the intake refuses a
+                // request already past its deadline at submit (6cc7114c).
+                request.lifetime = Duration::from_millis(10);
                 let expired = intake.submit(request).unwrap();
                 asupersync::time::sleep_until(asupersync::types::Time::from_nanos(
-                    (now(&h).unwrap() + 2_000) * 1000,
+                    (now(&h).unwrap() + 20_000) * 1000,
                 ))
                 .await;
                 lane.host(&mut state.host, view, &mut tickets);
