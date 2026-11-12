@@ -70,7 +70,6 @@ impl Error {
             3 => Self::Busy,
             4 => Self::Spawn,
             5 => Self::Clock,
-            6 => Self::Protocol,
             7 => Self::Pipe,
             8 => Self::ProcessExited,
             9 => Self::OpeningExpired,
@@ -88,6 +87,7 @@ impl Error {
             0x108 => Self::Native(State::UnsupportedSession),
             0x109 => Self::Native(State::EvidenceExpired),
             0x10a => Self::Native(State::Failed),
+            // Code 6 is Protocol; unknown private encodings fail the same way.
             _ => Self::Protocol,
         })
     }

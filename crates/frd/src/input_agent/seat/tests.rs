@@ -179,16 +179,16 @@ fn retirement_reaches_entered_native_submit_with_admission_and_reader_held() {
         let reader = seat.0.active.read().unwrap();
         let retiring = seat.clone();
         let (done, result) = mpsc::sync_channel(1);
-        let stopper = thread::spawn(move || {
+        let worker = thread::spawn(move || {
             retiring.retire(StopReason::Suspended);
             done.send(()).unwrap();
         });
-        let stopped = result.recv_timeout(Duration::from_secs(1));
+        let completion = result.recv_timeout(Duration::from_secs(1));
         drop(reader);
         drop(admission);
-        stopper.join().unwrap();
+        worker.join().unwrap();
         assert!(
-            stopped.is_ok(),
+            completion.is_ok(),
             "native fence waited for an unrelated seat lock"
         );
     });

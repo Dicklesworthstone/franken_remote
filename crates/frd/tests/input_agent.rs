@@ -273,6 +273,7 @@ fn controller_reservation_survives_blocking_native_destructor() {
     let seat = Seat::default();
     let (tx, rx) = mpsc::sync_channel(1);
     let (resume, wait) = mpsc::sync_channel(1);
+    let (ready, constructed) = mpsc::sync_channel(1);
     let (a, d) = seat
         .start(
             cx.clone(),
@@ -281,12 +282,16 @@ fn controller_reservation_survives_blocking_native_destructor() {
             move || {
                 let mut s = Sink::new(factory);
                 s.drop_block = Some((tx, wait));
+                ready.send(()).unwrap();
                 Ok(s)
             },
             clean,
         )
         .unwrap();
     let runner = Runner::start(r, d);
+    // This case owns a constructed sink with an entered destructor later.
+    // Cancellation before factory entry correctly creates no sink to destroy.
+    constructed.recv_timeout(Duration::from_secs(2)).unwrap();
     a.control().stop(StopReason::Suspended);
     rx.recv_timeout(Duration::from_secs(2)).unwrap();
     assert!(seat.is_occupied());
@@ -434,17 +439,26 @@ fn driver_drop_before_first_poll_stops_the_native_owner_and_cleans_up() {
     let seat = Seat::default();
     let trace_state = trace();
     let factory = trace_state.clone();
+    let (ready, constructed) = mpsc::sync_channel(1);
     let (a, d) = seat
         .start(
             cx.clone(),
             session(&cx, 3_000_000),
             route(),
-            move || Ok(Sink::new(factory)),
+            move || {
+                let sink = Sink::new(factory);
+                ready.send(()).unwrap();
+                Ok(sink)
+            },
             clean,
         )
         .unwrap();
+    // Native initialization is independent of Driver polling. Establish that
+    // this case has a real sink before abandoning the still-unpolled Driver.
+    constructed.recv_timeout(Duration::from_secs(2)).unwrap();
     drop(d);
     assert!(a.control().is_stopped());
+    assert_eq!(a.control().reason(), Some(StopReason::ClientDisconnected));
     eventually(|| !seat.is_occupied());
     assert_eq!(trace_state.drops.load(Ordering::Acquire), 1);
 }

@@ -42,7 +42,7 @@ jobs:
       - name: Install native X11 test prerequisites
         run: |
           sudo apt-get update
-          sudo apt-get install -y libx11-dev libxcb1-dev libxtst6 libxi6 xvfb xauth xfonts-base pkg-config
+          sudo apt-get install -y libx11-dev libxcb1-dev libxtst6 libxi6 libxrandr2 xvfb xauth xfonts-base pkg-config
       - name: Fixed-size read-only IPC regressions
         run: cargo test -p fr-core indicator_process --locked
       - name: Original host lifetime and real subprocess regressions
@@ -50,7 +50,9 @@ jobs:
           cargo test -p frd --lib host_indicator --locked
           cargo test -p frd --lib retirement --locked -- --test-threads=1
           cargo test -p frd --lib retired_seat_ends_the_original_grant_broker --locked
-          cargo test -p frd --test input_agent retirement --locked -- --test-threads=1
+          cargo test -p frd --test input_agent --locked -- --test-threads=1
+      - name: Check host lifecycle code and test targets without warning exemptions
+        run: cargo clippy -p frd --lib --tests --locked -- -D warnings
       - name: Original desktop consent and unchanged active-session deadlines
         run: |
           cargo test -p frd --lib desktop_approval --locked
@@ -78,6 +80,11 @@ jobs:
           cargo test -p fr-native --no-default-features --features linux-input --lib sharing_indicator::microphone --locked
           cargo test -p fr-native --no-default-features --features linux-input --lib approval_surface --locked
           cargo test -p fr-native --no-default-features --features linux-input --bin fr-observation-indicator --locked
+      - name: Preserve custody after entered native initialization is cancelled
+        run: |
+          cargo test -p fr-native --no-default-features --features linux-input-agent --test input_quic --locked broker::changed_view_and_abandoned_unpolled_io_revoke_without_early_seat_release -- --exact --test-threads=1
+          cargo test -p fr-native --no-default-features --features linux-input-agent --test input_quic --locked broker::late_local_denial_revokes_a_pending_native_grant -- --exact --test-threads=1
+          cargo clippy -p fr-native --no-default-features --features linux-input-agent --test input_quic --locked -- -D warnings
       - name: Require real native child mapping and process retirement
         run: |
           FR_OBSERVATION_INDICATOR_REQUIRED=1 xvfb-run -a -s '-screen 0 1280x1024x24 -noreset -nolisten tcp' \

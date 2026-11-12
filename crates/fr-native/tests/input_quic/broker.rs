@@ -517,6 +517,14 @@ impl InputSink for EmptySink {
         panic!("no grant, no native input")
     }
 }
+
+async fn wait_for_factory(cx: &Cx, entered: &AtomicBool) {
+    let until = Instant::now() + Duration::from_secs(2);
+    while !entered.load(Ordering::Acquire) {
+        assert!(Instant::now() < until, "native factory was not entered");
+        asupersync::time::sleep(cx.now(), Duration::from_millis(1)).await;
+    }
+}
 #[test]
 fn blocked_initialization_expires_without_grant_and_keeps_seat_until_native_destruction() {
     run(|cx, _second| async move {
@@ -548,9 +556,7 @@ fn blocked_initialization_expires_without_grant_and_keeps_seat_until_native_dest
             )
             .unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
-            while !entered.load(Ordering::Acquire) {
-                asupersync::time::sleep(s.cx.now(), Duration::from_millis(1)).await;
-            }
+            wait_for_factory(&s.cx, &entered).await;
             assert_eq!(
                 s.broker
                     .service(&mut s.pair.server, Some(s.request.target))
@@ -583,6 +589,8 @@ fn watchdog_revokes_blocked_initialization_without_broker_service() {
         let mut s = Setup::new(cx, Seat::default(), policy, true).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
+        let entered = Arc::new(AtomicBool::new(false));
+        let worker = entered.clone();
         let driver = s
             .broker
             .approve(
@@ -590,12 +598,17 @@ fn watchdog_revokes_blocked_initialization_without_broker_service() {
                 s.request.target,
                 || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
                 move || {
+                    worker.store(true, Ordering::Release);
                     let _ = rx.recv();
                     Ok(EmptySink)
                 },
                 |_| true,
             )
             .unwrap();
+        // This case measures watchdog revocation of an entered native call.
+        // Keep its original short lease/ticket, but establish entry before the
+        // first Driver poll can validly cancel a not-yet-started factory.
+        wait_for_factory(&s.cx, &entered).await;
         let (shutdown, ()) = Box::pin(network::both(driver, async {
             let end = Instant::now() + Duration::from_secs(1);
             while !s.broker.native_status().unwrap().stopped {
@@ -654,6 +667,8 @@ fn changed_view_and_abandoned_unpolled_io_revoke_without_early_seat_release() {
             let mut s = Setup::default(cx).await;
             s.request().await;
             let (tx, rx) = mpsc::channel();
+            let entered = Arc::new(AtomicBool::new(false));
+            let worker = entered.clone();
             let driver = s
                 .broker
                 .approve(
@@ -661,6 +676,7 @@ fn changed_view_and_abandoned_unpolled_io_revoke_without_early_seat_release() {
                     s.request.target,
                     || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
                     move || {
+                        worker.store(true, Ordering::Release);
                         let _ = rx.recv();
                         Ok(EmptySink)
                     },
@@ -668,6 +684,7 @@ fn changed_view_and_abandoned_unpolled_io_revoke_without_early_seat_release() {
                 )
                 .unwrap();
             let (shutdown, ()) = Box::pin(network::both(driver, async {
+                wait_for_factory(&s.cx, &entered).await;
                 if abandoned {
                     drop(s.broker.drive(&mut s.pair.server, Duration::from_millis(1)));
                 } else {
@@ -997,6 +1014,8 @@ fn late_local_denial_revokes_a_pending_native_grant() {
         let mut s = Setup::default(cx).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
+        let entered = Arc::new(AtomicBool::new(false));
+        let worker = entered.clone();
         let driver = s
             .broker
             .approve(
@@ -1004,6 +1023,7 @@ fn late_local_denial_revokes_a_pending_native_grant() {
                 s.request.target,
                 || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
                 move || {
+                    worker.store(true, Ordering::Release);
                     let _ = rx.recv();
                     Ok(EmptySink)
                 },
@@ -1011,6 +1031,7 @@ fn late_local_denial_revokes_a_pending_native_grant() {
             )
             .unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
+            wait_for_factory(&s.cx, &entered).await;
             s.broker.deny();
             assert!(s.broker.native_status().unwrap().stopped);
             assert!(s.seat.is_occupied());
@@ -1031,6 +1052,8 @@ fn publication_rejects_already_buffered_input_without_requiring_another_receive_
         let mut s = Setup::default(cx).await;
         s.request().await;
         let (tx, rx) = mpsc::channel();
+        let entered = Arc::new(AtomicBool::new(false));
+        let worker = entered.clone();
         let driver = s
             .broker
             .approve(
@@ -1038,6 +1061,7 @@ fn publication_rejects_already_buffered_input_without_requiring_another_receive_
                 s.request.target,
                 || Some((InputLeaseId::from_raw(20), InputTicketId::from_raw(30))),
                 move || {
+                    worker.store(true, Ordering::Release);
                     let _ = rx.recv();
                     Ok(EmptySink)
                 },
@@ -1045,6 +1069,7 @@ fn publication_rejects_already_buffered_input_without_requiring_another_receive_
             )
             .unwrap();
         let (shutdown, ()) = Box::pin(network::both(driver, async {
+            wait_for_factory(&s.cx, &entered).await;
             let req = InputRequest {
                 credentials: credentials(),
                 sequence: 0,

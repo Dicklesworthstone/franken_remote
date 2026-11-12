@@ -89,14 +89,14 @@ fn stop_does_not_wait_for_an_unfinished_registration_and_the_registrar_rechecks(
     });
     waiting.recv_timeout(Duration::from_secs(1)).unwrap();
     let stopping = monitor.clone();
-    let (done, stopped) = mpsc::sync_channel(1);
-    let stopper = thread::spawn(move || {
+    let (done, completion) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
         done.send(stopping.0.stop(Error::Native(State::SessionUnavailable)))
             .unwrap();
     });
-    let result = stopped.recv_timeout(Duration::from_secs(1));
+    let result = completion.recv_timeout(Duration::from_secs(1));
     resume.send(()).unwrap();
-    stopper.join().unwrap();
+    worker.join().unwrap();
     let bound = registrar.join().unwrap();
     assert_eq!(result.unwrap(), Error::Native(State::SessionUnavailable));
     assert_eq!(bound, Err(Error::Native(State::SessionUnavailable)));
@@ -123,15 +123,15 @@ fn first_native_cause_survives_a_poisoned_reader_and_later_clock_failures() {
     });
     waiting.recv_timeout(Duration::from_secs(1)).unwrap();
     let stopping = monitor.clone();
-    let (done, stopped) = mpsc::sync_channel(1);
-    let stopper = thread::spawn(move || {
+    let (done, completion) = mpsc::sync_channel(1);
+    let worker = thread::spawn(move || {
         done.send(stopping.0.stop(Error::Native(State::Inactive)))
             .unwrap();
     });
-    let result = stopped.recv_timeout(Duration::from_secs(1));
+    let result = completion.recv_timeout(Duration::from_secs(1));
     resume.send(()).unwrap();
     assert!(poison.join().is_err());
-    stopper.join().unwrap();
+    worker.join().unwrap();
     assert_eq!(result.unwrap(), Error::Native(State::Inactive));
     assert_eq!(seat.retirement_reason(), Some(StopReason::AuthorityEnded));
     assert_eq!(

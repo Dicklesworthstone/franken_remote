@@ -1149,6 +1149,8 @@ fn ticket_reply(
 #[cfg(test)]
 mod reservation_tests {
     use super::*;
+    use fr_core::input_submission::{Operation, Submission};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn broker_reservation_excludes_all_seat_clones_before_authority_is_created() {
@@ -1177,23 +1179,13 @@ mod reservation_tests {
         assert!(!seat.is_occupied());
     }
 
-    #[test]
-    fn consent_invalidates_a_prepared_grant_even_after_the_prompt_is_gone() {
+    fn input() -> (asupersync::runtime::Runtime, Cx, InputSession) {
         use fr_core::{
             authority::{AuthorityPolicy, SessionAuthority},
             ids::{InputLeaseId, RemoteSessionId},
             input::{DesktopPoint, InputBounds, InputCredentials, InputView},
-            input_submission::{Capabilities, Operation, Submission},
+            input_submission::Capabilities,
         };
-        struct NeverStarted;
-        impl InputSink for NeverStarted {
-            fn prepare(&mut self, _: Operation) -> Result<(), PlatformError> {
-                panic!("old reservation must not acquire a sink");
-            }
-            fn submit(&mut self, _: Operation) -> Submission {
-                panic!("old reservation must not submit");
-            }
-        }
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .unwrap();
@@ -1227,6 +1219,22 @@ mod reservation_tests {
             now,
         )
         .unwrap();
+        (runtime, cx, input)
+    }
+
+    struct NeverStarted;
+    impl InputSink for NeverStarted {
+        fn prepare(&mut self, _: Operation) -> Result<(), PlatformError> {
+            panic!("old reservation must not acquire a sink");
+        }
+        fn submit(&mut self, _: Operation) -> Submission {
+            panic!("old reservation must not submit");
+        }
+    }
+
+    #[test]
+    fn consent_invalidates_a_prepared_grant_even_after_the_prompt_is_gone() {
+        let (_runtime, cx, input) = input();
         let seat = Seat::default();
         let reserved = seat.reserve().unwrap();
         let guard = seat.inhibit().unwrap();
@@ -1246,5 +1254,85 @@ mod reservation_tests {
             seat.reserve().is_ok(),
             "only a fresh reservation may proceed"
         );
+    }
+
+    struct CapturedNativeOwner {
+        seat: Seat,
+        destroyed: Arc<AtomicUsize>,
+    }
+    impl Drop for CapturedNativeOwner {
+        fn drop(&mut self) {
+            assert!(self.seat.is_occupied(), "capture outlived native custody");
+            self.destroyed.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    #[test]
+    fn retirement_before_native_factory_preserves_reply_and_capture_destruction() {
+        for outstanding in [false, true] {
+            let (_runtime, cx, input) = input();
+            let seat = Seat::default();
+            let reserved = seat.reserve().unwrap();
+            let watchdog = Watchdog::new(cx.clone(), input.monitor()).unwrap();
+            let control = watchdog.control();
+            seat.install(reserved.epoch, &control).unwrap();
+            let shared = Shared {
+                admission: AdmissionGate {
+                    seat: Some(seat.clone()),
+                    ..AdmissionGate::default()
+                },
+                mailbox: Mutex::new(Mailbox {
+                    outstanding,
+                    command: outstanding.then_some(Command {
+                        kind: CommandKind::Authority(AuthorityCommand::ControlChallenge(1)),
+                        bytes: [0; MAX_INPUT_RECORD_BYTES],
+                        length: 0,
+                    }),
+                    ..Mailbox::default()
+                }),
+                control,
+            };
+            let destroyed = Arc::new(AtomicUsize::new(0));
+            let factory_capture = CapturedNativeOwner {
+                seat: seat.clone(),
+                destroyed: destroyed.clone(),
+            };
+            let cleanup_capture = CapturedNativeOwner {
+                seat: seat.clone(),
+                destroyed: destroyed.clone(),
+            };
+            // Latch the actual original owner before invoking the production
+            // loop, without a scheduler race or a factory that must run first.
+            shared.control.stop(StopReason::LocalRevoke);
+            seat.retire(StopReason::Suspended);
+            let exit = native_loop(
+                &cx,
+                input,
+                Route::new(7, ProtocolLimits::ABSOLUTE),
+                move || -> Result<NeverStarted, PlatformError> {
+                    let _captured = &factory_capture;
+                    panic!("cancelled owner invoked its native factory");
+                },
+                move |_: &mut NeverStarted| {
+                    let _captured = &cleanup_capture;
+                    panic!("uncreated native sink required cleanup");
+                },
+                &shared,
+            );
+            assert!(exit.handoff_safe());
+            assert_eq!(exit.cleanup.unwrap().submitted_releases, 0);
+            assert_eq!(destroyed.load(Ordering::Acquire), 2);
+            assert_eq!(shared.control.reason(), Some(StopReason::LocalRevoke));
+            assert_eq!(
+                shared.lock().reply,
+                outstanding.then_some(Reply::CancelledBeforeStart)
+            );
+            assert!(seat.is_occupied());
+            // The real reservation may be released only after the returned
+            // clean Exit and both unused caller captures have been destroyed.
+            drop(reserved);
+            assert!(!seat.is_occupied());
+            assert!(matches!(seat.reserve(), Err(Error::SeatInhibited)));
+        }
     }
 }
