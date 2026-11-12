@@ -9,6 +9,11 @@ child, and `macos-audio` integrates it with the native client. No downloader, al
 codec, Rust dependency, model loading, dynamic-library path API or shell codec
 process is introduced. This is the plan's explicit native libopus exception.
 
+The separate `macos-host-audio` feature uses the same encoder for explicitly
+enabled host playback capture in `fr-media-worker --audio`. It enables neither
+client playback nor microphone capture. See [Mac host playback audio](docs/macos-host.md#host-playback-audio)
+for native source scope, lifetime and packaging.
+
 `opus::Encoder` accepts 48 kHz mono/stereo, either direction, and 5/10/20/40/60 ms
 frames. Other durations admitted by the broader shared configuration return
 UnsupportedFormat, not a silently changed duration. The default is AUDIO mode,

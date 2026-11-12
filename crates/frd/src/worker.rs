@@ -163,6 +163,16 @@ impl Launch {
     /// session of this process; no display name or X authority applies.
     #[cfg(target_os = "macos")]
     pub fn macos_capture(image: &Path, epoch: u128) -> Result<Self, Error> {
+        Self::macos(image, epoch, Role::Capture)
+    }
+    /// A separate macOS playback-capture child in the original login session.
+    /// It has no X11 display, cookie, presentation target or input authority.
+    #[cfg(target_os = "macos")]
+    pub fn macos_audio(image: &Path, epoch: u128) -> Result<Self, Error> {
+        Self::macos(image, epoch, Role::Audio)
+    }
+    #[cfg(target_os = "macos")]
+    fn macos(image: &Path, epoch: u128, role: Role) -> Result<Self, Error> {
         if !image.is_absolute() || epoch == 0 {
             return Err(Error::InvalidLaunch);
         }
@@ -170,7 +180,7 @@ impl Launch {
             image: image.into(),
             display: String::new(),
             xauthority: None,
-            role: Role::Capture,
+            role,
             epoch,
             target: None,
             fit_target: false,
@@ -1369,8 +1379,10 @@ mod tests {
                 frame_duration_ms: 20,
                 bitrate: 96_000,
                 max_packet_bytes: 1000,
-                server: "/run/user/1000/pulse/native".into(),
-                monitor: worker::audio::Monitor::DefaultSink,
+                source: worker::audio::Source::Pulse {
+                    server: "/run/user/1000/pulse/native".into(),
+                    monitor: worker::audio::Monitor::DefaultSink,
+                },
             };
             // A capture/present launch can never start the audio role, and
             // a hostile profile refuses before any spawn.
@@ -1381,7 +1393,10 @@ mod tests {
                 ));
             }
             let hostile = worker::audio::Capture {
-                server: "relative/native".into(),
+                source: worker::audio::Source::Pulse {
+                    server: "relative/native".into(),
+                    monitor: worker::audio::Monitor::DefaultSink,
+                },
                 ..capture
             };
             assert!(matches!(
@@ -1389,6 +1404,25 @@ mod tests {
                 Err(Error::Protocol(worker::Error::Malformed))
             ));
         });
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_audio_launch_keeps_its_distinct_role_and_has_no_x11_selection() {
+        let image = std::path::Path::new("/local/fr-media-worker");
+        let audio = Launch::macos_audio(image, 7).unwrap();
+        assert_eq!(audio.role, Role::Audio);
+        assert!(audio.display.is_empty() && audio.xauthority.is_none());
+        assert!(audio.target.is_none() && audio.local.is_none());
+        assert_eq!(Launch::macos_capture(image, 8).unwrap().role, Role::Capture);
+        assert!(matches!(
+            Launch::macos_audio(image, 0),
+            Err(Error::InvalidLaunch)
+        ));
+        assert!(matches!(
+            Launch::macos_audio(std::path::Path::new("relative-worker"), 7),
+            Err(Error::InvalidLaunch)
+        ));
     }
 
     #[test]

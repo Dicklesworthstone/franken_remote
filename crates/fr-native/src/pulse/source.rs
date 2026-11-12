@@ -20,7 +20,7 @@ use crate::opus::{CodecLimits, Encoder};
 use fr_core::audio::{AudioDirection, AudioStreamConfig, DEFAULT_JITTER_TARGET_MS};
 use fr_media::{
     audio::{AudioAccessUnit, AudioEncoder, AudioPcmFrame},
-    worker::audio::{Capture, CaptureCounters, MAX_BATCH_PACKETS},
+    worker::audio::{Capture, CaptureCounters, MAX_BATCH_PACKETS, Source},
 };
 use std::path::Path;
 
@@ -61,7 +61,10 @@ impl PlaybackSource {
             DEFAULT_JITTER_TARGET_MS,
         )
         .map_err(|_| Error::Configuration)?;
-        let selection = CaptureSelection::new(Path::new(&capture.server), &capture.monitor)?;
+        let Source::Pulse { server, monitor } = &capture.source else {
+            return Err(Error::Selection);
+        };
+        let selection = CaptureSelection::new(Path::new(server), monitor)?;
         let source = RecordSource::connect(
             selection,
             config,

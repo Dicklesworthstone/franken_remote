@@ -9,8 +9,16 @@ fn capture() -> Capture {
         frame_duration_ms: 20,
         bitrate: 96_000,
         max_packet_bytes: 1000,
-        server: "/run/fr-audio/native".into(),
-        monitor: Monitor::DefaultSink,
+        source: Source::Pulse {
+            server: "/run/fr-audio/native".into(),
+            monitor: Monitor::DefaultSink,
+        },
+    }
+}
+fn source(server: &str, monitor: Monitor) -> Source {
+    Source::Pulse {
+        server: server.into(),
+        monitor,
     }
 }
 fn unit(sequence: u64, timestamp: u64, len: usize) -> AudioAccessUnit {
@@ -30,7 +38,7 @@ fn unit(sequence: u64, timestamp: u64, len: usize) -> AudioAccessUnit {
 fn configuration_round_trips_and_refuses_hostile_or_unqualified_profiles() {
     for monitor in [Monitor::DefaultSink, Monitor::Sink("fr_host".into())] {
         let c = Capture {
-            monitor,
+            source: source("/run/fr-audio/native", monitor),
             ..capture()
         };
         let body = c.encode().unwrap();
@@ -61,23 +69,29 @@ fn configuration_round_trips_and_refuses_hostile_or_unqualified_profiles() {
             ..capture()
         },
         Capture {
-            server: "relative/native".into(),
+            source: source("relative/native", Monitor::DefaultSink),
             ..capture()
         },
         Capture {
-            server: "unix:/run/native".into(),
+            source: source("unix:/run/native", Monitor::DefaultSink),
             ..capture()
         },
         Capture {
-            server: format!("/{}", "a".repeat(MAX_SERVER_BYTES)),
+            source: source(
+                &format!("/{}", "a".repeat(MAX_SERVER_BYTES)),
+                Monitor::DefaultSink,
+            ),
             ..capture()
         },
         Capture {
-            monitor: Monitor::Sink("@DEFAULT_SINK@".into()),
+            source: source(
+                "/run/fr-audio/native",
+                Monitor::Sink("@DEFAULT_SINK@".into()),
+            ),
             ..capture()
         },
         Capture {
-            monitor: Monitor::Sink("bad sink".into()),
+            source: source("/run/fr-audio/native", Monitor::Sink("bad sink".into())),
             ..capture()
         },
     ];
@@ -98,11 +112,50 @@ fn configuration_round_trips_and_refuses_hostile_or_unqualified_profiles() {
     let text = format!(
         "{:?}",
         Capture {
-            monitor: Monitor::Sink("secret_sink".into()),
+            source: source("/run/fr-audio/native", Monitor::Sink("secret_sink".into())),
             ..capture()
         }
     );
     assert!(!text.contains("fr-audio") && !text.contains("secret_sink"));
+}
+
+#[test]
+fn native_source_is_explicit_and_does_not_reinterpret_pulse_paths() {
+    let pulse = capture().encode().unwrap();
+    // The existing Pulse profile remains byte-for-byte compatible, including
+    // its zero source tag. No native source is hidden in a fake socket name.
+    let mut original = vec![0, 0, 0, 0, 0, 0, 0, 3, 2, 20, 3, 232, 0, 1, 119, 0];
+    original.extend_from_slice(&[20, 0, 0, 0]);
+    original.extend_from_slice(b"/run/fr-audio/native");
+    assert_eq!(pulse, original);
+
+    let mac = Capture {
+        source: Source::MacSystem,
+        ..capture()
+    };
+    let bytes = mac.encode().unwrap();
+    assert_eq!(bytes.len(), CONFIG_FIXED_BYTES);
+    assert_eq!(&bytes[16..20], &[0, 0, 1, 0]);
+    assert!(Kind::ConfigureAudio.accepts_length(bytes.len(), &ProtocolLimits::ABSOLUTE));
+    assert_eq!(Capture::decode(&bytes).unwrap(), mac);
+    for tag in [0, 2, 255] {
+        let mut hostile = bytes.clone();
+        hostile[18] = tag;
+        assert_eq!(Capture::decode(&hostile), Err(Error::Malformed));
+    }
+    for (server, sink) in [(2, 0), (0, 2)] {
+        let mut hostile = bytes.clone();
+        hostile[16] = server;
+        hostile[17] = sink;
+        hostile.extend_from_slice(b"/a");
+        assert_eq!(Capture::decode(&hostile), Err(Error::Malformed));
+    }
+    let mut reserved = bytes.clone();
+    reserved[19] = 1;
+    assert_eq!(Capture::decode(&reserved), Err(Error::Malformed));
+    for end in 0..bytes.len() {
+        assert!(Capture::decode(&bytes[..end]).is_err());
+    }
 }
 
 #[test]

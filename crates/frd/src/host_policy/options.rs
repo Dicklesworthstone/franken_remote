@@ -68,7 +68,7 @@ pub struct RunOptions {
     /// Local enable of host playback audio (off by default). Only an admitted
     /// observer that selected audio-down receives it; see `frd run --help`.
     pub audio: bool,
-    /// Absolute local `PulseAudio` server socket for playback capture.
+    /// Linux-only absolute local `PulseAudio` server socket for playback capture.
     pub audio_server: Option<PathBuf>,
     /// Sink whose monitor is captured; default: the server's default sink.
     pub audio_sink: Option<String>,
@@ -329,9 +329,9 @@ impl RunOptions {
     pub fn macos_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
         let refusals: [(bool, &str, &str); 4] = [
             (
-                self.audio,
-                "audio_server_unavailable",
-                "--audio has no macOS capture backend yet; omit it to share without audio",
+                self.audio_server.is_some() || self.audio_sink.is_some(),
+                "audio_source_unsupported",
+                "macOS --audio captures application/system playback, not a PulseAudio endpoint; --audio-server and --audio-sink are Linux-only",
             ),
             (
                 self.microphone,
@@ -497,9 +497,11 @@ mod tests {
         assert_eq!(options.macos_refusal(approval), None);
         assert_eq!(options.macos_refusal(Approval::Local), None);
         let options = parse(&["--input-agent", "/a", "--audio"]).unwrap();
+        assert_eq!(options.macos_refusal(approval), None);
+        let options = parse(&["--audio", "--audio-server", "/run/pulse/native"]).unwrap();
         assert_eq!(
             options.macos_refusal(approval).map(|(code, _)| code),
-            Some("audio_server_unavailable")
+            Some("audio_source_unsupported")
         );
     }
 

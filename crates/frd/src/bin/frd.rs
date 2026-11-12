@@ -115,10 +115,11 @@ OPTIONS:
     --files-max-file-bytes N     Largest accepted file (default 268435456)
     --files-max-session-bytes N  Total declared bytes per controlled session,
                     refused offers included (default 1073741824)
-    --audio         Locally enable host playback audio (off by default): an admitted
-                    view-only viewer that asks for audio gets the monitor of the
-                    selected output, Opus-encoded by the worker. Endpoint-wide:
-                    every application playing to that output is captured
+    --audio         Locally enable host playback audio (off by default) for admitted
+                    viewers that request it, including a controlling viewer.
+                    Linux records the selected output monitor. macOS captures
+                    application/system playback through ScreenCaptureKit; audio
+                    is not confined to the selected display. Opus only; no microphone
     --microphone    Separately permit the controlling client's microphone (off
                     by default). Requires --input-agent, matching installed
                     fr-microphone-worker, fr-opus-worker and fr-observation-indicator.
@@ -128,9 +129,9 @@ OPTIONS:
                     hiding its window ends microphone permission for this session.
     --microphone-server P  Absolute PipeWire socket (default:
                     $XDG_RUNTIME_DIR/pipewire-0); requires --microphone
-    --audio-server P  Absolute PulseAudio socket (default: $PULSE_SERVER, then
+    --audio-server P  Linux-only absolute PulseAudio socket (default: $PULSE_SERVER, then
                     $XDG_RUNTIME_DIR/pulse/native); requires --audio
-    --audio-sink N  Sink whose monitor is captured (default: the server's default
+    --audio-sink N  Linux-only sink whose monitor is captured (default: the server's default
                     sink, pinned when capture starts); requires --audio
     --logind-session ID  The logind session of the shared display (see
                     `loginctl`): frd run requires fresh evidence for it before
@@ -1110,7 +1111,7 @@ fn audio(
             2,
         ));
     };
-    Ok(Some(frd::host_run::AudioOptions {
+    Ok(Some(frd::host_run::AudioOptions::Pulse {
         server,
         sink: options.audio_sink.clone(),
     }))

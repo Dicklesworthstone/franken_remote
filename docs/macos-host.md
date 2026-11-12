@@ -32,7 +32,7 @@ Defaults: control allowed (`--input-agent`; `--view-only` omits it), sharing
 limited to your own devices (`--approval none --sharing own-user`), 60 fps
 and 30 Mbit/s caps. Options after `--` go to `frd run`; `frd install` checks
 them with `frd run`'s own parser and refuses anything every start would refuse
-(no encoder, a macOS-unsupported option such as `--audio`, a LaunchDaemon).
+(no encoder, a macOS-unsupported option such as `--microphone`, a LaunchDaemon).
 Clipboard follows the controlling share by default; pass `-- --no-clipboard`
 to install with it disabled, or select `--view-only` to omit control entirely.
 
@@ -145,6 +145,60 @@ virtual key instead. Source tests cover scalar boundaries, optional negotiation,
 file bounds and owner receipts; the native event-tap and expired-agent tests
 still require a Mac with Accessibility permission. Live application typing and
 tailnet execution have not been qualified by the portable tests.
+
+## Host playback audio
+
+Playback audio requires macOS 13 or later and is off by default.
+`frd run --audio` explicitly allows admitted
+viewers that request audio to hear application/system playback through
+ScreenCaptureKit, including a controlling viewer. **Audio is not confined to
+the selected display or visible windows.** The existing local-approval prompt
+discloses this conditional scope; audio never enables the microphone. The
+mandatory Stop Sharing indicator and original console-session monitor remain
+in force. Linux `--audio-server` and `--audio-sink` selections are refused on Mac.
+
+Build the worker with `macos-host-audio` and the existing trusted Opus SDK:
+
+```sh
+export FR_NATIVE_OPUS_LIBRARY_DIR=/absolute/path/to/trusted/opus/lib
+cargo build -p fr-native --no-default-features --features macos-host-audio --bin fr-media-worker --locked
+```
+
+The directory must contain the trusted static `libopus.a` described in
+[the native codec boundary](../NATIVE_OPUS.md). The host installer selects this
+feature when `-- --audio` is supplied and checks for that archive before building;
+it does not download a codec. Omit `--audio` to retain the existing package and
+runtime behavior. A worker built without this feature explicitly refuses its
+audio role. Native permission/source failure stops the optional audio generation
+without enabling another source or interrupting a healthy desktop connection.
+
+Capture uses a separate audio-only stream in the existing supervised media
+child, starting only when an admitted streaming viewer has requested audio.
+The source requests 48-kHz mono/stereo from ScreenCaptureKit, checks the actual
+returned format, and converts bounded PCM for the existing Opus encoder.
+It preserves source-clock timestamps, explicit gaps and immutable frame expiry;
+callback arrival, encoding or private IPC cannot renew old sound. Only the newest
+bounded frames are retained. The final publication check follows serialization,
+and expired packets are removed before the original worker reply is written.
+
+The existing host owns generation changes, request deadlines, the bounded
+audio ring, per-viewer configuration acknowledgment and original child cleanup.
+Its admission timestamp remains an original-pull bound, not a claim of measured
+physical capture latency. Configuration acknowledgment gates delivery; it does
+not prove that every in-flight sample was physically captured after that acknowledgment.
+Sleep, terminal native errors, invalid format or clock
+evidence end the original source. Stopping fences retained frames and clears
+private PCM before waiting for native cleanup; a failed stop still requires
+the existing process kill/reap path.
+
+An entered callback has its own original processing deadline, checked by the
+command reader while native work is running. A stuck callback ends that source;
+a quiet source with no pending callback is not treated as a failure.
+
+Source/packing and private-record tests do not establish audible playback,
+permission behavior, source filtering, live device changes or end-to-end latency.
+Those remain actual Mac and two-node qualification requirements under
+`fr-p2-audio-playback-lel`.
 
 ## Text clipboard
 

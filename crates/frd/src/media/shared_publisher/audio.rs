@@ -23,7 +23,7 @@ use fr_media::{
     audio_delivery::{AudioLane, AudioRing, LaneAction, SourceStream, control::ControlOffer},
     worker::{
         Kind, Role,
-        audio::{Capture, Monitor, decode_batch},
+        audio::{Capture, Monitor, Source, decode_batch},
     },
 };
 use fr_transport::quic::{self, Disposition, QuicRecords, Route};
@@ -57,8 +57,7 @@ pub const MAX_PACKET_BYTES: u16 = 1000;
 pub struct AudioProfile {
     image: PathBuf,
     display: String,
-    server: String,
-    monitor: Monitor,
+    source: Source,
     channels: AudioChannels,
     /// Qualified host randomness for each child's private IPC epoch.
     entropy: crate::session_startup::shared_viewers::Entropy,
@@ -68,7 +67,7 @@ pub struct AudioProfile {
 impl std::fmt::Debug for AudioProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AudioProfile")
-            .field("monitor", &self.monitor)
+            .field("source", &self.source)
             .field("channels", &self.channels)
             .finish_non_exhaustive()
     }
@@ -84,11 +83,28 @@ impl AudioProfile {
         entropy: crate::session_startup::shared_viewers::Entropy,
         retired: Arc<Mutex<Option<Retirement>>>,
     ) -> Result<Self, Error> {
+        Self::with_source(
+            image,
+            display,
+            Source::Pulse { server, monitor },
+            entropy,
+            retired,
+        )
+    }
+
+    /// Select one explicit platform source. Native system playback is a
+    /// different scope from a Pulse server, never encoded as a server name.
+    pub fn with_source(
+        image: PathBuf,
+        display: String,
+        source: Source,
+        entropy: crate::session_startup::shared_viewers::Entropy,
+        retired: Arc<Mutex<Option<Retirement>>>,
+    ) -> Result<Self, Error> {
         let profile = Self {
             image,
             display,
-            server,
-            monitor,
+            source,
             channels: AudioChannels::Stereo,
             entropy,
             retired,
@@ -98,7 +114,9 @@ impl AudioProfile {
             .capture(AudioGeneration::from_raw(1))
             .validate()
             .map_err(|_| Error::InvalidBudget)?;
-        if !profile.image.is_absolute() {
+        if !profile.image.is_absolute()
+            || matches!(profile.source, Source::MacSystem) && !profile.display.is_empty()
+        {
             return Err(Error::InvalidBudget);
         }
         Ok(profile)
@@ -110,8 +128,7 @@ impl AudioProfile {
             frame_duration_ms: FRAME_MS,
             bitrate: BITRATE,
             max_packet_bytes: MAX_PACKET_BYTES,
-            server: self.server.clone(),
-            monitor: self.monitor.clone(),
+            source: self.source.clone(),
         }
     }
     fn stream(&self, generation: AudioGeneration) -> SourceStream {
@@ -121,6 +138,20 @@ impl AudioProfile {
             frame_duration_ms: FRAME_MS,
             max_packet_bytes: MAX_PACKET_BYTES,
             jitter_target_ms: JITTER_MS,
+        }
+    }
+    fn launch(&self, epoch: u128) -> Result<Launch, worker::Error> {
+        match &self.source {
+            Source::Pulse { .. } => {
+                Launch::new(&self.image, &self.display, None, Role::Audio, epoch)
+            }
+            Source::MacSystem => {
+                #[cfg(target_os = "macos")]
+                if self.display.is_empty() {
+                    return Launch::macos_audio(&self.image, epoch);
+                }
+                Err(worker::Error::InvalidLaunch)
+            }
         }
     }
 }
@@ -576,14 +607,10 @@ impl AudioSource {
         self.next_generation += 1;
         let stream = self.profile.stream(generation);
         let capture = self.profile.capture(generation);
-        let launch = Launch::new(
-            &self.profile.image,
-            &self.profile.display,
-            None,
-            Role::Audio,
-            (self.profile.entropy)().map_err(|()| Error::Closed)?,
-        )
-        .and_then(Launch::retain_cleanup);
+        let launch = self
+            .profile
+            .launch((self.profile.entropy)().map_err(|()| Error::Closed)?)
+            .and_then(Launch::retain_cleanup);
         let result = match launch {
             Ok((launch, retirement)) => {
                 *self.profile.retired.lock().map_err(|_| Error::Poisoned)? = Some(retirement);

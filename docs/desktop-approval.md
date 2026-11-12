@@ -132,6 +132,12 @@ installer script's existing `--approval none --sharing own-user` default is
 unchanged; the explicit command above selects local approval. This prompt does
 not establish graphical screen-lock detection.
 
+Both Mac prompt roles disclose that locally enabled playback audio can include
+other applications and displays. The original approval IPC carries the requested
+view/control role; this conditional notice does not claim audio is enabled in
+every request. The operator must still explicitly select `--audio`, and the
+viewer must negotiate it. No microphone capability follows from that choice.
+
 ## Original lifetimes, not reusable approvals
 
 The host notifies a capacity-one inbox with the ORIGINAL `Approval` capability,

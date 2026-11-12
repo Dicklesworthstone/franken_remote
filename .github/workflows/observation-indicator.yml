@@ -46,7 +46,11 @@ jobs:
       - name: Fixed-size read-only IPC regressions
         run: cargo test -p fr-core indicator_process --locked
       - name: Original host lifetime and real subprocess regressions
-        run: cargo test -p frd --lib host_indicator --locked
+        run: |
+          cargo test -p frd --lib host_indicator --locked
+          cargo test -p frd --lib retirement --locked -- --test-threads=1
+          cargo test -p frd --lib retired_seat_ends_the_original_grant_broker --locked
+          cargo test -p frd --test input_agent retirement --locked -- --test-threads=1
       - name: Original desktop consent and unchanged active-session deadlines
         run: |
           cargo test -p frd --lib desktop_approval --locked

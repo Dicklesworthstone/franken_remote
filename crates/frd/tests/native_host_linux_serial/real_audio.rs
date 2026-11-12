@@ -651,7 +651,7 @@ fn fr_connect_audio_plays_the_host_playback_tone_through_frd_run_audio() {
         &host_pulse,
         &client_pulse,
         // Default sink's monitor on the host's own (private) server.
-        Some(AudioOptions {
+        Some(AudioOptions::Pulse {
             server: host_pulse.socket.clone(),
             sink: None,
         }),
@@ -748,7 +748,7 @@ fn a_missing_host_monitor_is_a_typed_stop_while_video_continues() {
     let (completion, observed, diagnostics) = share(
         &host_pulse,
         &client_pulse,
-        Some(AudioOptions {
+        Some(AudioOptions::Pulse {
             server: host_pulse.socket.clone(),
             sink: Some("no_such_sink".into()),
         }),

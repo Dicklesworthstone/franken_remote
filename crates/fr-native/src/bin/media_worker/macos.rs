@@ -334,11 +334,11 @@ pub fn run() -> Result<(), Error> {
             };
         }
         Some("--capture") => Role::Capture,
-        // Presentation and audio are not macOS worker roles (yet).
+        Some("--audio") => Role::Audio,
+        // Presentation belongs to the independent native client.
         _ => return Err(Error::WrongRole),
     };
     parent(&mut args)?;
-    debug_assert_eq!(role, Role::Capture);
     // One unbuffered descriptor from the first record on, as on Linux.
     let mut input = File::from(
         io::stdin()
@@ -352,6 +352,15 @@ pub fn run() -> Result<(), Error> {
     let mut identity = first.header.identity;
     let mut sequence = Sequence::new(identity.epoch)?;
     sequence.accept(first.header)?;
+    if role == Role::Audio {
+        #[cfg(feature = "macos-host-audio")]
+        return crate::macos_audio::serve(first, sequence, &mut input, &mut output);
+        #[cfg(not(feature = "macos-host-audio"))]
+        {
+            refuse(identity, Error::Unsupported, &mut output, &absolute)?;
+            return Err(Error::Unsupported);
+        }
+    }
     if first.header.kind != Kind::DiscoverMonitors {
         refuse(identity, Error::Unsupported, &mut output, &absolute)?;
         return Err(Error::Unsupported);

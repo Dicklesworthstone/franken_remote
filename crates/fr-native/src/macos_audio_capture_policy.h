@@ -24,6 +24,52 @@ static inline bool fr_ac_source_window(uint64_t before, uint64_t age_ns,
     return fr_ac_live(*out, before);
 }
 
+static inline int fr_ac_latch(atomic_int *original, int error) {
+    int expected = 0;
+    atomic_compare_exchange_strong(original, &expected, error);
+    return atomic_load(original);
+}
+
+// Quiet audio has no callback obligation. Once a callback actually enters,
+// its original deadline is independently visible to the command thread even
+// if a Core Media query/copy never returns. A late/duplicate completion may
+// clear only its own original slot, never a later callback's obligation.
+typedef struct {
+    atomic_uint_fast64_t active_until;
+    atomic_uint_fast64_t last_until;
+} FrAcCallback;
+static inline void fr_ac_callback_init(FrAcCallback *callback) {
+    atomic_init(&callback->active_until, 0);
+    atomic_init(&callback->last_until, 0);
+}
+static inline uint64_t fr_ac_callback_begin(FrAcCallback *callback, uint64_t now) {
+    FrAcDeadline window = fr_ac_deadline(now, FR_AC_AGE_NS);
+    if (!fr_ac_live(window, now) || window.until <= atomic_load(&callback->last_until)) return 0;
+    uint_fast64_t expected = 0;
+    if (!atomic_compare_exchange_strong(&callback->active_until, &expected, window.until)) return 0;
+    // Strictly increasing ticket values avoid ABA even at a repeated clock
+    // reading. A repeated/regressed native clock refuses this new callback.
+    atomic_store(&callback->last_until, window.until);
+    return window.until;
+}
+static inline uint64_t fr_ac_callback_snapshot(const FrAcCallback *callback) {
+    return atomic_load(&callback->active_until);
+}
+static inline bool fr_ac_callback_expired(const FrAcCallback *callback,
+                                           uint64_t original, uint64_t now) {
+    // Snapshot BEFORE reading the clock. Otherwise a new callback beginning
+    // after that clock sample could be mistaken for clock reversal. The second
+    // read also excludes a completed/replaced original obligation.
+    FrAcDeadline window = {original >= FR_AC_AGE_NS ? original - FR_AC_AGE_NS : 0, original};
+    return original && !fr_ac_live(window, now) &&
+           atomic_load(&callback->active_until) == original;
+}
+static inline bool fr_ac_callback_complete(FrAcCallback *callback, uint64_t original) {
+    if (!original) return false;
+    uint_fast64_t expected = original;
+    return atomic_compare_exchange_strong(&callback->active_until, &expected, 0);
+}
+
 enum FrAcStart { FR_AC_ALLOCATED, FR_AC_STARTING, FR_AC_COMPLETING, FR_AC_COMPLETED };
 typedef struct {
     atomic_int stage;

@@ -78,8 +78,10 @@ fn capture(server: &Server, monitor: Monitor) -> Capture {
         frame_duration_ms: 20,
         bitrate: 96_000,
         max_packet_bytes: 1000,
-        server: server.socket.to_str().unwrap().to_owned(),
-        monitor,
+        source: fr_media::worker::audio::Source::Pulse {
+            server: server.socket.to_str().unwrap().to_owned(),
+            monitor,
+        },
     }
 }
 fn micros(origin: Instant) -> u64 {
@@ -186,7 +188,10 @@ fn a_missing_monitor_or_server_is_a_typed_refusal() {
     };
     assert_eq!(result, Err(Error::Unavailable));
     let mut absent = capture(&server, Monitor::DefaultSink);
-    absent.server = "/nonexistent/fr-pulse-missing".into();
+    absent.source = fr_media::worker::audio::Source::Pulse {
+        server: "/nonexistent/fr-pulse-missing".into(),
+        monitor: Monitor::DefaultSink,
+    };
     let error = PlaybackSource::connect(absent, 0).and_then(|mut s| {
         loop {
             match s.poll_ready(micros(origin)) {

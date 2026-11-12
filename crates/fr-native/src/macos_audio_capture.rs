@@ -198,6 +198,31 @@ impl Source {
         self.owner.check().map(|_| ())
     }
 
+    /// One final native check and ONE subsequent clock sample for the whole
+    /// original batch. No later frame's permission/display query can age an
+    /// already checked packet while its body is waiting to be published.
+    /// Foreign-source frames are refused before entering the native boundary.
+    pub fn check_frames(
+        &self,
+        frames: &[Frame],
+    ) -> Result<[bool; policy::MAX_BATCH_FRAMES], Error> {
+        if frames.len() > policy::MAX_BATCH_FRAMES {
+            return Err(Error::BufferLimit);
+        }
+        if frames
+            .iter()
+            .any(|frame| !Rc::ptr_eq(&frame.owner, &self.owner))
+        {
+            return Err(Error::Configuration);
+        }
+        let now = self.owner.check()?;
+        let mut live = [false; policy::MAX_BATCH_FRAMES];
+        for (index, frame) in frames.iter().enumerate() {
+            live[index] = now < frame.packed.valid_until_ns;
+        }
+        Ok(live)
+    }
+
     fn read_time(&self, until: u64) -> Result<u64, Error> {
         let now = self.owner.check()?;
         if now >= until {

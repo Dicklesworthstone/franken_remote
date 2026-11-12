@@ -6,6 +6,14 @@ on:
       - 'crates/fr-native/Cargo.toml'
       - 'crates/fr-native/src/lib.rs'
       - 'crates/fr-native/src/clock.rs'
+      - 'crates/fr-native/build.rs'
+      - 'crates/fr-native/src/macos_audio_capture*'
+      - 'crates/fr-native/src/macos_audio_clock.h'
+      - 'crates/fr-native/src/macos_approval.m'
+      - 'crates/fr-native/src/host_audio_batch.rs'
+      - 'crates/fr-native/src/bin/media_worker*'
+      - 'crates/fr-native/src/bin/media_worker/**'
+      - 'crates/fr-native/tests/macos_audio_capture_policy.c'
       - 'crates/fr-native/src/audio_process*'
       - 'crates/fr-native/src/audio_process/**'
       - 'crates/fr-native/src/bin/audio_worker.rs'
@@ -31,6 +39,30 @@ env:
   CARGO_PROFILE_TEST_DEBUG: '0'
   CARGO_INCREMENTAL: '0'
 jobs:
+  macos-host-source:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install pinned Rust and the explicit local Opus SDK
+        run: |
+          rustup show active-toolchain
+          brew install opus
+          echo "FR_NATIVE_OPUS_LIBRARY_DIR=$(brew --prefix opus)/lib" >> "$GITHUB_ENV"
+      - name: Check native capture and consent against the Apple SDK
+        run: |
+          cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=13.0 -Wall -Wextra -Werror crates/fr-native/src/macos_audio_capture.m
+          cc -x objective-c -fobjc-arc -fsyntax-only -mmacosx-version-min=11.0 -Wall -Wextra -Werror crates/fr-native/src/macos_approval.m
+      - name: Exercise original source age and callback retirement
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -pthread crates/fr-native/tests/macos_audio_capture_policy.c -o "$RUNNER_TEMP/fr-macos-audio-policy"
+          "$RUNNER_TEMP/fr-macos-audio-policy"
+      - name: Build and link the real native audio worker
+        run: cargo build -p fr-native --no-default-features --features macos-host-audio --bin fr-media-worker --locked
+      - name: Check the actual native worker and library without test substitutions
+        run: cargo clippy -p fr-native --lib --bin fr-media-worker --no-default-features --features macos-host-audio --locked -- -D warnings
   native:
     runs-on: ubuntu-latest
     timeout-minutes: 15

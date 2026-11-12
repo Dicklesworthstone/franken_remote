@@ -7,6 +7,9 @@ mod cursor;
 #[cfg(all(target_os = "macos", feature = "macos-media"))]
 #[path = "media_worker/macos.rs"]
 mod macos;
+#[cfg(all(target_os = "macos", feature = "macos-host-audio"))]
+#[path = "media_worker/macos_audio.rs"]
+mod macos_audio;
 
 #[cfg(target_os = "linux")]
 mod linux {

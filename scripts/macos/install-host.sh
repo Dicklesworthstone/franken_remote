@@ -15,6 +15,8 @@
 # - Runs `frd install` there, then (re)loads the agent with launchctl.
 # By default the host allows control (--input-agent) at 60 fps and 30 Mbit/s;
 # --view-only omits control.
+# -- --audio also builds the host's explicit ScreenCaptureKit/Opus source;
+# supply FR_NATIVE_OPUS_LIBRARY_DIR with the trusted local libopus.a.
 # Sharing stays limited to your own devices (--approval none --sharing
 # own-user) unless you pass other frd run options.
 set -euo pipefail
@@ -47,11 +49,24 @@ fi
 
 target=${CARGO_TARGET_DIR:-$repo/target}
 release=$target/release
+native_features=macos-media,macos-input,macos-desktop,macos-session-monitor
+opus_sdk=${FR_NATIVE_OPUS_LIBRARY_DIR:-}
+for option in "${extra[@]}"; do
+  if [[ $option == --audio ]]; then
+    native_features+=,macos-host-audio
+    if (( ! skip_build )) && [[ -z $opus_sdk ||
+        $opus_sdk != /* || ! -f $opus_sdk/libopus.a ]]; then
+      print -u2 "--audio needs FR_NATIVE_OPUS_LIBRARY_DIR pointing to an absolute trusted SDK directory containing libopus.a; this installer downloads no codec"
+      exit 2
+    fi
+    break
+  fi
+done
 if (( ! skip_build )); then
   (cd "$repo" &&
     cargo build --release --locked -p frd --features macos-host --bin frd &&
     cargo build --release --locked -p fr-native \
-      --features macos-media,macos-input,macos-desktop,macos-session-monitor \
+      --features "$native_features" \
       --bin fr-media-worker --bin fr-input-agent --bin fr-session-monitor --bin fr &&
     cargo build --release --locked -p fr-native --no-default-features \
       --features macos-observation-indicator --bin fr-observation-indicator)

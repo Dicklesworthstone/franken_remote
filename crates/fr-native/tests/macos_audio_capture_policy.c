@@ -85,11 +85,70 @@ static void close_racing_the_original_callback_stops_exactly_once(void) {
     }
 }
 
+static void quiet_audio_and_a_stuck_callback_are_distinct(void) {
+    FrAcCallback callback;
+    fr_ac_callback_init(&callback);
+    atomic_int fault;
+    atomic_init(&fault, 0);
+    assert(!fr_ac_callback_expired(&callback, fr_ac_callback_snapshot(&callback), UINT64_MAX)); // Quiet, not stalled.
+    uint64_t original = fr_ac_callback_begin(&callback, 1000);
+    assert(original == 1000 + FR_AC_AGE_NS);
+    assert(!fr_ac_callback_expired(&callback, original, original - 1));
+    assert(!fr_ac_callback_begin(&callback, 1001)); // No renewal while entered.
+    assert(fr_ac_callback_expired(&callback, original, original));
+    assert(fr_ac_latch(&fault, -6) == -6); // Command thread observes timeout.
+    assert(fr_ac_callback_complete(&callback, original)); // Native call returns late.
+    assert(!fr_ac_callback_expired(&callback, original, UINT64_MAX));
+    assert(atomic_load(&fault) == -6); // Completing does not revive the owner.
+    assert(fr_ac_latch(&fault, -3) == -6); // Restored/changed permission cannot replace it.
+}
+
+static void callback_completion_cannot_clear_another_original_obligation(void) {
+    FrAcCallback callback;
+    fr_ac_callback_init(&callback);
+    uint64_t first = fr_ac_callback_begin(&callback, 1000);
+    assert(fr_ac_callback_complete(&callback, first));
+    assert(!fr_ac_callback_begin(&callback, 1000)); // No duplicate/reversed clock ticket.
+    uint64_t next = fr_ac_callback_begin(&callback, 1001);
+    assert(next && next != first);
+    assert(!fr_ac_callback_complete(&callback, first));
+    assert(fr_ac_callback_expired(&callback, next, next));
+    atomic_int fault;
+    atomic_init(&fault, 0);
+    assert(fr_ac_latch(&fault, -3) == -3); // First permission failure wins.
+    assert(fr_ac_latch(&fault, -6) == -3);
+    assert(fr_ac_callback_complete(&callback, next));
+    assert(!fr_ac_callback_complete(&callback, next));
+    assert(atomic_load(&fault) == -3);
+}
+
+static void callback_clock_reversal_requires_an_already_observed_original(void) {
+    FrAcCallback callback;
+    fr_ac_callback_init(&callback);
+    uint64_t quiet_snapshot = fr_ac_callback_snapshot(&callback);
+    uint64_t original = fr_ac_callback_begin(&callback, 1000);
+    assert(!fr_ac_callback_expired(&callback, quiet_snapshot, 999));
+    // The callback began after a quiet snapshot; this earlier command sample
+    // cannot be evidence of a reversed clock on that newly entered callback.
+    uint64_t entered_snapshot = fr_ac_callback_snapshot(&callback);
+    assert(entered_snapshot == original);
+    assert(fr_ac_callback_expired(&callback, entered_snapshot, 999));
+    assert(!fr_ac_callback_expired(&callback, entered_snapshot, 1000));
+    assert(fr_ac_callback_complete(&callback, original));
+    uint64_t later = fr_ac_callback_begin(&callback, 2000);
+    assert(later && later != original);
+    assert(!fr_ac_callback_expired(&callback, entered_snapshot, UINT64_MAX));
+    assert(fr_ac_callback_complete(&callback, later));
+}
+
 int main(void) {
     source_age_is_spent_before_and_during_copy();
     expired_open_keeps_original_start_cleanup();
     failed_native_start_does_not_prove_cleanup();
     close_racing_the_original_callback_stops_exactly_once();
-    puts("macos audio capture policy: 4 passed (including 200 callback races)");
+    quiet_audio_and_a_stuck_callback_are_distinct();
+    callback_completion_cannot_clear_another_original_obligation();
+    callback_clock_reversal_requires_an_already_observed_original();
+    puts("macos audio capture policy: 7 passed (including 200 callback races)");
     return 0;
 }

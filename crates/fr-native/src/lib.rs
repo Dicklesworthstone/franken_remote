@@ -1,6 +1,8 @@
 //! Native media adapters. `FFmpeg` and X11 stay behind this named FFI boundary.
 #![deny(unsafe_op_in_unsafe_fn)]
 
+#[cfg(any(test, feature = "macos-host-audio"))]
+pub mod host_audio_batch;
 #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "opus"))]
 pub mod opus;
 

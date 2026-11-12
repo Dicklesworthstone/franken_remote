@@ -6,26 +6,37 @@ use super::{Error, Options};
 use crate::{
     media::shared_publisher::AudioProfile, session_startup::shared_viewers, worker::Retirement,
 };
-use fr_media::worker::audio::Monitor;
+use fr_media::worker::audio::{Monitor, Source};
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
-/// The locally selected audio server and playback monitor.
+/// Explicit local playback scope. It is independent of the selected display
+/// and never authorizes microphone capture.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AudioOptions {
-    /// Absolute path of the local `PulseAudio` server's UNIX socket.
-    pub server: PathBuf,
-    /// Sink whose monitor is captured; `None` is the server's default sink,
-    /// resolved once when capture starts and pinned there.
-    pub sink: Option<String>,
+pub enum AudioOptions {
+    Pulse {
+        /// Absolute path of the local `PulseAudio` server's UNIX socket.
+        server: PathBuf,
+        /// The selected sink, or the default resolved once at capture start.
+        sink: Option<String>,
+    },
+    /// `ScreenCaptureKit` application/system playback, not display isolation.
+    MacSystem,
 }
 impl AudioOptions {
-    fn monitor(&self) -> Monitor {
-        self.sink
-            .clone()
-            .map_or(Monitor::DefaultSink, Monitor::Sink)
+    fn source(&self) -> Result<Source, Error> {
+        match self {
+            Self::Pulse { server, sink } if cfg!(target_os = "linux") && server.is_absolute() => {
+                Ok(Source::Pulse {
+                    server: server.to_str().ok_or(Error::Configuration)?.to_owned(),
+                    monitor: sink.clone().map_or(Monitor::DefaultSink, Monitor::Sink),
+                })
+            }
+            Self::MacSystem if cfg!(target_os = "macos") => Ok(Source::MacSystem),
+            _ => Err(Error::Configuration),
+        }
     }
 }
 
@@ -35,9 +46,6 @@ pub(super) fn check(options: &Options) -> Result<(), Error> {
     let Some(audio) = &options.audio else {
         return Ok(());
     };
-    if !audio.server.is_absolute() {
-        return Err(Error::Configuration);
-    }
     profile(options, audio, Arc::new(Mutex::new(None))).map(drop)
 }
 
@@ -46,18 +54,12 @@ pub(super) fn profile(
     audio: &AudioOptions,
     retired: Arc<Mutex<Option<Retirement>>>,
 ) -> Result<AudioProfile, Error> {
-    let server = audio
-        .server
-        .to_str()
-        .ok_or(Error::Configuration)?
-        .to_owned();
     let entropy: shared_viewers::Entropy =
         Arc::new(|| super::random_nonzero_u128().map_err(|_| ()));
-    AudioProfile::new(
+    AudioProfile::with_source(
         options.worker.clone(),
         options.display.clone(),
-        server,
-        audio.monitor(),
+        audio.source()?,
         entropy,
         retired,
     )

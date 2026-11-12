@@ -1,7 +1,7 @@
 //! Private audio-capture worker records (plan §15.4). NOT a network protocol.
 //!
-//! The parent names a locally selected audio server and playback monitor and
-//! the Opus profile; the worker records that monitor, encodes Opus and answers
+//! The parent names a locally selected native playback source and the Opus
+//! profile; the worker captures that source, encodes Opus and answers
 //! each `ReadAudio` pull with already encoded packets. Bodies carry compressed
 //! audio, so no `Debug` exposes payload bytes. Every length, count, duration,
 //! sequence and timestamp is validated BEFORE the parent allocates packets.
@@ -47,6 +47,38 @@ impl fmt::Debug for Monitor {
     }
 }
 
+/// Explicit local capture scope, never inferred from the video display or
+/// selected by a remote peer. The Pulse encoding retains its original bytes.
+#[derive(Clone, PartialEq, Eq)]
+pub enum Source {
+    Pulse {
+        server: String,
+        monitor: Monitor,
+    },
+    /// `ScreenCaptureKit` application/system playback. Audio is not confined
+    /// to the selected video display, and this never enables microphone input.
+    MacSystem,
+}
+impl fmt::Debug for Source {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pulse { monitor, .. } => f.debug_tuple("Pulse").field(monitor).finish(),
+            Self::MacSystem => f.write_str("MacSystem"),
+        }
+    }
+}
+impl Source {
+    fn validate(&self) -> Result<(), Error> {
+        if let Self::Pulse { server, monitor } = self
+            && (!valid_server(server)
+                || matches!(monitor, Monitor::Sink(sink) if !valid_sink(sink)))
+        {
+            return Err(Error::Malformed);
+        }
+        Ok(())
+    }
+}
+
 /// Complete, validated capture/encode profile for one audio generation.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Capture {
@@ -57,9 +89,7 @@ pub struct Capture {
     pub bitrate: u32,
     /// Opus payload ceiling; the parent sizes it to its datagram routes.
     pub max_packet_bytes: u16,
-    /// Absolute path of the local server's UNIX socket.
-    pub server: String,
-    pub monitor: Monitor,
+    pub source: Source,
 }
 impl fmt::Debug for Capture {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -69,7 +99,7 @@ impl fmt::Debug for Capture {
             .field("frame_duration_ms", &self.frame_duration_ms)
             .field("bitrate", &self.bitrate)
             .field("max_packet_bytes", &self.max_packet_bytes)
-            .field("monitor", &self.monitor)
+            .field("source", &self.source)
             .finish_non_exhaustive()
     }
 }
@@ -102,34 +132,39 @@ impl Capture {
             || self.max_packet_bytes == 0
             || usize::from(self.max_packet_bytes) > MAX_OPUS_PAYLOAD_BYTES
             || !fits
-            || !valid_server(&self.server)
-            || matches!(&self.monitor, Monitor::Sink(s) if !valid_sink(s))
         {
             return Err(Error::Malformed);
         }
-        Ok(())
+        self.source.validate()
     }
     pub fn encode(&self) -> Result<Vec<u8>, Error> {
         self.validate()?;
-        let sink = match &self.monitor {
-            Monitor::DefaultSink => "",
-            Monitor::Sink(s) => s.as_str(),
+        let (tag, server, sink) = match &self.source {
+            Source::Pulse { server, monitor } => (
+                0,
+                server.as_str(),
+                match monitor {
+                    Monitor::DefaultSink => "",
+                    Monitor::Sink(sink) => sink.as_str(),
+                },
+            ),
+            Source::MacSystem => (1, "", ""),
         };
-        let mut b = Vec::with_capacity(CONFIG_FIXED_BYTES + self.server.len() + sink.len());
+        let mut b = Vec::with_capacity(CONFIG_FIXED_BYTES + server.len() + sink.len());
         b.extend_from_slice(&self.generation.as_raw().to_be_bytes());
         b.push(self.channels.count());
         b.push(u8::try_from(self.frame_duration_ms).map_err(|_| Error::Malformed)?);
         b.extend_from_slice(&self.max_packet_bytes.to_be_bytes());
         b.extend_from_slice(&self.bitrate.to_be_bytes());
-        b.push(u8::try_from(self.server.len()).map_err(|_| Error::Malformed)?);
+        b.push(u8::try_from(server.len()).map_err(|_| Error::Malformed)?);
         b.push(u8::try_from(sink.len()).map_err(|_| Error::Malformed)?);
-        b.extend_from_slice(&[0, 0]);
-        b.extend_from_slice(self.server.as_bytes());
+        b.extend_from_slice(&[tag, 0]);
+        b.extend_from_slice(server.as_bytes());
         b.extend_from_slice(sink.as_bytes());
         Ok(b)
     }
     pub fn decode(b: &[u8]) -> Result<Self, Error> {
-        if !accepts_configuration_length(b.len()) || b[18..20] != [0, 0] {
+        if !accepts_configuration_length(b.len()) || b[19] != 0 {
             return Err(Error::Malformed);
         }
         let server_len = usize::from(b[16]);
@@ -146,11 +181,17 @@ impl Capture {
                 .map(str::to_owned)
                 .map_err(|_| Error::Malformed)
         };
-        let server = text(CONFIG_FIXED_BYTES..CONFIG_FIXED_BYTES + server_len)?;
-        let monitor = if sink_len == 0 {
-            Monitor::DefaultSink
-        } else {
-            Monitor::Sink(text(CONFIG_FIXED_BYTES + server_len..b.len())?)
+        let source = match b[18] {
+            0 => Source::Pulse {
+                server: text(CONFIG_FIXED_BYTES..CONFIG_FIXED_BYTES + server_len)?,
+                monitor: if sink_len == 0 {
+                    Monitor::DefaultSink
+                } else {
+                    Monitor::Sink(text(CONFIG_FIXED_BYTES + server_len..b.len())?)
+                },
+            },
+            1 if server_len == 0 && sink_len == 0 => Source::MacSystem,
+            _ => return Err(Error::Malformed),
         };
         let capture = Self {
             generation: AudioGeneration::from_raw(u64::from_be_bytes(
@@ -160,16 +201,14 @@ impl Capture {
             frame_duration_ms: u16::from(b[9]),
             max_packet_bytes: u16::from_be_bytes([b[10], b[11]]),
             bitrate: u32::from_be_bytes(b[12..16].try_into().map_err(|_| Error::Malformed)?),
-            server,
-            monitor,
+            source,
         };
         capture.validate()?;
         Ok(capture)
     }
 }
 pub(super) fn accepts_configuration_length(length: usize) -> bool {
-    (CONFIG_FIXED_BYTES + 2..=CONFIG_FIXED_BYTES + MAX_SERVER_BYTES + MAX_SINK_BYTES)
-        .contains(&length)
+    (CONFIG_FIXED_BYTES..=CONFIG_FIXED_BYTES + MAX_SERVER_BYTES + MAX_SINK_BYTES).contains(&length)
 }
 pub(super) fn accepts_batch_length(length: usize) -> bool {
     (BATCH_HEADER_BYTES..=MAX_BATCH_BYTES).contains(&length)

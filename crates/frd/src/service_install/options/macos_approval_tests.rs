@@ -122,3 +122,41 @@ fn macos_approval_installer_keeps_original_profile_and_explicit_policy_boundarie
     .unwrap();
     assert_eq!(emitted(&none).approval, Some(Approval::None));
 }
+
+#[test]
+fn installed_playback_enable_is_preserved_without_inventing_a_pulse_source_or_microphone() {
+    let base = [
+        "--user",
+        "--dry-run",
+        "--approval",
+        "local",
+        "--",
+        "--encoder",
+        "videotoolbox",
+    ];
+    for enabled in [false, true] {
+        let mut args = base.to_vec();
+        if enabled {
+            args.push("--audio");
+        }
+        let run = emitted(&parse(&args).unwrap());
+        assert_eq!(run.audio, enabled);
+        assert!(run.audio_server.is_none() && run.audio_sink.is_none());
+        assert!(!run.microphone && run.input_agent.is_none());
+        assert_eq!(run.approval, Some(Approval::Local));
+        assert_eq!(run.macos_refusal(Approval::Local), None);
+    }
+    for tail in [
+        ["--audio", "--audio-server", "/run/pulse/native"],
+        ["--audio", "--audio-sink", "speakers"],
+    ] {
+        let args = base.iter().copied().chain(tail).collect::<Vec<_>>();
+        assert!(matches!(
+            parse(&args),
+            Err(ServiceError::HostProfileUnavailable {
+                code: "audio_source_unsupported",
+                ..
+            })
+        ));
+    }
+}

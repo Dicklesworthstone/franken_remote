@@ -97,12 +97,24 @@ pub(super) fn session_monitor(
     }))
 }
 
-/// Refused in [`supported`].
+/// Local application/system playback enable. Capture still starts only on
+/// demand from an admitted viewer that negotiated audio-down.
 pub(super) fn audio(
-    _options: &RunOptions,
-    _json: bool,
+    options: &RunOptions,
+    json: bool,
 ) -> Result<Option<frd::host_run::AudioOptions>, ExitCode> {
-    Ok(None)
+    if !options.audio {
+        return Ok(None);
+    }
+    if options.audio_server.is_some() || options.audio_sink.is_some() {
+        return Err(run_refusal(
+            json,
+            "audio_source_unsupported",
+            "macOS --audio captures application/system playback; --audio-server and --audio-sink are Linux-only selections",
+            2,
+        ));
+    }
+    Ok(Some(frd::host_run::AudioOptions::MacSystem))
 }
 
 /// Refused in [`supported`].
@@ -111,4 +123,35 @@ pub(super) fn microphone(
     _json: bool,
 ) -> Result<Option<frd::host_run::MicrophoneOptions>, ExitCode> {
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use frd::host_run::AudioOptions;
+
+    #[test]
+    fn playback_scope_is_explicit_and_linux_selections_are_never_reinterpreted() {
+        assert_eq!(audio(&RunOptions::default(), false).unwrap(), None);
+        let parse = |args: &[&str]| {
+            RunOptions::parse(&args.iter().map(|v| (*v).to_owned()).collect::<Vec<_>>()).unwrap()
+        };
+        let options = parse(&["--audio"]);
+        assert_eq!(
+            audio(&options, false).unwrap(),
+            Some(AudioOptions::MacSystem)
+        );
+        assert!(options.input_agent.is_none() && !options.microphone);
+        for args in [
+            &["--audio", "--audio-server", "/run/pulse/native"][..],
+            &["--audio", "--audio-sink", "speakers"][..],
+        ] {
+            let options = parse(args);
+            assert_eq!(
+                options.macos_refusal(Approval::None).map(|(code, _)| code),
+                Some("audio_source_unsupported")
+            );
+            assert!(audio(&options, false).is_err());
+        }
+    }
 }

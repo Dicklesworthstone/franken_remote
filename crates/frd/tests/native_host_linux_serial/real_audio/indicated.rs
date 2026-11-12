@@ -29,7 +29,7 @@ fn the_observation_indicator_shows_during_an_audio_share_and_its_stop_ends_it() 
         &worker,
         &host.display,
         &roots,
-        Some(AudioOptions {
+        Some(AudioOptions::Pulse {
             server: host_pulse.socket.clone(),
             sink: None,
         }),

@@ -2563,7 +2563,7 @@ mod tests {
         ] {
             let mut audio = options.clone();
             audio.worker = PathBuf::from("/usr/bin/fr-media-worker");
-            audio.audio = Some(AudioOptions {
+            audio.audio = Some(AudioOptions::Pulse {
                 server: PathBuf::from(server),
                 sink: sink.map(str::to_owned),
             });

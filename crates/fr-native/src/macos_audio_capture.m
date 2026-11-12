@@ -173,6 +173,7 @@ static int discover(FrAcDeadline deadline, FrAcLease *lease,
     os_unfair_lock lock;
     atomic_int fault;
     FrAcOpening opening;
+    FrAcCallback callback;
     atomic_int stop_result;
     dispatch_semaphore_t start_done;
     dispatch_semaphore_t stop_done;
@@ -196,9 +197,7 @@ static int discover(FrAcDeadline deadline, FrAcLease *lease,
 @end
 
 static int fail(FrAcOwner *owner, int error) {
-    int expected = FR_AC_OK;
-    atomic_compare_exchange_strong(&owner->fault, &expected, error);
-    return atomic_load(&owner->fault);
+    return fr_ac_latch(&owner->fault, error);
 }
 
 static BOOL sleep_offset(FrAcOwner *owner, FrAudioSleepOffset *out) {
@@ -213,6 +212,11 @@ static int current(FrAcOwner *owner) {
     int error = atomic_load(&owner->fault);
     if (error) return error;
     if (fr_ac_opening_closed(&owner->opening)) return FR_AC_CLOSED;
+    uint64_t original_callback = fr_ac_callback_snapshot(&owner->callback);
+    uint64_t now = monotonic_ns();
+    if (!now) return fail(owner, FR_AC_CLOCK);
+    if (fr_ac_callback_expired(&owner->callback, original_callback, now))
+        return fail(owner, now < original_callback - FR_AC_AGE_NS ? FR_AC_CLOCK : FR_AC_EXPIRED);
     FrAudioSleepOffset offset;
     if (!sleep_offset(owner, &offset)) return fail(owner, FR_AC_CLOCK);
     if (!fr_audio_sleep_unchanged(owner->original_sleep, offset))
@@ -318,6 +322,9 @@ static int copy_sample(FrAcOwner *owner, CMSampleBufferRef sample, FrAcStamp *st
         ofType:(SCStreamOutputType)type {
     @autoreleasepool {
         if (current(self) != FR_AC_OK) return;
+        uint64_t original_callback = fr_ac_callback_begin(&callback, monotonic_ns());
+        if (!original_callback) { fail(self, FR_AC_CLOCK); return; }
+      @try {
         if (original != stream || type != SCStreamOutputTypeAudio) {
             fail(self, FR_AC_FORMAT);
             return;
@@ -355,6 +362,15 @@ static int copy_sample(FrAcOwner *owner, CMSampleBufferRef sample, FrAcStamp *st
             ++count;
         }
         os_unfair_lock_unlock(&lock);
+      } @catch (NSException *exception) {
+        (void)exception;
+        fail(self, FR_AC_NATIVE);
+      } @finally {
+        // Check the original obligation before releasing it. A late return
+        // cannot erase a timeout already observed by the command thread.
+        (void)current(self);
+        if (!fr_ac_callback_complete(&callback, original_callback)) fail(self, FR_AC_DISCONTINUITY);
+      }
     }
 }
 - (void)stream:(SCStream *)original didStopWithError:(NSError *)error {
@@ -442,6 +458,7 @@ int fr_ac_open(uint32_t channels, void **out) {
         owner->lock = OS_UNFAIR_LOCK_INIT;
         atomic_init(&owner->fault, FR_AC_OK);
         fr_ac_opening_init(&owner->opening, FR_AC_UNAVAILABLE);
+        fr_ac_callback_init(&owner->callback);
         atomic_init(&owner->stop_result, FR_AC_CLEANUP);
         owner->channels = channels;
         owner->display = selected;

@@ -152,7 +152,7 @@ serve(lambda e: None, command)
 "#;
 
 fn enabled(pulse: &Pulse) -> AudioOptions {
-    AudioOptions {
+    AudioOptions::Pulse {
         server: pulse.socket.clone(),
         sink: None,
     }

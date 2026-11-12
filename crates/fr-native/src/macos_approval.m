@@ -87,9 +87,9 @@ static NSRect deny_rect(NSRect bounds) {
     NSString *title = self.owner.control ? @"Allow remote control?" : @"Allow desktop viewing?";
     [title drawInRect:NSMakeRect(28, 170, 444, 32) withAttributes:heading];
     NSString *detail = self.owner.control
-        ? @"A verified device requests this desktop and remote control.\nLocally enabled clipboard and file sharing may follow."
-        : @"A verified device requests a view of this desktop.\nThis request does not grant keyboard or pointer control.";
-    [detail drawInRect:NSMakeRect(28, 100, 444, 60) withAttributes:body];
+        ? @"A verified device requests this desktop and remote control.\nLocally enabled clipboard and file sharing may follow.\nEnabled playback audio may include other apps/displays."
+        : @"A verified device requests a view of this desktop.\nThis request does not grant keyboard or pointer control.\nEnabled playback audio may include other apps/displays.";
+    [detail drawInRect:NSMakeRect(28, 88, 444, 72) withAttributes:body];
     for (NSUInteger i = 0; i < 2; ++i) {
         NSRect rect = i ? allow_rect(self.bounds) : deny_rect(self.bounds);
         [(i ? NSColor.controlAccentColor : NSColor.controlColor) setFill];
@@ -129,8 +129,9 @@ static NSRect deny_rect(NSRect bounds) {
 - (BOOL)isAccessibilityElement { return YES; }
 - (NSAccessibilityRole)accessibilityRole { return NSAccessibilityGroupRole; }
 - (NSString *)accessibilityLabel {
-    return self.owner.control ? @"Allow remote control? Click Allow to accept, or press Escape to deny."
-                              : @"Allow desktop viewing? Click Allow to accept, or press Escape to deny.";
+    return self.owner.control
+        ? @"Allow remote control? Locally enabled playback audio may include other apps and displays. Click Allow to accept, or press Escape to deny."
+        : @"Allow desktop viewing? Locally enabled playback audio may include other apps and displays. Click Allow to accept, or press Escape to deny.";
 }
 - (BOOL)accessibilityPerformCancel {
     [self.owner deny:nil];
