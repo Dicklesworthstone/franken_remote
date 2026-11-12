@@ -19,6 +19,71 @@ fn until() -> Instant {
 }
 
 #[test]
+fn displayed_command_control_keeps_its_original_batch_when_a_successor_arrives() {
+    let first = SendControl::new();
+    let results = Results(Arc::new(Mutex::new(vec![Record {
+        control: first.clone(),
+        selected: 1,
+        sizes: vec![Some(10)],
+    }])));
+    let (sequence, displayed) = results.latest_control().unwrap();
+    assert_eq!(sequence, 1);
+    let second = SendControl::new();
+    results.records().push(Record {
+        control: second.clone(),
+        selected: 1,
+        sizes: vec![Some(20)],
+    });
+    assert_eq!(results.latest_control().unwrap().0, 2);
+
+    // A UI click on the previously displayed row must not look up the newly
+    // selected command. The retained handle is the real production control.
+    assert!(displayed.pause());
+    assert!(first.snapshot().pause_requested);
+    assert!(!second.snapshot().pause_requested);
+    assert_eq!(first.snapshot().paused, None);
+    first.observe(None, Some(sender::Stage::Queued), None, Some(true));
+    assert!(displayed.resume());
+    assert!(!first.snapshot().pause_requested);
+    assert_eq!(first.snapshot().paused, Some(true));
+    assert_eq!(second.snapshot().paused, None);
+    assert!(
+        results
+            .batches()
+            .iter()
+            .all(|batch| batch.status.report.is_none())
+    );
+}
+
+#[test]
+fn displayed_command_pacing_cannot_reactivate_cancelled_or_terminal_owners() {
+    for phase in [
+        SendPhase::WaitingForControl,
+        SendPhase::Finished,
+        SendPhase::Ended,
+    ] {
+        let original = SendControl::new();
+        assert!(original.pause());
+        let results = Results(Arc::new(Mutex::new(vec![Record {
+            control: original.clone(),
+            selected: 1,
+            sizes: vec![None],
+        }])));
+        let (_, displayed) = results.latest_control().unwrap();
+        if phase == SendPhase::WaitingForControl {
+            assert!(original.cancel());
+        } else {
+            original.update(|status| status.phase = phase);
+        }
+        assert!(!displayed.resume());
+        assert!(!displayed.pause());
+        assert_eq!(original.snapshot().paused, None);
+        assert_eq!(original.snapshot().cleanup, None);
+        assert!(original.status().report.is_none());
+    }
+}
+
+#[test]
 fn original_attachment_readiness_precedes_local_path_selection() {
     let runtime = RuntimeBuilder::current_thread().build().unwrap();
     let bridge = HostSendIntake::new();

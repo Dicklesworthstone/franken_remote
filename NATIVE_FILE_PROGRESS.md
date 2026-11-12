@@ -25,6 +25,32 @@ the desktop. There is no automatic reopen or replacement selection. Upload
 shortcuts and terminal receipts remain available when the panel is hidden or
 unavailable.
 
+## Mac window controls
+
+The `macos-desktop` viewer uses its reserved native sharing strip for both file
+directions. The upload cell shows current queued/total bytes, a distinct pacing
+label, **Pause / Resume**, and **Cancel**. Receive shows staged/total bytes and
+its independent **Cancel**. The two-row upload cell fits inside the existing
+230-by-44-point space; it does not change pointer mapping, cover the picture,
+or require a larger fitted window.
+
+The upload button follows initial selections, native drops/copied files and
+local commands. It is bound to the exact batch whose state was displayed;
+an older click never looks up the latest batch at dispatch. **Run pending** and
+**Pause pending** mean that the latest request and the sender's observed gate
+do not yet agree. **Running** and **Paused** reflect the sampled original gate,
+not the peer's disk or the absence of already-admitted data. Fresh local clicks
+are consumed only after a complete bounded native event batch; terminal native
+events and original owner cancellation win over pending Resume.
+
+The Mac strip samples at most ten times per second and contains no paths or
+filenames. Terminal success still requires actual publication receipts and
+source cleanup. See [pause/resume semantics](NATIVE_FILE_PACING.md#native-mac-upload-controls)
+and [the Mac CLI](docs/native-client-cli.md#explicit-macos-file-transfer).
+The following standalone-panel ownership and X11 qualification details apply
+to the Linux utility windows. Mac AppKit layout and live transfer qualification
+remain separate.
+
 ## Progress and publication
 
 Neither progress bar establishes publication. A full bar can still be waiting
@@ -142,5 +168,5 @@ admission and Xvfb displays. These targets do not establish physical-user
 authenticity, general window-manager compatibility or a live tailnet.
 
 Folder synchronization, cross-connection resumption, automatic file
-opening, Wayland/macOS/Windows UI and a general accessibility implementation are
+opening, Wayland/Windows UI and a general accessibility implementation are
 not added by this panel. Existing file and input authority checks are unchanged.

@@ -247,8 +247,8 @@ impl Files {
             .map_or_else(Vec::new, macos_file_drop::Owner::batches)
     }
 
-    pub(crate) fn drop_progress(&self) -> Option<Result<SendSnapshot, &'static str>> {
-        self.selections.as_ref()?.progress()
+    pub(crate) fn dropped_selection(&self) -> Option<(u64, Result<SendControl, &'static str>)> {
+        self.selections.as_ref()?.latest_selection()
     }
 
     /// Bind command consent to the original foreground connection exactly once,
@@ -462,6 +462,12 @@ impl Files {
             .latest_snapshot()
     }
 
+    /// Owning UI access to one exact batch; read-only command results do not
+    /// expose pacing or cancellation. Sequence and handle share one sample.
+    pub(crate) fn command_control(&self) -> Option<(u64, SendControl)> {
+        self.commands.as_ref()?.owner.as_ref()?.latest_control()
+    }
+
     /// Actual retirement of the original local socket and selection workers.
     /// A cancellation request alone cannot allow another native attempt.
     pub fn commands_complete(&self) -> bool {
@@ -567,7 +573,7 @@ mod tests {
             assert!(files.file_drop_requested());
             assert_eq!(files.upload_sizes().len(), usize::from(selected));
             assert!(files.dropped_batches().is_empty());
-            assert!(files.drop_progress().is_none());
+            assert!(files.dropped_selection().is_none());
             assert!(files.commands_complete());
             assert!(has(&files.offer(false), fr_wire::files::DUPLEX_CAPABILITY));
             let ingress = files.file_drop_ingress().unwrap();

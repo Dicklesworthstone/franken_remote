@@ -49,6 +49,29 @@ custody, unavailable mappings and qualification limits. A separate non-focus-tak
 and offers the same three local requests as buttons. There is no command-line
 pause switch; closing the panel only hides it.
 
+## Native Mac upload controls
+
+The `macos-desktop` viewer's upload strip has a **Pause / Resume** button beside
+**Cancel**, for initial `--send` or `--choose-files` selections and later
+`--file-drop` or `--file-commands` batches. It fits inside the existing native
+toolbar; enabling pacing changes neither the remote viewport nor `--fit` limits.
+An empty negotiated upload lane has no selected batch and cannot be paced.
+
+The separate label shows **Running**, **Run pending**, **Paused**, or **Pause
+pending**. A request becomes an observed state only when the original sender
+reports it. The button always retains the exact `SendControl` displayed with
+that label. Selecting a newer batch cannot redirect an older click. Terminal
+or cancelled owners refuse a request, including a race after the button was
+drawn. The download's independent Cancel button keeps its own owner.
+
+AppKit captures one original physical mouse-down timestamp and displayed batch
+identity. Stale, synthetic, remotely injected, modified or disabled gestures
+do not reach a control. A queued close, focus loss, emergency release, display
+change or event overflow suppresses pending pacing before Rust can resume it.
+The full bounded event batch is inspected even when download cancellation
+follows a resume click. Upload cancellation discards pending pacing and retires
+the original upload consent. Neither action creates a selection or a deadline.
+
 ## Deadlines and effects do not pause
 
 Already-admitted records can still drain. A prepared but unadmitted packet is
@@ -78,3 +101,12 @@ The accompanying validation bundle records execution scope explicitly. Scripted
 boundary/application tests are not qualification of the full Asupersync runtime,
 network transfer, native desktop, or a live tailnet session. The full workspace
 and real transport tests must pass on the pinned toolchain before release.
+
+The Mac routing policy has six dependency-free tests using the production
+`macos_file_pacing.rs`: requested/observed state separation, immutable displayed
+handles, successor selection, exact gesture expiry, cancellation precedence,
+and malformed/disabled actions. Local-command owner tests additionally exercise
+retained real `SendControl` handles and cancelled/terminal refusal. The latter
+require the full `frd` dependency build. Portable routing tests do not qualify
+AppKit event delivery, the Apple SDK build, native window layout or a real
+pause/resume transfer on a Mac.

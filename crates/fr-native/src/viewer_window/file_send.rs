@@ -140,13 +140,17 @@ impl Shared {
 pub struct Control(Arc<Shared>);
 impl Control {
     #[cfg(any(test, target_os = "macos"))]
-    pub(crate) fn latest_snapshot(
-        &self,
-    ) -> Option<Result<frd::native_files::SendSnapshot, &'static str>> {
-        self.0.batches().last().map(|batch| match &batch.outcome {
-            Outcome::Preparing => Err("file_selection_preparing"),
-            Outcome::Refused(code) => Err(*code),
-            Outcome::Submitted(control) => Ok(control.snapshot()),
+    pub(crate) fn latest_selection(&self) -> Option<(u64, Result<SendControl, &'static str>)> {
+        let batches = self.0.batches();
+        batches.last().map(|batch| {
+            (
+                u64::try_from(batches.len()).expect("bounded original selections"),
+                match &batch.outcome {
+                    Outcome::Preparing => Err("file_selection_preparing"),
+                    Outcome::Refused(code) => Err(*code),
+                    Outcome::Submitted(control) => Ok(control.clone()),
+                },
+            )
         })
     }
     pub fn batches(&self) -> Vec<BatchStatus> {

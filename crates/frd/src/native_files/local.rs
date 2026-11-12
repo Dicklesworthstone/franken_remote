@@ -58,6 +58,13 @@ impl Owner {
     pub fn results(&self) -> Results {
         self.results.clone()
     }
+    /// The exact latest admitted batch and its original local control. Only
+    /// the owning endpoint exposes this capability; retained `Results` remain
+    /// read-only. A native surface must keep the pair it actually displayed,
+    /// rather than resolving a later click against a newer selection.
+    pub fn latest_control(&self) -> Option<(u64, SendControl)> {
+        self.results.latest_control()
+    }
     pub fn stop(&self) {
         self.ipc.stop();
     }
@@ -81,6 +88,16 @@ pub struct BatchStatus {
 #[derive(Clone)]
 pub struct Results(Arc<Mutex<Vec<Record>>>);
 impl Results {
+    fn latest_control(&self) -> Option<(u64, SendControl)> {
+        let records = self.records();
+        records.last().map(|record| {
+            (
+                u64::try_from(records.len()).expect("bounded original history"),
+                record.control.clone(),
+            )
+        })
+    }
+
     /// Latest original selection's progress, without retaining its local paths
     /// or providing any selection, cancellation or replacement capability.
     pub fn latest_snapshot(&self) -> Option<super::SendSnapshot> {

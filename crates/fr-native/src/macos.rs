@@ -97,11 +97,15 @@ unsafe extern "C" {
         download_status: u32,
         download_done: u64,
         download_total: u64,
+        upload_context: u64,
+        upload_pacing: u32,
     ) -> c_int;
     fn fr_mac_window_sharing_state(
         window: *mut c_void,
         actions: *mut u32,
         visible: *mut c_int,
+        upload_context: *mut u64,
+        upload_captured: *mut f64,
     ) -> c_int;
     fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
     fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
@@ -485,18 +489,36 @@ impl Window {
                 view.download.state as u32,
                 view.download.done,
                 view.download.total,
+                view.upload_context,
+                view.upload_pacing as u32,
             )
         })
     }
     pub(crate) fn sharing_state(&self) -> Result<sharing::Sample, NativeError> {
         let (mut actions, mut visible) = (0, 0);
-        // SAFETY: live main-thread window; both out parameters are writable.
+        let (mut upload_context, mut upload_captured) = (0, 0.0);
+        // SAFETY: live main-thread window; every scalar out parameter is writable.
         status(unsafe {
-            fr_mac_window_sharing_state(self.raw.as_ptr(), &raw mut actions, &raw mut visible)
+            fr_mac_window_sharing_state(
+                self.raw.as_ptr(),
+                &raw mut actions,
+                &raw mut visible,
+                &raw mut upload_context,
+                &raw mut upload_captured,
+            )
         })?;
         Ok(sharing::Sample {
             actions,
             visible: visible != 0,
+            upload_context,
+            upload_captured: if upload_captured == 0.0 {
+                None
+            } else {
+                Some(
+                    Duration::try_from_secs_f64(upload_captured)
+                        .map_err(|_| NativeError::Unavailable)?,
+                )
+            },
         })
     }
     pub(crate) fn display_change_enabled(&self, enabled: bool) -> Result<(), NativeError> {

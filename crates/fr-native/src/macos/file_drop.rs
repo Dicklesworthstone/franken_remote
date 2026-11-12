@@ -9,7 +9,7 @@ use crate::{
     file_drop::{self, Inbox},
     file_selection::{BatchStatus, Control, Error, Manager, Surface},
 };
-use frd::native_files::{SendControl, SendIntake, SendRequest, SendSnapshot};
+use frd::native_files::{SendControl, SendIntake, SendRequest};
 use std::{
     fmt,
     sync::{
@@ -145,8 +145,8 @@ impl Owner {
             .as_ref()
             .map_or_else(Vec::new, Control::batches)
     }
-    pub(crate) fn progress(&self) -> Option<Result<SendSnapshot, &'static str>> {
-        self.control.as_ref()?.latest_snapshot()
+    pub(crate) fn latest_selection(&self) -> Option<(u64, Result<SendControl, &'static str>)> {
+        self.control.as_ref()?.latest_selection()
     }
 }
 impl Drop for Owner {

@@ -64,6 +64,17 @@ typedef struct {
 #define FR_MAC_QUEUE 1024
 #define FR_MAC_PUMP_EVENTS 256
 
+// Sharing actions are a separate namespace from window capability flags.
+// Must match macos_file_pacing.rs; only cancellation may short-circuit polling.
+enum {
+    FR_MAC_CANCEL_UPLOAD = 1,
+    FR_MAC_CANCEL_DOWNLOAD = 2,
+    FR_MAC_PAUSE_UPLOAD = 4,
+    FR_MAC_RESUME_UPLOAD = 8,
+    FR_MAC_CANCEL_ACTIONS = 3,
+    FR_MAC_PACING_ACTIONS = 12,
+};
+
 static NSString *const kShader =
     @"#include <metal_stdlib>\n"
      "using namespace metal;\n"
@@ -527,9 +538,9 @@ static BOOL fr_any_key(const BOOL *keys) {
 @interface FrSharingView : NSView
 @end
 
-// NSButton normally enters a tracking loop until mouse-up. These local stop
-// controls act on mouse-down and return immediately, so holding the button
-// cannot postpone Rust's cancellation/authority turn.
+// NSButton normally enters a tracking loop until mouse-up. These local controls
+// act on mouse-down and return immediately, so holding the button cannot
+// postpone Rust's cancellation/authority turn.
 @interface FrSharingButton : NSButton
 @end
 
@@ -557,9 +568,9 @@ static BOOL fr_any_key(const BOOL *keys) {
     FrMetalView *view;
     FrContentView *content;
     FrSharingView *sharing;
-    NSTextField *uploadLabel, *downloadLabel;
+    NSTextField *uploadLabel, *uploadPacingLabel, *downloadLabel;
     NSTextField *clipboardLabel;
-    FrSharingButton *uploadCancel, *downloadCancel, *changeDisplay;
+    FrSharingButton *uploadCancel, *uploadPacing, *downloadCancel, *changeDisplay;
     FrSharingButton *clipboardOff;
     FrSharingButton *sendCopiedFiles;
     void *fileSelectionContext;
@@ -576,6 +587,10 @@ static BOOL fr_any_key(const BOOL *keys) {
     BOOL clipboardStopped, clipboardUserOff;
     uint32_t sharingFlags, sharingActions, uploadStatus, downloadStatus;
     uint64_t uploadDone, uploadTotal, downloadDone, downloadTotal;
+    uint64_t uploadContext, uploadActionContext;
+    uint32_t uploadPacingState;
+    double uploadPacingSince, uploadActionCaptured;
+    BOOL uploadPacingPending;
     BOOL uploadCancelled, downloadCancelled, layoutInProgress;
     BOOL displayChangeUsed;
     double displayChangeAt;
@@ -622,6 +637,8 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)buildSharing;
 - (void)layoutSharing;
 - (void)cancelUpload:(id)sender;
+- (void)paceUpload:(id)sender;
+- (void)retireUploadPacing;
 - (void)cancelDownload:(id)sender;
 - (void)changeDisplay:(id)sender;
 - (void)stopClipboard:(BOOL)userOff;
@@ -1031,6 +1048,11 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     if (sharingFlags & FR_MAC_SHARE_UPLOAD) {
         uploadStatus = 1;
         uploadLabel = fr_sharing_label(sharing, @"Send: Waiting");
+        uploadPacingLabel = fr_sharing_label(sharing, @"Not ready");
+        uploadPacing = fr_sharing_button(sharing, @"Pause", self, @selector(paceUpload:));
+        uploadPacing.accessibilityLabel = @"Pause this original file selection";
+        uploadPacing.toolTip = @"Pause or resume this selection on the same connection. Its original deadlines continue; data already queued may still arrive.";
+        uploadPacing.enabled = NO; // No selected owner is displayed yet.
         uploadCancel = fr_sharing_button(sharing, @"Cancel", self, @selector(cancelUpload:));
         uploadCancel.accessibilityLabel = @"Cancel sending file";
     }
@@ -1079,8 +1101,17 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     for (unsigned i = 0; i < 2; i++) {
         if (!labels[i]) continue;
         double x = 8 + offset + index++ * cell;
-        labels[i].frame = NSMakeRect(x + 4, 14, fmax(1, cell - 78), 17);
-        controls[i].frame = NSMakeRect(x + cell - 70, 8, 66, 28);
+        if (i == 0) {
+            // Fit progress and pacing in the original 230-by-44-point cell.
+            // The remote viewport and existing fit policy do not shrink.
+            labels[i].frame = NSMakeRect(x + 4, 1, fmax(1, cell - 8), 16);
+            uploadPacingLabel.frame = NSMakeRect(x + 4, 22, fmax(1, cell - 146), 16);
+            uploadPacing.frame = NSMakeRect(x + cell - 140, 17, 66, 25);
+            controls[i].frame = NSMakeRect(x + cell - 70, 17, 66, 25);
+        } else {
+            labels[i].frame = NSMakeRect(x + 4, 14, fmax(1, cell - 78), 17);
+            controls[i].frame = NSMakeRect(x + cell - 70, 8, 66, 28);
+        }
     }
     if (textScroll) {
         double width = NSWidth(sharing.bounds);
@@ -1248,6 +1279,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     }
 }
 - (void)stopNativeInput:(NSString *)message {
+    [self retireUploadPacing];
     [self cancelResize];
     nativeStopPending = YES;
     [self stopFileSelections];
@@ -1370,17 +1402,68 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 - (void)cancelUpload:(id)sender {
     (void)sender;
     if (!uploadCancel.enabled || uploadCancelled) return;
+    [self retireUploadPacing];
     [self stopFileSelections];
     uploadCancelled = YES;
-    sharingActions |= FR_MAC_SHARE_UPLOAD;
+    sharingActions |= FR_MAC_CANCEL_UPLOAD;
     uploadCancel.enabled = NO;
+    uploadPacing.enabled = NO;
     uploadLabel.stringValue = @"Send: Cancelling";
+}
+- (void)retireUploadPacing {
+    // Scalar-only fencing precedes any native cleanup or owner callback.
+    sharingActions &= ~FR_MAC_PACING_ACTIONS;
+    uploadActionContext = 0;
+    uploadActionCaptured = 0;
+    uploadContext = 0;
+    uploadPacingState = 0;
+    uploadPacingPending = NO;
+}
+- (void)paceUpload:(id)sender {
+    uint64_t context = uploadContext;
+    uint32_t state = uploadPacingState;
+    NSEvent *event = NSApp.currentEvent;
+    double captured = event ? event.timestamp : 0;
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (sender != uploadPacing || !uploadPacing.enabled || uploadPacingPending ||
+        uploadCancelled || !uploadContext || !uploadPacingState ||
+        nativeStopPending || overflow || fullScreenMoving || displayChangeAt > 0 ||
+        textActive || textPending ||
+        atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) ||
+        !window.isKeyWindow || !window.isVisible || window.isMiniaturized ||
+        !window.isOnActiveSpace || !(window.occlusionState & NSWindowOcclusionStateVisible) ||
+        !sharing || sharing.isHidden ||
+        !NSContainsRect(sharing.visibleRect, uploadPacing.frame) ||
+        !event || event.type != NSEventTypeLeftMouseDown || event.window != window ||
+        !isfinite(captured) || captured <= 0 ||
+        captured < uploadPacingSince || fr_held_modifiers(event.modifierFlags) ||
+        !isfinite(now) || now < captured || now - captured >= 0.250)
+        return;
+    CGEventRef native = event.CGEvent;
+    if (!native ||
+        CGEventGetIntegerValueField(native, kCGEventSourceUserData) == FR_MAC_REMOTE_INPUT_TAG ||
+        CGEventGetIntegerValueField(native, kCGEventSourceUnixProcessID) == getpid())
+        return;
+    // Native getters must not bridge a reentrant terminal callback or redraw.
+    if (nativeStopPending || uploadCancelled || uploadPacingPending || displayChangeAt > 0 ||
+        atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) ||
+        uploadContext != context || uploadPacingState != state)
+        return;
+    uint32_t action = state == 1 || state == 2
+        ? FR_MAC_PAUSE_UPLOAD : FR_MAC_RESUME_UPLOAD;
+    // Freeze the identity and timestamp which were actually presented. Rust
+    // consumes this one latch only after the full bounded native event batch.
+    uploadActionContext = context;
+    uploadActionCaptured = captured;
+    uploadPacingPending = YES;
+    sharingActions |= action;
+    uploadPacing.enabled = NO;
 }
 - (void)cancelDownload:(id)sender {
     (void)sender;
     if (!downloadCancel.enabled || downloadCancelled) return;
     downloadCancelled = YES;
-    sharingActions |= FR_MAC_SHARE_DOWNLOAD;
+    sharingActions |= FR_MAC_CANCEL_DOWNLOAD;
     downloadCancel.enabled = NO;
     downloadLabel.stringValue = @"Receive: Cancelling";
 }
@@ -1393,6 +1476,7 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         !isfinite(event.timestamp) || event.timestamp <= 0 || now < event.timestamp ||
         now - event.timestamp >= 0.250) return;
     displayChangeUsed = YES;
+    [self retireUploadPacing];
     [self stopFileSelections];
     // This is a nonterminal handoff: Rust must first inspect the rest of the
     // batch for a queued veto, then park the original producer. IME/chrome
@@ -1931,22 +2015,36 @@ int fr_mac_window_new(uint32_t width, uint32_t height, uint32_t point_width,
 // the toolbar NEVER infers successful completion from staged byte counts.
 int fr_mac_window_sharing_update(void *handle,
                                  uint32_t upload_status, uint64_t upload_done, uint64_t upload_total,
-                                 uint32_t download_status, uint64_t download_done, uint64_t download_total) {
+                                 uint32_t download_status, uint64_t download_done, uint64_t download_total,
+                                 uint64_t upload_context, uint32_t upload_pacing) {
     if (!handle || !fr_sharing_status(upload_status) || !fr_sharing_status(download_status) ||
-        upload_done > upload_total || download_done > download_total)
+        upload_done > upload_total || download_done > download_total || upload_pacing > 4 ||
+        ((upload_context == 0) != (upload_pacing == 0)) ||
+        (upload_pacing && upload_status != 1 && upload_status != 2))
         return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
     if ((!(owner->sharingFlags & FR_MAC_SHARE_UPLOAD) &&
-         (upload_status || upload_done || upload_total)) ||
+         (upload_status || upload_done || upload_total || upload_context || upload_pacing)) ||
         (!(owner->sharingFlags & FR_MAC_SHARE_DOWNLOAD) &&
          (download_status || download_done || download_total)))
         return FR_MAC_INVALID;
     BOOL changed = owner->uploadStatus != upload_status || owner->uploadDone != upload_done ||
                    owner->uploadTotal != upload_total || owner->downloadStatus != download_status ||
-                   owner->downloadDone != download_done || owner->downloadTotal != download_total;
+                   owner->downloadDone != download_done || owner->downloadTotal != download_total ||
+                   owner->uploadContext != upload_context || owner->uploadPacingState != upload_pacing ||
+                   owner->uploadPacingPending;
     if (!changed) return FR_MAC_OK;
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!isfinite(now) || now <= 0 || now < owner->uploadPacingSince)
+        return FR_MAC_UNAVAILABLE;
     @autoreleasepool {
+        if (owner->uploadContext != upload_context || owner->uploadPacingState != upload_pacing)
+            owner->uploadPacingSince = now;
+        owner->uploadContext = upload_context;
+        owner->uploadPacingState = upload_pacing;
+        owner->uploadPacingPending = NO;
         owner->uploadStatus = upload_status;
         owner->uploadDone = upload_done;
         owner->uploadTotal = upload_total;
@@ -1960,6 +2058,23 @@ int fr_mac_window_sharing_update(void *handle,
                     : fr_transfer_label(@"Send", upload_status, upload_done, upload_total);
             owner->uploadCancel.enabled = !owner->uploadCancelled &&
                                            (upload_status == 1 || upload_status == 2);
+            // Intent and the original sender's observed gate remain distinct.
+            // These labels never acknowledge delivery, publication or cleanup.
+            NSString *label = @"Not ready";
+            switch (upload_pacing) {
+                case 1: label = @"Running"; break;
+                case 2: label = @"Run pending"; break;
+                case 3: label = @"Paused"; break;
+                case 4: label = @"Pause pending"; break;
+            }
+            owner->uploadPacingLabel.stringValue = label;
+            owner->uploadPacingLabel.toolTip = label;
+            BOOL resume = upload_pacing == 3 || upload_pacing == 4;
+            owner->uploadPacing.title = resume ? @"Resume" : @"Pause";
+            owner->uploadPacing.accessibilityLabel = resume
+                ? @"Resume this original file selection" : @"Pause this original file selection";
+            owner->uploadPacing.enabled = upload_pacing && !owner->uploadCancelled &&
+                !owner->nativeStopPending && !owner->displayChangeAt;
         }
         if (owner->downloadLabel) {
             owner->downloadLabel.stringValue =
@@ -1973,15 +2088,21 @@ int fr_mac_window_sharing_update(void *handle,
     return FR_MAC_OK;
 }
 
-// Drain local cancellation latches every pump. "Visible" means mapped and
+// Drain local action latches every pump. "Visible" means mapped and
 // unclipped AppKit chrome; it is not an unobscured privacy/UI heartbeat proof.
 // File ownership and cancellation remain with the original Rust session.
-int fr_mac_window_sharing_state(void *handle, uint32_t *actions, int *visible) {
-    if (!handle || !actions || !visible) return FR_MAC_INVALID;
+int fr_mac_window_sharing_state(void *handle, uint32_t *actions, int *visible,
+                                uint64_t *upload_context, double *upload_captured) {
+    if (!handle || !actions || !visible || !upload_context || !upload_captured)
+        return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     *actions = owner->sharingActions;
+    *upload_context = owner->uploadActionContext;
+    *upload_captured = owner->uploadActionCaptured;
     owner->sharingActions = 0;
+    owner->uploadActionContext = 0;
+    owner->uploadActionCaptured = 0;
     NSWindow *w = owner->window;
     *visible = owner->sharingFlags && owner->sharing && !owner->sharing.hidden &&
                w.isVisible && !w.isMiniaturized && w.isOnActiveSpace &&
@@ -2243,11 +2364,13 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        // A display change or captured Send must inspect the full bounded
+        // A display change, file pacing or captured Send inspects the full bounded
         // batch so queued close, escape or focus loss can veto the action.
         // File-only cancel still reaches Rust immediately when neither is pending.
         while (!owner->nativeStopPending &&
-               (!owner->sharingActions || owner->displayChangeAt > 0 || owner->textPending) &&
+               (!(owner->sharingActions & FR_MAC_CANCEL_ACTIONS) ||
+                (owner->sharingActions & FR_MAC_PACING_ACTIONS) ||
+                owner->displayChangeAt > 0 || owner->textPending) &&
                owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:until
@@ -2591,9 +2714,11 @@ void fr_mac_window_free(void *handle) {
         owner->textCancel = nil;
         owner->textNotice = nil;
         owner->uploadLabel = nil;
+        owner->uploadPacingLabel = nil;
         owner->downloadLabel = nil;
         owner->clipboardLabel = nil;
         owner->uploadCancel = nil;
+        owner->uploadPacing = nil;
         owner->downloadCancel = nil;
         owner->changeDisplay = nil;
         owner->clipboardOff = nil;

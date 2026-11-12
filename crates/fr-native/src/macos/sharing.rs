@@ -5,10 +5,10 @@
 //! buttons stays on the `AppKit` thread; file work stays with the original frd
 //! owners. No path, file name or contents enter this UI.
 use super::{Window, event_time, files};
-use crate::NativeError;
+use crate::{NativeError, macos_file_pacing as pacing};
 use fr_files::{sender::Outcome, worker::Completion};
 use frd::{
-    native_files::{Absence, ReceivePhase, SendPhase},
+    native_files::{Absence, ReceivePhase, SendControl, SendPhase, SendSnapshot},
     session_startup::FileSendError,
 };
 use std::time::Duration;
@@ -45,33 +45,96 @@ impl Progress {
 pub(crate) struct View {
     pub(crate) upload: Progress,
     pub(crate) download: Progress,
+    pub(crate) upload_context: u64,
+    pub(crate) upload_pacing: pacing::State,
 }
 
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct Sample {
     pub(crate) actions: u32,
     pub(crate) visible: bool,
+    pub(crate) upload_context: u64,
+    pub(crate) upload_captured: Option<Duration>,
 }
 
-fn upload(files: &files::Files, native_last: bool) -> Progress {
-    use files::Status;
-    // Later admitted batches have independent progress and cleanup. Sampling
-    // their retained handle never replaces the initial selection's receipts.
-    let command = files.command_snapshot();
-    let native = files.drop_progress();
-    let active = |snapshot: &frd::native_files::SendSnapshot| {
-        snapshot.status.absence.is_none()
+struct UploadOwner {
+    context: u64,
+    control: SendControl,
+    snapshot: SendSnapshot,
+}
+impl UploadOwner {
+    fn new(context: u64, control: SendControl) -> Self {
+        let snapshot = control.snapshot();
+        Self {
+            context,
+            control,
+            snapshot,
+        }
+    }
+    fn active(&self) -> bool {
+        self.snapshot.status.absence.is_none()
             && matches!(
-                snapshot.status.phase,
+                self.snapshot.status.phase,
                 SendPhase::WaitingForControl | SendPhase::Negotiating | SendPhase::Sending
             )
-    };
+    }
+}
+
+#[derive(Default)]
+struct Upload {
+    progress: Progress,
+    owner: Option<UploadOwner>,
+}
+impl Upload {
+    fn state(state: State) -> Self {
+        Self {
+            progress: Progress::state(state),
+            owner: None,
+        }
+    }
+    fn selected(owner: UploadOwner) -> Self {
+        Self {
+            progress: upload_progress(Some(files::Status::Configured(owner.snapshot))),
+            owner: Some(owner),
+        }
+    }
+    fn pacing(&self) -> pacing::State {
+        self.owner
+            .as_ref()
+            .map_or(pacing::State::Unavailable, |owner| {
+                pacing_state(owner.snapshot)
+            })
+    }
+}
+
+fn pacing_state(snapshot: SendSnapshot) -> pacing::State {
+    let eligible = !snapshot.cancel_requested
+        && snapshot.status.absence.is_none()
+        && snapshot.cleanup.is_none()
+        && snapshot.status.report.is_none_or(|report| !report.complete)
+        && matches!(
+            snapshot.status.phase,
+            SendPhase::WaitingForControl | SendPhase::Negotiating | SendPhase::Sending
+        );
+    pacing::State::new(eligible, snapshot.pause_requested, snapshot.paused)
+}
+
+fn upload(files: &files::Files, native_last: bool) -> Upload {
+    // Later admitted batches have independent progress and cleanup. Sampling
+    // sequence and handle together pins the button to the displayed owner.
+    // Contexts are bounded UI comparisons, never new transfer authority.
+    let command = files
+        .command_control()
+        .map(|(sequence, control)| UploadOwner::new(sequence * 4 + 3, control));
+    let native = files.dropped_selection().map(|(sequence, selected)| {
+        selected.map(|control| UploadOwner::new(sequence * 4 + 2, control))
+    });
     // Both local selectors use the same one-slot intake. A refused concurrent
     // gesture must not conceal progress of the batch actually being sent.
-    let later = if command.as_ref().is_some_and(active) {
+    let later = if command.as_ref().is_some_and(UploadOwner::active) {
         command.map(Ok)
     } else if native.as_ref().is_some_and(|status| match status {
-        Ok(snapshot) => active(snapshot),
+        Ok(owner) => owner.active(),
         Err(code) => *code == "file_selection_preparing",
     }) || native_last
     {
@@ -79,14 +142,24 @@ fn upload(files: &files::Files, native_last: bool) -> Progress {
     } else {
         command.map(Ok).or(native)
     };
-    let later = match later {
-        Some(Ok(snapshot)) => Some(Status::Configured(snapshot)),
-        Some(Err("file_selection_preparing")) => return Progress::state(State::Waiting),
-        Some(Err("file_selection_stopped")) => return Progress::state(State::Cancelled),
-        Some(Err(_)) => return Progress::state(State::Failed),
-        None => None,
-    };
-    let status = match later.or_else(|| files.upload_status()) {
+    match later {
+        Some(Ok(owner)) => Upload::selected(owner),
+        Some(Err("file_selection_preparing")) => Upload::state(State::Waiting),
+        Some(Err("file_selection_stopped")) => Upload::state(State::Cancelled),
+        Some(Err(_)) => Upload::state(State::Failed),
+        None => files.upload_control().map_or_else(
+            || Upload {
+                progress: upload_progress(files.upload_status()),
+                owner: None,
+            },
+            |control| Upload::selected(UploadOwner::new(1, control)),
+        ),
+    }
+}
+
+fn upload_progress(status: Option<files::Status<SendSnapshot>>) -> Progress {
+    use files::Status;
+    let status = match status {
         None => return Progress::default(),
         Some(Status::NotStarted) => return Progress::state(State::Waiting),
         Some(Status::Unavailable(absence)) => {
@@ -216,6 +289,7 @@ pub(crate) struct Ui {
     previous: Option<Duration>,
     sampled: Option<Duration>,
     displayed: Option<View>,
+    upload: pacing::Displayed<SendControl>,
     command_batches: usize,
     native_batches: usize,
     native_last: bool,
@@ -230,14 +304,14 @@ impl Ui {
             return Ok(());
         }
         let sample = window.sharing_state()?;
-        if sample.actions & !3 != 0 || !sample.visible {
+        if sample.actions & !pacing::ALL_ACTIONS != 0 || !sample.visible {
             files.cancel();
             return Err(NativeError::Unavailable);
         }
-        if sample.actions & 1 != 0 {
+        if sample.actions & pacing::CANCEL_UPLOAD != 0 {
             files.cancel_upload();
         }
-        if sample.actions & 2 != 0 {
+        if sample.actions & pacing::CANCEL_DOWNLOAD != 0 {
             files.cancel_download();
         }
         let now = event_time().ok_or(NativeError::Unavailable)?;
@@ -246,6 +320,31 @@ impl Ui {
             return Err(NativeError::Unavailable);
         }
         self.previous = Some(now);
+        let action = self.upload.resolve(
+            sample.actions,
+            sample.upload_context,
+            sample.upload_captured,
+            now,
+        );
+        let Ok(action) = action else {
+            files.cancel();
+            return Err(NativeError::Unavailable);
+        };
+        if let Some((action, control)) = action
+            && pacing_state(control.snapshot()).permits(action)
+        {
+            // The existing sender observes this request on its next ordinary
+            // turn. No source, handshake, selection or deadline is recreated.
+            // SendControl repeats the cancellation/terminal check under lock.
+            match action {
+                pacing::Action::Pause => {
+                    control.pause();
+                }
+                pacing::Action::Resume => {
+                    control.resume();
+                }
+            }
+        }
         if sample.actions == 0
             && self
                 .sampled
@@ -267,12 +366,27 @@ impl Ui {
         }
         self.command_batches = commands;
         self.native_batches = native;
+        let upload = upload(files, self.native_last);
+        let upload_pacing = upload.pacing();
         let view = View {
-            upload: upload(files, self.native_last),
+            upload: upload.progress,
             download: download(files),
+            upload_context: upload
+                .owner
+                .as_ref()
+                .filter(|_| upload_pacing != pacing::State::Unavailable)
+                .map_or(0, |owner| owner.context),
+            upload_pacing,
         };
-        if self.displayed != Some(view) {
+        if self.displayed != Some(view)
+            || sample.actions & (pacing::PAUSE_UPLOAD | pacing::RESUME_UPLOAD) != 0
+        {
             window.sharing_update(view)?;
+            self.upload.show(
+                view.upload_context,
+                upload.owner.map(|owner| owner.control),
+                upload_pacing,
+            );
             self.displayed = Some(view);
         }
         Ok(())

@@ -442,8 +442,16 @@ transfer. A failed dial before observer configuration has started no file
 owner and can retain the pending choice for its normal bounded retry.
 
 A reserved strip above the Metal picture shows send and receive status with
-independent **Cancel** buttons. It does not cover the remote viewport or enter
-the remote pointer mapping. Cancel requests act on mouse-down, before another
+independent **Cancel** buttons and upload **Pause / Resume**. The upload's
+separate **Running / Run pending / Paused / Pause pending** label distinguishes
+the local request from the original sender's observed gate. The button stays
+bound to the displayed batch, including when a newer selection arrives before
+the click is processed. All original deadlines continue during a pause;
+resuming cannot restart cancelled or expired work. Already queued data can
+still arrive. See [native upload pacing](../NATIVE_FILE_PACING.md#native-mac-upload-controls).
+
+The controls fit inside the existing native strip and do not cover the remote
+viewport or enter the remote pointer mapping. Cancel requests act on mouse-down, before another
 ordinary network/input turn, and affect only their original file direction.
 A request during setup still settles the already negotiated attachment before
 retirement. The window's close/escape and connection cleanup fence both file
@@ -560,7 +568,9 @@ Both native gestures and local commands share the original upload intake,
 sender policy, attachment, control lease, cumulative host limits and publication
 receipts. Finish the current batch before selecting another. There is one
 pending native selection and at most eight native batch results per invocation.
-The native progress strip follows the current batch. Its **Cancel** retires
+The native progress strip follows the current batch. **Pause / Resume** affects
+only its displayed original owner and does not permit another selection while
+that owner is paused. Its **Cancel** retires
 upload selection consent and cancels admitted uploads; it leaves the separate
 receive direction intact. Closing, Escape, focus loss, display change and
 connection cleanup also fence native selection. A later viewing reconnect or
@@ -623,7 +633,9 @@ one request cannot cancel a later batch. Each `--status --request N` reports the
 original request's own publication, uncertainty, pacing and cleanup evidence.
 
 The native upload strip follows the latest admitted batch and samples its actual
-progress and cleanup. Its **Cancel** button retires command intake and cancels
+progress and cleanup. **Pause / Resume** uses the exact displayed command's
+original control; a click queued before a new command cannot pace that successor.
+Its **Cancel** button retires command intake and cancels
 all admitted upload batches; the independent receive direction stays available.
 Window close, escape, display change and connection cleanup also fence the
 endpoint synchronously. A later viewing retry or fresh F8 control never reopens

@@ -100,6 +100,8 @@ mod macos_control;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_file_choice;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
+mod macos_file_pacing;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 pub mod macos_input_receipts;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 mod macos_resize;
