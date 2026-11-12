@@ -2,8 +2,8 @@
 //!
 //! This boundary does not authorize capture/playback or load peer-selected
 //! libraries. The caller must keep these calls off input-authority and realtime
-//! audio threads. The opt-in Linux feature
-//! links the system SONAME; deployment must provide a trusted native package.
+//! audio threads. Linux links the system SONAME; macOS links an explicitly
+//! supplied static libopus archive. Deployment must provide a trusted package.
 //! Codec state and pending output are bounded separately. No callback or borrowed
 //! Rust input survives a native call. See `NATIVE_OPUS.md` for the ABI/trust limits.
 
@@ -11,10 +11,10 @@ mod decoder;
 mod encoder;
 mod ffi;
 
-#[cfg(feature = "linux-opus-process")]
+#[cfg(feature = "opus-process")]
 pub mod process;
 
-#[cfg(feature = "linux-audio-playout")]
+#[cfg(feature = "opus-playout")]
 pub mod playout;
 
 pub use decoder::{Decoder, MAX_CONCEALED_SAMPLES};

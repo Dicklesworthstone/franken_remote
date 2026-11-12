@@ -3,8 +3,7 @@
 //! from `fr_native::macos::session` in place of the X11 desktop.
 //!
 //! Not implemented on macOS yet, and refused by name rather than ignored:
-//! audio, microphone,
-//! and system-shortcut capture. Local inspection and disconnect address the same
+//! microphone and system-shortcut capture. Local inspection and disconnect address the same
 //! authenticated foreground owner and wait for its actual native cleanup.
 //! Explicit --send/--receive choices, --file-drop native selections and opt-in
 //! local upload commands use the original controlled file lanes.
@@ -21,7 +20,8 @@ mod host_choice;
 #[path = "macos_media.rs"]
 mod media;
 use super::{
-    Failure, Shutdown, failure, lapse, read_roots, refusal, robot, session_control, tailnet,
+    Failure, Shutdown, failure, lapse, macos_audio as playback, read_roots, refusal, robot,
+    session_control, tailnet,
 };
 use crate::options::{Connection, DisplayChoice};
 use asupersync::{cx::Cx, runtime::Runtime, types::Budget};
@@ -38,6 +38,7 @@ fn unsupported(option: &'static str) -> Failure {
 
 /// Refuse every option this path does not implement, before any network I/O.
 fn check(connection: &Connection) -> Result<(), Failure> {
+    playback::check(connection.audio.as_ref(), cfg!(feature = "macos-audio"))?;
     if connection.upload.choose_files
         && (!connection.control || !connection.upload.paths.is_empty())
     {
@@ -82,28 +83,36 @@ fn check(connection: &Connection) -> Result<(), Failure> {
             || connection.upload.file_drop,
     ) + u32::from(connection.receive.is_some());
     let clipboard = u32::from(connection.control && connection.clipboard);
+    playback::check_profile(
+        connection.control,
+        clipboard != 0,
+        directions,
+        connection.audio.is_some(),
+    )?;
     let sharing_width =
         152 + 230 * directions + 184 * clipboard + 144 * u32::from(connection.upload.file_drop);
-    let minimum_width = if connection.control {
+    let mut minimum_width = if connection.control {
         sharing_width.max(480)
     } else {
         sharing_width
     };
-    let minimum_height = if connection.control { 184 } else { 108 };
+    let mut minimum_height = if connection.control { 184 } else { 108 };
+    if connection.audio.is_some() {
+        minimum_width = minimum_width.max(320);
+        minimum_height += 44;
+    }
     if connection
         .fit_window
         .is_some_and(|(width, height)| width < minimum_width || height < minimum_height)
     {
         return Err(Failure::new(
             "viewer_fit_too_small",
-            "--fit must leave room for Change Display and visible sharing controls. Controlling windows also reserve the local text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction, 184 for the default-on clipboard and 144 for --file-drop's Send copied files button; both file directions with clipboard and file-drop need 940x184. Viewing-only windows need 152x108. --no-clipboard removes only the clipboard strip.",
+            "--fit must leave room for Change Display and visible sharing controls. Controlling windows reserve the text composer: minimum 480x184 points. Width is at least 152 plus 230 per file direction, 184 for clipboard and 144 for --file-drop; both file directions with clipboard and file-drop need 940x184. Viewing needs 152x108. --audio adds 44 points of height and requires at least 320 points of width. --no-clipboard removes only the clipboard strip.",
             2,
         ));
     }
     let refused = if connection.capture_system_shortcuts {
         Some("--capture-system-shortcuts is not implemented on macOS yet.")
-    } else if connection.audio.is_some() {
-        Some("--audio is not implemented on macOS yet.")
     } else if connection.microphone.is_some() {
         Some("--microphone is not implemented on macOS yet.")
     } else {
@@ -129,6 +138,7 @@ pub(super) fn connect(
         ));
     }
     check(connection)?;
+    let audio = playback::prepare(connection.audio.as_ref())?;
     // The explicit native choice runs before host lookup or connection startup.
     // It never changes the active viewer's terminal focus-loss policy. Pin its
     // sources through the same original upload owner as --send after the panel
@@ -154,10 +164,13 @@ pub(super) fn connect(
         connection,
         json,
         selected_files,
+        audio.clone(),
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
         clipboard::preserve(&pending_clipboard, &mut error);
+        let audio = audio.as_ref().map(|report| report.borrow());
+        playback::preserve(audio.as_deref(), &mut error);
         error
     })
 }
@@ -172,6 +185,7 @@ fn connect_selected(
     connection: &Connection,
     json: bool,
     selected_files: fr_native::macos::files::Files,
+    audio: Option<playback::Report>,
 ) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
@@ -199,8 +213,10 @@ fn connect_selected(
         display.select(catalog).map(Some).ok_or(())
     });
     // The screen's 1:1 box below the title bar, the 44-point sharing strip
-    // and, when controlling, the 76-point text composer.
-    let picture_box = fr_native::macos::window_box(44 + if connection.control { 76 } else { 0 });
+    // and explicitly selected text/audio controls, before the host sizes video.
+    let reserved =
+        44 + if connection.control { 76 } else { 0 } + if audio.is_some() { 44 } else { 0 };
+    let picture_box = fr_native::macos::window_box(reserved);
     let mut session = Session::new(
         connection.control.then(ControlPolicy::default),
         ObserverPolicy::default(),
@@ -212,6 +228,7 @@ fn connect_selected(
     .with_picture_box(picture_box)
     .with_files(selected_files)
     .clipboard(connection.control && connection.clipboard);
+    session = playback::install(session, audio.as_ref());
     if display == DisplayChoice::Choose {
         session = session.with_display_picker();
     }
@@ -250,7 +267,7 @@ fn connect_selected(
     let result = if connection.control {
         // Drop the Ref before handing the mutable session to its supervisor.
         // Clipboard and file consent are independent original choices.
-        let offer = session.files().offer(connection.clipboard);
+        let offer = playback::offer(session.files().offer(connection.clipboard), audio.is_some())?;
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
@@ -267,7 +284,7 @@ fn connect_selected(
             runtime.handle(),
             selector,
             cfg,
-            fr_client::native::observation_offer(),
+            playback::offer(fr_client::native::observation_offer(), audio.is_some())?,
             policy,
             &mut session,
         );
@@ -286,7 +303,7 @@ fn connect_selected(
     // independently reports an unknown outcome if this response is lost.
     let _ = runtime.block_on(owner.complete(&local, cleanup));
     let evidence = files::Summary::capture(&session.files());
-    evidence.finish(
+    let result = evidence.finish(
         finish(
             &session.report(),
             result,
@@ -297,7 +314,9 @@ fn connect_selected(
             session.picker_error(),
         ),
         json,
-    )
+    );
+    let audio = audio.as_ref().map(|report| report.borrow());
+    playback::finish(audio.as_deref(), result, json)
 }
 
 const fn stop_name(stop: LocalStop) -> &'static str {

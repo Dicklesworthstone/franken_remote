@@ -42,6 +42,10 @@ macos-media = ["media-worker"]
 # IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an
 # AppKit window. Objective-C glue compiled by build.rs; system frameworks only.
 macos-desktop = ["cli", "dep:fr-files", "dep:fr-transport", "frd/macos-viewer", "macos-clipboard"]
+# Explicit client playback: CoreAudio output and one supervised Opus child per
+# epoch. Does not enable host capture or microphone forwarding.
+macos-audio = ["macos-desktop", "macos-opus-process", "opus-playout"]
+macos-opus-process = ["opus-process"]
 # The per-lease input executor binary `fr-input-agent`; each platform's input
 # feature enables it.
 input-agent = []
@@ -63,9 +67,12 @@ observation-indicator = []
 macos-observation-indicator = ["observation-indicator"]
 linux-session-events = ["linux-logind", "dep:frd", "dep:asupersync"]
 # Opt-in native libopus ABI; independent of HEVC, GUI and async dependencies.
-linux-opus = []
+opus = []
+opus-process = ["opus", "dep:fr-client"]
+opus-playout = ["opus", "dep:fr-client"]
+linux-opus = ["opus"]
 # Wire-to-codec worker boundary; still no native audio-device or CLI dependency.
-linux-audio-playout = ["linux-opus", "dep:fr-client"]
+linux-audio-playout = ["linux-opus", "opus-playout"]
 # Native local PulseAudio output, no alternate Rust runtime or default device.
 linux-pulse-playback = ["linux-audio-playout"]
 # Explicit named client recording source; permission-gated worker API only.
@@ -85,7 +92,7 @@ linux-microphone-playout = ["linux-pipewire-mic", "linux-audio-playout", "linux-
 # Host playback audio end to end: the worker's PulseAudio monitor-record +
 # Opus-encode role and `fr connect --audio` playback. Same libpulse/libopus
 # SONAMEs as above; frd itself never enables this feature or links either.
-linux-opus-process = ["linux-opus", "dep:fr-client"]
+linux-opus-process = ["linux-opus", "opus-process"]
 linux-audio = ["linux-pulse-playback", "linux-opus-process"]
 linux-displays = ["linux-media"]
 linux-input = ["input-agent", "observation-indicator"]
@@ -164,7 +171,7 @@ required-features = ["observation-indicator"]
 [[bin]]
 name = "fr-opus-worker"
 path = "src/bin/opus_worker.rs"
-required-features = ["linux-opus-process"]
+required-features = ["opus-process"]
 
 # Explicit microphone RECORD/Opus worker; independent of HEVC and CLI/runtime.
 [[bin]]

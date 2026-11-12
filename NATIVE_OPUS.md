@@ -1,8 +1,11 @@
 # Native Opus codec boundary
 
-`fr-native`'s opt-in `linux-opus` feature implements the existing `AudioEncoder` and
+`fr-native`'s opt-in `opus` feature implements the existing `AudioEncoder` and
 `AudioDecoder` contracts with real libopus, independently of the CLI, HEVC, GUI and async runtime.
-It links only the installed Linux `libopus.so.0` ABI. No downloader, alternate
+The compatible `linux-opus` feature links the installed Linux `libopus.so.0` ABI.
+On macOS, the build links an explicitly provisioned `libopus.a` from the absolute
+`FR_NATIVE_OPUS_LIBRARY_DIR`; `macos-opus-process` enables its supervised decoder
+child, and `macos-audio` integrates it with the native client. No downloader, alternate
 codec, Rust dependency, model loading, dynamic-library path API or shell codec
 process is introduced. This is the plan's explicit native libopus exception.
 
@@ -31,7 +34,12 @@ Output and Debug contain no diagnostic audio samples or packet bytes.
 These synchronous adapters belong on a supervised audio-worker thread, not the
 input-authority thread or a realtime audio callback. They are not themselves a
 process sandbox, session admission, source consent, or a native audio device.
-They are integrated: host capture encodes in `fr-media-worker --audio`, and client decode runs in the restricted per-epoch `fr-opus-worker` child (20c49ef, 7e15e31; see WORKER_SANDBOX.md). Trusted native packaging is still required.
+They are integrated: Linux host capture encodes in `fr-media-worker --audio`,
+and client decode runs in a per-epoch `fr-opus-worker` child. Linux retains its
+mandatory seccomp restriction; the macOS child provides same-user process
+containment and a parent-exit watchdog, without an OS sandbox claim. See
+[the decoder owner](NATIVE_OPUS_PROCESS.md) and [Mac playback](docs/macos-audio.md).
+Trusted native packaging is still required.
 The system loader/library and native codec remain trust boundaries: this feature
 does not claim protected-path packaging or safely load an arbitrary supplied .so.
 The shared synthetic codecs remain explicitly test doubles, not this implementation.

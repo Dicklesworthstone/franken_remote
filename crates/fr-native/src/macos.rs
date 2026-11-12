@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 pub(crate) use crate::macos_text::Commit as TextCommit;
 pub(crate) const TEXT_COMPOSER_FLAG: u32 = 16;
 pub(crate) const FILE_SELECTION_FLAG: u32 = 32;
+pub(crate) const AUDIO_FLAG: u32 = 64;
 
 /// A consumed native slot, including a locally refused gesture. A native error
 /// is separate because it must fence the original owner before native cleanup.
@@ -106,6 +107,18 @@ unsafe extern "C" {
         visible: *mut c_int,
         upload_context: *mut u64,
         upload_captured: *mut f64,
+    ) -> c_int;
+    fn fr_mac_window_audio_update(
+        window: *mut c_void,
+        state: u32,
+        volume: u32,
+        muted: c_int,
+    ) -> c_int;
+    fn fr_mac_window_audio_state(
+        window: *mut c_void,
+        volume: *mut u32,
+        muted: *mut c_int,
+        changed: *mut c_int,
     ) -> c_int;
     fn fr_mac_window_display_change_enabled(window: *mut c_void, enabled: c_int) -> c_int;
     fn fr_mac_window_take_display_change(window: *mut c_void, captured: *mut f64) -> c_int;
@@ -520,6 +533,34 @@ impl Window {
                 )
             },
         })
+    }
+    pub(crate) fn audio_update(&self, view: session::AudioView) -> Result<(), NativeError> {
+        // SAFETY: live main-thread window and bounded local scalar preferences.
+        status(unsafe {
+            fr_mac_window_audio_update(
+                self.raw.as_ptr(),
+                view.state as u32,
+                u32::from(view.volume_percent),
+                c_int::from(view.muted),
+            )
+        })
+    }
+    pub(crate) fn audio_preferences(&self) -> Result<Option<(u8, bool)>, NativeError> {
+        let (mut volume, mut muted, mut changed) = (0, 0, 0);
+        // SAFETY: live main-thread window; every scalar output is writable.
+        status(unsafe {
+            fr_mac_window_audio_state(
+                self.raw.as_ptr(),
+                &raw mut volume,
+                &raw mut muted,
+                &raw mut changed,
+            )
+        })?;
+        if volume > 100 || !(0..=1).contains(&muted) || !(0..=1).contains(&changed) {
+            return Err(NativeError::Unavailable);
+        }
+        let volume = u8::try_from(volume).map_err(|_| NativeError::Unavailable)?;
+        Ok((changed != 0).then_some((volume, muted != 0)))
     }
     pub(crate) fn display_change_enabled(&self, enabled: bool) -> Result<(), NativeError> {
         // SAFETY: live window on its owning main thread; a bounded local flag.

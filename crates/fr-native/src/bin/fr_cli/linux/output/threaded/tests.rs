@@ -23,9 +23,14 @@ fn fixture(
     shared.authorize_at(0).unwrap();
     let slot = Arc::new(AtomicBool::new(false));
     let job = Job::spawn(&slot, shared.clone(), work).unwrap();
+    let report = Rc::new(RefCell::new(Report::default()));
     let output = Output {
-        server: PathBuf::from("/unused-fixture"),
-        sink: None,
+        selected: Selected {
+            #[cfg(target_os = "linux")]
+            server: PathBuf::from("/unused-fixture"),
+            #[cfg(target_os = "linux")]
+            sink: None,
+        },
         image: Some(PathBuf::from("/unused-fixture")),
         origin,
         job: Some(job),
@@ -34,7 +39,8 @@ fn fixture(
         current: Some((73, offer())),
         last: Some(offer().generation),
         ended: false,
-        report: Rc::new(RefCell::new(Report::default())),
+        cleanup: Retirement::new(report.clone()),
+        report,
         volume: AudioVolumeControl::new(),
     };
     (output, shared, slot)
@@ -48,6 +54,100 @@ fn retired(shared: &Shared) {
         );
         thread::sleep(TICK);
     }
+}
+
+#[test]
+fn retained_stop_before_configuration_or_worker_spawn_is_terminal() {
+    for configured in [false, true] {
+        let report = Rc::new(RefCell::new(Report::default()));
+        let mut output = Output::selected(
+            Selected {
+                #[cfg(target_os = "linux")]
+                server: PathBuf::from("/unused-fixture"),
+                #[cfg(target_os = "linux")]
+                sink: None,
+            },
+            report,
+            AudioVolumeControl::new(),
+        );
+        output.image = Some(PathBuf::from("/unused-fixture"));
+        let cleanup = output.retirement();
+        if configured {
+            output.configure(73, offer()).unwrap();
+        }
+        assert!(output.job.is_none());
+        cleanup.stop();
+        assert!(cleanup.is_complete(), "no native work was started");
+        assert!(output.configure(73, offer()).is_err());
+        assert!(
+            output
+                .service(
+                    &mut || panic!("terminal owner cannot renew permission"),
+                    &mut |_| panic!("terminal owner cannot ACK")
+                )
+                .is_err()
+        );
+        assert!(
+            output
+                .start_pending(|_, _| panic!("terminal owner cannot spawn native work"))
+                .is_err()
+        );
+        assert!(output.pending.is_none());
+        output.reset();
+        assert!(
+            output.configure(73, offer()).is_err(),
+            "epoch reset cannot reopen a terminal original output"
+        );
+        assert!(output.job.is_none());
+    }
+}
+
+#[test]
+fn retained_cleanup_fences_without_waiting_and_keeps_final_committed_audio() {
+    let (release, blocked) = mpsc::sync_channel(1);
+    let (mut output, shared, _) = fixture(move |shared, _, _| {
+        blocked.recv_timeout(Duration::from_secs(2)).unwrap();
+        shared.submitted.store(3, Ordering::Release);
+        true
+    });
+    let report = output.report.clone();
+    let cleanup = output.retirement();
+    assert!(!cleanup.is_complete());
+    cleanup.stop();
+    assert!(shared.stopped.load(Ordering::Acquire));
+    assert!(
+        !cleanup.is_complete(),
+        "a stop request is not native retirement"
+    );
+    output.account();
+    drop(output);
+    release.send(()).unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    while !cleanup.is_complete() {
+        assert!(Instant::now() < until);
+        thread::sleep(TICK);
+    }
+    assert_eq!(report.borrow().submitted, 3);
+    assert!(cleanup.is_complete());
+    assert_eq!(report.borrow().submitted, 3, "one shared receipt counter");
+}
+
+#[test]
+fn a_finished_thread_with_unknown_native_cleanup_remains_unretired() {
+    let (output, shared, slot) = fixture(|_, _, _| false);
+    let cleanup = output.retirement();
+    let until = Instant::now() + Duration::from_secs(2);
+    while !output.job.as_ref().unwrap().thread.is_finished() {
+        assert!(Instant::now() < until);
+        thread::sleep(TICK);
+    }
+    drop(output);
+    assert!(!cleanup.is_complete());
+    assert!(!shared.retired.load(Ordering::Acquire));
+    assert!(
+        slot.load(Ordering::Acquire),
+        "unproved native custody retains its bound"
+    );
 }
 fn packet(sequence: u64) -> Vec<u8> {
     let mut bytes = vec![0; RECORD_BYTES];

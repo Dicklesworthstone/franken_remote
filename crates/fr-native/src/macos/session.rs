@@ -19,7 +19,7 @@
 //! Main thread only: `AppKit` owns the window and its event loop, which this
 //! session services between network turns of the same runtime.
 use super::{
-    HevcDecoder, PicturePoint, Surface, TEXT_COMPOSER_FLAG, TextCommit, TextRetireMode,
+    AUDIO_FLAG, HevcDecoder, PicturePoint, Surface, TEXT_COMPOSER_FLAG, TextCommit, TextRetireMode,
     TextRetirement, TextTaken, Window, WindowEvent, clipboard, event_time, files, picker, sharing,
 };
 use crate::NativeError;
@@ -566,6 +566,37 @@ impl LocalPresenter for Presenter {
 /// UI callbacks take only short borrows of it.
 type WindowSlot = Rc<RefCell<Option<Window>>>;
 
+/// Independently retained original audio cleanup. A stop only fences admission;
+/// completion requires the actual device, decoder child and native worker to
+/// retire. Implementations must remain nonblocking on the AppKit thread.
+pub trait AudioRetirement {
+    fn stop(&self);
+    fn is_complete(&self) -> bool;
+    fn view(&self) -> AudioView;
+    fn preferences(&self, volume_percent: u8, muted: bool);
+    fn controls_failed(&self);
+}
+
+/// Content-free native playback status. Playing means actual PCM submission,
+/// never independently measured speaker audibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum AudioState {
+    Starting = 0,
+    Playing = 1,
+    Unavailable = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AudioView {
+    pub state: AudioState,
+    pub volume_percent: u8,
+    pub muted: bool,
+}
+
+type InstallAudio = Box<dyn FnMut(&mut NativeObserver) -> Box<dyn AudioRetirement>>;
+type AudioSlot = Rc<RefCell<Option<Rc<dyn AudioRetirement>>>>;
+
 // These facts have independent owners: chooser configuration, actual service
 // completion, startup ownership and positively completed cleanup.
 #[allow(clippy::struct_excessive_bools)]
@@ -593,6 +624,8 @@ pub struct Session {
     input: Rc<RefCell<Option<Input>>>,
     files: Rc<RefCell<files::Files>>,
     clipboard: Rc<RefCell<clipboard::Clipboard>>,
+    audio_install: Option<InstallAudio>,
+    audio_owner: AudioSlot,
     report: Rc<RefCell<Report>>,
     closed: Rc<Cell<bool>>,
     intent: Rc<RefCell<Intent>>,
@@ -612,6 +645,9 @@ impl Drop for Session {
         // teardown. This does not claim that mandatory cleanup completed.
         if let Some(observer) = &self.observer {
             observer.control().stop();
+        }
+        if let Some(audio) = self.audio_owner.borrow().as_ref() {
+            audio.stop();
         }
         if let Ok(mut input) = self.input.try_borrow_mut() {
             input.take();
@@ -649,6 +685,8 @@ impl Session {
             input: Rc::default(),
             files: Rc::default(),
             clipboard: Rc::default(),
+            audio_install: None,
+            audio_owner: Rc::default(),
             report: Rc::default(),
             closed: Rc::default(),
             intent: Rc::new(RefCell::new(Intent::new(control.is_some()))),
@@ -667,6 +705,18 @@ impl Session {
         self.clipboard
             .borrow_mut()
             .request(enabled && self.control.is_some());
+        self
+    }
+    /// Supply an explicitly requested local output for each fresh original
+    /// observer, before serving it. The installer handles an unselected audio
+    /// capability as typed absence. Its independent cleanup owner is fenced
+    /// before any native window teardown and must finish before another attempt.
+    #[must_use]
+    pub fn with_audio_output(
+        mut self,
+        install: impl FnMut(&mut NativeObserver) -> Box<dyn AudioRetirement> + 'static,
+    ) -> Self {
+        self.audio_install = Some(Box::new(install));
         self
     }
     /// An optional logical point bound for the fitted viewer content.
@@ -923,6 +973,53 @@ async fn reap_clipboard_watchdog(
             return false;
         }
         sleep(now, Duration::from_millis(1)).await;
+    }
+}
+
+async fn reap_audio(owner: Option<&dyn AudioRetirement>, cx: &Cx, deadline: Deadline) -> bool {
+    let Some(owner) = owner else {
+        return true;
+    };
+    loop {
+        if owner.is_complete() {
+            return true;
+        }
+        let Some(timer) = cx.timer_driver() else {
+            return false;
+        };
+        let now = timer.now();
+        if cx.checkpoint().is_err() || now >= deadline.time() {
+            return false;
+        }
+        let remaining = Duration::from_nanos(deadline.time().as_nanos() - now.as_nanos());
+        sleep(now, PUMP.min(remaining)).await;
+    }
+}
+
+/// Consume local preferences before refreshing labels, always against this
+/// window's original output handle. A failed optional control fences audio
+/// without inventing a failure for the still-working desktop.
+fn service_audio(window: &RefCell<Option<Window>>, audio: &AudioSlot, stopped: bool) {
+    let owner = audio.borrow().clone();
+    let Some(owner) = owner else {
+        return;
+    };
+    if stopped {
+        owner.stop();
+        return;
+    }
+    let window = window.borrow();
+    let Some(window) = window.as_ref() else {
+        return;
+    };
+    let result = (|| {
+        if let Some((volume, muted)) = window.audio_preferences()? {
+            owner.preferences(volume, muted);
+        }
+        window.audio_update(owner.view())
+    })();
+    if result.is_err() {
+        owner.controls_failed();
     }
 }
 
@@ -1471,7 +1568,11 @@ impl Application for Session {
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
-        if self.started || self.native_started.get() || self.observer.is_some() {
+        if self.started
+            || self.native_started.get()
+            || self.observer.is_some()
+            || self.audio_owner.borrow().is_some()
+        {
             return Err(ObserverError::Order);
         }
         self.started = true;
@@ -1485,6 +1586,8 @@ impl Application for Session {
         let files = self.files.clone();
         let clipboard = self.clipboard.clone();
         let clipboard_requested = clipboard.borrow().available();
+        let audio_requested = self.audio_install.is_some();
+        let audio_owner = self.audio_owner.clone();
         let file_directions = sharing::flags(&files.borrow()).count_ones();
         let file_selections = files.borrow().file_drop_requested();
         let text_requested = self
@@ -1502,7 +1605,8 @@ impl Application for Session {
                 TEXT_COMPOSER_FLAG
             } else {
                 0
-            };
+            }
+            | if audio_requested { AUDIO_FLAG } else { 0 };
         let report = self.report.clone();
         let closed = self.closed.clone();
         let intent = self.intent.clone();
@@ -1559,7 +1663,7 @@ impl Application for Session {
                         Some((expected, points))
                     })
                     .unwrap_or((native, (display.logical_width, display.logical_height)));
-                let points = crate::macos_sizing::sharing_points_with_selections(
+                let points = crate::macos_sizing::sharing_points_with_audio(
                     pixels,
                     logical,
                     fit_window,
@@ -1567,6 +1671,7 @@ impl Application for Session {
                     clipboard_requested,
                     text_requested,
                     file_selections,
+                    audio_requested,
                 )?;
                 // From this point onward, losing the observer is not proof
                 // that AppKit, the renderer or its worker finished cleanup.
@@ -1642,6 +1747,11 @@ impl Application for Session {
                 &mut sharing,
                 &mut events,
             );
+            service_audio(
+                &window,
+                &audio_owner,
+                stop.is_stopped() || closed.get() || display_intent.borrow().pending(),
+            );
         };
         let opened = pumped(opening, &mut pump).await?;
         {
@@ -1654,6 +1764,9 @@ impl Application for Session {
         }
         let display = opened.display();
         let observer = self.observer.insert(opened);
+        if let Some(install) = &mut self.audio_install {
+            *self.audio_owner.borrow_mut() = Some(Rc::from(install(observer)));
+        }
         // Startup owns a real first frame; a missing repaint is never inferred
         // to be a resize. The next current native sample can arm its watcher.
         can_resize.set(true);
@@ -1869,6 +1982,9 @@ impl Application for Session {
         if let Some(observer) = &self.observer {
             observer.control().stop();
         }
+        if let Some(audio) = self.audio_owner.borrow().as_ref() {
+            audio.stop();
+        }
         self.seal_window_resize();
         let text_retired = retire_text(&self.window, TextRetireMode::Fenced).is_ok();
         self.intent.borrow_mut().invalidate();
@@ -1933,10 +2049,13 @@ impl Application for Session {
             };
             let commands = reap_file_commands(&self.files, cx, deadline).await;
             let clipboard = reap_clipboard_watchdog(&self.clipboard, cx, deadline).await;
-            if !result || !text_retired || !picker_closed || !commands || !clipboard {
+            let audio_owner = self.audio_owner.borrow().clone();
+            let audio = reap_audio(audio_owner.as_deref(), cx, deadline).await;
+            if !result || !text_retired || !picker_closed || !commands || !clipboard || !audio {
                 return Err(CallbackError);
             }
             self.observer = None;
+            self.audio_owner.borrow_mut().take();
             window.borrow_mut().take();
             self.picker.borrow_mut().take();
             self.started = false;
@@ -1951,6 +2070,7 @@ impl Application for Session {
                 if self.started
                     || self.native_started.get()
                     || self.observer.is_some()
+                    || self.audio_owner.borrow().is_some()
                     || self.picker.borrow().is_some()
                     || !self.files.borrow().commands_complete()
                     || !self.clipboard.borrow_mut().finished()
@@ -2119,6 +2239,72 @@ fn reported_terminal(observer: &NativeObserver) -> Option<ObserverError> {
 mod tests {
     use super::*;
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
+
+    #[derive(Default)]
+    struct AudioCleanup {
+        stopped: Cell<bool>,
+        finished: Cell<bool>,
+    }
+    impl AudioRetirement for AudioCleanup {
+        fn stop(&self) {
+            self.stopped.set(true);
+        }
+        fn is_complete(&self) -> bool {
+            self.finished.get()
+        }
+        fn view(&self) -> AudioView {
+            AudioView {
+                state: AudioState::Starting,
+                volume_percent: 100,
+                muted: false,
+            }
+        }
+        fn preferences(&self, _: u8, _: bool) {
+            panic!("no native controls in this ownership fixture");
+        }
+        fn controls_failed(&self) {
+            self.stop();
+        }
+    }
+
+    #[test]
+    fn unresolved_audio_cleanup_fences_synchronously_and_prevents_reconnect() {
+        let runtime = RuntimeBuilder::current_thread().build().unwrap();
+        let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+        let deadline = Deadline::after(&cx, Duration::from_millis(10)).unwrap();
+        let mut session = failed_startup(false);
+        let original = Rc::new(AudioCleanup::default());
+        *session.audio_owner.borrow_mut() = Some(original.clone());
+
+        let cleanup = session.cleanup(&cx, deadline);
+        assert!(
+            original.stopped.get(),
+            "fence before polling any native cleanup"
+        );
+        assert_eq!(runtime.block_on(cleanup), Err(CallbackError));
+        assert!(session.audio_owner.borrow().is_some());
+        assert!(!session.cleanup_confirmed());
+        assert_eq!(
+            session.status(Status::Connecting { attempt: 2 }),
+            Err(CallbackError)
+        );
+
+        original.finished.set(true);
+        let deadline = Deadline::after(&cx, Duration::from_secs(1)).unwrap();
+        assert_eq!(runtime.block_on(session.cleanup(&cx, deadline)), Ok(()));
+        assert!(session.audio_owner.borrow().is_none());
+        session.status(Status::Connecting { attempt: 2 }).unwrap();
+    }
+
+    #[test]
+    fn dropping_session_fences_original_audio_without_certifying_retirement() {
+        let session = failed_startup(false);
+        let original = Rc::new(AudioCleanup::default());
+        *session.audio_owner.borrow_mut() = Some(original.clone());
+        drop(session);
+        assert!(original.stopped.get());
+        assert!(!original.finished.get());
+    }
 
     fn selected_close() -> Session {
         let mut session = failed_startup(false);

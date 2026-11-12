@@ -1,4 +1,7 @@
-#[cfg(feature = "linux-desktop")]
+#[cfg(any(
+    feature = "linux-desktop",
+    all(target_os = "macos", feature = "macos-desktop")
+))]
 #[path = "linux/audio.rs"]
 mod audio;
 #[cfg(feature = "linux-desktop")]
@@ -31,6 +34,12 @@ mod lapse;
 #[cfg(all(target_os = "macos", feature = "macos-desktop"))]
 #[path = "linux/macos.rs"]
 mod macos;
+#[cfg(any(
+    all(test, feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "linux/macos_audio.rs"]
+mod macos_audio;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-desktop")))]
 #[path = "linux/macos_completion.rs"]
 mod macos_completion;

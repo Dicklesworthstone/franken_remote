@@ -2,6 +2,8 @@ use std::{env, path::PathBuf, process::Command};
 fn main() {
     build_pipewire_microphone();
     build_opus_process();
+    build_macos_opus();
+    build_macos_audio();
     build_keyboard();
     build_clipboard();
     build_indicator();
@@ -478,7 +480,7 @@ fn build_host_picker() {
 
 fn build_opus_process() {
     println!("cargo:rerun-if-changed=src/opus/process/sandbox.c");
-    if env::var_os("CARGO_FEATURE_LINUX_OPUS_PROCESS").is_none()
+    if env::var_os("CARGO_FEATURE_OPUS_PROCESS").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("linux")
     {
         return;
@@ -518,6 +520,118 @@ fn build_opus_process() {
     );
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=fropussandbox");
+}
+
+/// The Mac decoder keeps its own native process and statically linked codec.
+/// The caller supplies an audited SDK archive; this build downloads nothing and
+/// creates no new runtime library-search path.
+fn build_macos_opus() {
+    println!("cargo:rerun-if-changed=src/opus/process/macos.c");
+    println!("cargo:rerun-if-env-changed=FR_NATIVE_OPUS_LIBRARY_DIR");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    if env::var_os("CARGO_FEATURE_OPUS").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS Opus cross-builds require an explicit qualified SDK"
+    );
+    let library = PathBuf::from(
+        env::var_os("FR_NATIVE_OPUS_LIBRARY_DIR")
+            .expect("macOS Opus requires FR_NATIVE_OPUS_LIBRARY_DIR with the trusted libopus.a"),
+    );
+    assert!(
+        library.is_absolute() && library.join("libopus.a").is_file(),
+        "FR_NATIVE_OPUS_LIBRARY_DIR must be absolute and contain the trusted libopus.a"
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        library.join("libopus.a").display()
+    );
+    println!("cargo:rustc-link-search=native={}", library.display());
+    if env::var_os("CARGO_FEATURE_OPUS_PROCESS").is_none() {
+        return;
+    }
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args(["-std=c11", "-O2", "-fPIC", "-Wall", "-Wextra", "-Werror"])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/opus/process/macos.c", "-o"])
+            .arg(out.join("opus_macos.o"))
+            .status()
+            .expect("native C compiler")
+            .success(),
+        "macOS Opus child boundary compilation failed"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfropusmacos.a"))
+            .arg(out.join("opus_macos.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=fropusmacos");
+}
+
+/// Native output only. Opus decoding stays in its separately supervised child.
+fn build_macos_audio() {
+    println!("cargo:rerun-if-changed=src/macos_audio.m");
+    println!("cargo:rerun-if-changed=src/macos_audio_clock.h");
+    if env::var_os("CARGO_FEATURE_MACOS_AUDIO").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS audio cross-builds require an explicit qualified SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror"
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_audio.m", "-o"])
+            .arg(out.join("macosaudio.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "macOS audio output boundary compilation failed"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacosaudio.a"))
+            .arg(out.join("macosaudio.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacosaudio");
+    for framework in ["AudioToolbox", "CoreAudio", "CoreFoundation"] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
 }
 
 /// macOS viewer glue (fr-5a4w): `AppKit` window, `VideoToolbox` decode and `Metal`

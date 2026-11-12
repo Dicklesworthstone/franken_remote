@@ -2,14 +2,14 @@
 //! Session-facing proxy. Every `PulseAudio` operation, including construction and
 //! destruction, belongs to one foreign-work thread, not the session executor.
 //! The restricted decoder process and its existing retirement proof are retained.
-use super::{Report, end_reason, now};
+use super::{Report, Selected, end_reason, now};
 use fr_client::audio::AudioVolumeControl;
 use fr_client::input::ClientInstant;
 use fr_core::audio::{AudioDirection, AudioGeneration, MAX_OPUS_PAYLOAD_BYTES};
 use fr_wire::audio::{self as wire, AudioConfiguration};
 use frd::session_startup::{ViewerAudioEnd, ViewerAudioOutput, ViewerAudioRefused};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
     sync::{
@@ -152,10 +152,10 @@ struct Job {
     shared: Arc<Shared>,
     packets: SyncSender<Packet>,
     replies: Receiver<Ack>,
-    thread: JoinHandle<()>,
+    thread: Arc<JoinHandle<()>>,
     acknowledged: bool,
-    counted: u64,
-    fault_counted: bool,
+    counted: Rc<Cell<u64>>,
+    fault_counted: Rc<Cell<bool>>,
 }
 impl Job {
     fn spawn(
@@ -187,15 +187,83 @@ impl Job {
             shared,
             packets,
             replies: outbox,
-            thread,
+            thread: Arc::new(thread),
             acknowledged: false,
-            counted: 0,
-            fault_counted: false,
+            counted: Rc::default(),
+            fault_counted: Rc::default(),
         })
     }
     fn stop(&self) {
         self.shared.stop();
         self.thread.thread().unpark();
+    }
+}
+
+/// The same original worker after the session drops its output proxy. This
+/// owner can fence it and retain final committed output while native cleanup
+/// completes. A different attempt gets a different handle.
+#[derive(Clone)]
+pub(crate) struct Retirement {
+    current: Rc<RefCell<Option<Retiring>>>,
+    /// Terminal for the entire original output, including metadata accepted
+    /// before its first native worker exists. Epoch reset never clears this.
+    stopped: Rc<Cell<bool>>,
+    report: Rc<RefCell<Report>>,
+}
+#[derive(Clone)]
+struct Retiring {
+    shared: Arc<Shared>,
+    thread: Arc<JoinHandle<()>>,
+    counted: Rc<Cell<u64>>,
+    fault_counted: Rc<Cell<bool>>,
+}
+impl Retirement {
+    fn new(report: Rc<RefCell<Report>>) -> Self {
+        Self {
+            current: Rc::default(),
+            stopped: Rc::default(),
+            report,
+        }
+    }
+    fn track(&self, job: &Job) {
+        *self.current.borrow_mut() = Some(Retiring {
+            shared: job.shared.clone(),
+            thread: job.thread.clone(),
+            counted: job.counted.clone(),
+            fault_counted: job.fault_counted.clone(),
+        });
+        if self.stopped.get() {
+            job.stop();
+        }
+    }
+    fn collect(&self) {
+        let current = self.current.borrow();
+        let Some(worker) = current.as_ref() else {
+            return;
+        };
+        let submitted = worker.shared.submitted.load(Ordering::Acquire);
+        let mut report = self.report.borrow_mut();
+        report.submitted = report
+            .submitted
+            .saturating_add(submitted.saturating_sub(worker.counted.replace(submitted)));
+        let fault = worker.shared.fault.load(Ordering::Acquire);
+        if fault != 0 && !worker.fault_counted.replace(true) {
+            report.failed_generation(reason(fault), fault == Fault::Expired as u8);
+        }
+    }
+    pub(crate) fn stop(&self) {
+        self.stopped.set(true);
+        if let Some(worker) = self.current.borrow().as_ref() {
+            worker.shared.stop();
+            worker.thread.thread().unpark();
+        }
+    }
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn is_complete(&self) -> bool {
+        self.collect();
+        self.current.borrow().as_ref().is_none_or(|worker| {
+            worker.thread.is_finished() && worker.shared.retired.load(Ordering::Acquire)
+        })
     }
 }
 impl Drop for Job {
@@ -222,8 +290,7 @@ impl Drop for Exit {
 }
 
 pub(crate) struct Output {
-    server: PathBuf,
-    sink: Option<String>,
+    selected: Selected,
     image: Option<PathBuf>,
     origin: Instant,
     job: Option<Job>,
@@ -234,17 +301,29 @@ pub(crate) struct Output {
     ended: bool,
     report: Rc<RefCell<Report>>,
     volume: AudioVolumeControl,
+    cleanup: Retirement,
 }
 impl Output {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn macos(report: Rc<RefCell<Report>>, volume: AudioVolumeControl) -> Self {
+        Self::selected(Selected {}, report, volume)
+    }
+    #[cfg(target_os = "linux")]
     pub(crate) fn new(
         server: PathBuf,
         sink: Option<String>,
         report: Rc<RefCell<Report>>,
         volume: AudioVolumeControl,
     ) -> Self {
+        Self::selected(Selected { server, sink }, report, volume)
+    }
+    fn selected(
+        selected: Selected,
+        report: Rc<RefCell<Report>>,
+        volume: AudioVolumeControl,
+    ) -> Self {
         Self {
-            server,
-            sink,
+            selected,
             image: super::super::decoder_image().ok(),
             origin: Instant::now(),
             job: None,
@@ -253,27 +332,27 @@ impl Output {
             current: None,
             last: None,
             ended: false,
+            cleanup: Retirement::new(report.clone()),
             report,
             volume,
         }
     }
     fn account(&mut self) {
-        if let Some(job) = &mut self.job {
-            let submitted = job.shared.submitted.load(Ordering::Acquire);
-            let mut report = self.report.borrow_mut();
-            report.submitted = report
-                .submitted
-                .saturating_add(submitted.saturating_sub(job.counted));
-            job.counted = submitted;
+        if let Some(job) = &self.job {
+            self.cleanup.track(job);
+            self.cleanup.collect();
             let fault = job.shared.fault.load(Ordering::Acquire);
-            if fault != 0 && !job.fault_counted {
-                report.failed_generation(reason(fault), fault == Fault::Expired as u8);
-                job.fault_counted = true;
-            }
             if fault == 0 && self.current.is_some() && !job.shared.stopped.load(Ordering::Acquire) {
-                report.recovered();
+                self.report.borrow_mut().recovered();
             }
         }
+    }
+    #[cfg(any(test, target_os = "macos"))]
+    pub(crate) fn retirement(&self) -> Retirement {
+        if let Some(job) = &self.job {
+            self.cleanup.track(job);
+        }
+        self.cleanup.clone()
     }
     fn account_retired(&mut self) -> bool {
         if self.job.as_ref().is_some_and(|job| {
@@ -288,7 +367,7 @@ impl Output {
     }
     fn authorize(&self, live: &mut dyn FnMut() -> bool) -> Result<(), ViewerAudioRefused> {
         let job = self.job.as_ref().ok_or(ViewerAudioRefused)?;
-        if !live() {
+        if self.cleanup.stopped.get() || !live() || self.cleanup.stopped.get() {
             job.stop();
             return Err(ViewerAudioRefused);
         }
@@ -320,12 +399,22 @@ impl Output {
                 .absent("audio_output_worker_unavailable");
         })?;
         self.job = Some(job);
+        self.cleanup
+            .track(self.job.as_ref().ok_or(ViewerAudioRefused)?);
+        if self.cleanup.stopped.get() {
+            return Err(ViewerAudioRefused);
+        }
         // Cleanup can publish the old worker's final committed-PCM count.
         // Only submissions beyond this stable boundary can prove recovery.
         self.report.borrow_mut().begin_generation();
         Ok(true)
     }
     fn check_setup(&mut self) -> Result<(), ViewerAudioRefused> {
+        if self.cleanup.stopped.get() {
+            self.pending = None;
+            self.setup_until = None;
+            return Err(ViewerAudioRefused);
+        }
         if self
             .setup_until
             .is_some_and(|until| Instant::now() >= until)
@@ -350,7 +439,8 @@ impl ViewerAudioOutput for Output {
         offer: AudioConfiguration,
     ) -> Result<(), ViewerAudioRefused> {
         self.account();
-        if self.ended
+        if self.cleanup.stopped.get()
+            || self.ended
             || self.current.is_some()
             || binding == 0
             || offer.direction != AudioDirection::Downlink
@@ -364,8 +454,7 @@ impl ViewerAudioOutput for Output {
             .checked_add(SETUP)
             .ok_or(ViewerAudioRefused)?;
         let config = NativeConfig {
-            server: self.server.clone(),
-            sink: self.sink.clone(),
+            selected: self.selected.clone(),
             image,
             origin: self.origin,
             binding,
@@ -386,6 +475,11 @@ impl ViewerAudioOutput for Output {
         acknowledge: &mut dyn FnMut(&[u8]) -> Result<(), ViewerAudioRefused>,
     ) -> Result<(), ViewerAudioRefused> {
         self.account();
+        if self.cleanup.stopped.get() {
+            self.pending = None;
+            self.setup_until = None;
+            return Err(ViewerAudioRefused);
+        }
         if self.current.is_none() {
             return Ok(()); // Cleanup is owned by the worker, not renewed here.
         }
@@ -540,17 +634,14 @@ impl ViewerAudioOutput for Output {
 }
 impl Drop for Output {
     fn drop(&mut self) {
-        if let Some(job) = &self.job {
-            job.stop();
-        }
+        self.cleanup.stop();
         self.current = None;
         self.account();
     }
 }
 
 struct NativeConfig {
-    server: PathBuf,
-    sink: Option<String>,
+    selected: Selected,
     image: PathBuf,
     origin: Instant,
     binding: u32,
@@ -597,7 +688,7 @@ fn native(
     replies: &SyncSender<Ack>,
 ) -> bool {
     let report = Rc::new(RefCell::new(Report::default()));
-    let mut output = super::Output::new(config.server, config.sink, report.clone(), config.volume);
+    let mut output = super::Output::selected(config.selected, report.clone(), config.volume);
     output.image = Some(config.image);
     output.origin = config.origin;
     let result = (|| {
@@ -675,8 +766,17 @@ fn native(
     }
     output.reset();
     let retirement = output.retirement.clone();
+    #[cfg(target_os = "macos")]
+    let device_retirement = output.device_retirement.clone();
     drop(output);
     while retirement.as_ref().is_some_and(|r| !r.is_complete()) {
+        if Instant::now() >= until {
+            return false;
+        }
+        thread::park_timeout(TICK);
+    }
+    #[cfg(target_os = "macos")]
+    while device_retirement.as_ref().is_some_and(|r| !r.is_complete()) {
         if Instant::now() >= until {
             return false;
         }

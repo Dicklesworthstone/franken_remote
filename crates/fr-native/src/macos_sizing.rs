@@ -52,7 +52,7 @@ pub struct WindowBox {
     pub pixels: (u32, u32),
     /// Whole pixels per point.
     pub scale: u32,
-    /// Points of native strips below the picture (sharing, text composer).
+    /// Points of native strips below the picture (sharing, text, playback).
     pub reserved: u32,
 }
 
@@ -183,12 +183,137 @@ pub(crate) fn sharing_points_with_selections(
     Ok((width.max(minimum), height))
 }
 
+/// Reserve the optional 44-point playback row before establishing a viewport.
+/// The local volume and mute controls never resize an existing remote picture.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sharing_points_with_audio(
+    pixels: (u32, u32),
+    logical: (u32, u32),
+    fit: Option<(u32, u32)>,
+    directions: u32,
+    clipboard: bool,
+    text: bool,
+    selections: bool,
+    audio: bool,
+) -> Result<(u32, u32), ()> {
+    let fit = if audio {
+        match fit {
+            Some((width, height)) if width >= 320 => {
+                Some((width, height.checked_sub(44).ok_or(())?))
+            }
+            Some(_) => return Err(()),
+            None => None,
+        }
+    } else {
+        fit
+    };
+    let (width, height) = sharing_points_with_selections(
+        pixels, logical, fit, directions, clipboard, text, selections,
+    )?;
+    Ok((if audio { width.max(320) } else { width }, height))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        WindowBox, points, scaled_picture_points, sharing_points, sharing_points_with_selections,
-        sharing_points_with_text,
+        WindowBox, points, scaled_picture_points, sharing_points, sharing_points_with_audio,
+        sharing_points_with_selections, sharing_points_with_text,
     };
+
+    #[test]
+    fn playback_controls_reserve_space_before_every_selected_viewport() {
+        for directions in 0..=2 {
+            for clipboard in [false, true] {
+                for text in [false, true] {
+                    for selections in [false, true] {
+                        if selections && directions == 0 {
+                            continue;
+                        }
+                        let width = (152
+                            + directions * 230
+                            + u32::from(clipboard) * 184
+                            + u32::from(selections) * 144)
+                            .max(if text { 480 } else { 320 });
+                        let reserved = 88 + u32::from(text) * 76;
+                        let height = reserved + 64;
+                        assert_eq!(
+                            sharing_points_with_audio(
+                                (64, 64),
+                                (64, 64),
+                                Some((width, height)),
+                                directions,
+                                clipboard,
+                                text,
+                                selections,
+                                true
+                            ),
+                            Ok((width, 64))
+                        );
+                        assert!(
+                            sharing_points_with_audio(
+                                (64, 64),
+                                (64, 64),
+                                Some((width, height - 1)),
+                                directions,
+                                clipboard,
+                                text,
+                                selections,
+                                true
+                            )
+                            .is_err()
+                        );
+                        assert!(
+                            sharing_points_with_audio(
+                                (64, 64),
+                                (64, 64),
+                                Some((width - 1, height)),
+                                directions,
+                                clipboard,
+                                text,
+                                selections,
+                                true
+                            )
+                            .is_err()
+                        );
+                        let fit = Some((width, 600));
+                        let (_, picture_height) = sharing_points_with_audio(
+                            (1920, 1080),
+                            (1920, 1080),
+                            fit,
+                            directions,
+                            clipboard,
+                            text,
+                            selections,
+                            true,
+                        )
+                        .unwrap();
+                        assert!(picture_height + reserved <= 600);
+                        assert_eq!(
+                            sharing_points_with_audio(
+                                (1920, 1080),
+                                (1920, 1080),
+                                fit,
+                                directions,
+                                clipboard,
+                                text,
+                                selections,
+                                false
+                            ),
+                            sharing_points_with_selections(
+                                (1920, 1080),
+                                (1920, 1080),
+                                fit,
+                                directions,
+                                clipboard,
+                                text,
+                                selections
+                            )
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn the_box_follows_the_window_up_to_the_screen() {

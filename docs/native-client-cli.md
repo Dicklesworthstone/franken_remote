@@ -261,6 +261,12 @@ refuse before a connection. A narrow picture can have horizontal letterboxing
 to keep the local controls accessible. Without
 `--fit`, the remote logical size remains the picture's default.
 
+An explicitly requested `--audio` row adds 44 points to the minimum height and
+requires at least 320 points of width. It is reserved before the original
+viewport: viewing with audio needs 320x152, and controlling with audio needs at
+least 480x228 plus any wider sharing controls. Volume and mute never resize a
+live controlled picture.
+
 The admitted native presenter runs on one bounded Asupersync blocking task.
 Decoder configuration, frame submission, cursor updates, idle repaint and the
 configured presenter's destructor do not run inside the UI/session future.
@@ -329,7 +335,7 @@ the loopback `LocalAPI`, about 12 ms of CPU per lookup. The signed-CLI
 transport it replaced used 60-80 ms of CPU per read.
 
 Not implemented on macOS yet, and refused by name before any network I/O:
-`--capture-system-shortcuts`, `--audio`, `--microphone` and
+`--capture-system-shortcuts`, `--microphone` and
 `fr robot session open`. The Mac client offers the controlling text clipboard
 by default; the host must independently enable it. A Mac host still has no
 clipboard backend and returns a typed absence without disabling control.
@@ -353,6 +359,48 @@ compilation of the unchanged pinned Asupersync dependency was killed by
 SIGKILL. Native AppKit event delivery, Metal repaint, the macOS pathname owner
 and a full live reconnect/close sequence still require execution on a Mac;
 Linux-side policy tests are not hardware qualification.
+
+### macOS playback audio
+
+Build the explicit `macos-audio` feature with a trusted local static Opus
+archive, and install both executables together:
+
+```sh
+export FR_NATIVE_OPUS_LIBRARY_DIR=/absolute/path/to/opus/lib
+cargo build -p fr-native --features macos-desktop,macos-audio --bin fr --bin fr-opus-worker --locked
+fr connect <host> --view-only --audio --experimental-native --display only
+# --control --audio is also supported; input and audio permissions are independent.
+```
+
+The host must independently enable playback capture. An older host or an
+unselected optional capability leaves the desktop working with a typed audio
+absence. A build without `macos-audio` refuses an explicit audio request before
+dialing. This subset pins the current local default output when the original
+stream opens; choose it in System Settings before connecting. Linux-specific
+`--audio-server` and `--audio-sink` selectors are refused on Mac.
+
+The negotiated profile admits at most 24 capabilities. Playback with clipboard
+and a single file direction fits, as does playback with both file directions
+and `--no-clipboard`. Combining playback, clipboard and both file directions
+returns `audio_feature_limit` before connecting. The client keeps cursor and
+input safety support; optional quality/receiver diagnostics and bulk/credit
+extensions yield their slots first.
+
+`--audio-volume 0..100` and `--audio-muted` initialize the local playback row.
+Its −/＋ and Mute/Unmute buttons affect future PCM submissions only; prepared or
+queued output may remain, with the native queue bounded to 40 ms. Reconnects
+keep the latest preference values in a fresh handle, so an old window cannot
+alter its successor. No audio is requested without `--audio`, and playback does
+not enable microphone forwarding or Mac host capture.
+
+CoreAudio uses a real advancing queue clock before acknowledging readiness.
+The shared supervised Opus decoder keeps original arrival/deadline bounds,
+one child per epoch and no in-process fallback. Stop and cleanup retain the
+original device/child/worker until each positively retires, including failed
+native setup. Submitted-frame counters do not prove physical audibility.
+The Mac decoder provides same-user process containment and parent-exit cleanup;
+it does not claim Linux's seccomp sandbox. [Mac playback](macos-audio.md) records
+the exact native boundary, verification scope and remaining device qualification.
 
 ### Native macOS host and display selection
 

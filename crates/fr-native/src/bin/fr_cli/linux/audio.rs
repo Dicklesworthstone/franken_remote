@@ -1,10 +1,11 @@
 //! `fr connect --audio`: host playback in either viewing role into the selected local
-//! `PulseAudio` output. Host Opus is decoded only in the restricted per-epoch
+//! native output. Host Opus is decoded only in the separate per-epoch
 //! fr-opus-worker, never on the session thread or by an in-process fallback.
 //! Configuration acknowledgement waits for BOTH real native owners. PCM replies
 //! retain their original arrival/device deadlines; a receipt is not audibility.
-//! The CLI uses a bounded output worker: no `PulseAudio` call or native teardown
-//! runs on the session thread. The decoder remains a restricted child process.
+//! The CLI uses a bounded output worker: no device call or native teardown
+//! runs on the session thread. Linux requires seccomp; macOS retains a private
+//! same-user child with parent-exit binding, without an OS sandbox claim.
 use super::super::{Failure, options::AudioRequest};
 use std::path::PathBuf;
 
@@ -13,6 +14,7 @@ use std::path::PathBuf;
 pub(super) struct Report {
     /// Exact local preference used by the actual output and optional panel.
     pub volume: fr_client::audio::AudioVolumeControl,
+    #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
     pub controls:
         Option<Result<fr_native::file_progress::Control, fr_native::file_progress::Error>>,
     /// The host configured a stream and this client acknowledged it.
@@ -49,10 +51,14 @@ impl Report {
     }
     /// Retain the latest local preference across reconnects, without allowing
     /// an old panel or output handle to change the next attempt's preference.
+    #[cfg(any(target_os = "linux", feature = "macos-audio", test))]
     pub(super) fn begin_attempt(&mut self) -> fr_client::audio::AudioVolumeControl {
         let (volume, muted) = self.volume.snapshot();
         self.volume = fr_client::audio::AudioVolumeControl::from_parts(volume, muted);
-        self.controls = None;
+        #[cfg(all(target_os = "linux", feature = "linux-desktop"))]
+        {
+            self.controls = None;
+        }
         self.acknowledged = false;
         self.generation_start = self.submitted;
         self.volume.clone()
@@ -63,12 +69,12 @@ impl Report {
     pub(super) fn absent(&mut self, reason: &'static str) {
         self.absence.get_or_insert(reason);
     }
-    #[cfg(any(feature = "linux-audio", test))]
+    #[cfg(any(feature = "linux-audio", feature = "macos-audio", test))]
     fn begin_generation(&mut self) {
         self.acknowledged = false;
         self.generation_start = self.submitted;
     }
-    #[cfg(any(feature = "linux-audio", test))]
+    #[cfg(any(feature = "linux-audio", feature = "macos-audio", test))]
     fn failed_generation(&mut self, reason: &'static str, expired: bool) {
         if expired {
             self.expired_generations = self.expired_generations.saturating_add(1);
@@ -81,7 +87,7 @@ impl Report {
     }
     /// Called only for the current, fault-free worker. Configuration, silence,
     /// old-generation submissions and cleanup cannot count as recovery.
-    #[cfg(any(feature = "linux-audio", test))]
+    #[cfg(any(feature = "linux-audio", feature = "macos-audio", test))]
     fn recovered(&mut self) {
         if self.acknowledged && self.submitted > self.generation_start {
             self.recovered_generations = self
@@ -97,6 +103,7 @@ impl Report {
 mod report_tests;
 
 /// The view-only offer: the optional audio-down capability only with `--audio`.
+#[cfg(target_os = "linux")]
 pub(super) fn observation_offer(audio: bool) -> fr_wire::negotiation::Offer {
     if audio {
         fr_client::native::observation_offer_with_audio()
@@ -107,6 +114,7 @@ pub(super) fn observation_offer(audio: bool) -> fr_wire::negotiation::Offer {
 
 /// An explicit local request only: a build without playback and a missing
 /// local output socket are typed refusals before any connection attempt.
+#[cfg(target_os = "linux")]
 pub(super) fn resolve(
     request: Option<&AudioRequest>,
 ) -> Result<Option<(PathBuf, AudioRequest)>, Failure> {
@@ -126,15 +134,16 @@ pub(super) fn resolve(
 
 /// The codec image is installed beside fr, never selected by a host record,
 /// environment search path or downloaded on demand. Missing is a typed refusal.
-fn decoder_image() -> Result<PathBuf, Failure> {
+pub(super) fn decoder_image() -> Result<PathBuf, Failure> {
     std::env::current_exe().ok().and_then(|exe| exe.parent().map(|p| p.join("fr-opus-worker")))
         .filter(|p| p.is_absolute() && p.is_file())
         .ok_or_else(|| Failure::new("audio_decoder_unavailable",
-            "--audio requires the matching fr-opus-worker installed beside fr; build it with --features linux-opus-process. No in-process decoder fallback was selected.", 2))
+            "--audio requires the matching fr-opus-worker installed beside fr; build it with the native Opus process feature. No in-process decoder fallback was selected.", 2))
 }
 
 /// Resolve the local server socket once, before dialing: flag, then
 /// `PULSE_SERVER`, then the user runtime dir. Missing is a typed refusal.
+#[cfg(target_os = "linux")]
 fn server(request: &AudioRequest) -> Result<PathBuf, Failure> {
     let server = request.server.clone().or_else(|| {
         std::env::var("PULSE_SERVER")
@@ -156,9 +165,11 @@ fn server(request: &AudioRequest) -> Result<PathBuf, Failure> {
         })
 }
 
-#[cfg(feature = "linux-audio")]
+#[cfg(any(feature = "linux-audio", feature = "macos-audio"))]
 pub(super) use output::threaded::Output;
-#[cfg(feature = "linux-audio")]
+#[cfg(all(target_os = "macos", feature = "macos-audio"))]
+pub(super) use output::threaded::Retirement;
+#[cfg(any(feature = "linux-audio", feature = "macos-audio"))]
 mod output {
     pub(super) mod threaded;
     use super::Report;
@@ -170,9 +181,15 @@ mod output {
         playout::ReceiveResult,
         process::{ProcessDecoder, Retirement},
     };
+    #[cfg(target_os = "linux")]
     use fr_native::pulse::{
         Error as DeviceError, PlaybackDevice, Selection, State,
         playout::{Error as PlayoutError, PulsePlayout, RenderResult},
+    };
+    #[cfg(target_os = "macos")]
+    use fr_native::{
+        macos_audio::{Error as DeviceError, PlaybackDevice, Selection, State},
+        macos_audio_playout::{Error as PlayoutError, NativePlayout as PulsePlayout, RenderResult},
     };
     use fr_wire::audio::AudioConfiguration;
     use frd::session_startup::{ViewerAudioEnd, ViewerAudioOutput, ViewerAudioRefused};
@@ -180,6 +197,32 @@ mod output {
 
     /// At most this many decode/render steps per service turn.
     const RENDERS_PER_TURN: usize = 4;
+
+    /// Locally selected device, before any native output is opened. The Mac
+    /// subset pins its current default output; Linux retains its named socket.
+    #[derive(Clone)]
+    pub(super) struct Selected {
+        #[cfg(target_os = "linux")]
+        server: PathBuf,
+        #[cfg(target_os = "linux")]
+        sink: Option<String>,
+    }
+    impl Selected {
+        #[cfg_attr(target_os = "macos", allow(clippy::unused_self))] // Mac's default-only selection carries no unqualified device name.
+        fn open(&self) -> Result<Selection, DeviceError> {
+            #[cfg(target_os = "linux")]
+            {
+                match &self.sink {
+                    Some(sink) => Selection::new(&self.server, sink),
+                    None => Selection::default_output(&self.server),
+                }
+            }
+            #[cfg(target_os = "macos")]
+            {
+                Selection::default_output()
+            }
+        }
+    }
 
     /// Preserve the native cause across the session trait's content-free refusal.
     /// Expiring old sound is a freshness refusal, not a broken output device.
@@ -224,8 +267,9 @@ mod output {
     pub struct Output {
         image: Option<PathBuf>,
         retirement: Option<Retirement>,
-        server: PathBuf,
-        sink: Option<String>,
+        #[cfg(target_os = "macos")]
+        device_retirement: Option<fr_native::macos_audio::Retirement>,
+        selected: Selected,
         origin: Instant,
         stage: Stage,
         failure: Option<Failure>,
@@ -233,17 +277,26 @@ mod output {
         volume: AudioVolumeControl,
     }
     impl Output {
+        #[cfg(all(test, target_os = "linux"))]
         pub fn new(
             server: PathBuf,
             sink: Option<String>,
             report: Rc<RefCell<Report>>,
             volume: AudioVolumeControl,
         ) -> Self {
+            Self::selected(Selected { server, sink }, report, volume)
+        }
+        fn selected(
+            selected: Selected,
+            report: Rc<RefCell<Report>>,
+            volume: AudioVolumeControl,
+        ) -> Self {
             Self {
                 image: super::decoder_image().ok(),
                 retirement: None,
-                server,
-                sink,
+                #[cfg(target_os = "macos")]
+                device_retirement: None,
+                selected,
                 origin: Instant::now(),
                 stage: Stage::Idle,
                 failure: None,
@@ -331,13 +384,19 @@ mod output {
                 offer.jitter_target_ms,
             )
             .map_err(|_| ViewerAudioRefused)?;
-            let selection = match &self.sink {
-                Some(sink) => Selection::new(&self.server, sink),
-                None => Selection::default_output(&self.server),
-            }
-            .map_err(|_| ViewerAudioRefused)?;
+            let selection = self.selected.open().map_err(|_| ViewerAudioRefused)?;
+            #[cfg(target_os = "linux")]
             let device = PlaybackDevice::connect(selection, config, now(self.origin))
                 .map_err(|_| ViewerAudioRefused)?;
+            #[cfg(target_os = "macos")]
+            let device = {
+                let (device, retirement) =
+                    PlaybackDevice::connect_retained(selection, config, now(self.origin));
+                // Partial native setup can still own an unresolved queue.
+                // Retain its cleanup witness before propagating an open error.
+                self.device_retirement = Some(retirement);
+                device.map_err(|_| ViewerAudioRefused)?
+            };
             self.stage = Stage::Starting {
                 device,
                 offer,
@@ -476,7 +535,7 @@ mod output {
             }
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     mod tests;
 
     impl Drop for Output {
@@ -489,7 +548,7 @@ mod output {
 }
 
 /// Build the output for one attempt; `None` when this build has no audio.
-#[cfg(feature = "linux-audio")]
+#[cfg(all(target_os = "linux", feature = "linux-audio"))]
 pub(super) fn output(
     server: PathBuf,
     request: &AudioRequest,
@@ -502,4 +561,16 @@ pub(super) fn output(
         report.clone(),
         volume,
     ))
+}
+
+/// The same bounded proxy and decoder ownership, selecting only the Mac's
+/// current local default output. The caller retains the real cleanup witness.
+#[cfg(all(target_os = "macos", feature = "macos-audio"))]
+pub(super) fn macos_output(
+    report: &std::rc::Rc<std::cell::RefCell<Report>>,
+    volume: fr_client::audio::AudioVolumeControl,
+) -> (Box<dyn frd::session_startup::ViewerAudioOutput>, Retirement) {
+    let output = Output::macos(report.clone(), volume);
+    let retirement = output.retirement();
+    (Box::new(output), retirement)
 }

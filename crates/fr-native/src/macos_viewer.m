@@ -425,10 +425,13 @@ enum {
     FR_MAC_CLIPBOARD = 8,
     FR_MAC_TEXT_COMPOSER = 16,
     FR_MAC_FILE_SELECTION = 32,
-    FR_MAC_SHARE_ALL = 63,
+    FR_MAC_AUDIO = 64,
+    FR_MAC_SHARE_ALL = 127,
 };
 #define FR_MAC_SHARING_HEIGHT 44.0
 #define FR_MAC_TEXT_HEIGHT 76.0
+#define FR_MAC_AUDIO_HEIGHT 44.0
+#define FR_MAC_AUDIO_MIN_WIDTH 320.0
 #define FR_MAC_TEXT_MIN_WIDTH 480.0
 #define FR_MAC_TEXT_BYTES 4096
 #define FR_MAC_TEXT_AGE 0.100
@@ -497,13 +500,16 @@ static double fr_sharing_width(uint32_t flags) {
                    ((flags & FR_MAC_CHANGE_DISPLAY) ? FR_MAC_CHANGE_WIDTH : 0) +
                    ((flags & FR_MAC_CLIPBOARD) ? FR_MAC_CLIPBOARD_WIDTH : 0) +
                    ((flags & FR_MAC_FILE_SELECTION) ? FR_MAC_FILE_SELECTION_WIDTH : 0);
-    return (flags & FR_MAC_TEXT_COMPOSER) ? fmax(width, FR_MAC_TEXT_MIN_WIDTH) : width;
+    if (flags & FR_MAC_TEXT_COMPOSER) width = fmax(width, FR_MAC_TEXT_MIN_WIDTH);
+    if (flags & FR_MAC_AUDIO) width = fmax(width, FR_MAC_AUDIO_MIN_WIDTH);
+    return width;
 }
 
 static double fr_sharing_height(uint32_t flags) {
-    return flags ? FR_MAC_SHARING_HEIGHT +
-                       ((flags & FR_MAC_TEXT_COMPOSER) ? FR_MAC_TEXT_HEIGHT : 0)
-                 : 0;
+    double height = (flags & ~FR_MAC_AUDIO)
+        ? FR_MAC_SHARING_HEIGHT + ((flags & FR_MAC_TEXT_COMPOSER) ? FR_MAC_TEXT_HEIGHT : 0)
+        : 0;
+    return height + ((flags & FR_MAC_AUDIO) ? FR_MAC_AUDIO_HEIGHT : 0);
 }
 
 static NSUInteger fr_held_modifiers(NSUInteger flags) {
@@ -572,6 +578,11 @@ static BOOL fr_any_key(const BOOL *keys) {
     NSTextField *clipboardLabel;
     FrSharingButton *uploadCancel, *uploadPacing, *downloadCancel, *changeDisplay;
     FrSharingButton *clipboardOff;
+    NSTextField *audioLabel, *audioVolumeLabel;
+    FrSharingButton *audioDown, *audioUp, *audioMute;
+    uint32_t audioState, audioVolume;
+    BOOL audioMuted, audioInitialized, audioDirty, audioRedraw;
+    double audioPreferencesSince;
     FrSharingButton *sendCopiedFiles;
     void *fileSelectionContext;
     FrFileSelectionReady fileSelectionReady;
@@ -639,6 +650,8 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)cancelUpload:(id)sender;
 - (void)paceUpload:(id)sender;
 - (void)retireUploadPacing;
+- (void)changeAudio:(id)sender;
+- (void)updateAudioControls;
 - (void)cancelDownload:(id)sender;
 - (void)changeDisplay:(id)sender;
 - (void)stopClipboard:(BOOL)userOff;
@@ -1079,6 +1092,26 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         [sharing addSubview:textScroll];
         [self updateTextControls];
     }
+    if (sharingFlags & FR_MAC_AUDIO) {
+        audioLabel = fr_sharing_label(sharing, @"Audio: starting");
+        audioLabel.toolTip = @"Playback status reports original output submissions, not proof that sound was heard.";
+        audioVolumeLabel = fr_sharing_label(sharing, @"--%");
+        audioVolumeLabel.alignment = NSTextAlignmentCenter;
+        audioDown = fr_sharing_button(sharing, @"−", self, @selector(changeAudio:));
+        audioUp = fr_sharing_button(sharing, @"+", self, @selector(changeAudio:));
+        audioMute = fr_sharing_button(sharing, @"Mute", self, @selector(changeAudio:));
+        audioDown.accessibilityLabel = @"Reduce playback volume by ten percentage points";
+        audioUp.accessibilityLabel = @"Increase playback volume by ten percentage points";
+        audioMute.accessibilityLabel = @"Mute future playback audio";
+        NSString *notice = @"Changes apply to future audio submissions. Audio already prepared or queued can still play; the output queue is bounded to 40 ms.";
+        audioVolumeLabel.toolTip = notice;
+        audioDown.toolTip = notice;
+        audioUp.toolTip = notice;
+        audioMute.toolTip = notice;
+        audioDown.enabled = NO;
+        audioUp.enabled = NO;
+        audioMute.enabled = NO;
+    }
 }
 - (void)layoutSharing {
     if (!sharing || !sharingFlags) return;
@@ -1121,6 +1154,65 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         textSend.frame = NSMakeRect(width - 92, 62, 84, 24);
         textCancel.frame = NSMakeRect(width - 92, 88, 84, 24);
     }
+    if (audioLabel) {
+        double width = NSWidth(sharing.bounds);
+        double y = fr_sharing_height(sharingFlags & ~FR_MAC_AUDIO);
+        audioLabel.frame = NSMakeRect(8, y + 14, fmax(1, width - 210), 17);
+        audioDown.frame = NSMakeRect(width - 194, y + 8, 28, 28);
+        audioVolumeLabel.frame = NSMakeRect(width - 162, y + 14, 44, 17);
+        audioUp.frame = NSMakeRect(width - 114, y + 8, 28, 28);
+        audioMute.frame = NSMakeRect(width - 78, y + 8, 70, 28);
+    }
+}
+
+- (void)updateAudioControls {
+    if (!audioInitialized || nativeStopPending) return;
+    audioLabel.stringValue = audioState == 0 ? @"Audio: starting"
+        : (audioState == 1 ? @"Audio: playing" : @"Audio: unavailable");
+    audioVolumeLabel.stringValue = [NSString stringWithFormat:@"%u%%", audioVolume];
+    audioMute.title = audioMuted ? @"Unmute" : @"Mute";
+    audioMute.accessibilityLabel = audioMuted ? @"Unmute future playback audio"
+        : @"Mute future playback audio";
+    // These are bounded local preferences, available even when output failed.
+    // They never reopen a device, select a stream or grant remote authority.
+    audioDown.enabled = !nativeStopPending && audioVolume > 0;
+    audioUp.enabled = !nativeStopPending && audioVolume < 100;
+    audioMute.enabled = !nativeStopPending;
+}
+- (void)changeAudio:(id)sender {
+    FrSharingButton *button = sender == audioDown ? audioDown
+        : (sender == audioUp ? audioUp : (sender == audioMute ? audioMute : nil));
+    uint32_t volume = audioVolume;
+    BOOL muted = audioMuted;
+    NSEvent *event = NSApp.currentEvent;
+    double captured = event ? event.timestamp : 0;
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!button || !button.enabled || !audioInitialized || nativeStopPending || overflow ||
+        displayChangeAt > 0 ||
+        atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) ||
+        !window.isKeyWindow || !window.isVisible || window.isMiniaturized ||
+        !window.isOnActiveSpace || !(window.occlusionState & NSWindowOcclusionStateVisible) ||
+        !sharing || sharing.isHidden || !NSContainsRect(sharing.visibleRect, button.frame) ||
+        !event || event.type != NSEventTypeLeftMouseDown || event.window != window ||
+        !isfinite(captured) || captured <= 0 || captured < audioPreferencesSince ||
+        fr_held_modifiers(event.modifierFlags) || !isfinite(now) || now < captured ||
+        now - captured >= 0.250)
+        return;
+    CGEventRef native = event.CGEvent;
+    if (!native ||
+        CGEventGetIntegerValueField(native, kCGEventSourceUserData) == FR_MAC_REMOTE_INPUT_TAG ||
+        CGEventGetIntegerValueField(native, kCGEventSourceUnixProcessID) == getpid())
+        return;
+    if (nativeStopPending || displayChangeAt > 0 || audioVolume != volume || audioMuted != muted ||
+        atomic_load_explicit(&lifetime->unavailable, memory_order_acquire))
+        return;
+    if (button == audioDown) audioVolume = volume > 10 ? volume - 10 : 0;
+    else if (button == audioUp) audioVolume = volume < 90 ? volume + 10 : 100;
+    else audioMuted = !muted;
+    audioDirty = YES;
+    audioRedraw = YES;
+    // No native tracking loop, device call or remote input in this callback.
+    // Rust consumes one coalesced preference sample after its terminal checks.
 }
 
 - (FrTextComposer *)newTextEditor {
@@ -1280,6 +1372,8 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 }
 - (void)stopNativeInput:(NSString *)message {
     [self retireUploadPacing];
+    audioDirty = NO;
+    audioRedraw = NO;
     [self cancelResize];
     nativeStopPending = YES;
     [self stopFileSelections];
@@ -1477,6 +1571,8 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         now - event.timestamp >= 0.250) return;
     displayChangeUsed = YES;
     [self retireUploadPacing];
+    audioDirty = NO;
+    audioRedraw = NO;
     [self stopFileSelections];
     // This is a nonterminal handoff: Rust must first inspect the rest of the
     // batch for a queued veto, then park the original producer. IME/chrome
@@ -2112,6 +2208,50 @@ int fr_mac_window_sharing_state(void *handle, uint32_t *actions, int *visible,
     return FR_MAC_OK;
 }
 
+// Playback preferences only. The original Rust owner performs all decoding,
+// output and retirement. A dirty native choice survives a status-only refresh
+// until audio_state takes it; an older preference cannot overwrite that click.
+int fr_mac_window_audio_update(void *handle, uint32_t state, uint32_t volume, int muted) {
+    if (!handle || state > 2 || volume > 100 || (muted != 0 && muted != 1))
+        return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->audioLabel || !(owner->sharingFlags & FR_MAC_AUDIO)) return FR_MAC_INVALID;
+    if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
+    BOOL changed = !owner->audioInitialized || owner->audioState != state ||
+        owner->audioVolume != volume || owner->audioMuted != (muted != 0) || owner->audioRedraw;
+    if (!changed) return FR_MAC_OK;
+    double now = NSProcessInfo.processInfo.systemUptime;
+    if (!isfinite(now) || now <= 0 || now < owner->audioPreferencesSince)
+        return FR_MAC_UNAVAILABLE;
+    if (!owner->audioInitialized ||
+        (!owner->audioDirty && (owner->audioVolume != volume || owner->audioMuted != (muted != 0))))
+        owner->audioPreferencesSince = now;
+    if (!owner->audioDirty) {
+        owner->audioVolume = volume;
+        owner->audioMuted = muted != 0;
+    }
+    owner->audioState = state;
+    owner->audioInitialized = YES;
+    owner->audioRedraw = NO;
+    @autoreleasepool {
+        [owner updateAudioControls];
+    }
+    return FR_MAC_OK;
+}
+
+int fr_mac_window_audio_state(void *handle, uint32_t *volume, int *muted, int *changed) {
+    if (!handle || !volume || !muted || !changed) return FR_MAC_INVALID;
+    if (![NSThread isMainThread]) return FR_MAC_THREAD;
+    FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
+    if (!owner->audioLabel || !(owner->sharingFlags & FR_MAC_AUDIO)) return FR_MAC_INVALID;
+    *volume = owner->audioVolume;
+    *muted = owner->audioMuted ? 1 : 0;
+    *changed = owner->audioInitialized && owner->audioDirty && !owner->nativeStopPending ? 1 : 0;
+    owner->audioDirty = NO;
+    return FR_MAC_OK;
+}
+
 int fr_mac_window_display_change_enabled(void *handle, int enabled) {
     if (!handle || (enabled != 0 && enabled != 1)) return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
@@ -2364,12 +2504,13 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
     @autoreleasepool {
         NSDate *until = timeout > 0 ? [NSDate dateWithTimeIntervalSinceNow:timeout]
                                     : [NSDate distantPast];
-        // A display change, file pacing or captured Send inspects the full bounded
+        // A display change, audio preference, file pacing or captured Send inspects the full bounded
         // batch so queued close, escape or focus loss can veto the action.
         // File-only cancel still reaches Rust immediately when neither is pending.
         while (!owner->nativeStopPending &&
                (!(owner->sharingActions & FR_MAC_CANCEL_ACTIONS) ||
                 (owner->sharingActions & FR_MAC_PACING_ACTIONS) ||
+                owner->audioDirty ||
                 owner->displayChangeAt > 0 || owner->textPending) &&
                owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS) {
             NSEvent *event = [NSApp nextEventMatchingMask:NSEventMaskAny
@@ -2383,8 +2524,8 @@ size_t fr_mac_window_poll(void *handle, double timeout, FrMacEvent *out, size_t 
             if ([owner translate:event] && !owner->nativeStopPending) [NSApp sendEvent:event];
             until = [NSDate distantPast];
         }
-        // A local cancellation must reach Rust before any further UI drawing.
-        if (!owner->sharingActions && !owner->nativeStopPending &&
+        // Local actions must reach Rust before any further UI drawing.
+        if (!owner->sharingActions && !owner->audioDirty && !owner->nativeStopPending &&
             !owner->displayChangeAt && !owner->textPending &&
             owner->count < FR_MAC_QUEUE && dequeued < FR_MAC_PUMP_EVENTS)
             [NSApp updateWindows];
@@ -2722,6 +2863,11 @@ void fr_mac_window_free(void *handle) {
         owner->downloadCancel = nil;
         owner->changeDisplay = nil;
         owner->clipboardOff = nil;
+        owner->audioLabel = nil;
+        owner->audioVolumeLabel = nil;
+        owner->audioDown = nil;
+        owner->audioUp = nil;
+        owner->audioMute = nil;
         owner->sendCopiedFiles = nil;
     }
 }

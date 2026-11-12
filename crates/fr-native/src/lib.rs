@@ -1,8 +1,17 @@
 //! Native media adapters. `FFmpeg` and X11 stay behind this named FFI boundary.
 #![deny(unsafe_op_in_unsafe_fn)]
 
-#[cfg(all(target_os = "linux", feature = "linux-opus"))]
+#[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "opus"))]
 pub mod opus;
+
+#[cfg(all(target_os = "macos", feature = "macos-audio"))]
+pub mod macos_audio;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-audio")))]
+mod macos_audio_policy;
+// Both native devices use the same original Opus/ACK/playout owner.
+#[cfg(all(target_os = "macos", feature = "macos-audio"))]
+#[path = "pulse/playout.rs"]
+pub mod macos_audio_playout;
 
 #[cfg(all(target_os = "linux", feature = "linux-pulse-playback"))]
 pub mod pulse;
@@ -157,7 +166,7 @@ pub mod image_transfer;
         feature = "linux-media",
         feature = "linux-input",
         feature = "linux-session-ui",
-        feature = "linux-opus-process",
+        feature = "opus-process",
         feature = "linux-microphone-process"
     )
 ))]
@@ -170,7 +179,7 @@ pub use parent::bind_worker_parent;
         feature = "linux-media",
         feature = "linux-input",
         feature = "linux-session-ui",
-        feature = "linux-opus-process",
+        feature = "opus-process",
         feature = "linux-microphone-process"
     )
 ))]

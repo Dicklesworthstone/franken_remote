@@ -1,6 +1,6 @@
-# Restricted per-epoch Opus decoder
+# Supervised per-epoch Opus decoder
 
-The opt-in `linux-opus-process` feature supplies `ProcessDecoder` and the
+The opt-in `linux-opus-process` and `macos-opus-process` features supply `ProcessDecoder` and the
 `fr-opus-worker` executable. It uses the existing Opus codec and AudioPlayout,
 not a new runtime, jitter buffer, transport, audio device or codec family.
 
@@ -24,6 +24,16 @@ thread creation, descriptor duplication, and new executable mappings. Address
 space is capped at 256 MiB and core/file output at zero. Other architectures or
 failed confinement refuse rather than running unrestricted. The executable,
 loader, already-loaded native libraries, OS and kernel remain trusted.
+
+The macOS child uses the same original epoch, bounded IPC, watchdog, cancellation
+and positively reaped retirement. It verifies the expected parent and the
+private stdin/stdout socket peers before reading any codec request, closes
+unrelated inherited descriptors, disables core/regular-file dumps and observes
+parent exit with an independent kqueue watchdog. It statically links the locally
+provisioned codec. This is same-user process crash/hang containment, **not a macOS
+OS sandbox or protection against a malicious same-user process**. Linux still
+requires its seccomp sandbox; the platform distinction never enables an
+unconfined Linux fallback.
 
 The parent validates complete versioned replies, transaction, original epoch,
 direction, channel count, timestamp and exact sample/byte count before accepting
@@ -65,21 +75,28 @@ cargo test -p fr-native --no-default-features --features linux-opus-process --te
 
 ## Installed client integration
 
-`fr connect --view-only --audio` now uses the process-backed decoder in its
-existing Opus/Pulse playout owner. Build `fr-opus-worker` with `linux-opus-process`
-(or `linux-audio`) and install the matching executable beside `fr`. A missing
+`fr connect --view-only --audio` and `--control --audio` use the process-backed
+decoder in their shared Opus playout owner, with PulseAudio on Linux and
+CoreAudio on macOS. Build `fr-opus-worker` with `linux-opus-process`/`linux-audio`
+or `macos-opus-process`/`macos-audio`, and install the matching executable beside `fr`. A missing
 image refuses before dialing as `audio_decoder_unavailable`; confinement/setup
 failure is a local audio refusal, never permission to select the old decoder.
 Both the original output device and the actual decoder must acknowledge native
 configuration before the client emits `AudioConfigured`. The former synchronous
 adapter remains for explicitly worker-confined library use and its tests, not
-as a CLI fallback. Control-mode audio remains unsupported independently.
+as a CLI fallback. Playback remains independent of remote input permission.
+The Mac native volume/mute row updates only the original attempt's local gain;
+new attempts preserve the last values in a fresh handle. See
+[Mac build, ownership and qualification](docs/macos-audio.md).
 
 The output owner retains decoder retirement separately from output cork/flush.
 On reset it stops the old child and refuses a replacement until actual reaping;
 no old PCM, decoder history or pending operation crosses the epoch. The existing
 output permission, packet bounds, jitter, device clocks and final submission
 checks remain in force. A frozen child returns no PCM and cannot hold the CLI.
+Mac cleanup additionally retains the original native queue witness, including
+partially failed setup. A failed disposal cannot certify retirement or allow a
+replacement session to consume that slot.
 
 The complete CLI test binary passed 52 ordinary cases; four additional ignored-by-
 default native cases were explicitly executed and passed with the actual private

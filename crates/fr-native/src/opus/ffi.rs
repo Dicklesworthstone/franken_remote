@@ -9,7 +9,11 @@ pub(super) const GET_LOOKAHEAD: c_int = 4027;
 
 // Linux's installed, versioned ABI; no dlopen, path search API, build downloader,
 // FFmpeg dependency or alternate runtime. Package provenance is a deployment gate.
-#[link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")]
+#[cfg_attr(
+    target_os = "linux",
+    link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")
+)]
+#[cfg_attr(target_os = "macos", link(name = "opus", kind = "static"))]
 unsafe extern "C" {
     pub(super) fn opus_encoder_get_size(channels: c_int) -> c_int;
     pub(super) fn opus_encoder_create(
@@ -31,7 +35,11 @@ unsafe extern "C" {
 
 pub(super) const RESET_STATE: c_int = 4028;
 
-#[link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")]
+#[cfg_attr(
+    target_os = "linux",
+    link(name = "libopus.so.0", kind = "dylib", modifiers = "+verbatim")
+)]
+#[cfg_attr(target_os = "macos", link(name = "opus", kind = "static"))]
 unsafe extern "C" {
     pub(super) fn opus_decoder_get_size(channels: c_int) -> c_int;
     pub(super) fn opus_decoder_create(rate: i32, channels: c_int, error: *mut c_int)

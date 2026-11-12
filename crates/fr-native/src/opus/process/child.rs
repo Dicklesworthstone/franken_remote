@@ -6,6 +6,7 @@ use super::{
 use crate::opus::Decoder;
 use fr_media::audio::AudioDecoder;
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 #[link(name = "fropussandbox", kind = "static")]
 unsafe extern "C" {
     fn fr_opus_sandbox_enter() -> std::ffi::c_int;
@@ -14,6 +15,7 @@ unsafe extern "C" {
 /// command or entering libopus. It must have its parent's connected socket on
 /// stdin/stdout. All other descriptors close. This changes process-wide state;
 /// never call inside the client, daemon, test runner or a reusable worker.
+#[cfg(target_os = "linux")]
 pub fn confine() -> Result<(), Error> {
     // SAFETY: no pointers, borrowed buffers or callbacks. Kernel-only process
     // restrictions; exact success required, no unrestricted fallback.
@@ -24,8 +26,24 @@ pub fn confine() -> Result<(), Error> {
     }
 }
 pub fn run(parent: u32) -> Result<(), Error> {
-    crate::bind_parent(parent).map_err(|_| Error::Fatal)?;
-    confine()?;
+    #[cfg(target_os = "linux")]
+    {
+        crate::bind_parent(parent).map_err(|_| Error::Fatal)?;
+        confine()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "fropusmacos", kind = "static")]
+        unsafe extern "C" {
+            fn fr_opus_macos_prepare(parent: u32) -> std::ffi::c_int;
+        }
+        // SAFETY: this private child owns its process, inherited sockets and
+        // parent-exit watcher. No pointers or callbacks cross this boundary.
+        // This is process containment, explicitly not a macOS sandbox claim.
+        if unsafe { fr_opus_macos_prepare(parent) } != 1 {
+            return Err(Error::Fatal);
+        }
+    }
     serve(&mut std::io::stdin().lock(), &mut std::io::stdout().lock())
 }
 fn serve(input: &mut impl Read, output: &mut impl Write) -> Result<(), Error> {

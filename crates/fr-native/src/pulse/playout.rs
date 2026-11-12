@@ -1,10 +1,17 @@
 #![forbid(unsafe_code)]
 //! The bound native Opus receiver and selected output share one retiring owner.
 //! No public mutable device/decoder escape, reconnect, or implicit audio enable.
-use super::{Error as DeviceError, PlaybackDevice, State, StopOutcome, Submission};
+#[cfg(target_os = "macos")]
+use crate::macos_audio::{
+    Error as DeviceError, PlaybackDevice, STARTUP_US, State, StopOutcome, Submission,
+};
 use crate::opus::{
     Decoder,
     playout::{self, Error as ReceiveError, OpusPlayout, ReceiveResult},
+};
+#[cfg(target_os = "linux")]
+use crate::pulse::{
+    Error as DeviceError, PlaybackDevice, STARTUP_US, State, StopOutcome, Submission,
 };
 use fr_client::{
     audio::{
@@ -30,7 +37,7 @@ pub enum Error {
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "pulse-opus-playout: {self:?}")
+        write!(f, "native-opus-playout: {self:?}")
     }
 }
 impl std::error::Error for Error {}
@@ -55,6 +62,8 @@ pub struct PulsePlayout<D: PolledDecoder = Decoder> {
     acknowledged: bool,
     setup_until: ClientInstant,
 }
+/// Platform-neutral name for the same native device/codec owner.
+pub type NativePlayout<D = Decoder> = PulsePlayout<D>;
 impl PulsePlayout<Decoder> {
     pub fn new(
         binding: u32,
@@ -95,7 +104,7 @@ impl<D: PolledDecoder> PulsePlayout<D> {
             clock
                 .now
                 .0
-                .checked_add(super::STARTUP_US)
+                .checked_add(STARTUP_US)
                 .ok_or(Error::Device(DeviceError::Clock))?,
         );
         let receiver =
