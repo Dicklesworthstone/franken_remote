@@ -30,7 +30,10 @@ async fn expire_retained(q: &mut QuicRecords, cx: &Cx) {
 async fn retire_remote_receiver(f: &mut Running, cx: &Cx) {
     let until = clock(cx) + 500_000;
     loop {
-        assert!(clock(cx) < until, "file reset never reached its original peer");
+        assert!(
+            clock(cx) < until,
+            "file reset never reached its original peer"
+        );
         f.link.drive(cx).await;
         match f.host.service(&mut f.link.h, || true) {
             Err(error) => {
@@ -98,13 +101,19 @@ fn a_later_send_expiry_keeps_prior_batch_receipts_and_never_starts_the_successor
         assert_eq!(sender.service(&mut f.link.c, || true), Err(cause));
         let cleanup_until = Instant::now() + Duration::from_secs(2);
         while !sender.batch_report().unwrap().complete {
-            assert!(Instant::now() < cleanup_until, "batch source cleanup stalled");
+            assert!(
+                Instant::now() < cleanup_until,
+                "batch source cleanup stalled"
+            );
             let _ = sender.try_finish_cleanup();
             std::thread::yield_now();
         }
         let report = sender.take_batch_report().unwrap();
         assert_eq!(report.stop, Some(Stop::Local(cause)));
-        assert_eq!((report.total, report.started, report.not_started()), (3, 2, 1));
+        assert_eq!(
+            (report.total, report.started, report.not_started()),
+            (3, 2, 1)
+        );
         assert_eq!(
             report.receipts().collect::<Vec<_>>(),
             vec![

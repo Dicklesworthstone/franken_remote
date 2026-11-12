@@ -114,13 +114,20 @@ impl Slot {
         authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
         if let Some(pending) = &mut self.pending {
-            match pending.preflight(q, authorize)? {
-                Advance::Waiting | Advance::Ready => {}
-                Advance::PeerRetired => {
+            match pending.preflight(q, authorize) {
+                Ok(Advance::Waiting | Advance::Ready) => {}
+                Ok(Advance::PeerRetired) => {
                     pending.stopped();
                     self.pending = None;
                     self.stopped = true;
                     self.failure.get_or_insert(Error::Cancelled);
+                }
+                Err(error) => {
+                    // Preflight can cross the original setup deadline after
+                    // the turn's initial check. Preserve that cause before
+                    // parent teardown cancels the still-pending attachment.
+                    self.failure.get_or_insert(error);
+                    return Err(error);
                 }
             }
         }

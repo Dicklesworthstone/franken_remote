@@ -20,8 +20,9 @@ concurrency:
 
 jobs:
   format:
-    # Formatting needs no Linux native SDK or newer libopus ABI.
-    runs-on: ubuntu-24.04
+    # Match the Linux image used by the compiler and native verification jobs.
+    # Formatting still uses the pinned toolchain and needs no native SDK.
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Check out repository

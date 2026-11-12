@@ -1096,11 +1096,21 @@ fn expired(viewer: &mut ControlledViewer, current: u64) -> Option<Error> {
         return Some(Error::Session(super::Error::Expired));
     }
     let passed = |deadline: Option<u64>| deadline.is_some_and(|at| current >= at);
-    (passed(viewer.pending.as_ref().map(|p| p.until))
+    if passed(viewer.pending.as_ref().map(|p| p.until))
         || passed(viewer.input.control_response_deadline().map(|at| at.0))
         || passed(viewer.session.responder.response_deadline().map(|at| at.0))
-        || passed(viewer.files.deadline_us())
-        || passed(viewer.clipboard_setup.deadline_us())
+    {
+        return Some(Error::Expired);
+    }
+    // The setup horizon may pass after the turn's initial pending check but
+    // before its wait is bounded. Let the original file owner retain and name
+    // that cause before Operation's teardown cancels unfinished attachments.
+    if passed(viewer.files.deadline_us())
+        && let Err(error) = viewer.files.check_pending()
+    {
+        return Some(Error::Files(error));
+    }
+    (passed(viewer.clipboard_setup.deadline_us())
         || passed(viewer.microphone.deadline_us()))
     .then_some(Error::Expired)
 }

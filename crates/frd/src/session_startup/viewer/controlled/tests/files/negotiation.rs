@@ -238,19 +238,23 @@ fn withheld_file_offer_expires_even_while_input_and_observation_are_serviced() {
         let ((), done) = Box::pin(support::both(
             async {
                 let (mut n, mut t) = (80_000, 90_000);
-                loop {
+                let failure = loop {
                     assert!(
                         now(&h).unwrap() < start + 400_000,
                         "file expectation refreshed its deadline"
                     );
                     let (host, viewer) = turn(&mut state, &c, &h, &mut n, &mut t).await;
                     host.unwrap();
-                    if viewer.is_err() {
-                        break;
+                    if let Err(error) = viewer {
+                        break error;
                     }
-                }
+                };
                 stopped_without_source(&state);
-                assert_eq!(state.viewer.file_failure(), Some(SendError::Expired));
+                assert_eq!(
+                    state.viewer.file_failure(),
+                    Some(SendError::Expired),
+                    "viewer stopped with {failure:?}"
+                );
                 assert!(c.timer_driver().unwrap().now().as_nanos() / 1000 >= start + 100_000);
                 state.host.close();
             },
@@ -260,6 +264,65 @@ fn withheld_file_offer_expires_even_while_input_and_observation_are_serviced() {
         assert!(done.handoff_safe());
     });
 }
+
+#[test]
+fn expectation_expiring_before_receive_preflight_retains_its_original_cause() {
+    run(|c, h| async move {
+        let mut state = pending_fixture(&c, &h).await;
+        expect(&mut state, Permission::new(true), Duration::from_millis(30));
+        state.viewer.files.check_pending().unwrap();
+        let original_until = state.viewer.files.deadline_us().unwrap();
+        asupersync::time::sleep(c.now(), Duration::from_millis(40)).await;
+        assert!(now(&c).unwrap() >= original_until);
+
+        // The earlier pending check passed. Expiry is first discovered by
+        // the real preflight that runs before generic receive dispatch.
+        let viewer = &mut state.viewer;
+        assert_eq!(
+            viewer
+                .files
+                .prepare_pending_receive(&mut viewer.session.transport, || true),
+            Err(SendError::Expired)
+        );
+        assert_eq!(viewer.file_failure(), Some(SendError::Expired));
+        assert!(viewer.file_send_negotiating());
+        assert_eq!(viewer.file_stage(), None);
+        viewer.close();
+        stopped_without_source(&state);
+        assert_eq!(state.viewer.file_failure(), Some(SendError::Expired));
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
+#[test]
+fn expectation_expiring_during_wait_budget_recheck_retains_its_original_cause() {
+    run(|c, h| async move {
+        let mut state = pending_fixture(&c, &h).await;
+        expect(&mut state, Permission::new(true), Duration::from_millis(30));
+        state.viewer.files.check_pending().unwrap();
+        let original_until = state.viewer.files.deadline_us().unwrap();
+        asupersync::time::sleep(c.now(), Duration::from_millis(40)).await;
+        let current = now(&c).unwrap();
+        assert!(current >= original_until);
+
+        // This is drive's exact deadline recheck after the wait budget was
+        // sampled. It must name and retain the file cause before cleanup.
+        assert_eq!(
+            expired(&mut state.viewer, current),
+            Some(Error::Files(SendError::Expired))
+        );
+        assert_eq!(state.viewer.file_failure(), Some(SendError::Expired));
+        assert!(state.viewer.file_send_negotiating());
+        assert_eq!(state.viewer.file_stage(), None);
+        state.viewer.close();
+        stopped_without_source(&state);
+        assert_eq!(state.viewer.file_failure(), Some(SendError::Expired));
+        state.host.close();
+        assert!(state.driver.take().unwrap().await.handoff_safe());
+    });
+}
+
 #[test]
 fn cancelling_unfinished_expectation_fences_parent_without_source_or_receipt() {
     run(|c, h| async move {

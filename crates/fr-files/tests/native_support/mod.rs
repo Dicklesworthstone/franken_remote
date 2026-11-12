@@ -124,7 +124,10 @@ impl Link {
             .unwrap();
         let mut received = false;
         while !received {
-            assert!(clock(cx) < until, "critical route stalled after file retirement");
+            assert!(
+                clock(cx) < until,
+                "critical route stalled after file retirement"
+            );
             self.drive(cx).await;
             self.h
                 .receive_ready(

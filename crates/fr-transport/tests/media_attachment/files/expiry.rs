@@ -396,7 +396,10 @@ async fn send_expiry_preserves_siblings(role: MediaRole, staged: bool) {
     assert!(sender.send_expired(sending(&mut l, host)));
     assert!(!sender.receive_expired(sending(&mut l, host)));
     assert!(!sender.send_expired(receiving(&mut l, host)));
-    assert_eq!(sender.check(receiving(&mut l, host)), Err(Error::WrongRoute));
+    assert_eq!(
+        sender.check(receiving(&mut l, host)),
+        Err(Error::WrongRoute)
+    );
     assert_eq!(sending(&mut l, host).usage().retained_send_records, 0);
     assert_eq!(sending(&mut l, host).usage().retained_send_upper_bound, 0);
     assert!(!sending(&mut l, host).has_route(Route::Stream(old_send.outbound)));
@@ -489,8 +492,7 @@ fn file_send_expiry_cannot_hide_expired_critical_output() {
         let c = FilesChannel::new(&l.c, cp, InputLeaseId::from_raw(123), 456).unwrap();
         quiet(&mut l, &cx).await;
         let until = clock(&cx) + 100_000;
-        c.send(&mut l.c, &cx, &chunk(&c), until, || true)
-            .unwrap();
+        c.send(&mut l.c, &cx, &chunk(&c), until, || true).unwrap();
         l.c.send(
             &cx,
             Route::Stream(l.cr.outbound),
@@ -517,18 +519,11 @@ fn file_send_expiry_inside_a_native_poll_still_fences_the_connection() {
         let h = FilesChannel::new(&l.h, hp, InputLeaseId::from_raw(123), 456).unwrap();
         let c = FilesChannel::new(&l.c, cp, InputLeaseId::from_raw(123), 456).unwrap();
         quiet(&mut l, &cx).await;
-        c.send(
-            &mut l.c,
-            &cx,
-            &chunk(&c),
-            clock(&cx) + 100_000,
-            || true,
-        )
-        .unwrap();
+        c.send(&mut l.c, &cx, &chunk(&c), clock(&cx) + 100_000, || true)
+            .unwrap();
         let mut checks = 0;
-        let result = l
-            .c
-            .drive(&cx, Duration::ZERO, || {
+        let result =
+            l.c.drive(&cx, Duration::ZERO, || {
                 checks += 1;
                 if checks == 3 {
                     // Admission and native prefix staging already succeeded. The

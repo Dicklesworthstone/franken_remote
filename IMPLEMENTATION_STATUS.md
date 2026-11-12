@@ -31,10 +31,15 @@ They retain an earlier uncollected publication receipt, check the untouched
 original item cap, fence subsequent native activity and preserve input/control.
 These fixtures do not establish real OS clipboard or live-tailnet acceptance.
 
-Local execution remains unavailable. Hosted verification for the preceding file
-checkpoint has started; this new clipboard slice has no compiler, Clippy or
-runtime pass at this checkpoint. The shared-clipboard and loaded-session beads
-remain open for their existing acceptance work.
+Local execution remains unavailable. The
+[focused workflow on 4812fb8](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43196003850)
+compiled the actual daemon library test binary, including the new clipboard
+bridge tests, checked the daemon executable, and passed 206 selected test
+executions with zero failures. Some filters overlap; this is an execution count,
+not a count of distinct tests. Its selected tests include real X11 indicator
+and microphone controls, but **do not execute the new clipboard expiry tests**.
+Their runtime verdict and the latest full workspace gates remain pending.
+The shared-clipboard and loaded-session beads remain open.
 
 ## File send expiry preserves the original desktop (2026-11-12)
 
@@ -52,20 +57,37 @@ A completion request admitted without a publication proof remains an unknown
 effect; no timeout replays a selection or starts its successor. Native upload
 and download reports distinguish this cause from receive expiry and cancellation.
 
-**Added and independently source-reviewed, not executed:** transport regressions
-for queued and native-staged sends in both file directions, control/sibling
-continuity, consumed identities and terminal negatives; real ATP/disk scenarios
-for partial staging cleanup, earlier batch receipts, and an expired publication
-reply; and an original ControlledViewer regression that sends input under the
-same lease after file retirement. CLI projection checks preserve earlier and
-unknown publication evidence.
+**Executed on Linux:** the
+[full Linux job on 8ee5be4](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43194283238/job/131101107036)
+passed all 10 file-expiry regression executions: six transport cases, three
+real ATP/disk scenarios and the original ControlledViewer/input continuation
+test. Nine tests were newly added; one existing expiry test was updated.
+They cover queued and staged sends in both directions, sibling continuity,
+consumed identities, terminal negatives, partial staging cleanup, earlier batch
+receipts and publication uncertainty. All-target/all-feature compilation and
+every native integration exercise lane in that job also passed.
 
-The exact pinned toolchain and locked dependencies were prepared, but the local
-execution environment became unavailable before compiler or test output.
-Compilation, strict Clippy, full workspace tests, the new runtime regressions
-and the loaded namespace acceptance remain unverified at this checkpoint.
-Existing GitHub verification runs follow the direct main commit. This is not a
-live-tailnet or hardware qualification; `fr-jlgm` remains open.
+The full run was not green. Strict Clippy found the additional reservation
+boolean; `e4f980a` replaces the mutually exclusive flags with a typed
+`Option<Expiry>` without suppressing the lint. The formatter returned exact
+source-layout corrections. One existing file-expectation regression reported
+`Cancelled` instead of `Expired`. Two concrete cause-loss paths are now fixed:
+receive preflight retains its exact failure before returning, and a passed file
+setup deadline is rechecked through its original owner before session cleanup.
+Earlier input, session and critical-response failures keep their priority.
+Two actual-clock regressions require the original expiry before and after
+cleanup; the existing withheld-offer test keeps its deadlines and assertion and
+now includes the concrete viewer error in diagnostics. The original failure log
+did not expose that error, so it does not identify which path caused that run.
+These new negotiation regressions remain unexecuted.
+
+The existing non-Rust glue count also exceeds its 20,000-line allowance; the
+same failure predates this series. Source formatting now uses the Ubuntu image
+already used by the Linux compiler/native jobs after the previous formatting
+jobs stayed unassigned. The pinned toolchain and check are unchanged.
+The typed-cause fix, final formatting and full workspace verdict require fresh CI.
+The local executor remains unavailable. No live-tailnet, hardware or
+load-at-least-40 acceptance is claimed; `fr-jlgm` remains open.
 
 ## Clipboard publication boundary integration (2026-11-12)
 
