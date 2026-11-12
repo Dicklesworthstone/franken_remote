@@ -25,6 +25,10 @@
 //! Clipboard text never appears in Debug output, errors or logs here. This is
 //! crash/hang isolation of the broker, NOT a security sandbox: the child runs as
 //! the same desktop user with that user's native clipboard permissions.
+use crate::sys::{
+    fd::OwnedFd,
+    unix::{net::UnixStream, process::CommandExt},
+};
 use crate::{
     input_process::{ProcessLaunch, kill_group, monotonic_ns},
     input_watchdog,
@@ -43,10 +47,6 @@ use fr_wire::clipboard::session::synchronize::{
 use std::{
     fmt,
     io::{self, Read, Write},
-    os::{
-        fd::OwnedFd,
-        unix::{net::UnixStream, process::CommandExt},
-    },
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };

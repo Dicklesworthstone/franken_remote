@@ -105,14 +105,14 @@ impl LocalApi {
     }
     /// iOS has no installed daemon and no readable `LocalAPI`: every
     /// endpoint is refused, so no read on iOS ever reaches a transport.
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", windows))]
     pub fn new(_path: impl AsRef<Path>) -> Result<Self, Error> {
         Err(Error::LocalApiUnavailable)
     }
     /// A locally configured absolute Unix-socket path (macOS: never the app
     /// endpoint). The kernel-reported server UID must be root even at a custom
     /// path. The selected host OS/root remain trusted.
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", windows)))]
     pub fn new(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref();
         if !socket::valid_path(path) {
@@ -391,7 +391,7 @@ impl LocalApi {
     /// One read over the selected transport (module docs). On macOS the app's
     /// endpoint is chosen afresh for every read, as its files are; a read that
     /// changes transport mid-lookup cannot share the other's identity.
-    #[cfg(not(target_os = "ios"))]
+    #[cfg(not(any(target_os = "ios", windows)))]
     async fn get_typed(
         &self,
         uri: &str,
@@ -408,7 +408,7 @@ impl LocalApi {
     }
     /// iOS: no transport exists. Unreachable in practice (no iOS constructor
     /// succeeds); refused with a type anyway.
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", windows))]
     #[allow(clippy::unused_self)] // The Linux/macOS transports need the receiver.
     fn get_typed(
         &self,
@@ -466,13 +466,13 @@ pub use dial::{ConnectedPeer, DialRoute, NativeClient};
 
 #[cfg(target_os = "linux")]
 mod discovery;
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", windows)))]
 mod socket;
 
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
+#[cfg(any(target_os = "macos", target_os = "ios", windows, test))]
 mod lookup_budget;
 #[cfg(target_os = "macos")]
 mod macos;
 
-#[cfg(not(target_os = "ios"))]
+#[cfg(not(any(target_os = "ios", windows)))]
 pub mod ingress;

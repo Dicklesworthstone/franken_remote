@@ -30,6 +30,12 @@ fn main() {
             "macosx",
             format!("{}-apple-macos{MACOS_MINIMUM}", clang_arch(&arch)),
         ),
+        // Windows: the same bundled roots, exported on the build Mac (the
+        // Windows client is cross-built); no VideoToolbox glue.
+        ("windows", _) => {
+            export_roots(&PathBuf::from(env::var_os("OUT_DIR").unwrap()));
+            return;
+        }
         _ => return,
     };
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());

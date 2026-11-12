@@ -2,15 +2,15 @@
 //! an owned native-I/O worker, never a reactor or an authority callback. The
 //! first private record selects a role; no role or authority travels in argv.
 use crate::input_process::ProcessLaunch;
+use crate::sys::{
+    fd::OwnedFd,
+    unix::{
+        net::{UnixDatagram, UnixStream},
+        process::CommandExt,
+    },
+};
 use std::{
     io,
-    os::{
-        fd::OwnedFd,
-        unix::{
-            net::{UnixDatagram, UnixStream},
-            process::CommandExt,
-        },
-    },
     process::{Child, Command, Stdio},
 };
 

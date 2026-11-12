@@ -39,6 +39,7 @@ pub fn bundled() -> Result<Vec<Certificate>, fr_tailnet::Error> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn sha256_hex(bytes: &[u8]) -> String {
         use std::fmt::Write;
         let digest = system_sha256(bytes);
@@ -48,7 +49,9 @@ mod tests {
         })
     }
     // SHA-256 from the system's `shasum`: an independent implementation, so
-    // the check does not trust the TLS stack it guards.
+    // the check does not trust the TLS stack it guards. Unix only: the bundle
+    // is the same compiled-in bytes on Windows, checked on the Apple hosts.
+    #[cfg(unix)]
     fn system_sha256(bytes: &[u8]) -> Vec<u8> {
         use std::io::Write;
         let mut child = std::process::Command::new("/usr/bin/shasum")
@@ -68,6 +71,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(unix)]
     #[test]
     fn exactly_the_two_isrg_roots_are_bundled_with_their_published_fingerprints() {
         let roots = bundled().unwrap();

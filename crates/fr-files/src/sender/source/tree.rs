@@ -4,7 +4,7 @@ use super::{Error, File, Gate, Identity, identity, unchanged};
 use crate::receive::directory::{
     MAX_TREE_ENTRIES, MAX_TREE_NAMES_BYTES, MAX_TREE_NODES, path_components,
 };
-use rustix::fs::{self, AtFlags, FileType, Mode, OFlags};
+use crate::rx::fs::{self, AtFlags, FileType, Mode, OFlags};
 
 pub(super) struct Selected {
     pub path: String,
@@ -178,16 +178,17 @@ impl Selection {
         self.bytes
     }
 }
-use std::os::unix::fs::MetadataExt;
+use crate::rx::MetadataExt;
 
-/// `st_dev` widened exactly as std's `MetadataExt::dev` widens it.
-#[cfg(target_os = "linux")]
+/// `st_dev` widened exactly as std's `MetadataExt::dev` widens it (the
+/// Windows stand-in `Stat` is Linux-shaped).
+#[cfg(any(target_os = "linux", windows))]
 fn device(stat: &fs::Stat) -> u64 {
     stat.st_dev
 }
 /// `st_dev` widened exactly as std's `MetadataExt::dev` widens it (macOS
 /// `dev_t` is `i32`; std sign-extends it).
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 #[allow(clippy::cast_sign_loss, reason = "a device number is a bit pattern")]
 fn device(stat: &fs::Stat) -> u64 {
     stat.st_dev as u64

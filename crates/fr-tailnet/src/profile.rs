@@ -19,7 +19,6 @@ use asupersync::{
 };
 use std::{
     future::{Future, poll_fn},
-    io::Read,
     pin::pin,
     task::Poll,
     time::Duration,
@@ -94,10 +93,9 @@ pub(crate) fn handshake_error(error: &NativeQuicUdpConnectionError) -> Error {
 
 pub(crate) fn connection_ids() -> Result<(ConnectionId, ConnectionId), Error> {
     let mut bytes = [0u8; 32];
-    // Kernel entropy, no deterministic runtime seed and no peer-controlled path.
-    std::fs::File::open("/dev/urandom")
-        .and_then(|mut f| f.read_exact(&mut bytes))
-        .map_err(|_| Error::EntropyUnavailable)?;
+    // Kernel entropy (getrandom/getentropy/ProcessPrng), no deterministic
+    // runtime seed and no peer-controlled path.
+    getrandom::fill(&mut bytes).map_err(|_| Error::EntropyUnavailable)?;
     let a = ConnectionId::new(&bytes[..16]).map_err(|_| Error::EntropyUnavailable)?;
     let b = ConnectionId::new(&bytes[16..]).map_err(|_| Error::EntropyUnavailable)?;
     if a == b {

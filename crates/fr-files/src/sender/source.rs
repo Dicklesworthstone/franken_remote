@@ -7,6 +7,7 @@ mod tests;
 mod tree;
 use super::{Error, Policy};
 use crate::receive::MAX_CHUNK_BYTES;
+use crate::rx::MetadataExt;
 use asupersync::{
     cx::Cx,
     net::atp::{
@@ -21,7 +22,6 @@ use asupersync::{
 use std::{
     fs::{File, Metadata},
     io::{Read, Seek},
-    os::unix::fs::MetadataExt,
     path::PathBuf,
     sync::{
         Arc,

@@ -1,8 +1,10 @@
 //! Bounded readiness on a supervised child's existing descriptors. This is used
 //! only on native-I/O threads, never on the authority/runtime thread. A permanent
 //! local shutdown wakes an outstanding poll without periodic sleeps or a queue.
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
-use std::{io, net::Shutdown, os::unix::net::UnixStream, time::Duration};
+use crate::sys::rustix;
+use crate::sys::rustix::event::{PollFd, PollFlags, Timespec, poll};
+use crate::sys::unix::net::UnixStream;
+use std::{io, net::Shutdown, time::Duration};
 
 pub(crate) struct Wake {
     read: UnixStream,

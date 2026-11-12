@@ -1,0 +1,588 @@
+//! `fr-windows view`: one session in a native window. The window asks the
+//! host for a picture no larger than its client area (physical pixels,
+//! per-monitor DPI aware), so the host's pixels land 1:1 on the screen; the
+//! newest decoded picture is converted and presented on the next vertical
+//! blank. With `--control`, pointer, buttons, wheel and physical keys go to
+//! the host while it grants control.
+//!
+//! Minimizing hides the view, which (as on iOS) ends a controlled session:
+//! frd's contract ends the session with control. Losing focus releases
+//! every key and button this window holds.
+use super::render::Renderer;
+use crate::{
+    geometry::{Rect, picture_point},
+    keys,
+};
+use fr_mobile_ffi::{
+    events::{Event, kind, state},
+    session::{Config, Session, end},
+    video,
+};
+use std::{
+    cell::RefCell,
+    fmt::Write as _,
+    io::Write as _,
+    process::ExitCode,
+    time::{Duration, Instant},
+};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
+use windows::Win32::Media::MediaFoundation::IMFSample;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IDC_ARROW,
+    LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostQuitMessage,
+    QS_ALLINPUT, RegisterClassExW, SIZE_MINIMIZED, SPI_GETWORKAREA, SW_SHOW,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+};
+use windows::core::{HSTRING, Interface, w};
+
+/// The window's session, renderer and input state, owned by the UI thread.
+struct Viewer {
+    session: Session,
+    renderer: Renderer,
+    /// The last drawn picture's size and place (input maps through these).
+    picture: (u32, u32),
+    dest: Option<Rect>,
+    /// Held buttons (`session.button` indices) and the last pointer point.
+    buttons: [bool; 5],
+    last_point: (f64, f64),
+}
+thread_local! {
+    static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
+}
+/// Runs `f` on the viewer unless it is absent or already borrowed (a
+/// message dispatched from inside another viewer call).
+fn with_viewer<R>(f: impl FnOnce(&mut Viewer) -> R) -> Option<R> {
+    VIEWER.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+#[derive(Default)]
+struct Stats {
+    drawn: u64,
+    draw_failures: u64,
+    last_draw: Option<Instant>,
+    /// Microseconds between consecutive draws.
+    intervals: Vec<u64>,
+    picture: (u32, u32),
+    display: (u32, u32),
+}
+
+pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
+    // SAFETY: process-wide DPI awareness, set before any window exists, so
+    // client-area sizes and mouse points are physical pixels.
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let Some(gpu) = video::gpu() else {
+        return refuse("no_d3d11_device");
+    };
+    let Ok(hwnd) = create_window(title) else {
+        return refuse("window_unavailable");
+    };
+    let size = client_size(hwnd);
+    config.picture = Some(size);
+    let control = config.control;
+    let Ok(session) = Session::start(config) else {
+        return refuse("session_thread_unavailable");
+    };
+    let Ok(renderer) = Renderer::new(&gpu.device, hwnd, size) else {
+        return refuse("swap_chain_unavailable");
+    };
+    if control {
+        session.shared().request_control();
+    }
+    VIEWER.with(|cell| {
+        *cell.borrow_mut() = Some(Viewer {
+            session,
+            renderer,
+            picture: (0, 0),
+            dest: None,
+            buttons: [false; 5],
+            last_point: (0.0, 0.0),
+        });
+    });
+    // SAFETY: showing the window this thread created.
+    let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+    with_viewer(|v| v.session.shared().set_visible(true));
+    let started = Instant::now();
+    let stats = pump(seconds);
+    let viewer = VIEWER.with(|cell| cell.borrow_mut().take());
+    // SAFETY: destroying the window this thread created; the viewer (and
+    // with it the swap chain) is already out of the window procedure's
+    // reach.
+    let _ = unsafe { DestroyWindow(hwnd) };
+    let Some(viewer) = viewer else {
+        return refuse("viewer_lost");
+    };
+    report(&viewer, &stats, started.elapsed())
+}
+
+fn refuse(reason: &str) -> ExitCode {
+    let _ = writeln!(
+        std::io::stdout().lock(),
+        "{{\"status\":\"refused\",\"reason\":\"{reason}\"}}"
+    );
+    ExitCode::from(1)
+}
+
+/// The message pump and draw loop, until the session ends.
+fn pump(seconds: Option<u64>) -> Stats {
+    let deadline = seconds.map(|s| Instant::now() + Duration::from_secs(s));
+    let mut stats = Stats::default();
+    let mut last_sequence = 0;
+    let mut closing = false;
+    let mut msg = MSG::default();
+    loop {
+        // SAFETY: the standard message pump on this thread's queue.
+        while unsafe { PeekMessageW(&raw mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            if msg.message == WM_QUIT {
+                return stats;
+            }
+            // SAFETY: a message this thread just removed from its queue.
+            unsafe {
+                let _ = TranslateMessage(&raw const msg);
+                DispatchMessageW(&raw const msg);
+            }
+        }
+        let Some((finished, drew)) = with_viewer(|v| step(v, &mut stats, &mut last_sequence))
+        else {
+            return stats;
+        };
+        if finished {
+            return stats;
+        }
+        if !closing && deadline.is_some_and(|d| Instant::now() >= d) {
+            closing = true;
+            with_viewer(|v| v.session.shared().close());
+        }
+        if !drew {
+            // SAFETY: waits for input or 2 ms; no handles.
+            unsafe { MsgWaitForMultipleObjects(None, false, 2, QS_ALLINPUT) };
+        }
+    }
+}
+
+/// Events, then the newest picture if there is one. (finished, drew)
+fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bool) {
+    let shared = v.session.shared();
+    while let Some(event) = shared.events.poll() {
+        log_event(&event);
+        // One VIDEO event names the host display, a later one the encoded
+        // picture; each leaves the other zero.
+        if event.kind == kind::VIDEO && event.display_width != 0 {
+            stats.display = (event.display_width, event.display_height);
+        }
+    }
+    if shared.finished() {
+        return (true, false);
+    }
+    let Some((raw, info)) = shared
+        .frames
+        .take_newer(*last_sequence, shared.full_range())
+    else {
+        return (false, false);
+    };
+    *last_sequence = info.sequence;
+    // SAFETY: the slot handed out a +1 `IMFSample` reference for this
+    // caller; `from_raw` takes it over.
+    let sample = unsafe { IMFSample::from_raw(raw) };
+    let drawn = video::texture_of(&sample).and_then(|(texture, slice)| {
+        v.renderer
+            .draw(&texture, slice, (info.width, info.height), info.full_range)
+            .ok()
+            .flatten()
+    });
+    let Some(dest) = drawn else {
+        stats.draw_failures += 1;
+        return (false, false);
+    };
+    v.dest = Some(dest);
+    v.picture = (info.width, info.height);
+    shared.frames.mark_drawn(info.frame);
+    let now = Instant::now();
+    if let Some(last) = stats.last_draw {
+        stats
+            .intervals
+            .push(u64::try_from(now.duration_since(last).as_micros()).unwrap_or(u64::MAX));
+    }
+    stats.last_draw = Some(now);
+    stats.drawn += 1;
+    stats.picture = v.picture;
+    (false, true)
+}
+
+fn log_event(event: &Event) {
+    let name = match (event.kind, event.value) {
+        (kind::STATE, state::CONNECTING) => "connecting",
+        (kind::STATE, state::AUTHENTICATED) => "authenticated",
+        (kind::STATE, state::AWAITING_APPROVAL) => "awaiting_approval",
+        (kind::STATE, state::VIEWING) => "viewing",
+        (kind::STATE, state::REQUESTING_CONTROL) => "requesting_control",
+        (kind::STATE, state::CONTROLLED) => "controlled",
+        (kind::STATE, state::RECONNECTING) => "reconnecting",
+        (kind::STATE, state::CLOSING) => "closing",
+        (kind::STATE, state::CONTROL_ENDED) => "control_ended",
+        (kind::VIDEO, _) => {
+            eprintln!(
+                "fr-windows: video display {}x{} picture {}x{} (attempt {})",
+                event.display_width,
+                event.display_height,
+                event.picture_width,
+                event.picture_height,
+                event.attempt
+            );
+            return;
+        }
+        (kind::PIN, _) => "pin",
+        (kind::ENDED, code) => {
+            eprintln!("fr-windows: ended {}", end_name(code));
+            return;
+        }
+        (kind::OVERFLOW, _) => "event_overflow",
+        _ => "other",
+    };
+    eprintln!("fr-windows: {name} (attempt {})", event.attempt);
+}
+
+const fn end_name(code: u32) -> &'static str {
+    match code {
+        end::OK => "ok",
+        end::HOST_CLOSED => "host_closed",
+        end::NAME_UNRESOLVED => "name_unresolved",
+        end::OUTSIDE_TAILNET => "outside_tailnet",
+        end::IDENTITY_CHANGED => "identity_changed",
+        end::TLS_REFUSED => "tls_refused",
+        end::UNREACHABLE => "unreachable",
+        end::HOST_REFUSED => "host_refused",
+        end::SESSION_FAILED => "session_failed",
+        end::CANCELLED => "cancelled",
+        end::INTERNAL => "internal",
+        end::CONTROL_STOPPED => "control_stopped",
+        end::HOST_BUSY => "host_busy",
+        _ => "unknown",
+    }
+}
+
+/// The completion document (content-free counts and timings) on stdout.
+/// Exit 0 only when pictures were drawn and the session ended in order.
+fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
+    let shared = viewer.session.shared();
+    let code = shared.end_code();
+    let (decoded, decode_micros) = shared.frames.decode_stats();
+    let mut intervals = stats.intervals.clone();
+    intervals.sort_unstable();
+    let percentile = |p: usize| -> f64 {
+        if intervals.is_empty() {
+            return 0.0;
+        }
+        let index = (intervals.len() - 1) * p / 100;
+        micros_to_ms(intervals[index])
+    };
+    let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
+    let mut json = String::new();
+    let _ = write!(
+        json,
+        "{{\"status\":\"ended\",\"end\":\"{}\",\"detail\":{},\"drawn\":{},\"draw_failures\":{},\
+         \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
+         \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
+         \"frame_interval_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1},\"max\":{:.1}}},\
+         \"seconds\":{:.1}}}",
+        end_name(code),
+        shared
+            .detail()
+            .map_or_else(|| "null".to_owned(), |d| format!("{d:?}")),
+        stats.drawn,
+        stats.draw_failures,
+        shared.frames.presented(),
+        decoded,
+        mean_decode,
+        micros_to_ms(shared.first_view_micros()),
+        shared.hardware(),
+        stats.display.0,
+        stats.display.1,
+        stats.picture.0,
+        stats.picture.1,
+        viewer.renderer.size().0,
+        viewer.renderer.size().1,
+        percentile(50),
+        percentile(95),
+        percentile(99),
+        intervals.last().map_or(0.0, |m| micros_to_ms(*m)),
+        elapsed.as_secs_f64(),
+    );
+    let _ = writeln!(std::io::stdout().lock(), "{json}");
+    if stats.drawn > 0 && matches!(code, end::OK | end::CANCELLED) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+#[allow(clippy::cast_precision_loss, reason = "timings far below 2^52 µs")]
+fn micros_to_ms(micros: u64) -> f64 {
+    micros as f64 / 1000.0
+}
+
+fn create_window(title: &str) -> windows::core::Result<HWND> {
+    // SAFETY: registers this module's window class (once per process; a
+    // second registration fails harmlessly) and creates one window with
+    // it on this thread.
+    unsafe {
+        let instance = GetModuleHandleW(None)?;
+        let class = w!("FrankenRemoteViewer");
+        let wc = WNDCLASSEXW {
+            cbSize: u32::try_from(size_of::<WNDCLASSEXW>()).unwrap_or(0),
+            lpfnWndProc: Some(window_proc),
+            hInstance: instance.into(),
+            hCursor: LoadCursorW(None, IDC_ARROW)?,
+            lpszClassName: class,
+            ..Default::default()
+        };
+        RegisterClassExW(&raw const wc);
+        let mut work = RECT::default();
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some((&raw mut work).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )?;
+        let (width, height) = (
+            (work.right - work.left) * 9 / 10,
+            (work.bottom - work.top) * 9 / 10,
+        );
+        CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            class,
+            &HSTRING::from(title),
+            WS_OVERLAPPEDWINDOW,
+            work.left + (work.right - work.left - width) / 2,
+            work.top + (work.bottom - work.top - height) / 2,
+            width,
+            height,
+            None,
+            None,
+            Some(instance.into()),
+            None,
+        )
+    }
+}
+
+fn client_size(hwnd: HWND) -> (u32, u32) {
+    let mut rect = RECT::default();
+    // SAFETY: a live window and a writable rectangle.
+    let _ = unsafe { GetClientRect(hwnd, &raw mut rect) };
+    (
+        u32::try_from(rect.right - rect.left).unwrap_or(0),
+        u32::try_from(rect.bottom - rect.top).unwrap_or(0),
+    )
+}
+
+/// The signed 16-bit LOWORD and HIWORD of a message parameter.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "masked to 16 bits first"
+)]
+const fn words(value: isize) -> (i16, i16) {
+    (
+        ((value & 0xffff) as u16).cast_signed(),
+        (((value >> 16) & 0xffff) as u16).cast_signed(),
+    )
+}
+fn point_of(lparam: LPARAM) -> (i32, i32) {
+    let (x, y) = words(lparam.0);
+    (i32::from(x), i32::from(y))
+}
+
+impl Viewer {
+    /// The picture point under `(x, y)`. While a button is held the window
+    /// has the mouse captured, and points past the picture's edge clamp to
+    /// it, so a drag that leaves the picture still releases.
+    fn point(&self, x: i32, y: i32) -> Option<(f64, f64)> {
+        let dest = self.dest?;
+        let (x, y) = if self.buttons.iter().any(|b| *b) {
+            (
+                x.clamp(dest.left, dest.right - 1),
+                y.clamp(dest.top, dest.bottom - 1),
+            )
+        } else {
+            (x, y)
+        };
+        picture_point(dest, self.picture, x, y)
+    }
+    fn pointer(&mut self, x: i32, y: i32) {
+        if let Some((px, py)) = self.point(x, y) {
+            self.last_point = (px, py);
+            let _ = self.session.shared().pointer(px, py);
+        }
+    }
+    fn button(&mut self, hwnd: HWND, index: usize, pressed: bool, x: i32, y: i32) {
+        let Some((px, py)) = self.point(x, y) else {
+            return;
+        };
+        self.last_point = (px, py);
+        let Ok(wire) = u32::try_from(index) else {
+            return;
+        };
+        let _ = self.session.shared().button(wire, pressed, px, py);
+        self.buttons[index] = pressed;
+        // SAFETY: capture for this thread's own window while any button is
+        // held, released when none is.
+        unsafe {
+            if pressed {
+                SetCapture(hwnd);
+            } else if !self.buttons.iter().any(|b| *b) {
+                let _ = ReleaseCapture();
+            }
+        }
+    }
+    fn release_everything(&mut self) {
+        let shared = self.session.shared();
+        let _ = shared.release_all();
+        let (px, py) = self.last_point;
+        for (index, held) in self.buttons.iter_mut().enumerate() {
+            if *held {
+                if let Ok(wire) = u32::try_from(index) {
+                    let _ = shared.button(wire, false, px, py);
+                }
+                *held = false;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines, reason = "one message switch")]
+extern "system" fn window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let handled = match message {
+        WM_CLOSE => {
+            // An orderly close: the loop ends once the session finishes.
+            if with_viewer(|v| v.session.shared().close()).is_none() {
+                // SAFETY: no session: destroy this thread's window now.
+                let _ = unsafe { DestroyWindow(hwnd) };
+            }
+            true
+        }
+        WM_DESTROY => {
+            // SAFETY: ends this thread's message loop.
+            unsafe { PostQuitMessage(0) };
+            true
+        }
+        WM_SIZE => {
+            let (width, height) = point_of(lparam);
+            let minimized = wparam.0 == SIZE_MINIMIZED as usize;
+            with_viewer(|v| {
+                if minimized {
+                    v.session.shared().set_visible(false);
+                } else {
+                    v.session.shared().set_visible(true);
+                    let size = (
+                        u32::try_from(width).unwrap_or(0),
+                        u32::try_from(height).unwrap_or(0),
+                    );
+                    let _ = v.renderer.resize(size);
+                }
+            });
+            true
+        }
+        WM_ERASEBKGND => return LRESULT(1),
+        WM_PAINT => {
+            // SAFETY: the loop draws every picture; nothing to paint here.
+            let _ = unsafe { ValidateRect(Some(hwnd), None) };
+            true
+        }
+        WM_MOUSEMOVE => {
+            let (x, y) = point_of(lparam);
+            with_viewer(|v| v.pointer(x, y));
+            true
+        }
+        WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
+        | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            let index = match message {
+                WM_LBUTTONDOWN | WM_LBUTTONUP => 0,
+                WM_RBUTTONDOWN | WM_RBUTTONUP => 1,
+                WM_MBUTTONDOWN | WM_MBUTTONUP => 2,
+                // XBUTTON1 is Back, XBUTTON2 Forward (HIWORD of wParam).
+                _ if (wparam.0 >> 16) & 0xffff == 2 => 4,
+                _ => 3,
+            };
+            let pressed = matches!(
+                message,
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+            );
+            let (x, y) = point_of(lparam);
+            with_viewer(|v| v.button(hwnd, index, pressed, x, y));
+            if matches!(message, WM_XBUTTONDOWN | WM_XBUTTONUP) {
+                return LRESULT(1);
+            }
+            true
+        }
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            #[allow(clippy::cast_possible_wrap, reason = "GET_WHEEL_DELTA_WPARAM")]
+            let delta = f64::from(words(wparam.0 as isize).1) / 120.0;
+            // Wheel points are screen coordinates.
+            let (sx, sy) = point_of(lparam);
+            let mut point = POINT { x: sx, y: sy };
+            // SAFETY: a live window and a writable point.
+            let _ = unsafe { ScreenToClient(hwnd, &raw mut point) };
+            with_viewer(|v| {
+                if let Some((px, py)) = v.point(point.x, point.y) {
+                    // Forward (positive) is up; the session's positive y is
+                    // down. A right tilt is positive x.
+                    let (dx, dy) = if message == WM_MOUSEWHEEL {
+                        (0.0, -delta)
+                    } else {
+                        (delta, 0.0)
+                    };
+                    let _ = v.session.shared().scroll(dx, dy, px, py);
+                }
+            });
+            true
+        }
+        WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "bits 16-23 of lParam"
+            )]
+            let scan = ((lparam.0 >> 16) & 0xff) as u8;
+            let extended = (lparam.0 >> 24) & 1 == 1;
+            let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+            // Only a controlled session takes keys; otherwise Windows keeps
+            // its own (Alt+F4 and the system menu).
+            with_viewer(|v| {
+                let shared = v.session.shared();
+                if !shared.controlled() {
+                    return false;
+                }
+                if let Some(usage) = keys::usage(scan, extended) {
+                    let _ = shared.key(usage, pressed);
+                }
+                true
+            })
+            .unwrap_or(false)
+        }
+        WM_KILLFOCUS => {
+            with_viewer(Viewer::release_everything);
+            false
+        }
+        _ => false,
+    };
+    if handled {
+        LRESULT(0)
+    } else {
+        // SAFETY: default processing of this window's message.
+        unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+    }
+}

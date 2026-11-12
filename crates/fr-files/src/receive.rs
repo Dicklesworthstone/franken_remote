@@ -10,17 +10,17 @@ pub use conflict::{ConflictPolicy, PublishedFile};
 use conflict::{MAX_CONFLICT_ATTEMPTS, conflict_name};
 use staging::StagingFile;
 
+use crate::rx::{
+    fd::{AsFd, OwnedFd},
+    fs::{self, Mode, OFlags},
+    process::geteuid,
+};
 use asupersync::atp::{
     object::{ContentId, ObjectId},
     safety::validate_portable_path_component,
 };
 use asupersync::net::atp::transport_common::{
     StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
-};
-use rustix::{
-    fd::{AsFd, OwnedFd},
-    fs::{self, Mode, OFlags},
-    process::geteuid,
 };
 use std::{
     fmt,
@@ -85,8 +85,8 @@ impl From<io::Error> for Error {
         Self::Io(value.kind())
     }
 }
-impl From<rustix::io::Errno> for Error {
-    fn from(value: rustix::io::Errno) -> Self {
+impl From<crate::rx::io::Errno> for Error {
+    fn from(value: crate::rx::io::Errno) -> Self {
         io::Error::from(value).into()
     }
 }
@@ -455,14 +455,14 @@ impl PendingFile {
                 .publish(self.reservation.root.fd.as_fd(), self.destination.as_str())
             {
                 Ok(()) => break,
-                Err(rustix::io::Errno::EXIST)
+                Err(crate::rx::io::Errno::EXIST)
                     if self.conflict_policy == ConflictPolicy::KeepBoth
                         && attempt < MAX_CONFLICT_ATTEMPTS =>
                 {
                     self.destination = conflict_name(&original, self.nonce, attempt);
                     attempt += 1;
                 }
-                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict.into()),
+                Err(crate::rx::io::Errno::EXIST) => return Err(Error::Conflict.into()),
                 Err(error) => return Err(Error::from(error).into()),
             }
         }

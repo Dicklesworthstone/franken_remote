@@ -15,6 +15,9 @@ serde_json.workspace = true
 # macOS standalone app's loopback LocalAPI.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 asupersync = { workspace = true, features = ["tls"] }
+# Kernel entropy for QUIC connection IDs on every OS (Windows has no
+# /dev/urandom); the same pinned version frd and fr-files use.
+getrandom = "=0.4.3"
 
 # macOS only: the safe LOCAL_PEERPID getsockopt binding, the Unix-socket
 # daemon's kernel-reported PID (Asupersync's getpeereid carries no PID). The

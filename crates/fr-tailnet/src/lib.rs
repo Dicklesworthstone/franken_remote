@@ -9,30 +9,30 @@
 //! The Linux adapter implements exact installed-daemon membership admission and
 //! an explicit app-capability alternative. It never infers membership from names,
 //! routed prefixes, reachability, or missing authority evidence.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod directory;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use directory::{Directory, DirectoryNode, MAX_NODES as MAX_DIRECTORY_NODES};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod discovery;
 mod expiry;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use discovery::{DiscoveredPeer, Discovery, DiscoveryExclusions, PeerTransportPath};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod selector;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use selector::PeerSelector;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod outbound;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use outbound::{TargetLease, TargetOwner};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod lease;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use lease::{Admission, ApprovalIdentity, Lease};
 #[path = "local/endpoint.rs"]
 pub mod endpoint;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod local;
 pub mod trust;
 pub use endpoint::{
@@ -41,7 +41,7 @@ pub use endpoint::{
     honest_quic_endpoint,
 };
 mod metadata;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use local::{
     CertificateEvent, CertificateEventKind, CertificatePolicy, CredentialStatus, LocalQuery,
     NativeServerIdentity, NodeIdentity,
@@ -50,14 +50,14 @@ pub use local::{
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use local::ingress;
 // The one dial profile (TLS, ALPN, transport limits) both dialers share.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod profile;
 // A LocalAPI-less client's dialer: an exact MagicDNS name under strict WebPKI.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 mod named;
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use local::{ConnectedPeer, DialRoute, LocalApi, NativeClient, PeerTarget};
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub use named::{HostName, HostPin, NamedClient, NamedConnection};
 
 use std::{fmt, net::SocketAddr, time::Duration};

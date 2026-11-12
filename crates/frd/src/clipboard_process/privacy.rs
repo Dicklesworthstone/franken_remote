@@ -3,11 +3,11 @@
 //! worker is waiting on the command channel. No lease or clipboard bytes cross
 //! this channel. The owning native worker closes and joins this monitor.
 use crate::native_clipboard::Control;
+use crate::sys::unix::net::UnixStream;
 use fr_core::clipboard::PlatformError;
 use std::{
     io::{self, Read},
     net::Shutdown,
-    os::unix::net::UnixStream,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},

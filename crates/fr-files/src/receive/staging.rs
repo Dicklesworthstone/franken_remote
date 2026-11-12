@@ -8,8 +8,8 @@
 //! Other platforms have no procfs: they always stage under an exclusively
 //! created private name in the destination directory.
 #[cfg(target_os = "linux")]
-use rustix::fd::{AsRawFd, OwnedFd};
-use rustix::{
+use crate::rx::fd::{AsRawFd, OwnedFd};
+use crate::rx::{
     fd::BorrowedFd,
     fs::{self, AtFlags, Mode, OFlags, RenameFlags},
     io::{Errno, Result},

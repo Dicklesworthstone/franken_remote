@@ -16,6 +16,14 @@
 //! This is crash/hang isolation of the broker, NOT a security sandbox: the
 //! child runs as the same desktop user with the same X server authority.
 use crate::input_watchdog;
+use crate::sys::rustix;
+use crate::sys::{
+    fd::OwnedFd,
+    unix::{
+        net::{UnixDatagram, UnixStream},
+        process::CommandExt,
+    },
+};
 use asupersync::cx::Cx;
 use fr_core::{
     input::InputBounds,
@@ -28,13 +36,6 @@ use fr_core::{
 use std::{
     fmt,
     io::{self, Read, Write},
-    os::{
-        fd::OwnedFd,
-        unix::{
-            net::{UnixDatagram, UnixStream},
-            process::CommandExt,
-        },
-    },
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{Arc, Mutex, MutexGuard, PoisonError},

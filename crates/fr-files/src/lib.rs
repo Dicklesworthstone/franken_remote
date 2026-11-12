@@ -11,24 +11,27 @@
 #[cfg(test)]
 extern crate self as fr_files;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
+mod rx;
+
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod receive;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod session;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod worker;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod atp;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod wire;
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod quic;
 
 /// Bounded native file sender using locally selected descriptors.
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub mod sender;

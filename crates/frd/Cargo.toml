@@ -23,10 +23,12 @@ macos-viewer = []
 # The host half of frd on macOS (fr-p1-host-macos-vif): `frd run` with the
 # macOS capture worker (fr-native macos-media). Off by default.
 macos-host = []
+# The viewer half of frd on Windows, for the Windows client. Off by default.
+windows-viewer = []
 
 # iOS compiles only the viewer half (`native_stack`, see build.rs) for
 # fr-mobile-ffi; it has no host and no installed tailnet daemon.
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))'.dependencies]
 fr-client.workspace = true
 fr-transport.workspace = true
 fr-tailnet.workspace = true

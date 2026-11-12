@@ -3,16 +3,16 @@
 use super::TURN;
 use super::{CHECK_BUDGET, CHECK_INTERVAL, Error, ProcessLaunch, Role, Shared, deadline, now_ns};
 use crate::input_process::kill_group;
+use crate::sys::rustix::event::{PollFd, PollFlags};
+use crate::sys::unix::net::{UnixDatagram, UnixStream};
 use fr_core::{
     indicator_process::{FRAME_BYTES, Frame, Kind},
     input_submission::process::{self, Signal},
 };
-use rustix::event::{PollFd, PollFlags};
 #[cfg(test)]
 use std::thread;
 use std::{
     io::{self, Read, Write},
-    os::unix::net::{UnixDatagram, UnixStream},
     process::Child,
     time::Duration,
 };

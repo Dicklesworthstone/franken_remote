@@ -418,6 +418,17 @@ jobs:
         run: cargo check --workspace --all-targets --locked
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # The Windows client (fr-windows) is cross-built on a Mac: its session
+      # core embeds the ISRG roots exported from this Mac's keychain
+      # (fr-mobile-ffi build.rs). No other lane compiles the Windows target,
+      # and the shared viewer stack (frd, fr-files, fr-tailnet) needed Unix-only
+      # imports moved behind shims before it built there (2026-11-12). Source
+      # evidence only; decode and presentation run on a real Windows machine.
+      - name: Cross-check the Windows client (x86_64-pc-windows-gnu, deny warnings)
+        run: |
+          rustup target add x86_64-pc-windows-gnu
+          brew install mingw-w64
+          cargo clippy -p fr-windows -p fr-mobile-ffi --features fr-mobile-ffi/windows-session --all-targets --target x86_64-pc-windows-gnu --locked -- -D warnings
       - name: Test (platform-neutral)
         run: cargo test --workspace --locked --no-fail-fast
 

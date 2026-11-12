@@ -11,14 +11,29 @@ build = "build.rs"
 [lib]
 crate-type = ["staticlib", "rlib"]
 
-# Everything here is Apple-only. Other platforms compile an empty crate.
-[target.'cfg(any(target_os = "ios", target_os = "macos"))'.dependencies]
+# Apple (the iOS app; macOS for host tests) and Windows (the Windows client's
+# session core). Other platforms compile an empty crate.
+[target.'cfg(any(target_os = "ios", target_os = "macos", windows))'.dependencies]
 asupersync = { workspace = true, features = ["tls"] }
 fr-client.workspace = true
 fr-core.workspace = true
 fr-media.workspace = true
 fr-tailnet.workspace = true
 fr-wire.workspace = true
+
+# Windows: the system HEVC decoder (Media Foundation) on one shared D3D11
+# device. The version Cargo.lock already carries (sysinfo's); only the
+# bindings named below compile.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 [dependencies]
 # The session (frd's viewer stack): the iOS build passes `--features session`
@@ -34,12 +49,15 @@ serde_json = { workspace = true, optional = true }
 default = []
 session = ["dep:frd", "dep:fr-transport", "dep:serde_json"]
 macos-session = ["session", "frd/macos-viewer"]
+# The session core for the Windows client (no C ABI there yet).
+windows-session = ["session", "frd/windows-viewer"]
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # fr-mobile-ffi is a named FFI boundary crate (AGENTS.md 3.2): it exports the
 # hand-written C ABI in include/fr_mobile.h to Swift and calls the
-# VideoToolbox/CoreVideo glue in src/vt_decode.c, so it opts out of the
+# VideoToolbox/CoreVideo glue in src/vt_decode.c (Media Foundation and D3D11
+# COM calls on Windows), so it opts out of the
 # workspace's `unsafe_code = "forbid"` explicitly. Every unsafe block states
 # its invariant (lint below). Session, input and policy code is safe Rust.
 unsafe_code = "allow"

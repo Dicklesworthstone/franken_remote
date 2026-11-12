@@ -10,28 +10,40 @@
 //! machines this device may reach; frd's host policy decides whether the
 //! viewer may watch or control.
 //!
-//! Everything here is Apple-only (iOS for the app, macOS for the host tests
-//! of the same code). Other platforms compile an empty crate.
-#![cfg_attr(not(any(target_os = "ios", target_os = "macos")), allow(unused))]
+//! iOS links it for the app and macOS runs the host tests of the same code;
+//! Windows builds the session core for its client (`windows-session`, no C
+//! ABI yet). Other platforms compile an empty crate.
+#![cfg_attr(
+    not(any(target_os = "ios", target_os = "macos", windows)),
+    allow(unused)
+)]
 
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod events;
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod input;
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod roots;
-#[cfg(any(target_os = "ios", target_os = "macos"))]
+#[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod video;
 
 #[cfg(all(
     feature = "session",
-    any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
+    any(
+        target_os = "ios",
+        all(target_os = "macos", feature = "macos-session"),
+        all(windows, feature = "windows-session")
+    )
 ))]
 pub mod session;
 
 #[cfg(all(
     feature = "session",
-    any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
+    any(
+        target_os = "ios",
+        all(target_os = "macos", feature = "macos-session"),
+        all(windows, feature = "windows-session")
+    )
 ))]
 pub mod directory;
 

@@ -5,10 +5,11 @@
 // The macos-host build compiles that run while it is being wired: Linux-only
 // paths it does not reach yet (Xvfb provisioning, X11 indicators) stay quiet.
 // iOS compiles the same shared modules for its viewer (fr-mobile-ffi) and
-// never reaches their host half.
+// never reaches their host half; so does the Windows viewer (`windows-viewer`).
 #![cfg_attr(
     any(
         target_os = "ios",
+        windows,
         all(
             target_os = "macos",
             any(feature = "macos-viewer", feature = "macos-host")
@@ -125,6 +126,10 @@ mod session_ui_process;
 // Readiness waits for supervised native children, woken by their original stop.
 #[cfg(native_stack)]
 mod native_wait;
+
+// Unix child primitives, and their Windows refusals (`windows-viewer`).
+#[cfg(native_stack)]
+mod sys;
 
 // Executable test fixture images, shared with the integration tests.
 #[cfg(all(test, any(target_os = "linux", target_os = "macos")))]

@@ -626,6 +626,7 @@ dependencies = [
  "fr-wire",
  "frd",
  "serde_json",
+ "windows",
 ]
 
 [[package]]
@@ -651,6 +652,7 @@ name = "fr-tailnet"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "getrandom 0.4.3",
  "nix",
  "serde",
  "serde_json",
@@ -664,6 +666,17 @@ dependencies = [
  "fr-core",
  "fr-media",
  "fr-wire",
+]
+
+[[package]]
+name = "fr-windows"
+version = "0.1.0"
+dependencies = [
+ "fr-core",
+ "fr-mobile-ffi",
+ "fr-tailnet",
+ "serde_json",
+ "windows",
 ]
 
 [[package]]

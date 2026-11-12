@@ -5,16 +5,16 @@ use super::{
     ConflictPolicy, Error, MAX_CHUNK_BYTES, Publication, Reservation, STAGING_PREFIX, State,
 };
 
+use crate::rx::{
+    fd::OwnedFd,
+    fs::{self, AtFlags, Mode, OFlags, RenameFlags},
+};
 use asupersync::net::atp::{
     transport_common::{
         EntryMetadata, FileKind, StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
         metadata_commitment,
     },
     transport_tcp::ManifestEntry,
-};
-use rustix::{
-    fd::OwnedFd,
-    fs::{self, AtFlags, Mode, OFlags, RenameFlags},
 };
 use std::{collections::BTreeMap, fs::File, io::Write};
 
@@ -473,14 +473,14 @@ impl PendingDirectory {
                 RenameFlags::NOREPLACE,
             ) {
                 Ok(()) => break,
-                Err(rustix::io::Errno::EXIST)
+                Err(crate::rx::io::Errno::EXIST)
                     if self.conflict_policy == ConflictPolicy::KeepBoth
                         && attempt < MAX_CONFLICT_ATTEMPTS =>
                 {
                     self.destination = conflict_name(&original, self.nonce, attempt);
                     attempt += 1;
                 }
-                Err(rustix::io::Errno::EXIST) => return Err(Error::Conflict.into()),
+                Err(crate::rx::io::Errno::EXIST) => return Err(Error::Conflict.into()),
                 Err(error) => return Err(Error::from(error).into()),
             }
         }
@@ -517,7 +517,7 @@ impl PendingDirectory {
                 &self.directories[entry.parent].fd,
                 entry.name.as_str(),
                 AtFlags::empty(),
-            ) && error != rustix::io::Errno::NOENT
+            ) && error != crate::rx::io::Errno::NOENT
             {
                 failure = Some(error);
             }
@@ -527,7 +527,7 @@ impl PendingDirectory {
                 &self.directories[directory.parent].fd,
                 directory.name.as_str(),
                 AtFlags::REMOVEDIR,
-            ) && error != rustix::io::Errno::NOENT
+            ) && error != crate::rx::io::Errno::NOENT
             {
                 failure = Some(error);
             }
@@ -537,7 +537,7 @@ impl PendingDirectory {
             self.directories[0].name.as_str(),
             AtFlags::REMOVEDIR,
         ) {
-            Ok(()) | Err(rustix::io::Errno::NOENT) => (),
+            Ok(()) | Err(crate::rx::io::Errno::NOENT) => (),
             Err(error) => failure = Some(error),
         }
         if let Some(error) = failure {

@@ -73,7 +73,7 @@ impl PeerTarget {
         // Darwin's runtime monotonic clock can pause across system sleep.
         // Wall-clock rollback refuses above; forward elapsed time may only
         // shorten this original metadata lifetime, never extend it.
-        #[cfg(any(target_os = "macos", target_os = "ios"))]
+        #[cfg(any(target_os = "macos", target_os = "ios", windows))]
         super::lookup_budget::check_wall_lifetime(
             self.wall_issued_us,
             wall,
@@ -85,7 +85,7 @@ impl PeerTarget {
 impl LocalApi {
     /// iOS has no installed daemon to select a destination from (and no
     /// `LocalApi` constructor succeeds there); the named dialer is its path.
-    #[cfg(target_os = "ios")]
+    #[cfg(any(target_os = "ios", windows))]
     #[allow(clippy::unused_self)] // The Linux/macOS lookups need the receiver.
     pub fn peer_target(
         &self,

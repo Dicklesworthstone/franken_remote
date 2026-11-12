@@ -290,7 +290,7 @@ impl Identity {
     }
     /// Who a directory read is for: the admitted host and viewer node IDs,
     /// and the viewer's user unless the viewer is tagged (owning nothing).
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
     pub(crate) fn directory_scope(&self) -> crate::directory::Scope<'_> {
         crate::directory::Scope {
             host: &self.host.id.0,
@@ -596,5 +596,5 @@ impl Status {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]
 pub(crate) mod outbound;

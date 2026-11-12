@@ -13,17 +13,18 @@
 //! browsing, synchronization or picker UI. Native copy drops can submit fresh
 //! selections on the original upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
+use crate::sys::rustix;
+use crate::sys::rustix::fs::{Mode, OFlags};
+use crate::sys::unix::fs::{MetadataExt, PermissionsExt};
 use fr_files::{
     receive::{DropDirectory, Limits as DirectoryLimits},
     sender::{self, batch},
     session::{Permission, Policy as SessionPolicy},
 };
-use rustix::fs::{Mode, OFlags};
 use std::{
     fmt,
     fs::File,
     io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };

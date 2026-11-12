@@ -239,7 +239,9 @@ impl Launch {
     /// `vaapi` or `software`; `videotoolbox` on macOS): the worker opens it at
     /// the display's size
     /// and admits one real IDR. Synchronous and bounded, run before any
-    /// listener exists; the child is always ended and reaped.
+    /// listener exists; the child is always ended and reaped. Hosts only
+    /// (Linux, macOS): no Windows host exists yet.
+    #[cfg(unix)]
     pub fn probe_encoder(&self, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {
         use std::io::Read;
         use std::os::unix::process::CommandExt;
@@ -378,9 +380,16 @@ fn runtime_ready(cx: &Cx) -> Result<(), Error> {
     let backend = Runtime::current_handle()
         .and_then(|h| h.io_reactor_capability_snapshot())
         .map(asupersync::runtime::reactor::IoReactorCapabilitySnapshot::backend);
+    // A real OS reactor (Windows: I/O completion ports), never a lab,
+    // browser or injected one.
     if !matches!(
         backend,
-        Some(IoReactorBackend::Epoll | IoReactorBackend::IoUring | IoReactorBackend::Kqueue)
+        Some(
+            IoReactorBackend::Epoll
+                | IoReactorBackend::IoUring
+                | IoReactorBackend::Kqueue
+                | IoReactorBackend::Iocp
+        )
     ) || Cx::current().is_none_or(|c| c.timer_driver().is_none())
         || cx.timer_driver().is_none()
     {

@@ -1,5 +1,6 @@
 //! No native call or process wait escapes this one retained I/O worker.
 use super::{Error, OPEN_BUDGET, POLL_INTERVAL, REPLY_BUDGET, Report, Shared, TURN};
+use crate::sys::unix::net::{UnixDatagram, UnixStream};
 use crate::{
     input_process::{ProcessLaunch, kill_group},
     session_ui_process,
@@ -11,7 +12,6 @@ use fr_core::indicator_process::{
 use fr_wire::negotiation::Role;
 use std::{
     io::{self, Read, Write},
-    os::unix::net::{UnixDatagram, UnixStream},
     process::Child,
     thread,
     time::Instant,

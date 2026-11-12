@@ -14,7 +14,7 @@ serde_json.workspace = true
 getrandom = "=0.4.3"
 
 # iOS: the frd viewer stack (fr-mobile-ffi) links the session's file plane.
-[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "ios"))'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))'.dependencies]
 fr-client.workspace = true
 fr-transport.workspace = true
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }

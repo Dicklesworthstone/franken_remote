@@ -1,5 +1,6 @@
-//! Real `VideoToolbox` decode of a real libx265 stream (fr-native's macOS
-//! viewer fixture), on the macOS host: the same C glue the iOS app links.
+//! Real platform decode of a real libx265 stream (fr-native's macOS viewer
+//! fixture): `VideoToolbox` on the macOS host (the same C glue the iOS app
+//! links), Media Foundation on Windows.
 use super::*;
 use fr_core::ids::{CodecConfigurationGeneration, RecoveryGeneration};
 use fr_media::config::{CodedGeometry, ColorInfo, GopPolicy};
@@ -77,6 +78,22 @@ fn record(first: &EncodedAccessUnit) -> Vec<u8> {
     guard.validate_length_prefixed(first.bytes(), true).unwrap();
     guard.decoder_record().unwrap().bytes().to_vec()
 }
+/// Releases a +1 reference the slot handed out.
+fn release(raw: *mut c_void) {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    // SAFETY: the slot returned a +1 reference for this caller to release.
+    unsafe {
+        super::backend::fr_vt_image_release(raw);
+    }
+    #[cfg(windows)]
+    // SAFETY: the slot returned a +1 `IMFSample` reference; `from_raw`
+    // takes it over and releases it on drop.
+    drop(unsafe {
+        <windows::Win32::Media::MediaFoundation::IMFSample as windows::core::Interface>::from_raw(
+            raw,
+        )
+    });
+}
 fn decoder() -> Decoder {
     Decoder::new(config(), ProtocolLimits::ABSOLUTE, &record(&units()[0])).unwrap()
 }
@@ -97,7 +114,11 @@ fn videotoolbox_decodes_into_io_surface_nv12_pictures_of_the_stream_size() {
         let (width, height, format, io_surface) = image.describe();
         assert_eq!((width, height), (128, 96));
         assert_eq!(format, NV12_VIDEO_RANGE);
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
         assert!(io_surface, "Metal needs an IOSurface-backed buffer");
+        // DXVA pictures are D3D11 textures; a software transform's are not.
+        #[cfg(windows)]
+        assert_eq!(Some(io_surface), decoder.hardware(), "texture vs DXVA");
         // testsrc2 is colour bars and gradients: never a flat black or
         // white picture. Limited-range luma stays inside 16..=235.
         let mean = image.mean_luma().unwrap();
@@ -105,7 +126,7 @@ fn videotoolbox_decodes_into_io_surface_nv12_pictures_of_the_stream_size() {
         slot.publish(image, unit.frame().as_raw());
     }
     assert_eq!(slot.presented(), 3);
-    eprintln!("videotoolbox hardware decoder: {:?}", decoder.hardware());
+    eprintln!("platform hardware decoder: {:?}", decoder.hardware());
 }
 
 #[test]
@@ -127,8 +148,7 @@ fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
     slot.publish(image, 7);
     let (raw, info) = slot.take_newer(0, false).unwrap();
     assert!(!raw.is_null());
-    // SAFETY: the slot returned a +1 reference for this caller to release.
-    unsafe { fr_vt_image_release(raw) };
+    release(raw);
     assert_eq!(
         info,
         FrameInfo {

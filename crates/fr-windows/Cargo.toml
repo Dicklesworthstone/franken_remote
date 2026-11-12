@@ -1,0 +1,56 @@
+[package]
+name = "fr-windows"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+# The Windows client: the shared session core (fr-mobile-ffi, which already
+# dials one exact MagicDNS name under strict WebPKI for the iOS app), driven
+# from a native Win32 window with Media Foundation decode and a D3D11 swap
+# chain. Other platforms build a stub that says so.
+[[bin]]
+name = "fr-windows"
+path = "src/main.rs"
+
+[target.'cfg(windows)'.dependencies]
+fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
+fr-tailnet.workspace = true
+serde_json.workspace = true
+# The window, swap chain and video processor (the version Cargo.lock
+# already carries; only the bindings named below compile).
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+# The key table's test checks every mapped usage against the protocol's.
+fr-core.workspace = true
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# fr-windows is the Windows platform adapter (AGENTS.md 3.2): the Win32
+# window, its message procedure and the D3D11/DXGI presentation are COM and
+# Win32 FFI, so it opts out of the workspace's `unsafe_code = "forbid"`
+# explicitly. Every unsafe block states its invariant (lint below); session,
+# input policy and geometry are safe Rust.
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

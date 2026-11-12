@@ -7,6 +7,14 @@
 //! The worker's positive configuration is admitted to the original authenticated
 //! route before a separate Commit can arm output. Public microphone discovery
 //! and approval UI remain the containing coordinator's responsibility.
+// fr-native's PipeWire test and frd's own test compile this file by path,
+// so Unix keeps its direct imports; only Windows goes through `crate::sys`.
+#[cfg(windows)]
+use crate::sys::{
+    fd::OwnedFd,
+    rustix,
+    unix::{net::UnixStream, process::CommandExt},
+};
 use fr_core::{audio::AudioDirection, input_submission::Refusal, time::HostInstant};
 use fr_media::{
     audio::authority::HostController,
@@ -18,13 +26,14 @@ use fr_wire::{
     audio,
     negotiation::{ControlBinding, Selection},
 };
+#[cfg(unix)]
+use std::os::{
+    fd::OwnedFd,
+    unix::{net::UnixStream, process::CommandExt},
+};
 use std::{
     io::{self, Read},
     net::Shutdown,
-    os::{
-        fd::OwnedFd,
-        unix::{net::UnixStream, process::CommandExt},
-    },
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
     process::{Child, Command, Stdio},

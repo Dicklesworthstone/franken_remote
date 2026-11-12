@@ -15,7 +15,12 @@ fn main() {
     let os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let viewer = std::env::var_os("CARGO_FEATURE_MACOS_VIEWER").is_some();
     let host = std::env::var_os("CARGO_FEATURE_MACOS_HOST").is_some();
-    if os == "linux" || os == "ios" || (os == "macos" && (viewer || host)) {
+    let windows = std::env::var_os("CARGO_FEATURE_WINDOWS_VIEWER").is_some();
+    if os == "linux"
+        || os == "ios"
+        || (os == "windows" && windows)
+        || (os == "macos" && (viewer || host))
+    {
         println!("cargo::rustc-cfg=native_stack");
     }
     if os == "linux" || (os == "macos" && host) {

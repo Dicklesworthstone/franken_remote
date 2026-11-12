@@ -7,6 +7,7 @@ mod tests;
 #[cfg(target_os = "linux")]
 mod watcher;
 use crate::input_process::ProcessLaunch;
+use crate::sys::rustix;
 use std::{
     fmt,
     sync::{
