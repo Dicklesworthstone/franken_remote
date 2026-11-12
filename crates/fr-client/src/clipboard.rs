@@ -56,13 +56,11 @@ impl ControllerTransport {
         if !self.transport.is_open() {
             return Err(Error::Stopped);
         }
-        let at = self
-            .clock
-            .state
-            .upgrade()
-            .ok_or(Error::Stopped)?
-            .try_sample_cursor(now, &self.clock.cursor, true)?;
-        if !self.transport.is_open() {
+        let state = self.clock.state.upgrade().ok_or(Error::Stopped)?;
+        let at = state.try_sample_cursor(now, &self.clock.cursor, true)?;
+        // The original input owner fences this state independently of the
+        // channel's transport lifetime. Retaining State never retains authority.
+        if state.stopped.load(Ordering::Acquire) || !self.transport.is_open() {
             return Err(Error::Stopped);
         }
         Ok(at)

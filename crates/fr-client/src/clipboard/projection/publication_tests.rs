@@ -366,7 +366,9 @@ fn final_view_suspension_refuses_but_the_same_original_owner_can_resume() {
     assert_eq!(samples, 3);
     assert_eq!(
         result,
-        Err(Error::Session(SessionError::Clipboard(CoreError::Suspended)))
+        Err(Error::Session(SessionError::Clipboard(
+            CoreError::Suspended
+        )))
     );
     assert_eq!(sink.prepared, 1);
     assert_eq!(sink.cancelled, 1);
@@ -447,7 +449,9 @@ fn the_final_clock_discovers_receiver_recovery_before_native_publication() {
     assert_eq!(samples, 3);
     assert_eq!(
         result,
-        Err(Error::Session(SessionError::Clipboard(CoreError::Suspended)))
+        Err(Error::Session(SessionError::Clipboard(
+            CoreError::Suspended
+        )))
     );
     assert_eq!(sink.text, [] as [String; 0]);
     assert_eq!(sink.cancelled, 1);
@@ -511,10 +515,10 @@ fn final_native_clock_never_waits_on_policy_mutexes_or_revokes_input() {
                 .unwrap();
         });
         let reached_final_sample = ready_rx.recv_timeout(Duration::from_secs(5));
-        let cursor_guard = (reached_final_sample.is_ok() && hold_cursor)
-            .then(|| cursor.lock().unwrap());
-        let state_guard = (reached_final_sample.is_ok() && !hold_cursor)
-            .then(|| state.inner.lock().unwrap());
+        let cursor_guard =
+            (reached_final_sample.is_ok() && hold_cursor).then(|| cursor.lock().unwrap());
+        let state_guard =
+            (reached_final_sample.is_ok() && !hold_cursor).then(|| state.inner.lock().unwrap());
         let _ = go_tx.send(());
         let completed = done_rx.recv_timeout(Duration::from_secs(5));
         // Release before asserting so a regression cannot strand its worker.

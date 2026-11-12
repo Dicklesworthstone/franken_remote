@@ -62,7 +62,7 @@ impl NativeAccess {
         if !self.live() {
             return false;
         }
-        let Ok((_, now)) = self.clock.sample(&self.cx) else {
+        let Ok((_, now)) = self.clock.sample_native(&self.cx) else {
             return false;
         };
         until.is_none_or(|deadline| now < deadline) && self.live()

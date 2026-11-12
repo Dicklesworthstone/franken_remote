@@ -1,5 +1,32 @@
 # Implementation status
 
+## Native clipboard callbacks after policy waits (2026-11-12)
+
+The native clipboard access guard now retains the original authorization cap
+before a host policy wait, rechecks cancellation, and samples the runtime clock
+again after the wait. That fresh sample must precede the retained authority
+cap and the caller's original item deadline. The subsequent readiness check is
+nonblocking and refusal-only; a newer policy deadline cannot revive the old
+operation. Switch generations and original transport lifetime are still checked
+before returning permission.
+
+Controller callbacks use their independently owned nonblocking clock cursor,
+including a final original-owner stop check. They cannot borrow another
+consumer's sample or renew the item's deadline. Metadata reads still require
+current authority, temporary view suspension remains resumable, and original
+owner stop fences native access even if the transport object still exists.
+Native submission/unknown-effect receipts and cleanup paths are unchanged.
+
+**Added and independently reviewed, not executed:** six regressions using the
+real runtime virtual clock, a channel-delayed original authority read, and the
+accepted-controller fixture. They exercise authority versus item expiry,
+just-before/exact boundaries, policy renewal during a wait, revocation, runtime
+cancellation, independent cursors, same-owner resume and original-owner drop.
+The execution environment remains unavailable, so these new runtime tests and
+the full current workspace have not been qualified locally. Exact formatter
+patches from the client slice's GitHub job are included; earlier core and
+portable Mac policy test results remain the separate evidence recorded below.
+
 ## Viewer clipboard publication caps and nonblocking native clocks (2026-11-12)
 
 The controlling viewer now bounds clipboard publication by the current visible

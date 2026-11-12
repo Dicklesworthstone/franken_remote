@@ -62,6 +62,11 @@ impl Transport {
         self.live.load(Ordering::Acquire)
     }
     pub fn check(&self, now: HostInstant) -> Result<(), SessionError> {
+        self.deadline(now).map(drop)
+    }
+    /// Read the original owner's exclusive authorization cap. A caller which
+    /// waits here must resample its clock afterward and retain this exact cap.
+    pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, SessionError> {
         if !self.live.load(Ordering::Acquire) {
             return Err(Error::Closed.into());
         }
@@ -69,15 +74,30 @@ impl Transport {
         if !self.live.load(Ordering::Acquire) {
             return Err(Error::Closed.into());
         }
-        deadline.map(drop).map_err(|reason| {
-            SessionError::Clipboard(
-                if reason == Refusal::Authority(fr_core::authority::AuthorityError::ViewUnready) {
-                    Error::Suspended
-                } else {
-                    Error::Authority(reason)
-                },
-            )
-        })
+        deadline.map_err(Self::refusal)
+    }
+    /// Refusal-only native fence after a fresh clock sample. The caller must
+    /// already retain and check the original authorization and item deadlines;
+    /// this nonblocking check cannot grant or replace either bound. A viewer
+    /// must use the exact cursor which authorized this monitor's sample.
+    pub fn check_publication(&self, now: HostInstant) -> Result<(), SessionError> {
+        if !self.live.load(Ordering::Acquire) {
+            return Err(Error::Closed.into());
+        }
+        let refusal = self.monitor.publication_refusal(now);
+        if !self.live.load(Ordering::Acquire) {
+            return Err(Error::Closed.into());
+        }
+        refusal.map_or(Ok(()), |reason| Err(Self::refusal(reason)))
+    }
+    fn refusal(reason: Refusal) -> SessionError {
+        SessionError::Clipboard(
+            if reason == Refusal::Authority(fr_core::authority::AuthorityError::ViewUnready) {
+                Error::Suspended
+            } else {
+                Error::Authority(reason)
+            },
+        )
     }
     /// Fence clipboard work only. Never revoke the input monitor.
     pub fn close(&self) {

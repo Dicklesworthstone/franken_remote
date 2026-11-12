@@ -622,3 +622,4 @@ fn expired_unsent_cancel_remains_terminal() {
 
 mod expiry;
 mod native_access;
+mod native_publication;

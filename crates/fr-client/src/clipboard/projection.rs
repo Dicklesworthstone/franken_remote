@@ -646,8 +646,8 @@ impl Projection {
             state.stopped.store(true, Ordering::Release);
             return Err(Refusal::Revoked);
         }
-        let (host, _) = Self::ready_sample(&state, &c, &mut m)
-            .map_err(|error| Self::refusal(&state, error))?;
+        let (host, _) =
+            Self::ready_sample(&state, &c, &mut m).map_err(|error| Self::refusal(&state, error))?;
         // An owner update can overtake even this nonblocking final read. Its
         // newer clock must not validate a cap already retained for an older
         // sample, especially when that update also refreshed the visible view.
@@ -679,8 +679,8 @@ impl Projection {
             state.stopped.store(true, Ordering::Release);
             return Err(Refusal::Revoked);
         }
-        let (host, local) = Self::ready_sample(&state, &c, &mut m)
-            .map_err(|error| Self::refusal(&state, error))?;
+        let (host, local) =
+            Self::ready_sample(&state, &c, &mut m).map_err(|error| Self::refusal(&state, error))?;
         let until = if publication {
             // Publication uses this observation and every outstanding input
             // obligation. Core retains the cap across its final clock sample,
@@ -703,11 +703,7 @@ impl Projection {
         };
         Ok(HostInstant::from_micros(until))
     }
-    fn ready_sample(
-        state: &State,
-        c: &Cursor,
-        m: &mut Metadata,
-    ) -> Result<(u64, u64), Error> {
+    fn ready_sample(state: &State, c: &Cursor, m: &mut Metadata) -> Result<(u64, u64), Error> {
         let local = c.client.max(m.last_client);
         let rolling = c.host.checked_add(local - c.client).ok_or(Error::Clock)?;
         let base = m

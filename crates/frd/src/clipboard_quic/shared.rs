@@ -1,7 +1,7 @@
 //! Fixed record slots. No native code or user callback runs under these locks.
 use super::{
     Admission, Arc, ClientInstant, ControllerTransport, Cx, Disposition, Egress, Error,
-    HostInstant, Received, RecordSink, Transport, TransportFailure,
+    HostInstant, Received, RecordSink, SessionError, Transport, TransportFailure,
 };
 use std::sync::{
     Mutex, OnceLock, TryLockError,
@@ -29,6 +29,40 @@ impl Clock {
                 .map_err(Error::Controller)?,
         };
         Ok((local, host))
+    }
+    /// Native boundaries retain the original authorization cap across any
+    /// policy wait. Only nonblocking readiness checks follow the final raw
+    /// clock sample; a newer view or ticket cannot retime the caller's item.
+    pub(super) fn sample_native(&self, cx: &Cx) -> Result<(u64, HostInstant), Error> {
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let sampled = now(cx)?;
+        match self {
+            Self::Host(gate) => {
+                let until = gate
+                    .deadline(HostInstant::from_micros(sampled))
+                    .map_err(Error::Session)?;
+                cx.checkpoint().map_err(|_| Error::Cancelled)?;
+                let local = now(cx)?;
+                if local < sampled {
+                    gate.close();
+                    return Err(Error::Clock);
+                }
+                let host = HostInstant::from_micros(local);
+                if host >= until {
+                    return Err(Error::Session(SessionError::Clipboard(
+                        fr_core::clipboard::Error::Expired,
+                    )));
+                }
+                gate.check_publication(host).map_err(Error::Session)?;
+                Ok((local, host))
+            }
+            Self::Controller(gate) => {
+                let host = gate
+                    .sample_native(ClientInstant(sampled))
+                    .map_err(Error::Controller)?;
+                Ok((sampled, host))
+            }
+        }
     }
     pub(super) fn sample(&self, cx: &Cx) -> Result<(u64, HostInstant), Error> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
