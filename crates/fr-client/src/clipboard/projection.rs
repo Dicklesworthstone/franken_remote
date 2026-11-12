@@ -428,6 +428,25 @@ impl State {
         }
         result
     }
+    /// Native clock callbacks cannot wait for a policy lock after sampling
+    /// the local clock. Contention fences only this optional clipboard owner.
+    pub(super) fn try_sample_cursor(
+        &self,
+        now: ClientInstant,
+        cursor: &Mutex<Cursor>,
+        require_view: bool,
+    ) -> Result<HostInstant, Error> {
+        let result = (|| {
+            let mut c = cursor.try_lock().map_err(|_| Error::Stopped)?;
+            let mut m = self.inner.try_lock().map_err(|_| Error::Stopped)?;
+            self.sample_cursor_locked(now, &mut c, &mut m, require_view, false)
+                .map(|(host, _)| host)
+        })();
+        if result.as_ref().is_err_and(|e| *e != Error::NotReady) {
+            self.stopped.store(true, Ordering::Release);
+        }
+        result
+    }
     pub(super) fn sample_concurrent(
         &self,
         now: ClientInstant,
@@ -577,12 +596,6 @@ impl State {
         }
         Ok(ClientInstant(until))
     }
-    pub(super) fn last_host(&self) -> Option<HostInstant> {
-        self.inner
-            .lock()
-            .ok()
-            .map(|m| HostInstant::from_micros(m.last_host))
-    }
 }
 struct Projection {
     state: Weak<State>,
@@ -604,6 +617,50 @@ impl Authority for Projection {
         }
     }
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        self.checked_deadline(now, true)
+    }
+    fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
+        self.checked_deadline(now, false)
+    }
+    fn publication_refusal(&self, now: HostInstant) -> Option<Refusal> {
+        self.check_publication(now).err()
+    }
+}
+impl Projection {
+    /// Tighten the final decision without granting a new deadline or waiting
+    /// after the native consumer sampled its clock.
+    fn check_publication(&self, now: HostInstant) -> Result<(), Refusal> {
+        let state = self.state.upgrade().ok_or(Refusal::Revoked)?;
+        if state.stopped.load(Ordering::Acquire) {
+            return Err(Refusal::Revoked);
+        }
+        let c = self
+            .cursor
+            .try_lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        let mut m = state
+            .inner
+            .try_lock()
+            .map_err(|_| Refusal::AuthorityUnavailable)?;
+        if now.as_micros() != c.host {
+            state.stopped.store(true, Ordering::Release);
+            return Err(Refusal::Revoked);
+        }
+        let (host, _) = Self::ready_sample(&state, &c, &mut m)
+            .map_err(|error| Self::refusal(&state, error))?;
+        // An owner update can overtake even this nonblocking final read. Its
+        // newer clock must not validate a cap already retained for an older
+        // sample, especially when that update also refreshed the visible view.
+        if host != now.as_micros() {
+            return Err(Refusal::AuthorityUnavailable);
+        }
+        Ok(())
+    }
+    fn checked_deadline(
+        &self,
+        now: HostInstant,
+        publication: bool,
+    ) -> Result<HostInstant, Refusal> {
         let state = self.state.upgrade().ok_or(Refusal::Revoked)?;
         if state.stopped.load(Ordering::Acquire) {
             return Err(Refusal::Revoked);
@@ -618,27 +675,66 @@ impl Authority for Projection {
             .map_err(|_| Refusal::AuthorityUnavailable)?;
         // This exact sample belongs to the native consumer. An original-owner
         // update can only tighten its decision; no lock spans native work.
-        let local = c.client.max(m.last_client);
         if now.as_micros() != c.host {
             state.stopped.store(true, Ordering::Release);
             return Err(Refusal::Revoked);
         }
-        let status = (|| {
-            state.lifecycle(&mut m, local)?;
-            let host = m.clock.age_upper_us(0, local).map_err(|_| Error::Clock)?;
-            state.ready_at(&mut m, local, host.max(c.host), true)
-        })();
-        match status {
-            Ok(()) => {}
-            Err(Error::NotReady) => return Err(Refusal::Authority(AuthorityError::ViewUnready)),
-            Err(_) => {
-                state.stopped.store(true, Ordering::Release);
-                return Err(Refusal::Revoked);
-            }
-        }
+        let (host, local) = Self::ready_sample(&state, &c, &mut m)
+            .map_err(|error| Self::refusal(&state, error))?;
+        let until = if publication {
+            // Publication uses this observation and every outstanding input
+            // obligation. Core retains the cap across its final clock sample,
+            // even if the original owner refreshes its view in the meantime.
+            let local_until = m
+                .view_until
+                .ok_or(Refusal::Authority(AuthorityError::ViewUnready))?
+                .min(m.local_until)
+                .min(m.obligations_until);
+            let remaining = local_until
+                .checked_sub(local)
+                .ok_or(Refusal::AuthorityUnavailable)?;
+            host.checked_add(remaining)
+                .ok_or(Refusal::AuthorityUnavailable)?
+                .min(m.host_until)
+        } else {
+            // An item may outlive one view and resume on this same owner.
+            // Its lifetime stays lease-bounded, independently of publication.
+            m.host_until
+        };
+        Ok(HostInstant::from_micros(until))
+    }
+    fn ready_sample(
+        state: &State,
+        c: &Cursor,
+        m: &mut Metadata,
+    ) -> Result<(u64, u64), Error> {
+        let local = c.client.max(m.last_client);
+        let rolling = c.host.checked_add(local - c.client).ok_or(Error::Clock)?;
+        let base = m
+            .last_host
+            .checked_add(local - m.last_client)
+            .ok_or(Error::Clock)?;
+        let host = m
+            .clock
+            .age_upper_us(0, local)
+            .map_err(|_| Error::Clock)?
+            .max(rolling)
+            .max(base);
+        state.ready_at(m, local, host, true)?;
         if state.stopped.load(Ordering::Acquire) {
-            return Err(Refusal::Revoked);
+            return Err(Error::Stopped);
         }
-        Ok(HostInstant::from_micros(m.host_until))
+        Ok((host, local))
+    }
+    fn refusal(state: &State, error: Error) -> Refusal {
+        if error == Error::NotReady {
+            Refusal::Authority(AuthorityError::ViewUnready)
+        } else {
+            state.stopped.store(true, Ordering::Release);
+            Refusal::Revoked
+        }
     }
 }
+
+#[cfg(test)]
+mod publication_tests;

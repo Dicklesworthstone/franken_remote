@@ -1,5 +1,34 @@
 # Implementation status
 
+## Viewer clipboard publication caps and nonblocking native clocks (2026-11-12)
+
+The controlling viewer now bounds clipboard publication by the current visible
+view, outstanding input receipt/control-response obligations and original lease
+proof. The item lifetime remains a separate lease-bound cap, allowing an
+incomplete transfer to survive a temporary view suspension. Core retains the
+publication cap across its final sample, even when a newer view becomes ready.
+The final readiness hook also catches receiver-epoch loss and owner progress
+that overtook that sample without authorizing a replacement deadline.
+
+Native clock callbacks and their failure fallback no longer wait on cursor or
+policy mutexes after sampling local time. Contention fences only clipboard;
+the existing input maintenance retires that optional owner while preserving the
+original input grant. A narrow nonblocking native transport sampler exposes the
+same behavior to the original native worker. Temporary suspension stays
+resumable; immutable item expiry and consumed-publication replay rules remain.
+
+**Added and independently source-reviewed, not executed:** twelve regressions
+using actual accepted grants, wire records, clock models and receiver epochs,
+plus both real mutex contention paths. Positive cases retain submitted and
+unknown-effect receipts, same-owner resume, and an incomplete transfer's
+original lease cap. Contention cases require the original input owner to accept
+a key afterward. The executor outage prevented compiling or running this new
+client suite. The preceding shared/core 44-test result is separate evidence.
+GitHub source formatting passed for dc0cc77, including the shared clipboard and
+Mac changes; full runtime/native qualification is still pending. The native
+callback's host-side clock-after-policy check follows in its own implementation
+slice rather than being inferred from this viewer projection change.
+
 ## Native Mac adaptive bitrate (2026-11-12)
 
 The existing adaptive-capture option now drives VideoToolbox rate transactions

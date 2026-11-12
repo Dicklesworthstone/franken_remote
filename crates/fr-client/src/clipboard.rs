@@ -47,6 +47,26 @@ impl ControllerTransport {
         }
         Ok(at)
     }
+    /// Project a final native boundary without waiting after the caller's local
+    /// clock sample. This checks the same original owner and visible view;
+    /// callers must still retain and enforce their operation's original cap.
+    /// Contention fences only the optional clipboard owner. A stale view pauses
+    /// it without revoking input or granting native work.
+    pub fn sample_native(&self, now: ClientInstant) -> Result<HostInstant, Error> {
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
+        let at = self
+            .clock
+            .state
+            .upgrade()
+            .ok_or(Error::Stopped)?
+            .try_sample_cursor(now, &self.clock.cursor, true)?;
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
+        Ok(at)
+    }
     /// Advance the original conservative clock while a view suspension blocks
     /// clipboard work. This is time for expiring bounded items, not authority:
     /// `sample` and the native publication monitor still return `NotReady`.
@@ -140,18 +160,24 @@ impl ProjectedClock {
             .ok_or(Error::Stopped)?
             .sample_cursor(now, &self.cursor, false)
     }
-    /// The core clock callback is infallible. On projection failure, fence FIRST
-    /// and return only the previous sample. That sample is unusable authority,
-    /// not a fabricated fresh clock; the immediately following check refuses it.
+    /// The infallible core clock callback must not wait after the local sample.
+    /// On contention or projection failure, fence only this clipboard owner
+    /// and return the attachment sample. It is unusable authority: the next
+    /// core gate observes the fence before native publication.
     fn checked(&self, now: ClientInstant, failure: &Cell<Option<Error>>) -> HostInstant {
-        match self.sample_maintenance(now) {
+        let result = self
+            .state
+            .upgrade()
+            .ok_or(Error::Stopped)
+            .and_then(|state| state.try_sample_cursor(now, &self.cursor, false));
+        match result {
             Ok(at) => at,
             Err(error) => {
                 failure.set(Some(error));
-                self.state.upgrade().map_or(self.fallback, |state| {
+                if let Some(state) = self.state.upgrade() {
                     state.stopped.store(true, Ordering::Release);
-                    state.last_host().unwrap_or(self.fallback)
-                })
+                }
+                self.fallback
             }
         }
     }
