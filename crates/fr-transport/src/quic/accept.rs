@@ -396,7 +396,7 @@ impl Listener {
             let driver =
                 bounded_identity(cx, until, identity(local, peer, transport_parameters())).await?;
             remaining(cx, until, Error::HandshakeTimeout)?;
-            let connection = timeout_at(
+            let mut connection = timeout_at(
                 Time::from_nanos(until),
                 // The handshake starts from the Initial already read for discovery.
                 // Otherwise every connect waits out the client's 1.5 s handshake PTO
@@ -427,6 +427,12 @@ impl Listener {
             if connection.peer_addr() != peer || connection.peer_connection_id() != scid {
                 return Err(Error::PeerChanged);
             }
+            // Capacity is one, so while this connection lives another
+            // source's Initial is answered CONNECTION_REFUSED (paced by the
+            // stack to one per 100 ms) instead of being dropped: a second
+            // viewer learns the host is busy at once rather than
+            // retransmitting until its own handshake timeout (fr-0kyf).
+            connection.refuse_foreign_initials();
             Ok(connection)
         })
     }

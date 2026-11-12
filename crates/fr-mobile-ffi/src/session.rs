@@ -80,6 +80,8 @@ pub mod end {
     /// Control stopped on this device (the view left the screen, input was
     /// refused, or the picture changed size), and the session with it.
     pub const CONTROL_STOPPED: u32 = 11;
+    /// The host is serving another viewer (one at a time).
+    pub const HOST_BUSY: u32 = 12;
 }
 
 /// Why this device stopped control (`CONTROL_STOPPED`'s detail). The first
@@ -705,6 +707,7 @@ pub(crate) const fn tailnet_end(error: fr_tailnet::Error) -> u32 {
         // failed native handshake (fr-tailnet's named tests).
         T::NativeHandshake | T::PeerCertificateRejected => end::TLS_REFUSED,
         T::HandshakeTimeout | T::NativeRouteIo | T::NativeBind | T::Timeout => end::UNREACHABLE,
+        T::HostBusy => end::HOST_BUSY,
         _ => end::SESSION_FAILED,
     }
 }

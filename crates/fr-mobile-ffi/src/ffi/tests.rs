@@ -58,6 +58,7 @@ fn every_header_constant_matches_the_rust_value() {
         ("FR_END_CANCELLED", end::CANCELLED),
         ("FR_END_INTERNAL", end::INTERNAL),
         ("FR_END_CONTROL_STOPPED", end::CONTROL_STOPPED),
+        ("FR_END_HOST_BUSY", end::HOST_BUSY),
     ] {
         expected.push((name.to_owned(), value.into()));
     }

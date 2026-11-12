@@ -164,6 +164,7 @@ fn transient_route_and_name_failures_allow_a_fresh_connection_attempt() {
         fr_tailnet::Error::HandshakeTimeout,
         fr_tailnet::Error::NameUnresolved,
         fr_tailnet::Error::Busy,
+        fr_tailnet::Error::HostBusy,
     ] {
         assert!(retryable(Failure::Connection(ConnectionError::Tailnet(
             error

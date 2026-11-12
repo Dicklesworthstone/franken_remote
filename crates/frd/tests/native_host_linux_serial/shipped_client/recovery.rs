@@ -199,3 +199,58 @@ fn an_established_viewer_that_stops_answering_renewal_is_still_retired_on_time()
     assert_eq!(host.tools.state()["deleted"], 1);
     host.finish();
 }
+
+/// The host serves one viewer at a time. While a first viewer is served, the
+/// shipped client's inspection of the same host is refused `host_busy` at
+/// once (`CONNECTION_REFUSED` to its Initial), and the first session continues
+/// in the same share.
+#[test]
+#[ignore = "explicit isolated user/mount/network namespace; synthetic ingress; shipped fr binary"]
+fn a_second_client_is_refused_host_busy_while_the_first_streams() {
+    let host = Hosted::new();
+    let api = ClientApi::new();
+    let fr = shipped_client();
+    let runtime = network::runtime();
+    let cx = runtime.request_cx_with_budget(Budget::INFINITE);
+    let (output, elapsed) = runtime.block_on(async {
+        timeout(cx.now(), Duration::from_secs(20), async {
+            let mut viewer = viewer(&cx).await;
+            let (path, roots) = (api.path.clone(), host.roots.clone());
+            let started = Instant::now();
+            let second = thread::spawn(move || run_displays(&fr, &path, &roots));
+            // The first viewer answers renewal and decodes throughout.
+            while !second.is_finished() {
+                viewer.turn().await;
+            }
+            let elapsed = started.elapsed();
+            // The fixture's desktop is static, so no new pictures arrive;
+            // the first session's evidence is the host's: one more second
+            // of renewal later it has neither finished that peer nor ended
+            // its share.
+            let until = network::clock(&cx) + 1_000_000;
+            while network::clock(&cx) < until {
+                viewer.turn().await;
+            }
+            assert_eq!(host.count(|e| matches!(e, Event::PeerFinished { .. })), 0);
+            assert_eq!(host.count(|e| matches!(e, Event::ShareEnded { .. })), 0);
+            assert_eq!(host.count(|e| matches!(e, Event::Listening { .. })), 1);
+            host.stop.request();
+            (second.join().unwrap(), elapsed)
+        })
+        .await
+        .unwrap()
+    });
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "{error}; stdout {}; stderr {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
+    assert_eq!(value["error"]["code"], "host_busy", "{value}");
+    assert_eq!(output.status.code(), Some(1));
+    // A dropped Initial would wait out the client's 5 s handshake deadline
+    // and end `host_not_answering`.
+    assert!(elapsed < Duration::from_secs(4), "refused after {elapsed:?}");
+    host.finish();
+}

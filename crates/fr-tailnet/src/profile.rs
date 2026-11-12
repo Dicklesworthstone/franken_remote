@@ -82,6 +82,12 @@ pub(crate) fn handshake_error(error: &NativeQuicUdpConnectionError) -> Error {
             provider: "rustls-quic-handshake",
             code: "udp_send" | "udp_recv",
         }) => Error::NativeRouteIo,
+        // The host's capacity-one listener is serving another viewer
+        // (fr-0kyf). The other address family would not answer either.
+        NativeQuicUdpConnectionError::Handshake(QuicTlsError::CryptoProviderFailure {
+            provider: "rustls-quic-handshake",
+            code: "peer_connection_refused",
+        }) => Error::HostBusy,
         _ => Error::NativeHandshake,
     }
 }
@@ -247,6 +253,31 @@ mod tests {
             },
         ] {
             assert_eq!(handshake_error(&other), Error::NativeHandshake);
+        }
+    }
+
+    #[test]
+    fn a_refused_initial_is_a_busy_host_and_never_tries_the_other_family() {
+        let refused = handshake_error(&NativeQuicUdpConnectionError::Handshake(
+            QuicTlsError::CryptoProviderFailure {
+                provider: "rustls-quic-handshake",
+                code: "peer_connection_refused",
+            },
+        ));
+        assert_eq!(refused, Error::HostBusy);
+        assert!(!may_try_alternate(refused));
+        // Any other close, or the code from another provider, stays a
+        // terminal handshake failure.
+        for (provider, code) in [
+            ("rustls-quic-handshake", "peer_closed"),
+            ("rustls", "peer_connection_refused"),
+        ] {
+            assert_eq!(
+                handshake_error(&NativeQuicUdpConnectionError::Handshake(
+                    QuicTlsError::CryptoProviderFailure { provider, code }
+                )),
+                Error::NativeHandshake
+            );
         }
     }
 

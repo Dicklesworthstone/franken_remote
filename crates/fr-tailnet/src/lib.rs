@@ -119,6 +119,11 @@ pub enum Error {
     /// A named destination resolved to an address outside Tailscale's
     /// ranges, or a pin held one. Nothing is sent to such an address.
     OutsideTailnet,
+    /// The host answered this dial's Initial with `CONNECTION_REFUSED`: it
+    /// serves one viewer at a time and another session is active. The
+    /// answer is unauthenticated (Initial keys are public), so it can only
+    /// end this dial early; it never grants anything.
+    HostBusy,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

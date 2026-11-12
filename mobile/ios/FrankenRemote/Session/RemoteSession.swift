@@ -26,7 +26,7 @@ enum SessionPhase: Equatable {
 /// Why a session ended (FR_END_*), worded for the user.
 enum SessionEnd: Equatable {
     case closedByYou, hostClosed, nameUnresolved, outsideTailnet, identityChanged, tlsRefused
-    case unreachable, hostRefused, sessionFailed, cancelled, internalError
+    case unreachable, hostRefused, hostBusy, sessionFailed, cancelled, internalError
     /// This device stopped control (the view left the screen, input was
     /// refused, or the host's picture changed size); the session ended
     /// with it, as the host requires.
@@ -42,6 +42,7 @@ enum SessionEnd: Equatable {
         case FR_END_TLS_REFUSED: self = .tlsRefused
         case FR_END_UNREACHABLE: self = .unreachable
         case FR_END_HOST_REFUSED: self = .hostRefused
+        case FR_END_HOST_BUSY: self = .hostBusy
         case FR_END_SESSION_FAILED: self = .sessionFailed
         case FR_END_CANCELLED: self = .cancelled
         case FR_END_CONTROL_STOPPED: self = .controlStopped
@@ -59,6 +60,7 @@ enum SessionEnd: Equatable {
         case .tlsRefused: return "Secure connection refused"
         case .unreachable: return "Host unreachable"
         case .hostRefused: return "The host refused the session"
+        case .hostBusy: return "The host is busy"
         case .sessionFailed: return "The session failed"
         case .cancelled: return "Connection cancelled"
         case .internalError: return "Something went wrong"
@@ -82,6 +84,8 @@ enum SessionEnd: Equatable {
             return "No answer from the host. Check that FrankenRemote is running there and that both devices are online in Tailscale."
         case .hostRefused:
             return "The host's policy refused this session, or the host declined approval."
+        case .hostBusy:
+            return "Someone else is viewing this machine, and it serves one viewer at a time. Try again after that session ends."
         case .sessionFailed: return "The session ended unexpectedly."
         case .cancelled: return "The connection was cancelled."
         case .internalError: return "The app could not run the session."

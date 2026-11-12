@@ -292,6 +292,7 @@ fn tailnet(error: TailnetError) -> Failure {
         TailnetError::UntrustedLocalApi => "untrusted_localapi",
         TailnetError::Timeout => "tailnet_lookup_timeout",
         TailnetError::HandshakeTimeout => "host_not_answering",
+        TailnetError::HostBusy => "host_busy",
         TailnetError::KeyExpired => "tailnet_key_expired",
         TailnetError::PeerCertificateRejected => "tls_certificate_rejected",
         TailnetError::NativeRouteIo => "tailnet_route_unavailable",

@@ -736,7 +736,10 @@ pub fn retryable(failure: Failure) -> bool {
             // The named route's resolver (a phone between networks while
             // Tailscale reconnects) and a lookup slot held by another dial.
             | fr_tailnet::Error::NameUnresolved
-            | fr_tailnet::Error::Busy,
+            | fr_tailnet::Error::Busy
+            // The host still serves another session, possibly this
+            // client's own previous one until the host notices it ended.
+            | fr_tailnet::Error::HostBusy,
         ))
         | Failure::Observation(ObserverError::Streaming(
             StreamingViewerError::Recovery(crate::media_quic::recovery::Error::NamespaceExhausted(

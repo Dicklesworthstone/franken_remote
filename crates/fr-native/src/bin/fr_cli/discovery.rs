@@ -65,6 +65,10 @@ pub(super) fn tailnet(error: TailnetError) -> Failure {
             "host_not_answering",
             "The host did not complete the connection in time: check that frd run is running there (it serves one viewer at a time, so another session may be active) and that tailnet policy allows UDP to its port; fr hosts shows the path.",
         ),
+        TailnetError::HostBusy => failure(
+            "host_busy",
+            "The host is serving another viewer; it serves one at a time. Retry after that session ends.",
+        ),
         TailnetError::NativeRouteIo => failure(
             "tailnet_route_unavailable",
             "The local UDP path failed during connection setup. Check the installed Tailscale connection and routing; fr hosts shows the host path.",
@@ -105,6 +109,7 @@ mod tests {
             (TailnetError::UntrustedLocalApi, "untrusted_localapi", 1),
             (TailnetError::BackendNotRunning, "tailscale_not_running", 1),
             (TailnetError::Timeout, "tailnet_lookup_timeout", 1),
+            (TailnetError::HostBusy, "host_busy", 1),
             (TailnetError::Cancelled, "cancelled", 130),
         ] {
             let refusal = tailnet(error);

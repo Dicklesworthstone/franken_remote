@@ -78,6 +78,7 @@ extern "C" {
 #define FR_END_CONTROL_STOPPED 11 /* this device stopped control (view hidden,
                                      input refused, picture resized); the
                                      session ended with it */
+#define FR_END_HOST_BUSY 12       /* the host is serving another viewer */
 
 /* A generation-checked session handle (ADR 0003). Never 0 when issued; a
  * handle used after fr_session_free finds nothing (FR_STALE). */

@@ -45,6 +45,10 @@ fn failures_map_to_the_apps_end_codes() {
             end::SESSION_FAILED,
         ),
         (
+            Failure::Connection(C::Tailnet(T::HostBusy)),
+            end::HOST_BUSY,
+        ),
+        (
             Failure::Connection(C::Session(frd::session_startup::Error::Denied)),
             end::HOST_REFUSED,
         ),
