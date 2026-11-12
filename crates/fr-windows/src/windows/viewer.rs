@@ -15,7 +15,7 @@ use crate::{
 };
 use fr_mobile_ffi::{
     events::{Event, kind, state},
-    session::{Config, Session, end},
+    session::{Config, InputResult, Session, end},
     video,
 };
 use std::{
@@ -55,6 +55,8 @@ struct Viewer {
     /// Held buttons (`session.button` indices) and the last pointer point.
     buttons: [bool; 5],
     last_point: (f64, f64),
+    /// Key transitions waiting behind a press the session answered `Busy`.
+    keys: keys::Deferred,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -106,6 +108,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             dest: None,
             buttons: [false; 5],
             last_point: (0.0, 0.0),
+            keys: keys::Deferred::default(),
         });
     });
     // SAFETY: showing the window this thread created.
@@ -171,6 +174,9 @@ fn pump(seconds: Option<u64>) -> Stats {
 
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bool) {
+    if !v.keys.is_empty() {
+        v.send_keys();
+    }
     let shared = v.session.shared();
     while let Some(event) = shared.events.poll() {
         log_event(&event);
@@ -443,7 +449,22 @@ impl Viewer {
             }
         }
     }
+    /// A key transition, in order behind any the session deferred.
+    fn key(&mut self, usage: u16, pressed: bool) {
+        let shared = self.session.shared();
+        self.keys.push(usage, pressed, |usage, pressed| {
+            shared.key(usage, pressed) != InputResult::Busy
+        });
+    }
+    /// Retries deferred key transitions (each loop turn, ~2 ms at most).
+    fn send_keys(&mut self) {
+        let shared = self.session.shared();
+        self.keys
+            .drain(|usage, pressed| shared.key(usage, pressed) != InputResult::Busy);
+    }
     fn release_everything(&mut self) {
+        // Unsent presses never go after focus loss; held keys are released.
+        self.keys.clear();
         let shared = self.session.shared();
         let _ = shared.release_all();
         let (px, py) = self.last_point;
@@ -559,15 +580,19 @@ extern "system" fn window_proc(
             let scan = ((lparam.0 >> 16) & 0xff) as u8;
             let extended = (lparam.0 >> 24) & 1 == 1;
             let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+            // Bit 30: the key was already down (auto-repeat). The session
+            // never sends repeats; the host repeats a held key itself.
+            let repeat = pressed && (lparam.0 >> 30) & 1 == 1;
             // Only a controlled session takes keys; otherwise Windows keeps
             // its own (Alt+F4 and the system menu).
             with_viewer(|v| {
-                let shared = v.session.shared();
-                if !shared.controlled() {
+                if !v.session.shared().controlled() {
                     return false;
                 }
-                if let Some(usage) = keys::usage(scan, extended) {
-                    let _ = shared.key(usage, pressed);
+                if let Some(usage) = keys::usage(scan, extended)
+                    && !repeat
+                {
+                    v.key(usage, pressed);
                 }
                 true
             })

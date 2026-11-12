@@ -116,9 +116,123 @@ pub fn usage(scan: u8, extended: bool) -> Option<u16> {
     })
 }
 
+/// Key transitions the session has not taken yet, in typing order. The
+/// session answers a new press `Busy` while frd's input queue is backed up;
+/// that press, and every transition typed after it, waits here and goes on a
+/// later turn, so the host sees exactly the local order (Shift still held
+/// over a deferred letter, a release never ahead of its press).
+#[derive(Debug, Default)]
+pub struct Deferred {
+    queue: std::collections::VecDeque<(u16, bool)>,
+}
+
+/// Presses past this many waiting transitions are dropped (a stalled host
+/// never grows the queue without bound). Releases always queue: they only
+/// follow presses, and a release of a key never pressed sends nothing.
+pub const MAX_DEFERRED: usize = 64;
+
+impl Deferred {
+    /// Queues `(usage, pressed)` behind any waiting transitions, then sends
+    /// in order. `send` returns false when the session answered `Busy`; it
+    /// stops the drain and keeps that transition first.
+    pub fn push(&mut self, usage: u16, pressed: bool, send: impl FnMut(u16, bool) -> bool) {
+        if pressed && self.queue.len() >= MAX_DEFERRED {
+            return;
+        }
+        self.queue.push_back((usage, pressed));
+        self.drain(send);
+    }
+    /// Sends waiting transitions in order until the session is busy again.
+    pub fn drain(&mut self, mut send: impl FnMut(u16, bool) -> bool) {
+        while let Some(&(usage, pressed)) = self.queue.front() {
+            if !send(usage, pressed) {
+                return;
+            }
+            self.queue.pop_front();
+        }
+    }
+    /// Forgets every waiting transition (focus lost: an unsent press must
+    /// never reach the host afterwards).
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a session took. New presses are refused (`Busy`) while `busy`
+    /// is set; releases always go, as in the session core.
+    struct Host {
+        busy: bool,
+        sent: Vec<(u16, bool)>,
+    }
+    impl Host {
+        fn send(&mut self, usage: u16, pressed: bool) -> bool {
+            if pressed && self.busy {
+                return false;
+            }
+            self.sent.push((usage, pressed));
+            true
+        }
+    }
+
+    #[test]
+    fn a_busy_press_holds_everything_typed_after_it_in_order() {
+        const SHIFT: u16 = 0xE1;
+        const A: u16 = 0x04;
+        let mut deferred = Deferred::default();
+        let mut host = Host {
+            busy: false,
+            sent: Vec::new(),
+        };
+        deferred.push(SHIFT, true, |u, p| host.send(u, p));
+        host.busy = true;
+        // A is deferred; A's release and Shift's release wait behind it
+        // (sent now, Shift would be up before A went down).
+        deferred.push(A, true, |u, p| host.send(u, p));
+        deferred.push(A, false, |u, p| host.send(u, p));
+        deferred.push(SHIFT, false, |u, p| host.send(u, p));
+        assert_eq!(host.sent, vec![(SHIFT, true)]);
+        // A later turn while still busy moves nothing.
+        deferred.drain(|u, p| host.send(u, p));
+        assert_eq!(host.sent, vec![(SHIFT, true)]);
+        assert!(!deferred.is_empty());
+        // Ready again: the rest, in typing order.
+        host.busy = false;
+        deferred.drain(|u, p| host.send(u, p));
+        assert_eq!(
+            host.sent,
+            vec![(SHIFT, true), (A, true), (A, false), (SHIFT, false)]
+        );
+        assert!(deferred.is_empty());
+    }
+
+    #[test]
+    fn a_stalled_session_drops_new_presses_but_never_releases() {
+        let mut deferred = Deferred::default();
+        let mut host = Host {
+            busy: true,
+            sent: Vec::new(),
+        };
+        for usage in 0..u16::try_from(MAX_DEFERRED + 10).unwrap() {
+            deferred.push(usage, true, |u, p| host.send(u, p));
+        }
+        assert_eq!(deferred.queue.len(), MAX_DEFERRED);
+        deferred.push(7, false, |u, p| host.send(u, p));
+        assert_eq!(deferred.queue.len(), MAX_DEFERRED + 1);
+        assert_eq!(deferred.queue.back(), Some(&(7, false)));
+        assert_eq!(host.sent, Vec::new());
+        // Focus lost: nothing that waited is ever sent, even once ready.
+        deferred.clear();
+        host.busy = false;
+        deferred.drain(|u, p| host.send(u, p));
+        assert_eq!(host.sent, Vec::new());
+    }
 
     #[test]
     fn letters_digits_and_function_keys_follow_the_hid_layout() {
