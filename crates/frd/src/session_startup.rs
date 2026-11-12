@@ -619,6 +619,27 @@ impl Host {
         directory::decode_request(bytes, self.maximum).map_err(negotiation::Error::from)?;
         Err(Error::InspectionComplete)
     }
+    /// Preserve the original admitted identity, negotiated scope and startup
+    /// deadline before publishing this one local decision opportunity.
+    fn begin_approval(&mut self) -> Result<(), Error> {
+        self.attribution = Some(Arc::new(approval_context::Attribution::new(
+            self.peer.as_ref().ok_or(Error::Closed)?,
+            self.selected.as_ref().ok_or(Error::Order)?,
+        )?));
+        self.authority
+            .as_mut()
+            .ok_or(Error::Closed)?
+            .require_approval()
+            .map_err(|_| Error::Authority)?;
+        self.stage(&Message::ApprovalRequired {
+            request: self.config.binding.remote_session,
+            deadline_us: self.until,
+            role: self.role,
+        })?;
+        self.approval.store(WAITING, Ordering::Release);
+        self.phase = Phase::Approval;
+        Ok(())
+    }
     fn consume(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.check()?;
         if self.phase == Phase::Selection && self.directory == DirectoryUse::Requested {
@@ -693,22 +714,7 @@ impl Host {
                     .mark_capabilities_checked()
                     .map_err(|_| Error::Authority)?;
                 if self.config.require_approval {
-                    self.attribution = Some(Arc::new(approval_context::Attribution::new(
-                        self.peer.as_ref().ok_or(Error::Closed)?,
-                        self.selected.as_ref().ok_or(Error::Order)?,
-                    )?));
-                    self.authority
-                        .as_mut()
-                        .ok_or(Error::Closed)?
-                        .require_approval()
-                        .map_err(|_| Error::Authority)?;
-                    self.stage(&Message::ApprovalRequired {
-                        request: self.config.binding.remote_session,
-                        deadline_us: self.until,
-                        role: self.role,
-                    })?;
-                    self.approval.store(WAITING, Ordering::Release);
-                    self.phase = Phase::Approval;
+                    self.begin_approval()?;
                 } else {
                     self.open_observation()?;
                 }
