@@ -24,8 +24,8 @@ const RESERVED_BYTES: usize = 512;
 
 impl QuicRecords {
     /// Called after framing, route and total-budget validation, before copying.
-    /// Count ALL retained critical records, including native-unacknowledged
-    /// epochs. A prefix flush or membership in a batch cannot reclaim room.
+    /// Count ALL retained critical records, including staged records the peer
+    /// has not acknowledged. A prefix flush alone cannot reclaim room.
     pub(super) fn metadata_admission_ready(
         &self,
         route: StreamRoute,

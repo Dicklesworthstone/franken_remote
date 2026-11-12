@@ -30,8 +30,8 @@ The check follows framing, installed-route and total-budget validation and prece
 allocation. Refusal is ordinary backpressure: retry the same bytes and absolute
 send-by, not a newly dated record. Original authority and prepared-record checks,
 retirement checks, sender/receiver deadlines, stream FIFO, congestion control and
-flow credit remain in force. A response may still wait behind earlier bytes or
-an acknowledgement epoch on its stream. Nothing grants input or extends a lease.
+flow credit remain in force. A response may still wait behind earlier bytes on
+its stream, but not for their acknowledgement. Nothing grants input or extends a lease.
 
 ## Evidence and remaining scope
 

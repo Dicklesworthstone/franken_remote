@@ -31,10 +31,14 @@ repository = "https://github.com/Dicklesworthstone/franken_remote"
 # ServerCertificateRejected for a refused server certificate.
 # becc05376 (asupersync main, 2026-11-11) adds the kqueue reactor on iOS, so
 # the iOS build no longer needs a patched copy.
+# a9705afe8 (asupersync main, 2026-11-12) adds
+# QuicStream::acknowledged_send_offset, so QuicRecords releases each
+# record when the peer has acknowledged it instead of sending in
+# stop-and-wait batches (fr-00nc).
 # Owner approval for a Git pin while 0.6.x is unpublished: 2026-10-12
 # ("do everything you think is advisable"). Return to a crates.io release
 # once one contains these fixes. Selecting this revision does not qualify transport.
-asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "becc0537626632a40ae5529a2a0bdf9807fd971f", default-features = false }
+asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "a9705afe89ad58989aad75cc9e8a7598ff904c2c", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }

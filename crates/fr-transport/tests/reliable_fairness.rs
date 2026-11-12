@@ -13,8 +13,8 @@ use std::time::Duration;
 use support::{clock, native_pair, runtime};
 
 /// A sender turn that also services the peer's ACKs. `drive(Duration::ZERO)`
-/// stages prefixes but does not process received packets, so no
-/// acknowledgement epoch can close in a loop of zero-wait turns.
+/// stages prefixes but does not process received packets, so no record's
+/// charge can be released in a loop of zero-wait turns.
 const ACK_TURN: Duration = Duration::from_millis(1);
 
 struct Peers {
@@ -276,12 +276,12 @@ fn the_bulk_opportunity_after_critical_work_still_rechecks_authority() {
 }
 
 #[test]
-fn a_waiting_epoch_does_not_bypass_ack_accounting_or_hold_another_lane() {
+fn a_record_behind_an_unacknowledged_one_stages_at_once_and_stays_charged() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut peers = peers(&cx).await;
         let first = record(peers.outgoing[0], 11, 100);
-        let waiting = record(peers.outgoing[0], 12, 100);
+        let following = record(peers.outgoing[0], 12, 100);
         let other = record(peers.outgoing[1], 23, 100);
         send(&cx, &mut peers, 0, &first);
         peers
@@ -292,30 +292,35 @@ fn a_waiting_epoch_does_not_bypass_ack_accounting_or_hold_another_lane() {
         assert!(peers.server.send_staged(peers.outgoing[0]).unwrap());
         assert_eq!(peers.server.usage().retained_send_records, 1);
 
-        // The peer has not driven I/O since admission, so the first epoch has
-        // no ACK. Bulk admissions may join an epoch only during its fixed 10 ms
-        // fill window (3a4df0e); after it, these later admissions must not
-        // join that unacknowledged epoch.
+        // The peer has not driven I/O since admission, so `first` has no ACK.
+        // Until fr-00nc a record admitted more than 10 ms later waited for the
+        // whole previous batch to be acknowledged: one more RTT per record.
         std::thread::sleep(Duration::from_millis(11));
-        send(&cx, &mut peers, 0, &waiting);
+        send(&cx, &mut peers, 0, &following);
         send(&cx, &mut peers, 1, &other);
         peers
             .server
             .drive(&cx, Duration::ZERO, || true)
             .await
             .unwrap();
-        assert!(!peers.server.send_staged(peers.outgoing[0]).unwrap());
+        assert!(peers.server.send_staged(peers.outgoing[0]).unwrap());
         assert!(peers.server.send_staged(peers.outgoing[1]).unwrap());
+        // Staging releases nothing: all three wait for the peer's ACKs.
         assert_eq!(peers.server.usage().retained_send_records, 3);
 
         let mut received = Vec::new();
         receive_queued(&cx, &mut peers, &mut received).await;
-        assert_eq!(received.len(), 2);
-        assert!(received.contains(&(1, first)));
+        assert_eq!(received.len(), 3);
+        let on_first_lane: Vec<_> = received
+            .iter()
+            .filter(|(binding, _)| *binding == 1)
+            .map(|(_, bytes)| bytes.clone())
+            .collect();
+        assert_eq!(on_first_lane, [first, following], "stream order");
         assert!(received.contains(&(2, other)));
-        assert!(!received.iter().any(|(_, bytes)| bytes == &waiting));
+        // The receiver acknowledged, but the sender has not processed it yet.
+        assert_eq!(peers.server.usage().retained_send_records, 3);
 
-        // Only after the sender services ACKs can the waiting epoch stage.
         for _ in 0..128 {
             peers.server.drive(&cx, ACK_TURN, || true).await.unwrap();
             peers
@@ -323,12 +328,11 @@ fn a_waiting_epoch_does_not_bypass_ack_accounting_or_hold_another_lane() {
                 .drive(&cx, Duration::from_millis(1), || true)
                 .await
                 .unwrap();
-            receive(&cx, &mut peers, &mut received);
-            if received.len() == 3 {
+            if peers.server.usage().retained_send_records == 0 {
                 break;
             }
         }
-        assert_eq!(received.len(), 3);
-        assert_eq!(received.last(), Some(&(1, waiting)));
+        assert_eq!(peers.server.usage().retained_send_records, 0);
+        assert_eq!(peers.server.usage().retained_send_upper_bound, 0);
     });
 }

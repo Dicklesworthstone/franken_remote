@@ -333,7 +333,7 @@ impl QuicRecords {
                 sender.bytes = 0;
                 sender.records = 0;
                 sender.until = None;
-                sender.epoch = None;
+                sender.staged.clear();
             }
         }
         for receiver in &mut self.inbound {

@@ -115,7 +115,7 @@ On iOS the runtime fell back to timer-paced polling, re-polling every socket
 each millisecond. Measured on the iOS simulator: 500 UDP round trips took
 1.72 s that way and 21.5 ms with kqueue. While parked for 1 s on one receive,
 the process spent 41.5-42.4 ms of CPU before the fix and 0.64-0.86 ms after.
-becc05376 (the workspace pin) adds `target_os = "ios"` beside
+becc05376 (in the workspace pin) adds `target_os = "ios"` beside
 `target_os = "macos"` in the reactor's platform lists, so the iOS build uses
 the pinned revision as is. `FR_CARGO_CONFIG` (for
 `mobile/ios/scripts/build-rust.sh`) stays available for a local `[patch]`.

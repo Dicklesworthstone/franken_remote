@@ -338,7 +338,9 @@ queue at the window limit. Asupersync puts STREAM frames ahead of DATAGRAMs in
 each packet, so critical prefixes now need window room only for themselves,
 while bulk prefixes still wait for the media queue (QUIC_RECORDS.md). The
 remaining expiries at 100 ms RTT had a staged frame awaiting acknowledgement,
-the stop-and-wait epoch cost that needs an upstream retention query.
+the stop-and-wait epoch cost that needed an upstream retention query. Records
+have been acknowledged one by one since 2026-11-12 (fr-00nc); these rows have
+not been re-measured since.
 
 Before the change, the view-only rows at 40 ms RTT failed as follows:
 - with 1% loss (a must-hold row), 2 of about 15 runs failed;

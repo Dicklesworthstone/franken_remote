@@ -17,6 +17,7 @@ use fr_wire::{
 };
 use std::{
     cell::Cell,
+    collections::VecDeque,
     fmt,
     sync::{
         Arc,
@@ -625,7 +626,7 @@ impl QuicRecords {
             bytes: 0,
             records: 0,
             until: None,
-            epoch: None,
+            staged: VecDeque::new(),
         });
         self.inbound.push(Inbound {
             route: inbound,

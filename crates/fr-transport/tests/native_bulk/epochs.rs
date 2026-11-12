@@ -171,13 +171,13 @@ fn newer_epoch_cannot_extend_unacknowledged_or_waiting_record_deadlines() {
 }
 
 #[test]
-fn later_records_wait_for_the_closed_native_epoch_without_losing_order_or_credit() {
+fn a_later_record_stages_before_the_earlier_one_is_acknowledged_keeping_order_and_credit() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx, Policy::default()).await;
         for sequence in 0..2 {
             if sequence != 0 {
-                // Close the fixed 10 ms fill window without servicing ACKs.
+                // Past the old 10 ms batch fill window, with no ACK serviced.
                 asupersync::time::sleep(cx.now(), Duration::from_millis(11)).await;
             }
             pair.server
@@ -197,8 +197,8 @@ fn later_records_wait_for_the_closed_native_epoch_without_losing_order_or_credit
         assert_eq!(pair.server.usage().retained_send_records, 2);
         let mut received = 0;
         // Do not give the sender another opportunity to collect acknowledgement.
-        // The later record stays accounted in the project queue, not appended
-        // to the native retention set whose old deadline needs to be retired.
+        // Both records are already in the native stream: the later one did not
+        // wait a round trip for the earlier one's ACK (fr-00nc).
         for _ in 0..8 {
             pair.client
                 .drive(&cx, Duration::from_millis(1), || true)
@@ -216,10 +216,9 @@ fn later_records_wait_for_the_closed_native_epoch_without_losing_order_or_credit
                 )
                 .unwrap();
         }
-        assert_eq!(
-            received, 1,
-            "new admissions cannot join an epoch after its fill window closes"
-        );
+        assert_eq!(received, 2, "the later record was staged without an ACK");
+        // Delivery alone releases nothing: the sender has processed no ACK.
+        assert_eq!(pair.server.usage().retained_send_records, 2);
         let until = clock(&cx) + 500_000;
         while pair.server.usage().retained_send_records != 0 {
             assert!(clock(&cx) < until);

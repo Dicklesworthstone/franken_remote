@@ -57,7 +57,7 @@ connection's smoothed QUIC round trip, capped at 1 s, and never below 250 ms.
 An unmeasured path keeps 250 ms.
 - The viewer uses three round trips. A static view's age grows by the host
   observation's transit, a stop-and-wait wait behind the previous record on its
-  stream, and up to one round trip of clock uncertainty in the viewer's
+  stream (removed 2026-11-12, fr-00nc; the bound was not changed), and up to one round trip of clock uncertainty in the viewer's
   conservative age. Host-side ages peaked near three round trips at 60, 120 and
   200 ms RTT (namespace probe, 2026-09-30).
 - The host uses four. The extra round trip covers the report's transit and

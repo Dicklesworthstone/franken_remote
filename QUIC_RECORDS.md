@@ -170,13 +170,21 @@ payloads test transport ownership, not typed application delivery or WAN loss.
 
 Reliable bytes stay charged after native packet assembly. Merely draining
 `pending_stream_data_bytes` is not evidence that retransmission copies died.
-The pinned API has no public retained-buffer count: this adapter saves an EMPTY
-outbound `QuicStream` value before its first write, refreshes only its public
-scalar counters, and uses that type's structural equality to prove the private
-pending and retained maps are empty. It never clones live payload maps or parses
-Debug output. Any unmatched private state conservatively prevents release. This
-version-specific absence proof must be requalified on an Asupersync upgrade and
-can be replaced by an explicit upstream retention query when available.
+Since 2026-11-12 (fr-00nc) each record is released by Asupersync's
+`QuicStream::acknowledged_send_offset` (a9705afe8): the offset below which the
+peer has acknowledged every byte, which is the lowest offset still queued for
+packet assembly or retained for retransmission. When a record's last prefix
+enters the native stream, the adapter keeps the stream's `send_offset` as that
+record's end. The record keeps its byte and count charge until the acknowledged
+offset reaches that end. ACKs above the first unacknowledged byte release
+nothing, and a locally reset lane reports no offset and releases nothing.
+
+The terminal paths must prove a whole lane empty, FIN or reset state included.
+They still use the older absence proof: an EMPTY outbound `QuicStream` value
+saved before the first write, with its public scalar counters refreshed and the
+type's structural equality as the test. It never clones live payload maps or
+parses Debug output, and any unmatched private state refuses. It must be
+requalified on an Asupersync upgrade.
 
 Staging priority. Asupersync assembles each packet from control frames, then
 STREAM frames, then queued DATAGRAMs. A critical reliable prefix (at most 900
@@ -192,28 +200,39 @@ also fitted every queued datagram. Under namespace `tc netem` loss, media kept
 that queue at the window limit, so host renewal challenges missed their send-by
 deadline and closed view-only sessions. Bulk prefixes still wait for the media
 queue, so a file or recovery transfer never gets ahead of media. Records on one
-stream keep bounded acknowledgment epochs (the absence proof above). Critical
-streams freeze their membership at the first native prefix. Bulk streams now
-allow newly admitted records to join for a fixed 10 ms from that first prefix,
-so a producer serviced on successive turns can fill the existing budget without
-waiting an extra RTT for every record. The first prefix is not delayed. Joining
-is decided at admission, even if congestion prevents a native prefix until later.
-After the fixed window, new records wait for the next epoch; continued traffic
-never slides the window. All original byte/count limits, critical connection
-credit, per-stream FIFO order and delivery deadlines remain unchanged. No byte
-is released until the entire current epoch is proven absent from both native
-queues. An empty epoch retires immediately, including inside its fill window.
-Per-record acknowledgment and a fully sliding send window still require an
-explicit upstream retention query.
+stream no longer wait for earlier records' acknowledgement. Until 2026-11-12 the
+whole-lane absence proof was the only release test, so each stream sent in
+stop-and-wait batches ("epochs"). A record admitted after a batch's first prefix
+could join it only within a fixed 10 ms (bulk) or up to four records
+(critical). Otherwise it waited for that batch's ACK before its first byte was
+staged, up to one more round trip per record. On a 100 ms path that allowed
+about one 8 KiB clipboard or file record per round trip
+(fr-clipboard-wan-item-ceiling-6mlb). Now a record is staged as soon as
+congestion, flow credit and per-stream FIFO allow. All byte/count limits,
+critical connection credit, per-stream FIFO order and delivery deadlines are
+unchanged. A staged record's original delivery deadline still covers its
+acknowledgement.
 
-The batching policy's five direct-source unit tests and strict Clippy check
-pass on the pinned nightly. Reverting to always-closed batches or sliding the
-fill start makes four tests fail in each case. `bulk_epochs.rs` adds real
-UDP/TLS coverage for staggered FIFO delivery, bounded credit reclamation and
-unchanged earliest deadlines. Those transport tests are not yet qualified by
-this change: local compilation of the pinned Asupersync dependency was killed
-at the container's 4 GiB memory ceiling. No WAN throughput improvement or
-clipboard item ceiling is claimed without the corresponding live runs.
+Evidence for the per-record release (2026-11-12). The source is namespace
+`tc netem` rows of `real_impairment::controlled_session_under_namespace_delay_and_loss`
+(in-process `frd` host, shipped `fr` client). Arm A was 77100ab0 on the same
+Asupersync pin; arm B was A plus this change. Both carried print-only close
+diagnostics. There was no WAN or tailnet run.
+
+- Latency: at 120 ms RTT with 1% loss on csd, the presented-age p50 was
+  190-300 ms in A (median 230 ms, 24 runs) and 140-150 ms in B (24 runs). At
+  40 ms RTT it fell from 60-100 ms to 60-90 ms (trj, 8 rounds; csd, 7 rounds).
+- Files: a 1 MiB file finished 15-18% sooner at 120 ms (trj).
+- Endings were not reduced:
+  - At 120 ms with 1% loss, A ended 1 of 24 runs and B 3 of 24 (csd), and
+    1 of 10 versus 1 of 12 on trj.
+  - At 120 ms with 5% loss, almost every run ended in both arms (csd: A 21 of
+    23, B 22 of 24), mostly `video_startup_expired`.
+  - Both arms show the same startup failure. A critical stream's first
+    record (host or client) is never acknowledged before its delivery
+    deadline, after only one to three lost packets on the connection. Of all
+    logged rows (A 299, B 359), 5 of A's endings and 8 of B's had this
+    signature.
 
 Delivery allowance (2026-09-30). A reliable record's send-by is its usefulness
 deadline, enforced at admission: a record already past it is refused. Until

@@ -23,10 +23,8 @@ use std::{
 mod admission;
 mod datagrams;
 pub use datagrams::DatagramReceipt;
-mod send_epoch;
 mod send_window;
 pub use admission::SendAdmission;
-use send_epoch::SendEpoch;
 
 mod lifetime;
 pub use lifetime::terminal::client_abort::{ClientAbortRegistration, ClientAbortReport};
@@ -318,37 +316,13 @@ impl Default for Policy {
         }
     }
 }
-/// Start a batch at its first native prefix, including all records already
-/// queued. Later admissions may join only within `SendEpoch`'s fixed fill window
-/// and critical count bound. No first-prefix delay or new queue is added.
-fn freeze_epoch(
-    senders: &mut [Sender],
-    pending: &mut VecDeque<PendingWrite>,
-    route: StreamRoute,
-    now: u64,
-) {
-    let sender = senders
-        .iter_mut()
-        .find(|s| s.route == route)
-        .expect("validated outbound route");
-    if sender.epoch.is_some() {
-        return;
-    }
-    let mut epoch = SendEpoch::new(0, 0, route.priority == Priority::Bulk, now);
-    for record in pending.iter_mut().filter(|p| p.route == route) {
-        record.in_epoch = true;
-        epoch.bytes += record.bytes.len();
-        epoch.records += 1;
-    }
-    sender.epoch = Some(epoch);
-}
-/// Pinned 0.4.10 exposes stream structural equality but not a retained-byte
-/// getter. Preserve an EMPTY, never-used outbound stream as an exact absence
-/// witness. Refresh only public scalar counters, never clone live private maps.
+/// Preserve an EMPTY, never-used outbound stream as an exact absence witness for
+/// the terminal paths, which must prove a whole lane empty (FIN and reset state
+/// included). Refresh only public scalar counters, never clone live private maps.
 /// Equality proves that BOTH pending and retained retransmission maps are empty;
 /// ACK-only traffic in `bytes_in_flight` is irrelevant. Additional unequal private
-/// state conservatively prevents credit reclamation. Requalify when upgrading
-/// Asupersync; replace with a public retention query when one is provided.
+/// state conservatively refuses. Requalify when upgrading Asupersync. Ordinary
+/// record credit does not use this: it follows `acknowledged_send_offset`.
 struct EmptySendState(QuicStream);
 impl EmptySendState {
     fn matches(&mut self, live: &QuicStream) -> bool {
@@ -386,13 +360,23 @@ impl EmptySendState {
         witness == *live
     }
 }
+/// Charges for every admitted record on one outbound stream, from admission
+/// until the peer has acknowledged the record's last byte. Each charged record
+/// is either still in `pending_writes` or fully written and in `staged`.
 struct Sender {
     route: StreamRoute,
     empty: EmptySendState,
     bytes: usize,
     records: usize,
     until: Option<u64>,
-    epoch: Option<SendEpoch>,
+    staged: VecDeque<Staged>,
+}
+/// A record whose bytes are all in the native stream, awaiting acknowledgement.
+struct Staged {
+    /// Native stream offset just past the record's last byte.
+    end: u64,
+    bytes: usize,
+    deliver_by: u64,
 }
 struct PendingWrite {
     route: StreamRoute,
@@ -401,7 +385,6 @@ struct PendingWrite {
     /// max(the caller's send-by, admission + this path's delivery allowance):
     /// staging and acknowledgement must both complete by then.
     deliver_by: u64,
-    in_epoch: bool,
 }
 struct Inbound {
     route: StreamRoute,
@@ -439,10 +422,11 @@ pub struct ConnectionBinding(Weak<()>);
 /// out of this object: dropping that future drops the socket and makes reuse
 /// terminal, instead of retrying a partially transmitted record.
 ///
-/// Reliable send accounting is deliberately conservative: credit is released
-/// only when native reliable buffers are proven empty, NOT merely when packet
-/// assembly drains or an ACK count increases. Batches, not individual frames,
-/// on each stream may wait for ACKs; there is no new on-wire per-frame acknowledgement.
+/// Reliable send accounting: a record's credit is released only when the
+/// stream's acknowledged prefix (`acknowledged_send_offset`) passes the
+/// record's last byte, NOT merely when packet assembly drains or an ACK count
+/// increases. Later records on a stream are staged without waiting for earlier
+/// ones to be acknowledged; there is no new on-wire per-record acknowledgement.
 /// Asupersync still owns congestion/loss recovery and its qualification gates.
 pub struct QuicRecords {
     identity: Arc<()>,
@@ -517,7 +501,7 @@ impl QuicRecords {
                     bytes: 0,
                     records: 0,
                     until: None,
-                    epoch: None,
+                    staged: VecDeque::new(),
                 });
             } else {
                 // Installing the accepted binding also bounds the native stream
@@ -670,7 +654,7 @@ impl QuicRecords {
             s.bytes = 0;
             s.records = 0;
             s.until = None;
-            s.epoch = None;
+            s.staged.clear();
         }
     }
     pub fn usage(&self) -> Usage {
@@ -899,10 +883,19 @@ impl QuicRecords {
         // Finish application-owned allocations before the final record and
         // connection gates, including the reliable queue's metadata allocation.
         let storage = Bytes::from(storage);
-        if matches!(route, Route::Stream(_)) {
+        if let Route::Stream(stream) = route {
             self.pending_writes
                 .try_reserve(1)
                 .map_err(|_| Error::Allocation)?;
+            // Every charged record, this one included, may be fully staged
+            // before any is acknowledged: staging then never allocates.
+            if let Some(sender) = self.senders.iter_mut().find(|s| s.route == stream) {
+                let charged = sender.records + 1;
+                sender
+                    .staged
+                    .try_reserve(charged.saturating_sub(sender.staged.len()))
+                    .map_err(|_| Error::Allocation)?;
+            }
         }
         let record_check = prepared();
         let current = self.check(cx, authorize)?;
@@ -925,20 +918,13 @@ impl QuicRecords {
                     .iter_mut()
                     .find(|s| s.route == route)
                     .expect("validated outgoing route");
-                // Join at ADMISSION, not when congestion later permits a
-                // prefix. Otherwise a full flight would still force one RTT
-                // per producer turn. Every earlier gate has passed; both this
-                // record and the entire batch remain charged until proven ACKed.
-                let in_epoch = sender
-                    .epoch
-                    .as_mut()
-                    .is_some_and(|epoch| epoch.try_join(bytes.len(), current));
+                // Every earlier gate has passed. The record stays charged until
+                // the peer acknowledges its last byte, however early it stages.
                 self.pending_writes.push_back(PendingWrite {
                     route,
                     bytes: storage,
                     offset: 0,
                     deliver_by,
-                    in_epoch,
                 });
                 sender.bytes += bytes.len();
                 sender.records += 1;
@@ -1031,7 +1017,7 @@ impl QuicRecords {
             // After critical service, offer exactly ONE prefix to the existing
             // bulk round-robin, then yield to ingress even if more work fits.
             // It borrows no critical flow credit and cannot bypass congestion,
-            // epoch accounting, authority or the original delivery deadlines.
+            // acknowledgement accounting, authority or the original deadlines.
             bulk_opportunity = queued == Some(Priority::Critical);
         }
         let current = self.check(cx, authorize)?;
@@ -1050,12 +1036,12 @@ impl QuicRecords {
         .await;
         let native = held.release();
         self.finish_native_io(native, result)?;
-        // This completed operation may have authenticated the last ACK of an
-        // epoch. Retire that custody before sampling the clock again: a local
+        // This completed operation may have authenticated the last ACK of a
+        // record. Retire that custody before sampling the clock again: a local
         // scheduling pause after successful I/O is not a missed peer deadline.
         // No expired operation is resumed here; the pre-I/O boundary, original
         // delivery deadlines and synchronous tick/send/receive gates still apply.
-        self.retire_acknowledged_epochs()?;
+        self.retire_acknowledged()?;
         self.check(cx, authorize)?;
         let native = self.native.as_mut().ok_or(Error::Closed)?;
         if native.connection().state() != QuicConnectionState::Established
@@ -1068,34 +1054,57 @@ impl QuicRecords {
         Ok(())
     }
 
-    fn retire_acknowledged_epochs(&mut self) -> Result<(), Error> {
-        let native = self.native.as_mut().ok_or(Error::Closed)?;
-        // Retire only this epoch, not records waiting for the next batch.
-        // Bulk filling does not delay retirement: exact native emptiness plus
-        // no queued member is sufficient even inside the short fill window.
-        // Waiting records keep their charges and original deadlines. The live
-        // native stream is never cloned or modified to manufacture absence.
+    /// The pending record at `index` is now wholly in the native stream, which
+    /// ends at `end`. It stays charged until the acknowledged prefix passes it.
+    fn stage_record(&mut self, index: usize, end: u64) {
+        let pending = self
+            .pending_writes
+            .remove(index)
+            .expect("written pending record");
+        // Capacity was reserved at admission: this push never allocates.
+        self.senders
+            .iter_mut()
+            .find(|s| s.route == pending.route)
+            .expect("validated outbound route")
+            .staged
+            .push_back(Staged {
+                end,
+                bytes: pending.bytes.len(),
+                deliver_by: pending.deliver_by,
+            });
+    }
+    fn retire_acknowledged(&mut self) -> Result<(), Error> {
+        let native = self.native.as_ref().ok_or(Error::Closed)?;
+        let streams = native.connection().inner().streams();
+        // Release each staged record whose last byte the peer acknowledged:
+        // every byte below `acknowledged_send_offset` is acknowledged, whatever
+        // order the ACKs arrived in. Records behind the first unacknowledged
+        // byte keep their charges and original deadlines. A reset lane reports
+        // no offset and releases nothing.
         for sender in &mut self.senders {
-            if sender.epoch.is_some()
-                && !self
-                    .pending_writes
-                    .iter()
-                    .any(|p| p.route == sender.route && p.in_epoch)
-                && native
-                    .connection()
-                    .inner()
-                    .streams()
-                    .stream(sender.route.stream)
-                    .is_ok_and(|live| sender.empty.matches(live))
+            let Some(acknowledged) = streams
+                .stream(sender.route.stream)
+                .ok()
+                .and_then(QuicStream::acknowledged_send_offset)
+            else {
+                continue;
+            };
+            let mut retired = false;
+            while let Some(record) = sender
+                .staged
+                .pop_front_if(|record| record.end <= acknowledged)
             {
-                let epoch = sender.epoch.take().expect("checked epoch");
-                sender.bytes -= epoch.bytes;
-                sender.records -= epoch.records;
+                sender.bytes -= record.bytes;
+                sender.records -= 1;
+                retired = true;
+            }
+            if retired {
                 sender.until = self
                     .pending_writes
                     .iter()
                     .filter(|p| p.route == sender.route)
                     .map(|p| p.deliver_by)
+                    .chain(sender.staged.iter().map(|record| record.deliver_by))
                     .min();
             }
         }
@@ -1217,7 +1226,7 @@ impl QuicRecords {
                 }
                 // The FIRST pending record preserves whole-record and byte
                 // order on this stream. A later record cannot bypass its head,
-                // and a waiting epoch cannot join an unacknowledged one.
+                // but it need not wait for earlier records' acknowledgement.
                 let Some(index) = self
                     .pending_writes
                     .iter()
@@ -1226,9 +1235,6 @@ impl QuicRecords {
                     continue;
                 };
                 let pending = &self.pending_writes[index];
-                if !pending.in_epoch && sender.epoch.is_some() {
-                    continue;
-                }
                 let credit = inner
                     .stream_send_credit_remaining(pending.route.stream)
                     .min(if priority == Priority::Bulk {
@@ -1251,8 +1257,6 @@ impl QuicRecords {
         let Some((index, length, priority, class, sender_index)) = selected else {
             return Ok(None);
         };
-        let route = self.pending_writes[index].route;
-        freeze_epoch(&mut self.senders, &mut self.pending_writes, route, now);
         let pending = &mut self.pending_writes[index];
         native
             .connection_mut()
@@ -1265,7 +1269,14 @@ impl QuicRecords {
             .map_err(|_| Error::Native)?;
         pending.offset += length;
         if pending.offset == pending.bytes.len() {
-            self.pending_writes.remove(index);
+            let end = native
+                .connection()
+                .inner()
+                .streams()
+                .stream(pending.route.stream)
+                .map_err(|_| Error::Native)?
+                .send_offset;
+            self.stage_record(index, end);
         }
         // Advance only after native acceptance. Backpressure and failed writes
         // neither spend another lane's turn nor relax any retained deadline.
