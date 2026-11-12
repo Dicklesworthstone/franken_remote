@@ -9,8 +9,10 @@ between peers; it is not a peer count or evidence that a viewer is connected.
 Linux selects this surface explicitly. **macOS always requires it**, for both
 view-only and control-capable hosts. The Mac's default image is the matching
 `fr-observation-indicator` beside `frd`; the option selects an absolute override.
-It does not implement local approval, approve a peer, or change Tailscale
-admission. Local approval uses its separate platform-specific consent path.
+The observation role does not approve a peer or change Tailscale admission.
+Local approval uses a separate one-use child of the same packaged image; see
+[local desktop approval](desktop-approval.md). On macOS the persistent Stop
+Sharing item remains mandatory while approval is pending and after it completes.
 
 ## macOS hosting
 
@@ -61,8 +63,10 @@ hidden or removed item, parent loss or malformed IPC ends the original host.
 A local Stop action uses the local-revoke signal; ordinary host cleanup
 completes with a successful exit, so launchd's failure-only restart does not
 undo that action. Cleanup succeeds only once the item is removed and any open
-popover window has left WindowServer. The macOS role refuses approval and microphone commands
-rather than reusing the observation surface for another capability.
+popover window has left WindowServer. An original observation role refuses
+approval and microphone commands. A separately opened AppKit approval role
+can answer only its original pending request and cannot replace this item's
+host-lifetime obligation; microphone commands remain unsupported by this image.
 
 This visible surface complements the independent
 [console-session monitor](macos-host.md#console-session-lifecycle). It does not
@@ -102,9 +106,10 @@ window lifetimes has not been qualified, so it is not silently enabled.
 
 ## Lifetime and failure behavior
 
-The Linux child uses the existing X11 Stop sharing surface and its device-attributed
-input handling; macOS uses its menu bar item. Neither has capture,
-clipboard, file-transfer, input-injection or positive-approval protocol.
+The Linux observation role uses the existing X11 Stop sharing surface and its
+device-attributed input handling; macOS uses its menu bar item. Neither
+observation role has capture, clipboard, file-transfer, input-injection or
+positive-approval protocol.
 The parent/child channel is an inherited socketpair, not a listener; every
 record has fixed size, direction, sequence and epoch checks. The parent passes
 a cleared environment with only the locally selected X11 display and optional

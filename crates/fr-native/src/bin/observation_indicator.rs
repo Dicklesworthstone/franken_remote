@@ -249,6 +249,10 @@ mod role;
 #[path = "observation_indicator/macos.rs"]
 mod macos;
 
+#[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
+#[path = "observation_indicator/macos_approval.rs"]
+mod macos_approval;
+
 fn main() {
     #[cfg(all(
         target_os = "linux",

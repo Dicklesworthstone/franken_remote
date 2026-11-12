@@ -326,13 +326,8 @@ impl RunOptions {
     /// refuse at every start.
     #[cfg(target_os = "macos")]
     #[must_use]
-    pub fn macos_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 5] = [
-            (
-                approval == Approval::Local,
-                "local_approval_unavailable",
-                "macOS has no local approval prompt yet; share with your own devices using --approval none",
-            ),
+    pub fn macos_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
+        let refusals: [(bool, &str, &str); 4] = [
             (
                 self.audio,
                 "audio_server_unavailable",
@@ -500,10 +495,7 @@ mod tests {
         let options = parse(&["--input-agent", "/a"]).unwrap();
         assert!(options.clipboard);
         assert_eq!(options.macos_refusal(approval), None);
-        assert_eq!(
-            options.macos_refusal(Approval::Local).map(|(code, _)| code),
-            Some("local_approval_unavailable")
-        );
+        assert_eq!(options.macos_refusal(Approval::Local), None);
         let options = parse(&["--input-agent", "/a", "--audio"]).unwrap();
         assert_eq!(
             options.macos_refusal(approval).map(|(code, _)| code),

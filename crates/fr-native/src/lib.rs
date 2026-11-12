@@ -101,6 +101,13 @@ pub mod macos_session;
 mod macos_session_policy;
 // Visible host-lifetime stop surface; never constructs an input executor.
 #[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
+pub mod macos_approval;
+#[cfg(any(
+    test,
+    all(target_os = "macos", feature = "macos-observation-indicator")
+))]
+mod macos_approval_policy;
+#[cfg(all(target_os = "macos", feature = "macos-observation-indicator"))]
 pub mod macos_observation;
 #[cfg(any(
     test,

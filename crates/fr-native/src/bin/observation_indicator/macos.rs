@@ -47,8 +47,11 @@ pub(crate) fn run() -> i32 {
         Ok(frame) => frame,
         Err(code) => return code,
     };
+    if matches!(hello.kind, Kind::ApproveView | Kind::ApproveControl) {
+        return crate::macos_approval::run(command, signals, hello);
+    }
     let Some(role) = Observation::open(hello) else {
-        // No native owner exists for an approval/microphone or foreign role.
+        // No observation owner exists for a microphone or foreign role.
         if hello.kind.is_request() {
             let _ = pipe::send(&mut command, hello, Kind::Refused);
         }

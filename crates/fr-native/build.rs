@@ -928,6 +928,7 @@ fn build_macos_input() {
 /// injection, capture or codec bindings in this native adapter.
 fn build_macos_observation_indicator() {
     println!("cargo:rerun-if-changed=src/macos_observation.m");
+    println!("cargo:rerun-if-changed=src/macos_approval.m");
     if env::var_os("CARGO_FEATURE_MACOS_OBSERVATION_INDICATOR").is_none()
         || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
     {
@@ -941,31 +942,37 @@ fn build_macos_observation_indicator() {
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     let minimum = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    assert!(
-        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
-            .args([
-                "-x",
-                "objective-c",
-                "-fobjc-arc",
-                "-O2",
-                "-fPIC",
-                "-Wall",
-                "-Wextra",
-                "-Werror",
-            ])
-            .arg(format!("-mmacosx-version-min={minimum}"))
-            .args(["-c", "src/macos_observation.m", "-o"])
-            .arg(out.join("macosobservation.o"))
-            .status()
-            .expect("native Objective-C compiler")
-            .success(),
-        "install the Xcode command line tools (xcode-select --install)"
-    );
+    for (source, object) in [
+        ("src/macos_observation.m", "macosobservation.o"),
+        ("src/macos_approval.m", "macosapproval.o"),
+    ] {
+        assert!(
+            Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+                .args([
+                    "-x",
+                    "objective-c",
+                    "-fobjc-arc",
+                    "-O2",
+                    "-fPIC",
+                    "-Wall",
+                    "-Wextra",
+                    "-Werror",
+                ])
+                .arg(format!("-mmacosx-version-min={minimum}"))
+                .args(["-c", source, "-o"])
+                .arg(out.join(object))
+                .status()
+                .expect("native Objective-C compiler")
+                .success(),
+            "install the Xcode command line tools (xcode-select --install)"
+        );
+    }
     assert!(
         Command::new("ar")
             .arg("crs")
             .arg(out.join("libfrmacosobservation.a"))
             .arg(out.join("macosobservation.o"))
+            .arg(out.join("macosapproval.o"))
             .status()
             .unwrap()
             .success()

@@ -1,5 +1,5 @@
-//! The macOS helper's single observation role. Matching a sequence and epoch
-//! is only correlation; neither an approval nor another UI role is accepted.
+//! Distinct one-lifetime UI roles. Sequence/epoch correlation cannot turn
+//! observation readiness into consent or retarget an existing prompt.
 use fr_core::indicator_process::{Frame, Kind};
 
 pub(crate) struct Observation {
@@ -23,6 +23,43 @@ impl Observation {
             return None;
         }
         self.next = self.next.checked_add(1)?;
+        Some(frame.kind)
+    }
+}
+
+pub(crate) struct Approval {
+    epoch: u128,
+    next: Option<u64>,
+    control: bool,
+}
+impl Approval {
+    pub(crate) fn open(frame: Frame) -> Option<Self> {
+        (matches!(frame.kind, Kind::ApproveView | Kind::ApproveControl)
+            && frame.sequence == 1
+            && frame.epoch != 0)
+            .then_some(Self {
+                epoch: frame.epoch,
+                next: Some(2),
+                control: frame.kind == Kind::ApproveControl,
+            })
+    }
+
+    pub(crate) const fn requests_control(&self) -> bool {
+        self.control
+    }
+
+    pub(crate) fn accept(&mut self, frame: Frame) -> Option<Kind> {
+        if frame.epoch != self.epoch
+            || Some(frame.sequence) != self.next
+            || !matches!(frame.kind, Kind::ApprovalCheck | Kind::Stop)
+        {
+            return None;
+        }
+        self.next = if frame.kind == Kind::Stop {
+            None
+        } else {
+            Some(frame.sequence.checked_add(1)?)
+        };
         Some(frame.kind)
     }
 }
@@ -129,5 +166,71 @@ mod tests {
             }),
             None
         );
+    }
+
+    #[test]
+    fn native_consent_intent_is_fixed_by_the_original_request() {
+        for (kind, controlling) in [(Kind::ApproveView, false), (Kind::ApproveControl, true)] {
+            let original = Frame { kind, ..open() };
+            let mut role = Approval::open(original).unwrap();
+            assert_eq!(role.requests_control(), controlling);
+            for kind in [
+                Kind::Open,
+                Kind::ApproveView,
+                Kind::ApproveControl,
+                Kind::Ready,
+                Kind::Allowed,
+                Kind::Check,
+            ] {
+                assert_eq!(
+                    role.accept(Frame {
+                        kind,
+                        sequence: 2,
+                        ..original
+                    }),
+                    None
+                );
+            }
+            let check = Frame {
+                kind: Kind::ApprovalCheck,
+                sequence: 2,
+                ..original
+            };
+            assert_eq!(role.accept(Frame { epoch: 8, ..check }), None);
+            assert_eq!(
+                role.accept(Frame {
+                    sequence: 3,
+                    ..check
+                }),
+                None
+            );
+            assert_eq!(role.accept(check), Some(Kind::ApprovalCheck));
+            assert_eq!(role.accept(check), None);
+            assert_eq!(
+                role.accept(Frame {
+                    kind: Kind::Stop,
+                    sequence: 3,
+                    ..original
+                }),
+                Some(Kind::Stop)
+            );
+            assert_eq!(
+                role.accept(Frame {
+                    sequence: 4,
+                    ..check
+                }),
+                None
+            );
+        }
+        for kind in [
+            Kind::Open,
+            Kind::Check,
+            Kind::ApprovalCheck,
+            Kind::Stop,
+            Kind::Ready,
+            Kind::Allowed,
+        ] {
+            assert!(Approval::open(Frame { kind, ..open() }).is_none());
+        }
     }
 }

@@ -102,6 +102,35 @@ pub fn run_with_policy_and_encoder(
     image: &Path,
     encoder: impl Into<host_run::EncoderSelection>,
 ) -> Result<(), Error> {
+    run_with_surface(options, stop, image, || {
+        host_run::run_with_policy_and_encoder(options, report, stop, policy, encoder)
+    })
+}
+
+/// A host with local approval still keeps its independent Stop Sharing
+/// surface before listening, while prompting, and through final cleanup.
+#[cfg(host_stack)]
+pub fn run_with_desktop_approval(
+    options: &Options,
+    report: &Reporter,
+    stop: &Arc<StopHandle>,
+    policy: policy::Configuration,
+    image: &Path,
+    encoder: impl Into<host_run::EncoderSelection>,
+    approval: &host_run::approval::Configuration,
+) -> Result<(), Error> {
+    run_with_surface(options, stop, image, || {
+        host_run::run_with_desktop_approval(options, report, stop, policy, encoder, approval)
+    })
+}
+
+#[cfg(host_stack)]
+fn run_with_surface(
+    options: &Options,
+    stop: &Arc<StopHandle>,
+    image: &Path,
+    serve: impl FnOnce() -> Result<(), host_run::Error>,
+) -> Result<(), Error> {
     if stop.is_requested() {
         return Ok(());
     }
@@ -119,9 +148,7 @@ pub fn run_with_policy_and_encoder(
     .map_err(|_| Error::Configuration)?;
     let stopped = stop.clone();
     let mut owner = Owner::start(launch, move || stopped.request()).map_err(Error::Indicator)?;
-    let result = drive(&owner, stop, || {
-        host_run::run_with_policy_and_encoder(options, report, stop, policy, encoder)
-    });
+    let result = drive(&owner, stop, serve);
     // Keep the UI through normal host teardown. Joining the I/O worker proves
     // its exact child was reaped; a timeout retains the original worker handle.
     owner.stop();

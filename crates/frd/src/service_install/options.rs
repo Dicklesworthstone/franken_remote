@@ -121,20 +121,25 @@ impl InstallOptions {
         let unavailable = || ServiceError::HostProfileUnavailable {
             code: "local_approval_unavailable",
             detail: if self.kind == ServiceKind::LaunchdAgent {
-                "macOS has no local approval prompt yet; share with your own devices using --approval none"
+                "local approval needs a macOS host build and a per-user LaunchAgent in the selected console session; startup revalidates that session and the packaged approval UI"
             } else {
                 "local approval needs a user service with -- --logind-session ID for the shared graphical desktop, without --headless or --observation-indicator; startup revalidates that session and the packaged approval UI"
             },
         };
-        if self.kind != ServiceKind::SystemdUser {
-            return Err(unavailable());
-        }
         #[cfg(target_os = "linux")]
-        {
+        if self.kind == ServiceKind::SystemdUser {
             let run = crate::host_policy::options::RunOptions::parse(&self.run_args)
                 .map_err(|_| ServiceError::InvalidOptions)?;
             if run.logind_session.is_some() && !run.headless && run.observation_indicator.is_none()
             {
+                return Ok(());
+            }
+        }
+        #[cfg(all(target_os = "macos", host_stack))]
+        if self.kind == ServiceKind::LaunchdAgent {
+            let run = crate::host_policy::options::RunOptions::parse(&self.run_args)
+                .map_err(|_| ServiceError::InvalidOptions)?;
+            if run.logind_session.is_none() && !run.headless && run.display.is_none() {
                 return Ok(());
             }
         }
@@ -217,8 +222,7 @@ impl InstallOptions {
                 detail: "a system unit has no user's X display; install a user unit, or pass -- --headless",
             });
         }
-        // The same refusals `frd run` makes at every start on macOS. Saved
-        // local approval is refused here only when explicitly selected.
+        // The same platform refusals `frd run` makes at every start on macOS.
         #[cfg(target_os = "macos")]
         {
             let approval = if self.approval_mode == "local" {
@@ -293,3 +297,6 @@ mod file_conflict_tests;
 
 #[cfg(all(test, target_os = "linux"))]
 mod local_approval_tests;
+
+#[cfg(all(test, target_os = "macos", host_stack))]
+mod macos_approval_tests;

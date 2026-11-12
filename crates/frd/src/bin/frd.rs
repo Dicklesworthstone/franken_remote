@@ -858,31 +858,38 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         },
         None => None,
     };
-    let result = if let Some(approval) = local_ui {
-        host_run::run_with_desktop_approval(
+    let result = match (local_ui.as_ref(), observation_indicator.as_deref()) {
+        (Some(approval), Some(image)) => frd::host_indicator::run_with_desktop_approval(
+            &run_options,
+            &report,
+            &stop,
+            policy,
+            image,
+            encoder,
+            approval,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
+        (Some(approval), None) => host_run::run_with_desktop_approval(
             &run_options,
             &report,
             &stop,
             policy,
             encoder,
-            &approval,
+            approval,
         )
-        .map_err(|error| (error.code(), error.to_string()))
-    } else {
-        match observation_indicator.as_deref() {
-            Some(image) => frd::host_indicator::run_with_policy_and_encoder(
-                &run_options,
-                &report,
-                &stop,
-                policy,
-                image,
-                encoder,
-            )
-            .map_err(|error| (error.code(), error.to_string())),
-            None => {
-                host_run::run_with_policy_and_encoder(&run_options, &report, &stop, policy, encoder)
-                    .map_err(|error| (error.code(), error.to_string()))
-            }
+        .map_err(|error| (error.code(), error.to_string())),
+        (None, Some(image)) => frd::host_indicator::run_with_policy_and_encoder(
+            &run_options,
+            &report,
+            &stop,
+            policy,
+            image,
+            encoder,
+        )
+        .map_err(|error| (error.code(), error.to_string())),
+        (None, None) => {
+            host_run::run_with_policy_and_encoder(&run_options, &report, &stop, policy, encoder)
+                .map_err(|error| (error.code(), error.to_string()))
         }
     };
     let files_cleaned = file_commands_host::finish(file_owner.as_ref());
