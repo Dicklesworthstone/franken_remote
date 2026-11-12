@@ -1,6 +1,6 @@
 //! Completed auxiliary-channel cleanup, never abandonment of a partial handshake.
 mod files_setup;
-use super::{ACTIVE, MediaChannel, MediaRole, Ordering, Phase, QuicRecords, RETIRED};
+use super::{ACTIVE, Expiry, MediaChannel, MediaRole, Ordering, Phase, QuicRecords, RETIRED};
 use crate::quic::{Cx, Error};
 use asupersync::bytes::Bytes;
 
@@ -171,7 +171,7 @@ impl QuicRecords {
                     && matches!(r.role, MediaRole::AudioDown | MediaRole::AudioUp)
             })
             .ok_or(Error::WrongRoute)?;
-        Ok(reservation.retired() && reservation.receive_expired)
+        Ok(reservation.retired() && reservation.expiry == Some(Expiry::Receive))
     }
     /// Run before framing/retained-record deadline checks. A peer's reset/FIN
     /// cancels this media/optional pair; it is not EOF on the critical input stream.
@@ -218,34 +218,36 @@ impl QuicRecords {
                 // A received terminal cause predates this turn's local clock
                 // checks. Do not relabel the peer's send expiry as a receive
                 // expiry merely because this consumer was scheduled later.
-                let receive_expired =
-                    peer_receive_expired || (receive_expired && !peer_send_expired);
-                let send_expired = send_expiry.is_some()
-                    && !receive_expired
+                let expiry = if peer_receive_expired || (receive_expired && !peer_send_expired) {
+                    Some(Expiry::Receive)
+                } else if send_expiry.is_some()
                     && (peer_send_expired
                         || self.senders.iter().any(|sender| {
                             sender.route.stream == r.outbound
                                 && sender.until.is_some_and(|until| now >= until)
-                        }));
+                        }))
+                {
+                    Some(Expiry::Send)
+                } else {
+                    None
+                };
                 // Only the exclusive between-I/O owner can retract this
                 // stream's unsent and retransmittable bytes. An unsettled
                 // native operation may own protected packets containing them;
                 // resetting stream metadata cannot selectively withdraw those.
                 // poll_io_at_boundary keeps its unchanged terminal deadline
                 // check while a native future owns the connection.
-                if send_expired && self.native_io_unsettled {
+                if expiry == Some(Expiry::Send) && self.native_io_unsettled {
                     return Err(Error::Expired);
                 }
-                if receive_expired
-                    || send_expired
+                if expiry.is_some()
                     || r.retire.load(Ordering::Acquire)
                     || outgoing.stop_sending_error_code.is_some()
                     || outgoing.send_reset.is_some()
                     || incoming.recv_reset.is_some()
                     || incoming.final_size.is_some()
                 {
-                    self.attachments[index].receive_expired = receive_expired;
-                    self.attachments[index].send_expired = send_expired;
+                    self.attachments[index].expiry = expiry;
                     self.retire_optional_at(cx, index)?;
                 }
             }
@@ -265,13 +267,12 @@ impl QuicRecords {
     /// original Files exchange reached its direction-specific staged final boundary.
     fn retire_reservation_at(&mut self, cx: &Cx, index: usize) -> Result<(), Error> {
         let r = &self.attachments[index];
-        let code = if r.receive_expired {
-            receive_expiry_code(r.role).ok_or(Error::WrongRoute)?
-        } else if r.send_expired {
-            send_expiry_code(r.role).ok_or(Error::WrongRoute)?
-        } else {
-            retirement_code(r.role).ok_or(Error::WrongRoute)?
-        };
+        let code = match r.expiry {
+            Some(Expiry::Receive) => receive_expiry_code(r.role),
+            Some(Expiry::Send) => send_expiry_code(r.role),
+            None => retirement_code(r.role),
+        }
+        .ok_or(Error::WrongRoute)?;
         let (outbound, inbound, binding) = (r.outbound, r.inbound, r.binding);
         // The native DATAGRAM queue mixes routes and exposes no selective erase.
         // Check before removing this binding, on all three retirement paths:

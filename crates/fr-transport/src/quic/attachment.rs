@@ -54,6 +54,14 @@ impl RetirementRequest {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Expiry {
+    /// Original partial or complete receive framing deadline.
+    Receive,
+    /// Original retained-send obligation, also reported unchanged by the peer.
+    Send,
+}
+
 /// Retained through connection closure: consumed bindings and ticket identities
 /// never re-enter the allocation pool. The fixed stream limit also bounds
 /// consumed recovery generations and both optional file directions.
@@ -67,12 +75,10 @@ pub(super) struct Reservation {
     pub(super) inbound: StreamId,
     outbound: StreamId,
     retired_receive_accounted: u64,
-    /// Original framing expiry retired this completed optional pair.
-    /// Retain the cause beside the one-use reservation after buffers are gone.
-    receive_expired: bool,
-    /// A retained send on this original completed clipboard or file pair expired.
-    /// The peer reports the same original sender obligation, not receive expiry.
-    send_expired: bool,
+    /// The first expiry cause of this completed optional pair, retained beside
+    /// its one-use reservation after buffers are gone. Receive and send expiry
+    /// are mutually exclusive; ordinary retirement leaves this empty.
+    expiry: Option<Expiry>,
     role: MediaRole,
     files_duplex: bool,
     // True only after the host Binding entered the ordered control queue.
@@ -635,8 +641,7 @@ impl QuicRecords {
             inbound: inbound.stream,
             outbound: outbound.stream,
             retired_receive_accounted: 0,
-            receive_expired: false,
-            send_expired: false,
+            expiry: None,
             role: d.role,
             files_duplex,
             offered: false,
@@ -896,7 +901,7 @@ impl MediaChannel {
             && q.attachments.iter().any(|reservation| {
                 Arc::ptr_eq(&reservation.state, &self.state)
                     && reservation.retired()
-                    && reservation.receive_expired
+                    && reservation.expiry == Some(Expiry::Receive)
             })
     }
     pub(super) fn send_expired(&self, q: &QuicRecords) -> bool {
@@ -905,7 +910,7 @@ impl MediaChannel {
             && q.attachments.iter().any(|reservation| {
                 Arc::ptr_eq(&reservation.state, &self.state)
                     && reservation.retired()
-                    && reservation.send_expired
+                    && reservation.expiry == Some(Expiry::Send)
             })
     }
     /// Ask the original connection to retire this completed optional pair at
