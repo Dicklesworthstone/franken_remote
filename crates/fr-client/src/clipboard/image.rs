@@ -180,7 +180,7 @@ impl ControllerImageClipboard {
     ) -> Result<Receipt, Error> {
         let failure = Cell::new(None);
         let result = self.session.commit(stamp, total_bytes, sink, || {
-            self.clock.checked(clock(), &failure)
+            self.clock.checked(&mut clock, &failure)
         });
         result.map_err(|_| failure.get().unwrap_or(Error::Stopped))
     }

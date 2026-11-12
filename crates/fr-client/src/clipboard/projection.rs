@@ -14,7 +14,7 @@ use fr_core::{
 use fr_media::freshness::{ClockCorrelation, ReceiverLifetime};
 use fr_wire::{control::Granted, negotiation::ControlBinding};
 use std::sync::{
-    Arc, Mutex, Weak,
+    Arc, Mutex, TryLockError, Weak,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -436,11 +436,35 @@ impl State {
         cursor: &Mutex<Cursor>,
         require_view: bool,
     ) -> Result<HostInstant, Error> {
+        match self.try_sample_cursor_once(now, cursor, require_view)? {
+            Some(host) => Ok(host),
+            None => self.failure(Error::Stopped),
+        }
+    }
+    /// One nonblocking attempt. `Ok(None)` is contention: the original input
+    /// owner (or this cursor's other user) held a lock at that instant. Nothing
+    /// was sampled, waited for or fenced, so a caller that can take a FRESH
+    /// local sample may back off and retry. Any other failure fences as
+    /// `try_sample_cursor` does.
+    pub(super) fn try_sample_cursor_once(
+        &self,
+        now: ClientInstant,
+        cursor: &Mutex<Cursor>,
+        require_view: bool,
+    ) -> Result<Option<HostInstant>, Error> {
         let result = (|| {
-            let mut c = cursor.try_lock().map_err(|_| Error::Stopped)?;
-            let mut m = self.inner.try_lock().map_err(|_| Error::Stopped)?;
+            let mut c = match cursor.try_lock() {
+                Ok(c) => c,
+                Err(TryLockError::WouldBlock) => return Ok(None),
+                Err(TryLockError::Poisoned(_)) => return Err(Error::Stopped),
+            };
+            let mut m = match self.inner.try_lock() {
+                Ok(m) => m,
+                Err(TryLockError::WouldBlock) => return Ok(None),
+                Err(TryLockError::Poisoned(_)) => return Err(Error::Stopped),
+            };
             self.sample_cursor_locked(now, &mut c, &mut m, require_view, false)
-                .map(|(host, _)| host)
+                .map(|(host, _)| Some(host))
         })();
         if result.as_ref().is_err_and(|e| *e != Error::NotReady) {
             self.stopped.store(true, Ordering::Release);

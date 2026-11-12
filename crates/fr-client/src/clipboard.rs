@@ -8,7 +8,10 @@ pub(crate) mod projection;
 mod synchronize;
 use crate::input::{ClientInstant, InputClient};
 use fr_core::{
-    clipboard::{ClipboardSink, ClipboardSwitch, Receipt, Stamp},
+    clipboard::{
+        ClipboardSink, ClipboardSwitch, Receipt, Stamp,
+        authority::{CONTENDED_RETRIES, contended_backoff},
+    },
     limits::ProtocolLimits,
     time::HostInstant,
 };
@@ -64,6 +67,22 @@ impl ControllerTransport {
             return Err(Error::Stopped);
         }
         Ok(at)
+    }
+    /// As `sample_native`, except that contention with the original input
+    /// owner is `Ok(None)` and fences nothing. Nothing was waited for after
+    /// `now`, so the caller may back off and retry with a FRESH local sample.
+    pub fn try_sample_native(&self, now: ClientInstant) -> Result<Option<HostInstant>, Error> {
+        if !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
+        let state = self.clock.state.upgrade().ok_or(Error::Stopped)?;
+        let Some(at) = state.try_sample_cursor_once(now, &self.clock.cursor, true)? else {
+            return Ok(None);
+        };
+        if state.stopped.load(Ordering::Acquire) || !self.transport.is_open() {
+            return Err(Error::Stopped);
+        }
+        Ok(Some(at))
     }
     /// Advance the original conservative clock while a view suspension blocks
     /// clipboard work. This is time for expiring bounded items, not authority:
@@ -159,15 +178,47 @@ impl ProjectedClock {
             .sample_cursor(now, &self.cursor, false)
     }
     /// The infallible core clock callback must not wait after the local sample.
-    /// On contention or projection failure, fence only this clipboard owner
-    /// and return the attachment sample. It is unusable authority: the next
-    /// core gate observes the fence before native publication.
-    fn checked(&self, now: ClientInstant, failure: &Cell<Option<Error>>) -> HostInstant {
+    /// The original input owner updates this projection under the same lock on
+    /// its own thread, so contention is ordinary: discard that sample, back off
+    /// and take a fresh one (bounded by `CONTENDED_RETRIES`). On projection
+    /// failure or persistent contention, fence only this clipboard owner and
+    /// return the attachment sample. It is unusable authority: the next core
+    /// gate observes the fence before native publication.
+    fn checked(
+        &self,
+        mut clock: impl FnMut() -> ClientInstant,
+        failure: &Cell<Option<Error>>,
+    ) -> HostInstant {
+        let result = self
+            .state
+            .upgrade()
+            .ok_or(Error::Stopped)
+            .and_then(|state| {
+                for retry in 0..CONTENDED_RETRIES {
+                    if let Some(at) = state.try_sample_cursor_once(clock(), &self.cursor, false)? {
+                        return Ok(at);
+                    }
+                    contended_backoff(retry);
+                }
+                state.try_sample_cursor(clock(), &self.cursor, false)
+            });
+        self.settle(result, failure)
+    }
+    /// As `checked`, for a caller that holds one sample and cannot take a
+    /// fresher one: contention fences without a retry.
+    fn checked_once(&self, now: ClientInstant, failure: &Cell<Option<Error>>) -> HostInstant {
         let result = self
             .state
             .upgrade()
             .ok_or(Error::Stopped)
             .and_then(|state| state.try_sample_cursor(now, &self.cursor, false));
+        self.settle(result, failure)
+    }
+    fn settle(
+        &self,
+        result: Result<HostInstant, Error>,
+        failure: &Cell<Option<Error>>,
+    ) -> HostInstant {
         match result {
             Ok(at) => at,
             Err(error) => {
@@ -354,7 +405,7 @@ impl ControllerClipboard {
         let mut call = Call::new(&mut self.channel);
         let result = call
             .channel
-            .pump(scratch, sink, || self.clock.checked(clock(), &failure));
+            .pump(scratch, sink, || self.clock.checked(&mut clock, &failure));
         call.complete = true;
         result.map_err(|error| failure.get().unwrap_or(Error::Session(error)))
     }
@@ -368,7 +419,7 @@ impl ControllerClipboard {
         let mut call = Call::new(&mut self.channel);
         let result = call
             .channel
-            .receive(bytes, sink, || self.clock.checked(clock(), &failure));
+            .receive(bytes, sink, || self.clock.checked(&mut clock, &failure));
         call.complete = true;
         // Never replace a successful/uncertain external receipt with a later
         // diagnostic. Core checks the projected clock BEFORE native publication.

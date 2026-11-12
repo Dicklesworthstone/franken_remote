@@ -568,7 +568,12 @@ fn final_native_clock_never_waits_on_policy_mutexes_or_revokes_input() {
         worker.join().unwrap();
         reached_final_sample.unwrap();
         let (result, sink, closed, samples) = completed.unwrap();
-        assert_eq!(samples, 3);
+        // Persistent contention: each bounded retry backed off and took a fresh
+        // sample without waiting on the held mutex, and every one was refused.
+        assert_eq!(
+            samples,
+            3 + fr_core::clipboard::authority::CONTENDED_RETRIES
+        );
         assert_eq!(result, Err(Error::Stopped));
         assert!(closed);
         assert_eq!(sink.prepared, 1);
@@ -580,6 +585,38 @@ fn final_native_clock_never_waits_on_policy_mutexes_or_revokes_input() {
         assert_eq!(input.stopped(), None);
         press(&mut input, 2);
         assert_eq!(input.pending_actions(), 1);
+    }
+}
+
+#[test]
+fn final_native_clock_contention_retries_with_a_fresh_sample_and_publishes() {
+    for hold_cursor in [true, false] {
+        let (mut input, mut lane) = attached();
+        let mut sink = Platform::default();
+        let commit = stage(&mut lane, &mut sink, 1, "after contention", 0);
+        let cursor = lane.clock.cursor.clone();
+        let state = lane.clock.state.upgrade().unwrap();
+        let mut samples = 0;
+        let mut held_cursor = None;
+        let mut held_state = None;
+        // The input owner holds a projection lock at the final sample and has
+        // released it by the next one: ordinary contention, not a lost grant.
+        let receipt = lane
+            .receive(&commit, &mut sink, || {
+                samples += 1;
+                held_cursor = (samples == 3 && hold_cursor).then(|| cursor.lock().unwrap());
+                held_state = (samples == 3 && !hold_cursor).then(|| state.inner.lock().unwrap());
+                client(samples)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(samples, 4, "one fresh sample after the contended one");
+        assert_eq!(receipt.publication, Publication::SubmittedToOs);
+        assert_eq!(sink.text, ["after contention"]);
+        assert!(!lane.is_closed());
+        input.tick(client(5)).unwrap();
+        assert_eq!(input.stopped(), None);
+        press(&mut input, 5);
     }
 }
 
@@ -647,6 +684,27 @@ fn the_native_transport_sample_refuses_contention_without_waiting_or_revoking_in
         input.tick(client(2)).unwrap();
         assert_eq!(input.stopped(), None);
         press(&mut input, 2);
+    }
+}
+
+#[test]
+fn the_retryable_native_sample_reports_contention_without_fencing() {
+    for hold_cursor in [true, false] {
+        let (mut input, lane) = attached();
+        let network = lane.transport();
+        let cursor = network.clock.cursor.clone();
+        let state = network.clock.state.upgrade().unwrap();
+        {
+            let _cursor = hold_cursor.then(|| cursor.lock().unwrap());
+            let _state = (!hold_cursor).then(|| state.inner.lock().unwrap());
+            assert_eq!(network.try_sample_native(client(1)), Ok(None));
+        }
+        assert!(!state.stopped.load(Ordering::Acquire));
+        // The caller's fresh sample after its backoff is admitted as usual.
+        assert_eq!(network.try_sample_native(client(2)), Ok(Some(host_at(2))));
+        input.tick(client(3)).unwrap();
+        assert_eq!(input.stopped(), None);
+        press(&mut input, 3);
     }
 }
 

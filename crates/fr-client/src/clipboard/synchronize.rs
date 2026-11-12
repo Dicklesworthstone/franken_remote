@@ -63,7 +63,7 @@ impl<N: NativeClipboard> ControllerSynchronizer<N> {
         let result = self.native.poll(
             scratch,
             sink,
-            || self.clock.checked(clock(), &failure),
+            || self.clock.checked(&mut clock, &failure),
             new_id,
         );
         result.map_err(|error| {
@@ -91,7 +91,7 @@ impl<N: NativeClipboard> ControllerSynchronizer<N> {
         now: ClientInstant,
     ) -> Result<Received, NativeError<N::Error>> {
         let failure = Cell::new(None);
-        let at = self.clock.checked(now, &failure);
+        let at = self.clock.checked_once(now, &failure);
         self.native.expire_receive(expired, at).map_err(|error| {
             failure
                 .get()
@@ -108,7 +108,7 @@ impl<N: NativeClipboard> ControllerSynchronizer<N> {
         let failure = Cell::new(None);
         let result =
             self.native
-                .receive_before(record, || self.clock.checked(clock(), &failure), bound);
+                .receive_before(record, || self.clock.checked(&mut clock, &failure), bound);
         result.map_err(|error| {
             failure
                 .get()

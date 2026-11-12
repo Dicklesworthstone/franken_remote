@@ -3,6 +3,7 @@ use super::{
     Admission, Arc, ClientInstant, ControllerTransport, Cx, Disposition, Egress, Error,
     HostInstant, Received, RecordSink, SessionError, Transport, TransportFailure,
 };
+use fr_core::clipboard::authority::{CONTENDED_RETRIES, contended_backoff};
 use std::sync::{
     Mutex, OnceLock, TryLockError,
     atomic::{AtomicU64, Ordering},
@@ -33,6 +34,9 @@ impl Clock {
     /// Native boundaries retain the original authorization cap across any
     /// policy wait. Only nonblocking readiness checks follow the final raw
     /// clock sample; a newer view or ticket cannot retime the caller's item.
+    /// A check refused only because the input owner held its policy lock at
+    /// that instant is retried after a bounded backoff with a fresh sample
+    /// (`CONTENDED_RETRIES`), against the same cap.
     pub(super) fn sample_native(&self, cx: &Cx) -> Result<(u64, HostInstant), Error> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let sampled = now(cx)?;
@@ -41,26 +45,53 @@ impl Clock {
                 let until = gate
                     .deadline(HostInstant::from_micros(sampled))
                     .map_err(Error::Session)?;
-                cx.checkpoint().map_err(|_| Error::Cancelled)?;
-                let local = now(cx)?;
-                if local < sampled {
-                    gate.close();
-                    return Err(Error::Clock);
+                let mut previous = sampled;
+                let mut retries = 0;
+                loop {
+                    cx.checkpoint().map_err(|_| Error::Cancelled)?;
+                    let local = now(cx)?;
+                    if local < previous {
+                        gate.close();
+                        return Err(Error::Clock);
+                    }
+                    previous = local;
+                    let host = HostInstant::from_micros(local);
+                    if host >= until {
+                        return Err(Error::Session(SessionError::Clipboard(
+                            fr_core::clipboard::Error::Expired,
+                        )));
+                    }
+                    match gate.check_publication(host) {
+                        Err(SessionError::Clipboard(fr_core::clipboard::Error::Authority(
+                            fr_core::input_submission::Refusal::AuthorityUnavailable,
+                        ))) if retries < CONTENDED_RETRIES => {
+                            contended_backoff(retries);
+                            retries += 1;
+                        }
+                        result => {
+                            result.map_err(Error::Session)?;
+                            return Ok((local, host));
+                        }
+                    }
                 }
-                let host = HostInstant::from_micros(local);
-                if host >= until {
-                    return Err(Error::Session(SessionError::Clipboard(
-                        fr_core::clipboard::Error::Expired,
-                    )));
-                }
-                gate.check_publication(host).map_err(Error::Session)?;
-                Ok((local, host))
             }
             Self::Controller(gate) => {
+                let mut local = sampled;
+                for retry in 0..CONTENDED_RETRIES {
+                    if let Some(host) = gate
+                        .try_sample_native(ClientInstant(local))
+                        .map_err(Error::Controller)?
+                    {
+                        return Ok((local, host));
+                    }
+                    contended_backoff(retry);
+                    cx.checkpoint().map_err(|_| Error::Cancelled)?;
+                    local = now(cx)?;
+                }
                 let host = gate
-                    .sample_native(ClientInstant(sampled))
+                    .sample_native(ClientInstant(local))
                     .map_err(Error::Controller)?;
-                Ok((sampled, host))
+                Ok((local, host))
             }
         }
     }

@@ -43,6 +43,28 @@ pub trait Authority: Send + Sync {
     fn revoke(&self);
 }
 
+/// Fresh-sample retries after a final fence found the original owner's policy
+/// lock held. That owner (input submission, ticket and view updates) holds it
+/// only for pure policy work, so contention is ordinary during a session and is
+/// not a lost grant. Each retry backs off BEFORE taking its own new clock
+/// sample, so no fence waits after the sample it checks, and an item's
+/// original cap never moves. Persistent contention still refuses.
+pub const CONTENDED_RETRIES: u32 = 32;
+
+/// Back off between those retries: yield first, then sleep briefly, about
+/// 3 ms in all, which outlasts a policy holder preempted mid-update.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn contended_backoff(retry: u32) {
+    if retry < 8 {
+        std::thread::yield_now();
+    } else {
+        std::thread::sleep(std::time::Duration::from_micros(100));
+    }
+}
+/// A single-threaded target has no other policy holder to wait for.
+#[cfg(target_arch = "wasm32")]
+pub fn contended_backoff(_: u32) {}
+
 /// Shared read/revoke-only access. Cloning retains the SAME owner; it is not a
 /// new grant or a way to reset a clipboard channel's consumed sequence floors.
 #[derive(Clone)]

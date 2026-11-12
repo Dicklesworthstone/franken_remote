@@ -435,19 +435,34 @@ impl ClipboardSession {
     }
     /// Preserve the original time cap and inspect only nonblocking fences after
     /// the last policy wait. A second authorization could wait again or replace
-    /// the cap just checked.
-    fn check_publication(&mut self, now: HostInstant, until: HostInstant) -> Result<(), Error> {
-        if now < self.clock {
-            self.monitor.revoke();
-            self.close();
-            return Err(Error::Clock);
-        }
-        self.clock = now;
-        if now >= until {
-            return Err(Error::Expired);
-        }
-        if let Some(reason) = self.monitor.publication_refusal(now) {
-            return Err(self.authority_error(reason));
+    /// the cap just checked. A fence refused only because the policy owner was
+    /// busy at that instant (`AuthorityUnavailable`) is retried with a fresh
+    /// sample after a bounded backoff, against the same cap.
+    fn check_publication(
+        &mut self,
+        mut clock: impl FnMut() -> HostInstant,
+        until: HostInstant,
+    ) -> Result<(), Error> {
+        let mut retries = 0;
+        loop {
+            let now = clock();
+            if now < self.clock {
+                self.monitor.revoke();
+                self.close();
+                return Err(Error::Clock);
+            }
+            self.clock = now;
+            if now >= until {
+                return Err(Error::Expired);
+            }
+            match self.monitor.publication_refusal(now) {
+                None => break,
+                Some(Refusal::AuthorityUnavailable) if retries < authority::CONTENDED_RETRIES => {
+                    authority::contended_backoff(retries);
+                    retries += 1;
+                }
+                Some(reason) => return Err(self.authority_error(reason)),
+            }
         }
         self.check_switches()?;
         Ok(())

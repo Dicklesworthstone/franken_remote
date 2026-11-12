@@ -418,3 +418,33 @@ fn final_policy_contention_refuses_clipboard_without_waiting_or_revoking_input()
     assert_eq!(sink.effects, [] as [String; 0]);
     assert_eq!(sink.cleanup, 1);
 }
+
+#[test]
+fn final_policy_contention_retries_with_a_fresh_sample_and_publishes_under_the_original_cap() {
+    let (input, shared) = shared_owner();
+    let mut session = receiver(&input);
+    let item = receive(&mut session, 1, b"private");
+    let mut sink = Sink::default();
+    let mut samples = 0;
+    let mut held_policy = None;
+    // The input owner holds its policy lock at the first final sample and has
+    // released it by the next one: ordinary contention, not a lost grant.
+    let receipt = session
+        .commit(item.stamp, item.total_bytes, &mut sink, || {
+            samples += 1;
+            if samples == 3 {
+                held_policy = Some(shared.lock().unwrap());
+            } else {
+                held_policy = None;
+            }
+            at(samples)
+        })
+        .unwrap();
+    assert_eq!(samples, 4, "one fresh sample after the contended fence");
+    assert_eq!(receipt.publication, Publication::SubmittedToOs);
+    assert!(!session.is_closed());
+    assert!(!input.monitor().is_revoked());
+    assert_eq!(sink.effects, ["private"]);
+    // The prepared-state guard always releases once, published or not.
+    assert_eq!(sink.cleanup, 1);
+}

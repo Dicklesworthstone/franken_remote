@@ -183,7 +183,7 @@ impl ClipboardSession {
         // The policy read can wait for the original authority owner. Account
         // for that wait after every policy lock is released, without renewing
         // this item's lifetime or reauthorizing against a newer deadline.
-        self.check_publication(clock(), until)?;
+        self.check_publication(&mut clock, until)?;
         let publication = prepared.0.publish_until(text, stamp, until);
         let receipt = Receipt { stamp, publication };
         // In particular UnknownEffect is retained, not reclassified as safe to
