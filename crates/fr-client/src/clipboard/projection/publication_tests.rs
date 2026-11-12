@@ -317,6 +317,41 @@ fn publication_before_the_view_deadline_preserves_real_receipts_and_the_cap() {
 }
 
 #[test]
+fn final_publication_honors_the_earlier_input_receipt_deadline() {
+    for elapsed in [499_999, 500_000] {
+        let (mut input, mut lane) = attached();
+        press(&mut input, 0);
+        let mut sink = Platform::default();
+        let commit = stage(&mut lane, &mut sink, 1, "receipt bound", 0);
+        let mut samples = 0;
+        let result = lane.receive(&commit, &mut sink, || {
+            samples += 1;
+            client(if samples == 3 { elapsed } else { 0 })
+        });
+        assert_eq!(samples, 3);
+        assert_eq!(sink.prepared, 1);
+        assert_eq!(sink.cancelled, 1);
+        assert_eq!(lane.retained_bytes(), 0);
+        if elapsed < 500_000 {
+            assert_eq!(
+                result.unwrap().unwrap().publication,
+                Publication::SubmittedToOs
+            );
+            assert_eq!(sink.until, Some(host_at(500_000)));
+            assert_eq!(sink.text, ["receipt bound"]);
+            assert!(!lane.is_closed());
+        } else {
+            // The failed clock projection fences this optional owner; the
+            // receive wrapper preserves its Expired diagnostic over Revoked.
+            assert_eq!(result, Err(Error::Expired));
+            assert!(sink.until.is_none());
+            assert_eq!(sink.text, [] as [String; 0]);
+            assert!(lane.is_closed());
+        }
+    }
+}
+
+#[test]
 fn a_fresh_view_during_the_final_clock_does_not_replace_the_retained_cap() {
     let (mut input, mut lane) = attached();
     let mut sink = Platform::default();

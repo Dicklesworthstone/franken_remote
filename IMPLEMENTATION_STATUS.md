@@ -1,5 +1,34 @@
 # Implementation status
 
+## Clipboard publication boundary integration (2026-11-12)
+
+The controlling-viewer suite now has a thirteenth regression that stages real
+clipboard records under an outstanding input receipt obligation. It verifies OS
+publication immediately before that obligation expires, with the original
+500,000-microsecond cap, and refusal plus prepared-state cleanup at exact expiry
+while the view and lease are still live. This new regression is source-reviewed
+but has not been executed.
+
+The [focused Observation indicator run on 15cb1cc](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43147800628)
+passed **206 selected test executions with zero failures**. This includes the
+updated software/VideoToolbox rate preflight test, host approval and policy,
+shared publishing, Linux native input responsiveness, and real X11 indicator and
+microphone controls. The run also compiled the actual frd library test binary,
+including the six new native clipboard callback regressions, and checked the
+frd executable. Some filtered suites overlap; 206 is an execution count, not a
+count of distinct tests.
+
+That workflow does not select the new client clipboard publication suite or
+the six native clipboard callback tests. Those remain unexecuted, as does the
+real Mac adaptive-rate worker regression. The earlier 44 shared/core clipboard
+tests and the five Rust plus 25 portable C capture-policy checks are separate
+passing evidence recorded below. Separately, the [Linux verification job on a7a5778](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43148535884/job/130952835434)
+passed the all-target, all-feature compiler check and strict Clippy. Its tests
+and the Mac jobs are still running at this checkpoint. Complete multi-platform
+verification and live VideoToolbox qualification remain outstanding. The two
+native-test wrapping corrections from the pinned GitHub formatter are included
+without semantic changes.
+
 ## Native clipboard callbacks after policy waits (2026-11-12)
 
 The native clipboard access guard now retains the original authorization cap

@@ -191,23 +191,27 @@ fn newer_policy_cannot_replace_a_cap_retained_before_the_native_wait() {
 #[test]
 fn native_revocation_during_the_policy_wait_is_seen_before_returning_permission() {
     let mut boundary = HostBoundary::new(2_000);
-    assert!(!boundary.during_policy_read(Some(HostInstant::from_micros(1_000)), |boundary| {
-        boundary.clock.advance_to(Time::from_nanos(999_000));
-        boundary.policy.revoked.store(true, Ordering::Release);
-    }));
+    assert!(
+        !boundary.during_policy_read(Some(HostInstant::from_micros(1_000)), |boundary| {
+            boundary.clock.advance_to(Time::from_nanos(999_000));
+            boundary.policy.revoked.store(true, Ordering::Release);
+        })
+    );
     assert!(!boundary.check(None));
 }
 
 #[test]
 fn native_cancellation_during_the_policy_wait_is_seen_before_returning_permission() {
     let mut boundary = HostBoundary::new(2_000);
-    assert!(!boundary.during_policy_read(Some(HostInstant::from_micros(1_000)), |boundary| {
-        boundary.clock.advance_to(Time::from_nanos(999_000));
-        boundary
-            .seed
-            .cx
-            .cancel_with(asupersync::types::CancelKind::User, None);
-    }));
+    assert!(
+        !boundary.during_policy_read(Some(HostInstant::from_micros(1_000)), |boundary| {
+            boundary.clock.advance_to(Time::from_nanos(999_000));
+            boundary
+                .seed
+                .cx
+                .cancel_with(asupersync::types::CancelKind::User, None);
+        })
+    );
     assert!(!boundary.check(None));
 }
 
