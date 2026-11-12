@@ -116,6 +116,35 @@ pub fn usage(scan: u8, extended: bool) -> Option<u16> {
     })
 }
 
+/// One keyboard message as the window procedure sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyMessage {
+    pub scan: u8,
+    pub extended: bool,
+    pub pressed: bool,
+    /// The message time (milliseconds, `GetMessageTime`).
+    pub time: u32,
+}
+
+/// Whether `this` is the left Ctrl Windows synthesizes around `AltGr` on
+/// layouts that have it: a left Ctrl transition (scan 0x1D, not extended)
+/// queued directly ahead of a right Alt transition (scan 0x38, extended) in
+/// the same direction with the same message time. The host types with its
+/// own layout, where right Alt is `AltGr`; forwarding the synthetic Ctrl
+/// would make every `AltGr` character Ctrl+`AltGr` (`@` on a German layout
+/// arrives as Ctrl+@). A real left Ctrl is a separate keystroke with its own
+/// time.
+pub fn synthetic_ctrl(this: KeyMessage, next: Option<KeyMessage>) -> bool {
+    this.scan == 0x1D
+        && !this.extended
+        && next.is_some_and(|next| {
+            next.scan == 0x38
+                && next.extended
+                && next.pressed == this.pressed
+                && next.time == this.time
+        })
+}
+
 /// Key transitions the session has not taken yet, in typing order. The
 /// session answers a new press `Busy` while frd's input queue is backed up;
 /// that press, and every transition typed after it, waits here and goes on a
@@ -179,6 +208,41 @@ mod tests {
             self.sent.push((usage, pressed));
             true
         }
+    }
+
+    #[test]
+    fn only_the_ctrl_windows_synthesizes_for_altgr_is_dropped() {
+        let message = |scan, extended, pressed, time| KeyMessage {
+            scan,
+            extended,
+            pressed,
+            time,
+        };
+        let ctrl = message(0x1D, false, true, 1000);
+        let altgr = message(0x38, true, true, 1000);
+        assert!(synthetic_ctrl(ctrl, Some(altgr)));
+        // The release pair, too.
+        assert!(synthetic_ctrl(
+            message(0x1D, false, false, 2000),
+            Some(message(0x38, true, false, 2000))
+        ));
+        // Planted negatives: a real Ctrl (its own time), right Ctrl, left
+        // Alt, opposite directions, nothing queued, and AltGr itself.
+        assert!(!synthetic_ctrl(ctrl, Some(message(0x38, true, true, 1001))));
+        assert!(!synthetic_ctrl(
+            message(0x1D, true, true, 1000),
+            Some(altgr)
+        ));
+        assert!(!synthetic_ctrl(
+            ctrl,
+            Some(message(0x38, false, true, 1000))
+        ));
+        assert!(!synthetic_ctrl(
+            ctrl,
+            Some(message(0x38, true, false, 1000))
+        ));
+        assert!(!synthetic_ctrl(ctrl, None));
+        assert!(!synthetic_ctrl(altgr, Some(altgr)));
     }
 
     #[test]

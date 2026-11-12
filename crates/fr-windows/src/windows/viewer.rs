@@ -42,15 +42,16 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IDC_ARROW,
-    LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA,
-    SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW,
-    TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
-    WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
-    WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+    GetMessageTime, IDC_ARROW, LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE,
+    PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED,
+    SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
+    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST,
+    WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -532,6 +533,43 @@ const fn words(value: isize) -> (i16, i16) {
         (((value >> 16) & 0xffff) as u16).cast_signed(),
     )
 }
+/// Scan code (bits 16-23) and extended flag (bit 24) of a key message.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "bits 16-23 of lParam"
+)]
+const fn key_bits(lparam: LPARAM) -> (u8, bool) {
+    (((lparam.0 >> 16) & 0xff) as u8, (lparam.0 >> 24) & 1 == 1)
+}
+/// The key message queued next for this window, left in the queue.
+fn next_key(hwnd: HWND) -> Option<keys::KeyMessage> {
+    let mut msg = MSG::default();
+    // SAFETY: looks at (PM_NOREMOVE) this thread's next keyboard message
+    // for its own window; nothing is dispatched or removed.
+    let found = unsafe {
+        PeekMessageW(
+            &raw mut msg,
+            Some(hwnd),
+            WM_KEYFIRST,
+            WM_KEYLAST,
+            PM_NOREMOVE,
+        )
+    }
+    .as_bool();
+    let pressed = match msg.message {
+        WM_KEYDOWN | WM_SYSKEYDOWN => true,
+        WM_KEYUP | WM_SYSKEYUP => false,
+        _ => return None,
+    };
+    let (scan, extended) = key_bits(msg.lParam);
+    found.then_some(keys::KeyMessage {
+        scan,
+        extended,
+        pressed,
+        time: msg.time,
+    })
+}
 fn point_of(lparam: LPARAM) -> (i32, i32) {
     let (x, y) = words(lparam.0);
     (i32::from(x), i32::from(y))
@@ -741,17 +779,24 @@ extern "system" fn window_proc(
             true
         }
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                reason = "bits 16-23 of lParam"
-            )]
-            let scan = ((lparam.0 >> 16) & 0xff) as u8;
-            let extended = (lparam.0 >> 24) & 1 == 1;
+            let (scan, extended) = key_bits(lparam);
             let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
             // Bit 30: the key was already down (auto-repeat). The session
             // never sends repeats; the host repeats a held key itself.
             let repeat = pressed && (lparam.0 >> 30) & 1 == 1;
+            // The left Ctrl Windows adds around AltGr never reaches the host
+            // (keys::synthetic_ctrl); AltGr itself goes as right Alt.
+            let synthetic = scan == 0x1D && !extended && {
+                // SAFETY: the time of the message being handled.
+                let time = unsafe { GetMessageTime() }.cast_unsigned();
+                let this = keys::KeyMessage {
+                    scan,
+                    extended,
+                    pressed,
+                    time,
+                };
+                keys::synthetic_ctrl(this, next_key(hwnd))
+            };
             // Only a controlled session takes keys; otherwise Windows keeps
             // its own (Alt+F4 and the system menu).
             with_viewer(|v| {
@@ -760,6 +805,7 @@ extern "system" fn window_proc(
                 }
                 if let Some(usage) = keys::usage(scan, extended)
                     && !repeat
+                    && !synthetic
                 {
                     v.key(usage, pressed);
                 }
