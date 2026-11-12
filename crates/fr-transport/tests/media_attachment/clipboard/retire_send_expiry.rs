@@ -97,7 +97,10 @@ async fn preserves_siblings(host: bool, staged: bool) {
     assert_eq!(sender.check(sending(&mut l, host)), Err(Error::SendExpired));
     let until = clock(&cx) + 1_000_000;
     while sending(&mut l, !host).has_route(Route::Stream(old_receive.inbound)) {
-        assert!(clock(&cx) < until, "peer did not learn original send expiry");
+        assert!(
+            clock(&cx) < until,
+            "peer did not learn original send expiry"
+        );
         l.drive(&cx).await;
     }
     assert!(receiver.send_expired(sending(&mut l, !host)));
@@ -191,9 +194,7 @@ fn prepared_refusal_cannot_hide_original_retained_clipboard_expiry() {
                             // Test-only scheduling stall before the final
                             // connection check. Both prepared-refusal paths
                             // must retain the already-admitted send's cause.
-                            std::thread::sleep(Duration::from_micros(
-                                MAX_DELIVERY_ALLOWANCE_US,
-                            ));
+                            std::thread::sleep(Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US));
                             Err(7_u8)
                         } else {
                             Ok(())
@@ -276,8 +277,7 @@ fn clipboard_send_expiry_cannot_conceal_authority_loss_or_expired_control() {
             let _c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
             quiet(&mut l, &cx).await;
             let until = clock(&cx) + 100_000;
-            h.send(&mut l.h, &cx, &chunk(&h), until, || true)
-                .unwrap();
+            h.send(&mut l.h, &cx, &chunk(&h), until, || true).unwrap();
             if !lose_authority {
                 l.h.send(
                     &cx,
@@ -288,11 +288,8 @@ fn clipboard_send_expiry_cannot_conceal_authority_loss_or_expired_control() {
                 )
                 .unwrap();
             }
-            asupersync::time::sleep(
-                cx.now(),
-                Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US),
-            )
-            .await;
+            asupersync::time::sleep(cx.now(), Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US))
+                .await;
             assert_eq!(
                 l.h.tick(&cx, || !lose_authority),
                 Err(if lose_authority {

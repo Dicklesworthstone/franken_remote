@@ -1110,9 +1110,8 @@ fn expired(viewer: &mut ControlledViewer, current: u64) -> Option<Error> {
     {
         return Some(Error::Files(error));
     }
-    (passed(viewer.clipboard_setup.deadline_us())
-        || passed(viewer.microphone.deadline_us()))
-    .then_some(Error::Expired)
+    (passed(viewer.clipboard_setup.deadline_us()) || passed(viewer.microphone.deadline_us()))
+        .then_some(Error::Expired)
 }
 /// Only this viewer's own view-gate refusal is relabelled. The transport checks
 /// its identity/lifetime gate first, so an identity refusal leaves `view` empty.

@@ -1,5 +1,37 @@
 # Implementation status
 
+## Verification checkpoint for optional-channel expiry (2026-11-12)
+
+Validation used `21393211` (the bead-only update after `8838a919`) plus the
+exact output of the pinned `nightly-2026-08-31` formatter. The remaining four
+Rust-file corrections are layout only. Workspace `cargo fmt --all --check`
+and `git diff --check` pass.
+
+The changed-source UBS scan completed with exit 0 across 25 Rust files:
+zero critical findings, 763 warnings and 107 informational findings.
+Warnings on changed lines were test assertions and fixture mutex checks.
+The scan did not run Cargo phases in its targeted shadow workspace, and its
+AST rule-pack mode was unavailable; this is limited static evidence.
+
+The restored executor could not build the latest transport test binary.
+`cargo test -p fr-transport --test media_attachment clipboard --locked`
+exited 101 when the unchanged pinned Asupersync compiler process received
+SIGKILL. A retry with one compiler frontend/backend/linker job and 256
+codegen units also received SIGKILL, at 7,680,948 KiB maximum child RSS.
+The all-workspace/all-target/all-feature metadata-only `cargo check --locked`
+likewise exited 101 with SIGKILL, at 7,697,744 KiB maximum child RSS.
+Both measured peaks are about 7.3 GiB. Kernel OOM counters were unavailable,
+so the kill and memory measurements are evidence; its kernel cause is not.
+These local attempts executed no selected clipboard tests. Latest strict Clippy and full
+workspace runtime verification remain blocked by this dependency build.
+
+The completed hosted results below retain their original revision scope.
+At 10:52 UTC the newer hosted Rust, formatting and Observation jobs were
+still queued or pending. The temporary formatter runner switch was restored
+after both runner queues remained unassigned and local formatting became
+available; the final series has no workflow-policy change. The non-Rust size
+failure and live/loaded/platform acceptance requirements remain open.
+
 ## Clipboard send expiry preserves the original desktop (2026-11-12)
 
 Completed Clipboard pairs now share the settled native-I/O send-expiry boundary
@@ -31,7 +63,7 @@ They retain an earlier uncollected publication receipt, check the untouched
 original item cap, fence subsequent native activity and preserve input/control.
 These fixtures do not establish real OS clipboard or live-tailnet acceptance.
 
-Local execution remains unavailable. The
+The
 [focused workflow on 4812fb8](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43196003850)
 compiled the actual daemon library test binary, including the new clipboard
 bridge tests, checked the daemon executable, and passed 206 selected test
@@ -82,12 +114,10 @@ did not expose that error, so it does not identify which path caused that run.
 These new negotiation regressions remain unexecuted.
 
 The existing non-Rust glue count also exceeds its 20,000-line allowance; the
-same failure predates this series. Source formatting now uses the Ubuntu image
-already used by the Linux compiler/native jobs after the previous formatting
-jobs stayed unassigned. The pinned toolchain and check are unchanged.
-The typed-cause fix, final formatting and full workspace verdict require fresh CI.
-The local executor remains unavailable. No live-tailnet, hardware or
-load-at-least-40 acceptance is claimed; `fr-jlgm` remains open.
+same failure predates this series. Final pinned formatting passes locally.
+The typed-cause fix and full workspace runtime verdict still require execution
+beyond the dependency build barrier recorded above. No live-tailnet, hardware
+or load-at-least-40 acceptance is claimed; `fr-jlgm` remains open.
 
 ## Clipboard publication boundary integration (2026-11-12)
 

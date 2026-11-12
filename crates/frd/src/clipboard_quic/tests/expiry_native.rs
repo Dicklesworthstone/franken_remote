@@ -337,7 +337,10 @@ async fn expire_retained_send(
     // The retained deadline is max(original send-by, admission + path allowance);
     // this test guard only bounds the wait and cannot renew either obligation.
     while q.usage().retained_send_records != 0 {
-        assert!(clock(cx) < until, "original clipboard retention did not expire");
+        assert!(
+            clock(cx) < until,
+            "original clipboard retention did not expire"
+        );
         asupersync::time::sleep(cx.now(), Duration::from_millis(5)).await;
         q.tick(cx, &mut authorize).unwrap();
     }
@@ -427,7 +430,10 @@ async fn send_expiry_after_publication(from_host: bool, staged: bool) {
         }
         let until = clock(&cx) + 500_000;
         while bridge.shared.outbox.lock().unwrap().item.is_none() {
-            assert!(clock(&cx) < until, "original native read did not produce Begin");
+            assert!(
+                clock(&cx) < until,
+                "original native read did not produce Begin"
+            );
             worker.step(|| Ok(903)).unwrap();
         }
         assert_eq!(bridge.service(&mut link.h, || true), Ok(State::Active));
@@ -489,7 +495,10 @@ async fn send_expiry_after_publication(from_host: bool, staged: bool) {
     // Begin cannot bypass the uncollected publication receipt or reach the OS.
     let until = clock(&cx) + 1_000_000;
     while !bridge.lane.send_expired(&link.h) || !peer.send_expired(&link.c) {
-        assert!(clock(&cx) < until, "original send-expiry reset did not arrive");
+        assert!(
+            clock(&cx) < until,
+            "original send-expiry reset did not arrive"
+        );
         link.drive(&cx).await;
     }
     assert_eq!(bridge.maintain(&mut link.h), Ok(State::Retired));

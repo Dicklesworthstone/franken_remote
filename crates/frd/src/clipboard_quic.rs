@@ -562,11 +562,9 @@ impl Bridge {
                     turn.complete();
                     return Ok(state);
                 }
-                Err(
-                    quic::Error::SendExpired
-                    | quic::Error::WrongRoute
-                    | quic::Error::Expired,
-                ) if self.lane.send_expired(q) => {
+                Err(quic::Error::SendExpired | quic::Error::WrongRoute | quic::Error::Expired)
+                    if self.lane.send_expired(q) =>
+                {
                     let state = self.on_refusal(q, Error::SendExpired)?;
                     turn.complete();
                     return Ok(state);
@@ -629,9 +627,7 @@ impl Bridge {
         }
         if matches!(
             dispatched,
-            Err(quic::Error::SendExpired
-                | quic::Error::WrongRoute
-                | quic::Error::Closed)
+            Err(quic::Error::SendExpired | quic::Error::WrongRoute | quic::Error::Closed)
         ) && self.lane.send_expired(q)
         {
             return Ok(Some(Error::SendExpired));
