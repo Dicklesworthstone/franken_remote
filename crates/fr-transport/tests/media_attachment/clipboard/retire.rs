@@ -9,6 +9,8 @@ use fr_wire::clipboard::{self as wire, Body, Message};
 mod expiry;
 #[path = "retire_io.rs"]
 mod io;
+#[path = "retire_send_expiry.rs"]
+mod send_expiry;
 
 fn scope() -> Scope {
     Scope {

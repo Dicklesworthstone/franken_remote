@@ -46,6 +46,10 @@ pub enum Error {
     /// The original clipboard pair reached its fixed framing deadline.
     /// No completed native publication or replacement attachment is implied.
     ReceiveExpired,
+    /// The original pair's retained reliable-send transport deadline expired,
+    /// locally or as reported by its peer. Original item and authority caps
+    /// still apply; native publication receipts keep their actual effect.
+    SendExpired,
     NativeSetup(PlatformError),
     Session(SessionError),
     Controller(fr_client::clipboard::Error),
@@ -400,6 +404,8 @@ impl Bridge {
     fn retirement_reason(&self, q: &QuicRecords) -> Error {
         if self.lane.receive_expired(q) {
             Error::ReceiveExpired
+        } else if self.lane.send_expired(q) {
+            Error::SendExpired
         } else {
             Error::Closed
         }
@@ -556,6 +562,15 @@ impl Bridge {
                     turn.complete();
                     return Ok(state);
                 }
+                Err(
+                    quic::Error::SendExpired
+                    | quic::Error::WrongRoute
+                    | quic::Error::Expired,
+                ) if self.lane.send_expired(q) => {
+                    let state = self.on_refusal(q, Error::SendExpired)?;
+                    turn.complete();
+                    return Ok(state);
+                }
                 Err(quic::Error::Expired) if !q.is_closed() => {
                     // send_prepared can hit its local deadline before invoking
                     // the record callback. Only an open connection proves this
@@ -611,6 +626,15 @@ impl Bridge {
         ) && self.lane.receive_expired(q)
         {
             return Ok(Some(Error::ReceiveExpired));
+        }
+        if matches!(
+            dispatched,
+            Err(quic::Error::SendExpired
+                | quic::Error::WrongRoute
+                | quic::Error::Closed)
+        ) && self.lane.send_expired(q)
+        {
+            return Ok(Some(Error::SendExpired));
         }
         dispatched.map_err(Error::Transport)?;
         Ok(refused)

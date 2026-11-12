@@ -10,6 +10,9 @@ const CLIPBOARD_RETIRED: u64 = 0x4652_4350;
 // Only the original ACTIVE Clipboard pair can report this framing expiry.
 // It is terminal metadata, not a new item lifetime or permission to retry.
 const CLIPBOARD_RECEIVE_EXPIRED: u64 = 0x4652_4345;
+// The original sender's transport deadline, not the item's authority lifetime.
+// Only the original ACTIVE Clipboard pair recognizes this terminal metadata.
+const CLIPBOARD_SEND_EXPIRED: u64 = 0x4652_4353;
 const FILES_RETIRED: u64 = 0x4652_4649;
 // An expired receive is a terminal file-transfer outcome, including for its
 // peer sender. It carries no retry or authority semantics and is recognized
@@ -33,6 +36,19 @@ fn receive_expiry_code(role: MediaRole) -> Option<u64> {
         MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video | MediaRole::Input => {
             None
         }
+    }
+}
+
+fn send_expiry_code(role: MediaRole) -> Option<u64> {
+    match role {
+        MediaRole::Clipboard => Some(CLIPBOARD_SEND_EXPIRED),
+        MediaRole::Files | MediaRole::FilesDownload => Some(FILES_SEND_EXPIRED),
+        MediaRole::Configuration
+        | MediaRole::Recovery
+        | MediaRole::Video
+        | MediaRole::Input
+        | MediaRole::AudioDown
+        | MediaRole::AudioUp => None,
     }
 }
 
@@ -194,15 +210,17 @@ impl QuicRecords {
                     outgoing.stop_sending_error_code == Some(code)
                         || incoming.recv_reset.map(|(code, _)| code) == Some(code)
                 });
-                let peer_send_expired = r.role.is_files()
-                    && (outgoing.stop_sending_error_code == Some(FILES_SEND_EXPIRED)
-                        || incoming.recv_reset.map(|(code, _)| code) == Some(FILES_SEND_EXPIRED));
+                let send_expiry = send_expiry_code(r.role);
+                let peer_send_expired = send_expiry.is_some_and(|code| {
+                    outgoing.stop_sending_error_code == Some(code)
+                        || incoming.recv_reset.map(|(code, _)| code) == Some(code)
+                });
                 // A received terminal cause predates this turn's local clock
                 // checks. Do not relabel the peer's send expiry as a receive
                 // expiry merely because this consumer was scheduled later.
                 let receive_expired =
                     peer_receive_expired || (receive_expired && !peer_send_expired);
-                let send_expired = r.role.is_files()
+                let send_expired = send_expiry.is_some()
                     && !receive_expired
                     && (peer_send_expired
                         || self.senders.iter().any(|sender| {
@@ -249,8 +267,8 @@ impl QuicRecords {
         let r = &self.attachments[index];
         let code = if r.receive_expired {
             receive_expiry_code(r.role).ok_or(Error::WrongRoute)?
-        } else if r.send_expired && r.role.is_files() {
-            FILES_SEND_EXPIRED
+        } else if r.send_expired {
+            send_expiry_code(r.role).ok_or(Error::WrongRoute)?
         } else {
             retirement_code(r.role).ok_or(Error::WrongRoute)?
         };

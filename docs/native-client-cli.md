@@ -1166,12 +1166,15 @@ clipboard worker started; it is not proof that either native owner opened),
 `clipboard_absence`: `null` when active, otherwise a typed code such as
 `host_clipboard_unavailable` (the host did not enable it),
 `host_clipboard_refused`, `local_clipboard_unavailable`, `clipboard_not_started`
-(for example, control never granted), `clipboard_receive_expired` (a completed
-lane expired before native worker readiness was observed) or `not_requested`. `clipboard_ended`
+(for example, control never granted), `clipboard_receive_expired` or
+`clipboard_send_expired` (a completed lane expired before native worker readiness
+was observed), or `not_requested`. `clipboard_ended`
 is `null` unless an ACTIVE clipboard retired while the session ran on. Then it
 names why: `clipboard_receive_expired` (a partial or complete record reached
-its original framing deadline, locally or at the peer), `clipboard_item_expired`
-(retained outgoing or uncertain native work outlived its original deadline),
+its original framing deadline, locally or at the peer), `clipboard_send_expired`
+(a retained send reached its original transport delivery deadline while native
+I/O was settled), `clipboard_item_expired` (retained outgoing or uncertain native
+work outlived its original item or handoff deadline),
 `clipboard_disabled`, `clipboard_authority_ended` or `clipboard_ended`. Control
 continues, and the clipboard is not re-attached under that grant. Clipboard text
 never appears in output, errors or logs.

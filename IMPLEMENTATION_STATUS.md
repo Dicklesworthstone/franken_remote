@@ -1,5 +1,41 @@
 # Implementation status
 
+## Clipboard send expiry preserves the original desktop (2026-11-12)
+
+Completed Clipboard pairs now share the settled native-I/O send-expiry boundary
+with Files and FilesDownload. The original stream pair retires with a distinct
+`SendExpired` cause and reset/stop code `0x4652_4353`; control, input, media and
+independent file lanes remain owned. Native queued/retransmittable stream work
+and application accounting are withdrawn, and consumed identities stay retired.
+Critical expiry, incomplete exchanges, authority loss and expiry inside an
+active native operation retain their existing connection fences.
+
+The bridge fences its original worker and preserves already produced native
+publication receipts. Its item deadlines, Egress checks, privacy switches and
+`permits_io` guard remain unchanged. Native send-by still derives from the
+original item's permit; this change does not manufacture a shorter normal
+bridge deadline or extend an expired item. Whichever original terminal check
+wins first retains its actual cause. The native CLI reports
+`clipboard_send_expired` when the original transport tombstone proves it.
+
+Prepared-send refusal handling also preserves a retained send's terminal cause
+when either per-record callback crosses the old deadline. A refused new record
+cannot conceal the expired original lane or reacquire queue ownership.
+
+**Added and independently source-reviewed, not executed:** six UDP/TLS transport
+regressions cover queued and staged sends in both directions, sibling traffic,
+first/final prepared-refusal races, consumed identities, and terminal/admission
+negatives. Two bridge tests cover four direction/staging combinations with the
+real bridge, worker and Egress code plus an explicitly recording native fixture.
+They retain an earlier uncollected publication receipt, check the untouched
+original item cap, fence subsequent native activity and preserve input/control.
+These fixtures do not establish real OS clipboard or live-tailnet acceptance.
+
+Local execution remains unavailable. Hosted verification for the preceding file
+checkpoint has started; this new clipboard slice has no compiler, Clippy or
+runtime pass at this checkpoint. The shared-clipboard and loaded-session beads
+remain open for their existing acceptance work.
+
 ## File send expiry preserves the original desktop (2026-11-12)
 
 Completed Files and FilesDownload attachments now retire independently when a

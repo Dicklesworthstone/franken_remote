@@ -753,6 +753,7 @@ mod tests {
         use frd::clipboard_quic::Error;
         for (reason, code) in [
             (Error::ReceiveExpired, "clipboard_receive_expired"),
+            (Error::SendExpired, "clipboard_send_expired"),
             (Error::HandoffExpired, "clipboard_item_expired"),
             (
                 Error::Session(SessionError::Clipboard(Item::Expired)),
@@ -782,6 +783,7 @@ mod tests {
             absence(Some(Error::ReceiveExpired)),
             "clipboard_receive_expired"
         );
+        assert_eq!(absence(Some(Error::SendExpired)), "clipboard_send_expired");
         assert_eq!(
             absence(Some(Error::NotNegotiated)),
             "host_clipboard_unavailable"

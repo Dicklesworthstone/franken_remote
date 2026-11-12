@@ -134,6 +134,9 @@ impl ClipboardChannel {
         if self.receive_expired(q) {
             return Err(Error::Stream(fr_wire::stream::StreamError::Expired));
         }
+        if self.send_expired(q) {
+            return Err(Error::SendExpired);
+        }
         if self.attachment.completed_on(q)? != self.routes
             || !q.has_route(Route::Stream(self.routes.outbound))
             || !q.has_route(Route::Stream(self.routes.inbound))
@@ -151,6 +154,14 @@ impl ClipboardChannel {
     /// Foreign or closed connections cannot supply that isolation evidence.
     pub fn receive_expired(&self, q: &QuicRecords) -> bool {
         self.attachment.receive_expired(q)
+    }
+    /// This exact completed pair retired at its original retained-send
+    /// transport deadline, locally or as reported by its peer. The transport
+    /// deadline is separate from the item's fixed authority cap; neither is renewed.
+    /// No native publication, retry or replacement attachment is implied.
+    /// Foreign or closed connections cannot supply this isolation evidence.
+    pub fn send_expired(&self, q: &QuicRecords) -> bool {
+        self.attachment.send_expired(q)
     }
     /// Invalidate the original attachment; its connection's next checked
     /// operation fences retained data. It never mutates an unrelated connection.
@@ -200,13 +211,14 @@ impl ClipboardChannel {
     ) -> Result<(), Error> {
         self.check(q)?;
         clipboard::decode(bytes, self.outgoing, &self.limits).map_err(|_| Error::Malformed)?;
-        q.send(
+        let result = q.send(
             cx,
             Route::Stream(self.routes.outbound),
             bytes,
             deadline_us,
             authorize,
-        )
+        );
+        self.send_result(q, result)
     }
     /// `send` with a per-record validity check: a refusal admits no bytes and
     /// leaves the connection open (`QuicRecords::send_prepared`).
@@ -221,14 +233,27 @@ impl ClipboardChannel {
     ) -> Result<SendAdmission<E>, Error> {
         self.check(q)?;
         clipboard::decode(bytes, self.outgoing, &self.limits).map_err(|_| Error::Malformed)?;
-        q.send_prepared(
+        let result = q.send_prepared(
             cx,
             Route::Stream(self.routes.outbound),
             bytes,
             deadline_us,
             authorize,
             prepared,
-        )
+        );
+        self.send_result(q, result)
+    }
+    fn send_result<T>(&self, q: &QuicRecords, result: Result<T, Error>) -> Result<T, Error> {
+        // The checked admission can retire this exact original pair after our
+        // preflight. Neither a prepared-record refusal nor its missing route or
+        // new deadline may hide retained-send expiry. Authority loss and closed
+        // connections keep their original terminal errors.
+        match result {
+            Ok(_) | Err(Error::WrongRoute | Error::Expired) if self.send_expired(q) => {
+                Err(Error::SendExpired)
+            }
+            other => other,
+        }
     }
     /// Dispatch at most one exact-lane record. The callback must be bounded and
     /// nonblocking; hand off to the native worker rather than call the OS here.

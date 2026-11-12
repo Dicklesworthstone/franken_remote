@@ -313,6 +313,16 @@ keeps its independent lifecycle. A newer local copy can discard an exclusively
 local unsent record, but records already accepted by transport keep their
 original custody until drain or retirement.
 
+When the original transport delivery deadline expires between settled native
+I/O operations, the completed Clipboard pair resets independently with
+`0x4652_4353`. The reset withdraws unsent and retransmittable stream data and
+preserves its one-use identities. Both endpoints report `SendExpired`; an
+older peer may report a generic stop. The bridge fences its native worker and
+retains prior publication receipts. This does not extend item/Egress authority
+or permit replay. An expiry detected inside active native I/O, or while
+protected output is unsettled, retains the connection fence. See
+[NATIVE_CLIPBOARD_TRANSPORT.md](NATIVE_CLIPBOARD_TRANSPORT.md).
+
 This route proof grants neither input nor native clipboard access. A host joins
 its actual original input owner and native clipboard grant; a viewer must use
 qualified client-side authority, never manufacture a host owner from wire IDs.

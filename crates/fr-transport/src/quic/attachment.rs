@@ -70,8 +70,8 @@ pub(super) struct Reservation {
     /// Original framing expiry retired this completed optional pair.
     /// Retain the cause beside the one-use reservation after buffers are gone.
     receive_expired: bool,
-    /// A retained send on this original completed file pair expired. The
-    /// peer reports the same original sender obligation, not receive expiry.
+    /// A retained send on this original completed clipboard or file pair expired.
+    /// The peer reports the same original sender obligation, not receive expiry.
     send_expired: bool,
     role: MediaRole,
     files_duplex: bool,

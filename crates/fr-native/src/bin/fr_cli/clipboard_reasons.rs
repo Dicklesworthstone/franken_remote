@@ -7,6 +7,7 @@ pub(crate) fn ended(reason: Option<frd::clipboard_quic::Error>) -> &'static str 
     use frd::clipboard_quic::Error;
     match reason {
         Some(Error::ReceiveExpired) => "clipboard_receive_expired",
+        Some(Error::SendExpired) => "clipboard_send_expired",
         Some(Error::HandoffExpired | Error::Session(SessionError::Clipboard(Item::Expired))) => {
             "clipboard_item_expired"
         }
@@ -25,6 +26,7 @@ pub(crate) fn absence(reason: Option<frd::clipboard_quic::Error>) -> &'static st
     use frd::clipboard_quic::Error;
     match reason {
         Some(Error::ReceiveExpired) => "clipboard_receive_expired",
+        Some(Error::SendExpired) => "clipboard_send_expired",
         Some(Error::NotNegotiated) => "host_clipboard_unavailable",
         Some(Error::ConsentRequired) => "host_clipboard_refused",
         Some(Error::NativeSetup(_)) => "local_clipboard_unavailable",

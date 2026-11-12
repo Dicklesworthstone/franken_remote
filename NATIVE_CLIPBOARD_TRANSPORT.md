@@ -55,9 +55,9 @@ connection, frees its partial/complete framing and queued-send storage, and
 preserves receive-credit accounting and one-use tombstones. Repeated partial
 reads or blocked callbacks do not renew the first-byte deadline. No expired
 bytes are dispatched or retried, and the same grant cannot reopen the lane.
-Malformed records, critical streams, incomplete attachments, authority loss,
-outbound delivery expiry and native-I/O cancellation retain their existing
-connection-fencing handling.
+Malformed records, critical streams, incomplete attachments, authority loss
+and native-I/O cancellation retain their existing connection-fencing handling.
+Retained clipboard send expiry has the settled-I/O isolation described below.
 
 The content-free reset code `CLIPBOARD_RECEIVE_EXPIRED` (`0x4652_4345`) carries
 the terminal reason to the peer's original `ACTIVE` Clipboard pair. It grants
@@ -81,6 +81,40 @@ blocked callbacks, fixed deadlines, peer causes, freed buffers, preserved
 control/input and malformed-record fencing. Bridge tests use an explicitly
 recording native fixture to check worker fencing, cleanup and retained actual
 fixture receipts. These are separate from real OS and live-tailnet qualification.
+
+## Stalled clipboard sends
+
+An established Clipboard pair also retires independently when its retained
+reliable send reaches the original transport delivery deadline between settled
+native I/O operations. This applies to both locally queued records and records
+already held by the native send stream. Retirement resets that original pair,
+withdraws its unsent and retransmittable STREAM data, clears retained application
+accounting and framing, and preserves the consumed binding/ticket tombstones.
+Control, input, video and independent file lanes keep their original owners.
+
+The content-free reset/stop code `CLIPBOARD_SEND_EXPIRED` (`0x4652_4353`)
+carries the cause to the peer's original active pair. It is distinct from
+receive expiry and ordinary cancellation. `ClipboardChannel::send_expired`
+requires the exact retained reservation on its original open connection;
+`quic::Error::SendExpired` and the bridge's `Error::SendExpired` preserve
+that cause through maintenance, enqueue and dispatch. Native completion reports
+use `clipboard_send_expired`, without exposing text or opaque identifiers.
+An older peer may report a generic clipboard stop for this terminal code.
+
+This transport deadline does not replace the item's immutable lifetime, original
+Egress permits, controller authority or privacy switches. The bridge retains
+those checks, including while bytes are in flight. The native bridge derives
+its send-by bound from the original Egress deadline; retirement never gives an
+expired item more time or turns uncertain native publication into a refusal.
+Worker fencing and cleanup preserve actual `SubmittedToOs` and `UnknownEffect`
+receipts.
+Already delivered or published bytes cannot be recalled, and no expired copy
+is automatically retried or attached again under the same grant.
+
+Expiry during an active native I/O operation, unsettled protected output, an
+unfinished attachment, or critical-stream expiry retains the connection fence.
+A caller missing its enqueue deadline before a record is admitted does not
+create retained-send-expiry evidence.
 
 ## Authorization across a worker handoff
 
