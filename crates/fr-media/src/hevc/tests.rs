@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "encoder_tests.rs"]
 mod encoder;
+#[path = "intel_tests.rs"]
+mod intel;
 use crate::config::{CodedGeometry, ColorInfo, GopPolicy};
 use fr_core::ids::CodecConfigurationGeneration;
 

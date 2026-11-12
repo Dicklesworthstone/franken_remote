@@ -67,6 +67,8 @@ pub(super) struct Rps {
     past: u32,
     max_distance: u32,
     first_is_previous: bool,
+    /// Entries used by the current picture (`NumPicTotalCurr`).
+    used: u32,
 }
 impl Rps {
     /// `st_ref_pic_set` without inter-RPS prediction (the caller has consumed
@@ -84,6 +86,7 @@ impl Rps {
         for index in 0..past {
             distance += b.ue(32767)? + 1;
             let used = b.flag()?;
+            set.used += u32::from(used);
             if index == 0 {
                 set.first_is_previous = distance == 1 && used;
             }
@@ -91,8 +94,9 @@ impl Rps {
         }
         Ok(set)
     }
-    /// Additional retained entries are legal, but only L0[0] can be active:
-    /// PPS/slice active-count and list-modification checks enforce it.
+    /// Every entry is a past picture still in the history; the first is the
+    /// previous picture. At most two are active per list (PPS and slice
+    /// active counts) and no slice reorders its lists.
     fn check(self, available_history: u8) -> Result<(), HevcError> {
         if self.past == 0
             || !self.first_is_previous
@@ -199,6 +203,9 @@ pub(super) struct Sps {
     pub cb_depth: u32,
     pub rps_count: u32,
     pub rps: [Rps; MAX_SPS_RPS],
+    /// The long-term syntax is present (with no SPS candidates): each
+    /// slice then signals its long-term picture count, which must be zero.
+    pub long_term: bool,
 }
 pub(super) fn sps(
     nal: Nal<'_>,
@@ -285,7 +292,13 @@ pub(super) fn sps(
         }
         *set = Rps::parse(&mut b, dpb)?;
     }
-    b.expect(1, 0)?; // No long-term references.
+    // No long-term references. Intel's Media Foundation HEVC transform
+    // declares the syntax with no SPS candidates and never uses it; slices
+    // must then say so (`slice` reads a zero long-term count).
+    let long_term = b.flag()?;
+    if long_term {
+        b.ue(0)?;
+    }
     let temporal_mvp = b.flag()?;
     b.flag()?; // Strong intra smoothing.
     if !b.flag()? {
@@ -305,6 +318,7 @@ pub(super) fn sps(
         cb_depth,
         rps_count,
         rps,
+        long_term,
     })
 }
 fn vui(
@@ -400,6 +414,10 @@ pub(super) struct Pps {
     pub deblock_override: bool,
     pub deblock_disabled: bool,
     pub init_qp: i32,
+    /// `num_ref_idx_l{0,1}_default_active_minus1`, each at most 1.
+    pub active_minus1: [u32; 2],
+    /// Slices carry list-modification flags (which must be zero).
+    pub lists_modification: bool,
 }
 pub(super) fn pps(nal: Nal<'_>, sps: Sps) -> Result<Pps, HevcError> {
     let mut b = nal.bits()?;
@@ -412,8 +430,9 @@ pub(super) fn pps(nal: Nal<'_>, sps: Sps) -> Result<Pps, HevcError> {
     b.expect(3, 0)?;
     b.flag()?;
     let cabac_init = b.flag()?;
-    b.ue(0)?;
-    b.ue(0)?; // At most one active previous reference.
+    // At most two active past references per list: x265, NVENC and
+    // VideoToolbox use one, Intel's Media Foundation transform two.
+    let active_minus1 = [b.ue(1)?, b.ue(1)?];
     let init_qp = b.se(-26, 25)? + 26;
     b.flag()?;
     b.flag()?;
@@ -438,8 +457,10 @@ pub(super) fn pps(nal: Nal<'_>, sps: Sps) -> Result<Pps, HevcError> {
             b.se(-6, 6)?;
         }
     }
-    b.expect(1, 0)?;
-    b.expect(1, 0)?; // No custom scaling list or reference list modification.
+    b.expect(1, 0)?; // No custom scaling list.
+    // List-modification syntax may be present; `slice` refuses any actual
+    // modification.
+    let lists_modification = b.flag()?;
     b.ue(u32::from(sps.ctb_log2) - 2)?;
     b.expect(1, 0)?;
     b.expect(1, 0)?; // No slice-header or PPS extensions.
@@ -454,7 +475,48 @@ pub(super) fn pps(nal: Nal<'_>, sps: Sps) -> Result<Pps, HevcError> {
         deblock_override,
         deblock_disabled,
         init_qp,
+        active_minus1,
+        lists_modification,
     })
+}
+/// A P or low-delay B slice's list sizes and prediction controls: at most
+/// two active references per list, no list modification, and a collocated
+/// picture inside its active list.
+fn reference_lists(
+    b: &mut Bits<'_>,
+    pps: Pps,
+    bi: bool,
+    used: u32,
+    temporal_mvp: bool,
+) -> Result<(), HevcError> {
+    let mut active = pps.active_minus1;
+    if b.flag()? {
+        active[0] = b.ue(1)?;
+        if bi {
+            active[1] = b.ue(1)?;
+        }
+    }
+    if pps.lists_modification && used > 1 {
+        b.expect(1, 0)?; // No L0 modification.
+        if bi {
+            b.expect(1, 0)?; // No L1 modification.
+        }
+    }
+    if bi {
+        b.flag()?; // mvd_l1_zero_flag
+    }
+    if pps.cabac_init {
+        b.flag()?;
+    }
+    if temporal_mvp {
+        let from_l0 = !bi || b.flag()?;
+        let list = active[usize::from(!from_l0)];
+        if list > 0 {
+            b.ue(list)?; // collocated_ref_idx
+        }
+    }
+    b.ue(4)?; // five_minus_max_num_merge_cand
+    Ok(())
 }
 /// Checks the complete independent slice header; CABAC data belongs to the decoder.
 pub(super) fn slice(
@@ -473,13 +535,20 @@ pub(super) fn slice(
     if b.ue(63)? != pps.id {
         return Err(HevcError::ParameterSetReference);
     }
-    if b.ue(2)? != if idr { 2 } else { 1 } {
+    // IDR pictures are I slices. Others are P, or low-delay B (Intel's
+    // Media Foundation transform): every reference of both lists is a past
+    // picture (`Rps::parse` refuses future ones), so nothing reorders.
+    let kind = b.ue(2)?;
+    if (idr && kind != 2) || (!idr && kind == 2) {
         return Err(HevcError::PictureMismatch);
     }
+    let bi = kind == 0;
     if pps.output {
         b.expect(1, 1)?;
     }
     let mut poc = 0;
+    let mut used = 0;
+    let mut temporal_mvp = false;
     if !idr {
         poc = b.read(sps.poc_bits)?;
         let set = if b.flag()? {
@@ -502,8 +571,12 @@ pub(super) fn slice(
             Rps::parse(&mut b, sps.dpb)?
         };
         set.check(available_history)?;
+        used = set.used;
+        if sps.long_term {
+            b.ue(0)?; // num_long_term_pics (no SPS candidates to select)
+        }
         if sps.temporal_mvp {
-            b.flag()?;
+            temporal_mvp = b.flag()?;
         }
     }
     let (mut sao_luma, mut sao_chroma) = (false, false);
@@ -512,14 +585,7 @@ pub(super) fn slice(
         sao_chroma = b.flag()?;
     }
     if !idr {
-        if b.flag()? {
-            b.ue(0)?;
-        }
-        if pps.cabac_init {
-            b.flag()?;
-        }
-        // With one L0 reference, collocated_ref_idx is inferred zero.
-        b.ue(4)?;
+        reference_lists(&mut b, pps, bi, used, temporal_mvp)?;
     }
     b.se(-pps.init_qp, 51 - pps.init_qp)?;
     if pps.chroma_offsets {

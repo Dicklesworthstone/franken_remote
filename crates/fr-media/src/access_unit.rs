@@ -55,10 +55,12 @@ pub enum FrameKind {
         /// The recovery generation this IDR begins.
         recovery: RecoveryGeneration,
     },
-    /// A predicted picture depending on exactly one previous reference frame
-    /// in the baseline chain.
+    /// A predicted picture whose references are earlier frames of the
+    /// baseline chain, the latest being `references`. A low-delay encoder
+    /// may also reference the frame before it; the chain is linear, so
+    /// `references` already depended on that frame.
     Predicted {
-        /// The frame this picture references.
+        /// The latest frame this picture references.
         references: FrameId,
     },
 }

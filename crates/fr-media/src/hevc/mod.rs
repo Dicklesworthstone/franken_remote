@@ -21,8 +21,10 @@ mod record;
 pub use record::{DecoderRecord, Hvc1AccessUnit, MAX_DECODER_RECORD_BYTES};
 use std::sync::Arc;
 
+mod describe;
 mod nal;
 mod parameters;
+pub use describe::{describe_encoder_colour, describe_encoder_colour_annex_b};
 #[cfg(test)]
 mod tests;
 
