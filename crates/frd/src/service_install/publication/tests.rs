@@ -3,6 +3,7 @@ use std::{
     fs as disk,
     os::unix::fs::{DirBuilderExt, PermissionsExt, symlink},
     path::PathBuf,
+    time::Instant,
 };
 
 struct Root(PathBuf);
@@ -123,6 +124,29 @@ fn a_raced_away_unit_requires_a_fresh_safe_destination_snapshot() {
         disk::read(root.0.join("frd.service")).unwrap(),
         b"new complete service"
     );
+}
+
+#[test]
+fn an_unlinked_snapshot_outlasts_a_replacement_still_in_flight() {
+    // A descheduled renamer can leave the name on the unlinked inode for
+    // milliseconds; here the replacement becomes visible only after 20 ms.
+    let root = Root::new();
+    let replacement = root.0.join("complete-replacement");
+    disk::write(&replacement, b"new complete service").unwrap();
+    let (dir, original) = replaced_unit(&root, &replacement);
+    let start = Instant::now();
+    let mut reads = 0;
+    let result = inspect_destination(|| {
+        reads += 1;
+        if reads == 1 || start.elapsed() < Duration::from_millis(20) {
+            fs::fstat(&original)
+        } else {
+            fs::statat(&dir, "frd.service", AtFlags::SYMLINK_NOFOLLOW)
+        }
+    });
+
+    assert_eq!(result, Ok(true));
+    assert!(reads < DESTINATION_SNAPSHOTS, "{reads} snapshots");
 }
 
 #[test]

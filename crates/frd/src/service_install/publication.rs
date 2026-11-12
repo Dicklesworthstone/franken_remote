@@ -12,10 +12,21 @@ use std::{
     fs::File,
     io::Write,
     path::{Component, Path},
+    thread,
+    time::Duration,
 };
 
 const TEMP_PREFIX: &str = ".frd-unit-pending-";
 const DESTINATION_SNAPSHOTS: usize = 16;
+
+/// Pause before retried snapshot `retry` (`1..DESTINATION_SNAPSHOTS`): 100 us
+/// doubling to 51.2 ms, about 0.36 s in all. The filesystem drops a replaced
+/// inode's last link before the directory cache moves the name to the new
+/// inode, and a descheduled renamer can hold that window for milliseconds
+/// under load. Back-to-back snapshots all landed inside one such window.
+fn snapshot_pause(retry: usize) -> Duration {
+    Duration::from_micros(100 << (retry - 1).min(9))
+}
 const DIRECTORY_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
@@ -153,7 +164,10 @@ fn destination(dir: &OwnedFd, name: &OsStr) -> Result<bool, ServiceError> {
 fn inspect_destination(
     mut snapshot: impl FnMut() -> rustix::io::Result<fs::Stat>,
 ) -> Result<bool, ServiceError> {
-    for _ in 0..DESTINATION_SNAPSHOTS {
+    for retry in 0..DESTINATION_SNAPSHOTS {
+        if retry != 0 {
+            thread::sleep(snapshot_pause(retry));
+        }
         match snapshot() {
             Ok(stat)
                 if FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
@@ -165,7 +179,8 @@ fn inspect_destination(
                     // A concurrent atomic replacement can unlink the inode
                     // after statat resolves its name but before it samples the
                     // metadata. That old inode is not evidence about the new
-                    // destination. Inspect the same no-follow path again;
+                    // destination. Inspect the same no-follow path again,
+                    // after a pause that lets that replacement finish;
                     // never accept an unlinked inode or an unsafe replacement.
                     0 => {}
                     _ => return Err(ServiceError::UnsafeUnitPath),
