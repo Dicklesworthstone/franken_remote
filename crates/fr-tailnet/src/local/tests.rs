@@ -1424,16 +1424,24 @@ fn a_renewal_waits_for_another_lookup_instead_of_failing_busy() {
         &[&s, &w, &s, &s, &w, &s, &s, &w, &s],
         Duration::from_millis(15),
     );
+    // The renewal re-checks the first proof after nine sequential fixture
+    // queries, so a 1 s validity ended it with Expired on CI's macOS runner
+    // (67669d01). The policy maxima keep slow runners inside the window.
+    let policy = GrantPolicy {
+        lookup_timeout: Duration::from_secs(3),
+        validity: Duration::from_secs(3),
+        ..Default::default()
+    };
     run_async!(cx, {
         let proof = server
             .client
-            .authorize_app_capability(&cx, endpoints(), GrantPolicy::default())
+            .authorize_app_capability(&cx, endpoints(), policy)
             .await
             .unwrap();
         let mut admission = Box::pin(server.client.authorize_app_capability(
             &cx,
             endpoints(),
-            GrantPolicy::default(),
+            policy,
         ));
         let mut renewal = Box::pin(server.client.revalidate(&cx, &proof, endpoints()));
         poll_fn(|task| {
