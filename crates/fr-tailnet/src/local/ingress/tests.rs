@@ -529,3 +529,21 @@ fn initial_direct_confirmation_keeps_its_cold_bound_and_periodic_wait_uses_old_v
             });
     }
 }
+#[test]
+fn a_periodic_kernel_read_may_use_the_old_snapshot_validity_not_one_second() {
+    // A real child that outlives the cold one-second bound. A periodic direct
+    // refresh now bounds its `ip`/`nft` reads by the old snapshot's remaining
+    // validity (up to three seconds), so the same read completes there.
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let sleep = Path::new("/usr/bin/sleep");
+        assert_eq!(
+            command_within(&cx, sleep, &["1.3"], b"", COMMAND_TIMEOUT).await,
+            Err(Error::CommandUncertain)
+        );
+        assert_eq!(
+            command_within(&cx, sleep, &["1.3"], b"", Duration::from_millis(2_500)).await,
+            Ok(Vec::new())
+        );
+    });
+}

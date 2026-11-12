@@ -16,7 +16,7 @@
 //! kernel's strong destination-address check for the address's family and
 //! rechecks it, with the utun interface, on the same refresh schedule
 //! ([`strong_host`]).
-use super::{LocalApi, NodeIdentity, bounded};
+use super::{LocalApi, NodeIdentity, bounded, now};
 use crate::Error as IdentityError;
 use asupersync::{
     cx::Cx,
@@ -292,6 +292,15 @@ fn interface_index(name: &str) -> Result<u32, Error> {
 }
 
 async fn command(cx: &Cx, image: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, Error> {
+    command_within(cx, image, args, input, COMMAND_TIMEOUT).await
+}
+async fn command_within(
+    cx: &Cx,
+    image: &Path,
+    args: &[&str],
+    input: &[u8],
+    limit: Duration,
+) -> Result<Vec<u8>, Error> {
     let image = protected_executable(image)?;
     let mut child = Command::new(image)
         .args(args)
@@ -337,7 +346,7 @@ async fn command(cx: &Cx, image: &Path, args: &[&str], input: &[u8]) -> Result<V
         }
         Ok(bytes)
     };
-    Box::pin(bounded(cx, COMMAND_TIMEOUT, operation))
+    Box::pin(bounded(cx, limit, operation))
         .await
         .map_err(|e| match e {
             IdentityError::MalformedMetadata => Error::CommandOutputLimit,
@@ -348,8 +357,17 @@ async fn command(cx: &Cx, image: &Path, args: &[&str], input: &[u8]) -> Result<V
 /// Kernel view of one interface: its qualified TUN index and the unprivileged
 /// `ip -j address show` report. Neither value comes from a caller.
 async fn observe(cx: &Cx, ip: &Path, interface: &str) -> Result<(u32, Vec<u8>), Error> {
+    observe_within(cx, ip, interface, COMMAND_TIMEOUT).await
+}
+async fn observe_within(
+    cx: &Cx,
+    ip: &Path,
+    interface: &str,
+    limit: Duration,
+) -> Result<(u32, Vec<u8>), Error> {
     let index = interface_index(interface)?;
-    let bytes = command(cx, ip, &["-j", "address", "show", "dev", interface], b"").await?;
+    let args = ["-j", "address", "show", "dev", interface];
+    let bytes = command_within(cx, ip, &args, b"", limit).await?;
     Ok((index, bytes))
 }
 /// `Ok(false)`: the report is exactly this interface but lacks a usable
@@ -381,12 +399,17 @@ fn address_assigned(
             && a["dadfailed"].as_bool() != Some(true)
     }))
 }
-async fn qualified_interface(cx: &Cx, config: &Configuration) -> Result<u32, Error> {
+/// `limit` bounds the `ip` read; the macOS strong-host check keeps its own.
+async fn qualified_interface(
+    cx: &Cx,
+    config: &Configuration,
+    limit: Duration,
+) -> Result<u32, Error> {
     #[cfg(target_os = "macos")]
     if config.enforcement == Enforcement::StrongHost {
         return strong_host::qualified(cx, &config.interface, config.address.ip()).await;
     }
-    let (index, bytes) = observe(cx, &config.ip, &config.interface).await?;
+    let (index, bytes) = observe_within(cx, &config.ip, &config.interface, limit).await?;
     if !address_assigned(&bytes, index, &config.interface, config.address.ip())?
         || interface_index(&config.interface)? != index
     {
@@ -496,10 +519,25 @@ fn validate_rule(
     Ok(())
 }
 async fn read_back(cx: &Cx, nft: &Path, table: &str) -> Result<Vec<u8>, Error> {
-    command(cx, nft, &["-j", "-n", "list", "table", "inet", table], b"").await
+    read_back_within(cx, nft, table, COMMAND_TIMEOUT).await
 }
-async fn read_rule(cx: &Cx, config: &Configuration, table: &str, index: u32) -> Result<(), Error> {
-    let bytes = read_back(cx, &config.nft, table).await?;
+async fn read_back_within(
+    cx: &Cx,
+    nft: &Path,
+    table: &str,
+    limit: Duration,
+) -> Result<Vec<u8>, Error> {
+    let args = ["-j", "-n", "list", "table", "inet", table];
+    command_within(cx, nft, &args, b"", limit).await
+}
+async fn read_rule(
+    cx: &Cx,
+    config: &Configuration,
+    table: &str,
+    index: u32,
+    limit: Duration,
+) -> Result<(), Error> {
+    let bytes = read_back_within(cx, &config.nft, table, limit).await?;
     validate_rule(
         &bytes,
         table,
@@ -648,7 +686,7 @@ impl Boundary {
             busy: Arc::new(AtomicBool::new(false)),
             ..api
         };
-        let index = qualified_interface(cx, &config).await?;
+        let index = qualified_interface(cx, &config, COMMAND_TIMEOUT).await?;
         api.check_node(cx, &node)?;
         let (table, backend, keepalive) = match &config.enforcement {
             Enforcement::Direct => {
@@ -739,9 +777,24 @@ impl Boundary {
                 .map_err(|_| Error::Closed)?
                 .node
                 .clone();
-            let node = if matches!(refresh, Refresh::Periodic)
-                && matches!(&owner.backend, Backend::Direct)
-            {
+            let periodic_direct =
+                matches!(refresh, Refresh::Periodic) && matches!(&owner.backend, Backend::Direct);
+            // A periodic direct refresh spends the old snapshot's remaining
+            // validity on its kernel reads too, as on its lookup. The lease
+            // ends at that expiry anyway, so the fixed one-second bound only
+            // ended protected sessions early when the task driving this
+            // refresh was slow to poll (namespace e2e, fr-jlgm).
+            let cx = owner.lease.cx.clone();
+            let limit = |old: &NodeIdentity| -> Result<Duration, Error> {
+                if !periodic_direct {
+                    return Ok(COMMAND_TIMEOUT);
+                }
+                let current = now(&cx)?;
+                Ok(Duration::from_micros(
+                    old.expires_us().saturating_sub(current),
+                ))
+            };
+            let node = if periodic_direct {
                 owner
                     .lease
                     .api
@@ -757,13 +810,14 @@ impl Boundary {
                     .revalidate_node(&owner.lease.cx, &old)
                     .await?
             };
-            let index = qualified_interface(&owner.lease.cx, &owner.config).await?;
+            let index = qualified_interface(&owner.lease.cx, &owner.config, limit(&old)?).await?;
             if index != owner.index {
                 return Err(Error::InterfaceChanged);
             }
             match &mut owner.backend {
                 Backend::Direct => {
-                    read_rule(&owner.lease.cx, &owner.config, &owner.table, index).await?;
+                    let limit = limit(&old)?;
+                    read_rule(&owner.lease.cx, &owner.config, &owner.table, index, limit).await?;
                 }
                 // The helper re-qualifies the interface/address and reads the
                 // kernel ruleset as root; its read-back must pass the same check.

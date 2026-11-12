@@ -51,10 +51,20 @@ node, interface and firewall checks all finish before the old expiry.
 Initial rule installation, cold node/admission checks and helper-backed
 boundaries keep their one-second lookup limit. The helper's connection-loss
 detection and shutdown grace are separate lifetime constraints; this change
-does not delay those checks. The original ip/nft command limits, refresh
-cadence, peer admission and observation/control authorization are unchanged.
-Any returned error, cancellation, expired snapshot or abandoned refresh still
-retires the boundary. A delayed success cannot revive it.
+does not delay those checks. Refresh cadence, peer admission and
+observation/control authorization are unchanged. Any returned error,
+cancellation, expired snapshot or abandoned refresh still retires the
+boundary. A delayed success cannot revive it.
+
+The same periodic direct refresh bounds its `ip` interface read and `nft` rule
+read-back by that old snapshot's remaining validity too (2026-11-12). Each read
+had its own one-second wall-clock limit, which also counts time the session
+task driving the refresh spends elsewhere. In the namespace e2e at load ~10 a
+refresh's two reads took up to 0.6 s, and under a capture stall one read passed
+a second and ended the session with `CommandUncertain` while the snapshot was
+still live. The lease still ends at the old snapshot's expiry whatever the
+reads do, so no authority deadline moves. Installation and helper-backed reads
+keep one second.
 
 Focused regressions cover real credential-checked Unix/HTTP exchanges with
 controlled authority-clock advancement, one actual reply delayed over one
@@ -63,8 +73,8 @@ identity, key expiry, wall-clock failure and cancellation. The interface fixture
 still refuses its deliberately nonexistent TUN; these tests do not replace
 kernel or installed-Tailscale qualification. The new regressions have been
 source-reviewed and formatted; their runtime execution is not yet claimed.
-Slow command/helper responses and live loaded-host measurements remain open
-under fr-ingress-revalidation-load-qelg.
+Slow helper responses and live loaded-host measurements remain open under
+fr-ingress-revalidation-load-qelg.
 
 `LinuxServer::stop` fences at call time and closes an unused listener. It removes
 only its owned rule, and refuses `InUse` while any handed-off transport retains
