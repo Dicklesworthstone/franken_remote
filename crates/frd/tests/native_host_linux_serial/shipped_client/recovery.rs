@@ -251,6 +251,9 @@ fn a_second_client_is_refused_host_busy_while_the_first_streams() {
     assert_eq!(output.status.code(), Some(1));
     // A dropped Initial would wait out the client's 5 s handshake deadline
     // and end `host_not_answering`.
-    assert!(elapsed < Duration::from_secs(4), "refused after {elapsed:?}");
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "refused after {elapsed:?}"
+    );
     host.finish();
 }
