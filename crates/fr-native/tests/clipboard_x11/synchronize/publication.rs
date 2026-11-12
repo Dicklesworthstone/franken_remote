@@ -99,7 +99,9 @@ fn a_local_copy_after_preparation_is_fenced_by_the_os_timestamp() {
     else {
         panic!("the attempted OS effect must retain its receipt")
     };
-    assert_eq!(calls, 4);
+    // The copy lands at the fourth sample, the policy check after preparation.
+    // 540962f2 gave the final publication fence its own (fifth) sample.
+    assert_eq!(calls, 5);
     assert_eq!(receipt.publication, Publication::UnknownEffect);
     assert_eq!(app.current_origin().unwrap(), Some(stamp(8)));
     assert!(input.monitor().deadline(at(0)).is_ok());
