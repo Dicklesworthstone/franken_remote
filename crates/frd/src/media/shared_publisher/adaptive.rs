@@ -1,6 +1,6 @@
 //! One raw-admission controller for the original shared source. Per-peer
 //! deadlines and retirement remain independent; one slow viewer never chooses
-//! the rate of a healthy viewer. Optional software bitrate control consumes the
+//! the rate of a healthy viewer. Optional encoder bitrate control consumes the
 //! same evidence; decoder configuration and recovery policy remain unchanged.
 use super::{Entry, Error, MediaError, Members, ObservationControl, Publisher};
 use crate::media::receiver_feedback::SharedSample;
@@ -392,15 +392,15 @@ impl Publisher {
         )?));
         Ok(())
     }
-    /// Enable native rate requests only for a real, explicitly selected software
-    /// worker. Cadence-only library callers keep their original IPC contract.
+    /// Enable native rate requests only for a worker implementing the complete
+    /// capture-rate transaction. Cadence-only library callers keep their IPC.
     pub(crate) fn enable_adaptive_bitrate(&mut self) -> Result<bool, Error> {
         self.members.lock().map_err(|_| Error::Poisoned)?.tick()?;
         if self.served {
             return Err(Error::InvalidBudget);
         }
         let adaptive = self.adaptive.as_mut().ok_or(Error::InvalidBudget)?;
-        if self.source.configuration.backend != fr_media::worker::Backend::SoftwareExplicit {
+        if !self.source.configuration.backend.accepts_rate_capture() {
             return Ok(false);
         }
         adaptive.enable_bitrate(self.source.configuration.bitrate)?;

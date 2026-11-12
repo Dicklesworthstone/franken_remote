@@ -1,5 +1,34 @@
 # Implementation status
 
+## Native Mac adaptive bitrate (2026-11-12)
+
+The existing adaptive-capture option now drives VideoToolbox rate transactions
+for both shared and exclusive native publishers. The original Mac capture owner
+retains a pending target bounded by its configured ceiling and the software
+policy's two-second host/worker-clock dwell. A new target does not create video
+work on an unchanged source. Required capture work applies and reads back the
+same VideoToolbox session's soft AverageBitRate, requests an independent frame,
+and reports a changed setting only after the existing strict HEVC guard admits
+the actual IDR under the unchanged decoder configuration. Failure ends that
+capture owner. Ordinary nonadaptive startup keeps its previous contract.
+Readback confirms a configured target, not measured output throughput.
+
+**Passed component checks:** all five production Rust rate-policy tests on the
+exact nightly, with strict Clippy including pedantic lints, and all 25 production
+portable C capture-policy tests with -Wall -Wextra -Werror. The checks cover idle
+deferral, exact dual-clock dwell, pending-target changes, native receipts and
+all combinations of conditional capture, source verification and forced IDRs.
+The owned Rust files were formatted before the executor became unavailable.
+
+**Added, not executed:** a real Mac worker protocol regression for 8 Mbps
+bootstrap, a 4 Mbps transition with independently admitted IDR, a deferred
+2 Mbps request, and 8 Mbps restoration after both original clocks pass the
+dwell, followed by orderly Stop. Apple SDK compilation, real VideoToolbox runs,
+full-workspace checks and impaired-path measurements remain unqualified here;
+the existing GitHub verification lanes run after direct main publication.
+The source-format runner's five clipboard-test wrapping corrections are also
+included exactly as emitted by the pinned formatter; no test semantics changed.
+
 ## Clipboard publication after policy waits (2026-11-12)
 
 The shared clipboard owner now retains the original item and readiness cap,

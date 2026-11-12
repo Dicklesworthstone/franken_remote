@@ -4,6 +4,33 @@
 #include <assert.h>
 #include <stdio.h>
 
+static void rate_targets_do_not_encode_an_unchanged_source(void) {
+    for (uint32_t target = 1000000; target <= 8000000; target *= 2) {
+        FrCapEncodePlan idle = fr_cap_encode_plan(false, true, false, true, 8000000, target);
+        assert(!idle.encode && !idle.change_rate && !idle.force_idr);
+    }
+}
+
+static void rate_changes_require_existing_work_and_an_independent_picture(void) {
+    for (int verification = 0; verification <= 1; verification++) {
+        for (int conditional = 0; conditional <= 1; conditional++) {
+            for (int forced = 0; forced <= 1; forced++) {
+                for (int same = 0; same <= 1; same++) {
+                    FrCapEncodePlan old = fr_cap_encode_plan(verification, conditional, forced,
+                                                              same, 8000000, 8000000);
+                    FrCapEncodePlan changed = fr_cap_encode_plan(verification, conditional, forced,
+                                                                  same, 8000000, 4000000);
+                    // Changing only the rate request cannot add any encode.
+                    assert(old.encode == changed.encode);
+                    assert(!old.change_rate && old.force_idr == (forced != 0));
+                    assert(changed.change_rate == changed.encode);
+                    assert(changed.force_idr == changed.encode);
+                }
+            }
+        }
+    }
+}
+
 static void deadline_has_exact_monotonic_boundaries(void) {
     FrCapDeadline deadline;
     assert(fr_cap_deadline_init(&deadline, 100, 2000));
@@ -396,6 +423,8 @@ static void a_refusal_outranks_every_answer_that_began_before_it(void) {
 }
 
 int main(void) {
+    rate_targets_do_not_encode_an_unchanged_source();
+    rate_changes_require_existing_work_and_an_independent_picture();
     deadline_has_exact_monotonic_boundaries();
     deadline_refuses_zero_and_overflow_without_wrapping();
     every_setup_stage_spends_the_same_original_budget();
@@ -419,6 +448,6 @@ int main(void) {
     encoded_allocation_is_bounded_before_append();
     a_positive_live_check_stands_for_at_most_its_bound();
     a_refusal_outranks_every_answer_that_began_before_it();
-    puts("23 macOS capture policy tests passed");
+    puts("25 macOS capture policy tests passed");
     return 0;
 }

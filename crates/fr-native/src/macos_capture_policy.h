@@ -7,6 +7,23 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// A pending rate never creates capture work. First decide from the existing
+// positive source evidence whether an encode is required; only that encode may
+// change the rate, and a changed rate requires a fresh independent picture.
+typedef struct {
+    bool encode;
+    bool change_rate;
+    bool force_idr;
+} FrCapEncodePlan;
+
+static inline FrCapEncodePlan fr_cap_encode_plan(bool verification, bool only_if_changed,
+                                                bool force_idr, bool same_picture,
+                                                uint32_t applied, uint32_t target) {
+    bool encode = verification || !only_if_changed || force_idr || !same_picture;
+    bool change_rate = encode && target != applied;
+    return (FrCapEncodePlan){encode, change_rate, force_idr || change_rate};
+}
+
 // All native-open stages share this original monotonic interval. A stage may
 // consume its remainder; neither a successful callback nor a retry renews it.
 typedef struct {

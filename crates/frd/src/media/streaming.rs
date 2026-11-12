@@ -142,8 +142,9 @@ impl Stream {
         );
         Ok(())
     }
-    /// Enable measured software bitrate adaptation on the same source, after
-    /// cadence adaptation and before service. Hardware retains cadence only.
+    /// Enable bitrate adaptation on the same source, after cadence adaptation
+    /// and before service. Software and `VideoToolbox` implement this transaction;
+    /// other hardware backends retain cadence only.
     /// Native startup calls this under the existing adaptive-capture option;
     /// cadence-only library callers need not opt into the new worker operation.
     pub(crate) fn enable_adaptive_bitrate(&mut self) -> Result<bool, super::Error> {
@@ -151,7 +152,7 @@ impl Stream {
         if self.served || self.pacing.is_none() || self.bitrate.is_some() {
             return Err(super::Error::InvalidFrame);
         }
-        if self.source.configuration.backend != fr_media::worker::Backend::SoftwareExplicit {
+        if !self.source.configuration.backend.accepts_rate_capture() {
             return Ok(false);
         }
         self.bitrate = Some(

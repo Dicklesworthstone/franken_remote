@@ -1,11 +1,13 @@
-# Adaptive capture and software bitrate
+# Adaptive capture and encoder bitrate
 
-This implements opt-in capture pacing and software encoder bitrate control for
-plan section 13 and beads `fr-p1-adaptive-v0-qgi` and
-`fr-rc-media-wire-controller-qej`. Both use the existing continuous host session,
-source and QUIC sender. Software bitrate changes reduce offered encoded bytes
-under measured send-admission pressure; resolution changes, end-to-end latency
-control and per-path aggregate-bandwidth estimation remain incomplete.
+This implements opt-in capture pacing and bitrate-control transactions for the
+software encoder and macOS VideoToolbox, following plan section 13 and beads
+`fr-p1-adaptive-v0-qgi` and `fr-rc-media-wire-controller-qej`. Both use the existing
+continuous host session, source and QUIC sender. The bitrate controller responds
+to measured send-admission pressure with bounded encoder targets. Offered-byte
+reductions have been measured for software HEVC; native macOS rate-change
+qualification remains pending. Resolution changes, end-to-end latency control
+and per-path aggregate-bandwidth estimation remain incomplete.
 
 ## Local host selection
 
@@ -25,9 +27,10 @@ through their `--` arguments, including on hosts that do not offer control.
 
 The original controlled publisher receives the existing measured source-work,
 send-admission, retention-credit and negotiated decoder-load samples. Collected
-native input retains its existing bounded idle wake path. The software encoder
-can change bitrate within the original local ceiling; hardware retains its fixed
-bitrate. Resolution and the exact decoder configuration stay fixed. An
+native input retains its existing bounded idle wake path. Software and
+VideoToolbox can change their bitrate targets within the original local ceiling;
+NVENC and VA-API retain their fixed bitrate. Resolution and the exact decoder
+configuration stay fixed. An
 observer-first share uses the
 same pacing state machine in its original shared publisher, with measured source
 work, genuine changed/unchanged observations and aggregate capture credit. A
@@ -74,7 +77,7 @@ without the capability receives no new records and keeps its existing behavior.
 
 The original private or shared capture owner reports its selected capture
 interval, active/idle mode, and the reason for its most recent adjustment. An
-enabled software bitrate controller separately reports the encoder's confirmed
+enabled bitrate controller separately reports the encoder's confirmed
 applied bitrate and any pending target. The target stays pending until the
 original native worker confirms the actual transition. Unknown bitrate remains
 null. These are scheduling and encoder settings, not measured frame delivery,
@@ -157,8 +160,9 @@ both minimum and maximum (up to one second). Invalid limits, repeated configurat
 serving owner are refused without replacing the controller. Existing callers
 retain their fixed policy until they explicitly enable adaptation. These public
 library calls enable capture cadence only and preserve legacy worker messages.
-The real Linux host startup additionally enables the software bitrate controller
-when `--adaptive-capture` is selected.
+Native host startup additionally enables the bitrate controller for an explicitly
+selected software or VideoToolbox encoder when `--adaptive-capture` is selected.
+NVENC and VA-API retain cadence adaptation without native bitrate transactions.
 
 For an independently owned shared source, call
 `Publisher::enable_adaptive_capture(capture_interval, maximum)` before its
@@ -244,8 +248,8 @@ Missed capture opportunities are not stored or replayed as a catch-up burst.
 
 The native source, exact codec configuration, capture timestamps, pending send
 expiry, repair spending, receiver budgets, input identities and authority
-deadlines retain their original bounds. A software bitrate transition starts
-with a verified IDR and subsequent pictures reference that actual output. A slower interval is not
+deadlines retain their original bounds. A bitrate transition starts with a
+verified IDR and subsequent pictures reference that actual output. A slower interval is not
 permission to retain an expired picture or action. Independent native-input
 cleanup and session renewal continue through the same host driver.
 
@@ -290,8 +294,9 @@ was 24 KB and the IDR fell from 85 to 69 KB. VA-API keeps its libavcodec default
 (not measured).
 
 Remaining work includes live impaired-path qualification of software bitrate
-changes, runtime resolution changes, hardware bitrate/quantizer control, platform
-presentation feedback, aggregate host/path budgets, qualified
+changes, native VideoToolbox rate-change qualification, runtime resolution
+changes, NVENC/VA-API bitrate transactions and hardware quantizer control,
+platform presentation feedback, aggregate host/path budgets, qualified
 damage-event and local-input wakeup, and platform/GUI policy selection. Collected
 remote-input wakeup is implemented separately in
 [INPUT_CAPTURE_WAKE.md](INPUT_CAPTURE_WAKE.md). The broad adaptive-control bead
@@ -332,9 +337,10 @@ The software adapter stops the old encoder before reopening it, preserves the
 original validated HEVC level and exact VPS/SPS/PPS, and releases the replacement
 only as a verified IDR. Frame identity, source timestamps and configuration
 generation stay bound to the same source. The existing decoder consumes the new
-IDR and following P pictures. Hardware returns typed unavailability for this
-operation; the host keeps hardware cadence adaptation without enabling software
-bitrate switching or silently substituting an encoder.
+IDR and following P pictures. NVENC and VA-API return typed unavailability for
+this operation; the host keeps their cadence adaptation without bitrate
+switching or silently substituting an encoder. VideoToolbox uses its own native
+transaction described below, without replacing the capture session.
 
 Applied-rate accounting happens before sender admission or recipient expiry can
 discard a picture. Private recovery also completes the original token before
@@ -383,6 +389,46 @@ execute the full daemon recovery scenarios. Full Cargo/daemon execution remains 
 exhausted shared-host disk/memory and the unavailable exact pinned runtime
 checkout. The actual 40/120 ms lossy-path acceptance rows remain untested here;
 beads `fr-rc-media-wire-controller-qej` and `fr-xfvs` stay open.
+
+## macOS VideoToolbox bitrate transactions
+
+With `--adaptive-capture`, the original macOS private or shared capture owner
+uses the same bitrate controller and initial `--bitrate` ceiling. The first real
+IDR still bootstraps at the configured rate. Later changes share software
+capture's two-second bound on both the original host observation clock and the
+worker's monotonic clock. Retargeting and deferred replies do not restart that
+bound.
+
+A pending rate alone never creates an encode. A fresh native Idle observation
+of the last encoded picture returns its previous rate and retains the target.
+Changed source pixels, an already-required verification capture or a forced
+recovery picture can apply an eligible target on the original capture credit.
+The original source-validity checks and absolute native deadline remain in
+force; no additional capture queue, worker or timeout is introduced.
+
+Before that required encode, the original VideoToolbox session sets and reads
+back `AverageBitRate`, then requests a keyframe. The Rust boundary reports the
+changed rate only after the existing `HevcGuard` admits a real HEVC IDR under
+the original decoder configuration. Property acceptance alone and a native
+keyframe flag are insufficient. Readback confirms the configured soft average
+target, not achieved throughput. A failed property change, readback, source
+check or IDR admission ends the original capture owner with a typed refusal.
+
+The exact production policies passed 25 C tests and five Rust tests on Linux.
+C warnings were errors; the standalone Rust policy used the pinned nightly and
+also passed strict pedantic Clippy. They cover idle suppression, required-encode
+and force-IDR decisions, both clocks, retargeting, and refusal of mismatched or
+unverified changed-rate receipts. These results do not execute VideoToolbox.
+
+The real Mac-worker regression
+`native_rate_changes_report_only_admitted_idrs_and_keep_the_original_dwell`
+is in source: it starts at 8 Mbit/s, admits a 4 Mbit/s IDR, defers an immediate
+2 Mbit/s target, and admits an 8 Mbit/s IDR after both original clocks pass the
+bound. It revalidates every unit independently and stops the same worker cleanly.
+This test has not run in the Linux session. A current macOS build and execution
+remain required before claiming native rate-change qualification or bitrate and
+quality improvements. The software measurements above do not establish either
+result for VideoToolbox.
 
 ## Software settle-to-sharp
 

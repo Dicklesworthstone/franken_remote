@@ -10,7 +10,7 @@
 //! macOS 14+ performs a bounded real screenshot through the original filter
 //! and configuration, then encodes that verification refresh. Fresh Idle events
 //! can suppress encoding; verification captures have an explicit counted cost.
-use crate::NativeError;
+use crate::{NativeError, capture_rate::Rate};
 use core::ffi::{c_int, c_void};
 use core::ptr::NonNull;
 use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
@@ -20,6 +20,7 @@ use fr_media::{
     hevc::HevcGuard,
     worker::UnchangedCapture,
 };
+use std::time::Instant;
 
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -52,8 +53,9 @@ unsafe extern "C" {
         capacity: usize,
         length: *mut usize,
         idr: *mut c_int,
+        target_bitrate: u32,
+        actual_bitrate: *mut u32,
     ) -> c_int;
-    fn fr_cap_set_bitrate(handle: *mut c_void, bitrate: u32) -> c_int;
     fn fr_cap_check(handle: *mut c_void) -> c_int;
     fn fr_cap_statistics(
         handle: *mut c_void,
@@ -171,7 +173,11 @@ pub struct MacCapture {
     admission: HevcGuard,
     buffer: Vec<u8>,
     last_output: Option<FrameId>,
+    last_request: Option<FrameId>,
+    last_observed: Option<u64>,
     bitrate: u32,
+    ceiling_bitrate: u32,
+    rate: Rate,
     closed: bool,
 }
 // Bound for the first frame (capture start) and for one encode.
@@ -226,7 +232,11 @@ impl MacCapture {
             admission,
             buffer,
             last_output: None,
+            last_request: None,
+            last_observed: None,
             bitrate,
+            ceiling_bitrate: bitrate,
+            rate: Rate::new(bitrate),
             closed: false,
         })
     }
@@ -248,10 +258,61 @@ impl MacCapture {
         force_idr: bool,
         only_if_changed: bool,
     ) -> Result<Captured, NativeError> {
+        // Legacy capture explicitly cancels an uncommitted adaptive target.
+        self.capture_request(
+            frame,
+            observed_micros,
+            force_idr,
+            only_if_changed,
+            self.bitrate,
+        )
+    }
+
+    /// Retain a rate target on the original capture owner. Fresh Idle evidence
+    /// still returns Unchanged at the previous rate. A real required encode may
+    /// apply the target only after the same dual-clock dwell as software capture;
+    /// its property readback and admitted IDR precede the reported rate change.
+    pub fn capture_with_bitrate(
+        &mut self,
+        frame: FrameId,
+        observed_micros: u64,
+        force_idr: bool,
+        only_if_changed: bool,
+        bitrate: u32,
+    ) -> Result<Captured, NativeError> {
+        self.capture_request(frame, observed_micros, force_idr, only_if_changed, bitrate)
+    }
+
+    fn capture_request(
+        &mut self,
+        frame: FrameId,
+        observed_micros: u64,
+        force_idr: bool,
+        only_if_changed: bool,
+        bitrate: u32,
+    ) -> Result<Captured, NativeError> {
         if self.closed {
             return Err(NativeError::Closed);
         }
-        let result = self.capture_inner(frame, observed_micros, force_idr, only_if_changed);
+        if !(10_000..=self.ceiling_bitrate).contains(&bitrate) {
+            return Err(NativeError::InvalidConfiguration);
+        }
+        if self.last_request.is_some_and(|last| frame <= last)
+            || self
+                .last_observed
+                .is_some_and(|last| observed_micros < last)
+        {
+            self.closed = true;
+            return Err(NativeError::StaleGeneration);
+        }
+        self.last_request = Some(frame);
+        self.last_observed = Some(observed_micros);
+        self.rate.request(bitrate);
+        let target = self
+            .rate
+            .due(observed_micros, Instant::now(), self.last_output.is_some())
+            .unwrap_or(self.bitrate);
+        let result = self.capture_inner(frame, observed_micros, force_idr, only_if_changed, target);
         if result.is_err() {
             self.closed = true;
         }
@@ -264,13 +325,12 @@ impl MacCapture {
         observed_micros: u64,
         force_idr: bool,
         only_if_changed: bool,
+        target_bitrate: u32,
     ) -> Result<Captured, NativeError> {
         // A P picture needs a previous unit; the first is always an IDR.
         let force_idr = force_idr || self.last_output.is_none();
-        if self.last_output.is_some_and(|last| frame <= last) {
-            return Err(NativeError::StaleGeneration);
-        }
         let (mut length, mut idr) = (0, 0);
+        let mut actual_bitrate = 0;
         // SAFETY: unique live handle; the buffer is writable for its length.
         let code = unsafe {
             fr_cap_encode(
@@ -282,10 +342,15 @@ impl MacCapture {
                 self.buffer.len(),
                 &raw mut length,
                 &raw mut idr,
+                target_bitrate,
+                &raw mut actual_bitrate,
             )
         };
         if code == UNCHANGED {
             let reference = self.last_output.ok_or(NativeError::Codec)?;
+            if force_idr || !only_if_changed || actual_bitrate != self.bitrate {
+                return Err(NativeError::UnsupportedBitstream);
+            }
             return Ok(Captured::Unchanged(UnchangedCapture {
                 candidate: frame,
                 reference,
@@ -324,6 +389,16 @@ impl MacCapture {
             bytes,
         )
         .map_err(|_| NativeError::Codec)?;
+        self.rate
+            .confirm(
+                target_bitrate,
+                actual_bitrate,
+                idr,
+                observed_micros,
+                Instant::now(),
+            )
+            .map_err(|()| NativeError::UnsupportedBitstream)?;
+        self.bitrate = actual_bitrate;
         self.last_output = Some(frame);
         Ok(Captured::Unit(unit))
     }
@@ -346,20 +421,6 @@ impl MacCapture {
             verification_encoded: encoded_refreshes,
             verification_wait_ms,
         })
-    }
-
-    /// Changes the encoder's average bitrate for later pictures.
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<(), NativeError> {
-        if self.closed {
-            return Err(NativeError::Closed);
-        }
-        if !(10_000..=200_000_000).contains(&bitrate) {
-            return Err(NativeError::InvalidConfiguration);
-        }
-        // SAFETY: unique live handle.
-        status(unsafe { fr_cap_set_bitrate(self.raw.as_ptr(), bitrate) })?;
-        self.bitrate = bitrate;
-        Ok(())
     }
 
     /// `GeometryChanged` once the stream stopped (display removed or

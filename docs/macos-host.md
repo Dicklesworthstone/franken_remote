@@ -36,6 +36,12 @@ them with `frd run`'s own parser and refuses anything every start would refuse
 Clipboard follows the controlling share by default; pass `-- --no-clipboard`
 to install with it disabled, or select `--view-only` to omit control entirely.
 
+Append `-- --adaptive-capture` to the installer command to enable adaptive
+capture cadence and VideoToolbox bitrate targets within the original `--fps`
+and `--bitrate` ceilings. This remains off by default. See
+[adaptive capture](../ADAPTIVE_CAPTURE.md#macos-videotoolbox-bitrate-transactions)
+for the native transaction and its pending macOS validation.
+
 `frd install` alone (without the script) writes the plist and prints the
 `launchctl` steps; it never starts the agent.
 

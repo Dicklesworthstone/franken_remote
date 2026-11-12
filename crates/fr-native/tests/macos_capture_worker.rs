@@ -145,6 +145,36 @@ fn unit(reply: Record, configuration: Configuration) -> fr_media::access_unit::E
     assert_eq!(reply.header.kind, Kind::Unit, "{:?}", refused_kind(&reply));
     worker::parse_unit(reply.into_body(), &configuration.limits().unwrap()).unwrap()
 }
+
+#[track_caller]
+fn rate_unit(
+    worker: &mut Worker,
+    configuration: Configuration,
+    frame: u64,
+    observed_micros: u64,
+    bitrate: u32,
+) -> (u32, fr_media::access_unit::EncodedAccessUnit) {
+    let request = worker::rate::Capture {
+        frame: FrameId::from_raw(frame),
+        observed_micros,
+        force_idr: false,
+        only_if_changed: false,
+        bitrate,
+    };
+    let reply = worker.transact(Kind::CaptureAtRate, request.encode().unwrap());
+    assert_eq!(
+        reply.header.kind,
+        Kind::RateUnit,
+        "{:?}",
+        refused_kind(&reply)
+    );
+    let (actual, unit) =
+        worker::rate::parse_unit(reply.into_body(), &configuration.limits().unwrap()).unwrap();
+    assert_eq!(unit.frame(), request.frame);
+    assert_eq!(unit.capture_micros(), request.observed_micros);
+    (actual, unit)
+}
+
 fn refused_kind(reply: &Record) -> Option<Error> {
     (reply.header.kind == Kind::Refused).then(|| refused(reply))
 }
@@ -236,6 +266,53 @@ fn live_display_units_are_admitted_idr_then_predicted_and_stop_is_clean() {
         worker.transact(Kind::CheckMonitor, Vec::new()).header.kind,
         Kind::MonitorValid
     );
+    assert_eq!(
+        worker.transact(Kind::Stop, Vec::new()).header.kind,
+        Kind::Stopped
+    );
+    assert!(worker.wait(Duration::from_secs(3)).success());
+}
+
+#[test]
+fn native_rate_changes_report_only_admitted_idrs_and_keep_the_original_dwell() {
+    let _serial = serial();
+    let mut worker = Worker::start();
+    let (configuration, _, _) = configure(&mut worker, 30, 8_000_000);
+    let mut guard = HevcGuard::new(
+        configuration.codec().unwrap(),
+        configuration.limits().unwrap(),
+        4,
+    )
+    .unwrap();
+    let mut last = FrameId::from_raw(0);
+    // Bootstrap at the configured rate before changing the original session.
+    // The next target is admitted only with a real IDR. Host time alone keeps
+    // the subsequent request inside that transition's original dwell, even on
+    // a loaded machine where the native calls take more worker time.
+    for (frame, observed, target, expected, idr) in [
+        (1, 1_000, 4_000_000, 8_000_000, true),
+        (2, 2_000, 4_000_000, 4_000_000, true),
+        (3, 3_000, 2_000_000, 4_000_000, false),
+    ] {
+        let (actual, unit) = rate_unit(&mut worker, configuration, frame, observed, target);
+        assert_eq!(actual, expected);
+        if idr {
+            assert!(matches!(unit.kind(), FrameKind::Idr { .. }));
+        } else {
+            assert_eq!(unit.kind(), FrameKind::Predicted { references: last });
+        }
+        guard.validate_length_prefixed(unit.bytes(), idr).unwrap();
+        last = unit.frame();
+    }
+
+    // Both original clocks now pass the bound. Retargeting does not extend it:
+    // the new desired setting can apply immediately, again only with an IDR
+    // that this independent guard admits under the original configuration.
+    std::thread::sleep(Duration::from_millis(2_100));
+    let (actual, unit) = rate_unit(&mut worker, configuration, 4, 2_103_000, 8_000_000);
+    assert_eq!(actual, 8_000_000);
+    assert!(matches!(unit.kind(), FrameKind::Idr { .. }));
+    guard.validate_length_prefixed(unit.bytes(), true).unwrap();
     assert_eq!(
         worker.transact(Kind::Stop, Vec::new()).header.kind,
         Kind::Stopped

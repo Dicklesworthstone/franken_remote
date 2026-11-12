@@ -28,7 +28,9 @@ fn shared_owner() -> (InputSession, Arc<Mutex<SessionAuthority>>) {
     authority.mark_capabilities_checked().unwrap();
     authority.authorize_observation(at(0)).unwrap();
     authority.require_view_evidence(at(0)).unwrap();
-    authority.mark_view_ready_until(at(1_000_000), at(0)).unwrap();
+    authority
+        .mark_view_ready_until(at(1_000_000), at(0))
+        .unwrap();
     authority.grant_lease(credentials.lease, at(0)).unwrap();
     authority
         .issue_input_ticket(credentials.lease, credentials.ticket, at(0))
@@ -130,8 +132,7 @@ fn policy_wait_cannot_publish_at_the_exact_original_view_deadline() {
     let mut session = receiver(&input);
     let item = receive(&mut session, 1, b"must not replace the local clipboard");
     let mut sink = Sink::default();
-    let (result, deadline) =
-        through_policy_turn(&mut session, &shared, item, &mut sink, 1_000_000);
+    let (result, deadline) = through_policy_turn(&mut session, &shared, item, &mut sink, 1_000_000);
     assert_eq!(result, Err(Error::Expired));
     assert_eq!(deadline, None);
     assert_eq!(sink.effects, [] as [String; 0]);
@@ -154,8 +155,7 @@ fn policy_wait_inside_original_deadline_publishes_once_with_the_same_cap() {
     let mut session = receiver(&input);
     let item = receive(&mut session, 1, b"current");
     let mut sink = Sink::default();
-    let (result, deadline) =
-        through_policy_turn(&mut session, &shared, item, &mut sink, 999_999);
+    let (result, deadline) = through_policy_turn(&mut session, &shared, item, &mut sink, 999_999);
     let receipt = result.unwrap();
     assert_eq!(receipt.publication, Publication::SubmittedToOs);
     assert_eq!(deadline, Some(at(1_000_000)));
@@ -176,8 +176,7 @@ fn policy_wait_does_not_extend_the_earlier_item_deadline() {
     session.begin_before(item, at(0), at(500_000)).unwrap();
     session.chunk(item.stamp, 0, 0, b"late", at(0)).unwrap();
     let mut sink = Sink::default();
-    let (result, deadline) =
-        through_policy_turn(&mut session, &shared, item, &mut sink, 500_000);
+    let (result, deadline) = through_policy_turn(&mut session, &shared, item, &mut sink, 500_000);
     assert_eq!(result, Err(Error::Expired));
     assert_eq!(deadline, None);
     assert_eq!(sink.effects, [] as [String; 0]);
@@ -229,7 +228,9 @@ fn revocation_during_final_unlocked_sample_prevents_publication() {
             }
             at(0)
         }),
-        Err(Error::Authority(fr_core::input_submission::Refusal::Revoked))
+        Err(Error::Authority(
+            fr_core::input_submission::Refusal::Revoked
+        ))
     );
     assert!(session.is_closed());
     assert_eq!(sink.effects, [] as [String; 0]);

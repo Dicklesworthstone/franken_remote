@@ -118,11 +118,18 @@ impl Share {
             }
             Kind::CaptureAtRate => {
                 let c = worker::rate::Capture::decode(request.body())?;
-                if c.bitrate != self.capture.bitrate() {
-                    self.capture.set_bitrate(c.bitrate).map_err(native)?;
-                }
+                let captured = self
+                    .capture
+                    .capture_with_bitrate(
+                        c.frame,
+                        c.observed_micros,
+                        c.force_idr,
+                        c.only_if_changed,
+                        c.bitrate,
+                    )
+                    .map_err(native)?;
                 let bitrate = self.capture.bitrate();
-                match self.capture(c.frame, c.observed_micros, c.force_idr, c.only_if_changed)? {
+                match captured {
                     Captured::Unit(unit) => {
                         Ok((Kind::RateUnit, worker::rate::unit_payload(&unit, bitrate)?))
                     }

@@ -378,6 +378,14 @@ pub enum Backend {
     SoftwareExplicit = 2,
     VideoToolbox = 3,
 }
+impl Backend {
+    /// Backends implementing the capture-local rate transaction. This selects
+    /// an IPC operation, not a device capability: native property application,
+    /// the unchanged decoder configuration and an actual IDR must still pass.
+    pub const fn accepts_rate_capture(self) -> bool {
+        matches!(self, Self::SoftwareExplicit | Self::VideoToolbox)
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Capture,

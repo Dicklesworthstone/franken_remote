@@ -97,22 +97,24 @@ fn request_encoding_preserves_candidate_time_and_all_force_conditional_modes() {
 }
 
 #[test]
-fn rate_preflight_preserves_original_cap_and_software_only_admission() {
+fn rate_preflight_preserves_original_cap_for_software_and_videotoolbox() {
     let mut configuration = request(None).configuration;
-    for rate in [10_000, 4_000_000, 8_000_000] {
-        assert_eq!(validate_bitrate(configuration, Some(rate)), Ok(()));
-    }
-    for rate in [0, 9_999, 8_000_001, u32::MAX] {
-        assert_eq!(
-            validate_bitrate(configuration, Some(rate)),
-            Err(worker::Error::ResourceLimit)
-        );
-    }
     for backend in [
-        worker::Backend::Nvenc,
-        worker::Backend::Vaapi,
+        worker::Backend::SoftwareExplicit,
         worker::Backend::VideoToolbox,
     ] {
+        configuration.backend = backend;
+        for rate in [10_000, 4_000_000, 8_000_000] {
+            assert_eq!(validate_bitrate(configuration, Some(rate)), Ok(()));
+        }
+        for rate in [0, 9_999, 8_000_001, u32::MAX] {
+            assert_eq!(
+                validate_bitrate(configuration, Some(rate)),
+                Err(worker::Error::ResourceLimit)
+            );
+        }
+    }
+    for backend in [worker::Backend::Nvenc, worker::Backend::Vaapi] {
         configuration.backend = backend;
         assert_eq!(
             validate_bitrate(configuration, Some(4_000_000)),

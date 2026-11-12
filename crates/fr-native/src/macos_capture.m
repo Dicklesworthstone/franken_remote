@@ -273,6 +273,7 @@ int fr_cap_bind_parent(int32_t expected) {
     VTCompressionSessionRef session;
     uint32_t width;
     uint32_t height;
+    uint32_t bitrate;          // configured target; adaptive changes require native readback
     // One encode in flight; the callback fills these and signals.
     dispatch_semaphore_t output;
     NSMutableData *unit;
@@ -576,6 +577,20 @@ static BOOL set(VTCompressionSessionRef s, CFStringRef key, CFTypeRef value) {
     return VTSessionSetProperty(s, key, value) == noErr;
 }
 
+// This confirms the configured soft average-rate target, never measured output
+// throughput. The caller still requires real output and Rust HEVC admission.
+static BOOL bitrate_is(VTCompressionSessionRef session, uint32_t expected) {
+    CFTypeRef value = NULL;
+    OSStatus status = VTSessionCopyProperty(session, kVTCompressionPropertyKey_AverageBitRate,
+                                            kCFAllocatorDefault, &value);
+    int64_t actual = 0;
+    BOOL matches = status == noErr && value && CFGetTypeID(value) == CFNumberGetTypeID() &&
+                   CFNumberGetValue((CFNumberRef)value, kCFNumberSInt64Type, &actual) &&
+                   actual == (int64_t)expected;
+    if (value) CFRelease(value);
+    return matches;
+}
+
 static void close_session(FrCapture *c) {
     if (!c->session) return;
     VTCompressionSessionInvalidate(c->session);
@@ -731,6 +746,7 @@ static int open_session(FrCapture *c, uint32_t fps, uint32_t bitrate,
     OSStatus prepared = VTCompressionSessionPrepareToEncodeFrames(session);
     if (!open_live(deadline)) return FR_CAP_TIMEOUT;
     if (prepared != noErr) return FR_CAP_UNAVAILABLE;
+    c->bitrate = bitrate;
     return FR_CAP_OK;
 }
 
@@ -948,8 +964,10 @@ static BOOL source_current(FrCapture *c, uint64_t source_epoch) {
 // Unchanged or a fresh IDR. One absolute deadline includes source verification,
 // native encoding and all bounded rate-control resubmissions.
 int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t timeout_ms, uint8_t *buffer,
-                  size_t capacity, size_t *length, int *idr) {
-    if (!handle || !buffer || !length || !idr || capacity == 0 || timeout_ms == 0)
+                  size_t capacity, size_t *length, int *idr, uint32_t target_bitrate,
+                  uint32_t *actual_bitrate) {
+    if (!handle || !buffer || !length || !idr || !actual_bitrate || capacity == 0 || timeout_ms == 0 ||
+        target_bitrate < 10000 || target_bitrate > 200000000)
         return FR_CAP_INVALID;
     uint64_t requested = mach_absolute_time();
     uint64_t entered_ns = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
@@ -960,6 +978,7 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
     FrCapture *c = (__bridge FrCapture *)handle;
     *length = 0;
     *idr = 0;
+    *actual_bitrate = c->bitrate;
     if (!c->session) return FR_CAP_CLOSED;
     int live = capture_live(c);
     if (live) return live;
@@ -1002,7 +1021,10 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
             CVPixelBufferRelease(picture);
             return live ? live : FR_CAP_TIMEOUT;
         }
-        if (!verification && only_if_changed && !force_idr && selected == c->encoded) {
+        FrCapEncodePlan plan = fr_cap_encode_plan(verification, only_if_changed, force_idr,
+                                                  selected == c->encoded, c->bitrate,
+                                                  target_bitrate);
+        if (!plan.encode) {
             CVPixelBufferRelease(picture);
             os_unfair_lock_lock(&c->lock);
             BOOL current = !c->stopped && fr_cap_source_current(&c->source, source_epoch);
@@ -1016,8 +1038,23 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
             CVPixelBufferRelease(picture);
             return FR_CAP_UNAVAILABLE;
         }
+        if (plan.change_rate) {
+            // The original source/deadline fences bracket the native property
+            // mutation. A failure ends this capture owner; it cannot resume a
+            // possibly changed session or report the old setting as successful.
+            BOOL applied = set(c->session, kVTCompressionPropertyKey_AverageBitRate,
+                               (__bridge CFTypeRef) @(target_bitrate));
+            BOOL timely = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) < deadline_ns;
+            BOOL confirmed = applied && timely && bitrate_is(c->session, target_bitrate);
+            if (!confirmed || !source_current(c, source_epoch) ||
+                clock_gettime_nsec_np(CLOCK_UPTIME_RAW) >= deadline_ns) {
+                CVPixelBufferRelease(picture);
+                return FR_CAP_CODEC;
+            }
+            c->bitrate = target_bitrate;
+        }
         NSDictionary *options =
-            force_idr ? @{(__bridge NSString *)kVTEncodeFrameOptionKey_ForceKeyFrame : @YES} : nil;
+            plan.force_idr ? @{(__bridge NSString *)kVTEncodeFrameOptionKey_ForceKeyFrame : @YES} : nil;
         int64_t now = (int64_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000);
         if (c->last_pts != INT64_MIN && c->last_pts > INT64_MAX - c->interval) {
             CVPixelBufferRelease(picture);
@@ -1080,6 +1117,7 @@ int fr_cap_encode(void *handle, int force_idr, int only_if_changed, uint32_t tim
         if (current && timely) {
             *length = c->unit.length;
             *idr = c->keyframe ? 1 : 0;
+            *actual_bitrate = c->bitrate;
             c->encoded = selected;
             if (verification) c->verification_encoded++;
         }
@@ -1102,15 +1140,6 @@ int fr_cap_statistics(void *handle, uint64_t *requests, uint64_t *encoded_refres
     *encoded_refreshes = c->verification_encoded;
     *verification_wait_ms = FR_CAP_VERIFY_WAIT_MS;
     return FR_CAP_OK;
-}
-
-int fr_cap_set_bitrate(void *handle, uint32_t bitrate) {
-    if (!handle || bitrate == 0) return FR_CAP_INVALID;
-    FrCapture *c = (__bridge FrCapture *)handle;
-    if (!c->session) return FR_CAP_CLOSED;
-    return set(c->session, kVTCompressionPropertyKey_AverageBitRate, (__bridge CFTypeRef) @(bitrate))
-               ? FR_CAP_OK
-               : FR_CAP_CODEC;
 }
 
 // FR_CAP_OK while the stream runs on an unchanged display; FR_CAP_GEOMETRY

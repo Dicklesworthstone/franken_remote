@@ -157,6 +157,16 @@ mod macos_file_drop;
 #[cfg(all(target_os = "linux", feature = "linux-media"))]
 pub mod capture;
 
+// The original dual-clock rate bound is shared by software and VideoToolbox
+// capture. Compile its pure policy tests on every host.
+#[cfg(any(
+    test,
+    all(target_os = "linux", feature = "linux-media"),
+    all(target_os = "macos", feature = "macos-media")
+))]
+#[path = "capture/rate.rs"]
+mod capture_rate;
+
 #[cfg(all(
     target_os = "linux",
     any(feature = "linux-media", feature = "linux-desktop")

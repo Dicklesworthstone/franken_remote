@@ -15,9 +15,8 @@ use fr_media::{
 use std::time::{Duration, Instant};
 
 mod refinement;
+use crate::capture_rate::Rate;
 use refinement::{Moment, Refinement};
-mod rate;
-use rate::Rate;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureOutput {

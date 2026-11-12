@@ -29,7 +29,7 @@ pub(super) fn validate_bitrate(
     bitrate: Option<u32>,
 ) -> Result<(), worker::Error> {
     if let Some(rate) = bitrate {
-        if configuration.backend != worker::Backend::SoftwareExplicit {
+        if !configuration.backend.accepts_rate_capture() {
             return Err(worker::Error::Unsupported);
         }
         if !(10_000..=configuration.bitrate).contains(&rate) {
