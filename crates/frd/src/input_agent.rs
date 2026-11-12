@@ -1278,8 +1278,9 @@ mod reservation_tests {
             seat.install(reserved.epoch, &control).unwrap();
             let shared = Shared {
                 admission: AdmissionGate {
+                    #[cfg(native_stack)]
+                    tailnet: None,
                     seat: Some(seat.clone()),
-                    ..AdmissionGate::default()
                 },
                 mailbox: Mutex::new(Mailbox {
                     outstanding,
