@@ -6,6 +6,16 @@ pub mod opus;
 
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 pub mod macos_audio;
+#[cfg(all(target_os = "macos", feature = "macos-host-audio"))]
+pub mod macos_audio_capture;
+#[cfg(any(test, all(target_os = "macos", feature = "macos-host-audio")))]
+// Portable packer tests do not construct the native owner that uses the
+// read budget, close operation and native-only errors.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-host-audio")),
+    allow(dead_code)
+)]
+mod macos_audio_capture_policy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-audio")))]
 // Test-only builds (every platform) compile the policy without the native
 // Core Audio owner that constructs most of its errors.
@@ -222,6 +232,7 @@ pub use parent::{ParentUnbound, bind_parent};
         any(
             test,
             feature = "macos-input",
+            feature = "macos-host-audio",
             feature = "macos-clipboard",
             feature = "macos-session-monitor",
             feature = "macos-observation-indicator"

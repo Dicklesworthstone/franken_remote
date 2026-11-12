@@ -38,6 +38,10 @@ media-worker = []
 # macOS host capture (fr-p1-host-macos-vif): ScreenCaptureKit into
 # VideoToolbox HEVC in the capture worker. System frameworks, macOS 14+ at runtime.
 macos-media = ["media-worker"]
+# Explicit host application/system playback capture. Reuses the separate
+# media-worker audio role and the existing statically linked Opus encoder.
+# No desktop client playback or microphone feature is enabled by this flag.
+macos-host-audio = ["macos-media", "opus"]
 # macOS client presentation (fr-5a4w): VideoToolbox HEVC decode into
 # IOSurface-backed pixel buffers, drawn by Metal into a CAMetalLayer in an
 # AppKit window. Objective-C glue compiled by build.rs; system frameworks only.

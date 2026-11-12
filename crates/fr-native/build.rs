@@ -13,6 +13,7 @@ fn main() {
     build_macos_viewer();
     build_macos_clipboard();
     build_macos_capture();
+    build_macos_audio_capture();
     build_macos_input();
     build_macos_session_monitor();
     build_macos_observation_indicator();
@@ -862,6 +863,80 @@ fn build_macos_capture() {
         "Foundation",
         "ScreenCaptureKit",
         "VideoToolbox",
+    ] {
+        println!("cargo:rustc-link-lib=framework={framework}");
+    }
+    println!("cargo:rustc-link-lib=objc");
+}
+
+/// Independent host playback capture; system frameworks and the separately
+/// linked trusted Opus archive, never microphone or client output.
+fn build_macos_audio_capture() {
+    println!("cargo:rerun-if-changed=src/macos_audio_capture.m");
+    println!("cargo:rerun-if-changed=src/macos_audio_capture_policy.h");
+    println!("cargo:rerun-if-changed=src/macos_audio_clock.h");
+    if env::var_os("CARGO_FEATURE_MACOS_HOST_AUDIO").is_none()
+        || env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos")
+    {
+        return;
+    }
+    assert_eq!(
+        env::var("HOST").unwrap(),
+        env::var("TARGET").unwrap(),
+        "macOS playback capture cross-builds require an explicit SDK"
+    );
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let requested = env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default();
+    let minimum = if requested
+        .split('.')
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+        >= 13
+    {
+        requested
+    } else {
+        "13.0".into()
+    };
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    assert!(
+        Command::new(env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args([
+                "-x",
+                "objective-c",
+                "-fobjc-arc",
+                "-O2",
+                "-fPIC",
+                "-Wall",
+                "-Wextra",
+                "-Werror"
+            ])
+            .arg(format!("-mmacosx-version-min={minimum}"))
+            .args(["-c", "src/macos_audio_capture.m", "-o"])
+            .arg(out.join("macosaudiocapture.o"))
+            .status()
+            .expect("native Objective-C compiler")
+            .success(),
+        "install the Xcode command line tools (xcode-select --install)"
+    );
+    assert!(
+        Command::new("ar")
+            .arg("crs")
+            .arg(out.join("libfrmacosaudiocapture.a"))
+            .arg(out.join("macosaudiocapture.o"))
+            .status()
+            .unwrap()
+            .success()
+    );
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=frmacosaudiocapture");
+    for framework in [
+        "CoreFoundation",
+        "CoreGraphics",
+        "CoreMedia",
+        "CoreAudio",
+        "Foundation",
+        "ScreenCaptureKit",
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
