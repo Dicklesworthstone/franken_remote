@@ -247,7 +247,9 @@ fn the_controller_native_guard_uses_its_own_cursor_and_keeps_the_original_item_c
 
     input.suspend(ClientInstant(1_000));
     assert!(!access.check(None));
-    clock.advance_to(Time::from_millis(2));
+    // Only a ticket issued after the host's own lapse (at most the 1 s
+    // source-age ceiling after this suspension) resumes input.
+    clock.advance_to(Time::from_millis(1_200));
     authority::present(&cx, &mut input, grant, 2);
     authority::renew(&cx, &mut input, grant);
     assert_eq!(input.suspended_since(), None);

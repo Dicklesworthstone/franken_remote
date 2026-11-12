@@ -24,6 +24,9 @@ use std::{sync::mpsc, time::Duration};
 const L: ProtocolLimits = ProtocolLimits::ABSOLUTE;
 const H: u64 = 1_000_000;
 const C: u64 = 10_000_000_000;
+/// A resume after a suspension that began near zero: past the 1 s source-age
+/// ceiling (fr-wire `MAX_SOURCE_AGE_US`) and inside the 3 s lease.
+const RESUMED: u64 = 1_200_000;
 fn client(elapsed: u64) -> ClientInstant {
     ClientInstant(C + 100 + elapsed)
 }
@@ -411,25 +414,27 @@ fn final_view_suspension_refuses_but_the_same_original_owner_can_resume() {
     assert_eq!(sink.text, [] as [String; 0]);
     assert!(!lane.is_closed());
 
-    ready(&mut input, 1, 1_000);
+    // Only a ticket issued after the host's own lapse (at most the 1 s
+    // source-age ceiling after this suspension) resumes input.
+    ready(&mut input, 1, RESUMED);
     input
         .accept_ticket(
-            &ticket(1, H + 1_000, H + 1_001_000),
-            correlation(1_000),
-            client(1_000),
+            &ticket(1, H + RESUMED, H + RESUMED + 1_000_000),
+            correlation(RESUMED),
+            client(RESUMED),
         )
         .unwrap();
     assert_eq!(input.suspended_since(), None);
-    press(&mut input, 1_000);
+    press(&mut input, RESUMED);
     assert_eq!(
-        lane.receive(&commit, &mut sink, || client(1_000)),
+        lane.receive(&commit, &mut sink, || client(RESUMED)),
         Err(Error::Session(SessionError::Clipboard(
             CoreError::UnknownTransfer
         )))
     );
-    let next = stage(&mut lane, &mut sink, 2, "resumed owner", 1_000);
+    let next = stage(&mut lane, &mut sink, 2, "resumed owner", RESUMED);
     assert_eq!(
-        lane.receive(&next, &mut sink, || client(1_000))
+        lane.receive(&next, &mut sink, || client(RESUMED))
             .unwrap()
             .unwrap()
             .publication,
@@ -661,14 +666,15 @@ fn the_native_transport_sample_keeps_view_suspension_resumable() {
             .stopped
             .load(Ordering::Acquire)
     );
-    ready(&mut input, 1, 1_000);
+    ready(&mut input, 1, RESUMED);
     input
         .accept_ticket(
-            &ticket(1, H + 1_000, H + 1_001_000),
-            correlation(1_000),
-            client(1_000),
+            &ticket(1, H + RESUMED, H + RESUMED + 1_000_000),
+            correlation(RESUMED),
+            client(RESUMED),
         )
         .unwrap();
-    assert_eq!(network.sample_native(client(1_000)), Ok(host_at(1_000)));
-    press(&mut input, 1_000);
+    assert_eq!(input.suspended_since(), None);
+    assert_eq!(network.sample_native(client(RESUMED)), Ok(host_at(RESUMED)));
+    press(&mut input, RESUMED);
 }
