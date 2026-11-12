@@ -9,9 +9,9 @@
 //! host addressed to the Mac's tailnet addresses: IPv6 (check on, forwarding
 //! off) dropped them; IPv4 with forwarding on delivered them, to sockets with
 //! and without `IP_BOUND_IF`, which therefore is no ingress restriction.
-use super::{Error, command, interface_valid};
+use super::{COMMAND_TIMEOUT, Error, command, command_within, interface_valid};
 use asupersync::cx::Cx;
-use std::{net::IpAddr, path::Path};
+use std::{net::IpAddr, path::Path, time::Duration};
 
 const SYSCTL: &str = "/usr/sbin/sysctl";
 const IFCONFIG: &str = "/sbin/ifconfig";
@@ -19,12 +19,18 @@ const IFCONFIG: &str = "/sbin/ifconfig";
 /// Whether the kernel drops this family's packets that arrive on an interface
 /// other than the one owning their destination address.
 pub async fn enforced(cx: &Cx, ipv6: bool) -> Result<bool, Error> {
+    enforced_within(cx, ipv6, COMMAND_TIMEOUT).await
+}
+
+/// [`enforced`] with the `sysctl` read bounded by `limit`.
+pub(super) async fn enforced_within(cx: &Cx, ipv6: bool, limit: Duration) -> Result<bool, Error> {
     let names: [&str; 2] = if ipv6 {
         ["net.inet6.ip6.check_interface", "net.inet6.ip6.forwarding"]
     } else {
         ["net.inet.ip.check_interface", "net.inet.ip.forwarding"]
     };
-    let bytes = command(cx, Path::new(SYSCTL), &["-n", names[0], names[1]], b"").await?;
+    let args = ["-n", names[0], names[1]];
+    let bytes = command_within(cx, Path::new(SYSCTL), &args, b"", limit).await?;
     strong_host_values(&bytes)
 }
 
@@ -43,11 +49,17 @@ fn strong_host_values(bytes: &[u8]) -> Result<bool, Error> {
 
 /// The interface's index when it is an up point-to-point utun that holds
 /// `address` (not tentative, duplicated or detached).
-pub(super) async fn qualified(cx: &Cx, interface: &str, address: IpAddr) -> Result<u32, Error> {
+/// `limit` bounds the `ifconfig` read.
+pub(super) async fn qualified(
+    cx: &Cx,
+    interface: &str,
+    address: IpAddr,
+    limit: Duration,
+) -> Result<u32, Error> {
     if !interface.starts_with("utun") || !interface_valid(interface) {
         return Err(Error::UnqualifiedInterface);
     }
-    let bytes = command(cx, Path::new(IFCONFIG), &["-v", interface], b"").await?;
+    let bytes = command_within(cx, Path::new(IFCONFIG), &["-v", interface], b"", limit).await?;
     tunnel_index(&bytes, interface, address)
 }
 
@@ -111,7 +123,7 @@ pub async fn tunnel_interface(cx: &Cx, address: IpAddr) -> Result<String, Error>
         .filter(|name| name.starts_with("utun") && interface_valid(name))
         .take(64)
     {
-        if qualified(cx, name, address).await.is_ok() {
+        if qualified(cx, name, address, COMMAND_TIMEOUT).await.is_ok() {
             if found.is_some() {
                 return Err(Error::UnqualifiedInterface);
             }
@@ -141,6 +153,46 @@ mod tests {
         for malformed in [&b""[..], b"1\n", b"1\n0\n0\n", b"one\n0\n", b"1 0\n"] {
             assert!(strong_host_values(malformed).is_err(), "{malformed:?}");
         }
+    }
+
+    #[test]
+    fn a_periodic_strong_host_read_may_use_the_old_snapshot_validity() {
+        // A periodic refresh passes the old snapshot's remaining validity to
+        // both kernel reads; installation keeps one second.
+        let runtime = asupersync::runtime::RuntimeBuilder::new()
+            .worker_threads(2)
+            .enable_platform_reactor(true)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let long = Duration::from_millis(2_500);
+            let address: IpAddr = "fd7a:115c:a1e0::1".parse().unwrap();
+            assert_eq!(
+                enforced_within(&cx, true, Duration::ZERO).await,
+                Err(Error::CommandUncertain)
+            );
+            assert!(enforced_within(&cx, true, long).await.is_ok());
+            assert_eq!(
+                qualified(&cx, "utun999", address, Duration::ZERO).await,
+                Err(Error::CommandUncertain)
+            );
+            assert_eq!(
+                qualified(&cx, "utun999", address, long).await,
+                Err(Error::CommandFailed)
+            );
+            // A real child that outlives one second completes within the
+            // longer limit.
+            let sleep = Path::new("/bin/sleep");
+            assert_eq!(
+                command_within(&cx, sleep, &["1.3"], b"", COMMAND_TIMEOUT).await,
+                Err(Error::CommandUncertain)
+            );
+            assert_eq!(
+                command_within(&cx, sleep, &["1.3"], b"", long).await,
+                Ok(Vec::new())
+            );
+        });
     }
 
     #[test]

@@ -399,7 +399,7 @@ fn address_assigned(
             && a["dadfailed"].as_bool() != Some(true)
     }))
 }
-/// `limit` bounds the `ip` read; the macOS strong-host check keeps its own.
+/// `limit` bounds the interface read (`ip`, or `ifconfig` on macOS).
 async fn qualified_interface(
     cx: &Cx,
     config: &Configuration,
@@ -407,7 +407,7 @@ async fn qualified_interface(
 ) -> Result<u32, Error> {
     #[cfg(target_os = "macos")]
     if config.enforcement == Enforcement::StrongHost {
-        return strong_host::qualified(cx, &config.interface, config.address.ip()).await;
+        return strong_host::qualified(cx, &config.interface, config.address.ip(), limit).await;
     }
     let (index, bytes) = observe_within(cx, &config.ip, &config.interface, limit).await?;
     if !address_assigned(&bytes, index, &config.interface, config.address.ip())?
@@ -777,16 +777,17 @@ impl Boundary {
                 .map_err(|_| Error::Closed)?
                 .node
                 .clone();
-            let periodic_direct =
-                matches!(refresh, Refresh::Periodic) && matches!(&owner.backend, Backend::Direct);
-            // A periodic direct refresh spends the old snapshot's remaining
-            // validity on its kernel reads too, as on its lookup. The lease
-            // ends at that expiry anyway, so the fixed one-second bound only
-            // ended protected sessions early when the task driving this
-            // refresh was slow to poll (namespace e2e, fr-jlgm).
+            // A periodic refresh of a boundary this process owns (a direct
+            // rule, or macOS kernel state) spends the old snapshot's remaining
+            // validity on its lookup and kernel reads. The lease ends at that
+            // expiry anyway, so the fixed one-second bound only ended
+            // protected sessions early when the task driving this refresh was
+            // slow to poll (namespace e2e, fr-jlgm; installed macOS host log).
+            let periodic_owned = matches!(refresh, Refresh::Periodic)
+                && !matches!(&owner.backend, Backend::Helper(_));
             let cx = owner.lease.cx.clone();
             let limit = |old: &NodeIdentity| -> Result<Duration, Error> {
-                if !periodic_direct {
+                if !periodic_owned {
                     return Ok(COMMAND_TIMEOUT);
                 }
                 let current = now(&cx)?;
@@ -794,7 +795,7 @@ impl Boundary {
                     old.expires_us().saturating_sub(current),
                 ))
             };
-            let node = if periodic_direct {
+            let node = if periodic_owned {
                 owner
                     .lease
                     .api
@@ -835,9 +836,9 @@ impl Boundary {
                 // Installation included: the boundary IS this kernel state.
                 #[cfg(target_os = "macos")]
                 Backend::StrongHost => {
-                    if !strong_host::enforced(&owner.lease.cx, owner.config.address.is_ipv6())
-                        .await?
-                    {
+                    let limit = limit(&old)?;
+                    let ipv6 = owner.config.address.is_ipv6();
+                    if !strong_host::enforced_within(&owner.lease.cx, ipv6, limit).await? {
                         return Err(Error::StrongHostOff);
                     }
                 }

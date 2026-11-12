@@ -303,3 +303,14 @@ frd: not serving this node's IPv4 address: the kernel would also accept IPv4 pac
 Clients that find hosts through Tailscale (`fr`) use IPv6 automatically.
 MagicDNS may answer only IPv4 (A) records, so a client given just the name
 (such as the iOS app) cannot reach such a host by name alone.
+
+While sharing, `frd` reads this kernel state again every 500 ms (`sysctl`,
+`ifconfig -v` and Tailscale's self-lookup) and ends the share if any read
+fails. Those periodic reads may take the old reading's remaining validity (up
+to three seconds), as on Linux (LINUX_NATIVE_INGRESS.md); the share still ends
+at that reading's expiry. They used to stop after one second each. The
+installed host's log (2026-11-09 to 11-12, 308 shares started) shows five
+shares ended by these reads: three `CommandUncertain` (a command that
+outlived its limit or lost its output) and two `Identity(Timeout)` (a lookup
+that outlived its limit).
+Starting a share keeps the one-second limit.
