@@ -12,7 +12,11 @@ use asupersync::{
     cx::Cx,
     time::TimerDriverHandle,
 };
-use fr_core::{input_submission::InputSession, time::HostInstant};
+use fr_core::{
+    clipboard::authority::{CONTENDED_RETRIES, contended_backoff},
+    input_submission::{InputSession, Refusal},
+    time::HostInstant,
+};
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{
@@ -116,9 +120,23 @@ impl Shared {
         if self.cx.checkpoint().is_err() {
             self.permission.revoke();
         }
-        let local = self.clock.now().as_nanos() / 1000;
+        let mut local = self.clock.now().as_nanos() / 1000;
         let sample = if publication {
-            self.authority.try_sample(local)
+            // The original owner holding its projection lock at this instant
+            // is ordinary contention, not a lost grant. Back off and take a
+            // FRESH sample; nothing waits after the sample that is used, and
+            // persistent contention still fences below.
+            let mut retries = 0;
+            loop {
+                match self.authority.try_sample(local) {
+                    Err(Refusal::AuthorityUnavailable) if retries < CONTENDED_RETRIES => {
+                        contended_backoff(retries);
+                        retries += 1;
+                        local = self.clock.now().as_nanos() / 1000;
+                    }
+                    result => break result,
+                }
+            }
         } else {
             self.authority.sample(local)
         };
