@@ -124,7 +124,6 @@ fn an_agent_needs_an_explicit_encoder_and_a_daemon_is_refused() {
 fn capabilities_without_a_macos_backend_refuse_with_frd_runs_own_codes() {
     let home = Home::new();
     for (tail, code) in [
-        (&["--audio"][..], "audio_server_unavailable"),
         (&["--headless"][..], "no_display"),
         (&["--display", ":1"][..], "no_display"),
         (
@@ -138,13 +137,20 @@ fn capabilities_without_a_macos_backend_refuse_with_frd_runs_own_codes() {
         args.extend_from_slice(tail);
         assert_eq!(refusal(&home, &args).as_deref(), Some(code), "{tail:?}");
     }
+    // Host playback audio has a macOS backend since 3a0225d5
+    // (ScreenCaptureKit through the native worker): the agent may carry it.
+    assert_eq!(
+        refusal(&home, &["--", "--encoder", "videotoolbox", "--audio"]),
+        None
+    );
+    // Local approval has a macOS backend since 0762aa41 for a macos-host
+    // build installed as a per-user LaunchAgent (this test's binary).
     assert_eq!(
         refusal(
             &home,
             &["--approval", "local", "--", "--encoder", "videotoolbox"]
-        )
-        .as_deref(),
-        Some("local_approval_unavailable")
+        ),
+        None
     );
 }
 
