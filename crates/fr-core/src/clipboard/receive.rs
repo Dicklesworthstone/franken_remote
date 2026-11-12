@@ -178,14 +178,13 @@ impl ClipboardSession {
         let text = core::str::from_utf8(&transfer.bytes.0).map_err(|_| Error::InvalidUtf8)?;
         let prepared = Prepared(sink);
         prepared.0.prepare(text, stamp).map_err(Error::Platform)?;
-        let now = clock();
-        let authority = self.check(now)?;
-        if now >= transfer.deadline {
-            return Err(Error::Expired);
-        }
-        let publication = prepared
-            .0
-            .publish_until(text, stamp, transfer.deadline.min(authority));
+        let authority = self.check(clock())?;
+        let until = transfer.deadline.min(authority);
+        // The policy read can wait for the original authority owner. Account
+        // for that wait after every policy lock is released, without renewing
+        // this item's lifetime or reauthorizing against a newer deadline.
+        self.check_publication(clock(), until)?;
+        let publication = prepared.0.publish_until(text, stamp, until);
         let receipt = Receipt { stamp, publication };
         // In particular UnknownEffect is retained, not reclassified as safe to
         // retry. Setting the clipboard says nothing about application paste.

@@ -593,6 +593,11 @@ impl Authority for Projection {
     fn binding(&self) -> Binding {
         self.binding
     }
+    fn is_revoked(&self) -> bool {
+        self.state
+            .upgrade()
+            .is_none_or(|state| state.stopped.load(Ordering::Acquire))
+    }
     fn revoke(&self) {
         if let Some(state) = self.state.upgrade() {
             state.stopped.store(true, Ordering::Release);

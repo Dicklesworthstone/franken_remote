@@ -21,6 +21,18 @@ use std::sync::Arc;
 pub trait Authority: Send + Sync {
     fn binding(&self) -> Binding;
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal>;
+    /// Lock-free terminal fence for the SAME original owner. Called after the
+    /// final clock sample, so it must not wait, acquire a policy mutex, sample
+    /// time or grant/renew authority. Temporary view suspension is not revocation;
+    /// `deadline` must separately include its current exclusive readiness cap.
+    fn is_revoked(&self) -> bool;
+    /// Tighten a previously authorized publication after its final clock sample.
+    /// This may inspect current readiness without waiting, but must never grant
+    /// authority, return a replacement deadline or sample a caller's clock under
+    /// a policy lock. Contention refuses; suspension remains resumable.
+    fn publication_refusal(&self, _now: HostInstant) -> Option<Refusal> {
+        self.is_revoked().then_some(Refusal::Revoked)
+    }
     /// The cap for one clipboard item admitted now, fixed at admission. It may
     /// outlast `deadline` while control is live: the host's input view window
     /// bounds input submission, not an item's lifetime. Every record and the
@@ -62,6 +74,12 @@ impl Monitor {
     pub fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         self.0.deadline(now)
     }
+    pub fn is_revoked(&self) -> bool {
+        self.0.is_revoked()
+    }
+    pub fn publication_refusal(&self, now: HostInstant) -> Option<Refusal> {
+        self.0.publication_refusal(now)
+    }
     pub fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         self.0.item_deadline(now)
     }
@@ -87,6 +105,12 @@ impl Authority for Host {
         } else {
             result
         }
+    }
+    fn is_revoked(&self) -> bool {
+        self.input.is_revoked()
+    }
+    fn publication_refusal(&self, now: HostInstant) -> Option<Refusal> {
+        self.input.publication_refusal(now)
     }
     fn item_deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         let result = self.input.authorization_deadline(now);

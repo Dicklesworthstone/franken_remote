@@ -168,6 +168,19 @@ impl Authority for Lifetime {
     fn binding(&self) -> Binding {
         self.original.binding()
     }
+    fn is_revoked(&self) -> bool {
+        !self.live.load(Ordering::Acquire) || self.original.is_revoked()
+    }
+    fn publication_refusal(&self, now: HostInstant) -> Option<Refusal> {
+        if !self.live.load(Ordering::Acquire) {
+            return Some(Refusal::Revoked);
+        }
+        let refusal = self.original.publication_refusal(now);
+        if !self.live.load(Ordering::Acquire) {
+            return Some(Refusal::Revoked);
+        }
+        refusal
+    }
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         if !self.live.load(Ordering::Acquire) {
             return Err(Refusal::Revoked);

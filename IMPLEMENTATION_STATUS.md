@@ -1,5 +1,32 @@
 # Implementation status
 
+## Clipboard publication after policy waits (2026-11-12)
+
+The shared clipboard owner now retains the original item and readiness cap,
+then samples the clock after authorization has released its policy locks.
+Before native publication it checks that immutable exclusive deadline, original
+owner revocation and both privacy-switch generations. A final nonblocking
+refusal check can tighten the decision after view loss; it cannot renew the
+item, grant authority or wait for the policy mutex. The host check preserves
+the original lease and native-owner identity. Temporary view loss remains
+resumable, while contention refuses the clipboard lane without revoking input.
+Preparation cleanup and submitted/unknown-effect receipts remain intact;
+consumed commits are never replayed.
+
+**Passed:** the exact pinned Cargo clipboard suite (30 tests) and suspension
+suite (14 tests), including ten new publication regressions using the actual
+shared authority mutex and deterministic thread handoffs. Cases cover exact
+expiry, the still-valid positive path, item expiry, clock regression, revoke,
+privacy-switch cycles, immutable caps after newer evidence, retained native
+receipts, final view loss and lock contention.
+
+**Validation limits:** strict core Clippy identified nine test-only empty-vector
+assertion style denials. Those assertions were corrected, but the executor
+became unavailable before a rerun. Full-workspace checks and native OS/session
+qualification have not passed on this revision. The companion viewer clock
+projection/readiness completion is tracked separately under the existing
+clipboard work; this shared/host slice does not claim that completion.
+
 ## Input expiry after authority-lock contention (2026-11-11)
 
 The shared `InputSession` now resamples its original host clock after policy

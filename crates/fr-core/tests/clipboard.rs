@@ -486,3 +486,6 @@ fn debug_and_errors_do_not_include_text_or_opaque_transfer_id() {
     assert!(!debug.contains("TOP SECRET"));
     assert!(!debug.contains("00000000000000000000000000000001"));
 }
+
+#[path = "clipboard/publication.rs"]
+mod publication;

@@ -175,7 +175,8 @@ pub trait ClipboardSink {
     fn publish(&mut self, text: &str, stamp: Stamp) -> Publication;
     /// The owner's final call, with the exclusive deadline its last authority
     /// check derived (the item's deadline, bounded by the controller's lease).
-    /// An in-process sink publishes immediately after that check; one whose
+    /// Policy locks have been released and time resampled against this exact
+    /// cap before the call. An in-process sink publishes immediately; one whose
     /// OS call happens elsewhere (another process) must re-check `until` there
     /// immediately before the native call, and report `NotSubmitted` when late.
     fn publish_until(&mut self, text: &str, stamp: Stamp, until: HostInstant) -> Publication {
@@ -417,6 +418,10 @@ impl ClipboardSession {
         {
             return deadline;
         }
+        self.check_switches()?;
+        deadline
+    }
+    fn check_switches(&mut self) -> Result<(), Error> {
         // Observe switch generations even while suspended. An off/on cycle
         // must still discard the old item rather than resume it with the view.
         let states = (self.switches.0.state(), self.switches.1.state());
@@ -426,7 +431,26 @@ impl ClipboardSession {
             self.incoming = None;
             return Err(Error::Disabled);
         }
-        deadline
+        Ok(())
+    }
+    /// Preserve the original time cap and inspect only nonblocking fences after
+    /// the last policy wait. A second authorization could wait again or replace
+    /// the cap just checked.
+    fn check_publication(&mut self, now: HostInstant, until: HostInstant) -> Result<(), Error> {
+        if now < self.clock {
+            self.monitor.revoke();
+            self.close();
+            return Err(Error::Clock);
+        }
+        self.clock = now;
+        if now >= until {
+            return Err(Error::Expired);
+        }
+        if let Some(reason) = self.monitor.publication_refusal(now) {
+            return Err(self.authority_error(reason));
+        }
+        self.check_switches()?;
+        Ok(())
     }
 }
 impl Drop for ClipboardSession {

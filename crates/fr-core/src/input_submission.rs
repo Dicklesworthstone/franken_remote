@@ -272,6 +272,43 @@ impl InputMonitor {
             ControlStatus::Suspended { .. } => Err(Refusal::Authority(AuthorityError::ViewUnready)),
         }
     }
+    /// Refusal-only fence for a clipboard publication whose original deadline
+    /// is already fixed. Never wait for policy after the final clock sample or
+    /// return a newer cap. A contended read retires that clipboard owner without
+    /// revoking otherwise live input; terminal authority decisions still fence
+    /// the native input owner before releasing the policy lock.
+    pub(crate) fn publication_refusal(&self, now: HostInstant) -> Option<Refusal> {
+        if self.is_revoked() {
+            return Some(Refusal::Revoked);
+        }
+        let Ok(mut authority) = self.authority.try_lock() else {
+            return Some(Refusal::AuthorityUnavailable);
+        };
+        if self.is_revoked() {
+            return Some(Refusal::Revoked);
+        }
+        if authority.lease_id() != Some(self.lease)
+            || !authority.is_native_owner(&self.native_owner)
+        {
+            return Some(Refusal::Authority(AuthorityError::StaleLease));
+        }
+        match authority.control_status(now) {
+            Ok(ControlStatus::Live { .. }) => None,
+            Ok(ControlStatus::Suspended { .. }) => {
+                Some(Refusal::Authority(AuthorityError::ViewUnready))
+            }
+            Err(error) => {
+                self.revoke();
+                // A terminal suspension-limit failure must not look like a
+                // resumable clipboard pause, including on its first sample.
+                Some(if error == AuthorityError::ViewUnready {
+                    Refusal::Revoked
+                } else {
+                    Refusal::Authority(error)
+                })
+            }
+        }
+    }
     /// Live or suspended control at a freshly sampled clock. Any error has
     /// already revoked this lease's native owner (terminal).
     pub fn status(&self, now: HostInstant) -> Result<ControlStatus, Refusal> {

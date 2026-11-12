@@ -36,6 +36,9 @@ impl Authority for Owner {
     fn binding(&self) -> Binding {
         binding()
     }
+    fn is_revoked(&self) -> bool {
+        self.0.revoked.load(Ordering::Acquire)
+    }
     fn deadline(&self, now: HostInstant) -> Result<HostInstant, Refusal> {
         if self.0.revoked.load(Ordering::Acquire) {
             return Err(Refusal::Revoked);
