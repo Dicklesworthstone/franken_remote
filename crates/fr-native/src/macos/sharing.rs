@@ -94,7 +94,7 @@ impl Upload {
     }
     fn selected(owner: UploadOwner) -> Self {
         Self {
-            progress: upload_progress(Some(files::Status::Configured(owner.snapshot))),
+            progress: upload_progress(Some(&files::Status::Configured(owner.snapshot))),
             owner: Some(owner),
         }
     }
@@ -102,12 +102,12 @@ impl Upload {
         self.owner
             .as_ref()
             .map_or(pacing::State::Unavailable, |owner| {
-                pacing_state(owner.snapshot)
+                pacing_state(&owner.snapshot)
             })
     }
 }
 
-fn pacing_state(snapshot: SendSnapshot) -> pacing::State {
+fn pacing_state(snapshot: &SendSnapshot) -> pacing::State {
     let eligible = !snapshot.cancel_requested
         && snapshot.status.absence.is_none()
         && snapshot.cleanup.is_none()
@@ -149,7 +149,7 @@ fn upload(files: &files::Files, native_last: bool) -> Upload {
         Some(Err(_)) => Upload::state(State::Failed),
         None => files.upload_control().map_or_else(
             || Upload {
-                progress: upload_progress(files.upload_status()),
+                progress: upload_progress(files.upload_status().as_ref()),
                 owner: None,
             },
             |control| Upload::selected(UploadOwner::new(1, control)),
@@ -157,13 +157,13 @@ fn upload(files: &files::Files, native_last: bool) -> Upload {
     }
 }
 
-fn upload_progress(status: Option<files::Status<SendSnapshot>>) -> Progress {
+fn upload_progress(status: Option<&files::Status<SendSnapshot>>) -> Progress {
     use files::Status;
     let status = match status {
         None => return Progress::default(),
         Some(Status::NotStarted) => return Progress::state(State::Waiting),
         Some(Status::Unavailable(absence)) => {
-            return Progress::state(if absence == Absence::Refused(FileSendError::Cancelled) {
+            return Progress::state(if *absence == Absence::Refused(FileSendError::Cancelled) {
                 State::Cancelled
             } else {
                 State::Failed
@@ -331,7 +331,7 @@ impl Ui {
             return Err(NativeError::Unavailable);
         };
         if let Some((action, control)) = action
-            && pacing_state(control.snapshot()).permits(action)
+            && pacing_state(&control.snapshot()).permits(action)
         {
             // The existing sender observes this request on its next ordinary
             // turn. No source, handshake, selection or deadline is recreated.

@@ -164,7 +164,7 @@ pub(super) fn connect(
         connection,
         json,
         selected_files,
-        audio.clone(),
+        audio.as_ref(),
     )
     .map_err(|mut error| {
         pending.preserve(&mut error);
@@ -185,7 +185,7 @@ fn connect_selected(
     connection: &Connection,
     json: bool,
     selected_files: fr_native::macos::files::Files,
-    audio: Option<playback::Report>,
+    audio: Option<&playback::Report>,
 ) -> Result<String, Failure> {
     fr_native::macos::initialize_application().map_err(|_| {
         failure(
@@ -228,7 +228,7 @@ fn connect_selected(
     .with_picture_box(picture_box)
     .with_files(selected_files)
     .clipboard(connection.control && connection.clipboard);
-    session = playback::install(session, audio.as_ref());
+    session = playback::install(session, audio);
     if display == DisplayChoice::Choose {
         session = session.with_display_picker();
     }
@@ -315,7 +315,7 @@ fn connect_selected(
         ),
         json,
     );
-    let audio = audio.as_ref().map(|report| report.borrow());
+    let audio = audio.map(|report| report.borrow());
     playback::finish(audio.as_deref(), result, json)
 }
 

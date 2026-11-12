@@ -568,7 +568,7 @@ type WindowSlot = Rc<RefCell<Option<Window>>>;
 
 /// Independently retained original audio cleanup. A stop only fences admission;
 /// completion requires the actual device, decoder child and native worker to
-/// retire. Implementations must remain nonblocking on the AppKit thread.
+/// retire. Implementations must remain nonblocking on the `AppKit` thread.
 pub trait AudioRetirement {
     fn stop(&self);
     fn is_complete(&self) -> bool;

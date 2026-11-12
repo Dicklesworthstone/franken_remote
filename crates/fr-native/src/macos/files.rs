@@ -464,6 +464,8 @@ impl Files {
 
     /// Owning UI access to one exact batch; read-only command results do not
     /// expose pacing or cancellation. Sequence and handle share one sample.
+    // Only the macOS sharing view reads it; Linux tests compile this file too.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) fn command_control(&self) -> Option<(u64, SendControl)> {
         self.commands.as_ref()?.owner.as_ref()?.latest_control()
     }

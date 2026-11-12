@@ -7,6 +7,12 @@ pub mod opus;
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]
 pub mod macos_audio;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-audio")))]
+// Test-only builds (every platform) compile the policy without the native
+// Core Audio owner that constructs most of its errors.
+#[cfg_attr(
+    not(all(target_os = "macos", feature = "macos-audio")),
+    allow(dead_code)
+)]
 mod macos_audio_policy;
 // Both native devices use the same original Opus/ACK/playout owner.
 #[cfg(all(target_os = "macos", feature = "macos-audio"))]

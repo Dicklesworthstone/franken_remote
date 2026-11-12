@@ -185,7 +185,7 @@ pub(crate) fn sharing_points_with_selections(
 
 /// Reserve the optional 44-point playback row before establishing a viewport.
 /// The local volume and mute controls never resize an existing remote picture.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
 pub(crate) fn sharing_points_with_audio(
     pixels: (u32, u32),
     logical: (u32, u32),
