@@ -645,6 +645,7 @@ dependencies = [
  "rustix",
  "serde",
  "serde_json",
+ "windows",
 ]
 
 [[package]]
@@ -673,7 +674,9 @@ name = "fr-windows"
 version = "0.1.0"
 dependencies = [
  "fr-core",
+ "fr-media",
  "fr-mobile-ffi",
+ "fr-native",
  "fr-tailnet",
  "serde_json",
  "windows",

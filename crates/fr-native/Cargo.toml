@@ -23,6 +23,26 @@ serde_json.workspace = true
 # The CLI's local profile store uses the same pinned safe filesystem adapter as frd.
 rustix = { version = "=1.1.4", default-features = false, features = ["std", "fs", "process"] }
 
+[target.'cfg(windows)'.dependencies]
+# Windows host capture (`windows-media`): Desktop Duplication, the D3D11 video
+# processor and Media Foundation hardware encoders. The version Cargo.lock
+# already carries for the Windows client; only the bindings named compile.
+windows = { version = "=0.62.2", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 fr-transport.workspace = true
 fr-client.workspace = true
@@ -38,6 +58,10 @@ media-worker = []
 # macOS host capture (fr-p1-host-macos-vif): ScreenCaptureKit into
 # VideoToolbox HEVC in the capture worker. System frameworks, macOS 14+ at runtime.
 macos-media = ["media-worker"]
+# Windows host capture (fr-p0-media-windows-fbt, fr-p2-host-windows-rt1):
+# Desktop Duplication into a hardware Media Foundation HEVC encoder on the
+# same adapter. System DLLs only; the capture worker role comes later.
+windows-media = ["dep:windows"]
 # Explicit host application/system playback capture. Reuses the separate
 # media-worker audio role and the existing statically linked Opus encoder.
 # No desktop client playback or microphone feature is enabled by this flag.

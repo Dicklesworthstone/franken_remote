@@ -1,3 +1,4 @@
+mod probe;
 mod render;
 mod viewer;
 
@@ -8,6 +9,11 @@ use fr_tailnet::{DEFAULT_SERVICE_PORT, HostName, HostPin};
 use std::{io::Write, net::IpAddr, process::ExitCode};
 
 pub fn run(args: &[String]) -> ExitCode {
+    if let [command, rest @ ..] = args
+        && command == "capture-probe"
+    {
+        return probe::run(rest);
+    }
     let [command, host, rest @ ..] = args else {
         return usage();
     };

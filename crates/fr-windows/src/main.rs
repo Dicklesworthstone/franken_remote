@@ -13,6 +13,10 @@
 //!       completion document (counts and timings, no content) at the end.
 //!   fr-windows directory <name> [--port N] [--address IP]...
 //!       the host's tailnet directory (JSON).
+//!   fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] [--display N] [--all]
+//!       this machine as a host: Desktop Duplication into the GPU's HEVC
+//!       encoder, admitted and then decoded here. Prints counts and timings
+//!       (JSON). Run it in the interactive session.
 //!
 //! `--address` dials those tailnet addresses instead of resolving the name
 //! (Windows `MagicDNS` answers only A records); TLS still verifies exactly
@@ -30,7 +34,8 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows view <machine>.<tailnet>.ts.net [--port N] [--address IP]... \
      [--control] [--seconds N]\n       fr-windows directory <machine>.<tailnet>.ts.net [--port N] \
-     [--address IP]...\n";
+     [--address IP]...\n       fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] \
+     [--display N] [--all]\n";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

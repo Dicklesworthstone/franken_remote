@@ -57,7 +57,8 @@ pub use linux::*;
     all(
         target_os = "macos",
         any(feature = "macos-desktop", feature = "macos-media")
-    )
+    ),
+    all(windows, feature = "windows-media")
 ))]
 mod error;
 #[cfg(any(
@@ -68,7 +69,8 @@ mod error;
     all(
         target_os = "macos",
         any(feature = "macos-desktop", feature = "macos-media")
-    )
+    ),
+    all(windows, feature = "windows-media")
 ))]
 pub use error::NativeError;
 
@@ -83,6 +85,9 @@ pub mod macos_clipboard;
 mod macos_clipboard_privacy;
 #[cfg(any(test, all(target_os = "macos", feature = "macos-clipboard")))]
 mod macos_clipboard_state;
+// Windows host capture: Desktop Duplication into Media Foundation HEVC.
+#[cfg(all(windows, feature = "windows-media"))]
+pub mod windows_capture;
 // Pure keycode data: compiled for tests everywhere so ordinary CI checks it.
 #[cfg(any(
     test,

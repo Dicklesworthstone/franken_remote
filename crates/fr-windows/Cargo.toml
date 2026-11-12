@@ -16,6 +16,11 @@ path = "src/main.rs"
 
 [target.'cfg(windows)'.dependencies]
 fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
+# `capture-probe`: the Windows host media path (Desktop Duplication into a
+# hardware Media Foundation HEVC encoder), checked by this client's decoder.
+fr-native = { workspace = true, default-features = false, features = ["windows-media"] }
+fr-media.workspace = true
+fr-core.workspace = true
 fr-tailnet.workspace = true
 serde_json.workspace = true
 # The window, swap chain and video processor (the version Cargo.lock
