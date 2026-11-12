@@ -229,7 +229,8 @@ fn projection(lane: &ControllerClipboard) -> Projection {
 }
 
 fn press(input: &mut InputClient, elapsed: u64) {
-    input
+    // Only the receipt matters here; the encoded datagram is never sent.
+    let _ = input
         .action(
             Action::Key {
                 key: PhysicalKey::new(4).unwrap(),
