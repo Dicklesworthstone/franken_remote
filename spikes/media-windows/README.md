@@ -4,6 +4,43 @@ This experiment belongs to `fr-p0-media-windows-fbt`, under plan sections 8.3, 9
 
 ---
 
+## 0. Rust capture path (37134e74, current)
+
+The C++ probe in sections 1–4 enumerated the encoder but never encoded or decoded, and the 2026-09-23 reality check flagged its timings. The Rust host path in `fr-native` (`windows-media`, `crates/fr-native/src/windows_capture*`) does encode and decode:
+
+1. Desktop Duplication on the display's adapter, with the pointer drawn in.
+2. BGRA to NV12 on that adapter's D3D11 video processor.
+3. Intel's hardware Media Foundation HEVC transform, opened directly (no FFmpeg).
+4. `HevcGuard` admission, after the host writes the colour description the transform leaves out.
+5. Viewer-side admission, then the client's Media Foundation hardware decoder.
+
+```text
+fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] [--display N] [--all]
+```
+
+Run it in the interactive session (a scheduled task with an `Interactive` principal from ssh). It prints one JSON document with counts and per-stage timings, and nothing else. `--all` encodes every tick; otherwise it encodes only when Desktop Duplication reports a new image or the pointer moved.
+
+Identity: same machine as section 2 (Iris Plus, driver 31.0.101.2125, Windows 11 Home build 26200), HEVC Video Extension 2.5.48.0, 2256x1504 at 144 dpi, 8 Mbit/s CBR.
+
+Retained results are in `results/surface-laptop-3-iris-plus/rust-capture-probe/`. "Static" means the ordinary desktop. "Moving" means a 1800x1200 WinForms test pattern (scrolling text lines and six moving boxes, redrawn every 15 ms) on top of it.
+
+| run | units | unit p50 / p95 ms | encode p50 ms | decoded (hardware) |
+| --- | --- | --- | --- | --- |
+| static, 60/s every tick | 600 in 10.0 s | 13.4 / 14.3 | 11.8 | 600/600 |
+| moving, 60/s every tick | 600 in 10.0 s | 14.8 / 20.1 (max 117.6) | 12.0 | 600/600 |
+| moving, 60/s changed only | 460 in 10.0 s | 15.5 / 21.6 | 12.9 | 460/460 |
+
+A forced mid-run IDR is honoured in every run.
+
+`experiments/` holds the runs that shaped the code. They used env-gated builds that were not committed:
+- **Timer A-B-A** (`timer-ab-*`): unit p50 31.3 / 13.4 / 31.3 ms. The transform waits on system timer ticks, so the committed encoder holds a 1 ms timer.
+- **Quality-vs-speed 0 and 33**: no change.
+- **Quality-vs-speed 100**: an IDR that admission refuses (`Limit`); the setting is not used.
+
+Not covered yet: the media_worker Windows host role, fault exercise (access lost, device removed, resize, exhaustion), rotated or multiple displays, HDR, hybrid GPUs, other vendors' transforms.
+
+---
+
 ## 1. Reproduce
 
 On any host connected to the target Windows machine over Tailscale/SSH:

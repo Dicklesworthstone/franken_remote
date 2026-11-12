@@ -1,0 +1,79 @@
+{
+ "bitrate": 8000000,
+ "coded": [
+  2256,
+  1504
+ ],
+ "decoder": {
+  "decode_ms_p50": 0.38949999999999996,
+  "decode_ms_p95": 0.49839999999999995,
+  "decoded": 360,
+  "error": null,
+  "gpu_pictures": 360,
+  "hardware": true,
+  "picture_size_ok": 360
+ },
+ "display": {
+  "dpi": 144,
+  "height": 1504,
+  "index": 0,
+  "of": 1,
+  "rotation": 0,
+  "width": 2256
+ },
+ "encoder": {
+  "name": "Intel® Hardware H265 Encoder MFT",
+  "provides_samples": true,
+  "refused": [
+   "one_reference",
+   "no_long_term",
+   "primaries_bt709",
+   "transfer_bt709",
+   "matrix_bt709",
+   "range_16_235"
+  ]
+ },
+ "end": "ok",
+ "first_unit_ms": 728.7535,
+ "forced_idr_honoured": true,
+ "fps": 60,
+ "idr": 2,
+ "images": 21,
+ "kbps": 317.07717650341976,
+ "mode": "every_tick",
+ "open_ms": 688.3417,
+ "pointer_only": 339,
+ "recreated": 0,
+ "seconds": 11.5169185,
+ "stage_ms": {
+  "admit": {
+   "p50": 0.155,
+   "p95": 0.213
+  },
+  "compose": {
+   "p50": 0.429,
+   "p95": 0.592
+  },
+  "convert": {
+   "p50": 0.833,
+   "p95": 1.049
+  },
+  "encode": {
+   "p50": 29.826,
+   "p95": 30.301
+  },
+  "poll": {
+   "p50": 0.05,
+   "p95": 0.131
+  }
+ },
+ "ticks": 360,
+ "unchanged": 0,
+ "unit_ms": {
+  "max": 40.4025,
+  "p50": 31.292599999999997,
+  "p95": 31.7294
+ },
+ "units": 360,
+ "unrequested_idr": 0
+}
