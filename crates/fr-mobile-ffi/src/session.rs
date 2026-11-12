@@ -134,6 +134,7 @@ fn requested_capabilities() -> Capabilities {
         .with(Capability::LineScroll)
 }
 
+#[derive(Clone)]
 pub struct Config {
     pub host: HostName,
     pub port: u16,

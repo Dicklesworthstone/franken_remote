@@ -8,9 +8,17 @@
 //! Minimizing hides the view, which (as on iOS) ends a controlled session:
 //! frd's contract ends the session with control. Losing focus releases
 //! every key and button this window holds.
+//!
+//! A resize that would change the picture (a finished drag, maximize or
+//! restore) reopens the session stating the new client size, as the macOS
+//! viewer does: the session core states its box once, and the host fits a
+//! fresh source to each new viewer. Only a host seen scaling gets a reopen:
+//! one that sends native pixels (a Linux host, an older Mac host) would
+//! send the same picture again after seconds without one. Control, if asked
+//! for, is asked for again.
 use super::render::Renderer;
 use crate::{
-    geometry::{Rect, picture_point},
+    geometry::{Rect, host_scales, picture_point, reopen_for},
     keys,
 };
 use fr_mobile_ffi::{
@@ -36,12 +44,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, IDC_ARROW,
     LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, PostQuitMessage,
-    QS_ALLINPUT, RegisterClassExW, SIZE_MINIMIZED, SPI_GETWORKAREA, SW_SHOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA,
+    SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW,
+    TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND,
+    WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -57,6 +66,25 @@ struct Viewer {
     last_point: (f64, f64),
     /// Key transitions waiting behind a press the session answered `Busy`.
     keys: keys::Deferred,
+    /// The host's display size (its first VIDEO event).
+    display: (u32, u32),
+    /// Inside a drag's size/move loop: reopen only once it ends.
+    sizing: bool,
+    /// A reopen the current session is closing for: the next session
+    /// states the client size current when this one finishes.
+    reopen: bool,
+    /// Closing for good (the user or `--seconds`): no more reopens.
+    closing: bool,
+    /// The box the current session stated (its client size at start).
+    stated: (u32, u32),
+    /// Whether this host fits pictures into the stated box, once a picture
+    /// has shown it (`geometry::host_scales`).
+    scales: Option<bool>,
+    /// When the pending reopen was asked for (its gap is reported).
+    reopen_asked: Option<Instant>,
+    /// When the pending reopen dials (`REDIAL_PAUSE` after the old session
+    /// finished).
+    redial_at: Option<Instant>,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -69,6 +97,16 @@ fn with_viewer<R>(f: impl FnOnce(&mut Viewer) -> R) -> Option<R> {
 
 #[derive(Default)]
 struct Stats {
+    /// Sessions reopened for a new picture size.
+    reopens: u64,
+    /// Counts of the sessions before the current one.
+    earlier_decoded: u64,
+    earlier_decode_micros: u64,
+    earlier_presented: u64,
+    /// The first session's time to its first view.
+    first_view_micros: Option<u64>,
+    /// Longest wait from a reopen's request to its first drawn picture.
+    reopen_gap_micros: u64,
     drawn: u64,
     draw_failures: u64,
     last_draw: Option<Instant>,
@@ -91,7 +129,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
-    let Ok(session) = Session::start(config) else {
+    let Ok(session) = Session::start(config.clone()) else {
         return refuse("session_thread_unavailable");
     };
     let Ok(renderer) = Renderer::new(&gpu.device, hwnd, size) else {
@@ -109,13 +147,21 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             buttons: [false; 5],
             last_point: (0.0, 0.0),
             keys: keys::Deferred::default(),
+            display: (0, 0),
+            sizing: false,
+            reopen: false,
+            closing: false,
+            stated: size,
+            scales: None,
+            reopen_asked: None,
+            redial_at: None,
         });
     });
     // SAFETY: showing the window this thread created.
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     with_viewer(|v| v.session.shared().set_visible(true));
     let started = Instant::now();
-    let stats = pump(seconds);
+    let stats = pump(seconds, hwnd, &config);
     let viewer = VIEWER.with(|cell| cell.borrow_mut().take());
     // SAFETY: destroying the window this thread created; the viewer (and
     // with it the swap chain) is already out of the window procedure's
@@ -135,8 +181,9 @@ fn refuse(reason: &str) -> ExitCode {
     ExitCode::from(1)
 }
 
-/// The message pump and draw loop, until the session ends.
-fn pump(seconds: Option<u64>) -> Stats {
+/// The message pump and draw loop, until the session ends (a session
+/// closed for a reopen is replaced, not the end).
+fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
     let deadline = seconds.map(|s| Instant::now() + Duration::from_secs(s));
     let mut stats = Stats::default();
     let mut last_sequence = 0;
@@ -159,11 +206,18 @@ fn pump(seconds: Option<u64>) -> Stats {
             return stats;
         };
         if finished {
-            return stats;
+            match with_viewer(|v| reopen(v, &mut stats, hwnd, config)) {
+                Some(Reopen::Started) => {
+                    last_sequence = 0;
+                    continue;
+                }
+                Some(Reopen::Waiting) => {}
+                Some(Reopen::No) | None => return stats,
+            }
         }
         if !closing && deadline.is_some_and(|d| Instant::now() >= d) {
             closing = true;
-            with_viewer(|v| v.session.shared().close());
+            with_viewer(Viewer::close);
         }
         if !drew {
             // SAFETY: waits for input or 2 ms; no handles.
@@ -171,6 +225,62 @@ fn pump(seconds: Option<u64>) -> Stats {
         }
     }
 }
+
+/// Replaces a session that finished because a resize closed it with one
+/// stating the current client size, once `REDIAL_PAUSE` has passed. `No`:
+/// no reopen was asked for (or it could not start), so the viewer ends.
+fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reopen {
+    if !v.reopen || v.closing {
+        return Reopen::No;
+    }
+    let now = Instant::now();
+    if now < *v.redial_at.get_or_insert(now + REDIAL_PAUSE) {
+        return Reopen::Waiting;
+    }
+    v.redial_at = None;
+    v.reopen = false;
+    let mut next = config.clone();
+    let size = client_size(hwnd);
+    next.picture = Some(size);
+    let Ok(session) = Session::start(next) else {
+        return Reopen::No;
+    };
+    v.stated = size;
+    let old = std::mem::replace(&mut v.session, session);
+    let shared = old.shared();
+    let (decoded, decode_micros) = shared.frames.decode_stats();
+    stats.earlier_decoded += decoded;
+    stats.earlier_decode_micros += decode_micros;
+    stats.earlier_presented += shared.frames.presented();
+    stats
+        .first_view_micros
+        .get_or_insert(shared.first_view_micros());
+    stats.reopens += 1;
+    // The reopen's own wait is not a frame interval.
+    stats.last_draw = None;
+    v.dest = None;
+    v.picture = (0, 0);
+    v.buttons = [false; 5];
+    v.keys.clear();
+    if config.control {
+        v.session.shared().request_control();
+    }
+    v.session.shared().set_visible(true);
+    Reopen::Started
+}
+
+enum Reopen {
+    Started,
+    /// The finished session's host is still rebinding: dial a little later.
+    Waiting,
+    No,
+}
+
+/// frd's serial host binds its next listener only after the last attempt's
+/// retirement wait and a 250 ms cooldown; a dial in that gap loses its
+/// Initials and connects about 5 s later (fr-w4yu). The iOS app waits 400 ms
+/// before a session that follows another; so does a reopen.
+const REDIAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bool) {
@@ -184,6 +294,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
         // picture; each leaves the other zero.
         if event.kind == kind::VIDEO && event.display_width != 0 {
             stats.display = (event.display_width, event.display_height);
+            v.display = stats.display;
         }
     }
     if shared.finished() {
@@ -211,8 +322,15 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
     };
     v.dest = Some(dest);
     v.picture = (info.width, info.height);
+    if v.scales.is_none() {
+        v.scales = host_scales(v.display, v.stated, v.picture);
+    }
     shared.frames.mark_drawn(info.frame);
     let now = Instant::now();
+    if let Some(asked) = v.reopen_asked.take() {
+        let gap = u64::try_from(now.duration_since(asked).as_micros()).unwrap_or(u64::MAX);
+        stats.reopen_gap_micros = stats.reopen_gap_micros.max(gap);
+    }
     if let Some(last) = stats.last_draw {
         stats
             .intervals
@@ -282,6 +400,10 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
     let shared = viewer.session.shared();
     let code = shared.end_code();
     let (decoded, decode_micros) = shared.frames.decode_stats();
+    let (decoded, decode_micros) = (
+        decoded + stats.earlier_decoded,
+        decode_micros + stats.earlier_decode_micros,
+    );
     let mut intervals = stats.intervals.clone();
     intervals.sort_unstable();
     let percentile = |p: usize| -> f64 {
@@ -299,6 +421,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1},\"max\":{:.1}}},\
+         \"reopens\":{},\"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
          \"seconds\":{:.1}}}",
         end_name(code),
         shared
@@ -306,10 +429,14 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
             .map_or_else(|| "null".to_owned(), |d| format!("{d:?}")),
         stats.drawn,
         stats.draw_failures,
-        shared.frames.presented(),
+        shared.frames.presented() + stats.earlier_presented,
         decoded,
         mean_decode,
-        micros_to_ms(shared.first_view_micros()),
+        micros_to_ms(
+            stats
+                .first_view_micros
+                .unwrap_or_else(|| shared.first_view_micros())
+        ),
         shared.hardware(),
         stats.display.0,
         stats.display.1,
@@ -321,6 +448,9 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         percentile(95),
         percentile(99),
         intervals.last().map_or(0.0, |m| micros_to_ms(*m)),
+        stats.reopens,
+        micros_to_ms(stats.reopen_gap_micros),
+        micros_to_ms(shared.first_view_micros()),
         elapsed.as_secs_f64(),
     );
     let _ = writeln!(std::io::stdout().lock(), "{json}");
@@ -462,6 +592,27 @@ impl Viewer {
         self.keys
             .drain(|usage, pressed| shared.key(usage, pressed) != InputResult::Busy);
     }
+    /// Closes for good: no reopen follows.
+    fn close(&mut self) {
+        self.closing = true;
+        self.reopen = false;
+        self.session.shared().close();
+    }
+    /// The client area is now `size` (a drag ended, or a maximize or
+    /// restore): reopen when the host would send a different picture.
+    fn resized(&mut self, size: (u32, u32)) {
+        if self.closing
+            || self.reopen
+            || self.scales != Some(true)
+            || !reopen_for(self.display, self.picture, size)
+        {
+            return;
+        }
+        self.reopen = true;
+        self.reopen_asked = Some(Instant::now());
+        self.release_everything();
+        self.session.shared().close();
+    }
     fn release_everything(&mut self) {
         // Unsent presses never go after focus loss; held keys are released.
         self.keys.clear();
@@ -489,7 +640,7 @@ extern "system" fn window_proc(
     let handled = match message {
         WM_CLOSE => {
             // An orderly close: the loop ends once the session finishes.
-            if with_viewer(|v| v.session.shared().close()).is_none() {
+            if with_viewer(Viewer::close).is_none() {
                 // SAFETY: no session: destroy this thread's window now.
                 let _ = unsafe { DestroyWindow(hwnd) };
             }
@@ -503,6 +654,9 @@ extern "system" fn window_proc(
         WM_SIZE => {
             let (width, height) = point_of(lparam);
             let minimized = wparam.0 == SIZE_MINIMIZED as usize;
+            // Maximize and restore arrive outside any drag; a drag's own
+            // sizes wait for WM_EXITSIZEMOVE.
+            let settled = matches!(u32::try_from(wparam.0), Ok(SIZE_MAXIMIZED | SIZE_RESTORED));
             with_viewer(|v| {
                 if minimized {
                     v.session.shared().set_visible(false);
@@ -513,9 +667,24 @@ extern "system" fn window_proc(
                         u32::try_from(height).unwrap_or(0),
                     );
                     let _ = v.renderer.resize(size);
+                    if settled && !v.sizing {
+                        v.resized(size);
+                    }
                 }
             });
             true
+        }
+        WM_ENTERSIZEMOVE => {
+            with_viewer(|v| v.sizing = true);
+            false
+        }
+        WM_EXITSIZEMOVE => {
+            let size = client_size(hwnd);
+            with_viewer(|v| {
+                v.sizing = false;
+                v.resized(size);
+            });
+            false
         }
         WM_ERASEBKGND => return LRESULT(1),
         WM_PAINT => {

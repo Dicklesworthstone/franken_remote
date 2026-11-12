@@ -52,9 +52,85 @@ pub fn picture_point(dest: Rect, picture: (u32, u32), x: i32, y: i32) -> Option<
     Some((px, py))
 }
 
+/// Whether a window whose client area became `client` should reopen the
+/// session to ask for a new picture: the host fits its `display` into the
+/// stated box (aspect kept, never larger than native), so a new box only
+/// helps when that fit differs from the `picture` arriving now. A box under
+/// 64 pixels on an axis gets native pictures anyway (frd's offer rule), and
+/// before the first picture there is nothing to compare. Within 2 pixels is
+/// the host's own rounding (even encoder sizes), not a different picture.
+pub fn reopen_for(display: (u32, u32), picture: (u32, u32), client: (u32, u32)) -> bool {
+    if client.0 < 64 || client.1 < 64 || display.0 == 0 || display.1 == 0 || picture.0 == 0 {
+        return false;
+    }
+    let Some(rect) = fit(display, client) else {
+        return false;
+    };
+    let wanted = (
+        rect.right.abs_diff(rect.left),
+        rect.bottom.abs_diff(rect.top),
+    );
+    wanted.0.abs_diff(picture.0) > 2 || wanted.1.abs_diff(picture.1) > 2
+}
+
+/// What one picture proves about the host: `Some(true)` when it scaled (a
+/// host that does not scale always sends the display's native size),
+/// `Some(false)` when it sent native pixels although the stated box was
+/// smaller (it ignored the box), `None` while the display fits the box and
+/// either answer would look the same.
+pub fn host_scales(display: (u32, u32), stated: (u32, u32), picture: (u32, u32)) -> Option<bool> {
+    if display.0 == 0 || display.1 == 0 || picture.0 == 0 || picture.1 == 0 {
+        return None;
+    }
+    if picture != display {
+        return Some(true);
+    }
+    let boxed = stated.0 >= 64 && stated.1 >= 64;
+    (boxed && (stated.0 < display.0 || stated.1 < display.1)).then_some(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_picture_proves_whether_the_host_scales_only_when_it_can() {
+        // A 5K Mac host fitting its display into the window: scales.
+        assert_eq!(
+            host_scales((5120, 2880), (2008, 1232), (2008, 1128)),
+            Some(true)
+        );
+        // An older host (or a Linux one) sending native 5K into that box.
+        assert_eq!(
+            host_scales((5120, 2880), (2008, 1232), (5120, 2880)),
+            Some(false)
+        );
+        // The display fits the box: native either way, nothing learned.
+        assert_eq!(host_scales((1920, 1080), (2008, 1232), (1920, 1080)), None);
+        // Planted negatives: no picture yet; a sub-64 box keeps native by rule.
+        assert_eq!(host_scales((1920, 1080), (2008, 1232), (0, 0)), None);
+        assert_eq!(host_scales((1920, 1080), (40, 1000), (1920, 1080)), None);
+    }
+
+    #[test]
+    fn a_resize_reopens_only_when_the_host_would_send_a_different_picture() {
+        let display = (1920, 1080);
+        // The whole display already fits and still does (a maximize on a
+        // larger screen): native pixels either way, no reopen.
+        assert!(!reopen_for(display, (1920, 1080), (2256, 1440)));
+        assert!(!reopen_for(display, (1920, 1080), (1920, 1080)));
+        // Shrunk below the display: the host must fit a smaller picture.
+        assert!(reopen_for(display, (1920, 1080), (1280, 1000)));
+        // Grown but still smaller than the display (a scaled 5K host).
+        let display = (5120, 2880);
+        assert!(reopen_for(display, (2008, 1129), (2256, 1440)));
+        // The host's even-size rounding of the same box is not a change.
+        assert!(!reopen_for(display, (2006, 1128), (2008, 1232)));
+        // Planted negatives: no picture yet, unknown display, tiny window.
+        assert!(!reopen_for(display, (0, 0), (1000, 800)));
+        assert!(!reopen_for((0, 0), (2008, 1129), (1000, 800)));
+        assert!(!reopen_for(display, (2008, 1129), (63, 800)));
+    }
 
     #[test]
     fn a_picture_that_fits_is_shown_one_to_one_and_centred() {
