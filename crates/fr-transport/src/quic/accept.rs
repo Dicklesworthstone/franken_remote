@@ -89,11 +89,18 @@ pub struct Configuration {
     pub max_initial_datagrams: u16,
     pub transport: Policy,
 }
+/// No native client dials with a handshake budget above 5 s (the fr CLI,
+/// mobile sessions and directory fetches all use 5 s). The host starts its
+/// handshake clock only when it reads an Initial, so a 5 s wait never cuts
+/// short a handshake its client still pursues. A longer wait only held the
+/// serial host's one slot for a client that had already redialed, and that
+/// redial's Initials went unanswered (fr-w4yu).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 impl Default for Configuration {
     fn default() -> Self {
         Self {
             initial_timeout: Duration::from_secs(10),
-            handshake_timeout: Duration::from_secs(10),
+            handshake_timeout: HANDSHAKE_TIMEOUT,
             max_initial_datagrams: 64,
             transport: Policy::default(),
         }
