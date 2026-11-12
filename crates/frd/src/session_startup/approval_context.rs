@@ -86,7 +86,15 @@ fn features(selected: &Selection) -> Features {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fr_wire::negotiation::Role;
+    use fr_wire::negotiation::{Offer, Role};
+
+    fn select(host: &Offer, viewer: &Offer) -> Selection {
+        let intersection = host.intersect(viewer).unwrap();
+        viewer.check_host(&intersection).unwrap();
+        let selected = intersection.select().unwrap();
+        selected.check_against(viewer).unwrap();
+        selected
+    }
 
     #[test]
     fn empty_daemon_alias_is_absent_but_unsafe_nonempty_alias_still_refuses() {
@@ -110,18 +118,37 @@ mod tests {
 
     #[test]
     fn approval_discloses_effective_negotiated_scope_not_offered_names() {
-        let mut offer = super::super::host_offer_with_duplex(true, true, true);
-        offer.role = Role::RequestControl;
-        let mut selected = fr_wire::audio_up::with_microphone(offer)
-            .unwrap()
-            .select()
-            .unwrap();
+        let host = super::super::host_offer_with_duplex(true, true, true);
+        assert_eq!(
+            host.capabilities.len(),
+            fr_wire::negotiation::MAX_CAPABILITIES
+        );
+        // The full offer has no diagnostic slot to yield. Approval reporting
+        // cannot invent a microphone profile beyond the unchanged wire bound.
+        assert_eq!(
+            fr_wire::audio_up::with_microphone(host.clone()),
+            Err(fr_wire::negotiation::Error::Limits)
+        );
+        let mut selected = select(
+            &host,
+            &fr_client::native::control_offer_with_duplex(true, true),
+        );
         let expected = Features::PLAYBACK
             .with(Features::CLIPBOARD)
             .with(Features::FILE_SEND)
-            .with(Features::FILE_RECEIVE)
-            .with(Features::MICROPHONE);
+            .with(Features::FILE_RECEIVE);
         assert_eq!(features(&selected), expected);
+        assert_eq!(
+            features(&select(&host, &fr_client::native::control_offer())),
+            Features::NONE
+        );
+        assert_eq!(
+            features(&select(
+                &host,
+                &fr_client::native::observation_offer_with_audio()
+            )),
+            Features::PLAYBACK
+        );
         // A read-only request cannot display control-owned effects as allowed,
         // even if its optional capability list contains those names.
         selected.role = Role::Observe;
@@ -132,5 +159,29 @@ mod tests {
             .retain(|cap| cap.name != fr_wire::audio_control::CAPABILITY);
         assert!(!features(&selected).contains(Features::PLAYBACK));
         assert!(features(&selected).contains(Features::CLIPBOARD));
+    }
+
+    #[test]
+    fn approval_discloses_microphone_only_when_both_endpoints_select_it() {
+        let host = fr_wire::audio_up::with_microphone(super::super::host_offer_with_audio(
+            true, true, true,
+        ))
+        .unwrap();
+        let viewer = fr_client::native::control_offer_with_auxiliary(true, false, true);
+        let expected = Features::PLAYBACK.with(Features::CLIPBOARD);
+        assert_eq!(features(&select(&host, &viewer)), expected);
+        let viewer = fr_wire::audio_up::with_microphone(viewer).unwrap();
+        let mut selected = select(&host, &viewer);
+        assert_eq!(features(&selected), expected.with(Features::MICROPHONE));
+        selected.role = Role::Observe;
+        assert_eq!(features(&selected), Features::PLAYBACK);
+        selected.role = Role::RequestControl;
+        selected
+            .capabilities
+            .retain(|cap| cap.name != fr_wire::audio_control::CAPABILITY);
+        assert_eq!(
+            features(&selected),
+            Features::CLIPBOARD.with(Features::MICROPHONE)
+        );
     }
 }
