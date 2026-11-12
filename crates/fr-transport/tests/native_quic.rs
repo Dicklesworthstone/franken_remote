@@ -1479,15 +1479,16 @@ fn bootstrap_transition_cannot_relabel_an_incomplete_record() {
 
 #[test]
 fn the_delivery_allowance_follows_the_measured_path_within_its_bounds() {
-    // Fast path: the old 250 ms floor; unknown path: the RFC 9002 initial RTT.
+    // Fast path: the 1 s floor; unknown path: the RFC 9002 initial RTT.
     assert_eq!(
         delivery_allowance_us(Some(1_000), Some(500)),
         MIN_DELIVERY_ALLOWANCE_US
     );
     assert_eq!(delivery_allowance_us(None, None), MAX_DELIVERY_ALLOWANCE_US);
-    // 7 x (srtt + 4 x rttvar + 25 ms ACK delay): three backed-off probes.
-    assert_eq!(delivery_allowance_us(Some(20_000), Some(2_000)), 371_000);
-    assert_eq!(delivery_allowance_us(Some(40_000), Some(1_000)), 483_000);
+    // 7 x (srtt + 4 x rttvar + 25 ms ACK delay): three backed-off probes,
+    // 371 ms and 483 ms here, raised to the floor.
+    assert_eq!(delivery_allowance_us(Some(20_000), Some(2_000)), 1_000_000);
+    assert_eq!(delivery_allowance_us(Some(40_000), Some(1_000)), 1_000_000);
     assert_eq!(delivery_allowance_us(Some(60_000), Some(15_000)), 1_015_000);
     assert_eq!(
         delivery_allowance_us(Some(120_000), Some(30_000)),
@@ -1576,6 +1577,53 @@ fn a_slow_acknowledgement_within_the_path_allowance_keeps_the_connection() {
     });
 }
 
+/// A record admitted while the path measured fast keeps that measurement's
+/// allowance. When the round-trip time then steps up (relay fallback, a roam,
+/// netem applied to a running session) its acknowledgement can take several
+/// new round trips plus a loss recovery. A 500 ms silence after admission on a
+/// measured loopback path closed the connection under the old 250 ms floor,
+/// and leaves half the 1 s floor for the delivery below on a slow runner.
+#[test]
+fn a_fast_path_record_survives_an_acknowledgement_delayed_by_a_path_step() {
+    run_test!(cx, {
+        let mut p = pair(&cx, Policy::default()).await;
+        let route = Route::Stream(p.host_routes[1]);
+        measure_path(&cx, &mut p, route).await;
+        let packet = recovery_packet(2, 100);
+        p.server
+            .send(&cx, route, &packet, clock(&cx) + 20_000, || true)
+            .unwrap();
+        let until = clock(&cx) + 500_000;
+        while clock(&cx) < until {
+            p.server
+                .drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
+        }
+        assert!(!p.server.is_closed(), "a delayed ACK closed the connection");
+        let mut received = 0;
+        for _ in 0..500 {
+            drive(&cx, &mut p).await;
+            p.client
+                .receive(
+                    &cx,
+                    || true,
+                    |_, b| {
+                        assert_eq!(b, packet);
+                        received += 1;
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+            if received == 1 && p.server.usage().retained_send_records == 0 {
+                break;
+            }
+        }
+        assert_eq!(received, 1);
+        assert_eq!(p.server.usage().retained_send_records, 0);
+    });
+}
+
 #[test]
 fn a_peer_that_stops_acknowledging_still_closes_the_connection_in_bounded_time() {
     run_test!(cx, {
@@ -1586,7 +1634,7 @@ fn a_peer_that_stops_acknowledging_still_closes_the_connection_in_bounded_time()
                 measure_path(&cx, &mut p, route).await;
             }
             let admitted = clock(&cx);
-            // A send-by far below the 250 ms delivery allowance, yet wide
+            // A send-by far below the 1 s delivery allowance, yet wide
             // enough that a preempted runner cannot pass it before the send
             // (a 2 ms send-by failed as Expired on a swapping CI runner).
             p.server

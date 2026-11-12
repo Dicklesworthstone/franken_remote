@@ -248,7 +248,7 @@ and acknowledged by max(send-by, admission + `delivery_allowance_us`):
   max(4 x RTT variation, 1 ms) + 25 ms maximum ACK delay): the span of three
   consecutive backed-off probes (1 + 2 + 4). It was three until 2026-10-13
   (below).
-- It is clamped to [250 ms, 2 s].
+- It is clamped to [1 s, 2 s]. The floor was 250 ms until 2026-11-12 (below).
 - Before the first RTT sample, the RFC 9002 initial RTT (333 ms) gives the 2 s
   ceiling. The native handshake leaves no sample, so the first records get it.
 
@@ -276,12 +276,42 @@ only a PING, so the lost data waits for the PING's acknowledgement before it
 is declared lost and resent. Instrumented namespace runs at 40 ms RTT and 1%
 loss showed a single 67-byte host progress record unacknowledged for 248 ms
 after one probe timeout, which closed a healthy connection at the 250 ms floor.
-At 40 ms RTT the allowance is now about 480 ms; at 120 ms about 1 s; 200 ms
-RTT reaches the 2 s ceiling. A silent peer still closes the connection within
+At 40 ms RTT the allowance was then about 480 ms (1 s since the floor below);
+at 120 ms about 1.9 s; 200 ms RTT reaches the 2 s ceiling. A silent peer still closes the connection within
 2 s, and content lateness is still enforced where the content is used. In one
 controlled matrix run each, the lossy 40 and 120 ms rows held 29 and 32 steps
 in total against 24 before, and the 40 ms, 1%, 5 Mbit/s row held. Most
 remaining lossy-row ends are not this deadline (fr-xfvs notes).
+
+One-second floor (2026-11-12). The allowance is computed once, at admission,
+from the path estimate at that moment. The impairment harness starts each row
+on a clean link and then applies netem. A record admitted just before that RTT
+step therefore got the floor allowance, 250 ms, from a clean-link RTT of a few
+milliseconds. One loss after the step outlasted it, and the connection closed
+with Expired while both peers were healthy. Real paths can step the same way:
+a tailnet direct path that falls back to a relay, a Wi-Fi roam, or queueing
+behind a burst.
+
+- Trace: STREAM-lifecycle prints in Asupersync were used for this diagnosis
+  and never committed. They showed a client control record lost in one
+  packet, declared lost and retransmitted about 130 ms later. The record's
+  deadline, about 250 ms after admission, passed before the retransmission's
+  ACK could return. Records admitted after the step had 1.5-1.9 s.
+- Signature: the same one appeared on the host, an expired critical stream
+  holding its first four records with one lost packet. It was 13 of the
+  endings in about 650 rows, in both arms of the fr-00nc A/B.
+- A/B: 12 alternating rounds on csd, 250 ms against 1 s floors, rows at
+  120 ms RTT with 1% loss at 5 Mbit/s, and with 5% loss unlimited and at
+  5 Mbit/s:
+  - This signature ended 4 sessions at 250 ms and none at 1 s.
+  - The rows held 179 and 202 of 288 steps.
+  - Endings were 24 and 22 of 36. Most remaining ends at 5% loss are renewal
+    lapses (Unauthorized at the host gate) and `video_startup_expired`, not
+    this deadline.
+
+A silent peer still closes the connection within 2 s, now no sooner than 1 s
+on a fast path. Input tickets, leases and content freshness keep their own
+deadlines.
 
 This distinction matters on 0.4.10: attaching bounded windows in both directions
 can generate continuing ACK/window-update traffic, so total bytes-in-flight

@@ -92,9 +92,13 @@ type StreamHandler<'a> = dyn FnMut(Route, &[u8]) -> Result<Disposition, ()> + 'a
 /// by Asupersync. This is a conservative APPLICATION-record cap, not an MTU.
 pub const MAX_DATAGRAM_RECORD: usize = 1150;
 
-/// Bounds of [`delivery_allowance_us`]: never below the 250 ms that every
-/// record already had on a fast path, never above the partial-record lifetime.
-pub const MIN_DELIVERY_ALLOWANCE_US: u64 = 250_000;
+/// Bounds of [`delivery_allowance_us`]: never above the partial-record
+/// lifetime, and never below 1 s. The allowance is fixed at admission from the
+/// path estimate at that moment. A record admitted on a fast path just before
+/// the round-trip time steps up therefore keeps a fast-path allowance, and one
+/// loss after the step outlasted a 250 ms floor (namespace runs: a 1 ms link
+/// impaired to 120 ms RTT ended healthy sessions with Expired).
+pub const MIN_DELIVERY_ALLOWANCE_US: u64 = 1_000_000;
 pub const MAX_DELIVERY_ALLOWANCE_US: u64 = 2_000_000;
 
 /// How long this path may take to deliver and acknowledge one admitted
