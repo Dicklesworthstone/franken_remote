@@ -561,7 +561,12 @@ approved handle, local permission, finite selection, rate/byte budget and
 publication receipt. Neither transfer ID equality nor cancellation can cross
 those scopes. No role is reallocated after retirement on this connection.
 Cancellation of a completed attachment retires that direction alone; uncertain
-partial attachment still fences the parent connection. Input and lease renewal
+partial attachment still fences the parent connection. An expired retained send
+on a completed file pair also retires only that pair when native I/O has settled;
+reset/stop code `0x46524653` preserves the send-expiry cause at both endpoints.
+Expiry during native I/O or with unsettled protected output still fences the
+connection. Retirement preserves actual and unknown publication outcomes and
+never authorizes replay. Input and lease renewal
 are serviced before bounded file work, and both file directions alternate first
 service under the original shared bulk queue limits. There is no increase to
 capability count, native stream ceilings or transport queue budgets. The fullest

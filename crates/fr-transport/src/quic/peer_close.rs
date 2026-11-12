@@ -23,9 +23,9 @@ pub enum ClientCloseReason {
 impl ClientCloseReason {
     pub(super) const fn from_error(error: super::Error) -> Self {
         match error {
-            super::Error::Expired | super::Error::Stream(fr_wire::stream::StreamError::Expired) => {
-                Self::DeadlineExpired
-            }
+            super::Error::Expired
+            | super::Error::SendExpired
+            | super::Error::Stream(fr_wire::stream::StreamError::Expired) => Self::DeadlineExpired,
             super::Error::Unauthorized => Self::AuthorityLost,
             super::Error::Cancelled => Self::Cancelled,
             _ => Self::Failure,

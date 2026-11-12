@@ -32,6 +32,20 @@ original lane's exact native send-drained proof empties the flight. A full fligh
 starts no further source read, and transport backpressure retains the same
 single prepared packet. This does not add resume, retry or a new ATP profile.
 
+If a retained reliable file record expires between settled native I/O operations,
+the transport resets only its original completed file pair. It releases that
+pair's unsent/retransmission work and retained storage, preserves its spent
+identities, and leaves desktop input, video and the opposite file direction
+running. The peer receives the same typed send-expiry cause. Expiry while a
+native operation owns uncertain protected output remains connection-terminal;
+the file owner cannot claim that stream reset withdrew those packets.
+
+Source results distinguish `interrupted_send_expired` from a receive timeout or
+generic cancellation. A receiving endpoint reports `send_expired` when its own
+reply or its peer's send expired. Neither code means that publication was rolled
+back: earlier publication receipts remain, and a sent completion request without
+proof remains `publication_unknown`. No selection is automatically replayed.
+
 The same selected descriptor is used throughout; source metadata and a second
 streaming hash are checked before emitting ObjectComplete. Completion is only
 prepared after all previously admitted content has positively drained, and still

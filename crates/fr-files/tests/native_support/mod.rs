@@ -89,6 +89,57 @@ impl Link {
         a.unwrap();
         b.unwrap();
     }
+    /// Exercise the existing critical route after optional file retirement.
+    /// This is transport progress, not a new grant or an OS input effect.
+    pub async fn control_progress(&mut self, cx: &Cx) {
+        use fr_wire::{
+            authority::{self, Message, Scope},
+            input::{InputDelivery, InputDirection},
+        };
+        let mut bytes = [0_u8; authority::MAX_AUTHORITY_BYTES];
+        let length = authority::encode(
+            Message::Response {
+                scope: Scope::Observation,
+                nonce: 123,
+            },
+            authority::Binding {
+                channel: self.cr.outbound.binding,
+                session: parent().remote_session,
+            },
+            &ProtocolLimits::ABSOLUTE,
+            &mut bytes,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        let until = clock(cx) + 500_000;
+        self.c
+            .send(
+                cx,
+                Route::Stream(self.cr.outbound),
+                &bytes[..length],
+                until,
+                || true,
+            )
+            .unwrap();
+        let mut received = false;
+        while !received {
+            assert!(clock(cx) < until, "critical route stalled after file retirement");
+            self.drive(cx).await;
+            self.h
+                .receive_ready(
+                    cx,
+                    || true,
+                    |route| route == Route::Stream(self.hr.inbound),
+                    |_, body| {
+                        assert_eq!(body, &bytes[..length]);
+                        received = true;
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+        }
+    }
     async fn viewer(&mut self, cx: &Cx, h: &mut MediaChannel) -> MediaChannel {
         let until = clock(cx) + 1_000_000;
         let mut sent = false;

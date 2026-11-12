@@ -15,6 +15,9 @@ const FILES_RETIRED: u64 = 0x4652_4649;
 // peer sender. It carries no retry or authority semantics and is recognized
 // only after the original Files/FilesDownload exchange has reached ACTIVE.
 const FILES_RECEIVE_EXPIRED: u64 = 0x4652_4645;
+// The original sender's retained delivery deadline, on an ACTIVE file pair.
+// Both endpoints retain that cause; it is not the peer's framing deadline.
+const FILES_SEND_EXPIRED: u64 = 0x4652_4653;
 const MEDIA_RETIRED: u64 = 0x4652_4d44;
 const AUDIO_RETIRED: u64 = 0x4652_4144;
 const MICROPHONE_RETIRED: u64 = 0x4652_4155;
@@ -187,12 +190,36 @@ impl QuicRecords {
                     .streams();
                 let outgoing = streams.stream(r.outbound).map_err(|_| Error::Native)?;
                 let incoming = streams.stream(r.inbound).map_err(|_| Error::Native)?;
-                let receive_expired = receive_expired
-                    || receive_expiry_code(r.role).is_some_and(|code| {
-                        outgoing.stop_sending_error_code == Some(code)
-                            || incoming.recv_reset.map(|(code, _)| code) == Some(code)
-                    });
+                let peer_receive_expired = receive_expiry_code(r.role).is_some_and(|code| {
+                    outgoing.stop_sending_error_code == Some(code)
+                        || incoming.recv_reset.map(|(code, _)| code) == Some(code)
+                });
+                let peer_send_expired = r.role.is_files()
+                    && (outgoing.stop_sending_error_code == Some(FILES_SEND_EXPIRED)
+                        || incoming.recv_reset.map(|(code, _)| code) == Some(FILES_SEND_EXPIRED));
+                // A received terminal cause predates this turn's local clock
+                // checks. Do not relabel the peer's send expiry as a receive
+                // expiry merely because this consumer was scheduled later.
+                let receive_expired =
+                    peer_receive_expired || (receive_expired && !peer_send_expired);
+                let send_expired = r.role.is_files()
+                    && !receive_expired
+                    && (peer_send_expired
+                        || self.senders.iter().any(|sender| {
+                            sender.route.stream == r.outbound
+                                && sender.until.is_some_and(|until| now >= until)
+                        }));
+                // Only the exclusive between-I/O owner can retract this
+                // stream's unsent and retransmittable bytes. An unsettled
+                // native operation may own protected packets containing them;
+                // resetting stream metadata cannot selectively withdraw those.
+                // poll_io_at_boundary keeps its unchanged terminal deadline
+                // check while a native future owns the connection.
+                if send_expired && self.native_io_unsettled {
+                    return Err(Error::Expired);
+                }
                 if receive_expired
+                    || send_expired
                     || r.retire.load(Ordering::Acquire)
                     || outgoing.stop_sending_error_code.is_some()
                     || outgoing.send_reset.is_some()
@@ -200,6 +227,7 @@ impl QuicRecords {
                     || incoming.final_size.is_some()
                 {
                     self.attachments[index].receive_expired = receive_expired;
+                    self.attachments[index].send_expired = send_expired;
                     self.retire_optional_at(cx, index)?;
                 }
             }
@@ -221,6 +249,8 @@ impl QuicRecords {
         let r = &self.attachments[index];
         let code = if r.receive_expired {
             receive_expiry_code(r.role).ok_or(Error::WrongRoute)?
+        } else if r.send_expired && r.role.is_files() {
+            FILES_SEND_EXPIRED
         } else {
             retirement_code(r.role).ok_or(Error::WrongRoute)?
         };

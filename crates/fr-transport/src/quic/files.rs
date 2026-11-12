@@ -125,6 +125,9 @@ impl FilesChannel {
         if self.receive_expired(q) {
             return Err(Error::Stream(fr_wire::stream::StreamError::Expired));
         }
+        if self.send_expired(q) {
+            return Err(Error::SendExpired);
+        }
         if !self.attachment.is_complete() {
             return Err(Error::Closed);
         }
@@ -145,6 +148,13 @@ impl FilesChannel {
     /// Closed or foreign connections cannot supply this isolation evidence.
     pub fn receive_expired(&self, q: &QuicRecords) -> bool {
         self.attachment.receive_expired(q)
+    }
+    /// The original completed pair retired after a retained send exceeded its
+    /// immutable delivery deadline, locally or as reported by its peer. This
+    /// does not establish whether earlier file data was published. A foreign
+    /// or closed connection cannot supply optional-retirement evidence.
+    pub fn send_expired(&self, q: &QuicRecords) -> bool {
+        self.attachment.send_expired(q)
     }
     /// Request retirement of this original completed pair without borrowing its
     /// connection. The next checked operation retires it before new application
@@ -178,13 +188,22 @@ impl FilesChannel {
     ) -> Result<(), Error> {
         self.check(q)?;
         files::decode(bytes, self.outgoing, self.limits).map_err(|_| Error::Malformed)?;
-        q.send(
+        let result = q.send(
             cx,
             Route::Stream(self.routes.outbound),
             bytes,
             deadline_us,
             authorize,
-        )
+        );
+        // The checked send can retire the original pair before admitting this
+        // new record. Preserve that terminal cause instead of reporting the
+        // subsequently missing route or this new record's admission deadline.
+        match result {
+            Err(Error::WrongRoute | Error::Expired) if self.send_expired(q) => {
+                Err(Error::SendExpired)
+            }
+            other => other,
+        }
     }
     /// At most one record per turn; Blocked retains the SAME transport-owned
     /// record while other streams remain available to the session's dispatcher.

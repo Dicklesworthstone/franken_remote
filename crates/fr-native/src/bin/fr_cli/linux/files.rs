@@ -357,6 +357,12 @@ mod tests {
             ),
             (FileSendOutcome::PublicationUnknown, "publication_unknown"),
             (
+                FileSendOutcome::InterruptedBeforePublication(FileSendError::Transport(
+                    fr_transport::quic::Error::SendExpired,
+                )),
+                "interrupted_send_expired",
+            ),
+            (
                 FileSendOutcome::InterruptedBeforePublication(FileSendError::Expired),
                 "interrupted_expired",
             ),

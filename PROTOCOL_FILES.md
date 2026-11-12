@@ -154,6 +154,32 @@ service. Family shutdown retains both owners until their original cleanup has
 completed. Reconnect does not carry a source selection, accepted destination,
 permission or uncertain result into another attempt.
 
+### Expired reliable file sends
+
+A completed native `Files` or `FilesDownload` pair may retire independently when
+one of its admitted reliable records exceeds its original delivery deadline.
+This applies only between native I/O operations, with settled protected output:
+the existing stream reset removes that pair's unsent and retransmission work,
+stops its receive stream and clears its bounded queue/framing reservations.
+The original role, binding and attachment remain consumed tombstones. Input,
+video and the other file direction keep their original owners and budgets.
+
+The native reset/stop code `0x46524653` reports **send expiry** at both endpoints.
+It differs from receive-framing expiry (`0x46524645`) and ordinary cancellation
+(`0x46524649`). It grants no retry, extended deadline, renewed permission or new
+attachment. Older peers may report the reset as generic file cancellation.
+
+Expiry during an active native operation, unsettled protected output, critical
+stream expiry and an unfinished attachment still fence the connection. Stream
+metadata cannot retract a protected packet that a native operation still owns.
+The new local retirement does not change those boundaries or audio datagrams.
+
+File owners stop their original disk work and retain all actual receipts. An
+admitted completion request without a publication proof remains an unknown
+publication result; send expiry does not prove that the recipient did nothing.
+Earlier publication receipts remain available after a later timeout, and private
+staging cleanup must still complete under the original receiver owner.
+
 The fullest native clipboard/audio/duplex offer stays within the existing 24
 capability ceiling by omitting only optional attachment-credit negotiation when
 necessary. That profile uses the existing bounded fixed-allowance attachment

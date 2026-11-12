@@ -133,6 +133,7 @@ mod tests {
             FILES_RETIRED - 1,
             FILES_RETIRED + 1,
             super::super::FILES_RECEIVE_EXPIRED,
+            super::super::FILES_SEND_EXPIRED,
             (1 << 62) - 1,
         ] {
             assert!(!files_retirement_requested(Some(wrong), None));

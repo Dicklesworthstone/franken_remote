@@ -1,5 +1,36 @@
 # Implementation status
 
+## File send expiry preserves the original desktop (2026-11-12)
+
+Completed Files and FilesDownload attachments now retire independently when a
+retained reliable send expires between settled native I/O operations. The native
+reset removes only that pair's unsent and retransmission work, clears its
+retained accounting and framing, and keeps consumed identities as tombstones.
+The peer receives a distinct send-expiry cause. Critical input, video and the
+other file direction retain their original owners. Expiry during held native
+I/O, unsettled protected output and unfinished attachment failures retain the
+connection fence.
+
+File owners preserve actual publication receipts and source/disk cleanup.
+A completion request admitted without a publication proof remains an unknown
+effect; no timeout replays a selection or starts its successor. Native upload
+and download reports distinguish this cause from receive expiry and cancellation.
+
+**Added and independently source-reviewed, not executed:** transport regressions
+for queued and native-staged sends in both file directions, control/sibling
+continuity, consumed identities and terminal negatives; real ATP/disk scenarios
+for partial staging cleanup, earlier batch receipts, and an expired publication
+reply; and an original ControlledViewer regression that sends input under the
+same lease after file retirement. CLI projection checks preserve earlier and
+unknown publication evidence.
+
+The exact pinned toolchain and locked dependencies were prepared, but the local
+execution environment became unavailable before compiler or test output.
+Compilation, strict Clippy, full workspace tests, the new runtime regressions
+and the loaded namespace acceptance remain unverified at this checkpoint.
+Existing GitHub verification runs follow the direct main commit. This is not a
+live-tailnet or hardware qualification; `fr-jlgm` remains open.
+
 ## Clipboard publication boundary integration (2026-11-12)
 
 The controlling-viewer suite now has a thirteenth regression that stages real

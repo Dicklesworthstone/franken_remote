@@ -64,6 +64,9 @@ pub(crate) fn absence_code(absence: Absence) -> &'static str {
         Absence::WithClipboard => "files_with_clipboard_unsupported",
         Absence::Unavailable => "files_unavailable",
         Absence::Refused(FileSendError::Cancelled) => "files_cancelled",
+        Absence::Refused(FileSendError::Transport(fr_transport::quic::Error::SendExpired)) => {
+            "files_send_expired"
+        }
         Absence::Refused(_) => "files_refused_locally",
         Absence::SetupFailed(_) => "files_setup_failed",
         Absence::ReceiveFailed(_) => "files_receive_failed",
@@ -98,6 +101,9 @@ pub(crate) fn refusal_reason(outcome: FileSendOutcome) -> Option<&'static str> {
         },
         FileSendOutcome::PublicationUnknown => "publication_unknown",
         FileSendOutcome::InterruptedBeforePublication(error) => match error {
+            FileSendError::Transport(fr_transport::quic::Error::SendExpired) => {
+                "interrupted_send_expired"
+            }
             FileSendError::Expired
             | FileSendError::Transport(
                 fr_transport::quic::Error::Expired
@@ -633,7 +639,7 @@ mod tests {
         // Typed receipt fixtures exercise projection only, not an authenticated
         // host, native transfer or filesystem publication.
         let summary = reported(
-            &[Some(0), Some(7), None, Some(11)],
+            &[Some(0), Some(7), None, Some(11), Some(23)],
             [
                 FileSendOutcome::HostPublished {
                     bytes: 0,
@@ -642,6 +648,9 @@ mod tests {
                 FileSendOutcome::HostRefused(Reason::Conflict),
                 FileSendOutcome::PublicationUnknown,
                 FileSendOutcome::InterruptedBeforePublication(FileSendError::Expired),
+                FileSendOutcome::InterruptedBeforePublication(FileSendError::Transport(
+                    fr_transport::quic::Error::SendExpired,
+                )),
             ]
             .into_iter(),
         );
@@ -652,6 +661,7 @@ mod tests {
                 (1, Some(7), "host_conflict"),
                 (2, None, "publication_unknown"),
                 (3, Some(11), "interrupted_expired"),
+                (4, Some(23), "interrupted_send_expired"),
             ]
         );
         assert!(summary.absence.is_none());
@@ -659,6 +669,12 @@ mod tests {
         let output = json(&summary);
         assert_eq!(output["files_sent"][0]["durable"], false);
         assert!(output["files_refused"][1]["bytes"].is_null());
+        assert_eq!(
+            absence_code(Absence::Refused(FileSendError::Transport(
+                fr_transport::quic::Error::SendExpired,
+            ))),
+            "files_send_expired"
+        );
     }
 
     #[test]

@@ -280,3 +280,108 @@ fn revoked_upload_after_native_staging_still_fences_the_parent() {
         assert!(!state.seat.is_occupied());
     });
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn expired_queued_file_offer_preserves_the_original_controller_and_input() {
+    run(|c, h| async move {
+        let cleanup = Cx::current().unwrap();
+        let mut state = Box::pin(setup(&c, &h)).await;
+        let source = Disk::new();
+        let destination = Disk::new();
+        join_with_config(
+            &mut state,
+            destination.config(),
+            Permission::new(true),
+            fr_files::sender::Policy {
+                record_lifetime: Duration::from_millis(50),
+                ..fr_files::sender::Policy::default()
+            },
+        );
+        let lease = state.viewer.input.binding().lease;
+        let connection = state.viewer.session.transport.binding();
+        let driver = state.driver.take().unwrap();
+        let ((), done) = Box::pin(support::both(
+            async {
+                let (mut n, mut t) = (80_000, 90_000);
+                quiet(&mut state, &c, &mut n, &mut t).await;
+                state
+                    .viewer
+                    .send_file(source.source(b"original selected source"), "expired")
+                    .unwrap();
+                let until = now(&c).unwrap() + 500_000;
+                // Prepare the real ATP offer and admit its bytes to the original
+                // transport, but withhold native I/O. No packet is substituted,
+                // no pending future is dropped and no deadline is refreshed.
+                while state.viewer.file_stage() != Some(Stage::AwaitingAcceptance) {
+                    assert!(now(&c).unwrap() < until, "bounded source preparation");
+                    let viewer = &mut state.viewer;
+                    viewer
+                        .files
+                        .service(
+                            &mut viewer.session.transport,
+                            &mut viewer.input,
+                            &viewer.control,
+                            &c,
+                        )
+                        .unwrap();
+                    if viewer.file_stage() != Some(Stage::AwaitingAcceptance) {
+                        asupersync::time::sleep(c.now(), Duration::from_millis(1)).await;
+                    }
+                }
+                assert_eq!(
+                    state.viewer.session.transport.usage().retained_send_records,
+                    1
+                );
+                let expires = now(&c).unwrap() + quic::MAX_DELIVERY_ALLOWANCE_US + 200_000;
+                while state.viewer.session.transport.usage().retained_send_records != 0 {
+                    assert!(now(&c).unwrap() < expires, "original delivery deadline");
+                    asupersync::time::sleep(c.now(), Duration::from_millis(1)).await;
+                    let viewer = &mut state.viewer;
+                    viewer
+                        .session
+                        .transport
+                        .tick(&c, || permitted(&mut viewer.input, &viewer.control, &c))
+                        .unwrap();
+                }
+                assert!(state.viewer.session.transport.is_bound_to(&connection));
+                assert!(!state.viewer.is_closed());
+                // Ordinary control turns observe the typed retirement, finish
+                // the original source and restore current view/ticket evidence.
+                let refreshed = now(&c).unwrap() + 1_200_000;
+                while now(&c).unwrap() < refreshed {
+                    drive(&mut state, &c, &h, &mut n, &mut t).await;
+                }
+                let expired = SendError::Transport(quic::Error::SendExpired);
+                assert_eq!(state.viewer.file_send_failure(), Some(expired));
+                let receipt = state.viewer.file_result().unwrap();
+                assert_eq!(
+                    receipt.outcome,
+                    Outcome::InterruptedBeforePublication(expired)
+                );
+                assert_eq!(state.viewer.try_finish_file_send_cleanup(), Some(Ok(())));
+                assert_eq!(fs::read_dir(&destination.0).unwrap().count(), 0);
+                assert_eq!(state.viewer.input.binding().lease, lease);
+                assert_eq!(state.effects.lock().unwrap().keys, [] as [bool; 0]);
+                let _ = state.viewer.action(key(true)).unwrap();
+                let submitted = now(&c).unwrap() + 500_000;
+                while state.viewer.pending_actions() != 0 {
+                    assert!(
+                        now(&c).unwrap() < submitted,
+                        "original input still serviced"
+                    );
+                    drive(&mut state, &c, &h, &mut n, &mut t).await;
+                }
+                assert_eq!(state.effects.lock().unwrap().keys, [true]);
+                assert_eq!(state.viewer.file_result(), Some(receipt));
+                assert!(state.viewer.session.transport.is_bound_to(&connection));
+                assert!(!state.host.control().is_stopped());
+                download::retire(&mut state, &cleanup).await;
+            },
+            driver,
+        ))
+        .await;
+        assert!(done.handoff_safe());
+        assert!(!state.seat.is_occupied());
+    });
+}

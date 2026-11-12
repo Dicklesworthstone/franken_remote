@@ -133,6 +133,10 @@ pub enum Error {
     TooLarge,
     Backpressure,
     Expired,
+    /// The original completed file pair exceeded a retained reliable-send
+    /// deadline and was retired between native I/O operations. The connection
+    /// remains open; this is neither receive expiry nor a publication receipt.
+    SendExpired,
     /// An optional lane requested retirement while native I/O may own staged or
     /// protected output. The connection is terminal; this does not confirm
     /// per-stream cleanup, payload delivery, or rollback of earlier effects.
@@ -764,8 +768,10 @@ impl QuicRecords {
     /// `send_by_micros` is the record's usefulness deadline and is enforced at
     /// admission: a record already past it is refused. An admitted reliable
     /// record must then be staged and acknowledged by max(send-by, admission +
-    /// [`delivery_allowance_us`] for this path), or the connection closes. A
-    /// late acknowledgement is a slow path, not a stale record: receivers judge
+    /// [`delivery_allowance_us`] for this path). Between settled native I/O
+    /// operations, expiry retires an ACTIVE file pair; other retained expiry
+    /// closes the connection. Expiry during native I/O always closes it. A late
+    /// acknowledgement is a slow path, not a stale record: receivers judge
     /// lateness by the record's own timestamps and deadlines.
     pub fn send(
         &mut self,
@@ -788,9 +794,10 @@ impl QuicRecords {
     /// connection/deadline check. It must be synchronous and nonblocking.
     ///
     /// A typed record refusal admits no bytes and does not close the connection.
-    /// Cancellation, lost authority and expired RETAINED records still close it,
-    /// taking precedence even when the record callback also refuses. Previously
-    /// admitted bytes are never retracted, replayed, or given a fresh deadline.
+    /// Cancellation, lost authority and non-isolatable retained expiry still
+    /// close it, taking precedence even when the record callback also refuses.
+    /// Completed file-pair retirement follows [`Self::send`]'s fixed boundary.
+    /// Already delivered bytes are never recalled or given a fresh deadline.
     /// Callers must retain the same absolute send-by across backpressure retries.
     pub fn send_prepared<E>(
         &mut self,

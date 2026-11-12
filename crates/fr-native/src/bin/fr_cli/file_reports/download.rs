@@ -232,6 +232,9 @@ pub(crate) fn absence_code(absence: Absence) -> &'static str {
         Absence::ReceiveFailed(error) => match error {
             fr_files::quic::Error::Cancelled => "receive_cancelled",
             fr_files::quic::Error::Limits => "receive_limit",
+            fr_files::quic::Error::Transport(fr_transport::quic::Error::SendExpired) => {
+                "send_expired"
+            }
             fr_files::quic::Error::Transport(
                 fr_transport::quic::Error::Expired
                 | fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
@@ -340,16 +343,24 @@ mod tests {
 
     #[test]
     fn receive_deadline_names_the_ended_lane_and_preserves_prior_publication() {
-        let mut state = status(vec![published(1, 19, Publication::Durable)]);
-        state.absence = Some(Absence::ReceiveFailed(fr_files::quic::Error::Transport(
-            fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
-        )));
-        let summary = Summary::from_status(&state);
-        let report = json(&summary);
-        assert_eq!(report["files_receive_ended"], "receive_expired");
-        assert_eq!(report["files_received"][0]["bytes"], 19);
-        assert_eq!(report["files_receive_refused"], serde_json::json!([]));
-        assert!(summary.text().contains("receive_expired"));
+        for (error, reason) in [
+            (
+                fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
+                "receive_expired",
+            ),
+            (fr_transport::quic::Error::SendExpired, "send_expired"),
+        ] {
+            let mut state = status(vec![published(1, 19, Publication::Durable)]);
+            state.absence = Some(Absence::ReceiveFailed(fr_files::quic::Error::Transport(
+                error,
+            )));
+            let summary = Summary::from_status(&state);
+            let report = json(&summary);
+            assert_eq!(report["files_receive_ended"], reason);
+            assert_eq!(report["files_received"][0]["bytes"], 19);
+            assert_eq!(report["files_receive_refused"], serde_json::json!([]));
+            assert!(summary.text().contains(reason));
+        }
     }
 
     #[test]

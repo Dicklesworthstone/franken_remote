@@ -3,7 +3,7 @@ use super::*;
 use asupersync::types::{Budget, CancelKind};
 use std::path::{Path, PathBuf};
 
-fn staged_handles(root: &Path) -> Vec<PathBuf> {
+pub(super) fn staged_handles(root: &Path) -> Vec<PathBuf> {
     let root = fs::canonicalize(root).unwrap();
     fs::read_dir("/proc/self/fd")
         .unwrap()

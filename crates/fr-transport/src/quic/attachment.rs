@@ -70,6 +70,9 @@ pub(super) struct Reservation {
     /// Original framing expiry retired this completed optional pair.
     /// Retain the cause beside the one-use reservation after buffers are gone.
     receive_expired: bool,
+    /// A retained send on this original completed file pair expired. The
+    /// peer reports the same original sender obligation, not receive expiry.
+    send_expired: bool,
     role: MediaRole,
     files_duplex: bool,
     // True only after the host Binding entered the ordered control queue.
@@ -633,6 +636,7 @@ impl QuicRecords {
             outbound: outbound.stream,
             retired_receive_accounted: 0,
             receive_expired: false,
+            send_expired: false,
             role: d.role,
             files_duplex,
             offered: false,
@@ -893,6 +897,15 @@ impl MediaChannel {
                 Arc::ptr_eq(&reservation.state, &self.state)
                     && reservation.retired()
                     && reservation.receive_expired
+            })
+    }
+    pub(super) fn send_expired(&self, q: &QuicRecords) -> bool {
+        q.is_bound_to(&self.connection)
+            && !q.is_closed()
+            && q.attachments.iter().any(|reservation| {
+                Arc::ptr_eq(&reservation.state, &self.state)
+                    && reservation.retired()
+                    && reservation.send_expired
             })
     }
     /// Ask the original connection to retire this completed optional pair at
