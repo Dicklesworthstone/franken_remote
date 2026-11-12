@@ -43,8 +43,10 @@ and the existing authority cleanup paths.
 One process-wide disk worker calls the ORIGINAL Store::load; there is no file
 I/O on authority/transport polls, filesystem notifier queue, extra async runtime,
 policy database or writer. Reads are attempted at 100ms intervals. Initial
-readiness has a two-second limit; subsequent positive evidence expires 500ms
-from read START, not reply completion. Each lease independently enforces expiry
+readiness has a two-second limit; subsequent positive evidence expires two
+seconds from read START, not reply completion. (It was 500ms. Single store
+reads under load took up to 805ms on a Mac, and each one ended every running
+session at once.) Each lease independently enforces expiry
 if the reader stalls. These are configured bounds, not measured real-time or
 suspend guarantees; the enclosing OS lifetime must still fence suspension.
 

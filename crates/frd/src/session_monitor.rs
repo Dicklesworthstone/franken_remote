@@ -18,7 +18,10 @@ use std::{
 };
 
 const OPEN_NS: u64 = 2_000_000_000;
-const VALID_NS: u64 = 500_000_000;
+/// Upper bound on one reply's evidence lifetime from the request. The helper's
+/// own bound is shorter or equal (Linux logind 500 ms, macOS 2 s, see
+/// fr-native `macos_session_policy`), and the smaller one applies.
+const VALID_NS: u64 = 2_000_000_000;
 static OCCUPIED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

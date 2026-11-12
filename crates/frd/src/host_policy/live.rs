@@ -16,7 +16,11 @@ use std::{
 };
 
 const OPEN_NS: u64 = 2_000_000_000;
-const VALID_NS: u64 = 500_000_000;
+/// Policy evidence lifetime from read START. Under load on a Mac, the policy
+/// store's path walk took up to 805 ms, so a 500 ms lifetime ended every
+/// running session at once (fr-uvji). Any read stall shorter than this is now
+/// ridden out. A changed revision still fences old leases as soon as it is read.
+const VALID_NS: u64 = 2_000_000_000;
 const REFRESH: Duration = Duration::from_millis(100);
 // A blocked filesystem call retains the permit until actual thread exit. Drop
 // never enables an unlimited succession of replacement disk workers.

@@ -3,7 +3,13 @@
 #![forbid(unsafe_code)]
 
 pub(crate) const OPEN_NS: u64 = 2_000_000_000;
-pub(crate) const VALID_NS: u64 = 500_000_000;
+/// Evidence lifetime from read START. Under load on a Mac, one
+/// `CGSessionCopyCurrentDictionary` call took up to 571 ms, so a 500 ms
+/// lifetime ended every running session at once, about every 17-40 minutes
+/// (fr-uvji). Any stall shorter than this lifetime is now ridden out. A
+/// logout or user switch that `WindowServer` has not yet reported takes
+/// effect at most this late.
+pub(crate) const VALID_NS: u64 = 2_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Stop {
@@ -120,7 +126,7 @@ impl Evidence {
             return self.stop(Stop::Failed);
         };
         // Stamp before the native call, never on reply receipt. A stalled call
-        // cannot return and convert stale evidence into another 500 ms lease.
+        // cannot return and convert stale evidence into another lease.
         if until <= now {
             return self.stop(Stop::EvidenceExpired);
         }

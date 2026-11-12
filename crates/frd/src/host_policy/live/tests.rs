@@ -306,7 +306,7 @@ fn stalled_read_expires_leases_and_keeps_worker_permit_until_real_exit() {
         active(&h);
         let lease = h.lease().unwrap();
         wait(|| blocked.load(Ordering::Acquire));
-        thread::sleep(Duration::from_millis(550));
+        thread::sleep(Duration::from_nanos(VALID_NS) + Duration::from_millis(50));
         assert_eq!(lease.check(), Err(Error::Expired));
         assert_eq!(h.status(), Status::Stopped(Error::Expired));
         watch.stop();
