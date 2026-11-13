@@ -405,7 +405,7 @@ impl RunOptions {
             (
                 self.observation_indicator.is_some(),
                 "observation_indicator_unavailable",
-                "a Windows host has no observation indicator yet",
+                "a Windows host always shows its own Stop sharing window; --observation-indicator names a Linux or macOS helper",
             ),
         ];
         refusals

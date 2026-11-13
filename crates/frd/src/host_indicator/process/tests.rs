@@ -392,7 +392,7 @@ while True:
         let called = AtomicBool::new(false);
         let drained = AtomicBool::new(false);
         let until = Instant::now() + Duration::from_secs(5);
-        let result = super::super::drive(&owner, &stop, || {
+        let result = super::super::drive(&owner.control(), &stop, || {
             called.store(true, Ordering::Release);
             if matches!(mode, "later-stall" | "revoke" | "revoke-exit" | "failed") {
                 while !stop.is_requested() {

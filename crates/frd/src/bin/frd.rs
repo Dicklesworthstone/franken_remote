@@ -71,7 +71,8 @@ OPTIONS:
                     macOS always requires it (default: next to frd), including
                     control hosts; build with --features macos-observation-indicator.
                     Linux: off by default, view-only hosts, --features linux-input.
-                    See docs/observation-indicator.md
+                    Windows always shows its own Stop sharing window (the
+                    option is refused there). See docs/observation-indicator.md
     --input-agent PATH  Absolute fr-input-agent path: lets the first viewer take
                     exclusive control after the current admission/approval policy;
                     the agent shows a mandatory local indicator. Probed once at
@@ -814,9 +815,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     };
     #[cfg(target_os = "linux")]
     let observation_indicator = options.observation_indicator.clone();
-    // None yet on Windows; `windows_run::supported` refused a request for one.
+    // Windows always shows the Stop sharing window, drawn by frd itself (no
+    // image: the path is unused). Naming a helper is refused there.
     #[cfg(windows)]
-    let observation_indicator: Option<PathBuf> = None;
+    let observation_indicator: Option<PathBuf> = Some(PathBuf::new());
     // Only the Unix --send-control owner below changes it.
     #[cfg_attr(windows, allow(unused_mut))]
     let mut run_options = Options {

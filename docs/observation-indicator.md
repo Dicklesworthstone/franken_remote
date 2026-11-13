@@ -104,6 +104,35 @@ library entry point refuse that combination. A controller-capable host keeps
 its existing mandatory per-lease control indicator. Combining both native
 window lifetimes has not been qualified, so it is not silently enabled.
 
+## Windows hosting
+
+A Windows `frd run` always shows its Stop sharing window, from the start of
+the run to its end; `--observation-indicator` is refused there
+(`observation_indicator_unavailable`), because no helper image is involved.
+frd draws the window itself on a thread of its own (`fr_winsys::indicator`):
+a small always-on-top window at the bottom right of the primary display's
+work area, above the taskbar, saying "This screen is being shared by
+FrankenRemote." with a Stop sharing button. It never takes focus when it
+appears and shows no text from a peer. It is part of the desktop, so a viewer
+sees it too.
+
+Pressing Stop sharing or closing the window is a local revoke: the window
+closes and the host stops through its normal teardown. Every 50 ms frd sends the
+window's thread a message; no answer within 250 ms, or the window no longer
+shown, ends the run as `observation_indicator_evidence_lost`, and a window
+that cannot open refuses the run as `observation_indicator_unavailable`.
+The host listens only after the first answer.
+
+Evidence (2026-11-13, one Surface Laptop 3, Windows 11 26200, 150% scaling):
+the window opened at 600x78 physical pixels; a Stop sharing press while
+listening idle ended the run (`share_ended` Cancelled, exit 0) and closed the
+window; a press 8 s into a share viewed from a Mac ended the share the same
+way, the viewer reporting `host_stopped`. The fr-winsys tests (run in the
+logged-on session) cover one stop per window however often it is pressed or
+closed, no stop when frd closes it, and a UI thread held for 800 ms failing
+the 250 ms check and passing again after. Not covered: a person seeing it,
+other displays or scaling, and occlusion by other always-on-top windows.
+
 ## Lifetime and failure behavior
 
 The Linux observation role uses the existing X11 Stop sharing surface and its
@@ -160,7 +189,8 @@ X11 mapping and responsive native code are not optical proof of human visibility
 The selected desktop user, X server and window manager remain trusted; the child
 is crash isolation, not a security sandbox against the same user. A headless
 Xvfb display is not a physical privacy indicator. macOS retains the same
-selected-user and OS trust boundary; there is no Wayland or Windows surface.
+selected-user and OS trust boundary; there is no Wayland surface. The Windows
+surface is described above.
 
 Production-code regressions cover fixed framing, correlation, deadline expiry,
 late-response non-revival, original stop propagation and cleanup ownership.

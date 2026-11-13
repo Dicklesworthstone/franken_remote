@@ -1,5 +1,6 @@
 //! Desktop "Stop sharing" surface around the canonical host run.
-//! Explicit on Linux; required by the macOS CLI for every host run.
+//! Explicit on Linux; required by the macOS CLI for every host run; always
+//! shown by a Windows host, which draws it itself (`windows`).
 //! One read-only child stays visible while this run is enabled, including idle
 //! listening between peers. It must be mapped and responsive BEFORE the host
 //! listener starts. It never approves a peer or changes admission policy.
@@ -10,6 +11,8 @@
 //! host future nor its media/firewall cleanup is cancelled and abandoned.
 pub mod microphone;
 mod process;
+#[cfg(all(host_stack, windows))]
+mod windows;
 #[cfg(host_stack)]
 use crate::{
     host_run::{self, Encoder, Options, Reporter, StopHandle, policy},
@@ -17,8 +20,10 @@ use crate::{
 };
 #[cfg(host_stack)]
 pub use process::Error as IndicatorError;
+#[cfg(all(host_stack, not(windows)))]
+use process::Owner;
 #[cfg(host_stack)]
-use process::{Owner, Status};
+use process::Status;
 #[cfg(host_stack)]
 use std::{
     fmt,
@@ -124,6 +129,7 @@ pub fn run_with_desktop_approval(
     })
 }
 
+/// On Windows `image` is unused: frd shows the window itself.
 #[cfg(host_stack)]
 fn run_with_surface(
     options: &Options,
@@ -137,6 +143,30 @@ fn run_with_surface(
     if cfg!(target_os = "linux") && options.input_agent.is_some() {
         return Err(Error::Configuration);
     }
+    #[cfg(windows)]
+    {
+        let _ = image;
+        let stopped = stop.clone();
+        let mut owner =
+            windows::Owner::start(move || stopped.request()).map_err(Error::Indicator)?;
+        let result = drive(&owner.control(), stop, serve);
+        // Keep the window through host teardown, then close it.
+        match owner.finish() {
+            Ok(()) => result,
+            Err(_) => Err(Error::Cleanup),
+        }
+    }
+    #[cfg(not(windows))]
+    run_with_process(options, stop, image, serve)
+}
+
+#[cfg(all(host_stack, not(windows)))]
+fn run_with_process(
+    options: &Options,
+    stop: &Arc<StopHandle>,
+    image: &Path,
+    serve: impl FnOnce() -> Result<(), host_run::Error>,
+) -> Result<(), Error> {
     let mut bytes = [0; 16];
     getrandom::fill(&mut bytes).map_err(|_| Error::Entropy)?;
     let launch = ProcessLaunch::new(
@@ -148,7 +178,7 @@ fn run_with_surface(
     .map_err(|_| Error::Configuration)?;
     let stopped = stop.clone();
     let mut owner = Owner::start(launch, move || stopped.request()).map_err(Error::Indicator)?;
-    let result = drive(&owner, stop, serve);
+    let result = drive(&owner.control(), stop, serve);
     // Keep the UI through normal host teardown. Joining the I/O worker proves
     // its exact child was reaped; a timeout retains the original worker handle.
     owner.stop();
@@ -174,13 +204,43 @@ fn fault(status: Status) -> Option<IndicatorError> {
         Status::Stopped(error) => Some(error),
     }
 }
+/// What a run's watcher reads from its Stop sharing surface.
+#[cfg(host_stack)]
+trait Watched: Sync {
+    fn status(&self) -> Status;
+    fn wait_for_stop(&self, finished: &AtomicBool) -> Option<IndicatorError>;
+    fn wake_watcher(&self);
+}
+#[cfg(host_stack)]
+impl Watched for process::Control {
+    fn status(&self) -> Status {
+        Self::status(self)
+    }
+    fn wait_for_stop(&self, finished: &AtomicBool) -> Option<IndicatorError> {
+        Self::wait_for_stop(self, finished)
+    }
+    fn wake_watcher(&self) {
+        Self::wake_watcher(self);
+    }
+}
+#[cfg(all(host_stack, windows))]
+impl Watched for windows::Control {
+    fn status(&self) -> Status {
+        Self::status(self)
+    }
+    fn wait_for_stop(&self, finished: &AtomicBool) -> Option<IndicatorError> {
+        Self::wait_for_stop(self, finished)
+    }
+    fn wake_watcher(&self) {
+        Self::wake_watcher(self);
+    }
+}
 #[cfg(host_stack)]
 fn drive(
-    owner: &Owner,
+    control: &impl Watched,
     stop: &StopHandle,
     serve: impl FnOnce() -> Result<(), host_run::Error>,
 ) -> Result<(), Error> {
-    let control = owner.control();
     loop {
         let status = control.status();
         if let Status::Stopped(error) = status {
@@ -212,7 +272,7 @@ fn drive(
         let _finish = Finish {
             done: &done,
             stop,
-            control: &control,
+            control,
         };
         let watcher = scope.spawn(|| {
             // A watcher panic also requests host stop before its thread exits.
@@ -240,13 +300,13 @@ impl Drop for Fence<'_> {
     }
 }
 #[cfg(host_stack)]
-struct Finish<'a> {
+struct Finish<'a, W: Watched> {
     done: &'a AtomicBool,
     stop: &'a StopHandle,
-    control: &'a process::Control,
+    control: &'a W,
 }
 #[cfg(host_stack)]
-impl Drop for Finish<'_> {
+impl<W: Watched> Drop for Finish<'_, W> {
     fn drop(&mut self) {
         self.stop.request();
         self.done.store(true, Ordering::Release);

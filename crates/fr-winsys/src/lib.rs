@@ -8,6 +8,8 @@ pub mod certs;
 #[cfg(windows)]
 pub mod fs;
 #[cfg(windows)]
+pub mod indicator;
+#[cfg(windows)]
 pub mod net;
 #[cfg(windows)]
 pub mod pipe;

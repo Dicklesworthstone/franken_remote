@@ -40,13 +40,16 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > in: Desktop Duplication into the adapter's Media Foundation HEVC encoder
 > (8e3269ca), a 1 ms timer while capturing (d65510bc), and a session monitor
 > that ends the share when the session locks, is switched away from, is logged
-> off or stops being the console session. Hardware measurements: one Surface
+> off or stops being the console session, and a Stop sharing window the run
+> shows from start to end (a press stops the share). Hardware measurements: one Surface
 > Laptop 3 (Windows 11 26200, Intel Iris Plus, one 2256x1504 display), viewed
 > from a Mac over the tailnet at `--fps 60`: 37-38 pictures/s with a moving
 > pattern. The session monitor's reads were checked on that machine (an
 > unlocked console logon reads active and unlocked) and a live share ran with
-> it, but no lock, user switch or logoff was performed during a share. No
-> input, cursor, audio, observation indicator, service split or HDR path
+> it, but no lock, user switch or logoff was performed during a share. The
+> Stop sharing window opened at 150% scaling, and a press ended a live share
+> (docs/observation-indicator.md). Trust roots default to the machine's ROOT
+> certificate store. No input, cursor, audio, service split or HDR path
 > exists. Nothing below is qualified.
 
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
