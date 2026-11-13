@@ -19,14 +19,17 @@ use abrupt::ClosePacket;
 // Exactly one terminal owner. A close packet is not a delivered FRD0 report;
 // its successful flush deliberately retains the report's Backpressure result.
 enum Prepared {
-    Record(Box<Drain>),
+    /// The record once its already-sent lanes settle; otherwise the close
+    /// packet, with the frozen `started` and the report's `code`.
+    Record(Box<Drain>, u64, u64),
     Close(Box<ClosePacket>),
 }
 impl Prepared {
     fn with_closed(mut self, report: Closed) -> Result<Self, Error> {
         match &mut self {
-            Self::Record(drain) => {
+            Self::Record(drain, _, code) => {
                 drain.byte_len = Report::Closed(report).encode(drain.binding, &mut drain.bytes)?;
+                *code = abrupt::report_code(&Report::Closed(report), drain.binding)?;
             }
             Self::Close(close) => close.replace_report(report)?,
         }
@@ -34,7 +37,13 @@ impl Prepared {
     }
     async fn run(self) -> Result<(), Error> {
         match self {
-            Self::Record(drain) => drain.run().await,
+            Self::Record(mut drain, started, code) => {
+                if drain.settle().await? {
+                    drain.run().await
+                } else {
+                    ClosePacket::unsettled(drain, started, code)?.run().await
+                }
+            }
             Self::Close(close) => close.run().await,
         }
     }
@@ -72,6 +81,9 @@ impl RevocationReport {
     /// The drain's fixed deadline was set at closure and is never restarted.
     /// Native backlog permits only one protected close packet, not payload
     /// draining. Even if flushed, the undelivered report returns Backpressure.
+    /// Bytes already sent and awaiting only an ACK are first waited on (ACK
+    /// frames only, up to half the budget); still unacknowledged, the same
+    /// close packet follows.
     pub fn finish(self) -> impl Future<Output = Option<Result<(), Error>>> + use<> {
         finish(self.take())
     }
@@ -434,8 +446,8 @@ impl QuicRecords {
         // A failed preparation cannot restart it or publish malformed metadata.
         let started = super::now(cleanup)?;
         let code = abrupt::report_code(&report, binding)?;
-        match self.prepare_report(cleanup, route, binding, report) {
-            Ok(drain) => Ok(Prepared::Record(Box::new(drain))),
+        match self.prepare_report(cleanup, route, binding, report, true) {
+            Ok(drain) => Ok(Prepared::Record(Box::new(drain), started, code)),
             Err(Error::Backpressure) => self
                 .prepare_close_packet(cleanup, route, binding, started, code)
                 .map(|close| Prepared::Close(Box::new(close))),

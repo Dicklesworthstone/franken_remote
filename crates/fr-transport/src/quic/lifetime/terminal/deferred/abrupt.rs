@@ -4,7 +4,7 @@
 //! protected application packets, and emits only the close. Never call flush or
 //! `drive_io_once` here: neither is a general post-fence send permission.
 use super::super::packet::Packet;
-use super::super::{Binding, Closed, Error, QuicRecords, Report, StreamRoute};
+use super::super::{Binding, Closed, Drain, Error, QuicRecords, Report, StreamRoute};
 use asupersync::cx::Cx;
 
 // PROTOCOL_TRANSPORT_CLOSE.md: namespaces for the existing reason enums.
@@ -49,6 +49,25 @@ impl QuicRecords {
     }
 }
 impl ClosePacket {
+    /// A registered report whose sent lanes stayed unacknowledged through its
+    /// settle: the same socket and gate, and the ORIGINAL frozen budget.
+    pub(super) fn unsettled(
+        drain: Box<Drain>,
+        started: u64,
+        code: u64,
+    ) -> Result<Box<Self>, Error> {
+        let drain = *drain;
+        Ok(Box::new(Self {
+            packet: Box::new(Packet::detached(
+                drain.native,
+                drain.cx,
+                drain.gate,
+                started,
+                code,
+            )?),
+            binding: drain.binding,
+        }))
+    }
     pub(super) fn replace_report(&mut self, report: Closed) -> Result<(), Error> {
         self.packet
             .replace_code(report_code(&Report::Closed(report), self.binding)?);

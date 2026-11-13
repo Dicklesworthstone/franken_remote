@@ -22,8 +22,32 @@ closure deadline apply on every asynchronous poll. There is no retry loop,
 ordinary receive callback, new connection, deadline extension, or I/O in Drop.
 Already transmitted application packets cannot be retracted.
 
-The immediate `close_with_closed` / `close_with_revocation` APIs and the client
-CloseRequest exchange retain their existing native-backlog refusal. Registered
+## Settling already-sent bytes (2026-11-13)
+
+Before a registered report or the client's CloseRequest is written, a lane that
+holds only bytes (or a FIN) already SENT before the fence and not yet
+acknowledged is waited on rather than refused. The wait uses asupersync's
+`acknowledge_io_once` (pinned since 1a0901df2): it receives and processes the
+peer's packets, but transmits ACK frames only. It services no loss timer, so it
+sends no probe or retransmission, and sends no STREAM, DATAGRAM or other frame.
+Nothing new leaves after the fence. Each side ACKs the other, so a host and a
+client settling at the same moment both make progress.
+
+A lane settles when it passes the same test `terminal_sender` applies (the EMPTY
+witness, or `drained` for a lane other than the report route). The wait is
+bounded at half of the frozen budget (125 ms of 250 ms for reports; half of the
+exchange's possibly shorter budget). At the bound a registered report takes the
+close-packet fallback below, with the ORIGINAL budget, and the exchange refuses
+with `Backpressure` as before. Bytes a received ACK declares lost are requeued
+as unsent and never settle here. Unsent bytes, partial records and queued
+datagrams still refuse at once.
+
+Measured before the change (fr-3d8i census, 2026-10-15, two namespace suites):
+about 9 in 10 close-packet fallbacks were lanes awaiting only an ACK; the October
+prototype of this settle cut fallbacks per suite from 45 and 40 to 10 and 7.
+
+The immediate `close_with_closed` / `close_with_revocation` APIs keep their
+existing native-backlog refusal and do not wait. Registered
 client aborts use the same close-only native operation under the additional
 rules below. A missing registration or dropped consumer never acquires another
 socket.

@@ -1,6 +1,6 @@
 //! One closing client exchange, never an ordinary post-close transport loan.
 pub(super) mod deferred;
-use super::{DRAIN_US, TURN};
+use super::{DRAIN_US, TURN, Unacknowledged, settle};
 use crate::ControlCloseOutcome;
 use crate::quic::{
     ConnectionBinding, ControlRoutes, EmptySendState, Error, Inbound, Messages, Priority,
@@ -61,15 +61,21 @@ struct Exchange {
     queued: bool,
     remaining_records: u8,
     outcome: CloseOutcome,
+    /// Sent lanes the request waits on before it is written, until
+    /// `settle_until` (half the budget); still unacknowledged, it refuses.
+    unacknowledged: Unacknowledged,
+    settle_until: u64,
 }
 impl QuicRecords {
     /// Close ordinary I/O at CALL time, then exchange ONE session `CloseRequest`
     /// for the original host's Closed report. The caller first stops application
     /// observation/input admission. This API performs no native-input cleanup.
     ///
-    /// Existing outbound native/retransmission data, partial writes and queued
-    /// datagrams refuse rather than flushing stale work. Unstaged writes are
-    /// discarded. The original inbound control parser/remainder is TRANSFERRED,
+    /// Unsent native data, partial writes and queued datagrams refuse rather
+    /// than flushing stale work. Bytes already sent and awaiting only the host's
+    /// ACK are waited on, transmitting ACK frames only, for up to half the
+    /// budget; still unacknowledged then, the exchange refuses. Unstaged writes
+    /// are discarded. The original inbound control parser/remainder is TRANSFERRED,
     /// not restarted mid-record. Other lanes are never delivered to applications.
     /// At most 32 control records are examined; the configured receive bounds are not raised.
     ///
@@ -215,7 +221,7 @@ impl QuicRecords {
             InputDelivery::Reliable,
         )
         .map_err(|_| Error::Malformed)?;
-        let empty = self.terminal_sender(routes.outbound)?;
+        let (empty, unacknowledged) = self.terminal_sender(routes.outbound, true)?;
         let index = self
             .inbound
             .iter()
@@ -245,6 +251,8 @@ impl QuicRecords {
             queued: false,
             remaining_records: 32,
             outcome: CloseOutcome::initial(Ok(())),
+            unacknowledged,
+            settle_until: started + (until - started) / 2,
         })
     }
 }
@@ -402,6 +410,19 @@ impl Exchange {
         Ok(false)
     }
     async fn run_inner(&mut self) -> Result<(), Error> {
+        if !settle(
+            &mut self.native,
+            &self.cx,
+            self.gate.as_deref(),
+            &mut self.unacknowledged,
+            self.streams,
+            &mut self.last,
+            self.settle_until,
+        )
+        .await?
+        {
+            return Err(Error::Backpressure);
+        }
         loop {
             let at = self.check()?;
             self.offer()?;

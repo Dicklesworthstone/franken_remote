@@ -59,6 +59,24 @@ impl QuicRecords {
     }
 }
 impl Packet {
+    /// A packet on a socket a terminal record already detached, with that
+    /// record's gate and the budget frozen at `started`.
+    pub(super) fn detached(
+        native: NativeQuicUdpConnection,
+        cx: Cx,
+        gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        started: u64,
+        code: u64,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            native,
+            cx,
+            gate,
+            code,
+            started,
+            until: started.checked_add(DRAIN_US).ok_or(Error::Clock)?,
+        })
+    }
     pub(super) fn replace_code(&mut self, code: u64) {
         self.code = code;
     }

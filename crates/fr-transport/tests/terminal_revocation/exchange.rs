@@ -194,6 +194,81 @@ fn native_outbound_data_is_never_flushed_as_part_of_the_close_request() {
         assert_eq!(result.report, None);
     });
 }
+/// A request whose earlier record was SENT but not yet acknowledged waits for
+/// that ACK, acknowledging and receiving only, instead of refusing, so an
+/// orderly close right after a last record still reaches the host.
+#[test]
+fn an_unacknowledged_earlier_record_settles_before_the_close_request() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let mut p = pair(&cx).await;
+        let routes = routes(&p);
+        let original = p.peer.binding();
+        p.peer
+            .send(
+                &cx,
+                Route::Stream(routes.outbound),
+                &request_bytes(closure::Reason::ClientFailure),
+                clock(&cx) + 1_000_000,
+                || true,
+            )
+            .unwrap();
+        p.peer.drive(&cx, Duration::ZERO, || true).await.unwrap();
+        assert!(p.peer.usage().retained_send_records > 0);
+        let exchange =
+            p.peer
+                .close_with_request(&cx, &original, routes, binding(), request(), u64::MAX);
+        let host = async {
+            let mut requests = Vec::new();
+            let until = clock(&cx) + 2_000_000;
+            while requests.len() < 2 {
+                assert!(
+                    clock(&cx) < until,
+                    "the close request never arrived (refused as backlog?): {requests:?}"
+                );
+                p.local
+                    .drive(&cx, Duration::from_millis(1), || true)
+                    .await
+                    .unwrap();
+                p.local
+                    .receive(
+                        &cx,
+                        || true,
+                        |_, bytes| {
+                            requests.push(
+                                closure::decode_request(
+                                    bytes,
+                                    binding(),
+                                    &ProtocolLimits::ABSOLUTE,
+                                    InputDirection::ViewerToHost,
+                                    InputDelivery::Reliable,
+                                )
+                                .unwrap()
+                                .reason,
+                            );
+                            Ok(Disposition::Consumed)
+                        },
+                    )
+                    .unwrap();
+            }
+            let original = p.local.binding();
+            let sent = p
+                .local
+                .close_with_closed(&cx, &original, p.control, binding(), final_report())
+                .await;
+            (requests, sent)
+        };
+        let (outcome, (requests, sent)) = Box::pin(both(exchange, host)).await;
+        assert_eq!(
+            requests,
+            [closure::Reason::ClientFailure, closure::Reason::Requested]
+        );
+        assert_eq!(outcome.transport, Ok(()));
+        assert!(outcome.request_acknowledged);
+        assert_eq!(outcome.report, Some(final_report()));
+        assert_eq!(sent, Ok(()));
+    });
+}
 #[test]
 fn destination_security_loss_prevents_the_detached_exchange() {
     runtime().block_on(async {

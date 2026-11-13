@@ -1,6 +1,9 @@
 //! A terminal report owns the original socket, never an ordinary send permit.
 //! Native retained data cannot be selectively discarded through the pinned API:
 //! refuse that case rather than flushing stale application bytes after a fence.
+//! A registered report (and the client's close exchange) may first wait for
+//! the peer to acknowledge bytes that were all sent before the fence; that wait
+//! transmits ACK frames only (`settle`).
 use super::super::{
     ConnectionBinding, EmptySendState, Error, Messages, Priority, QuicRecords, Route, StreamRoute,
     now,
@@ -8,7 +11,9 @@ use super::super::{
 use asupersync::{
     bytes::Bytes,
     cx::Cx,
-    net::quic_native::{NativeQuicUdpConnection, QuicConnectionState, StreamRole},
+    net::quic_native::{
+        NativeQuicUdpConnection, QuicConnectionState, QuicStream, StreamId, StreamRole,
+    },
     time::timeout,
 };
 use fr_core::limits::ProtocolLimits;
@@ -78,6 +83,87 @@ struct Drain {
     until: u64,
     bytes: [u8; REPORT_BYTES],
     byte_len: usize,
+    /// Lanes whose sent bytes the record waits on (registered reports only),
+    /// until `settle_until`, half the budget.
+    unacknowledged: Unacknowledged,
+    settle_until: u64,
+}
+
+/// Lanes holding bytes that were all SENT before the fence but are not yet all
+/// acknowledged. Nothing in them is unsent, a partial write or a queued
+/// datagram, so waiting needs only `acknowledge_io_once`, which transmits ACK
+/// frames and no application data. A lane is settled by the same test
+/// `terminal_sender` applies: the EMPTY witness, or for a lane other than the
+/// report route, `drained`.
+#[derive(Default)]
+struct Unacknowledged(Vec<Lane>);
+struct Lane {
+    stream: StreamId,
+    empty: EmptySendState,
+    route: bool,
+}
+impl Unacknowledged {
+    fn settled(&mut self, native: &NativeQuicUdpConnection) -> Result<bool, Error> {
+        let streams = native.connection().inner().streams();
+        for lane in &mut self.0 {
+            let live = streams.stream(lane.stream).map_err(|_| Error::Native)?;
+            if !lane.empty.matches(live) && (lane.route || !lane.empty.drained(live)) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+/// Receive and acknowledge, never send data, until the peer acknowledges every
+/// `unacknowledged` lane. `Ok(false)` at `until`: the caller falls back as if it
+/// had never waited. Bytes a received ACK declares lost are requeued as unsent;
+/// that lane never settles here, because resending it would follow the fence.
+async fn settle(
+    native: &mut NativeQuicUdpConnection,
+    cx: &Cx,
+    gate: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    unacknowledged: &mut Unacknowledged,
+    streams: usize,
+    last: &mut u64,
+    until: u64,
+) -> Result<bool, Error> {
+    loop {
+        if native.connection().state() != QuicConnectionState::Established
+            || native.connection().inner().streams().len() > streams
+        {
+            return Err(Error::Closed);
+        }
+        if unacknowledged.settled(native)? {
+            return Ok(true);
+        }
+        cx.checkpoint().map_err(|_| Error::Cancelled)?;
+        let at = now(cx)?;
+        if at < *last {
+            return Err(Error::Clock);
+        }
+        *last = at;
+        if at >= until {
+            return Ok(false);
+        }
+        let wait = TURN.min(Duration::from_micros(until - at));
+        match super::poll_io(
+            cx,
+            gate,
+            &mut || true,
+            // Detached only after proving no ordinary native data is unsent.
+            &[],
+            at,
+            Some(until),
+            native.acknowledge_io_once(cx, wait),
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(Error::Expired) => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 impl QuicRecords {
@@ -145,7 +231,7 @@ impl QuicRecords {
             let prepared = if self.deferred_revocation.is_some() {
                 Err(Error::InvalidPolicy)
             } else {
-                self.prepare_report(cx, route, binding, Report::Closed(report))
+                self.prepare_report(cx, route, binding, Report::Closed(report), false)
             };
             self.close();
             prepared
@@ -183,15 +269,18 @@ impl QuicRecords {
         binding: Binding,
         report: Revoked,
     ) -> Result<Drain, Error> {
-        self.prepare_report(cx, route, binding, Report::Revoked(report))
+        self.prepare_report(cx, route, binding, Report::Revoked(report), false)
     }
 
+    /// `settle`: the record may wait, receiving and acknowledging only, for
+    /// already-sent bytes to be acknowledged (see `Unacknowledged`).
     fn prepare_report(
         &mut self,
         cx: &Cx,
         route: StreamRoute,
         binding: Binding,
         report: Report,
+        settle: bool,
     ) -> Result<Drain, Error> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         let started = now(cx)?;
@@ -207,7 +296,7 @@ impl QuicRecords {
             return Err(Error::Unauthorized);
         }
         self.terminal_route(route, binding, report.byte_len())?;
-        let empty = self.terminal_sender(route)?;
+        let (empty, unacknowledged) = self.terminal_sender(route, settle)?;
         let mut bytes = [0; REPORT_BYTES];
         let byte_len = report.encode(binding, &mut bytes)?;
         Ok(Drain {
@@ -222,9 +311,18 @@ impl QuicRecords {
             until,
             bytes,
             byte_len,
+            unacknowledged,
+            settle_until: started + DRAIN_US / 2,
         })
     }
-    fn terminal_sender(&mut self, route: StreamRoute) -> Result<EmptySendState, Error> {
+    /// The report route's EMPTY witness. With `settle`, a lane whose bytes were
+    /// all sent but not all acknowledged is returned to wait on instead of
+    /// refusing. Unsent bytes, partial writes and queued datagrams still refuse.
+    fn terminal_sender(
+        &mut self,
+        route: StreamRoute,
+        settle: bool,
+    ) -> Result<(EmptySendState, Unacknowledged), Error> {
         let native = self.native.as_ref().ok_or(Error::Closed)?;
         // Private protected packets can outlive a failed or dropped native
         // operation after DATAGRAMs leave the visible queue. Only the existing
@@ -248,13 +346,21 @@ impl QuicRecords {
         // Another lane may be finished or reset (a retired clipboard or files
         // lane, a configuration stream after a handoff); it only has to hold
         // nothing. The report's own route must still be reusable.
+        let mut unacknowledged = Unacknowledged::default();
         for sender in &mut self.senders {
             let live = streams
                 .stream(sender.route.stream)
                 .map_err(|_| Error::Native)?;
-            if !sender.empty.matches(live) && (sender.route == route || !sender.empty.drained(live))
-            {
-                return Err(Error::Backpressure);
+            let is_route = sender.route == route;
+            if !sender.empty.matches(live) && (is_route || !sender.empty.drained(live)) {
+                if !settle || !awaits_acknowledgement(live, is_route) {
+                    return Err(Error::Backpressure);
+                }
+                unacknowledged.0.push(Lane {
+                    stream: sender.route.stream,
+                    empty: EmptySendState(sender.empty.0.clone()),
+                    route: is_route,
+                });
             }
         }
         let empty = EmptySendState(
@@ -266,11 +372,47 @@ impl QuicRecords {
                 .0
                 .clone(),
         );
-        Ok(empty)
+        Ok((empty, unacknowledged))
     }
 }
 
+/// Whether a lane that is not yet empty holds only bytes (or a FIN) already
+/// sent and awaiting acknowledgement: nothing queued for packet assembly, not
+/// reset, and for the report's own route, still reusable. Another difference
+/// (unread received data, say) never settles, so its wait ends at the bound in
+/// the same fallback it would have taken at once.
+fn awaits_acknowledgement(live: &QuicStream, route: bool) -> bool {
+    if live.has_pending_stream_frames() || live.send_reset.is_some() {
+        return false;
+    }
+    if route {
+        return live.send_final_size.is_none()
+            && live.stop_sending_error_code.is_none()
+            && live
+                .acknowledged_send_offset()
+                .is_some_and(|acknowledged| acknowledged < live.send_offset);
+    }
+    live.send_final_size.is_some()
+        || live
+            .acknowledged_send_offset()
+            .is_some_and(|acknowledged| acknowledged < live.send_offset)
+}
+
 impl Drain {
+    /// Wait for the sent bytes this record must follow. `Ok(false)`: still
+    /// unacknowledged at half the budget; the caller takes its fallback.
+    async fn settle(&mut self) -> Result<bool, Error> {
+        settle(
+            &mut self.native,
+            &self.cx,
+            self.gate.as_deref(),
+            &mut self.unacknowledged,
+            self.streams,
+            &mut self.last,
+            self.settle_until,
+        )
+        .await
+    }
     fn check(&mut self) -> Result<u64, Error> {
         self.cx.checkpoint().map_err(|_| Error::Cancelled)?;
         if self.gate.as_ref().is_some_and(|gate| !gate()) {
