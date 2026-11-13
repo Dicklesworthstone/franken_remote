@@ -178,9 +178,11 @@ fn dropping_a_client_with_a_pending_read_cancels_it() {
     let name = name("cancel");
     let server = server(&name);
     let (release, released) = mpsc::channel::<()>();
+    let (connected, accepted) = mpsc::channel::<()>();
     let worker = thread::spawn(move || {
         let mut server = server;
         accept(&server);
+        connected.send(()).expect("connected");
         // Never replies until the client is gone.
         released.recv().expect("release");
         server.write_all(b"late").err().map(|e| e.kind())
@@ -192,6 +194,9 @@ fn dropping_a_client_with_a_pending_read_cancels_it() {
     let cx = Context::from_waker(&waker);
     let mut out = [0_u8; 64];
     assert!(client.poll_read(&cx, &mut out).is_pending());
+    // A client gone before the server thread reached ConnectNamedPipe would
+    // fail the accept (the pipe is closing), not test cancellation.
+    accepted.recv().expect("accepted");
     let started = Instant::now();
     drop(client);
     let elapsed = started.elapsed();
