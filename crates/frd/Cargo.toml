@@ -46,3 +46,8 @@ subtle = { version = "=2.6.1", default-features = false }
 # boundary crate.
 [target.'cfg(windows)'.dependencies]
 fr-winsys.workspace = true
+
+# The Windows host-policy store's NTFS test needs the Windows host build.
+[[test]]
+name = "host_policy_windows"
+required-features = ["windows-host"]
