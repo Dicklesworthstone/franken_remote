@@ -47,6 +47,8 @@ pub use startup::ControlRoutes;
 
 mod peer_close;
 pub use peer_close::{ClientCloseReason, PeerClose};
+mod doorbell;
+pub use doorbell::Doorbell;
 
 pub const ALPN: &[u8] = b"fr-remote/0";
 /// Unidirectional streams per connection over its WHOLE lifetime: QUIC stream
@@ -462,6 +464,8 @@ pub struct QuicRecords {
     // critical prefix must not reset fairness among otherwise-ready bulk lanes.
     send_cursor: [usize; 2],
     cursor: usize,
+    /// Ends a turn's receive wait when records become ready for it.
+    doorbell: Doorbell,
 }
 impl fmt::Debug for QuicRecords {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -572,6 +576,7 @@ impl QuicRecords {
             senders,
             send_cursor: [0; 2],
             cursor: 0,
+            doorbell: Doorbell::default(),
         })
     }
     /// This path's smoothed round trip as QUIC measures it, once sampled.
@@ -585,6 +590,11 @@ impl QuicRecords {
     }
     pub fn binding(&self) -> ConnectionBinding {
         ConnectionBinding(Arc::downgrade(&self.identity))
+    }
+    /// Rings end this connection's current or next receive wait; see
+    /// [`Doorbell`].
+    pub fn doorbell(&self) -> Doorbell {
+        self.doorbell.clone()
     }
     /// Object identity only; this does not make a closed connection live.
     pub fn is_bound_to(&self, binding: &ConnectionBinding) -> bool {
@@ -1003,16 +1013,19 @@ impl QuicRecords {
             // or unwinding an in-flight operation cannot resume its queued data.
             let mut held = self.hold()?;
             let (native, boundary) = held.io_parts();
-            let result = lifetime::poll_io_at_boundary(
-                cx,
-                Some(&gate),
-                authorize,
-                boundary,
-                current,
-                until,
-                native.flush(cx),
-            )
-            .await;
+            let result = {
+                let flush = pin!(native.flush(cx));
+                lifetime::poll_io_at_boundary(
+                    cx,
+                    Some(&gate),
+                    authorize,
+                    boundary,
+                    current,
+                    until,
+                    flush,
+                )
+                .await
+            };
             let native = held.release();
             self.finish_native_io(native, result)?;
             if bulk_opportunity || queued.is_none() {
@@ -1026,18 +1039,26 @@ impl QuicRecords {
         }
         let current = self.check(cx, authorize)?;
         let until = self.senders.iter().filter_map(|s| s.until).min();
+        // Records that become ready during the wait (a picture published for
+        // this viewer) end it, so they leave on this turn's successor rather
+        // than after the rest of `wait`.
+        let doorbell = self.doorbell.clone();
         let mut held = self.hold()?;
         let (native, boundary) = held.io_parts();
-        let result = lifetime::poll_io_at_boundary(
-            cx,
-            Some(&gate),
-            authorize,
-            boundary,
-            current,
-            until,
-            native.drive_io_once(cx, wait),
-        )
-        .await;
+        let result = {
+            let rung = pin!(doorbell::Rung(&doorbell));
+            let drive = pin!(native.drive_io_once_or_wake(cx, wait, rung));
+            lifetime::poll_io_at_boundary(
+                cx,
+                Some(&gate),
+                authorize,
+                boundary,
+                current,
+                until,
+                drive,
+            )
+            .await
+        };
         let native = held.release();
         self.finish_native_io(native, result)?;
         // This completed operation may have authenticated the last ACK of a

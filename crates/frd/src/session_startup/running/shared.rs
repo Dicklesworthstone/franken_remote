@@ -356,6 +356,12 @@ impl<F: FnMut(Route, &[u8]) -> Result<Disposition, ()>> Services for SharedServi
             .statistics
             .admitted_records
             .saturating_add(u64::try_from(report.accepted).map_err(|_| Error::Clock)?);
+        // This pass took all it may and the transport refused none: more of
+        // the picture may be ready. End the coming wait at once so it follows
+        // on the next turn; a refusal instead waits for acknowledgements.
+        if !report.pending && report.accepted >= RECORDS_PER_MAINTENANCE {
+            q.doorbell().ring();
+        }
         self.finish_recovery(q)?;
         // A sender-discovered failure fences this view until the viewer's
         // request arrives: nothing certifies it or solicits reports about it.

@@ -704,6 +704,55 @@ fn invalid_turn_budget_and_unpolled_continuous_service_are_terminal() {
     });
 }
 
+#[test]
+fn a_published_picture_ends_the_viewers_network_wait() {
+    let rt = support::runtime();
+    let cx = rt.request_cx_with_budget(Budget::INFINITE);
+    rt.block_on(async {
+        let mut g = Box::pin(group_with_capabilities(&rt, 1, &[], true)).await;
+        ready(&mut g).await;
+        for _ in 0..10 {
+            g.peers[0].turn().await.unwrap();
+        }
+        let Group {
+            publisher, peers, ..
+        } = &mut *g;
+        let peer = &mut peers[0];
+        let mut draws = 0;
+        let host = peer.shared.as_mut().unwrap();
+        // The viewer is not driven from here on, so no packet can end the
+        // host's waits; drain anything already readable first.
+        for _ in 0..2 {
+            host.drive(Duration::from_millis(1), || nonce(&mut draws), block)
+                .await
+                .unwrap();
+        }
+        let before = host.statistics().admitted_records;
+        let (waited, captured) = Box::pin(support::both(
+            async {
+                let started = std::time::Instant::now();
+                host.drive(Duration::from_millis(100), || nonce(&mut draws), block)
+                    .await
+                    .unwrap();
+                started.elapsed()
+            },
+            publisher.capture_next(),
+        ))
+        .await;
+        assert_eq!(captured.unwrap().delivered, 1);
+        // The capture itself takes a few milliseconds of this.
+        assert!(
+            waited < Duration::from_millis(60),
+            "the turn waited {waited:?} of its 100 ms"
+        );
+        host.drive(Duration::from_millis(1), || nonce(&mut draws), block)
+            .await
+            .unwrap();
+        assert!(host.statistics().admitted_records > before);
+        cleanup(&mut g, &cx).await;
+    });
+}
+
 mod admission;
 
 #[path = "recovery/tests.rs"]

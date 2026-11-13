@@ -68,6 +68,8 @@ struct Entry {
     send_sample: Option<adaptive::SendSample>,
     /// Exact-view receiver evidence copied by the original session owner.
     receiver_sample: adaptive::ReceiverSample,
+    /// Ends this viewer's network wait when a picture is published for it.
+    doorbell: Option<fr_transport::quic::Doorbell>,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
@@ -129,7 +131,14 @@ impl Members {
             .filter(|e| e.failure.is_none())
         {
             match entry.publish(update) {
-                Ok(true) => delivered += 1,
+                Ok(true) => {
+                    delivered += 1;
+                    // Its connection task sends the picture on its next turn;
+                    // end the current turn's wait so that turn comes now.
+                    if let Some(doorbell) = &entry.doorbell {
+                        doorbell.ring();
+                    }
+                }
                 Ok(false) => {}
                 Err(error) => {
                     entry.close(error);
@@ -378,6 +387,7 @@ impl Publisher {
             audio: audio::EntryAudio::default(),
             send_sample: None,
             receiver_sample: adaptive::ReceiverSample::Unknown,
+            doorbell: None,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),

@@ -60,7 +60,10 @@ impl Subscriber {
                 return Err(Error::WrongSource);
             }
         }
-        self.with_entry(q, |entry| Ok(entry.view))
+        self.with_entry(q, |entry| {
+            entry.doorbell.get_or_insert_with(|| q.doorbell());
+            Ok(entry.view)
+        })
     }
     /// Copy the canonical selected feedback owner's content-free snapshot.
     /// None is selected-but-unknown; it never means an unnegotiated peer. The

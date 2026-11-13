@@ -91,6 +91,7 @@ impl Publisher {
             audio: super::audio::EntryAudio::default(),
             send_sample: None,
             receiver_sample: super::adaptive::ReceiverSample::Unknown,
+            doorbell: None,
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),

@@ -122,7 +122,7 @@ pub(super) struct IoBoundary<'a> {
 
 /// Terminal drains retain their original conservative guard. They have no
 /// Held entry witness and cannot opt into ordinary payload-empty continuation.
-pub(super) fn poll_io<T, E>(
+pub(super) async fn poll_io<T, E>(
     cx: &Cx,
     gate: Option<&(dyn Fn() -> bool + Send + Sync)>,
     authorize: &mut impl FnMut() -> bool,
@@ -130,7 +130,7 @@ pub(super) fn poll_io<T, E>(
     started: u64,
     until: Option<u64>,
     io: impl Future<Output = Result<T, E>>,
-) -> impl Future<Output = Result<T, Error>> {
+) -> Result<T, Error> {
     poll_io_at_boundary(
         cx,
         gate,
@@ -141,10 +141,14 @@ pub(super) fn poll_io<T, E>(
         },
         started,
         until,
-        io,
+        pin!(io),
     )
+    .await
 }
 
+/// `io` stays pinned in the caller: taking it by value would store the
+/// native driver future twice (the argument and its pinned copy) in every
+/// turn's state, and every viewer future that awaits a turn.
 pub(super) async fn poll_io_at_boundary<T, E>(
     cx: &Cx,
     gate: Option<&(dyn Fn() -> bool + Send + Sync)>,
@@ -152,9 +156,8 @@ pub(super) async fn poll_io_at_boundary<T, E>(
     boundary: IoBoundary<'_>,
     started: u64,
     until: Option<u64>,
-    io: impl Future<Output = Result<T, E>>,
+    mut io: Pin<&mut impl Future<Output = Result<T, E>>>,
 ) -> Result<T, Error> {
-    let mut io = pin!(io);
     poll_fn(|task| {
         if cx.checkpoint().is_err() {
             return Poll::Ready(Err(Error::Cancelled));

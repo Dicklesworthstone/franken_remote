@@ -122,6 +122,7 @@ impl JoinQueue {
             audio: super::audio::EntryAudio::default(),
             send_sample: None,
             receiver_sample: super::adaptive::ReceiverSample::Unknown,
+            doorbell: None,
             join: Some(PendingJoin {
                 setup,
                 cfg,
