@@ -86,9 +86,10 @@ impl Drop for Share {
         // One content-free line per native owner. Stdout remains FRW0.
         let _ = writeln!(
             io::stderr().lock(),
-            "capture_images={} capture_recreated={} capture_encoded={} capture_idr={} capture_unchanged={} capture_refusal={}",
+            "capture_images={} capture_recreated={} capture_refused_desktops={} capture_encoded={} capture_idr={} capture_unchanged={} capture_refusal={}",
             stats.images,
             stats.recreated,
+            stats.refused_desktops,
             stats.encoded,
             stats.idr,
             stats.unchanged,

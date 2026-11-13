@@ -52,6 +52,9 @@ pub struct CaptureStatistics {
     pub images: u64,
     /// Duplications recreated after the desktop switched or the mode reset.
     pub recreated: u64,
+    /// Times the input desktop refused a new duplication (a UAC prompt or
+    /// Ctrl+Alt+Del) and the last image stood until it came back.
+    pub refused_desktops: u64,
     /// Encoded units, and how many of them were IDR pictures.
     pub encoded: u64,
     pub idr: u64,
@@ -225,6 +228,7 @@ impl WinCapture {
         CaptureStatistics {
             images: self.source.acquired,
             recreated: self.source.recreated,
+            refused_desktops: self.source.refused_desktops,
             ..self.statistics
         }
     }

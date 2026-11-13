@@ -276,6 +276,7 @@ fn probe(options: &Options) -> serde_json::Value {
         "images": stats.images,
         "pointer_only": stats.pointer_only,
         "recreated": stats.recreated,
+        "refused_desktops": stats.refused_desktops,
         "idr": stats.idr,
         "unrequested_idr": stats.unrequested_idr,
         "forced_idr_honoured": forced_ok,
