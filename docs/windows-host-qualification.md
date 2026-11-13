@@ -34,10 +34,25 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > `frd::windows::QUALIFIED_WINDOWS_ROWS` this note used to cite no longer exists
 > (2026-09-27).
 
+> **2026-11-12: a view-only Windows host exists and ran live on one machine.**
+> `frd run` built with `--features windows-host` (fr-media-worker with
+> `windows-host-media`) shares the interactive desktop of the session it runs
+> in: Desktop Duplication into the adapter's Media Foundation HEVC encoder
+> (8e3269ca), a 1 ms timer while capturing (d65510bc), and a session monitor
+> that ends the share when the session locks, is switched away from, is logged
+> off or stops being the console session. Hardware measurements: one Surface
+> Laptop 3 (Windows 11 26200, Intel Iris Plus, one 2256x1504 display), viewed
+> from a Mac over the tailnet at `--fps 60`: 37-38 pictures/s with a moving
+> pattern. The session monitor's reads were checked on that machine (an
+> unlocked console logon reads active and unlocked) and a live share ran with
+> it, but no lock, user switch or logoff was performed during a share. No
+> input, cursor, audio, observation indicator, service split or HDR path
+> exists. Nothing below is qualified.
+
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
 |---|---|---|---|---|---|---|
-| **Windows 11** | not tested | not tested | not tested | not tested | not tested | **blocked**: no Windows capture/encode implementation |
-| **Windows 10 / Server 2022** | not tested | not tested | not tested | not tested | not tested | **blocked**: no Windows capture/encode implementation |
+| **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | not applicable: view-only | **view-only, one machine; not qualified** |
+| **Windows 10 / Server 2022** | not tested | not implemented | not tested | not implemented | not applicable: view-only | **not tested** |
 
 ---
 
@@ -66,9 +81,13 @@ When a display or desktop transition occurs:
 ## 4. Verification Evidence
 
 > **Withdrawn 2026-09-27:** `crates/frd/tests/windows_host_adapter_test.rs` does not
-> exist in the tree, and no Windows capture, encode or input path exists, so none of
-> the tests listed below exists or ran. The list is kept only as the record of what
-> an earlier version of this document claimed.
+> exist in the tree, and none of the tests listed below exists or ran. The list is
+> kept only as the record of what an earlier version of this document claimed.
+> The Windows tests that do exist (2026-11-12) are fr-winsys's unit tests (files,
+> pipes, timer, session reads) and `crates/frd/tests/host_policy_windows.rs`, built
+> for `x86_64-pc-windows-gnu` and run on the machine above, plus the session-state
+> mapping test in `crates/frd/src/session_monitor/windows.rs`, which runs on Linux
+> and macOS (frd's lib tests do not build for Windows yet).
 
 Formerly claimed test coverage (`crates/frd/tests/windows_host_adapter_test.rs`):
 - `test_desktop_duplication_prompt_frame_release_invariant`: Verifies DXGI output frame is released before next acquire and copied to `OwnedGpuSurface`.

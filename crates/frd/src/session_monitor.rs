@@ -2,10 +2,13 @@
 //! Parent-created pipes and one immutable local selection bind each process epoch.
 //! Native/IPC work stays off the authority thread; every status check independently
 //! expires original evidence on `CLOCK_BOOTTIME`, including across suspend.
-// Windows has no session-monitor process yet (frd refuses the option there).
+//! Windows has no helper process: the monitor thread reads this process's
+//! own logon session through the Terminal Services API (`windows`).
 #[cfg(unix)]
 mod process;
 pub mod protocol;
+#[cfg(any(windows, test))]
+mod windows;
 use crate::{input_agent::Seat, input_watchdog::StopReason};
 pub use protocol::{Platform, Selection, State};
 use std::{
@@ -143,6 +146,7 @@ struct Shared {
     input: OnceLock<Seat>,
     evidence: Mutex<Evidence>,
     waker: Mutex<Option<Waker>>,
+    #[cfg(unix)]
     native_wake: crate::native_wait::Wake,
 }
 /// Positive evidence and its original time bounds have one serialization point.
@@ -255,6 +259,7 @@ impl Shared {
         if let Some(seat) = self.input.get() {
             seat.retire(error.input_stop_reason());
         }
+        #[cfg(unix)]
         self.native_wake.signal();
         self.wake();
         error
@@ -411,14 +416,48 @@ pub struct Monitor {
 impl Monitor {
     pub fn start(configuration: Configuration) -> Result<Self, Error> {
         configuration.selection.validate()?;
-        // No Windows session monitor yet (fr-p2-host-windows-rt1).
         #[cfg(windows)]
         {
+            let started = Self::start_windows(&configuration);
             drop(configuration);
-            Err(Error::Selection)
+            started
         }
         #[cfg(unix)]
         Self::start_unix(configuration)
+    }
+    #[cfg(windows)]
+    fn start_windows(configuration: &Configuration) -> Result<Self, Error> {
+        let session = windows::selected(configuration)?;
+        let now = now_ns()?;
+        let until = now.checked_add(OPEN_NS).ok_or(Error::Clock)?;
+        OCCUPIED
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Error::Busy)?;
+        let shared = Arc::new(Shared {
+            terminal: AtomicU16::new(0),
+            input: OnceLock::new(),
+            evidence: Mutex::new(Evidence {
+                status: Status::Opening,
+                until_ns: until,
+                last_ns: now,
+            }),
+            waker: Mutex::new(None),
+        });
+        let inside = shared.clone();
+        let worker = thread::Builder::new()
+            .name("fr-session-monitor".into())
+            .spawn(move || {
+                windows::run(session, &inside);
+                Ok(())
+            })
+            .map_err(|_| {
+                OCCUPIED.store(false, Ordering::Release);
+                Error::Spawn
+            })?;
+        Ok(Self {
+            control: Control(shared),
+            worker: Some(worker),
+        })
     }
     #[cfg(unix)]
     fn start_unix(configuration: Configuration) -> Result<Self, Error> {

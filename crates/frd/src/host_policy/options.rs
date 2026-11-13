@@ -405,7 +405,7 @@ impl RunOptions {
                     || self.logind_seat.is_some()
                     || self.session_monitor.is_some(),
                 "session_monitor_unavailable",
-                "a Windows host has no session monitor yet; --logind-session, --logind-seat and --session-monitor are Linux and macOS options",
+                "a Windows host watches its own logon session; --logind-session, --logind-seat and --session-monitor are Linux and macOS options",
             ),
             (
                 self.observation_indicator.is_some(),

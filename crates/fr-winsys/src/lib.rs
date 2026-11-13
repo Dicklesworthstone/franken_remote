@@ -10,4 +10,6 @@ pub mod net;
 #[cfg(windows)]
 pub mod pipe;
 #[cfg(windows)]
+pub mod session;
+#[cfg(windows)]
 pub mod time;

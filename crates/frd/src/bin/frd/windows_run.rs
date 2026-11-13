@@ -30,13 +30,26 @@ pub(super) fn select_desktop(
     Ok((String::new(), None, None))
 }
 
-/// No session monitor yet; `supported` refused any request for one.
+/// The logon session this process runs in, always watched: locking it,
+/// switching away from it or logging off ends a share. No helper image.
 pub(super) fn session_monitor(
     _options: &RunOptions,
     _display: &str,
-    _json: bool,
+    json: bool,
 ) -> Result<Option<frd::session_monitor::Configuration>, ExitCode> {
-    Ok(None)
+    use frd::session_monitor::{Configuration, Selection};
+    match Selection::windows() {
+        Ok(selection) => Ok(Some(Configuration {
+            image: std::path::PathBuf::new(),
+            selection,
+        })),
+        Err(_) => Err(run_refusal(
+            json,
+            "session_monitor_unavailable",
+            "this process's Windows logon session could not be read",
+            2,
+        )),
+    }
 }
 
 /// No playback capture yet; `supported` refused `--audio`.

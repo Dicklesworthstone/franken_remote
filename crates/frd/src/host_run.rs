@@ -1316,10 +1316,12 @@ fn check(options: &Options) -> Result<(), Error> {
             if cfg!(target_os = "linux")
                 && selection.platform == session_monitor::Platform::Linux
                 && selection.validate().is_ok() => {}
-        // Windows has no session monitor yet: a share is not ended by a lock,
-        // logoff or session switch (Desktop Duplication itself stops on the
-        // secure desktop). fr-p2-host-windows-rt1 tracks the WTS monitor.
-        None if cfg!(any(target_os = "linux", windows)) => {}
+        // Windows always watches its own logon session, as macOS does.
+        Some(selection)
+            if cfg!(windows)
+                && selection.platform == session_monitor::Platform::Windows
+                && selection.validate().is_ok() => {}
+        None if cfg!(target_os = "linux") => {}
         _ => return Err(Error::SessionMonitor(session_monitor::Error::Selection)),
     }
     audio::check(options)?;

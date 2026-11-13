@@ -11,6 +11,9 @@ pub const REPLY_BYTES: usize = 40;
 pub enum Platform {
     Linux,
     Macos,
+    /// This process's own logon session, watched in-process (no helper and
+    /// no wire selection).
+    Windows,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +38,33 @@ impl Selection {
         }
     }
 
+    /// Select the logon session this process runs in.
+    #[cfg(windows)]
+    pub fn windows() -> Result<Self, Error> {
+        let session = fr_winsys::session::current().map_err(|_| Error::Selection)?;
+        Ok(Self {
+            platform: Platform::Windows,
+            session: session.to_string(),
+            uid: 0,
+            seat: String::new(),
+            display: String::new(),
+        })
+    }
+
     pub fn validate(&self) -> Result<(), Error> {
+        if self.platform == Platform::Windows {
+            return if !self.session.is_empty()
+                && self.session.len() <= 10
+                && self.session.bytes().all(|b| b.is_ascii_digit())
+                && self.uid == 0
+                && self.seat.is_empty()
+                && self.display.is_empty()
+            {
+                Ok(())
+            } else {
+                Err(Error::Selection)
+            };
+        }
         if self.platform == Platform::Macos {
             return if self.session.is_empty() && self.seat.is_empty() && self.display.is_empty() {
                 Ok(())
@@ -64,6 +93,10 @@ impl Selection {
     }
     pub fn encode(&self, epoch: u128) -> Result<[u8; SELECTION_BYTES], Error> {
         self.validate()?;
+        // A Windows selection never reaches a helper process.
+        if self.platform == Platform::Windows {
+            return Err(Error::Selection);
+        }
         if epoch == 0 {
             return Err(Error::Protocol);
         }
@@ -282,5 +315,57 @@ mod tests {
             }),
             Err(Error::Selection)
         ));
+    }
+
+    #[test]
+    fn a_windows_selection_names_only_a_session_and_never_reaches_a_helper() {
+        let windows = Selection {
+            platform: Platform::Windows,
+            session: "1".into(),
+            uid: 0,
+            seat: String::new(),
+            display: String::new(),
+        };
+        assert_eq!(windows.validate(), Ok(()));
+        // There is no helper wire image for it.
+        assert_eq!(windows.encode(7), Err(Error::Selection));
+        for bad in [
+            Selection {
+                session: String::new(),
+                ..windows.clone()
+            },
+            Selection {
+                session: "c2".into(),
+                ..windows.clone()
+            },
+            Selection {
+                session: "12345678901".into(),
+                ..windows.clone()
+            },
+            Selection {
+                uid: 501,
+                ..windows.clone()
+            },
+            Selection {
+                seat: "seat0".into(),
+                ..windows.clone()
+            },
+            Selection {
+                display: ":0".into(),
+                ..windows.clone()
+            },
+        ] {
+            assert_eq!(bad.validate(), Err(Error::Selection), "{bad:?}");
+        }
+        // Off Windows, a Windows selection starts nothing.
+        if !cfg!(windows) {
+            assert!(matches!(
+                super::super::Monitor::start(super::super::Configuration {
+                    image: std::path::PathBuf::new(),
+                    selection: windows,
+                }),
+                Err(Error::Selection | Error::Image)
+            ));
+        }
     }
 }

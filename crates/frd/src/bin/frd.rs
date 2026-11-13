@@ -553,6 +553,11 @@ fn print_event(json: bool, profile: Profile, event: &frd::host_run::Event) {
                         "frd: logout, user switching, sleep or lost console-session evidence ends sharing; \
                          macOS screen-lock detection remains unqualified"
                     );
+                } else if profile.session_lifetime && cfg!(windows) {
+                    println!(
+                        "frd: locking, logging off, switching away from or suspending this \
+                         Windows session ends sharing"
+                    );
                 } else if profile.session_lifetime {
                     println!(
                         "frd: locking, logging out of, switching away from or suspending the \
