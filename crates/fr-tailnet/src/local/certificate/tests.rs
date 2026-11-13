@@ -591,6 +591,28 @@ fn actual_quic_uses_the_localapi_pair_and_rotated_leaf() {
     });
 }
 
+/// A wall clock stepped back keeps the credential (a Surface Laptop,
+/// 2026-11-13: SurfaceService.exe set the time every few minutes, truncating
+/// it to whole milliseconds, and each step ended the host's listener). One
+/// more than a minute back still ends it.
+#[test]
+fn a_wall_clock_step_back_keeps_the_credential_but_a_broken_clock_ends_it() {
+    let fixture = Fixture::new();
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let identity = fixture.identity(&cx).await;
+        let status = identity.status(&cx).unwrap();
+        // The last reading is 1 ms ahead of the wall clock: the next reading
+        // is a 1 ms step back.
+        identity.state().unwrap().last_wall_us = wall_now().unwrap() + 1_000;
+        assert_eq!(identity.status(&cx).unwrap(), status);
+        assert!(identity.state().unwrap().active.is_some());
+        identity.state().unwrap().last_wall_us = wall_now().unwrap() + 61_000_000;
+        assert_eq!(identity.status(&cx), Err(Error::Clock));
+        assert_eq!(identity.status(&cx), Err(Error::Revoked));
+    });
+}
+
 #[test]
 fn events_recorded_and_expiry_countdown_computable() {
     let fixture = Fixture::new();

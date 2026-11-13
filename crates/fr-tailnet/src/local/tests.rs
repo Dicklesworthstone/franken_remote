@@ -218,6 +218,13 @@ fn real_unix_http_snapshot_has_exact_source_binding_and_exclusive_expiry() {
                 proof.check_at(endpoints(), proof.issued_us - 1),
                 Err(Error::Clock)
             );
+            // A wall clock stepped back since issue holds; more than a
+            // minute back is a broken clock.
+            assert_eq!(proof.check_wall(proof.wall_issued_us - 1_000), Ok(()));
+            assert_eq!(
+                proof.check_wall(proof.wall_issued_us - 60_000_001),
+                Err(Error::Clock)
+            );
             let debug = format!("{proof:?} {:?} {:?}", server.client, endpoints());
             for secret in [
                 "100.64.",

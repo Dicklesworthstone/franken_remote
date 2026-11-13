@@ -80,7 +80,14 @@ fn original_deadline_origin_and_source_identity_never_refresh_implicitly() {
     let origin = Arc::new(());
     let original = verified().finish(origin.clone()).unwrap();
     assert_eq!(original.check_at(99, 1_500_000), Err(Error::Clock));
-    assert_eq!(original.check_at(100, 1_499_999), Err(Error::Clock));
+    // A wall clock stepped back holds at issue: still valid, and still
+    // expired at the original monotonic deadline.
+    assert_eq!(original.check_at(100, 1_499_999), Ok(()));
+    assert_eq!(original.check_at(3_000_100, 1_000_000), Err(Error::Expired));
+    let mut far = verified();
+    far.wall_issued_us = 61_500_001;
+    let far = far.finish(origin.clone()).unwrap();
+    assert_eq!(far.check_at(100, 1_500_000), Err(Error::Clock));
     assert_eq!(original.check_at(3_000_099, 1_500_000), Ok(()));
     assert_eq!(original.check_at(3_000_100, 1_500_000), Err(Error::Expired));
 

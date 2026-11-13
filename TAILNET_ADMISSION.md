@@ -74,7 +74,12 @@ before and after polling the response operation, including a ready response.
 Crossing the lookup deadline refuses that result; the operation is not restarted.
 Delayed responses and snapshot retries never move issuance time. Strict RFC3339
 key expiry caps the deadline, fractional expiry rounds down, and wall-clock checks
-also refuse crossed expiry or regression. Revalidation requires the old proof to
+also refuse crossed expiry. A wall clock up to a minute behind an earlier reading
+counts as a step (another program setting the time: on a Surface Laptop,
+Microsoft's Surface service did so every few minutes, up to 2.6 ms back): wall time
+holds at that reading until the clock catches up, so a step ends nothing early and
+delays a wall-clock expiry by at most its own size; monotonic deadlines are
+unaffected. Further back refuses as a broken clock. Revalidation requires the old proof to
 remain live through completion and preserves endpoint tuple, node/local identity,
 policy, daemon PID and LocalAPI instance. An expired proof cannot be renewed.
 

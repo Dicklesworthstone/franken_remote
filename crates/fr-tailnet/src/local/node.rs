@@ -43,9 +43,8 @@ impl NodeIdentity {
         self.expires_us
     }
     pub(crate) fn check_at(&self, current: u64, wall: u64) -> Result<(), Error> {
-        if current < self.issued_us || wall < self.wall_issued_us {
-            return Err(Error::Clock);
-        }
+        let wall =
+            crate::discovery::effective_wall(self.issued_us, self.wall_issued_us, current, wall)?;
         if current >= self.expires_us {
             return Err(Error::Expired);
         }

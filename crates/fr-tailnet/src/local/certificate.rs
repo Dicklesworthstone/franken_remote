@@ -3,6 +3,7 @@
 //! admits a peer. The enclosing session must still apply its independent gates.
 use super::{LocalApi, Lookup, NodeIdentity, bounded, now, wall_now};
 use crate::Error;
+use crate::discovery::effective_wall;
 use asupersync::{
     cx::Cx,
     net::quic_native::{handshake_driver::QuicHandshakeDriver, tls::QuicServerIdentityVerifier},
@@ -177,10 +178,15 @@ impl State {
         if self.active.is_none() {
             return Err(Error::Revoked);
         }
-        if current < self.last_us || wall < self.last_wall_us {
-            self.active = None;
-            return Err(Error::Clock);
-        }
+        // A wall clock stepped back (see `effective_wall`) does not end the
+        // credential; a broken one does.
+        let wall = match effective_wall(self.last_us, self.last_wall_us, current, wall) {
+            Ok(wall) => wall,
+            Err(error) => {
+                self.active = None;
+                return Err(error);
+            }
+        };
         let expired = self.active.as_ref().and_then(|pair| {
             if wall >= pair.not_after_wall_us {
                 Some(pair.not_after_wall_us)

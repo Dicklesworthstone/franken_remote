@@ -68,9 +68,28 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > window. No input has been injected on a real desktop yet, and no elevated
 > window, lock screen or second display was present for a check.
 
+> **2026-11-13 (later): remote control ran live.** A Linux viewer
+> (`fr connect --control`, its window driven by xdotool) controlled the machine
+> above over the tailnet, with frd built from c4abdfa5 plus print-only
+> diagnostics. A medium-integrity window on the host logged what it received:
+> a left click, "Hello FR 42!" typed key by key (exactly those 12 characters,
+> with the Shift transitions), two wheel turns up and one down (±120), and the
+> pointer moves. Sessions on that machine also ended within minutes with
+> `Tailnet(Clock)`. Microsoft's Surface driver service (`SurfaceService.exe`)
+> sets the system time every one to eight minutes, often twice in a row,
+> truncating it to whole milliseconds (System log, Kernel-General event 1:
+> 33 changes between 15:35 and 16:24 that day, each 0 to 2.6 ms back), and the
+> host certificate took any step back as a broken clock and stopped the
+> listener.
+> A wall clock up to a minute behind an earlier reading now holds at that
+> reading until it catches up (fr-tailnet `held_wall`); further back still
+> refuses. Live check, alternating builds, 60 s view-only sessions with three
+> clock steps back made by `Set-Date -Adjust` (3 to 45 ms each): with the fix
+> 2 of 2 sessions ran to the end; without it 2 of 2 ended at the first step. No elevated window, lock screen or second display was present.
+
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
 |---|---|---|---|---|---|---|
-| **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | implemented (`--control`), not run against an elevated window | **view-only live; control not run live; one machine; not qualified** |
+| **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | implemented (`--control`), not run against an elevated window | **view-only and control live; one machine; not qualified** |
 | **Windows 10 / Server 2022** | not tested | not implemented | not tested | not implemented | not tested | **not tested** |
 
 ---

@@ -132,10 +132,7 @@ impl Discovery {
         completed_clock: impl FnOnce() -> Result<u64, Error>,
     ) -> Result<Self, Error> {
         let status = metadata::Status::parse(bytes)?;
-        let wall = wall_now()?;
-        if wall < started_wall_us {
-            return Err(Error::Clock);
-        }
+        let wall = held_wall(started_wall_us, wall_now()?)?;
         let host = status.host_identity()?;
         check_expiry(host.host.expiry.as_ref().map(|e| e.0.as_str()), wall)?;
         let mut peers = Vec::new();
@@ -213,9 +210,61 @@ pub(crate) fn wall_now() -> Result<u64, Error> {
     .map_err(|_| Error::Clock)
 }
 
+/// How far a wall-clock reading may fall behind an earlier one and still be
+/// taken as a step back rather than a broken clock.
+const WALL_STEP_BACK_US: u64 = 60_000_000;
+
+/// The wall time to judge an expiry by, given an earlier wall reading. Wall
+/// clocks do step back: on Windows any program that sets the time truncates
+/// it to whole milliseconds, and time sync can step it by seconds. A reading
+/// at most `WALL_STEP_BACK_US` behind is such a step: wall time holds at the
+/// earlier reading until the clock catches up, so a step ends nothing early
+/// and delays a wall-clock expiry by at most its own size (monotonic deadlines
+/// are unaffected). Advancing with the monotonic clock instead would keep an
+/// offset that grows with the drift between the two clocks until, weeks
+/// later, it read as a broken clock. Further behind is `Error::Clock`.
+pub(crate) fn held_wall(wall_then_us: u64, wall_us: u64) -> Result<u64, Error> {
+    if wall_then_us.saturating_sub(wall_us) > WALL_STEP_BACK_US {
+        return Err(Error::Clock);
+    }
+    Ok(wall_us.max(wall_then_us))
+}
+
+/// `held_wall` for an earlier pair of readings (`then_us` monotonic,
+/// `wall_then_us` wall) and the current pair; a monotonic clock behind
+/// `then_us` is `Error::Clock`.
+pub(crate) fn effective_wall(
+    then_us: u64,
+    wall_then_us: u64,
+    current_us: u64,
+    wall_us: u64,
+) -> Result<u64, Error> {
+    if current_us < then_us {
+        return Err(Error::Clock);
+    }
+    held_wall(wall_then_us, wall_us)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wall_clock_step_back_holds_wall_time_until_the_clock_catches_up() {
+        // Forward or level: the wall reading itself.
+        assert_eq!(effective_wall(10, 80, 20, 95), Ok(95));
+        assert_eq!(effective_wall(10, 80, 20, 80), Ok(80));
+        // A step back of 1 us, 1 ms or the whole allowance: the earlier wall
+        // time, never less.
+        assert_eq!(effective_wall(10, 80, 20, 79), Ok(80));
+        assert_eq!(effective_wall(10, 2_000, 20, 1_000), Ok(2_000));
+        assert_eq!(effective_wall(10, 60_000_080, 20, 80), Ok(60_000_080));
+        // Further back is not a step, and a monotonic regression never is.
+        assert_eq!(effective_wall(10, 60_000_081, 20, 80), Err(Error::Clock));
+        assert_eq!(effective_wall(10, 80, 9, 95), Err(Error::Clock));
+        // Holding needs no arithmetic, so the top of the range is no edge.
+        assert_eq!(effective_wall(0, u64::MAX, 1, u64::MAX - 1), Ok(u64::MAX));
+    }
     use serde_json::{Value, json};
 
     fn status() -> Value {
@@ -329,5 +378,8 @@ mod tests {
             Discovery::from_status_json(&bytes, 7, u64::MAX, || Ok(8)).unwrap_err(),
             Error::Clock
         );
+        // A wall clock stepped back during the read holds at its start.
+        let started_wall = wall_now().unwrap() + 1_000;
+        assert!(Discovery::from_status_json(&bytes, 7, started_wall, || Ok(8)).is_ok());
     }
 }

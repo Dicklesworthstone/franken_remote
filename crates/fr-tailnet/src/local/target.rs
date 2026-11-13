@@ -61,9 +61,8 @@ impl PeerTarget {
             && self.identity == other.identity
     }
     fn check_at(&self, current: u64, wall: u64) -> Result<(), Error> {
-        if current < self.issued_us || wall < self.wall_issued_us {
-            return Err(Error::Clock);
-        }
+        let wall =
+            crate::discovery::effective_wall(self.issued_us, self.wall_issued_us, current, wall)?;
         if current >= self.expires_us {
             return Err(Error::Expired);
         }
@@ -71,8 +70,9 @@ impl PeerTarget {
             return Err(Error::KeyExpired);
         }
         // Darwin's runtime monotonic clock can pause across system sleep.
-        // Wall-clock rollback refuses above; forward elapsed time may only
-        // shorten this original metadata lifetime, never extend it.
+        // A wall clock further back than a step refuses above; forward
+        // elapsed time may only shorten this original metadata lifetime,
+        // never extend it.
         #[cfg(any(target_os = "macos", target_os = "ios", windows))]
         super::lookup_budget::check_wall_lifetime(
             self.wall_issued_us,

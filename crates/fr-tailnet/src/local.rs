@@ -102,6 +102,18 @@ impl Drop for Waiting {
     }
 }
 
+impl Authorization {
+    /// The wall-clock half of [`LocalApi::check`]: a step back since issue
+    /// holds at issue (see `held_wall`); key expiry still ends the proof.
+    pub(crate) fn check_wall(&self, wall_us: u64) -> Result<(), Error> {
+        let wall = crate::discovery::held_wall(self.wall_issued_us, wall_us)?;
+        if self.key_expires_us.is_some_and(|expiry| wall >= expiry) {
+            return Err(Error::KeyExpired);
+        }
+        Ok(())
+    }
+}
+
 impl LocalApi {
     #[cfg(target_os = "linux")]
     pub fn installed() -> Self {
@@ -326,13 +338,7 @@ impl LocalApi {
             return Err(Error::IdentityChanged);
         }
         let permission = proof.check_at(addresses, now(cx)?)?;
-        let wall = wall_now()?;
-        if wall < proof.wall_issued_us {
-            return Err(Error::Clock);
-        }
-        if proof.key_expires_us.is_some_and(|expiry| wall >= expiry) {
-            return Err(Error::KeyExpired);
-        }
+        proof.check_wall(wall_now()?)?;
         Ok(permission)
     }
     /// The directory this admitted viewer may see (`crate::directory`): one

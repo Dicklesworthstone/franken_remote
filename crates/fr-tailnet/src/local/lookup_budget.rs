@@ -28,9 +28,12 @@ impl Clock {
         self.end_us
     }
     pub(super) fn check(&mut self, current_us: u64, wall_us: u64) -> Result<(), Error> {
-        if current_us < self.previous_us || wall_us < self.previous_wall_us {
-            return Err(Error::Clock);
-        }
+        let wall_us = crate::discovery::effective_wall(
+            self.previous_us,
+            self.previous_wall_us,
+            current_us,
+            wall_us,
+        )?;
         self.previous_us = current_us;
         self.previous_wall_us = wall_us;
         if current_us >= self.end_us || wall_us >= self.wall_end_us {
@@ -89,6 +92,23 @@ mod tests {
         }
         assert!(matches!(Clock::new(u64::MAX, 0), Err(Error::Clock)));
         assert!(matches!(Clock::new(0, u64::MAX), Err(Error::Clock)));
+    }
+
+    #[test]
+    fn a_wall_clock_step_back_holds_wall_time_without_ending_a_lookup() {
+        let mut clock = Clock::new(7, 70).unwrap();
+        clock.check(100_007, 100_070).unwrap();
+        // 1 ms back: the lookup goes on with wall time held, and the clock
+        // takes over again once it passes the held reading.
+        clock.check(200_007, 99_070).unwrap();
+        assert_eq!(clock.previous_wall_us, 100_070);
+        clock.check(300_007, 199_070).unwrap();
+        assert_eq!(clock.previous_wall_us, 199_070);
+        // The monotonic deadline does not move.
+        assert_eq!(clock.check(1_000_007, 999_070), Err(Error::Timeout));
+        // A minute and a microsecond back is a broken clock.
+        let mut clock = Clock::new(7, 60_000_080).unwrap();
+        assert_eq!(clock.check(8, 79), Err(Error::Clock));
     }
 
     #[test]
