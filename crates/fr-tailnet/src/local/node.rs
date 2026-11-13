@@ -192,5 +192,5 @@ impl LocalApi {
 
 // The fake LocalAPI daemon proves itself with kernel peer credentials (Linux
 // SO_PEERCRED; macOS getpeereid and LOCAL_PEERPID).
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

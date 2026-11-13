@@ -555,5 +555,6 @@ impl Future for Resolving {
     }
 }
 
-#[cfg(test)]
+// Their PKI comes from the openssl CLI in a mode-0700 directory (Unix).
+#[cfg(all(test, unix))]
 mod tests;

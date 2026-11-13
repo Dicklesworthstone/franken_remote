@@ -41,7 +41,7 @@ use std::{
 };
 // The fixtures below (`tests`) import these through `super::*`; the clock
 // and pulse that used them moved to `crate::profile`.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 use std::{
     future::{Future, poll_fn},
     pin::pin,
@@ -466,7 +466,9 @@ pub use node::NodeIdentity;
 
 // The fake daemons prove themselves with kernel peer credentials: Linux
 // SO_PEERCRED, macOS getpeereid and LOCAL_PEERPID.
-#[cfg(test)]
+// These fixtures serve a fake LocalAPI on a Unix socket; the Windows named
+// pipe has its own (`pipe/tests.rs`).
+#[cfg(all(test, unix))]
 mod tests;
 
 mod certificate;
