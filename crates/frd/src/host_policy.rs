@@ -119,8 +119,24 @@ impl From<rustix::io::Errno> for Error {
     }
 }
 
+/// Per-user configuration by default: the user's local application data on
+/// Windows (`LocalSystem`'s own profile for a service running as it).
+#[cfg(windows)]
+pub fn default_path() -> Result<PathBuf, Error> {
+    let base = PathBuf::from(
+        std::env::var_os("LOCALAPPDATA")
+            .filter(|p| !p.is_empty())
+            .ok_or(Error::InvalidPath)?,
+    );
+    if !base.is_absolute() {
+        return Err(Error::InvalidPath);
+    }
+    Ok(base.join("FrankenRemote").join("host-policy.json"))
+}
+
 /// Per-user configuration by default. A system service running as root uses
 /// /etc, never an inherited invoking user's HOME. Explicit paths must be absolute.
+#[cfg(unix)]
 pub fn default_path() -> Result<PathBuf, Error> {
     if rustix::process::geteuid().is_root() {
         return Ok(PathBuf::from("/etc/frankenremote/host-policy.json"));

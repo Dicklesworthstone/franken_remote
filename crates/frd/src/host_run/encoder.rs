@@ -16,6 +16,8 @@ impl Encoder {
             Self::Vaapi => Backend::Vaapi,
             #[cfg(target_os = "macos")]
             Self::VideoToolbox => Backend::VideoToolbox,
+            #[cfg(windows)]
+            Self::MediaFoundation => Backend::MediaFoundation,
         }
     }
 }

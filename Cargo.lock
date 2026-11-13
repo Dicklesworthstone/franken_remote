@@ -735,6 +735,7 @@ dependencies = [
  "fr-media",
  "fr-tailnet",
  "fr-transport",
+ "fr-winsys",
  "fr-wire",
  "getrandom 0.4.3",
  "ring",

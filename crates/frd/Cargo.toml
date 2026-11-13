@@ -25,6 +25,7 @@ macos-viewer = []
 macos-host = []
 # The viewer half of frd on Windows, for the Windows client. Off by default.
 windows-viewer = []
+windows-host = ["windows-viewer"]
 
 # iOS compiles only the viewer half (`native_stack`, see build.rs) for
 # fr-mobile-ffi; it has no host and no installed tailnet daemon.
@@ -40,3 +41,8 @@ rustix = { version = "=1.1.4", default-features = false, features = ["std", "eve
 # Reuse the cryptographic packages already in the pinned TLS/runtime graph.
 ring = { version = "=0.17.14", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
+
+# Win32 calls for the Windows host (policy store, clocks) stay in the FFI
+# boundary crate.
+[target.'cfg(windows)'.dependencies]
+fr-winsys.workspace = true

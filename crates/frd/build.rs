@@ -23,7 +23,8 @@ fn main() {
     {
         println!("cargo::rustc-cfg=native_stack");
     }
-    if os == "linux" || (os == "macos" && host) {
+    let windows_host = std::env::var_os("CARGO_FEATURE_WINDOWS_HOST").is_some();
+    if os == "linux" || (os == "macos" && host) || (os == "windows" && windows_host) {
         println!("cargo::rustc-cfg=host_stack");
     }
 }

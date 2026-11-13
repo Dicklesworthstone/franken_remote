@@ -46,8 +46,14 @@ impl Configuration {
             .session_monitor
             .as_ref()
             .ok_or(Error::LocalApprovalUnavailable)?;
+        #[cfg(unix)]
+        let same_user = monitor.selection.uid == rustix::process::geteuid().as_raw();
+        // No Windows session monitor exists yet to bind a user to
+        // (fr-p2-host-windows-rt1), so a Windows host never gets here.
+        #[cfg(windows)]
+        let same_user = false;
         if monitor.selection.display != options.display
-            || monitor.selection.uid != rustix::process::geteuid().as_raw()
+            || !same_user
             || monitor.selection.validate().is_err()
         {
             return Err(Error::LocalApprovalUnavailable);

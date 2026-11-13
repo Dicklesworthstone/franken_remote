@@ -10,6 +10,9 @@ mod macos;
 #[cfg(all(target_os = "macos", feature = "macos-host-audio"))]
 #[path = "media_worker/macos_audio.rs"]
 mod macos_audio;
+#[cfg(all(windows, feature = "windows-host-media"))]
+#[path = "media_worker/windows.rs"]
+mod win;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -129,7 +132,7 @@ mod linux {
             Backend::Nvenc => EncodeBackend::Nvenc,
             Backend::Vaapi => EncodeBackend::Vaapi,
             Backend::SoftwareExplicit => EncodeBackend::SoftwareExplicit,
-            Backend::VideoToolbox => return Err(Error::Unsupported),
+            Backend::VideoToolbox | Backend::MediaFoundation => return Err(Error::Unsupported),
         };
         let codec = HevcEncoder::new(
             configuration.codec()?,
@@ -699,7 +702,9 @@ mod linux {
                         Backend::Nvenc => EncodeBackend::Nvenc,
                         Backend::Vaapi => EncodeBackend::Vaapi,
                         Backend::SoftwareExplicit => EncodeBackend::SoftwareExplicit,
-                        Backend::VideoToolbox => return Err(Error::Unsupported),
+                        Backend::VideoToolbox | Backend::MediaFoundation => {
+                            return Err(Error::Unsupported);
+                        }
                     };
                     let codec = HevcEncoder::new(
                         c.codec()?,
@@ -1137,7 +1142,16 @@ fn main() {
         eprintln!("media_worker_refused={error}");
         std::process::exit(2);
     }
-    #[cfg(not(any(target_os = "linux", all(target_os = "macos", feature = "macos-media"))))]
+    #[cfg(all(windows, feature = "windows-host-media"))]
+    if let Err(error) = win::run() {
+        eprintln!("media_worker_refused={error}");
+        std::process::exit(2);
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        all(target_os = "macos", feature = "macos-media"),
+        all(windows, feature = "windows-host-media")
+    )))]
     {
         eprintln!("media_worker_refused=UnsupportedPlatform");
         std::process::exit(2);

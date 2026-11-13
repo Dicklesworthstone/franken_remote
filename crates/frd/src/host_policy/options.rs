@@ -355,6 +355,70 @@ impl RunOptions {
     }
 }
 
+impl RunOptions {
+    /// The first requested capability `frd run` cannot provide on Windows
+    /// yet (fr-p2-host-windows-rt1), as a typed refusal `(code, detail)`
+    /// returned before any I/O. A Windows host shares the interactive desktop
+    /// view-only for now. (`parse` already refuses `--send-control` off Linux
+    /// and macOS.)
+    #[cfg(windows)]
+    #[must_use]
+    pub fn windows_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
+        let refusals: [(bool, &str, &str); 9] = [
+            (
+                self.trust_roots.is_none(),
+                "trust_roots_unavailable",
+                "Windows has no PEM certificate bundle to default to; pass --trust-roots with an absolute path to one",
+            ),
+            (
+                self.software_explicit,
+                "software_encoder_unavailable",
+                "a Windows host encodes only with the adapter's Media Foundation HEVC encoder; use --encoder auto or mediafoundation",
+            ),
+            (
+                self.headless || self.display.is_some(),
+                "no_display",
+                "Windows shares the interactive desktop; --headless and --display are X11 options",
+            ),
+            (
+                self.microphone || self.microphone_server.is_some(),
+                "microphone_endpoint_unavailable",
+                "--microphone has no Windows backend yet",
+            ),
+            (
+                self.input_agent.is_some(),
+                "input_agent_unavailable",
+                "--input-agent has no Windows backend yet; a Windows host is view-only",
+            ),
+            (
+                approval == Approval::Local,
+                "local_approval_unavailable",
+                "a Windows host has no local approval prompt yet; use --approval none",
+            ),
+            (
+                self.audio || self.audio_server.is_some() || self.audio_sink.is_some(),
+                "audio_source_unavailable",
+                "--audio has no Windows backend yet",
+            ),
+            (
+                self.logind_session.is_some()
+                    || self.logind_seat.is_some()
+                    || self.session_monitor.is_some(),
+                "session_monitor_unavailable",
+                "a Windows host has no session monitor yet; --logind-session, --logind-seat and --session-monitor are Linux and macOS options",
+            ),
+            (
+                self.observation_indicator.is_some(),
+                "observation_indicator_unavailable",
+                "a Windows host has no observation indicator yet",
+            ),
+        ];
+        refusals
+            .into_iter()
+            .find_map(|(refused, code, detail)| refused.then_some((code, detail)))
+    }
+}
+
 pub struct PolicyCommand {
     pub path: PathBuf,
     pub change: Option<Change>,

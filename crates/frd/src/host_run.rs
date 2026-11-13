@@ -502,7 +502,8 @@ fn awaiting_permission<T>(
 /// Exact requests never substitute; explicit auto tries NVENC then VAAPI only
 /// after a completed refusal. Timeouts, launch errors and uncertain cleanup stop.
 /// The locally selected capture worker for this platform's desktop: the X11
-/// display and its authority on Linux, the logged-in window server on macOS.
+/// display and its authority on Linux, the logged-in window server on macOS,
+/// this process's interactive session on Windows.
 fn capture_launch(
     worker: &Path,
     display: &str,
@@ -514,7 +515,12 @@ fn capture_launch(
         let _ = (display, xauthority);
         Launch::macos_capture(worker, epoch)
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        let _ = (display, xauthority);
+        Launch::windows_capture(worker, epoch)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Launch::new(worker, display, xauthority, WorkerRole::Capture, epoch)
     }
@@ -526,7 +532,11 @@ const fn host_platform() -> PlatformKind {
     {
         PlatformKind::MacOs
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        PlatformKind::Windows
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         PlatformKind::LinuxX11
     }
@@ -1274,10 +1284,16 @@ fn local_action(
     }
 }
 
+/// Whether `uid` is this process's effective user.
+#[cfg(target_os = "macos")]
+fn own_uid(uid: u32) -> bool {
+    uid == rustix::process::geteuid().as_raw()
+}
+
 fn check(options: &Options) -> Result<(), Error> {
-    // An X11 host names its display; macOS shares the login session's.
+    // An X11 host names its display; macOS and Windows share the session's.
     if !options.worker.is_absolute()
-        || options.display.is_empty() != cfg!(target_os = "macos")
+        || options.display.is_empty() != cfg!(any(target_os = "macos", windows))
         || video::Profile::new(options.fps, options.bitrate).is_err()
         || options
             .input_agent
@@ -1290,17 +1306,20 @@ fn check(options: &Options) -> Result<(), Error> {
         return Err(Error::Configuration);
     }
     match options.session_monitor.as_ref().map(|m| &m.selection) {
+        #[cfg(target_os = "macos")]
         Some(selection)
-            if cfg!(target_os = "macos")
-                && selection.platform == session_monitor::Platform::Macos
+            if selection.platform == session_monitor::Platform::Macos
                 && selection.uid != 0
-                && selection.uid == rustix::process::geteuid().as_raw()
+                && own_uid(selection.uid)
                 && selection.validate().is_ok() => {}
         Some(selection)
             if cfg!(target_os = "linux")
                 && selection.platform == session_monitor::Platform::Linux
                 && selection.validate().is_ok() => {}
-        None if cfg!(target_os = "linux") => {}
+        // Windows has no session monitor yet: a share is not ended by a lock,
+        // logoff or session switch (Desktop Duplication itself stops on the
+        // secure desktop). fr-p2-host-windows-rt1 tracks the WTS monitor.
+        None if cfg!(any(target_os = "linux", windows)) => {}
         _ => return Err(Error::SessionMonitor(session_monitor::Error::Selection)),
     }
     audio::check(options)?;
@@ -1424,7 +1443,7 @@ impl Share<'_> {
     /// Linux: every node address, behind an nft rule on the configured TUN
     /// (without `CAP_NET_ADMIN` the root `frd ingress-helper` owns the rule).
     /// Ready at once; it is awaited like the macOS plan, which reads sysctls.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     fn ingress_plan(
         &self,
         _broker: &Cx,
@@ -1438,10 +1457,11 @@ impl Share<'_> {
         )))
     }
 
-    /// macOS: only the families whose packets the kernel already drops unless
-    /// they arrive on the address's own interface; refuse when there are none.
-    /// The tunnel is the utun holding those addresses unless one was named.
-    #[cfg(target_os = "macos")]
+    /// macOS and Windows: only the families whose packets the kernel already
+    /// drops unless they arrive on the address's own interface; refuse when
+    /// there are none. The tunnel is the one holding those addresses (utun,
+    /// Wintun) unless one was named.
+    #[cfg(any(target_os = "macos", windows))]
     async fn ingress_plan(
         &self,
         broker: &Cx,
@@ -1494,11 +1514,13 @@ impl Share<'_> {
         let mut configurations = Vec::with_capacity(addresses.len());
         for ip in addresses {
             let address = SocketAddr::new(ip, self.options.port);
-            let mut ingress =
+            let ingress =
                 ingress::Configuration::new(address, &interface).map_err(Error::Ingress)?;
-            if let Some((nft, ip)) = &self.options.ingress_tools {
-                ingress = ingress.executables(nft, ip).map_err(Error::Ingress)?;
-            }
+            #[cfg(unix)]
+            let ingress = match &self.options.ingress_tools {
+                Some((nft, ip)) => ingress.executables(nft, ip).map_err(Error::Ingress)?,
+                None => ingress,
+            };
             configurations.push(
                 ingress
                     .enforcement(enforcement.clone())

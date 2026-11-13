@@ -60,8 +60,10 @@ media-worker = []
 macos-media = ["media-worker"]
 # Windows host capture (fr-p0-media-windows-fbt, fr-p2-host-windows-rt1):
 # Desktop Duplication into a hardware Media Foundation HEVC encoder on the
-# same adapter. System DLLs only; the capture worker role comes later.
+# same adapter. System DLLs only.
 windows-media = ["dep:windows"]
+# fr-media-worker's Windows capture role around `windows-media`.
+windows-host-media = ["media-worker", "windows-media"]
 # Explicit host application/system playback capture. Reuses the separate
 # media-worker audio role and the existing statically linked Opus encoder.
 # No desktop client playback or microphone feature is enabled by this flag.

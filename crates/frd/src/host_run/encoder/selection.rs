@@ -9,10 +9,17 @@ pub enum Encoder {
     /// Apple's hardware HEVC encoder in the macOS capture worker.
     #[cfg(target_os = "macos")]
     VideoToolbox,
+    /// The adapter's hardware HEVC transform in the Windows capture worker,
+    /// Windows' only encoder (it has no software or `FFmpeg` path).
+    #[cfg(windows)]
+    MediaFoundation,
 }
 impl Encoder {
     /// Exact local names, never peer input or arbitrary `FFmpeg` codec names.
     pub fn parse(value: &str) -> Option<Self> {
+        #[cfg(windows)]
+        return (value == "mediafoundation").then_some(Self::MediaFoundation);
+        #[cfg(not(windows))]
         match value {
             "software" => Some(Self::SoftwareExplicit),
             "nvenc" => Some(Self::Nvenc),
@@ -29,6 +36,8 @@ impl Encoder {
             Self::Vaapi => "vaapi",
             #[cfg(target_os = "macos")]
             Self::VideoToolbox => "videotoolbox",
+            #[cfg(windows)]
+            Self::MediaFoundation => "mediafoundation",
         }
     }
     pub const fn is_hardware(self) -> bool {
@@ -111,10 +120,12 @@ pub(crate) fn resolve<E>(
     let candidates: &[Encoder] = match &selection {
         Selection::Exact(Encoder::SoftwareExplicit) => return Ok(Encoder::SoftwareExplicit),
         Selection::Exact(encoder) => std::slice::from_ref(encoder),
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", windows)))]
         Selection::AutomaticHardware => &[Encoder::Nvenc, Encoder::Vaapi],
         #[cfg(target_os = "macos")]
         Selection::AutomaticHardware => &[Encoder::VideoToolbox],
+        #[cfg(windows)]
+        Selection::AutomaticHardware => &[Encoder::MediaFoundation],
     };
     let mut refused = Vec::with_capacity(candidates.len());
     for &encoder in candidates {

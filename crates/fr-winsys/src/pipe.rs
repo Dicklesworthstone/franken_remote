@@ -55,7 +55,7 @@ pub struct PipeClient {
 /// The Win32 error inside a `windows` error, so `io::ErrorKind` and the raw
 /// code mean what they do for std's own calls (`windows` keeps the whole
 /// HRESULT).
-fn os(error: &windows::core::Error) -> io::Error {
+pub(crate) fn os(error: &windows::core::Error) -> io::Error {
     let code = error.code().0.cast_unsigned();
     if code & 0xFFFF_0000 == 0x8007_0000 {
         io::Error::from_raw_os_error((code & 0xFFFF).cast_signed())

@@ -1,5 +1,8 @@
 //! Handle-relative atomic publication with a stable, nonblocking writer lock.
+//! Unix walks the directory chain with `openat`; Windows (`windows`) keeps
+//! each directory open, refusing deletion and renaming, while it works.
 use super::{Approval, Error, Policy, Sharing};
+#[cfg(unix)]
 use rustix::{
     fd::OwnedFd,
     fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags},
@@ -12,6 +15,14 @@ use std::{
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::{Dir, WriterLock, discard, replace, temporary};
+
+/// The policy's directory, opened and checked.
+#[cfg(unix)]
+type Dir = OwnedFd;
 
 const MAX_BYTES: u64 = 4096;
 const LOCK_NAME: &str = ".frd-policy.lock";
@@ -44,15 +55,24 @@ impl Store {
         if !path.is_absolute() || path.as_os_str().len() > 4096 {
             return Err(Error::InvalidPath);
         }
-        if path
-            .components()
-            .any(|c| !matches!(c, Component::RootDir | Component::Normal(_)))
-        {
+        let plain = |c: Component<'_>| match c {
+            Component::RootDir | Component::Normal(_) => true,
+            // A drive letter; never a UNC share or a device namespace.
+            #[cfg(windows)]
+            Component::Prefix(prefix) => matches!(prefix.kind(), std::path::Prefix::Disk(_)),
+            _ => false,
+        };
+        if !path.components().all(plain) {
             return Err(Error::InvalidPath);
         }
         let name = path.file_name().ok_or(Error::InvalidPath)?;
-        if name.len() > 255 || name == LOCK_NAME || name.to_string_lossy().starts_with(TEMP_PREFIX)
-        {
+        // Windows names are case-insensitive.
+        let text = if cfg!(windows) {
+            name.to_string_lossy().to_ascii_lowercase()
+        } else {
+            name.to_string_lossy().into_owned()
+        };
+        if name.len() > 255 || text == LOCK_NAME || text.starts_with(TEMP_PREFIX) {
             return Err(Error::InvalidPath);
         }
         Ok(Self {
@@ -92,25 +112,45 @@ impl Store {
             .ok_or(Error::RevisionExhausted)?;
         let mut bytes = serde_json::to_vec(&policy).map_err(|_| Error::InvalidDocument)?;
         bytes.push(b'\n');
-        let (name, fd) = temporary(&dir)?;
+        let (name, mut file) = temporary(&dir)?;
         // No input policy file is truncated. On failure before rename the old
         // revision remains intact; our own exclusive staging file is removed.
         let result = (|| {
-            let mut file = File::from(fd);
             file.write_all(&bytes)?;
             file.sync_all()?;
-            fs::renameat(&dir, name.as_str(), &dir, &self.name)?;
+            // Closed before the rename: Windows will not rename an open file.
+            drop(file);
+            let durable = replace(&dir, &name, &self.name)?;
             Ok(Saved {
                 policy,
                 changed: true,
-                durable: fs::fsync(&dir).is_ok(),
+                durable,
             })
         })();
         if result.is_err() {
-            let _ = fs::unlinkat(&dir, name.as_str(), AtFlags::empty());
+            discard(&dir, &name);
         }
         result
     }
+    fn read(&self, dir: &Dir) -> Result<Policy, Error> {
+        let Some((file, size)) = self.open_policy(dir)? else {
+            return Ok(Policy::default());
+        };
+        if size > MAX_BYTES {
+            return Err(Error::TooLarge);
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_BYTES {
+            return Err(Error::TooLarge);
+        }
+        serde_json::from_slice::<Policy>(&bytes)
+            .map_err(|_| Error::InvalidDocument)?
+            .validate()
+    }
+}
+#[cfg(unix)]
+impl Store {
     fn sync_existing(&self, dir: &OwnedFd) -> Result<(), Error> {
         let file = fs::openat(
             dir,
@@ -123,7 +163,8 @@ impl Store {
         fs::fsync(dir)?;
         Ok(())
     }
-    fn read(&self, dir: &OwnedFd) -> Result<Policy, Error> {
+    /// The saved policy and its size, or `None` when there is none yet.
+    fn open_policy(&self, dir: &OwnedFd) -> Result<Option<(File, u64)>, Error> {
         let fd = match fs::openat(
             dir,
             &self.name,
@@ -131,21 +172,12 @@ impl Store {
             Mode::empty(),
         ) {
             Ok(fd) => fd,
-            Err(rustix::io::Errno::NOENT) => return Ok(Policy::default()),
+            Err(rustix::io::Errno::NOENT) => return Ok(None),
             Err(e) => return Err(e.into()),
         };
         regular_private(&fd)?;
-        if fs::fstat(&fd)?.st_size > i64::try_from(MAX_BYTES).expect("small bound") {
-            return Err(Error::TooLarge);
-        }
-        let mut bytes = Vec::new();
-        File::from(fd).take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_BYTES {
-            return Err(Error::TooLarge);
-        }
-        serde_json::from_slice::<Policy>(&bytes)
-            .map_err(|_| Error::InvalidDocument)?
-            .validate()
+        let size = u64::try_from(fs::fstat(&fd)?.st_size).map_err(|_| Error::TooLarge)?;
+        Ok(Some((File::from(fd), size)))
     }
     fn directory(&self, create: bool) -> Result<Option<OwnedFd>, Error> {
         let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -179,6 +211,7 @@ impl Store {
         Ok(Some(dir))
     }
 }
+#[cfg(unix)]
 fn trusted_ancestor(fd: &OwnedFd) -> Result<(), Error> {
     let stat = fs::fstat(fd)?;
     let trusted_owner = stat.st_uid == 0 || stat.st_uid == geteuid().as_raw();
@@ -188,6 +221,7 @@ fn trusted_ancestor(fd: &OwnedFd) -> Result<(), Error> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn regular_private(fd: &OwnedFd) -> Result<(), Error> {
     let stat = fs::fstat(fd)?;
     if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile
@@ -204,7 +238,9 @@ fn regular_private(fd: &OwnedFd) -> Result<(), Error> {
 /// its exec, and a bare close left the lock with that copy, so the next save
 /// failed with a spurious `Busy`. An unlock applies to the shared open file
 /// description, inherited copies included.
+#[cfg(unix)]
 struct WriterLock(OwnedFd);
+#[cfg(unix)]
 impl WriterLock {
     fn acquire(dir: &OwnedFd) -> Result<Self, Error> {
         let lock = fs::openat(
@@ -224,12 +260,25 @@ impl WriterLock {
         Ok(Self(lock))
     }
 }
+#[cfg(unix)]
 impl Drop for WriterLock {
     fn drop(&mut self) {
         let _ = fs::flock(&self.0, FlockOperation::Unlock);
     }
 }
-fn temporary(dir: &OwnedFd) -> Result<(String, OwnedFd), Error> {
+/// Publishes the staged revision. True when the publication is also on
+/// disk: the rename succeeded either way.
+#[cfg(unix)]
+fn replace(dir: &OwnedFd, staged: &str, name: &OsString) -> Result<bool, Error> {
+    fs::renameat(dir, staged, dir, name)?;
+    Ok(fs::fsync(dir).is_ok())
+}
+#[cfg(unix)]
+fn discard(dir: &OwnedFd, staged: &str) {
+    let _ = fs::unlinkat(dir, staged, AtFlags::empty());
+}
+#[cfg(unix)]
+fn temporary(dir: &OwnedFd) -> Result<(String, File), Error> {
     for _ in 0..16 {
         let sequence = NEXT_TEMP
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
@@ -241,7 +290,7 @@ fn temporary(dir: &OwnedFd) -> Result<(String, OwnedFd), Error> {
             OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
             Mode::from_raw_mode(0o600),
         ) {
-            Ok(fd) => return Ok((name, fd)),
+            Ok(fd) => return Ok((name, File::from(fd))),
             Err(rustix::io::Errno::EXIST) => {}
             Err(e) => return Err(e.into()),
         }
@@ -249,5 +298,5 @@ fn temporary(dir: &OwnedFd) -> Result<(String, OwnedFd), Error> {
     Err(Error::Busy)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

@@ -389,6 +389,8 @@ pub enum Backend {
     Vaapi = 1,
     SoftwareExplicit = 2,
     VideoToolbox = 3,
+    /// The adapter's hardware HEVC transform behind Windows Media Foundation.
+    MediaFoundation = 4,
 }
 impl Backend {
     /// Backends implementing the capture-local rate transaction. This selects
@@ -501,6 +503,7 @@ impl Configuration {
                 1 => Backend::Vaapi,
                 2 => Backend::SoftwareExplicit,
                 3 => Backend::VideoToolbox,
+                4 => Backend::MediaFoundation,
                 _ => return Err(Error::Unsupported),
             },
             bitrate: n(12),
@@ -665,6 +668,35 @@ fn u64_at(b: &[u8], offset: usize) -> Result<u64, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn every_backend_round_trips_and_unknown_ones_refuse() {
+        let base = Configuration {
+            width: 1920,
+            height: 1080,
+            fps: 60,
+            backend: Backend::Nvenc,
+            bitrate: 8_000_000,
+            max_access_unit_bytes: 1 << 20,
+            generation: CodecConfigurationGeneration::INITIAL,
+        };
+        for backend in [
+            Backend::Nvenc,
+            Backend::Vaapi,
+            Backend::SoftwareExplicit,
+            Backend::VideoToolbox,
+            Backend::MediaFoundation,
+        ] {
+            let c = Configuration { backend, ..base };
+            let bytes = c.encode().unwrap();
+            assert_eq!(bytes[10], backend as u8);
+            assert_eq!(Configuration::decode(&bytes), Ok(c));
+        }
+        let mut bytes = base.encode().unwrap();
+        for unknown in [5, 255] {
+            bytes[10] = unknown;
+            assert_eq!(Configuration::decode(&bytes), Err(Error::Unsupported));
+        }
+    }
     #[test]
     fn terminal_sequence_never_wraps() {
         let mut s = Sequence {

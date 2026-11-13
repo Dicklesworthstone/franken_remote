@@ -190,11 +190,17 @@ mod local_install;
 mod macos_run;
 #[cfg(all(host_stack, target_os = "macos"))]
 use macos_run::{audio, microphone, select_desktop, session_monitor};
+#[cfg(all(host_stack, windows))]
+#[path = "frd/windows_run.rs"]
+mod windows_run;
+#[cfg(all(host_stack, windows))]
+use windows_run::{audio, microphone, select_desktop, session_monitor};
 
-#[cfg(native_stack)]
+// Local host-file commands pin files by descriptor (Linux and macOS).
+#[cfg(all(native_stack, unix))]
 #[path = "frd/file_commands.rs"]
 mod file_commands;
-#[cfg(host_stack)]
+#[cfg(all(host_stack, unix))]
 #[path = "frd/file_commands_host.rs"]
 mod file_commands_host;
 
@@ -228,9 +234,9 @@ fn main() -> ExitCode {
         "approval" => execute_policy(&args, true, json),
         "sharing" => execute_policy(&args, false, json),
         "run" => execute_run(&args, json),
-        #[cfg(native_stack)]
+        #[cfg(all(native_stack, unix))]
         "send" => file_commands::execute(&args, json),
-        #[cfg(not(native_stack))]
+        #[cfg(not(all(native_stack, unix)))]
         "send" => {
             eprintln!(
                 "host_file_commands_unsupported: local host file commands require the Linux or macOS native stack"
@@ -701,6 +707,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     if let Err(code) = macos_run::supported(&options, effective.approval, json) {
         return code;
     }
+    #[cfg(windows)]
+    if let Err(code) = windows_run::supported(&options, effective.approval, json) {
+        return code;
+    }
     let local_ui = match desktop_approval::configuration(&options, effective.approval) {
         Ok(configuration) => configuration,
         Err(detail) => return run_refusal(json, "local_approval_unavailable", detail, 2),
@@ -753,9 +763,10 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         Err(code) => return code,
     };
     let worker = options.worker.clone().or_else(|| {
-        std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(|dir| dir.join("fr-media-worker")))
+        std::env::current_exe().ok().and_then(|exe| {
+            exe.parent()
+                .map(|dir| dir.join(format!("fr-media-worker{}", std::env::consts::EXE_SUFFIX)))
+        })
     });
     let Some(worker) = worker.filter(|path| path.is_absolute() && path.is_file()) else {
         return run_refusal(
@@ -764,6 +775,9 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
             if cfg!(target_os = "macos") {
                 "fr-media-worker not found; build fr-native with --features macos-media and pass \
                  --worker /absolute/path/fr-media-worker"
+            } else if cfg!(windows) {
+                "fr-media-worker.exe not found; build fr-native with --features windows-host-media \
+                 and install it beside frd.exe or pass --worker C:\\absolute\\path\\fr-media-worker.exe"
             } else {
                 "fr-media-worker not found; build fr-native with --features linux-displays (host display discovery; implies linux-media) and pass \
                  --worker /absolute/path/fr-media-worker"
@@ -794,12 +808,18 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     };
     #[cfg(target_os = "linux")]
     let observation_indicator = options.observation_indicator.clone();
+    // None yet on Windows; `windows_run::supported` refused a request for one.
+    #[cfg(windows)]
+    let observation_indicator: Option<PathBuf> = None;
+    // Only the Unix --send-control owner below changes it.
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut run_options = Options {
         socket: options.socket.clone(),
         port: effective.port,
-        // macOS: empty selects the utun that holds the node's addresses.
+        // macOS and Windows: empty selects the tunnel (utun, Wintun) that
+        // holds the node's addresses.
         interface: options.interface.clone().unwrap_or_else(|| {
-            if cfg!(target_os = "macos") {
+            if cfg!(any(target_os = "macos", windows)) {
                 String::new()
             } else {
                 "tailscale0".into()
@@ -849,6 +869,7 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
     // This optional endpoint never grants file/control authority. It is opened
     // after local configuration is valid, and the intake becomes ready only
     // after the original controlled download attachment has completed.
+    #[cfg(unix)]
     let file_owner = match options.send_control.as_deref() {
         Some(target) => match file_commands_host::open(target, json) {
             Ok((selection, owner)) => {
@@ -893,7 +914,11 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
                 .map_err(|error| (error.code(), error.to_string()))
         }
     };
+    #[cfg(unix)]
     let files_cleaned = file_commands_host::finish(file_owner.as_ref());
+    // `RunOptions::parse` refuses --send-control here: no file owner exists.
+    #[cfg(windows)]
+    let files_cleaned = true;
     drop(headless);
     match result {
         Ok(()) if files_cleaned => ExitCode::SUCCESS,

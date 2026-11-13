@@ -1,11 +1,10 @@
 //! Asupersync-managed private media processes with bounded, non-replayable IPC.
+#[cfg(unix)]
+use asupersync::process::{ProcessGroupMode, ProcessSignalTarget};
 use asupersync::{
     cx::Cx,
     io::{AsyncReadExt, AsyncWriteExt},
-    process::{
-        Child, ChildStdin, ChildStdout, Command, ExitStatus, ProcessError, ProcessGroupMode,
-        ProcessSignalTarget, Stdio,
-    },
+    process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, ProcessError, Stdio},
     runtime::{Runtime, reactor::IoReactorBackend},
     time::sleep_until,
     types::Time,
@@ -165,16 +164,23 @@ impl Launch {
     /// session of this process; no display name or X authority applies.
     #[cfg(target_os = "macos")]
     pub fn macos_capture(image: &Path, epoch: u128) -> Result<Self, Error> {
-        Self::macos(image, epoch, Role::Capture)
+        Self::session(image, epoch, Role::Capture)
+    }
+    /// A Windows capture worker. Its desktop is the interactive session this
+    /// process runs in; no display name or X authority applies.
+    #[cfg(windows)]
+    pub fn windows_capture(image: &Path, epoch: u128) -> Result<Self, Error> {
+        Self::session(image, epoch, Role::Capture)
     }
     /// A separate macOS playback-capture child in the original login session.
     /// It has no X11 display, cookie, presentation target or input authority.
     #[cfg(target_os = "macos")]
     pub fn macos_audio(image: &Path, epoch: u128) -> Result<Self, Error> {
-        Self::macos(image, epoch, Role::Audio)
+        Self::session(image, epoch, Role::Audio)
     }
-    #[cfg(target_os = "macos")]
-    fn macos(image: &Path, epoch: u128, role: Role) -> Result<Self, Error> {
+    /// A worker in this process's own desktop session (macOS, Windows).
+    #[cfg(any(target_os = "macos", windows))]
+    fn session(image: &Path, epoch: u128, role: Role) -> Result<Self, Error> {
         if !image.is_absolute() || epoch == 0 {
             return Err(Error::InvalidLaunch);
         }
@@ -251,37 +257,44 @@ impl Launch {
         Ok(launch)
     }
     /// One-shot startup probe of the locally selected encoder (`nvenc`,
-    /// `vaapi` or `software`; `videotoolbox` on macOS): the worker opens it at
-    /// the display's size
-    /// and admits one real IDR. Synchronous and bounded, run before any
-    /// listener exists; the child is always ended and reaped. Hosts only
-    /// (Linux, macOS): no Windows host exists yet.
-    #[cfg(unix)]
+    /// `vaapi` or `software`; `videotoolbox` on macOS; `mediafoundation` on
+    /// Windows): the worker opens it at the display's size and admits one
+    /// real IDR. Synchronous and bounded, run before any listener exists; the
+    /// child is always ended and reaped.
     pub fn probe_encoder(&self, backend: &str, limit: Duration) -> Result<EncoderProbe, Error> {
         use std::io::Read;
+        #[cfg(unix)]
         use std::os::unix::process::CommandExt;
         use std::process::{Command as Probe, Stdio as ProbeStdio};
-        if self.role != Role::Capture
-            || self.retirement.is_some()
-            || self.local.is_some()
-            || !(matches!(backend, "nvenc" | "vaapi" | "software")
-                || cfg!(target_os = "macos") && backend == "videotoolbox")
+        let known = if cfg!(windows) {
+            backend == "mediafoundation"
+        } else {
+            matches!(backend, "nvenc" | "vaapi" | "software")
+                || cfg!(target_os = "macos") && backend == "videotoolbox"
+        };
+        if self.role != Role::Capture || self.retirement.is_some() || self.local.is_some() || !known
         {
             return Err(Error::InvalidLaunch);
         }
         let mut command = Probe::new(&self.image);
         command.env_clear();
-        // A macOS launch has no X11 display; never pass an empty DISPLAY.
+        // A macOS or Windows launch has no X11 display; never pass an empty
+        // DISPLAY.
         if !self.display.is_empty() {
             command.env("DISPLAY", &self.display);
         }
+        #[cfg(windows)]
+        windows_environment(|key, value| {
+            command.env(key, value);
+        });
         command
             .args(["--probe-encoder", backend, "--parent-pid"])
             .arg(std::process::id().to_string())
             .stdin(ProbeStdio::null())
             .stdout(ProbeStdio::piped())
-            .stderr(ProbeStdio::null())
-            .process_group(0);
+            .stderr(ProbeStdio::null());
+        #[cfg(unix)]
+        command.process_group(0);
         if let Some(path) = &self.xauthority {
             command.env("XAUTHORITY", path);
         }
@@ -303,6 +316,7 @@ impl Launch {
             Ok(status) => status,
             Err(outcome) => {
                 // As for every worker: end the whole group, then reap.
+                #[cfg(unix)]
                 crate::input_process::kill_group(&child);
                 let _ = child.kill();
                 child
@@ -313,11 +327,15 @@ impl Launch {
         };
         // A probe leaves nothing behind. The group id cannot be reused while
         // any member lives, so ending it after the leader's exit is safe.
+        #[cfg(unix)]
         crate::input_process::kill_group(&child);
         // The reply is already in the pipe. Read what is there without
         // waiting, so a descendant holding the write end cannot stall startup.
+        // (A Windows worker starts no process that could hold it: the read
+        // ends at the exited child's end of file.)
         let mut reply = [0; 256];
         let read = child.stdout.take().map_or(0, |mut out| {
+            #[cfg(unix)]
             if rustix::io::ioctl_fionbio(&out, true).is_err() {
                 return 0;
             }
@@ -325,6 +343,17 @@ impl Launch {
         });
         let line = std::str::from_utf8(&reply[..read]).unwrap_or("");
         Ok(EncoderProbe::parse(status.success(), line.trim()))
+    }
+}
+/// The local system environment a Windows worker needs to load system
+/// components (COM and Media Foundation look up `SystemRoot`), from this
+/// process's own environment, never a peer's.
+#[cfg(windows)]
+fn windows_environment(mut set: impl FnMut(&str, &std::ffi::OsStr)) {
+    for key in ["SystemRoot", "windir"] {
+        if let Some(value) = std::env::var_os(key) {
+            set(key, &value);
+        }
     }
 }
 /// Outcome of [`Launch::probe_encoder`]. Content-free: dimensions and the
@@ -688,6 +717,10 @@ impl Worker {
         if !display.is_empty() {
             command.env("DISPLAY", display);
         }
+        #[cfg(windows)]
+        windows_environment(|key, value| {
+            command.env(key, value);
+        });
         command
             .arg(match role {
                 Role::Capture => "--capture",
@@ -699,9 +732,14 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .process_group_mode(ProcessGroupMode::NewProcessGroup)
-            .signal_target(ProcessSignalTarget::ProcessGroup)
             .kill_on_drop(true);
+        // A Unix worker leads its own process group, ended as one. A Windows
+        // worker starts no processes; it ends itself when frd does
+        // (`--parent-pid`).
+        #[cfg(unix)]
+        command
+            .process_group_mode(ProcessGroupMode::NewProcessGroup)
+            .signal_target(ProcessSignalTarget::ProcessGroup);
         if let Some(path) = xauthority {
             command.env("XAUTHORITY", path);
         }

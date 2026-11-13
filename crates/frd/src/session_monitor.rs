@@ -2,6 +2,8 @@
 //! Parent-created pipes and one immutable local selection bind each process epoch.
 //! Native/IPC work stays off the authority thread; every status check independently
 //! expires original evidence on `CLOCK_BOOTTIME`, including across suspend.
+// Windows has no session-monitor process yet (frd refuses the option there).
+#[cfg(unix)]
 mod process;
 pub mod protocol;
 use crate::{input_agent::Seat, input_watchdog::StopReason};
@@ -112,7 +114,16 @@ pub struct Configuration {
 }
 
 /// Suspend-aware time shared by parent and child. No adjustable wall clock.
+/// macOS's monotonic clock, unlike Linux's, keeps counting during sleep; so
+/// does Windows' interrupt time.
+#[cfg(windows)]
+#[allow(clippy::unnecessary_wraps, reason = "the Unix clock read can fail")]
+pub fn now_ns() -> Result<u64, Error> {
+    Ok(fr_winsys::time::since_boot_ns())
+}
+/// Suspend-aware time shared by parent and child. No adjustable wall clock.
 /// macOS's monotonic clock, unlike Linux's, keeps counting during sleep.
+#[cfg(unix)]
 pub fn now_ns() -> Result<u64, Error> {
     #[cfg(target_os = "linux")]
     let clock = rustix::time::ClockId::Boottime;
@@ -400,6 +411,17 @@ pub struct Monitor {
 impl Monitor {
     pub fn start(configuration: Configuration) -> Result<Self, Error> {
         configuration.selection.validate()?;
+        // No Windows session monitor yet (fr-p2-host-windows-rt1).
+        #[cfg(windows)]
+        {
+            drop(configuration);
+            Err(Error::Selection)
+        }
+        #[cfg(unix)]
+        Self::start_unix(configuration)
+    }
+    #[cfg(unix)]
+    fn start_unix(configuration: Configuration) -> Result<Self, Error> {
         let expected = if cfg!(target_os = "macos") {
             Platform::Macos
         } else {

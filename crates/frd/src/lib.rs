@@ -92,7 +92,8 @@ pub mod native_files;
 pub mod local_sharing;
 
 // Parent-owned terminal consent; no authority, capture or native input here.
-#[cfg(host_stack)]
+// It reads the controlling /dev/tty, which a Windows host does not have.
+#[cfg(all(host_stack, unix))]
 pub mod local_approval;
 
 #[cfg(native_stack)]

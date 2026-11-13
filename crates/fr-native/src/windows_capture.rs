@@ -14,6 +14,7 @@
 mod convert;
 mod duplication;
 mod encoder;
+mod parent;
 
 use crate::NativeError;
 use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
@@ -30,6 +31,7 @@ use std::time::{Duration, Instant};
 
 pub use duplication::{WinDisplay, displays};
 pub use encoder::EncoderIdentity;
+pub use parent::bind_parent;
 
 /// Bound for the first desktop image after opening.
 const FIRST_IMAGE_MS: u32 = 1500;
