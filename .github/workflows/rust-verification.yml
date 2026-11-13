@@ -104,12 +104,19 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0]],
               check=True, env=dict(os.environ, FR_NS_SUDO='1'), timeout=240)
           PYTHON
+      # The build has its own step: compiling frd's all-features lib tests
+      # takes 3-5 min on its own, and inside the 5-minute limit below it
+      # cancelled 2 of 7 runs (11-13) before any test ran.
+      - name: Build the cleanup-confirmed host recovery tests
+        id: share_retirement_build
+        continue-on-error: true
+        run: cargo test -p frd --all-features --locked --lib --no-run --message-format=json > "$RUNNER_TEMP/retirement-test.json"
       - name: Exercise cleanup-confirmed host recovery
         id: share_retirement
         continue-on-error: true
         timeout-minutes: 5
         run: |
-          cargo test -p frd --all-features --locked --lib --no-run --message-format=json > "$RUNNER_TEMP/retirement-test.json"
+          test "${{ steps.share_retirement_build.outcome }}" = success
           python3 - <<'PYTHON'
           import json, os, subprocess
           from pathlib import Path
