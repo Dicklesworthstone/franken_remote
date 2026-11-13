@@ -72,6 +72,38 @@ jobs:
         id: test
         continue-on-error: true
         run: ./scripts/verify.sh test
+      - name: Exercise serial reconnects and retirement fences
+        id: serial_turnover
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          cargo test -p frd --all-features --locked --test native_host_serial --no-run --message-format=json > "$RUNNER_TEMP/serial-test.json"
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'serial-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'native_host_serial'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact serial host test binary required'
+          listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True)
+          tests = [
+              'cooldown::immediate_ipv4_redial_keeps_its_initial_through_cooldown',
+              'cooldown::immediate_ipv6_redial_keeps_its_initial_through_cooldown',
+              'cooldown::ingress_loss_closes_the_prebound_socket_without_a_second_attempt',
+              'cooldown::cancellation_closes_the_prebound_socket_without_a_second_attempt',
+              'retained_original_transport_blocks_rebinding_and_reports_cleanup_failure',
+              'duplicate_peer_ids_refuse_before_a_second_accept_or_application',
+          ]
+          for test in tests:
+              assert listed.splitlines().count(f'{test}: test') == 1, f'serial regression must be present: {test}'
+          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0]],
+              check=True, env=dict(os.environ, FR_NS_SUDO='1'), timeout=240)
+          PYTHON
       - name: Exercise native downloads and complete directory uploads
         id: file_download
         continue-on-error: true
@@ -372,6 +404,7 @@ jobs:
             check=${{ steps.check.outcome }}
             clippy=${{ steps.clippy.outcome }}
             test=${{ steps.test.outcome }}
+            serial_turnover=${{ steps.serial_turnover.outcome }}
             file_download=${{ steps.file_download.outcome }}
             system_shortcuts=${{ steps.system_shortcuts.outcome }}
             native_dual_stack=${{ steps.native_dual_stack.outcome }}

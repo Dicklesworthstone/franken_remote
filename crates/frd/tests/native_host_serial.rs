@@ -53,6 +53,7 @@ async fn until(cx: &Cx, ready: impl Fn() -> bool) {
 struct App {
     requests: Arc<AtomicU64>,
     completed: u64,
+    completion_signal: Arc<AtomicU64>,
     served: u64,
     stop: u64,
     reuse: bool,
@@ -68,6 +69,7 @@ impl App {
         Self {
             requests: Arc::new(AtomicU64::new(0)),
             completed: 0,
+            completion_signal: Arc::new(AtomicU64::new(0)),
             served: 0,
             stop,
             reuse: false,
@@ -130,6 +132,8 @@ impl Application for App {
             Ok(n) => assert_eq!(n, self.served),
             Err(e) => self.refused.push(e),
         }
+        self.completion_signal
+            .store(self.completed, Ordering::Release);
         Ok(if self.completed == self.stop {
             Action::Stop
         } else {
@@ -352,7 +356,7 @@ fn stopped_ingress_wakes_idle_service_and_never_starts_a_replacement() {
 }
 #[test]
 #[ignore = "explicit isolated user/network namespace"]
-fn duplicate_peer_ids_refuse_before_a_second_socket_or_application() {
+fn duplicate_peer_ids_refuse_before_a_second_accept_or_application() {
     run(|broker, supervisor, runtime| {
         Box::pin(async move {
             let api = fixture::Api::new();
@@ -374,6 +378,8 @@ fn duplicate_peer_ids_refuse_before_a_second_socket_or_application() {
                 &mut app,
             );
             let (result, ()) = Box::pin(network::both(service, viewer(&client, address))).await;
+            // A prebound UDP socket carries no peer identity. Duplicate IDs
+            // still refuse before another accept or application can begin.
             assert_eq!(result, Err(Error::IdentityReuse));
             assert_eq!((app.completed, app.served), (1, 1));
             assert!(UdpSocket::bind(address).is_ok());
@@ -577,3 +583,6 @@ fn caught_application_panic_retires_peer_while_failed_service_is_retained() {
 
 #[path = "native_host_serial/live_policy.rs"]
 mod live_policy;
+
+#[path = "native_host_serial/cooldown.rs"]
+mod cooldown;

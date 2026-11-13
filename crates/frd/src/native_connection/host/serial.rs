@@ -137,7 +137,8 @@ pub trait Application {
 impl Server {
     /// Explicit capacity-one persistent hosting. This is NOT simultaneous
     /// multi-client QUIC routing: one admitted peer owns this destination until
-    /// its original transport is gone. Other arrivals are not queued or migrated.
+    /// its original transport is gone. During cooldown, the next protected socket
+    /// retains only bounded kernel UDP input; no peer is accepted or migrated.
     ///
     /// As with `run_on_protected_listener`, the boundary must ALREADY be enforced
     /// for this exact socket; the callback checks continuing local evidence only.
@@ -194,7 +195,7 @@ impl Server {
             inner: Some(Box::pin(async move {
                 policy.validate()?;
                 let mut stats = Statistics::default();
-                let mut listener = Some(listener);
+                let mut listener = listener;
                 let mut previous = None;
                 loop {
                     inside()?;
@@ -234,12 +235,7 @@ impl Server {
                     let gate = inside.clone();
                     let terminal_gate = security.clone();
                     let fence = super::PanicFence(&peer, false);
-                    let socket = match listener.take() {
-                        Some(socket) => socket,
-                        None => Listener::bind_addresses(&peer, &addresses, transport)
-                            .await
-                            .map_err(|e| Error::Host(HostError::Accept(e)))?,
-                    };
+                    let socket = listener;
                     inside()?;
                     let ordinary_addresses = addresses.clone();
                     let terminal_addresses = addresses.clone();
@@ -316,6 +312,18 @@ impl Server {
                     if action == Action::Stop {
                         return Ok(stats);
                     }
+                    // The old transport is actually gone. Keep the same protected
+                    // addresses bound through cooldown so an immediate reconnect's
+                    // Initial is not discarded while no socket exists. Only the
+                    // bounded kernel receive buffers are active: fresh request IDs,
+                    // policy/identity admission and TLS still wait for the next turn.
+                    inside()?;
+                    policy_available(self.live_policy.as_ref())?;
+                    listener = Listener::bind_addresses(&cx, &addresses, transport)
+                        .await
+                        .map_err(|e| Error::Host(HostError::Accept(e)))?;
+                    inside()?;
+                    policy_available(self.live_policy.as_ref())?;
                     let until = after(&cx, policy.cooldown)?;
                     wait(&cx, until, || false).await?;
                 }
