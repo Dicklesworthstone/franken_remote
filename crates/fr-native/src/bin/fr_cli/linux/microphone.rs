@@ -180,6 +180,9 @@ impl Local {
             }
         }
     }
+    // Without the microphone feature the turn cannot fail; the signature is
+    // the feature build's.
+    #[cfg_attr(not(feature = "linux-microphone"), allow(clippy::unnecessary_wraps))]
     pub(super) fn turn(&mut self, viewer: &mut ControlledViewer) -> Result<(), CallbackError> {
         #[cfg(feature = "linux-microphone")]
         {
@@ -293,11 +296,11 @@ impl Local {
         }
     }
     pub(super) fn cleanup_complete(&mut self) -> bool {
-        if !self.stopped {
-            return false;
-        }
         #[cfg(feature = "linux-microphone")]
         {
+            if !self.stopped {
+                return false;
+            }
             if let Some(retirement) = &self.retirement {
                 self.sample(retirement.status());
             }
@@ -313,7 +316,7 @@ impl Local {
         }
         #[cfg(not(feature = "linux-microphone"))]
         {
-            true
+            self.stopped
         }
     }
     pub(super) fn summary(&self, json: bool) -> String {
