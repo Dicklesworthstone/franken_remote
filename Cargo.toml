@@ -41,10 +41,13 @@ repository = "https://github.com/Dicklesworthstone/franken_remote"
 # so a second viewer learns at once that the host is busy (fr-0kyf);
 # 2ece34e14 keeps that path out of drive_io_once's future (1088 bytes,
 # not 3632).
+# 041a44e12 (asupersync main, 2026-11-12) drives child stdin/stdout/stderr
+# on Windows through overlapped pipes, so frd talks to its media worker
+# there (fr-p2-host-windows-rt1).
 # Owner approval for a Git pin while 0.6.x is unpublished: 2026-10-12
 # ("do everything you think is advisable"). Return to a crates.io release
 # once one contains these fixes. Selecting this revision does not qualify transport.
-asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "2ece34e1427c27492e68a1b58616118d7c8807f0", default-features = false }
+asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "041a44e1267202ba3339afc2c820eb643e7b2ea8", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }
