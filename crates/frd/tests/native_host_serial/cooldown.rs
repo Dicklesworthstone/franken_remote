@@ -1,5 +1,5 @@
 //! Reconnects use real UDP/TLS and the original serial admission path. The
-//! LocalAPI, CA and ingress fixtures are not live-tailnet qualification.
+//! `LocalAPI`, CA and ingress fixtures are not live-tailnet qualification.
 use super::*;
 
 #[test]
@@ -93,7 +93,7 @@ fn immediate_redial(ipv6: bool) {
                 })
             );
             assert_eq!((app.completed, app.served), (2, 2));
-            assert!(app.refused.is_empty());
+            assert_eq!(app.refused, Vec::<HostError>::new());
             assert!(
                 app.request_times[1].duration_since(app.completion_times[0]) >= policy.cooldown
             );

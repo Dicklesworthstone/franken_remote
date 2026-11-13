@@ -1,7 +1,7 @@
 //! Serial retirement with actual UDP/TLS, authenticated local HTTP and ingress
 //! lease custody. Interface/firewall replies are the existing explicit fixtures.
-//! Run ignored cases through scripts/test_linux_serial_lifecycle.sh with the frd
-//! library test binary and host_run::retirement_tests as its filter. No physical
+//! Run ignored cases through `scripts/test_linux_serial_lifecycle.sh` with the frd
+//! library test binary and `host_run::retirement_tests` as its filter. No physical
 //! GPU, installed-tailnet or whole-process host-run qualification is claimed.
 use super::*;
 use crate as frd;
@@ -13,12 +13,12 @@ use asupersync::{runtime::RuntimeHandle, time::timeout};
 use fr_transport::native_accept::Listener;
 use std::{fs, net::UdpSocket, os::unix::fs::PermissionsExt, sync::atomic::AtomicU64};
 
-#[allow(dead_code)]
+// The fixture binds to this module's imports through `use super::*`, so it
+// is loaded here as well as under the shared hub's native admission tests.
+#[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../../tests/native_host_accept/fixture.rs"]
 mod fixture;
-#[allow(dead_code)]
-#[path = "../../../fr-transport/tests/support/mod.rs"]
-mod network;
+use crate::test_support::transport_support as network;
 
 struct Tools(PathBuf);
 impl Tools {
