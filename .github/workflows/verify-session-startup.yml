@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/verify-session-startup.yml']
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -26,72 +26,6 @@ jobs:
           rustup show active-toolchain
           sudo apt-get update
           sudo apt-get install -y libpipewire-0.3-dev libavcodec-dev libavutil-dev libswscale-dev libx11-dev libxcb-render0-dev libxtst6 libxi6 libxdamage1 libxrandr2 libxfixes3 libx11-xcb1 libopus0 libpulse0 pkg-config xvfb xauth openssl iproute2 util-linux
-      - name: Stage exact reviewed session sources without branch writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          before = {
-              'crates/fr-transport/src/quic.rs': 'a80a7b1e9c5b6c0b6abdc9337573563a9b8ca347',
-              'crates/fr-transport/src/quic/negotiation.rs': None,
-              'crates/fr-transport/tests/support/mod.rs': 'a2447be9f9a6417c593e0e48a70d9906fc072287',
-              'crates/frd/examples/native_session_check.rs': None,
-              'crates/frd/src/lib.rs': 'fe08b684d1c6a94643f0eced6b8588229b3769ef',
-              'crates/frd/src/session.rs': None,
-              'crates/frd/src/session/tests.rs': None,
-          }
-          after = {
-              'crates/fr-transport/src/quic.rs': '33577c17379ad4163e41ff700ef5d7acaf82a9a9',
-              'crates/fr-transport/src/quic/negotiation.rs': '434189e9c9efa81450a7aab0ea1b7a769ba3e90d',
-              'crates/fr-transport/tests/support/mod.rs': '851d5dcbcf38b44664ed2c0480f93d85030c1735',
-              'crates/frd/examples/native_session_check.rs': 'ff1052312b5dc7942b4dcd3da3efbd0ae4f5c585',
-              'crates/frd/src/lib.rs': 'f7764f9b5bf59882964f1ab4f1135d7733dbe671',
-              'crates/frd/src/session.rs': '76a5796adf7a42f903de64603e6ad6f3fbee78a0',
-              'crates/frd/src/session/tests.rs': 'd04249cda48d33996e2cdf357c10ab1741da5f56',
-          }
-          def sha(data):
-              return hashlib.sha1(f'blob {len(data)}\0'.encode() + data).hexdigest()
-          def read_blob(oid):
-              blob = json.loads(subprocess.check_output(['gh', 'api', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}']))
-              data = base64.b64decode(blob['content'])
-              assert sha(data) == oid
-              return data
-          for path, oid in before.items():
-              if oid is None:
-                  assert not Path(path).exists(), f'Concurrent source exists: {path}'
-              else:
-                  assert sha(Path(path).read_bytes()) == oid, f'Concurrent source changed: {path}'
-          raw = read_blob('405e173c8859358738226d92a5da7dd571fb3fc9')
-          assert len(raw) == 12988
-          decoder = lzma.LZMADecompressor()
-          data = decoder.decompress(raw, max_length=100001)
-          assert decoder.eof and not decoder.unused_data
-          assert len(data) == 67462 and sha(data) == '7b7109a95ef087fd1f76550b749cb281cad6001c'
-          patch = Path(os.environ['RUNNER_TEMP'], 'session.patch')
-          patch.write_bytes(data)
-          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
-          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(after)
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
-          for path, oid in after.items():
-              assert sha(Path(path).read_bytes()) == oid, path
-          correction = {
-              'crates/fr-transport/tests/support/mod.rs': '2a8537713a9c36a2f3bdcbbce011522572d1af11',
-              'crates/frd/examples/native_session_check.rs': '1e79f89af3e604968a94417a4b7186998002899c',
-              'crates/frd/src/session.rs': '70c400f3a9445833752e8df8d5421af006ed60bc',
-          }
-          patch.write_bytes(read_blob('10e560cf01b24c7b933634085e533d7549f1e6c8'))
-          stats = subprocess.check_output(['git', 'apply', '--numstat', str(patch)], text=True)
-          assert {line.split('\t', 2)[2] for line in stats.splitlines()} == set(correction)
-          subprocess.run(['git', 'apply', '--check', str(patch)], check=True)
-          subprocess.run(['git', 'apply', str(patch)], check=True)
-          after.update(correction)
-          for path, oid in after.items():
-              assert sha(Path(path).read_bytes()) == oid, path
-          Path(os.environ['RUNNER_TEMP'], 'verified-paths.json').write_text(json.dumps(after))
-          PY
       - name: Verify docs and native UDP TLS session tests
         run: |
           ./scripts/verify.sh docs
@@ -111,18 +45,4 @@ jobs:
           # addresses are synthetic; this is not installed Tailscale or TUN proof.
           script = 'ip link set lo up; ip addr add 100.64.0.1/32 dev lo; ip addr add 100.64.0.2/32 dev lo; exec "$1"'
           subprocess.run(['sudo', 'unshare', '--net', '--', 'sh', '-eu', '-c', script, 'sh', str(executable)], check=True)
-          PY
-      - name: Export exact verified source blobs for explicit publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, json, os, subprocess
-          from pathlib import Path
-          for path, expected in json.loads(Path(os.environ['RUNNER_TEMP'], 'verified-paths.json').read_text()).items():
-              body = json.dumps({'encoding': 'base64', 'content': base64.b64encode(Path(path).read_bytes()).decode()})
-              result = subprocess.run(['gh', 'api', '--method', 'POST', f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs', '--input', '-'], input=body, text=True, capture_output=True, check=True)
-              actual = json.loads(result.stdout)['sha']
-              assert actual == expected, path
-              print(json.dumps({'path': path, 'sha': actual, 'verified_against': os.environ['GITHUB_SHA']}))
           PY

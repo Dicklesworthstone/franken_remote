@@ -5,7 +5,7 @@ on:
     branches: [main]
     paths: ['.github/workflows/verify-session-clock.yml']
 permissions:
-  contents: write
+  contents: read
 env:
   CARGO_BUILD_JOBS: '1'
   CARGO_PROFILE_DEV_DEBUG: '0'
@@ -22,41 +22,6 @@ jobs:
           persist-credentials: false
       - name: Add build swap (frd test codegen peaks near 19 GB)
         uses: ./.github/actions/build-swap
-      - name: Stage reconciled source without reference writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, lzma, os, subprocess
-          from pathlib import Path
-          def blob(data): return hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()
-          oid='e05424feb6b24fe6046898f0f26a858621db566d'
-          row=json.loads(subprocess.check_output(['gh','api',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs/{oid}'],timeout=30))
-          encoded=base64.b64decode(row['content'])
-          assert blob(encoded)==oid and len(encoded)==6748
-          dec=lzma.LZMADecompressor()
-          data=dec.decompress(base64.b64decode(encoded,validate=True),max_length=18714)
-          assert dec.eof and not dec.unused_data and len(data)==18713
-          assert hashlib.sha256(data).hexdigest()=='54721f2282a168f25e6d853409b0b963f9d98352d9c6e1bace7e0cedb78b88ce'
-          candidate=json.loads(data)
-          before,after=candidate['before'],candidate['after']
-          assert candidate['base']=='6bf14657d3b387b0ecc39d38d7c0a4b5f0aa6cc7'
-          assert len(after)==7 and set(before)==set(after)
-          for path in after:
-              assert path.startswith('crates/frd/src/') and path.endswith('.rs') and '..' not in Path(path).parts
-          current={p:blob(Path(p).read_bytes()) if Path(p).is_file() else None for p in before}
-          if current!=after:
-              assert current==before, 'concurrent source changes require reconciliation'
-              patch=Path(os.environ['RUNNER_TEMP'],'session-clock.patch')
-              patch.write_text(candidate['patch'])
-              stats=subprocess.check_output(['git','apply','--numstat',str(patch)],text=True)
-              assert {line.split('\t',2)[2] for line in stats.splitlines()}==set(after)
-              subprocess.run(['git','apply','--check',str(patch)],check=True)
-              subprocess.run(['git','apply',str(patch)],check=True)
-          for path,expected in after.items(): assert blob(Path(path).read_bytes())==expected,path
-          Path(os.environ['RUNNER_TEMP'],'session-clock-paths.json').write_text(json.dumps(after))
-          subprocess.run(['git','diff','--check'],check=True)
-          PY
       - name: Select pinned compiler and native SDKs
         run: |
           rustup show active-toolchain
@@ -82,42 +47,3 @@ jobs:
           export FR_NATIVE_TEST_WORKER="$PWD/target/debug/fr-media-worker"
           cargo test -p frd --lib public_publisher_and_observer --locked -- --ignored --test-threads=1
           cargo test -p frd --lib delayed_display_choice_keeps_discovered_source --locked -- --ignored --test-threads=1
-      - name: Retain verified source objects without reference writes
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 - <<'PY'
-          import base64, hashlib, json, os, subprocess
-          from pathlib import Path
-          manifest=Path(os.environ['RUNNER_TEMP'],'session-clock-paths.json')
-          for path,expected in json.loads(manifest.read_text()).items():
-              data=Path(path).read_bytes()
-              assert hashlib.sha1(f'blob {len(data)}\0'.encode()+data).hexdigest()==expected
-              body=json.dumps({'encoding':'base64','content':base64.b64encode(data).decode()})
-              row=json.loads(subprocess.check_output(['gh','api','--method','POST',f'repos/{os.environ["GITHUB_REPOSITORY"]}/git/blobs','--input','-'],input=body,text=True,timeout=30))
-              assert row['sha']==expected
-              print(json.dumps({'path':path,'sha':expected,'verified_checkout':os.environ['GITHUB_SHA']}))
-          PY
-      - name: Retain compiler-matched build inputs
-        if: always()
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/clock-build-inputs"
-          mkdir -p "$root/libraries"
-          if [ -d target/debug ]; then
-            find target/debug -type f \( -name '*.rlib' -o -name '*.rmeta' -o -name '*.so' -o -name '*.a' \) -exec cp -n '{}' "$root/libraries/" \;
-          fi
-          rustc -Vv > "$root/compiler.txt"
-          cp Cargo.lock "$root/Cargo.lock"
-          cp "$RUNNER_TEMP/session-clock-paths.json" "$root/source-hashes.json"
-          printf '%s\n' "$GITHUB_SHA" > "$root/checkout.txt"
-          (cd "$root" && find libraries -type f -print0 | sort -z | xargs -0 -r sha256sum > SHA256SUMS)
-          tar -czf "$RUNNER_TEMP/clock-build-inputs.tar.gz" -C "$root" .
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: clock-build-inputs
-          path: ${{ runner.temp }}/clock-build-inputs.tar.gz
-          retention-days: 1
-          compression-level: 0
-          if-no-files-found: error
