@@ -653,6 +653,7 @@ name = "fr-tailnet"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "fr-winsys",
  "getrandom 0.4.3",
  "nix",
  "serde",
@@ -679,6 +680,13 @@ dependencies = [
  "fr-native",
  "fr-tailnet",
  "serde_json",
+ "windows",
+]
+
+[[package]]
+name = "fr-winsys"
+version = "0.1.0"
+dependencies = [
  "windows",
 ]
 

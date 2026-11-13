@@ -154,7 +154,7 @@ for closing evidence and native qualification limits.
 
 ## Develop and verify
 
-The workspace contains 10 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr`, `fr-media-worker`, `fr-input-agent`, `fr-opus-worker` and `fr-session-monitor` binaries), `frd`, `fr-files` and `fr-lab` (the synthetic `fr-e2e` model, the orphan `fr-ffi` wrapper and the `fr-web` mockup were removed on 2026-09-24). From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
+The workspace contains 13 crates: `fr-core`, `fr-wire`, `fr-media`, `fr-transport`, `fr-tailnet`, `fr-client`, `fr-native` (the `fr`, `fr-media-worker`, `fr-input-agent`, `fr-opus-worker` and `fr-session-monitor` binaries), `frd`, `fr-files`, `fr-lab`, `fr-mobile-ffi` (the session core the iOS app links), `fr-windows` (the Windows client) and `fr-winsys` (Win32 calls under the safe-Rust crates, first `tailscaled`'s named-pipe `LocalAPI` for fr-tailnet) (the synthetic `fr-e2e` model, the orphan `fr-ffi` wrapper and the `fr-web` mockup were removed on 2026-09-24). From a checkout with Rustup installed, the repository's `rust-toolchain.toml` selects the exact nightly:
 
 ```bash
 ./scripts/verify.sh fast                  # format, workspace check, strict clippy, tests
@@ -301,7 +301,7 @@ FFmpeg integration is a deliberately narrow boundary (plan §9): a curated, allo
 
 ## Proposed workspace
 
-From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The 10 current members are listed under "Develop and verify" above; `fr` currently lives in `fr-native`, and `fr-platform` has no crate of its own.
+From plan §22 — responsibility boundaries, not a requirement to create every crate before the first working slice. Crates enter the workspace only with a real vertical slice. The 13 current members are listed under "Develop and verify" above; `fr` currently lives in `fr-native`, and `fr-platform` has no crate of its own.
 
 ```text
 frankenremote/

@@ -1,11 +1,11 @@
 //! An outbound destination pinned to fresh installed-daemon metadata.
 use super::{LocalApi, SourceIdentity, now, wall_now};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use super::{Lookup, bounded};
 use crate::{Error, metadata};
 use asupersync::cx::Cx;
 use std::{fmt, net::IpAddr, sync::Arc};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use std::{sync::atomic::Ordering, time::Duration};
 
 pub use crate::PeerSelector;
@@ -16,7 +16,7 @@ pub use crate::PeerSelector;
 pub struct PeerTarget {
     pub(super) identity: metadata::outbound::Target,
     origin: Arc<()>,
-    // Linux: kernel-authenticated daemon PID. macOS: the complete code
+    // Linux and Windows: kernel-reported daemon PID. macOS: the complete code
     // identity of the signed app, never an individual query child's PID.
     source_identity: SourceIdentity,
     issued_us: u64,
@@ -85,7 +85,7 @@ impl PeerTarget {
 impl LocalApi {
     /// iOS has no installed daemon to select a destination from (and no
     /// `LocalApi` constructor succeeds there); the named dialer is its path.
-    #[cfg(any(target_os = "ios", windows))]
+    #[cfg(target_os = "ios")]
     #[allow(clippy::unused_self)] // The Linux/macOS lookups need the receiver.
     pub fn peer_target(
         &self,
@@ -97,7 +97,7 @@ impl LocalApi {
     /// Two complete, bounded status reads select the same exact local/remote
     /// identity. Unrelated peer churn is ignored; absent/conflicting targets
     /// refuse. The deadline starts before I/O and both key expiries cap it.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", windows))]
     pub async fn peer_target(
         &self,
         cx: &Cx,

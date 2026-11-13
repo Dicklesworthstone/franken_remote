@@ -1,0 +1,38 @@
+[package]
+name = "fr-winsys"
+version = "0.1.0"
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+publish = false
+
+# The Win32 boundary below fr-native: safe wrappers for the safe-Rust crates
+# that need Windows system calls (fr-tailnet's LocalAPI pipe first). Other
+# platforms compile an empty crate.
+[target.'cfg(windows)'.dependencies]
+# The version Cargo.lock already carries for fr-windows and fr-native.
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+# fr-winsys is a named FFI boundary crate (AGENTS.md 3.2): it exists so the
+# Win32 calls under fr-tailnet and frd live outside those
+# `forbid(unsafe_code)` crates, so it opts out of the workspace's
+# `unsafe_code = "forbid"` explicitly. Every unsafe block states its
+# invariant (lint below).
+unsafe_code = "allow"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+undocumented_unsafe_blocks = "deny"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

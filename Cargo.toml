@@ -57,6 +57,7 @@ serde = "1"
 serde_json = "1"
 fr-transport = { path = "crates/fr-transport" }
 fr-native = { path = "crates/fr-native" }
+fr-winsys = { path = "crates/fr-winsys" }
 frd = { path = "crates/frd" }
 fr-client = { path = "crates/fr-client" }
 fr-mobile-ffi = { path = "crates/fr-mobile-ffi" }

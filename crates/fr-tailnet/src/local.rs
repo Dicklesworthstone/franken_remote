@@ -15,6 +15,10 @@
 //!    the open-source daemon's fixed socket `/var/run/tailscaled.socket`.
 //!    Tailscale's own CLI uses the same order.
 //!
+//! Windows: [`LocalApi::installed`] is `tailscaled`'s named pipe under the
+//! administrators-only `ProtectedPrefix` (`pipe.rs`); there is no configured
+//! endpoint ([`LocalApi::new`] refuses).
+//!
 //! Every socket server must be the root daemon by kernel credentials. An
 //! untrusted or denied app publication, or a refused or untrusted socket, is a
 //! typed refusal and never falls back to the other transport. The App Store
@@ -44,9 +48,9 @@ use std::{
     task::Poll,
 };
 
-/// The daemon that answered: a Unix-socket server's kernel-reported PID, or
-/// the macOS app endpoint's published run identity. Reads of one lookup must
-/// agree.
+/// The daemon that answered: a Unix-socket or Windows pipe server's
+/// kernel-reported PID, or the macOS app endpoint's published run identity.
+/// Reads of one lookup must agree.
 type SourceIdentity = i32;
 
 /// One fixed installed-daemon status read. This does not register a reader or
@@ -61,7 +65,7 @@ pub enum LocalQuery {
 #[derive(Clone)]
 pub struct LocalApi {
     /// The Unix socket (on macOS `installed()`, read only while the app has
-    /// published no endpoint).
+    /// published no endpoint), or on Windows the daemon's pipe.
     path: Arc<PathBuf>,
     /// macOS `installed()`: the standalone app's state directory, read first
     /// on every request. `None` for a configured socket.
@@ -103,8 +107,14 @@ impl LocalApi {
     pub fn installed() -> Self {
         Self::new("/var/run/tailscale/tailscaled.sock").expect("fixed protected socket")
     }
+    /// `tailscaled`'s fixed pipe (`pipe.rs` says what is trusted).
+    #[cfg(windows)]
+    pub fn installed() -> Self {
+        Self::at(Path::new(pipe::INSTALLED))
+    }
     /// iOS has no installed daemon and no readable `LocalAPI`: every
     /// endpoint is refused, so no read on iOS ever reaches a transport.
+    /// Windows reads only the installed daemon's pipe.
     #[cfg(any(target_os = "ios", windows))]
     pub fn new(_path: impl AsRef<Path>) -> Result<Self, Error> {
         Err(Error::LocalApiUnavailable)
@@ -118,7 +128,11 @@ impl LocalApi {
         if !socket::valid_path(path) {
             return Err(Error::InvalidEndpoint);
         }
-        Ok(Self {
+        Ok(Self::at(path))
+    }
+    #[cfg(not(target_os = "ios"))]
+    fn at(path: &Path) -> Self {
+        Self {
             path: Arc::new(path.to_path_buf()),
             #[cfg(target_os = "macos")]
             app: None,
@@ -128,7 +142,7 @@ impl LocalApi {
             certificate_busy: Arc::new(AtomicBool::new(false)),
             directory_busy: Arc::new(AtomicBool::new(false)),
             daemon_uid: 0,
-        })
+        }
     }
     /// Exact endpoint tuple MUST originate at a TUN-restricted, established
     /// transport. This proves identity/grants, not the listener's ingress path.
@@ -391,7 +405,7 @@ impl LocalApi {
     /// One read over the selected transport (module docs). On macOS the app's
     /// endpoint is chosen afresh for every read, as its files are; a read that
     /// changes transport mid-lookup cannot share the other's identity.
-    #[cfg(not(any(target_os = "ios", windows)))]
+    #[cfg(not(target_os = "ios"))]
     async fn get_typed(
         &self,
         uri: &str,
@@ -404,11 +418,14 @@ impl LocalApi {
         {
             return Ok(read);
         }
+        #[cfg(windows)]
+        return pipe::get(&self.path, uri, maximum, content_type).await;
+        #[cfg(not(windows))]
         socket::get(&self.path, self.daemon_uid, uri, maximum, content_type).await
     }
     /// iOS: no transport exists. Unreachable in practice (no iOS constructor
     /// succeeds); refused with a type anyway.
-    #[cfg(any(target_os = "ios", windows))]
+    #[cfg(target_os = "ios")]
     #[allow(clippy::unused_self)] // The Linux/macOS transports need the receiver.
     fn get_typed(
         &self,
@@ -464,8 +481,10 @@ pub use target::PeerTarget;
 mod dial;
 pub use dial::{ConnectedPeer, DialRoute, NativeClient};
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 mod discovery;
+#[cfg(windows)]
+mod pipe;
 #[cfg(not(any(target_os = "ios", windows)))]
 mod socket;
 
