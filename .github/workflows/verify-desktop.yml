@@ -13,7 +13,9 @@ env:
 jobs:
   desktop:
     runs-on: ubuntu-26.04
-    timeout-minutes: 25
+    # Dispatched run 43461847381 (455a677e) needed 23.5 min, 12 of them in
+    # the frd lib step at CARGO_BUILD_JOBS=1.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
         with:
