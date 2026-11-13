@@ -136,7 +136,11 @@ fn public_publisher_and_observer_discover_select_decode_and_stream_the_same_nati
         assert!(seen >= 1);
         assert_eq!(host.worker_id(), source_id);
         assert_eq!(viewer.worker_id(), decoder_id);
-        assert_eq!(host.statistics().encoded_updates, 1);
+        // The one paint's changed picture and at most its one settle
+        // refinement (SoftwareExplicit refines once after 400 ms of stillness,
+        // see fr-native capture/refinement.rs); idle encoding would exceed it.
+        let encoded = host.statistics().encoded_updates;
+        assert!((1..=2).contains(&encoded), "encoded updates: {encoded}");
         assert!(host.statistics().unchanged_observations > 4);
         assert!(
             host.pacing()
