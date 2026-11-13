@@ -61,21 +61,30 @@ def test_planted_over_budget_rust() -> None:
 
 
 def test_planted_over_budget_glue() -> None:
-    print("[4/8] Testing planted over-budget glue fixture (>20,000 lines)...")
+    # The 20k glue allowance was lifted on 2026-11-13 (owner-delegated). A
+    # tree past it must still be counted exactly, per extension, and must no
+    # longer be refused.
+    print("[4/8] Testing a glue fixture past the lifted 20,000 allowance...")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
         web_dir = tmp_path / "web"
         web_dir.mkdir(parents=True)
-        # Write 20,005 lines of dummy JS glue
         with open(web_dir / "app.js", "w", encoding="utf-8") as fp:
             fp.write("// glue line\n" * 20_005)
+        with open(web_dir / "peer.py", "w", encoding="utf-8") as fp:
+            fp.write("# glue line\n" * 7)
 
         rc, stdout, stderr = run_cmd([
-            sys.executable, "scripts/count.py", "--fixture", str(tmp_path)
+            sys.executable, "scripts/count.py", "--fixture", str(tmp_path), "--json"
         ])
-        assert rc == 1, f"Expected count.py to refuse over-budget glue, but got rc={rc}"
-        assert "OVER_BUDGET_REFUSAL" in stderr or "OVER_BUDGET_REFUSAL" in stdout
-        print("  ✓ Planted over-budget glue correctly refused with exit 1.")
+        assert rc == 0, f"Expected no glue allowance, but got rc={rc}: {stderr}"
+        assert "OVER_BUDGET_REFUSAL" not in stderr + stdout
+        stats = json.loads(stdout)
+        glue = stats["non_rust_glue"]
+        assert glue["total"] == 20_012, glue
+        assert glue["by_extension"] == {".js": 20_005, ".py": 7}, glue
+        assert glue["allowance"] is None, glue
+        print("  ✓ 20,012 glue lines counted exactly per extension and not refused.")
 
 
 def test_planted_forbidden_unsafe() -> None:

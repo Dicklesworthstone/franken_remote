@@ -6,7 +6,9 @@ Enforces size discipline per AGENTS.md Section 3.7 and Plan Section 22.2:
 - 240,000 planned maximum
 - no hard stop (the owner lifted the 500,000 stop on 2026-11-08; it was raised
   from 250,000 on 2026-09-24)
-- 20,000 separate allowance for non-Rust glue (JS/Swift/Kotlin/C/Python/shell)
+- no stop on non-Rust glue (JS/Swift/Kotlin/C/Python/shell) either: the owner
+  handed that decision over on 2026-11-13 and the 20,000 allowance was lifted
+  the same way
 
 Reports handwritten Rust, generated bindings, non-Rust glue, vendored source,
 and project-induced upstream changes as separate numbers.
@@ -27,11 +29,19 @@ RUST_PLANNED_MAX_LINES = 240_000
 # and to work super well on mac and windows natively". None means no stop: the
 # count still reports, and a stop can be set again here.
 RUST_HARD_STOP_LINES: int | None = None
-GLUE_ALLOWANCE_LINES = 20_000
+# Owner, 2026-11-13: "I want YOU to make all those decisions FOR ME", asked
+# whether to raise the 20k glue allowance; lifted like the Rust stop. The
+# native clients' C, Swift and Kotlin and the Python test peers are product and
+# test code. None means no stop; one can be set again here.
+GLUE_ALLOWANCE_LINES: int | None = None
 
 
 def rust_over_stop(total: int) -> bool:
     return RUST_HARD_STOP_LINES is not None and total > RUST_HARD_STOP_LINES
+
+
+def glue_over_allowance(total: int) -> bool:
+    return GLUE_ALLOWANCE_LINES is not None and total > GLUE_ALLOWANCE_LINES
 
 # File classifications
 RUST_EXTS = {".rs"}
@@ -202,7 +212,9 @@ def format_report(stats: dict) -> str:
     lines.extend([
         "--------------------------------------------------------------------------------",
         f"  Total Non-Rust Glue       : {glue_total:>8,} lines",
-        f"  Allowance Ceiling         : {GLUE_ALLOWANCE_LINES:>8,} lines",
+        (f"  Allowance Ceiling         : {GLUE_ALLOWANCE_LINES:>8,} lines"
+         if GLUE_ALLOWANCE_LINES is not None
+         else "  Allowance Ceiling         :     none (lifted 2026-11-13)"),
         "",
         "3. OTHER CATEGORIES (Reported Separately per AGENTS.md 3.7):",
         "--------------------------------------------------------------------------------",
@@ -214,7 +226,7 @@ def format_report(stats: dict) -> str:
 
     # Status verdicts
     rust_ok = not rust_over_stop(rust_total)
-    glue_ok = glue_total <= GLUE_ALLOWANCE_LINES
+    glue_ok = not glue_over_allowance(glue_total)
 
     if not rust_ok:
         lines.append(
@@ -242,11 +254,16 @@ def format_report(stats: dict) -> str:
     if not glue_ok:
         lines.append(
             f"VERDICT: REFUSAL - Non-Rust glue ({glue_total:,}) exceeds "
-            f"20k allowance ({GLUE_ALLOWANCE_LINES:,})!"
+            f"allowance ({GLUE_ALLOWANCE_LINES:,})!"
+        )
+    elif GLUE_ALLOWANCE_LINES is None:
+        lines.append(
+            f"VERDICT: PASS - Non-Rust glue ({glue_total:,}); no allowance applies."
         )
     else:
         lines.append(
-            f"VERDICT: PASS - Non-Rust glue ({glue_total:,}) is within the 20k allowance."
+            f"VERDICT: PASS - Non-Rust glue ({glue_total:,}) is within the "
+            f"allowance ({GLUE_ALLOWANCE_LINES:,})."
         )
 
     lines.append("================================================================================")
@@ -279,8 +296,8 @@ def main() -> int:
     if args.json:
         stats["verdict"] = {
             "rust_passed": not rust_over_stop(rust_total),
-            "glue_passed": glue_total <= GLUE_ALLOWANCE_LINES,
-            "overall_passed": not rust_over_stop(rust_total) and glue_total <= GLUE_ALLOWANCE_LINES,
+            "glue_passed": not glue_over_allowance(glue_total),
+            "overall_passed": not rust_over_stop(rust_total) and not glue_over_allowance(glue_total),
         }
         print(json.dumps(stats, indent=2))
     else:
@@ -293,7 +310,7 @@ def main() -> int:
                 f"exceed hard stop of {RUST_HARD_STOP_LINES:,} lines.\n"
             )
             return 1
-        if glue_total > GLUE_ALLOWANCE_LINES:
+        if glue_over_allowance(glue_total):
             sys.stderr.write(
                 f"\nOVER_BUDGET_REFUSAL: Non-Rust glue lines ({glue_total:,}) "
                 f"exceed allowance of {GLUE_ALLOWANCE_LINES:,} lines.\n"

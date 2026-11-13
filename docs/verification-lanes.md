@@ -11,7 +11,7 @@ FrankenRemote enforces all build, verification, size discipline, and security bo
 | **Fast** | `./scripts/verify.sh fast` | Formats, checks, lints (`-D warnings`), and tests the entire workspace with all features. |
 | **Docs** | `./scripts/verify.sh docs` | Verifies all Markdown links and presence of required constitutional documents. |
 | **Per-Crate** | `./scripts/verify.sh crate <name> [action]` | Runs checks (`fast`, `check`, `clippy`, `test`, `fmt`) scoped to `crates/<name>`. |
-| **Count** | `./scripts/verify.sh count [--fixture DIR]` | Reports handwritten Rust, generated bindings, non-Rust glue, vendored source, and upstream changes. Enforces line budgets. |
+| **Count** | `./scripts/verify.sh count [--fixture DIR]` | Reports handwritten Rust, generated bindings, non-Rust glue, vendored source, and upstream changes. Refuses only past a stop set in `count.py`; none is set. |
 | **Audit** | `./scripts/verify.sh audit [--fixture DIR]` | Feature-resolved per-target dependency and memory-safety boundary (`#![forbid(unsafe_code)]`) audit. |
 | **Test Fixtures** | `./scripts/verify.sh test-fixtures` | Runs planted over-budget and architectural violation fixtures proving negative detection. |
 | **Full** | `./scripts/verify.sh full` | Runs fast, docs, count, audit, test-fixtures, and UBS static analysis. |
@@ -24,8 +24,8 @@ FrankenRemote enforces all build, verification, size discipline, and security bo
 Per **AGENTS.md Section 3.7** and **Plan Section 22.2**:
 - **Target Handwritten Rust**: 194,000 lines
 - **Planned Maximum**: 240,000 lines
-- **Hard Stop**: 500,000 lines since the owner's 2026-09-24 decision (was 250,000; exceeding triggers `OVER_BUDGET_REFUSAL` and exits 1)
-- **Non-Rust Glue Allowance**: 20,000 lines (JS/Swift/Kotlin/C/Python/shell; exceeding exits 1)
+- **Hard Stop**: none since the owner lifted the 500,000 stop on 2026-11-08 (it was 250,000 before 2026-09-24). A stop set again in `count.py` triggers `OVER_BUDGET_REFUSAL` and exits 1.
+- **Non-Rust Glue Allowance**: none since 2026-11-13 (was 20,000 lines of JS/Swift/Kotlin/C/Python/shell); still counted and reported per extension.
 
 ### Category Accounting
 1. **Handwritten Rust**: All non-generated `.rs` files across project crates and test harnesses.
@@ -40,7 +40,7 @@ Per **AGENTS.md Section 3.7** and **Plan Section 22.2**:
 
 Per **AGENTS.md Sections 3.1, 3.2, 3.5**:
 1. **Memory-Safety Boundary**:
-   - Every workspace crate except the named boundary crate (`fr-native`; `fr-ffi` was deleted on 2026-09-24) must enforce `#![forbid(unsafe_code)]` at its root module (`src/lib.rs` / `src/main.rs`).
+   - Every workspace crate except the named boundary crates (`fr-native`, `fr-winsys`, `fr-windows`, `fr-mobile-ffi`; `fr-ffi` was deleted on 2026-09-24) must enforce `#![forbid(unsafe_code)]` at its root module (`src/lib.rs` / `src/main.rs`).
    - Zero `unsafe` code is permitted outside the named boundary crates.
 2. **One Runtime**:
    - Asupersync is the sole async runtime.
@@ -55,8 +55,8 @@ Per **AGENTS.md Sections 3.1, 3.2, 3.5**:
 ## 4. Planted Negative Fixture Proofs (`scripts/test_verify_lanes.py`)
 
 The verification lane includes automated tests with planted negative fixtures proving that drift is caught:
-1. Planted over-budget Rust fixture (>500,000 lines) triggers `OVER_BUDGET_REFUSAL` (exit 1).
-2. Planted over-budget glue fixture (>20,000 lines) triggers `OVER_BUDGET_REFUSAL` (exit 1).
+1. A Rust fixture past the lifted 500,000 stop is counted exactly and exits 0.
+2. A glue fixture past the lifted 20,000 allowance is counted exactly per extension and exits 0.
 3. Planted `unsafe` usage in a safe crate triggers `AUDIT_REFUSAL` (exit 1).
 4. Planted missing `#![forbid(unsafe_code)]` triggers `AUDIT_REFUSAL` (exit 1).
 5. Planted desktop FFI in a browser target triggers `AUDIT_REFUSAL` (exit 1).
