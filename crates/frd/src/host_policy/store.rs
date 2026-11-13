@@ -243,12 +243,7 @@ struct WriterLock(OwnedFd);
 #[cfg(unix)]
 impl WriterLock {
     fn acquire(dir: &OwnedFd) -> Result<Self, Error> {
-        let lock = fs::openat(
-            dir,
-            LOCK_NAME,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
-            Mode::from_raw_mode(0o600),
-        )?;
+        let lock = Self::open(dir)?;
         regular_private(&lock)?;
         fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|e| {
             if e == rustix::io::Errno::WOULDBLOCK {
@@ -258,6 +253,31 @@ impl WriterLock {
             }
         })?;
         Ok(Self(lock))
+    }
+    /// Opens the lock file, creating it only exclusively. On APFS two writers
+    /// racing a plain `O_CREAT` of one name can get `ENOENT` (11-12: 85% of
+    /// runs of `concurrent_field_updates_never_lose_each_other` on macOS 27);
+    /// an exclusive create gets `EEXIST` instead, and the loser opens the
+    /// winner's.
+    fn open(dir: &OwnedFd) -> Result<OwnedFd, Error> {
+        let flags = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+        for _ in 0..4 {
+            match fs::openat(dir, LOCK_NAME, flags, Mode::empty()) {
+                Err(rustix::io::Errno::NOENT) => {}
+                opened => return Ok(opened?),
+            }
+            match fs::openat(
+                dir,
+                LOCK_NAME,
+                flags | OFlags::CREATE | OFlags::EXCL,
+                Mode::from_raw_mode(0o600),
+            ) {
+                Err(rustix::io::Errno::EXIST) => {}
+                created => return Ok(created?),
+            }
+        }
+        // Created and removed between every pair of opens: not a writer race.
+        Err(Error::Busy)
     }
 }
 #[cfg(unix)]
