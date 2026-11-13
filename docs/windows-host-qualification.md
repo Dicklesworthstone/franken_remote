@@ -49,7 +49,9 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > it, but no lock, user switch or logoff was performed during a share. The
 > Stop sharing window opened at 150% scaling, and a press ended a live share
 > (docs/observation-indicator.md). Trust roots default to the machine's ROOT
-> certificate store. No cursor, audio, service split or HDR path exists.
+> certificate store. The pointer is drawn into each picture (37134e74;
+> timed, not yet checked in a decoded picture). No audio, service split or
+> HDR path exists.
 > Nothing below is qualified.
 >
 > **2026-11-13: remote control is built but has not been run live.**
