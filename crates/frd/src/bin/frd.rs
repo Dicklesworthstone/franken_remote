@@ -143,7 +143,8 @@ OPTIONS:
                     Linux requires --logind-session; macOS always monitors its
                     native console session (screen-lock detection is unqualified)
     --interface IF  Tailscale interface for ingress enforcement (default: tailscale0)
-    --trust-roots P PEM CA bundle for the host certificate chain (default: system)
+    --trust-roots P PEM CA bundle for the host certificate chain (default: system;
+                    Windows: the Local Machine ROOT certificate store)
     --once          Serve one sharing session, then exit
     --encoder NAME  Select 'auto', 'nvenc', 'vaapi' or 'software' explicitly.
                     Auto probes NVENC then VAAPI at startup (15s per candidate),

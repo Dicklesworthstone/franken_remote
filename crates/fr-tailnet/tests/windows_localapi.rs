@@ -2,9 +2,10 @@
 //! named-pipe `LocalAPI` answers the reads a host and a client make, and the
 //! strong host model protects the tunnel's addresses.
 //! Ignored by default; run on that machine with
-//! `cargo test -p fr-tailnet --test windows_localapi -- --ignored`, and
-//! `FR_TEST_ROOTS` naming a PEM bundle with the issuing CA's roots for the
-//! certificate test. Prints counts and timings only, never names or keys.
+//! `cargo test -p fr-tailnet --test windows_localapi -- --ignored`. The
+//! certificate test checks the pair against the machine's `ROOT` store, or
+//! the PEM bundle `FR_TEST_ROOTS` names. Prints counts and timings only,
+//! never names or keys.
 #![cfg(windows)]
 use asupersync::{cx::Cx, runtime::RuntimeBuilder, types::Budget};
 use fr_tailnet::{CertificatePolicy, LocalApi, PeerSelector, ingress, trust};
@@ -64,7 +65,8 @@ fn the_installed_daemon_names_this_node_and_pins_a_peer() {
 #[test]
 #[ignore = "needs the installed Windows tailscaled with HTTPS certificates"]
 fn the_installed_daemon_issues_this_node_its_certificate_pair() {
-    let roots = PathBuf::from(std::env::var_os("FR_TEST_ROOTS").expect("FR_TEST_ROOTS"));
+    let roots = std::env::var_os("FR_TEST_ROOTS")
+        .map_or_else(|| PathBuf::from(trust::SYSTEM_BUNDLE), PathBuf::from);
     let roots = trust::root_store(&roots).expect("roots");
     run(async |cx| {
         let api = LocalApi::installed();

@@ -1,6 +1,8 @@
 //! Locally configured platform trust roots for Tailscale-issued certificates.
-//! Roots always come from a local file chosen by the operator (by default the
-//! distribution CA bundle), never from the contacted peer or `LocalAPI` output.
+//! Roots always come from a local file chosen by the operator or, by default,
+//! the system's own roots (the distribution CA bundle; on Windows the Local
+//! Machine `ROOT` certificate store), never from the contacted peer or
+//! `LocalAPI` output.
 use asupersync::tls::{Certificate, RootCertStore};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
@@ -13,10 +15,15 @@ use std::{
 
 /// Debian/Ubuntu/Arch/Fedora-compatible distribution bundle location. It is a
 /// regular file on Debian/Ubuntu and a symlink into the extracted trust store
-/// on Fedora/RHEL and Arch; see [`resolve_protected`]. Windows has no such
-/// bundle, and [`resolve_protected`] refuses this default there.
-#[cfg(not(target_os = "macos"))]
+/// on Fedora/RHEL and Arch; see [`resolve_protected`].
+#[cfg(not(any(target_os = "macos", windows)))]
 pub const SYSTEM_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+/// Windows has no bundle file: the default is the Local Machine `ROOT`
+/// certificate store (third-party roots Windows installed included), which
+/// only an administrator can change, as only root can change a protected
+/// bundle. Named by the `PowerShell` path that lists it; never a file.
+#[cfg(windows)]
+pub const SYSTEM_BUNDLE: &str = r"Cert:\LocalMachine\Root";
 /// The PEM bundle macOS ships for `LibreSSL` (root-owned, under the
 /// root-owned `/etc` link to `/private/etc`).
 #[cfg(target_os = "macos")]
@@ -69,8 +76,8 @@ pub fn resolve_protected(path: &Path) -> Result<PathBuf, TrustError> {
 }
 
 /// Off Unix there is no root ownership to check, so no path is protected:
-/// the distribution default refuses, and roots must come from a regular file
-/// the operator names (read as on Unix, a symlink refused).
+/// a file the operator names is read as on Unix (a symlink refused), and the
+/// Windows default is the certificate store, not a path.
 #[cfg(not(unix))]
 pub fn resolve_protected(_path: &Path) -> Result<PathBuf, TrustError> {
     Err(TrustError::Unreadable)
@@ -99,8 +106,14 @@ fn protected_directories(dir: &Path) -> Result<(), TrustError> {
 
 /// Parse a bounded PEM bundle. An operator-supplied path must be the regular
 /// file itself (a symlink is refused). Only the distribution default
-/// [`SYSTEM_BUNDLE`] may be a link, followed through [`resolve_protected`].
+/// [`SYSTEM_BUNDLE`] may be a link, followed through [`resolve_protected`];
+/// on Windows that default reads the certificate store, within the same
+/// bounds.
 pub fn read_certificates(path: &Path) -> Result<Vec<Certificate>, TrustError> {
+    #[cfg(windows)]
+    if path == Path::new(SYSTEM_BUNDLE) {
+        return machine_roots();
+    }
     let resolved;
     let path = if path == Path::new(SYSTEM_BUNDLE) {
         resolved = resolve_protected(path)?;
@@ -137,6 +150,23 @@ pub fn read_certificates(path: &Path) -> Result<Vec<Certificate>, TrustError> {
         return Err(TrustError::Invalid);
     }
     Ok(certificates)
+}
+
+/// The Local Machine `ROOT` store's certificates, bounded as a bundle is.
+#[cfg(windows)]
+fn machine_roots() -> Result<Vec<Certificate>, TrustError> {
+    let max_bytes = usize::try_from(MAX_BYTES).unwrap_or(usize::MAX);
+    let roots = fr_winsys::certs::machine_roots(MAX_CERTIFICATES, max_bytes).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::InvalidData {
+            TrustError::TooLarge
+        } else {
+            TrustError::Unreadable
+        }
+    })?;
+    if roots.is_empty() {
+        return Err(TrustError::Invalid);
+    }
+    Ok(roots.into_iter().map(Certificate::from_der).collect())
 }
 
 /// Build a root store from a bundle. Distribution bundles can carry entries the
@@ -298,8 +328,21 @@ mod tests {
     fn no_path_is_protected_without_unix_ownership() {
         let file = temp("unprotected", b"x");
         assert_eq!(resolve_protected(&file).err(), Some(TrustError::Unreadable));
+    }
+
+    /// The Windows default is the machine's `ROOT` store, every entry of it a
+    /// root the TLS stack accepts; the user's own store (which the user can
+    /// add to) is not a default, only a path that names no file.
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_default_reads_the_machine_root_store() {
+        let certificates = read_certificates(Path::new(SYSTEM_BUNDLE)).unwrap();
+        let roots = root_store(Path::new(SYSTEM_BUNDLE)).unwrap();
+        eprintln!("{} certificates, {} roots", certificates.len(), roots.len());
+        assert!(!roots.is_empty());
+        assert!(roots.len() <= certificates.len());
         assert_eq!(
-            read_certificates(Path::new(SYSTEM_BUNDLE)).err(),
+            read_certificates(Path::new(r"Cert:\CurrentUser\Root")).err(),
             Some(TrustError::Unreadable)
         );
     }

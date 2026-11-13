@@ -364,12 +364,7 @@ impl RunOptions {
     #[cfg(windows)]
     #[must_use]
     pub fn windows_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 9] = [
-            (
-                self.trust_roots.is_none(),
-                "trust_roots_unavailable",
-                "Windows has no PEM certificate bundle to default to; pass --trust-roots with an absolute path to one",
-            ),
+        let refusals: [(bool, &str, &str); 8] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",

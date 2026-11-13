@@ -230,10 +230,8 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
         ),
         None
     );
-    assert_eq!(
-        refusal(&[], Approval::None),
-        Some("trust_roots_unavailable")
-    );
+    // Without --trust-roots the machine's ROOT certificate store is used.
+    assert_eq!(refusal(&[], Approval::None), None);
     assert_eq!(
         refusal(&plain, Approval::Local),
         Some("local_approval_unavailable")
