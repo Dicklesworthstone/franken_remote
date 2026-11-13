@@ -85,91 +85,6 @@ mod linux {
         }
     }
 
-    #[cfg(test)]
-    mod mapping_tests {
-        use super::*;
-        use fr_core::ids::CodecConfigurationGeneration;
-        use worker::presentation::{Fit, MappedX11Target, X11Target};
-
-        #[test]
-        fn identity_sampling_still_maps_cursor_from_the_original_display() {
-            let c = Configuration {
-                width: 1920,
-                height: 1080,
-                fps: 30,
-                backend: Backend::SoftwareExplicit,
-                bitrate: 1_000_000,
-                max_access_unit_bytes: 1024 * 1024,
-                generation: CodecConfigurationGeneration::INITIAL,
-            };
-            let target = X11Target::new(1, 1920, 1080).unwrap();
-            let mapped = MappedX11Target::new(target, 5120, 2880).unwrap();
-            let (sample, placement) = Destination::Mapped(mapped)
-                .sampling(c, c.limits().unwrap())
-                .unwrap();
-            assert!(
-                sample.is_none(),
-                "identity sampling must not copy the full picture"
-            );
-            assert_eq!(
-                placement,
-                OverlayPlacement::Fitted {
-                    fit: Fit {
-                        x: 0,
-                        y: 0,
-                        width: 1920,
-                        height: 1080
-                    },
-                    source_width: 5120,
-                    source_height: 2880,
-                }
-            );
-            // Old IPC keeps its original native-pixel cursor contract.
-            for destination in [Destination::Native(target), Destination::Fitted(target)] {
-                let (sample, placement) = destination.sampling(c, c.limits().unwrap()).unwrap();
-                assert!(sample.is_none());
-                assert_eq!(placement, OverlayPlacement::Identity);
-            }
-        }
-
-        #[test]
-        fn rounded_and_shared_pictures_keep_one_immutable_cursor_rectangle() {
-            let target =
-                MappedX11Target::new(X11Target::new(1, 1582, 888).unwrap(), 5120, 2880).unwrap();
-            let mut c = Configuration {
-                width: 1582,
-                height: 888,
-                fps: 30,
-                backend: Backend::SoftwareExplicit,
-                bitrate: 1_000_000,
-                max_access_unit_bytes: 1024 * 1024,
-                generation: CodecConfigurationGeneration::INITIAL,
-            };
-            for (width, height) in [(1582, 888), (640, 360), (5120, 2880)] {
-                c.width = width;
-                c.height = height;
-                let (sample, placement) = Destination::Mapped(target)
-                    .sampling(c, c.limits().unwrap())
-                    .unwrap();
-                assert_eq!(sample.unwrap().placement(), target.fit());
-                assert_eq!(
-                    placement,
-                    OverlayPlacement::Fitted {
-                        fit: target.fit(),
-                        source_width: 5120,
-                        source_height: 2880
-                    }
-                );
-            }
-            c.height = 2882;
-            assert!(
-                Destination::Mapped(target)
-                    .sampling(c, c.limits().unwrap())
-                    .is_err()
-            );
-        }
-    }
-
     // Fixed bounded native inventory stays inline in the single worker owner.
     #[allow(clippy::large_enum_variant)]
     enum Media {
@@ -995,6 +910,91 @@ mod linux {
         }
         // Parent death/pipe closure drops all native owners, even without Stop.
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod mapping_tests {
+        use super::*;
+        use fr_core::ids::CodecConfigurationGeneration;
+        use worker::presentation::{Fit, MappedX11Target, X11Target};
+
+        #[test]
+        fn identity_sampling_still_maps_cursor_from_the_original_display() {
+            let c = Configuration {
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                backend: Backend::SoftwareExplicit,
+                bitrate: 1_000_000,
+                max_access_unit_bytes: 1024 * 1024,
+                generation: CodecConfigurationGeneration::INITIAL,
+            };
+            let target = X11Target::new(1, 1920, 1080).unwrap();
+            let mapped = MappedX11Target::new(target, 5120, 2880).unwrap();
+            let (sample, placement) = Destination::Mapped(mapped)
+                .sampling(c, c.limits().unwrap())
+                .unwrap();
+            assert!(
+                sample.is_none(),
+                "identity sampling must not copy the full picture"
+            );
+            assert_eq!(
+                placement,
+                OverlayPlacement::Fitted {
+                    fit: Fit {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080
+                    },
+                    source_width: 5120,
+                    source_height: 2880,
+                }
+            );
+            // Old IPC keeps its original native-pixel cursor contract.
+            for destination in [Destination::Native(target), Destination::Fitted(target)] {
+                let (sample, placement) = destination.sampling(c, c.limits().unwrap()).unwrap();
+                assert!(sample.is_none());
+                assert_eq!(placement, OverlayPlacement::Identity);
+            }
+        }
+
+        #[test]
+        fn rounded_and_shared_pictures_keep_one_immutable_cursor_rectangle() {
+            let target =
+                MappedX11Target::new(X11Target::new(1, 1582, 888).unwrap(), 5120, 2880).unwrap();
+            let mut c = Configuration {
+                width: 1582,
+                height: 888,
+                fps: 30,
+                backend: Backend::SoftwareExplicit,
+                bitrate: 1_000_000,
+                max_access_unit_bytes: 1024 * 1024,
+                generation: CodecConfigurationGeneration::INITIAL,
+            };
+            for (width, height) in [(1582, 888), (640, 360), (5120, 2880)] {
+                c.width = width;
+                c.height = height;
+                let (sample, placement) = Destination::Mapped(target)
+                    .sampling(c, c.limits().unwrap())
+                    .unwrap();
+                assert_eq!(sample.unwrap().placement(), target.fit());
+                assert_eq!(
+                    placement,
+                    OverlayPlacement::Fitted {
+                        fit: target.fit(),
+                        source_width: 5120,
+                        source_height: 2880
+                    }
+                );
+            }
+            c.height = 2882;
+            assert!(
+                Destination::Mapped(target)
+                    .sampling(c, c.limits().unwrap())
+                    .is_err()
+            );
+        }
     }
 }
 /// The audio role: one locally selected playback monitor, real Opus encode,

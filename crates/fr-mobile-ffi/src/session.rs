@@ -238,9 +238,7 @@ impl Shared {
     /// with no adverse terminal report or local control stop. A resize may
     /// open a new viewing session only after this; control needs a fresh choice.
     pub fn orderly_closed(&self) -> bool {
-        self.finished()
-            && self.end_code() == end::OK
-            && self.orderly_closed.load(Ordering::SeqCst)
+        self.finished() && self.end_code() == end::OK && self.orderly_closed.load(Ordering::SeqCst)
     }
     /// The view is on screen in an active app (not backgrounded, covered or
     /// detached). Frames count as seen only while this holds; losing it

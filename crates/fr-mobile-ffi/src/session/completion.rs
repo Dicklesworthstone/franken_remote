@@ -103,9 +103,10 @@ pub(super) fn ending(
 fn terminal_report(error: ObserverError) -> bool {
     matches!(
         error,
-        ObserverError::Streaming(StreamingViewerError::Control(
-            ControlledViewerError::LeaseRevoked(_)
-        )) | ObserverError::Streaming(StreamingViewerError::Session(Error::RemoteClosed(_)))
+        ObserverError::Streaming(
+            StreamingViewerError::Control(ControlledViewerError::LeaseRevoked(_))
+                | StreamingViewerError::Session(Error::RemoteClosed(_))
+        )
     )
 }
 
@@ -169,5 +170,8 @@ pub(super) fn requested_terminal(error: ObserverError) -> bool {
     }
 }
 
+// frd's mobile_completion test includes this file by #[path], which gives it
+// mod.rs-style child paths; name the file so both crates load these tests.
 #[cfg(test)]
+#[path = "completion/tests.rs"]
 mod tests;

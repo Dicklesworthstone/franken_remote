@@ -15,13 +15,10 @@ fn closed(reason: closure::ClosedReason, cleanup: closure::Cleanup) -> ObserverE
     )))
 }
 
-fn revoked(
-    reason: lease_revoked::Reason,
-    cleanup: lease_revoked::CleanupStage,
-) -> ObserverError {
+fn revoked(reason: lease_revoked::Reason, cleanup: lease_revoked::CleanupStage) -> ObserverError {
     ObserverError::Streaming(StreamingViewerError::Control(
         ControlledViewerError::LeaseRevoked(lease_revoked::Revoked {
-            lease: InputLeaseId::new(19),
+            lease: InputLeaseId::from_raw(19),
             reason,
             cleanup,
             effects: lease_revoked::EffectStage::ReceiptsPending,
@@ -175,7 +172,10 @@ fn cleanup_failures_remain_primary_and_retain_the_original_report() {
             (end::INTERNAL, Some(format!("{failure:?}"))),
         );
         for terminal in adverse() {
-            let detail = format!("{failure:?}; terminal: {:?}", Failure::Observation(terminal));
+            let detail = format!(
+                "{failure:?}; terminal: {:?}",
+                Failure::Observation(terminal)
+            );
             assert_eq!(
                 ending(Err(failure), true, Some(LocalStop::Hidden), Some(terminal)),
                 (end::INTERNAL, Some(detail)),
@@ -212,7 +212,10 @@ fn a_later_local_close_preserves_the_first_control_stop_reason() {
         LocalStop::InputRefused,
         LocalStop::PictureChanged,
     ] {
-        for result in [Ok(()), Err(Failure::Observation(ObserverError::Application))] {
+        for result in [
+            Ok(()),
+            Err(Failure::Observation(ObserverError::Application)),
+        ] {
             for local_close in [false, true] {
                 assert_eq!(
                     ending(result, local_close, Some(stopped), None),
@@ -285,10 +288,7 @@ fn connection_refusals_keep_their_reason_even_after_a_local_close() {
             Failure::Connection(C::Tailnet(T::HandshakeTimeout)),
             end::UNREACHABLE,
         ),
-        (
-            Failure::Connection(C::Tailnet(T::HostBusy)),
-            end::HOST_BUSY,
-        ),
+        (Failure::Connection(C::Tailnet(T::HostBusy)), end::HOST_BUSY),
         (
             Failure::Connection(C::Session(Error::Denied)),
             end::HOST_REFUSED,
