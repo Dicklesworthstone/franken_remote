@@ -15,30 +15,46 @@
 //! On macOS no rule is installed: [`Enforcement::StrongHost`] requires the
 //! kernel's strong destination-address check for the address's family and
 //! rechecks it, with the utun interface, on the same refresh schedule
-//! ([`strong_host`]).
-use super::{LocalApi, NodeIdentity, bounded, now};
+//! ([`strong_host`]). Windows is the same, with its strong host model and
+//! Tailscale's Wintun interface (`strong_host_windows.rs`); it has no rule
+//! and no helper.
+#[cfg(unix)]
+use super::bounded;
+use super::{LocalApi, NodeIdentity, now};
 use crate::Error as IdentityError;
+use asupersync::cx::Cx;
+#[cfg(unix)]
 use asupersync::{
-    cx::Cx,
     io::{AsyncReadExt, AsyncWriteExt},
     process::{Command, Stdio},
 };
 use std::{
     fmt,
-    fs::{self, File},
     future::{Future, poll_fn},
-    io::Read,
     net::{IpAddr, SocketAddr},
-    os::unix::fs::MetadataExt,
-    path::{Path, PathBuf},
     pin::pin,
     sync::{Arc, Mutex, atomic::AtomicBool},
     task::Poll,
     time::Duration,
 };
+#[cfg(unix)]
+use std::{
+    fs::{self, File},
+    io::Read,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
+#[cfg(unix)]
 pub mod helper;
 #[cfg(target_os = "macos")]
 pub mod strong_host;
+#[cfg(windows)]
+#[path = "ingress/strong_host_windows.rs"]
+pub mod strong_host;
+#[cfg(any(windows, test))]
+#[path = "ingress/windows_rules.rs"]
+mod windows_rules;
+#[cfg(unix)]
 const COMMAND_LIMIT: usize = 16 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
@@ -63,9 +79,12 @@ pub enum Error {
     /// connection (and therefore its rule) was lost.
     HelperUnavailable,
     /// The helper answered with this typed refusal; no rule is held for it.
+    #[cfg(unix)]
     HelperRefused(helper::Refusal),
-    /// macOS: the kernel does not enforce the strong destination-address
-    /// check for this family (`check_interface` off or forwarding on).
+    /// macOS and Windows: the kernel does not enforce the strong
+    /// destination-address check for this family (macOS `check_interface`
+    /// off or forwarding on; Windows weak host receive or forwarding on any
+    /// interface).
     StrongHostOff,
 }
 impl fmt::Display for Error {
@@ -118,15 +137,19 @@ impl Protocols {
 pub enum Enforcement {
     /// This process runs the root-owned nft/ip tools itself (root or
     /// `CAP_NET_ADMIN`).
+    #[cfg(unix)]
     Direct,
     /// The root `frd ingress-helper` at this protected socket owns the rule for
     /// exactly the lifetime of the connection this process keeps open.
+    #[cfg(unix)]
     Helper(PathBuf),
-    /// macOS: no rule; the kernel's strong destination-address check, which
-    /// must be in force for the family and stay so (see [`strong_host`]).
-    #[cfg(target_os = "macos")]
+    /// macOS and Windows: no rule; the kernel's strong destination-address
+    /// check, which must be in force for the family and stay so (see
+    /// [`strong_host`]). Windows' only enforcement.
+    #[cfg(any(target_os = "macos", windows))]
     StrongHost,
 }
+#[cfg(unix)]
 impl Enforcement {
     /// Direct when this process holds effective `CAP_NET_ADMIN`; otherwise the
     /// least-privilege helper. Unknown capability state selects the helper.
@@ -140,6 +163,7 @@ impl Enforcement {
 }
 /// Effective `CAP_NET_ADMIN` (bit 12) of this process, from the kernel's own
 /// status file. Nothing is inferred from the user id.
+#[cfg(unix)]
 pub fn net_admin() -> bool {
     fs::read_to_string("/proc/self/status").is_ok_and(|status| effective_net_admin(&status))
 }
@@ -154,7 +178,9 @@ fn effective_net_admin(status: &str) -> bool {
 /// executable, or firewall script. Installed tools must be root-write-only.
 #[derive(Clone)]
 pub struct Configuration {
+    #[cfg(unix)]
     nft: PathBuf,
+    #[cfg(unix)]
     ip: PathBuf,
     interface: String,
     address: SocketAddr,
@@ -176,14 +202,20 @@ impl Configuration {
             return Err(Error::InvalidConfiguration);
         }
         Ok(Self {
+            #[cfg(unix)]
             nft: PathBuf::from("/usr/sbin/nft"),
+            #[cfg(unix)]
             ip: PathBuf::from("/usr/sbin/ip"),
             interface: interface.to_owned(),
             address,
             protocols: Protocols::UDP,
+            #[cfg(unix)]
             enforcement: Enforcement::Direct,
+            #[cfg(windows)]
+            enforcement: Enforcement::StrongHost,
         })
     }
+    #[cfg(unix)]
     pub fn executables(mut self, nft: &Path, ip: &Path) -> Result<Self, Error> {
         self.nft = protected_executable(nft)?;
         self.ip = protected_executable(ip)?;
@@ -197,6 +229,7 @@ impl Configuration {
     }
     /// Select direct administration or the helper socket (default: direct).
     pub fn enforcement(mut self, enforcement: Enforcement) -> Result<Self, Error> {
+        #[cfg(unix)]
         if let Enforcement::Helper(path) = &enforcement {
             helper::socket_path_valid(path)
                 .then_some(())
@@ -225,6 +258,7 @@ fn address_valid(ip: IpAddr) -> bool {
         && !ip.is_loopback()
         && !matches!(ip, IpAddr::V6(v) if v.to_ipv4_mapped().is_some())
 }
+#[cfg(unix)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Leaf {
     Executable,
@@ -235,6 +269,7 @@ enum Leaf {
 }
 /// After resolving symlinks, every ancestor is a root-owned directory that only
 /// root can write, and the leaf is root-owned and of the expected type.
+#[cfg(unix)]
 fn protected(path: &Path, leaf: Leaf) -> Option<PathBuf> {
     use std::os::unix::fs::FileTypeExt;
     if !path.is_absolute() {
@@ -260,9 +295,11 @@ fn protected(path: &Path, leaf: Leaf) -> Option<PathBuf> {
     }
     Some(path)
 }
+#[cfg(unix)]
 fn protected_executable(path: &Path) -> Result<PathBuf, Error> {
     protected(path, Leaf::Executable).ok_or(Error::UntrustedExecutable)
 }
+#[cfg(unix)]
 fn sys_value(interface: &str, field: &str) -> Result<u32, Error> {
     let path = Path::new("/sys/class/net").join(interface).join(field);
     let mut b = [0_u8; 65];
@@ -279,6 +316,7 @@ fn sys_value(interface: &str, field: &str) -> Result<u32, Error> {
         .map_or_else(|| s.parse(), |s| u32::from_str_radix(s, 16))
         .map_err(|_| Error::UnqualifiedInterface)
 }
+#[cfg(unix)]
 fn interface_index(name: &str) -> Result<u32, Error> {
     let index = sys_value(name, "ifindex")?;
     let flags = sys_value(name, "flags")?;
@@ -291,9 +329,11 @@ fn interface_index(name: &str) -> Result<u32, Error> {
     Ok(index)
 }
 
+#[cfg(unix)]
 async fn command(cx: &Cx, image: &Path, args: &[&str], input: &[u8]) -> Result<Vec<u8>, Error> {
     command_within(cx, image, args, input, COMMAND_TIMEOUT).await
 }
+#[cfg(unix)]
 async fn command_within(
     cx: &Cx,
     image: &Path,
@@ -356,9 +396,11 @@ async fn command_within(
 }
 /// Kernel view of one interface: its qualified TUN index and the unprivileged
 /// `ip -j address show` report. Neither value comes from a caller.
+#[cfg(unix)]
 async fn observe(cx: &Cx, ip: &Path, interface: &str) -> Result<(u32, Vec<u8>), Error> {
     observe_within(cx, ip, interface, COMMAND_TIMEOUT).await
 }
+#[cfg(unix)]
 async fn observe_within(
     cx: &Cx,
     ip: &Path,
@@ -399,7 +441,18 @@ fn address_assigned(
             && a["dadfailed"].as_bool() != Some(true)
     }))
 }
+/// Windows: the Wintun interface holding the address (`limit` is the
+/// snapshot's remaining validity; the reads themselves do not wait).
+#[cfg(windows)]
+async fn qualified_interface(
+    cx: &Cx,
+    config: &Configuration,
+    limit: Duration,
+) -> Result<u32, Error> {
+    strong_host::qualified(cx, &config.interface, config.address.ip(), limit).await
+}
 /// `limit` bounds the interface read (`ip`, or `ifconfig` on macOS).
+#[cfg(unix)]
 async fn qualified_interface(
     cx: &Cx,
     config: &Configuration,
@@ -518,9 +571,11 @@ fn validate_rule(
     }
     Ok(())
 }
+#[cfg(unix)]
 async fn read_back(cx: &Cx, nft: &Path, table: &str) -> Result<Vec<u8>, Error> {
     read_back_within(cx, nft, table, COMMAND_TIMEOUT).await
 }
+#[cfg(unix)]
 async fn read_back_within(
     cx: &Cx,
     nft: &Path,
@@ -530,6 +585,7 @@ async fn read_back_within(
     let args = ["-j", "-n", "list", "table", "inet", table];
     command_within(cx, nft, &args, b"", limit).await
 }
+#[cfg(unix)]
 async fn read_rule(
     cx: &Cx,
     config: &Configuration,
@@ -547,6 +603,7 @@ async fn read_rule(
         &config.interface,
     )
 }
+#[cfg(unix)]
 async fn residue_budget(cx: &Cx, config: &Configuration) -> Result<(), Error> {
     let bytes = command(cx, &config.nft, &["-j", "list", "tables", "inet"], b"").await?;
     let value: serde_json::Value =
@@ -568,6 +625,7 @@ async fn residue_budget(cx: &Cx, config: &Configuration) -> Result<(), Error> {
     }
     Ok(())
 }
+#[cfg(unix)]
 fn new_table(prefix: &str) -> Result<String, Error> {
     let mut bytes = [0_u8; 16];
     File::open("/dev/urandom")
@@ -584,12 +642,19 @@ struct State {
     cause: Option<Error>,
     /// A duplicate of the helper connection: the helper keeps the rule until
     /// the LAST lease and the owner are gone, never while a transport lives.
-    keepalive: Option<std::os::unix::net::UnixStream>,
+    keepalive: Option<Keepalive>,
 }
+#[cfg(unix)]
+type Keepalive = std::os::unix::net::UnixStream;
+/// Windows has no helper connection to keep.
+#[cfg(windows)]
+type Keepalive = core::convert::Infallible;
 enum Backend {
+    #[cfg(unix)]
     Direct,
+    #[cfg(unix)]
     Helper(helper::Link),
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     StrongHost,
 }
 enum Refresh {
@@ -689,6 +754,7 @@ impl Boundary {
         let index = qualified_interface(cx, &config, COMMAND_TIMEOUT).await?;
         api.check_node(cx, &node)?;
         let (table, backend, keepalive) = match &config.enforcement {
+            #[cfg(unix)]
             Enforcement::Direct => {
                 residue_budget(cx, &config).await?;
                 let table = new_table("frd_")?;
@@ -701,6 +767,7 @@ impl Boundary {
                 .await?;
                 (table, Backend::Direct, None)
             }
+            #[cfg(unix)]
             Enforcement::Helper(socket) => {
                 let (link, keepalive) = helper::Link::install(cx, socket, &config, index).await?;
                 (
@@ -709,7 +776,7 @@ impl Boundary {
                     Some(keepalive),
                 )
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             Enforcement::StrongHost => (String::new(), Backend::StrongHost, None),
         };
         let mut owner = Self {
@@ -783,8 +850,11 @@ impl Boundary {
             // expiry anyway, so the fixed one-second bound only ended
             // protected sessions early when the task driving this refresh was
             // slow to poll (namespace e2e, fr-jlgm; installed macOS host log).
-            let periodic_owned = matches!(refresh, Refresh::Periodic)
-                && !matches!(&owner.backend, Backend::Helper(_));
+            #[cfg(unix)]
+            let helper = matches!(&owner.backend, Backend::Helper(_));
+            #[cfg(windows)]
+            let helper = false;
+            let periodic_owned = matches!(refresh, Refresh::Periodic) && !helper;
             let cx = owner.lease.cx.clone();
             let limit = |old: &NodeIdentity| -> Result<Duration, Error> {
                 if !periodic_owned {
@@ -816,12 +886,14 @@ impl Boundary {
                 return Err(Error::InterfaceChanged);
             }
             match &mut owner.backend {
+                #[cfg(unix)]
                 Backend::Direct => {
                     let limit = limit(&old)?;
                     read_rule(&owner.lease.cx, &owner.config, &owner.table, index, limit).await?;
                 }
                 // The helper re-qualifies the interface/address and reads the
                 // kernel ruleset as root; its read-back must pass the same check.
+                #[cfg(unix)]
                 Backend::Helper(link) => {
                     let bytes = link.renew(&owner.lease.cx).await?;
                     validate_rule(
@@ -834,7 +906,7 @@ impl Boundary {
                     )?;
                 }
                 // Installation included: the boundary IS this kernel state.
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 Backend::StrongHost => {
                     let limit = limit(&old)?;
                     let ipv6 = owner.config.address.is_ipv6();
@@ -911,6 +983,8 @@ impl Boundary {
     /// Fence at CALL time, then remove only this table after every transport
     /// lease is dropped. InUse/timeout retains a retryable cleanup owner. Even a
     /// successful application result is not proof that it released its sockets.
+    // Windows installs nothing, so has nothing to clean up with `cleanup`.
+    #[cfg_attr(windows, allow(unused_variables))]
     pub fn stop<'a>(&'a mut self, cleanup: &'a Cx) -> impl Future<Output = Result<(), Error>> + 'a {
         self.close();
         async move {
@@ -921,9 +995,11 @@ impl Boundary {
                 return Err(Error::InUse);
             }
             match &mut self.backend {
+                #[cfg(unix)]
                 Backend::Direct => delete_table(cleanup, &self.config.nft, &self.table).await?,
                 // Acknowledged removal by generation; a lost connection is not
                 // reported as verified cleanup (the helper reclaims on its own).
+                #[cfg(unix)]
                 Backend::Helper(link) => {
                     link.remove(cleanup).await?;
                     if let Ok(mut state) = self.lease.state.lock() {
@@ -931,7 +1007,7 @@ impl Boundary {
                     }
                 }
                 // Nothing was installed; the fence above is the whole stop.
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", windows))]
                 Backend::StrongHost => {}
             }
             self.cleaned = true;
@@ -941,6 +1017,7 @@ impl Boundary {
 }
 /// Remove one owned table if present. Existence is read first so a prior
 /// uncertain deletion is retryable; absence needs a well-formed inventory.
+#[cfg(unix)]
 async fn delete_table(cx: &Cx, nft: &Path, table: &str) -> Result<(), Error> {
     let bytes = command(cx, nft, &["-j", "list", "tables", "inet"], b"").await?;
     if table_exists(&bytes, table)? {

@@ -47,7 +47,7 @@ pub use local::{
     NativeServerIdentity, NodeIdentity,
 };
 // Host ingress enforcement: no iOS host.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub use local::ingress;
 // The one dial profile (TLS, ALPN, transport limits) both dialers share.
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "ios", windows))]

@@ -7,12 +7,15 @@ repository.workspace = true
 publish = false
 
 # The Win32 boundary below fr-native: safe wrappers for the safe-Rust crates
-# that need Windows system calls (fr-tailnet's LocalAPI pipe first). Other
-# platforms compile an empty crate.
+# that need Windows system calls (fr-tailnet's LocalAPI pipe and its ingress
+# check's interface reads). Other platforms compile an empty crate.
 [target.'cfg(windows)'.dependencies]
 # The version Cargo.lock already carries for fr-windows and fr-native.
 windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",

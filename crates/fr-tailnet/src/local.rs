@@ -493,5 +493,5 @@ mod lookup_budget;
 #[cfg(target_os = "macos")]
 mod macos;
 
-#[cfg(not(any(target_os = "ios", windows)))]
+#[cfg(not(target_os = "ios"))]
 pub mod ingress;

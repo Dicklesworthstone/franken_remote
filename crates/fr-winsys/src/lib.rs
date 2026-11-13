@@ -4,4 +4,6 @@
 //!
 //! Every unsafe block states the invariant that makes it sound.
 #[cfg(windows)]
+pub mod net;
+#[cfg(windows)]
 pub mod pipe;
