@@ -536,6 +536,10 @@ pub struct Worker {
     /// In-process presentation, retained until its exact blocking task retires.
     local: Option<local::Owner>,
     in_process: bool,
+    /// While a capture worker lives, this process's timed waits (the capture
+    /// cadence) end on time instead of on Windows' 15.625 ms default tick.
+    #[cfg(windows)]
+    _timer: Option<fr_winsys::time::FineTimer>,
 }
 impl fmt::Debug for Worker {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -765,6 +769,8 @@ impl Worker {
             selected: None,
             local: None,
             in_process: false,
+            #[cfg(windows)]
+            _timer: (role == Role::Capture).then(fr_winsys::time::FineTimer::begin),
         };
         if worker.input.is_none() || worker.output.is_none() {
             return Err(Error::PipeFailed);

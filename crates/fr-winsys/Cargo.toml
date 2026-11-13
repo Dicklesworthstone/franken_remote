@@ -13,6 +13,7 @@ publish = false
 # The version Cargo.lock already carries for fr-windows and fr-native.
 windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
+    "Win32_Media",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",

@@ -344,6 +344,8 @@ impl Worker {
             selected: None,
             local: Some(local),
             in_process: true,
+            #[cfg(windows)]
+            _timer: None,
         };
         owner
             .exchange_local(cx, Kind::ConfigureDecoder, body, None, deadline, || {
