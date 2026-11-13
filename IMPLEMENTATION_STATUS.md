@@ -1,5 +1,41 @@
 # Implementation status
 
+## Serial reconnects and cleanup-confirmed host recovery (2026-11-13 UTC)
+
+The capacity-one listener now rebinds its exact protected address set after
+actual original transport destruction and before the existing cooldown. Bounded
+kernel UDP input can retain a reconnect's Initial during that wait. Fresh IDs,
+TLS, installed identity, policy and application admission still start only after
+cooldown. Cancellation and ingress loss close the prebound sockets. This removes
+the deliberate cooldown gap, not the interval while the old transport remains
+retained or the separate multi-client limitation (`fr-w4yu`).
+
+A serial `RetainedTransport` timeout still fences and ends its share. Persistent
+`frd run` can now start a fresh share if the later original source, launch, audio,
+ingress and approval cleanup all succeed. It uses the existing bounded host-fault
+budget and backoff; `--once` preserves the original typed failure. A still-retained
+transport, failed cleanup, or other listener fault cannot use this recovery
+(`fr-kyxt`). See [persistent hosting](LINUX_SERIAL_HOSTING.md).
+
+Four new serial namespace regressions cover immediate IPv4/IPv6 reconnects,
+no early admission, cancellation and ingress loss during cooldown. Four host
+namespace regressions exercise a deliberately retained real `HostSession`,
+actual cleanup, fresh negotiated identities, and refusal on retained transport
+or rule-removal failure. Two ordinary unit cases cover one-shot reporting and
+the shared failure budget. These compose actual owners and UDP/TLS with the
+existing explicit identity/interface/firewall fixtures, not physical GPU or
+installed-tailnet qualification. Both namespace suites now run as independent
+lanes of the existing Rust verification workflow.
+
+At publication, exact pinned formatting, whitespace checks and independent
+source reviews pass. UBS static-only scans of the five changed Rust files report
+zero critical findings; its Cargo phases and AST rule pack were not evaluated.
+Local `cargo check -p frd -p fr-transport --all-targets --locked` stopped with
+SIGKILL in the unchanged pinned Asupersync compiler before checking these crates.
+The local namespace cannot open netlink sockets. Compiler, Clippy and runtime
+verdicts therefore remain pending hosted execution; neither bead is closed on
+source evidence alone.
+
 ## Verification checkpoint for optional-channel expiry (2026-11-12)
 
 Validation used `21393211` (the bead-only update after `8838a919`) plus the

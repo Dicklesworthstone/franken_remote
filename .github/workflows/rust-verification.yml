@@ -104,6 +104,38 @@ jobs:
           subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0]],
               check=True, env=dict(os.environ, FR_NS_SUDO='1'), timeout=240)
           PYTHON
+      - name: Exercise cleanup-confirmed host recovery
+        id: share_retirement
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          cargo test -p frd --all-features --locked --lib --no-run --message-format=json > "$RUNNER_TEMP/retirement-test.json"
+          python3 - <<'PYTHON'
+          import json, os, subprocess
+          from pathlib import Path
+          binaries = []
+          for line in Path(os.environ['RUNNER_TEMP'], 'retirement-test.json').read_text().splitlines():
+              row = json.loads(line)
+              if (row.get('reason') == 'compiler-artifact'
+                      and row.get('profile', {}).get('test')
+                      and row.get('target', {}).get('name') == 'frd'
+                      and row.get('executable')):
+                  binaries.append(os.path.abspath(row['executable']))
+          assert len(binaries) == 1, 'one exact host recovery library test binary required'
+          listed = subprocess.check_output([binaries[0], '--list', '--ignored'], text=True)
+          cases = [
+              'delayed_original_transport_recovers_after_cleanup_into_a_fresh_session',
+              'still_retained_transport_prevents_cleanup_and_any_restart',
+              'failed_rule_cleanup_cannot_turn_a_retirement_timeout_into_a_restart',
+              'cleanup_failures_and_other_listener_faults_remain_terminal',
+          ]
+          for case in cases:
+              test = f'host_run::retirement_tests::{case}'
+              assert listed.splitlines().count(f'{test}: test') == 1, f'host recovery regression must be present: {test}'
+          subprocess.run(['bash', 'scripts/test_linux_serial_lifecycle.sh', binaries[0],
+              'host_run::retirement_tests'], check=True,
+              env=dict(os.environ, FR_NS_SUDO='1'), timeout=240)
+          PYTHON
       - name: Exercise native downloads and complete directory uploads
         id: file_download
         continue-on-error: true
@@ -405,6 +437,7 @@ jobs:
             clippy=${{ steps.clippy.outcome }}
             test=${{ steps.test.outcome }}
             serial_turnover=${{ steps.serial_turnover.outcome }}
+            share_retirement=${{ steps.share_retirement.outcome }}
             file_download=${{ steps.file_download.outcome }}
             system_shortcuts=${{ steps.system_shortcuts.outcome }}
             native_dual_stack=${{ steps.native_dual_stack.outcome }}

@@ -6,6 +6,15 @@ across every attempt: idle acquisition, TLS, post-TLS membership authorization,
 application service, original-transport retirement, cooldown, and rebinding.
 It does not expose a socket or accept a caller's boolean assertion of protection.
 
+After the previous transport is actually destroyed, the next exact-address
+listener is bound before the admission cooldown. Its bounded kernel receive
+queue can retain an immediate reconnect's Initial during that wait; no accept,
+TLS handshake or application admission starts until cooldown completes. Ingress,
+installed identity and current live policy remain requirements across the wait.
+This removes the deliberate unbound interval during cooldown. It does not keep
+listening while the previous transport is still retained, overlap transports or
+provide simultaneous multi-client service.
+
 `Server::bind_linux_addresses` extends the same owner to a fixed set of at most
 eight exact current node addresses. `frd run` supplies the installed node's IPv4
 and IPv6 addresses and installs a separate enforced ingress boundary for each.
@@ -92,6 +101,48 @@ checks that the old PID and ingress retire before a different source child serve
 frame zero to a fresh viewer. These tests have not been executed in this session;
 they do not qualify a physical NVENC driver's delayed teardown or the five-session
 hardware acceptance gate in `fr-kiao`.
+
+## Recovering after a transport-retirement timeout
+
+The serial listener still refuses to bind another socket when its original
+transport survives the two-second retirement bound. It returns the authentic
+`RetainedTransport` failure, preserves the completed peer outcome, and fences
+that share. Cancellation alone never proves the transport destroyed.
+
+The outer `frd run` owner can now recover after its subsequent, independently
+bounded cleanup positively succeeds. Source reaping, retained launch collection,
+audio retirement and ingress removal must all succeed, as must any local approval
+cleanup. Ingress removal refuses while an escaped original transport still holds
+its lease. Thus the later successful cleanup supplies retirement evidence that
+the earlier serial timeout did not have. Only then may a persistent run start a
+fresh share with fresh OS-share/session/connection identities and the existing
+consent, policy and installed-identity checks. No old grant, input action or
+observation session is resumed.
+
+This recovered timeout counts against the same five-consecutive-host-failure
+limit and increasing backoff used for source failures. Alternating source and
+transport failures cannot reset that budget. `--once` returns the original typed
+listener failure after cleanup; it does not retry or relabel the failed share as
+successful. Other listener failures and any failed cleanup remain fatal.
+Selected-session and live-policy outcomes keep precedence over recovery, so a
+restart never revives a retired grant.
+
+The new `host_run::retirement_tests` sources exercise a deliberately retained
+original `HostSession` with actual UDP/TLS, admission and protected ingress
+owners. They require the real serial timeout, then check successful cleanup and
+fresh-session negotiation, continued cleanup refusal while the transport is
+held, and failed rule-removal refusal. Separate cases check the exact one-shot
+error and shared failure budget. Interface/firewall and local identity metadata
+remain explicit namespace fixtures; the tests do not identify which native
+holder caused the reported Windows-to-Linux failure or qualify physical GPU
+teardown. Their execution status is reported separately.
+
+The ignored cases run with the same namespace runner and the compiled **frd
+library test binary**:
+
+```sh
+scripts/test_linux_serial_lifecycle.sh /absolute/path/to/frd-LIB_TEST_HASH host_run::retirement_tests
+```
 
 ## Focused lifecycle verification
 

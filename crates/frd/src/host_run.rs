@@ -822,7 +822,9 @@ enum Ended {
     Peer,
     PolicyChanged,
     GeometryChanged(dispatch::Error),
-    Failed(dispatch::Error),
+    /// A host fault after the original share's complete cleanup. The caller
+    /// applies the existing bounded restart budget; one-shot runs return it.
+    Failed(Error),
     /// The selected session's evidence ended while this share was up.
     Session(session_monitor::Error),
 }
@@ -912,7 +914,20 @@ fn capture_interval(fps: u16) -> Option<Duration> {
         .map(video::Profile::capture_interval)
 }
 
-/// 1s, 2s, 4s ... capped at 30s; wakes early when stop is requested.
+/// One shared restart allowance for source failures and cleanup-confirmed
+/// transport-retirement timeouts. Neither kind can bypass the other's budget.
+fn record_share_failure(once: bool, failures: &mut u32, error: Error) -> Result<(), Error> {
+    if once {
+        return Err(error);
+    }
+    *failures = failures.saturating_add(1);
+    if *failures >= MAX_CONSECUTIVE_FAILURES {
+        return Err(error);
+    }
+    Ok(())
+}
+
+/// Increasing delay capped at 30s; wakes early when stop is requested.
 async fn backoff(cx: &Cx, stop: &StopHandle, failures: u32) {
     let delay = Duration::from_secs(1u64 << failures.min(5)).min(Duration::from_secs(30));
     restart_wait(cx, stop, delay).await;
@@ -1189,13 +1204,7 @@ fn serve_run(
                             restart_wait(&broker, stop, delay).await;
                         }
                         Ended::Failed(error) => {
-                            if options.once {
-                                return Err(Error::Desktop(error));
-                            }
-                            failures += 1;
-                            if failures >= MAX_CONSECUTIVE_FAILURES {
-                                return Err(Error::Desktop(error));
-                            }
+                            record_share_failure(options.once, &mut failures, error)?;
                             backoff(&broker, stop, failures).await;
                         }
                     }
@@ -1715,8 +1724,9 @@ impl Share<'_> {
         failure.map_or(Ok(()), Err)
     }
 
-    /// Outer error: fatal to the host. `Failed`: this share's source failed
-    /// (retried with backoff by the caller). `Peer`: its viewer ended it.
+    /// Outer error: fatal to the host. `Failed`: this share had a host fault
+    /// followed by confirmed cleanup (retried with backoff by the caller).
+    /// `Peer`: its viewer ended it.
     async fn serve(self, broker: &Cx) -> Result<Ended, Error> {
         let epoch = policy::lease_with_approval(self.policy, self.approval.is_some())?;
         let required = approval::required(epoch.as_ref())?;
@@ -1869,8 +1879,23 @@ impl Share<'_> {
         if let Ok(mut slot) = self.active.lock() {
             *slot = None;
         }
-        self.cleanup(&mut driver, &retirement, &audio_retired, &mut linux)
-            .await?;
+        let cleanup = self
+            .cleanup(&mut driver, &retirement, &audio_retired, &mut linux)
+            .await;
+        self.after_cleanup(end, cleanup, epoch.as_ref())
+    }
+
+    /// A listener timeout is not retirement evidence. Only the original
+    /// cleanup's successful source/launch/audio/ingress results permit another
+    /// share; ingress stop refuses while any original transport retains it.
+    /// Original local-session and policy evidence still take precedence.
+    fn after_cleanup(
+        &self,
+        end: End,
+        cleanup: Result<(), Error>,
+        epoch: Option<&crate::host_policy::live::Lease>,
+    ) -> Result<Ended, Error> {
+        cleanup?;
         if let Some(cause) = session_ended(self.lifetime) {
             return Ok(Ended::Session(cause));
         }
@@ -1882,17 +1907,27 @@ impl Share<'_> {
             }
         }
         match end {
+            End::Listener(Err(error @ LinuxError::Serial(serial::Error::RetainedTransport))) => {
+                // The serial listener still ended on its unchanged hard bound.
+                // Full original cleanup has now proved every transport retired;
+                // a persistent run may start a fresh share with new identities.
+                Ok(Ended::Failed(Error::Listener(Box::new(error))))
+            }
             End::Listener(Err(error)) => Err(Error::Listener(Box::new(error))),
             End::DrainExpired => Err(Error::Cleanup("session")),
             End::Desktop(Err(error)) if error.is_geometry_changed() => {
                 Ok(Ended::GeometryChanged(error))
             }
             End::Desktop(Err(error)) if error.is_peer_outcome() => Ok(Ended::Peer),
-            End::Desktop(Err(error)) => Ok(Ended::Failed(error)),
+            End::Desktop(Err(error)) => Ok(Ended::Failed(Error::Desktop(error))),
             End::Desktop(Ok(_)) | End::Listener(Ok(_)) | End::Cancelled => Ok(Ended::Served),
         }
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "host_run/retirement_tests.rs"]
+mod retirement_tests;
 
 #[cfg(test)]
 #[path = "host_run/cleanup_tests.rs"]
