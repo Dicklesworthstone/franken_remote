@@ -60,13 +60,7 @@ impl Display {
     /// Whether `(width, height)` is this display's native size or one of its
     /// canonical scaled pictures.
     pub fn is_picture(&self, width: u32, height: u32) -> bool {
-        let (native_width, native_height) = (self.pixel_width, self.pixel_height);
-        (width, height) == (native_width, native_height)
-            || (width >= 2
-                && width < native_width
-                && width.is_multiple_of(2)
-                && height >= 2
-                && height == scaled_height(native_width, native_height, width))
+        is_picture((self.pixel_width, self.pixel_height), (width, height))
     }
 
     /// Whether a session may carry a picture of `width` x `height` from this
@@ -79,6 +73,23 @@ impl Display {
             (width, height) == (self.pixel_width, self.pixel_height)
         }
     }
+}
+
+/// The canonical picture rule, also used by the private presentation worker
+/// when binding decoded pixels to the original display's input coordinates.
+/// Callers validate resource limits independently; dimensions alone carry no
+/// session, display-selection or input authority.
+pub fn is_picture(display: (u32, u32), picture: (u32, u32)) -> bool {
+    let (native_width, native_height) = display;
+    let (width, height) = picture;
+    native_width != 0
+        && native_height != 0
+        && ((width, height) == (native_width, native_height)
+            || (width >= 2
+                && width < native_width
+                && width.is_multiple_of(2)
+                && height >= 2
+                && height == scaled_height(native_width, native_height, width)))
 }
 
 /// The even height of a picture `width` pixels wide with the display's aspect

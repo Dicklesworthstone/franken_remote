@@ -57,6 +57,8 @@ pub enum Kind {
     CaptureAtRate = 20,
     /// Copy the exact retained presentation named by a bounded identity tuple.
     ReadPresentation = 21,
+    /// Present a canonical scaled picture using the original display's mapping.
+    ConfigureMappedPresentation = 22,
     Ready = 257,
     Unit = 258,
     NeedInput = 259,
@@ -91,6 +93,8 @@ pub enum Kind {
     PresentationPixels = 280,
     /// Routine absence (no frame, mismatch, busy, or export bound).
     PresentationAbsent = 281,
+    /// Exact mapped presentation configuration echo, not visibility evidence.
+    MappedPresentationReady = 282,
 }
 impl Kind {
     fn parse(n: u16) -> Result<Self, Error> {
@@ -116,6 +120,7 @@ impl Kind {
             19 => Self::ReadAudio,
             20 => Self::CaptureAtRate,
             21 => Self::ReadPresentation,
+            22 => Self::ConfigureMappedPresentation,
             257 => Self::Ready,
             258 => Self::Unit,
             259 => Self::NeedInput,
@@ -141,6 +146,7 @@ impl Kind {
             279 => Self::RateUnchanged,
             280 => Self::PresentationPixels,
             281 => Self::PresentationAbsent,
+            282 => Self::MappedPresentationReady,
             _ => return Err(Error::Malformed),
         })
     }
@@ -178,6 +184,12 @@ impl Kind {
             | Self::FittedPresentationReady => {
                 length
                     .checked_sub(presentation::TARGET_BYTES)
+                    .is_some_and(|n| Self::ConfigureDecoder.accepts_length(n, limits))
+                    && length <= limits.max_control_message_bytes() as usize
+            }
+            Self::ConfigureMappedPresentation | Self::MappedPresentationReady => {
+                length
+                    .checked_sub(presentation::MAPPED_TARGET_BYTES)
                     .is_some_and(|n| Self::ConfigureDecoder.accepts_length(n, limits))
                     && length <= limits.max_control_message_bytes() as usize
             }
