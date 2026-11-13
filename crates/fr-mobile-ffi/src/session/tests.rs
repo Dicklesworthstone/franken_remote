@@ -105,6 +105,29 @@ fn input_is_refused_until_control_is_granted() {
 }
 
 #[test]
+fn native_key_capture_cannot_fabricate_a_grant_and_failure_is_typed() {
+    let shared = Shared::new();
+    assert!(matches!(
+        shared.capture_key(0x04, true),
+        Err(InputResult::NotControlled)
+    ));
+    assert!(matches!(
+        shared.capture_key(0, true),
+        Err(InputResult::Invalid)
+    ));
+    shared.set_visible(true);
+    shared.request_control();
+    assert!(shared.want_control.load(Ordering::SeqCst));
+    shared.input_failed();
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert_eq!(
+        LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst)),
+        Some(LocalStop::InputRefused)
+    );
+}
+
+#[test]
 fn releasing_control_closes_the_session_and_stops_any_pending_request() {
     let shared = Shared::new();
     shared.set_visible(true);
@@ -237,8 +260,11 @@ fn the_end_code_says_who_ended_the_session() {
         ending(Err(observed), false, hidden, None).0,
         end::CONTROL_STOPPED
     );
-    // This app's own close stays an orderly end.
-    assert_eq!(ending(Ok(()), true, hidden, None), (end::OK, None));
+    // A later close cannot hide the first local reason control stopped.
+    assert_eq!(
+        ending(Ok(()), true, hidden, None),
+        (end::CONTROL_STOPPED, Some("Hidden".into()))
+    );
     // A refused connection keeps its reason even after a local stop.
     assert_eq!(
         ending(

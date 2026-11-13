@@ -35,7 +35,7 @@ fn capture(receiver: &Receiver, text: &str) {
         event: Event::Text(CommittedText::new(text).unwrap()),
         sampled: ClientInstant(7),
         text_context: Some(original),
-        text_until: None,
+        send_until: None,
     });
 }
 
@@ -144,7 +144,7 @@ fn replacement_does_not_discard_a_preceding_key_release() {
         },
         sampled: ClientInstant(7),
         text_context: None,
-        text_until: None,
+        send_until: None,
     });
     capture(&receiver, "old");
     let replacement = replacements()[2];
@@ -180,7 +180,7 @@ fn completed_commit_expires_at_its_original_bound_despite_same_context_renewal()
         .events
         .front_mut()
         .unwrap()
-        .text_until = Some(ClientInstant(9));
+        .send_until = Some(ClientInstant(9));
     assert!(receiver.front(view(), ClientInstant(8)).unwrap().is_some());
     receiver.publish_context(view(), 0, false, true).unwrap();
     assert!(receiver.front(view(), ClientInstant(9)).unwrap().is_none());
@@ -209,7 +209,7 @@ fn later_commit_cannot_refresh_an_earlier_queued_completion_deadline() {
     assert!(receiver.front(view(), ClientInstant(9)).unwrap().is_none());
     assert_eq!(receiver.suspended(), 1);
     let captured = receiver.front(view(), ClientInstant(9)).unwrap().unwrap();
-    assert_eq!(captured.text_until, Some(ClientInstant(20)));
+    assert_eq!(captured.send_until, Some(ClientInstant(20)));
     assert!(matches!(
         &captured.event,
         Event::Text(text) if text.as_str() == "later"

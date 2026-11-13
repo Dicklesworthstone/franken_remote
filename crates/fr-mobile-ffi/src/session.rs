@@ -12,6 +12,15 @@
 //! contract for a native producer); so do closing, backgrounding and an
 //! invisible view. Ending control ends the session (`CONTROL_STOPPED` when
 //! this device stopped it); viewing again is a new session.
+mod completion;
+mod key_capture;
+
+#[cfg(test)]
+use completion::classify;
+pub use completion::end;
+pub(crate) use completion::tailnet_end;
+use completion::{LocalStop, ending, requested_terminal};
+
 use crate::{
     events::{self, Event, Events, kind, state},
     input::{self, LineScroller},
@@ -45,7 +54,8 @@ use frd::{
         ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
         Presentation, Viewer,
         viewer_events::{
-            Event as InputEvent, Layout, LocalPoint, NativeCapture, PositionedAction, Source,
+            ClientInstant, Event as InputEvent, Layout, LocalPoint, NativeCapture,
+            PositionedAction, Source,
         },
     },
     worker::{Deadline, Launch, LocalPresenter},
@@ -64,49 +74,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// Why a session ended (`FR_END_*` in `include/fr_mobile.h`). Content-free.
-pub mod end {
-    pub const OK: u32 = 0;
-    pub const HOST_CLOSED: u32 = 1;
-    pub const NAME_UNRESOLVED: u32 = 2;
-    pub const OUTSIDE_TAILNET: u32 = 3;
-    pub const IDENTITY_CHANGED: u32 = 4;
-    pub const TLS_REFUSED: u32 = 5;
-    pub const UNREACHABLE: u32 = 6;
-    pub const HOST_REFUSED: u32 = 7;
-    pub const SESSION_FAILED: u32 = 8;
-    pub const CANCELLED: u32 = 9;
-    pub const INTERNAL: u32 = 10;
-    /// Control stopped on this device (the view left the screen, input was
-    /// refused, or the picture changed size), and the session with it.
-    pub const CONTROL_STOPPED: u32 = 11;
-    /// The host is serving another viewer (one at a time).
-    pub const HOST_BUSY: u32 = 12;
-}
-
-/// Why this device stopped control (`CONTROL_STOPPED`'s detail). The first
-/// reason recorded wins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-enum LocalStop {
-    /// The view left the screen (background, a covering system view).
-    Hidden = 1,
-    /// frd refused an input push (a closed or failed source).
-    InputRefused = 2,
-    /// The host's picture changed size, so the attached layout is stale.
-    PictureChanged = 3,
-}
-impl LocalStop {
-    const fn from_code(code: u32) -> Option<Self> {
-        match code {
-            1 => Some(Self::Hidden),
-            2 => Some(Self::InputRefused),
-            3 => Some(Self::PictureChanged),
-            _ => None,
-        }
-    }
-}
-
 /// Input call results (`FR_INPUT_*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputResult {
@@ -122,6 +89,24 @@ pub enum InputResult {
     /// A new press or text was not sent because frd's input queue is backed
     /// up ([`PACED_EVENTS`]); send it again on a later frame.
     Busy,
+}
+
+/// A single key captured from one original grant. Busy retries must retain this
+/// exact value; creating another capture would grant old input a new lifetime.
+/// No Debug: physical keys are content, never diagnostics.
+pub struct CapturedKey {
+    slot: usize,
+    key: fr_core::input::PhysicalKey,
+    pressed: bool,
+    capture: key_capture::Capture,
+}
+impl CapturedKey {
+    /// Charge time already spent in the native event queue. Call once, after
+    /// capture, with the native clock sampled after the source-clock sample.
+    pub fn with_queue_age(mut self, age: Duration) -> Option<Self> {
+        self.capture = self.capture.with_queue_age(age)?;
+        Some(self)
+    }
 }
 
 /// The control request this app makes: the host's grant profile minus
@@ -171,6 +156,7 @@ impl Drop for Capture {
 /// The granted session's event source and the layout it was attached with.
 struct Granted {
     source: Source,
+    opened: ClientInstant,
     layout: Layout,
     picture: (u32, u32),
     stop: Arc<AtomicBool>,
@@ -202,6 +188,9 @@ pub struct Shared {
     local_stop: AtomicU32,
     serving: AtomicBool,
     finished: AtomicBool,
+    /// The original service and bounded cleanup succeeded for a local close.
+    /// Published before `finished`; never inferred from the UI's end code.
+    orderly_closed: AtomicBool,
     picture: Mutex<(u32, u32)>,
     full_range: AtomicBool,
     hardware: AtomicI32,
@@ -225,6 +214,7 @@ impl Shared {
             local_stop: AtomicU32::new(0),
             serving: AtomicBool::new(false),
             finished: AtomicBool::new(false),
+            orderly_closed: AtomicBool::new(false),
             picture: Mutex::new((0, 0)),
             full_range: AtomicBool::new(false),
             hardware: AtomicI32::new(-1),
@@ -243,6 +233,14 @@ impl Shared {
     }
     pub fn finished(&self) -> bool {
         self.finished.load(Ordering::SeqCst)
+    }
+    /// A completed local close whose original service and cleanup succeeded,
+    /// with no adverse terminal report or local control stop. A resize may
+    /// open a new viewing session only after this; control needs a fresh choice.
+    pub fn orderly_closed(&self) -> bool {
+        self.finished()
+            && self.end_code() == end::OK
+            && self.orderly_closed.load(Ordering::SeqCst)
     }
     /// The view is on screen in an active app (not backgrounded, covered or
     /// detached). Frames count as seen only while this holds; losing it
@@ -429,6 +427,87 @@ impl Shared {
             result
         })
     }
+    /// Stamp a native key once, before any busy retry, against this exact input
+    /// source. The native shell then charges its original message-queue age.
+    pub fn capture_key(&self, usage: u16, pressed: bool) -> Result<CapturedKey, InputResult> {
+        let Some((slot, key)) = input::key(usage) else {
+            return Err(InputResult::Invalid);
+        };
+        let mut captured = None;
+        let result = self.with_granted(|g| {
+            if !g.source.capabilities().contains(Capability::Keys) {
+                return InputResult::Unsupported;
+            }
+            let Ok(sampled) = g.source.clock() else {
+                return InputResult::ControlLost;
+            };
+            let Some(capture) = key_capture::Capture::new(
+                &g.stop,
+                g.opened.0,
+                sampled.0,
+                frd::session_startup::viewer_events::MAX_EVENT_AGE_US,
+            ) else {
+                return InputResult::ControlLost;
+            };
+            captured = Some(CapturedKey {
+                slot,
+                key,
+                pressed,
+                capture,
+            });
+            InputResult::Pending
+        });
+        captured.ok_or(result)
+    }
+
+    /// Retry one captured key without a new timestamp, deadline or source.
+    /// Expiry and source replacement fence control, allowing its original
+    /// owner to release held input instead of sending dependent keys late.
+    pub fn captured_key(&self, captured: &CapturedKey) -> InputResult {
+        self.with_granted(|g| {
+            let Ok(now) = g.source.clock() else {
+                return InputResult::ControlLost;
+            };
+            if !captured.capture.current(&g.stop, now.0) {
+                return InputResult::ControlLost;
+            }
+            if g.keys[captured.slot] == captured.pressed {
+                return InputResult::Pending;
+            }
+            if captured.pressed && paced(g) {
+                return InputResult::Busy;
+            }
+            let transition = if captured.pressed {
+                KeyTransition::Press
+            } else {
+                KeyTransition::Release
+            };
+            let (sampled, until) = captured.capture.bounds();
+            match g.source.push_until(
+                InputEvent::Key {
+                    key: captured.key,
+                    transition,
+                },
+                ClientInstant(sampled),
+                ClientInstant(until),
+            ) {
+                Ok(()) => {
+                    g.keys[captured.slot] = captured.pressed;
+                    InputResult::Sent
+                }
+                Err(_) => InputResult::ControlLost,
+            }
+        })
+    }
+
+    /// The native producer lost an ordered event or its original freshness
+    /// bound. Fence first; frd's existing owner performs release-only cleanup.
+    pub fn input_failed(&self) {
+        self.want_control.store(false, Ordering::SeqCst);
+        self.note_local_stop(LocalStop::InputRefused);
+        self.stop_control(Some(LocalStop::InputRefused));
+    }
+
     /// Committed Unicode text, only where the host granted `Text`.
     pub fn text(&self, text: &str) -> InputResult {
         self.with_granted(|g| {
@@ -632,85 +711,15 @@ fn run(shared: &Arc<Shared>, config: Config) {
         runtime.block_on(supervise(&cx, shared, operation))
     };
     publish_pin(shared, client.pin_watch().as_ref());
-    let (code, detail) = ending(
-        result,
-        shared.close.load(Ordering::SeqCst),
-        LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst)),
-        app.terminal_failure(),
-    );
+    let closed = shared.close.load(Ordering::SeqCst);
+    let stopped = LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst));
+    let terminal = app.terminal_failure();
+    let orderly =
+        completion::orderly_closed(result, app.service_succeeded, closed, stopped, terminal);
+    let (code, detail) = ending(result, closed, stopped, terminal);
     shared.frames.clear();
+    shared.orderly_closed.store(orderly, Ordering::SeqCst);
     finish(shared, code, detail);
-}
-
-/// The end code and detail for a finished run. `closed`: this app asked
-/// for the close; `stopped`: this device stopped control first.
-fn ending(
-    result: Result<(), Failure>,
-    closed: bool,
-    stopped: Option<LocalStop>,
-    terminal: Option<ObserverError>,
-) -> (u32, Option<String>) {
-    match (result, stopped) {
-        (Ok(()), _) if closed => (end::OK, None),
-        // This device stopped control, and so ended the session in order
-        // (or its close then failed): never "the host closed".
-        (Ok(()) | Err(Failure::Observation(_)), Some(reason)) => {
-            (end::CONTROL_STOPPED, Some(format!("{reason:?}")))
-        }
-        (Ok(()), None) => (end::HOST_CLOSED, None),
-        (Err(failure), _) => (
-            classify(failure, closed),
-            Some(format!(
-                "{:?}",
-                terminal.map_or(failure, Failure::Observation)
-            )),
-        ),
-    }
-}
-
-/// Content-free classification for the app's message. The exact typed
-/// failure stays available as `fr_session_copy_detail`.
-fn classify(failure: Failure, closed: bool) -> u32 {
-    use frd::native_connection::Error as C;
-    // Cancellation or a served session's end after this app's own close is
-    // the orderly end it asked for. A refused connection keeps its reason.
-    // A close during a reconnect makes the supervisor's status callback
-    // refuse to go on (`Notification`): also the end this app asked for.
-    if closed
-        && matches!(
-            failure,
-            Failure::Cancelled
-                | Failure::Notification
-                | Failure::Observation(_)
-                | Failure::Connection(C::Cancelled)
-        )
-    {
-        return end::OK;
-    }
-    match failure {
-        Failure::Cancelled => end::CANCELLED,
-        Failure::Connection(C::Tailnet(error)) => tailnet_end(error),
-        Failure::Connection(C::Session(_)) => end::HOST_REFUSED,
-        Failure::Observation(_) => end::SESSION_FAILED,
-        _ => end::INTERNAL,
-    }
-}
-
-/// The app's end code for a failed named connection (sessions and the
-/// directory fetch alike).
-pub(crate) const fn tailnet_end(error: fr_tailnet::Error) -> u32 {
-    use fr_tailnet::Error as T;
-    match error {
-        T::NameUnresolved => end::NAME_UNRESOLVED,
-        T::OutsideTailnet => end::OUTSIDE_TAILNET,
-        T::IdentityChanged => end::IDENTITY_CHANGED,
-        // The pinned stack reports a refused server certificate as a
-        // failed native handshake (fr-tailnet's named tests).
-        T::NativeHandshake | T::PeerCertificateRejected => end::TLS_REFUSED,
-        T::HandshakeTimeout | T::NativeRouteIo | T::NativeBind | T::Timeout => end::UNREACHABLE,
-        T::HostBusy => end::HOST_BUSY,
-        _ => end::SESSION_FAILED,
-    }
 }
 
 fn publish_pin(shared: &Shared, watch: Option<&PinWatch>) {
@@ -931,8 +940,10 @@ fn attach(
             let Ok(mut slot) = shared.granted.lock() else {
                 return Err(());
             };
+            let opened = source.clock().map_err(|_| ())?;
             let granted = Granted {
                 source,
+                opened,
                 layout,
                 picture,
                 stop,
@@ -1252,29 +1263,6 @@ impl Application for Mobile {
     fn terminal_failure(&self) -> Option<ObserverError> {
         self.terminal
             .filter(|error| !self.service_succeeded || !requested_terminal(*error))
-    }
-}
-
-/// An expected close the client itself asked for (a released lease or a
-/// session it closed), not an adverse report. Mirrors fr-native's macOS
-/// session.
-fn requested_terminal(error: ObserverError) -> bool {
-    use frd::session_startup::{ControlledViewerError, Error, StreamingViewerError};
-    match error {
-        ObserverError::Streaming(StreamingViewerError::Control(
-            ControlledViewerError::LeaseRevoked(report),
-        )) => {
-            matches!(
-                report.reason,
-                fr_wire::lease_revoked::Reason::ClientRequested
-                    | fr_wire::lease_revoked::Reason::SessionEnded
-            ) && report.cleanup != fr_wire::lease_revoked::CleanupStage::Failed
-        }
-        ObserverError::Streaming(StreamingViewerError::Session(Error::RemoteClosed(report))) => {
-            report.reason == fr_wire::closure::ClosedReason::ClientRequested
-                && report.cleanup != fr_wire::closure::Cleanup::Incomplete
-        }
-        _ => false,
     }
 }
 

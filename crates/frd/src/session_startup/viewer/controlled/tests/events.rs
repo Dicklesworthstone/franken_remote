@@ -237,6 +237,54 @@ fn captured_event_age_survives_encoding_before_transport_backpressure() {
     });
 }
 #[test]
+fn original_native_deadline_survives_source_queue_and_transport_encoding() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture(&client, &host)).await;
+        let mut source = state.viewer.capture_input().unwrap();
+        let sampled = source.clock().unwrap();
+        let until = ClientInstant(sampled.0 + events::MAX_EVENT_AGE_US / 2);
+        source
+            .push_until(physical(KeyTransition::Press), sampled, until)
+            .unwrap();
+        state.viewer.dispatch_captured().unwrap();
+        assert!(state.viewer.pending_send());
+        assert!(
+            state.viewer.pending.as_ref().unwrap().until <= until.0,
+            "encoding must not give a deferred native key another age window"
+        );
+        source.stop();
+        assert!(
+            state
+                .viewer
+                .drive(Duration::ZERO, |_| {}, block)
+                .await
+                .is_err()
+        );
+        assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
+        state.host.close();
+    });
+}
+
+#[test]
+fn an_already_expired_native_key_fences_the_original_source_before_enqueue() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture(&client, &host)).await;
+        let mut source = state.viewer.capture_input().unwrap();
+        let sampled = source.clock().unwrap();
+        assert_eq!(
+            source.push_until(physical(KeyTransition::Press), sampled, sampled),
+            Err(events::Error::Expired)
+        );
+        assert!(state.viewer.is_closed());
+        assert_eq!(
+            source.push(physical(KeyTransition::Press), sampled),
+            Err(events::Error::Closed)
+        );
+        assert_eq!(state.effects.lock().unwrap().operations, [] as [Op; 0]);
+        state.host.close();
+    });
+}
+#[test]
 fn captured_coordinates_cannot_be_reinterpreted_under_a_new_layout() {
     run(|client, host| async move {
         let mut state = Box::pin(fixture(&client, &host)).await;

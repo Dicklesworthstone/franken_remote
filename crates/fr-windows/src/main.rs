@@ -30,6 +30,12 @@ mod geometry;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
 
+// The original capture policy is safe and platform-neutral; exercise it here
+// without compiling the platform session and media bindings.
+#[cfg(test)]
+#[path = "../../fr-mobile-ffi/src/session/key_capture.rs"]
+mod key_capture_policy;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows view <machine>.<tailnet>.ts.net [--port N] [--address IP]... \

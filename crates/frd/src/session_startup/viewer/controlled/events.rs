@@ -2,6 +2,8 @@
 //! never borrows QUIC or holds an authority lock while making native calls.
 mod native;
 #[cfg(test)]
+mod native_deadline_tests;
+#[cfg(test)]
 mod text_context_tests;
 #[cfg(test)]
 mod text_view_tests;
@@ -50,6 +52,7 @@ pub enum Error {
     AlreadyAttached,
     Closed,
     Clock,
+    Expired,
     Overflow,
     Unavailable,
     UnsupportedText,
@@ -119,8 +122,9 @@ struct Captured {
     /// A Unicode commit cannot acquire a replacement view while queued.
     /// Physical positioned events retain their existing checked Layout.
     text_context: Option<TextState>,
-    /// The native commit's original checked send bound, never a renewed ticket.
-    text_until: Option<ClientInstant>,
+    /// An original native send bound, never a renewed ticket. Releases remain
+    /// eligible for cleanup after this bound if the host already holds them.
+    send_until: Option<ClientInstant>,
 }
 struct Queue {
     events: VecDeque<Captured>,
@@ -180,7 +184,7 @@ impl Queue {
             event,
             sampled,
             text_context,
-            text_until: until,
+            send_until: until,
         });
         Ok(())
     }
@@ -405,6 +409,33 @@ impl Source {
         let result = self.push_inner(event, sampled);
         self.finish_capture(result)
     }
+    /// Capture an event with its already established exclusive send deadline.
+    /// Native queues may consume part of the freshness budget before calling
+    /// this method. Neither this source nor transport backpressure renews it.
+    /// A refused capture is terminal, so a lost release triggers held cleanup.
+    pub fn push_until(
+        &mut self,
+        event: Event,
+        sampled: ClientInstant,
+        until: ClientInstant,
+    ) -> Result<(), Error> {
+        let result = (|| {
+            let current = self.clock()?;
+            not_future(sampled, current)?;
+            if until <= current {
+                return Err(Error::Expired);
+            }
+            let latest = sampled
+                .0
+                .checked_add(MAX_EVENT_AGE_US)
+                .ok_or(Error::Clock)?;
+            if until.0 > latest {
+                return Err(Error::Clock);
+            }
+            self.push_bounded(event, sampled, None, Some(until))
+        })();
+        self.finish_capture(result)
+    }
     fn push_inner(&mut self, event: Event, sampled: ClientInstant) -> Result<(), Error> {
         self.push_in_context(event, sampled, None)
     }
@@ -453,6 +484,10 @@ fn not_future(sampled: ClientInstant, current: ClientInstant) -> Result<(), Erro
         .checked_sub(sampled.0)
         .ok_or(Error::Clock)
         .map(|_| ())
+}
+fn native_deadline_expired(captured: &Captured, current: ClientInstant) -> bool {
+    !matches!(captured.event, Event::Text(_))
+        && captured.send_until.is_some_and(|until| current >= until)
 }
 fn aged(sampled: ClientInstant, current: ClientInstant) -> Result<bool, Error> {
     let age = current.0.checked_sub(sampled.0).ok_or(Error::Clock)?;
@@ -562,17 +597,27 @@ impl Receiver {
     pub(super) const fn suspended(&self) -> u64 {
         self.suspended
     }
-    /// Local input older than its dispatch bound is obsolete work (AGENTS.md
-    /// 5), never a reason to end control: an aged press, repeat, motion,
-    /// scroll or text is dropped and counted, never sent late. Cleanup
-    /// (`cleanup`) stays queued and is sent late. Front only, so nothing is
-    /// reordered. A view that awaits its visibility callback holds dispatch,
-    /// so events can age even while the loop runs (fr-1r40).
+    /// Ordinary local input older than its sample-age bound is obsolete work
+    /// (AGENTS.md 5): an aged press, repeat, motion, scroll or text is dropped
+    /// and counted, never sent late. An explicit native send deadline also
+    /// protects ordered dependent keys; losing that event is terminal below.
+    /// Cleanup (`cleanup`) stays queued and is sent late. Front only, so
+    /// nothing is reordered. A view that awaits its visibility callback holds
+    /// dispatch, so events can age even while the loop runs (fr-1r40).
     pub(super) fn expire(
         &mut self,
         current: ClientInstant,
         holds: &impl Fn(Held) -> bool,
     ) -> Result<(), Error> {
+        // A native producer that lost a bounded key cannot continue with
+        // dependent keys under a different modifier state. Text retains its
+        // independent whole-commit refusal; held releases remain cleanup.
+        if let Some(pending) = &self.pending
+            && native_deadline_expired(pending, current)
+            && !cleanup(&pending.event, holds)
+        {
+            return Err(Error::Expired);
+        }
         if let Some(pending) = &self.pending
             && aged(pending.sampled, current)?
             && !cleanup(&pending.event, holds)
@@ -584,6 +629,9 @@ impl Receiver {
         match queue.try_lock() {
             Ok(mut queue) => {
                 while let Some(first) = queue.events.front() {
+                    if native_deadline_expired(first, current) && !cleanup(&first.event, holds) {
+                        return Err(Error::Expired);
+                    }
                     if !aged(first.sampled, current)? || cleanup(&first.event, holds) {
                         break;
                     }
@@ -626,7 +674,8 @@ impl Receiver {
             captured
                 .text_context
                 .is_some_and(|original| original.suspended || original != self.context)
-                || captured.text_until.is_some_and(|until| now >= until)
+                || (matches!(captured.event, Event::Text(_))
+                    && captured.send_until.is_some_and(|until| now >= until))
         }) {
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
             self.note_refused(&event);
@@ -792,7 +841,7 @@ impl ControlledViewer {
                     .checked_add(MAX_EVENT_AGE_US)
                     .ok_or(super::Error::Capture(Error::Clock))?;
                 let deadline = captured
-                    .text_until
+                    .send_until
                     .map_or(deadline, |until| deadline.min(until.0));
                 if deadline > at.0
                     && let Some(pending) = &mut self.pending

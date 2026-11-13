@@ -10,12 +10,15 @@
 //! every key and button this window holds.
 //!
 //! A resize that would change the picture (a finished drag, maximize or
-//! restore) reopens the session stating the new client size, as the macOS
-//! viewer does: the session core states its box once, and the host fits a
+//! restore) can reopen an observing session stating the new client size:
+//! the session core states its box once, and the host fits a
 //! fresh source to each new viewer. Only a host seen scaling gets a reopen:
-//! one that sends native pixels (a Linux host, an older Mac host) would
-//! send the same picture again after seconds without one. Control, if asked
-//! for, is asked for again.
+//! one that sends native pixels would send the same picture again after
+//! seconds without one. Reopen requires successful retirement and the
+//! original requested close; it resumes viewing only. Stopping an active
+//! input source cancels its owner, so controlled resize cannot prove that
+//! orderly close and may terminate instead. Control requires a fresh
+//! explicit invocation, never replay of the earlier --control choice.
 use super::render::Renderer;
 use crate::{
     geometry::{Rect, host_scales, picture_point, reopen_for},
@@ -23,7 +26,7 @@ use crate::{
 };
 use fr_mobile_ffi::{
     events::{Event, kind, state},
-    session::{Config, InputResult, Session, end},
+    session::{CapturedKey, Config, InputResult, Session, end},
     video,
 };
 use std::{
@@ -37,6 +40,7 @@ use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{ScreenToClient, ValidateRect};
 use windows::Win32::Media::MediaFoundation::IMFSample;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -66,7 +70,7 @@ struct Viewer {
     buttons: [bool; 5],
     last_point: (f64, f64),
     /// Key transitions waiting behind a press the session answered `Busy`.
-    keys: keys::Deferred,
+    keys: keys::Deferred<CapturedKey>,
     /// The host's display size (its first VIDEO event).
     display: (u32, u32),
     /// Inside a drag's size/move loop: reopen only once it ends.
@@ -231,7 +235,7 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
 /// stating the current client size, once `REDIAL_PAUSE` has passed. `No`:
 /// no reopen was asked for (or it could not start), so the viewer ends.
 fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reopen {
-    if !v.reopen || v.closing {
+    if !v.reopen || v.closing || !v.session.shared().orderly_closed() {
         return Reopen::No;
     }
     let now = Instant::now();
@@ -241,6 +245,9 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.redial_at = None;
     v.reopen = false;
     let mut next = config.clone();
+    // The earlier input consent ended with its original grant. A resize
+    // may reopen a view but cannot request or restore control automatically.
+    next.control = false;
     let size = client_size(hwnd);
     next.picture = Some(size);
     let Ok(session) = Session::start(next) else {
@@ -262,10 +269,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.dest = None;
     v.picture = (0, 0);
     v.buttons = [false; 5];
-    v.keys.clear();
-    if config.control {
-        v.session.shared().request_control();
-    }
+    v.keys = keys::Deferred::default();
     v.session.shared().set_visible(true);
     Reopen::Started
 }
@@ -575,6 +579,20 @@ fn point_of(lparam: LPARAM) -> (i32, i32) {
     (i32::from(x), i32::from(y))
 }
 
+/// The same suspend-inclusive uptime domain as Win32 message creation time.
+fn input_ticks() -> u64 {
+    // SAFETY: reads an OS clock, with no handle, buffer or thread affinity.
+    unsafe { GetTickCount64() }
+}
+
+fn key_result(result: InputResult) -> Result<bool, ()> {
+    match result {
+        InputResult::Sent | InputResult::Pending => Ok(true),
+        InputResult::Busy => Ok(false),
+        _ => Err(()),
+    }
+}
+
 impl Viewer {
     /// The picture point under `(x, y)`. While a button is held the window
     /// has the mouse captured, and points past the picture's edge clamp to
@@ -592,12 +610,20 @@ impl Viewer {
         picture_point(dest, self.picture, x, y)
     }
     fn pointer(&mut self, x: i32, y: i32) {
+        // Replaceable motion may wait for a busy key; it must not overtake
+        // the key and give frd a newer capture stamp ahead of that key.
+        if !self.after_keys(false) {
+            return;
+        }
         if let Some((px, py)) = self.point(x, y) {
             self.last_point = (px, py);
             let _ = self.session.shared().pointer(px, py);
         }
     }
     fn button(&mut self, hwnd: HWND, index: usize, pressed: bool, x: i32, y: i32) {
+        if !self.after_keys(true) {
+            return;
+        }
         let Some((px, py)) = self.point(x, y) else {
             return;
         };
@@ -617,23 +643,96 @@ impl Viewer {
             }
         }
     }
-    /// A key transition, in order behind any the session deferred.
-    fn key(&mut self, usage: u16, pressed: bool) {
+    /// A key stamped once, in order behind any the session deferred. The
+    /// source clock is sampled before the native age, conservatively charging
+    /// an interrupted sample or a wait for the grant lock to the old event.
+    fn key(&mut self, usage: u16, pressed: bool, message_time: u32) {
+        if self.closing || self.reopen {
+            return;
+        }
         let shared = self.session.shared();
-        self.keys.push(usage, pressed, |usage, pressed| {
-            shared.key(usage, pressed) != InputResult::Busy
-        });
+        let Ok(captured) = shared.capture_key(usage, pressed) else {
+            self.input_failed();
+            return;
+        };
+        let now = input_ticks();
+        let Ok(at) = keys::message_time(message_time, now) else {
+            self.input_failed();
+            return;
+        };
+        let age = Duration::from_millis(now - at + keys::TICK_MARGIN_MS);
+        let Some(captured) = captured.with_queue_age(age) else {
+            self.input_failed();
+            return;
+        };
+        if self
+            .keys
+            .push(captured, at, input_ticks, |captured| {
+                key_result(shared.captured_key(captured))
+            })
+            .is_err()
+        {
+            self.input_failed();
+        }
     }
-    /// Retries deferred key transitions (each loop turn, ~2 ms at most).
+    /// Retry the same captures; neither the native queue nor frd receives a
+    /// fresh deadline when transport pacing releases a slot.
     fn send_keys(&mut self) {
         let shared = self.session.shared();
-        self.keys
-            .drain(|usage, pressed| shared.key(usage, pressed) != InputResult::Busy);
+        if self
+            .keys
+            .drain(input_ticks, |captured| {
+                key_result(shared.captured_key(captured))
+            })
+            .is_err()
+        {
+            self.input_failed();
+        }
+    }
+    /// An ordered button/scroll cannot bypass an unsent key. If the bounded
+    /// source still refuses it, fence and clean up instead of reordering input.
+    fn after_keys(&mut self, ordered: bool) -> bool {
+        if self.closing || self.reopen {
+            return false;
+        }
+        self.send_keys();
+        if self.closing {
+            return false;
+        }
+        if self.keys.is_empty() {
+            return true;
+        }
+        if ordered {
+            self.input_failed();
+        }
+        false
+    }
+    fn scroll(&mut self, dx: f64, dy: f64, x: i32, y: i32) {
+        if !self.after_keys(true) {
+            return;
+        }
+        if let Some((px, py)) = self.point(x, y) {
+            let _ = self.session.shared().scroll(dx, dy, px, py);
+        }
+    }
+    fn input_failed(&mut self) {
+        // Mark the local owner terminal before stopping its source. Dropping
+        // that source wakes frd's independent held-state cleanup; attempting
+        // more keys or re-stamping a release is never the recovery path.
+        self.closing = true;
+        self.reopen = false;
+        self.keys.clear();
+        self.session.shared().input_failed();
+        self.buttons.fill(false);
+        // SAFETY: release only this UI thread's mouse capture, after the
+        // original remote source has been fenced.
+        let _ = unsafe { ReleaseCapture() };
     }
     /// Closes for good: no reopen follows.
     fn close(&mut self) {
         self.closing = true;
         self.reopen = false;
+        self.keys.clear();
         self.session.shared().close();
     }
     /// The client area is now `size` (a drag ended, or a maximize or
@@ -764,31 +863,28 @@ extern "system" fn window_proc(
             let mut point = POINT { x: sx, y: sy };
             // SAFETY: a live window and a writable point.
             let _ = unsafe { ScreenToClient(hwnd, &raw mut point) };
-            with_viewer(|v| {
-                if let Some((px, py)) = v.point(point.x, point.y) {
-                    // Forward (positive) is up; the session's positive y is
-                    // down. A right tilt is positive x.
-                    let (dx, dy) = if message == WM_MOUSEWHEEL {
-                        (0.0, -delta)
-                    } else {
-                        (delta, 0.0)
-                    };
-                    let _ = v.session.shared().scroll(dx, dy, px, py);
-                }
-            });
+            // Forward (positive) is up; the session's positive y is down.
+            // A right tilt is positive x.
+            let (dx, dy) = if message == WM_MOUSEWHEEL {
+                (0.0, -delta)
+            } else {
+                (delta, 0.0)
+            };
+            with_viewer(|v| v.scroll(dx, dy, point.x, point.y));
             true
         }
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let (scan, extended) = key_bits(lparam);
             let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
+            // Read BEFORE peeking at another message for AltGr detection.
+            // SAFETY: the creation time of this thread's current message.
+            let time = unsafe { GetMessageTime() }.cast_unsigned();
             // Bit 30: the key was already down (auto-repeat). The session
             // never sends repeats; the host repeats a held key itself.
             let repeat = pressed && (lparam.0 >> 30) & 1 == 1;
             // The left Ctrl Windows adds around AltGr never reaches the host
             // (keys::synthetic_ctrl); AltGr itself goes as right Alt.
             let synthetic = scan == 0x1D && !extended && {
-                // SAFETY: the time of the message being handled.
-                let time = unsafe { GetMessageTime() }.cast_unsigned();
                 let this = keys::KeyMessage {
                     scan,
                     extended,
@@ -807,7 +903,7 @@ extern "system" fn window_proc(
                     && !repeat
                     && !synthetic
                 {
-                    v.key(usage, pressed);
+                    v.key(usage, pressed, time);
                 }
                 true
             })

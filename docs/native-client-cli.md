@@ -1689,3 +1689,48 @@ harness does not execute socket read/write, native startup or full session
 integration. Real abstract-socket regressions are authored but remain unrun
 because the pinned upstream Asupersync compilation exceeds this environment's
 8 GiB memory limit. This is not a new live-tailnet or physical-display result.
+
+## Windows keyboard lifetime and resize reopening
+
+`fr-windows view HOST --control` forwards physical keys only after the original
+session grants control. A key waiting for input capacity keeps the same source
+identity, capture sample and exclusive send deadline on every retry. Time spent
+in the Win32 message queue consumes that deadline too. Messages created before
+the original grant attached are refused. The native clock includes suspend,
+and wrapping message timestamps are checked before they are used.
+
+The pending keyboard queue holds at most 64 transitions in total, counting
+presses and releases. Its 100 ms freshness budget reserves a 16 ms native timer
+margin. Expiry, overflow, source replacement or enqueue failure ends original
+control and starts its existing held-key/button cleanup; pending presses are
+never carried into another connection. Replaceable pointer motion cannot pass
+a deferred key. If an ordered click or scroll would overtake a still-blocked
+key, the same control fence applies. A prolonged typing backlog therefore ends
+with `control_stopped` and `InputRefused`, instead of appearing later with a
+new deadline. Keyboard contents are not included in diagnostics.
+
+When a host is known to send fitted pictures, resizing an observing Windows
+viewer can reopen it for a different picture size. That reopen now requires
+proof that the original service and bounded cleanup completed after the
+requested local close. A host refusal, local input stop, cleanup failure or
+adverse retained terminal report prevents the reopen and remains visible in
+the completion result. Closing an active input source immediately fences its
+original owner; the resulting cancellation does not prove orderly retirement,
+so a controlled resize may terminate the session instead of reopening it. Every
+automatic resize reopen requests viewing only. To start again with control,
+make a fresh explicit `fr-windows view HOST --control` invocation.
+
+The portable `fr-windows` tests exercise the production keyboard queue and
+source-bound capture policy, including timestamp wrap, future timestamps,
+pre-grant events, suspend, exact expiry, queue pressure and refused sends.
+The `frd` native-deadline tests cover the production captured-event queue and
+original deadline propagation through input encoding. Completion-policy tests
+cover local-close races and preservation of earlier terminal outcomes. These
+checks do not qualify native Windows message delivery, D3D presentation or a
+live controlled desktop; those remain separate platform runs.
+
+The clock-domain interpretation follows Microsoft's
+[Windows time](https://learn.microsoft.com/en-us/windows/win32/sysinfo/windows-time)
+and [GetMessageTime](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getmessagetime)
+contracts. The authority and cleanup requirements are plan sections 6.3, 7.3
+and 15.1.
