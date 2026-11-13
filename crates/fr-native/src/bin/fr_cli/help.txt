@@ -76,10 +76,11 @@ Refusals/unstarted peers/omissions stay visible; timeout cannot prove offline.
 --trust-roots defaults to /etc/ssl/certs/ca-certificates.crt; --worker defaults
 to fr-media-worker beside fr. Each connection rechecks identity and strict TLS.
 Displays requires configured host approval. --display only refuses multiple
-displays; choose opens a chooser per approved connection. On Linux, --fit uses CPU
-nearest-neighbour fitting in a fixed local window. On macOS, it bounds AppKit
-content points with Metal aspect fitting. Remote size is unchanged.
-Omit it for native pixels. Set local XAUTHORITY when required.
+displays; choose opens a chooser per approved connection. Linux --fit bounds
+physical window pixels and requests smaller video from scaling-capable hosts;
+CPU sampling preserves display/input coordinates. On macOS, it bounds AppKit
+content points with Metal aspect fitting. The remote desktop size is unchanged.
+Set local XAUTHORITY when required.
 Native transport/media remain unqualified. Close the window/Ctrl-C to stop.
 
 Native machine picker:

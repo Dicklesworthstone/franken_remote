@@ -67,13 +67,25 @@ fn scaling_preserves_all_channels_and_rewrites_every_target_pixel() {
 }
 
 #[test]
-#[should_panic(expected = "width != 0 && width <= source.len()")]
+#[should_panic(expected = "width != 0 && !source.is_empty()")]
 fn an_empty_output_cannot_enter_the_downscale_kernel() {
     scale_row(&[[0; 4]], &mut []);
 }
 
 #[test]
-#[should_panic(expected = "width != 0 && width <= source.len()")]
-fn an_upscale_cannot_enter_the_downscale_kernel() {
-    scale_row(&[[0; 4]], &mut [[0; 4]; 2]);
+#[should_panic(expected = "width != 0 && !source.is_empty()")]
+fn an_empty_source_cannot_enter_the_sampling_kernel() {
+    scale_row(&[], &mut [[0; 4]; 2]);
+}
+
+#[test]
+fn shared_picture_upscales_match_independent_division_without_touching_guards() {
+    for source in 1..=128_u32 {
+        for target in source + 1..=256 {
+            compare(source, usize::try_from(target).unwrap());
+        }
+    }
+    for (source, target) in [(640, 1920), (1000, 1578), (1582, 1920), (2, 8192)] {
+        compare(source, target);
+    }
 }

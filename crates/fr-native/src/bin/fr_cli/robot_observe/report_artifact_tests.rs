@@ -180,3 +180,19 @@ fn screenshots_match_the_actual_clamped_viewport_for_oversized_and_mixed_fit_bou
         assert!(path.is_file());
     }
 }
+
+#[test]
+fn odd_display_snapshot_uses_the_actual_even_target_and_keeps_original_geometry() {
+    let (mut request, path) = request(true);
+    request.connection.fit_window = Some((64, 64));
+    let mut original = observation(PresentationStage::SubmittedToCompositor);
+    original.display.pixel_width = 33;
+    original.display.pixel_height = 25;
+    let value = render(&request, Some(original), None, None, Some(image(0, 32, 24))).unwrap();
+    let report: Value = serde_json::from_str(&value).unwrap();
+    assert_eq!(report["data"]["artifact"]["pixel_width"], 32);
+    assert_eq!(report["data"]["artifact"]["pixel_height"], 24);
+    assert_eq!(report["data"]["display"]["pixel_width"], 33);
+    assert_eq!(report["data"]["display"]["pixel_height"], 25);
+    assert!(path.is_file());
+}

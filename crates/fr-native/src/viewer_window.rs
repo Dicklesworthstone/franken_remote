@@ -549,6 +549,26 @@ impl ViewerWindow {
             .and_then(|launch| launch.present_fitted_in(target))
             .map_err(Error::Launch)
     }
+    /// Bind the original selected display to this immutable local target. A
+    /// scaled decoded picture supplies samples; rendering, input and cursor
+    /// coordinates continue to use the original display-space rectangle.
+    pub fn mapped_decoder_launch(
+        &self,
+        image: &Path,
+        xauthority: Option<&Path>,
+        epoch: u128,
+        display: fr_wire::display::Display,
+    ) -> Result<Launch, Error> {
+        let mapping = fr_media::worker::presentation::MappedX11Target::new(
+            self.control.target()?,
+            display.pixel_width,
+            display.pixel_height,
+        )
+        .map_err(|_| Error::InvalidSize)?;
+        Launch::new(image, &self.display, xauthority, Role::Present, epoch)
+            .and_then(|launch| launch.present_mapped_in(mapping))
+            .map_err(Error::Launch)
+    }
     /// Nonblocking and idempotent. Some proves only this native thread ended,
     /// not remote key release, decoder cleanup, or physical pixel erasure.
     pub fn finish(&mut self) -> Option<StopReason> {

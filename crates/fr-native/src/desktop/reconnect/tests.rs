@@ -214,6 +214,46 @@ impl Ui for SummaryUi {
 }
 
 #[test]
+fn picture_box_comes_only_from_the_current_fit_preference_after_retirement() {
+    let mut session = Session::new(
+        Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap(),
+        ObserverPolicy::default(),
+        Mode::Observe,
+        SummaryUi::default(),
+    );
+    // A caller's box cannot change a native-pixel renderer's interpretation.
+    assert_eq!(
+        Application::picture(&mut session, 1, Some((1920, 1080))),
+        None
+    );
+    session.configuration.fit_window = Some((1000, 750));
+    assert_eq!(
+        Application::picture(&mut session, 1, None),
+        Some((1000, 750))
+    );
+    assert!(session.desktop.is_none());
+    session.prepare_attempt(1).unwrap();
+    assert_eq!(Application::picture(&mut session, 2, None), None);
+    session.desktop.as_mut().unwrap().close();
+    assert_eq!(Application::picture(&mut session, 2, None), None);
+    // Model positive cleanup; existing resize tests check every native receipt.
+    session.desktop = None;
+    session.configuration.fit_window = Some((1582, 888));
+    assert_eq!(
+        Application::picture(&mut session, 2, None),
+        Some((1582, 888))
+    );
+    assert_eq!(session.configuration(2).unwrap().worker_epoch, 72);
+    for attempt in [0, 1, 33] {
+        assert_eq!(Application::picture(&mut session, attempt, None), None);
+    }
+    session.configuration.fit_window = Some((62, 64));
+    assert_eq!(Application::picture(&mut session, 2, None), None);
+    session.configuration.fit_window = Some((64, 64));
+    assert_eq!(Application::picture(&mut session, 2, None), Some((64, 64)));
+}
+
+#[test]
 fn cleanup_summary_is_informational_and_keeps_the_original_stop_on_failure() {
     // No native owner is started. This checks the real callback ordering and
     // exact metadata/result propagation, not an OS cleanup receipt.

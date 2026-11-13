@@ -4,8 +4,9 @@
 
 pub(super) fn scale_row(source: &[[u8; 4]], target: &mut [[u8; 4]]) {
     let width = target.len();
-    // The caller has already validated a nonempty, downwards-only Fit.
-    assert!(width != 0 && width <= source.len());
+    // Both buffers were bounded before allocation. Shared-source pictures may
+    // be smaller than the original display-space rectangle they must fill.
+    assert!(width != 0 && !source.is_empty());
     if width == source.len() {
         target.copy_from_slice(source);
         return;

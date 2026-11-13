@@ -124,6 +124,7 @@ pub struct Launch {
     epoch: u128,
     target: Option<worker::presentation::X11Target>,
     fit_target: bool,
+    mapped_target: Option<worker::presentation::MappedX11Target>,
     retirement: Option<retirement::Registration>,
     local: Option<Box<dyn LocalPresenter>>,
 }
@@ -155,6 +156,7 @@ impl Launch {
             epoch,
             target: None,
             fit_target: false,
+            mapped_target: None,
             retirement: None,
             local: None,
         })
@@ -184,6 +186,7 @@ impl Launch {
             epoch,
             target: None,
             fit_target: false,
+            mapped_target: None,
             retirement: None,
             local: None,
         })
@@ -202,6 +205,7 @@ impl Launch {
             epoch,
             target: None,
             fit_target: false,
+            mapped_target: None,
             retirement: None,
             local: Some(presenter),
         })
@@ -233,6 +237,17 @@ impl Launch {
     pub fn present_fitted_in(self, target: worker::presentation::X11Target) -> Result<Self, Error> {
         let mut launch = self.present_in(target)?;
         launch.fit_target = true;
+        Ok(launch)
+    }
+    /// Fit against the original display's pixel dimensions while sampling a
+    /// separately validated canonical encoded picture. The exact target and
+    /// display mapping are echoed before startup can publish the worker.
+    pub fn present_mapped_in(
+        self,
+        target: worker::presentation::MappedX11Target,
+    ) -> Result<Self, Error> {
+        let mut launch = self.present_in(target.target())?;
+        launch.mapped_target = Some(target);
         Ok(launch)
     }
     /// One-shot startup probe of the locally selected encoder (`nvenc`,
@@ -521,6 +536,11 @@ impl Worker {
         deadline: Deadline,
         live: impl FnMut() -> Result<Time, E> + Clone + Send + 'static,
     ) -> Result<Self, E> {
+        if launch.mapped_target.is_some() {
+            // This target requires an admitted decoder record and its distinct
+            // configuration echo; the generic bootstrap cannot discard it.
+            return Err(Error::Protocol(worker::Error::WrongState).into());
+        }
         let body = configuration.encode().map_err(Error::from)?;
         Self::start_with_body(
             cx,
@@ -586,6 +606,13 @@ impl Worker {
             return Self::start_local(cx, launch, configuration, record, deadline).await;
         }
         let (kind, body) = match launch.target {
+            Some(_) if launch.mapped_target.is_some() => (
+                Kind::ConfigureMappedPresentation,
+                launch
+                    .mapped_target
+                    .expect("mapped target checked")
+                    .encode_decoder(configuration, record)?,
+            ),
             Some(target) if launch.fit_target => (
                 Kind::ConfigureFittedPresentation,
                 target.encode_fitted_decoder(configuration, record)?,
@@ -622,6 +649,7 @@ impl Worker {
             Kind::ConfigureDecoder => Kind::DecoderReady,
             Kind::ConfigurePresentation => Kind::PresentationReady,
             Kind::ConfigureFittedPresentation => Kind::FittedPresentationReady,
+            Kind::ConfigureMappedPresentation => Kind::MappedPresentationReady,
             _ => Kind::Ready,
         };
         match result {
@@ -648,6 +676,7 @@ impl Worker {
             epoch,
             target: _, // Already bound into the immutable private configuration.
             fit_target: _,
+            mapped_target: _,
             retirement,
             local,
         } = launch;
@@ -1045,6 +1074,7 @@ fn allowed_reply(request: Kind, reply: Kind) -> bool {
             Kind::ConfigureDecoder => reply == Kind::DecoderReady,
             Kind::ConfigurePresentation => reply == Kind::PresentationReady,
             Kind::ConfigureFittedPresentation => reply == Kind::FittedPresentationReady,
+            Kind::ConfigureMappedPresentation => reply == Kind::MappedPresentationReady,
             Kind::Capture => matches!(reply, Kind::Unit | Kind::NeedInput | Kind::NeedDrain),
             Kind::CaptureIfChanged => matches!(
                 reply,

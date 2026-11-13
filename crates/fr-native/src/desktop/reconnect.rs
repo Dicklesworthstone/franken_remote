@@ -375,6 +375,17 @@ async fn serve_control(
 }
 impl<U: Ui> Application for Session<U> {
     type Output = ();
+    fn picture(&mut self, attempt: u8, _original: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        // Only the original UI's fit preference describes this renderer. A
+        // checked resize replaces it after cleanup, before the next attempt.
+        // Tiny local windows retain native pictures and sample locally.
+        if !(1..=32).contains(&attempt) || attempt <= self.last_attempt || self.desktop.is_some() {
+            return None;
+        }
+        self.configuration.fit_window.filter(|(width, height)| {
+            (*width).min(*height) >= fr_wire::display::picture::MIN_BOX_PIXELS
+        })
+    }
     fn offer(&mut self, attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
         if !(1..=32).contains(&attempt) || attempt <= self.last_attempt || self.desktop.is_some() {
             return Err(CallbackError);

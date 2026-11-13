@@ -66,9 +66,10 @@ impl Configuration {
         })
     }
     /// Explicit maximum window size in physical pixels. The full remote image
-    /// is aspect-fit with nearest-neighbour CPU sampling and opaque black bars;
-    /// native resolution is unchanged and no input is granted. Actual window
-    /// dimensions are capped at the selected image to forbid upscaling.
+    /// is aspect-fit with nearest-neighbour CPU sampling and opaque black bars.
+    /// The reconnect supervisor requests smaller pictures from scaling-capable
+    /// hosts. Display coordinates stay unchanged and no input is granted.
+    /// Actual window dimensions never exceed the original selected display.
     pub fn with_fitted_window(mut self, width: u32, height: u32) -> Result<Self, Error> {
         fr_media::worker::presentation::X11Target::new(1, width, height)
             .map_err(|_| Error::Window(viewer_window::Error::InvalidSize))?;
@@ -734,11 +735,17 @@ impl Desktop {
                 // evidence, not an inference from a missing worker handle.
                 *renderer_started = true;
                 let result = async {
-                    let (width, height) = configuration
+                    let (mut width, mut height) = configuration
                         .fit_window
                         .map_or((display.pixel_width, display.pixel_height), |(w, h)| {
                             (w.min(display.pixel_width), h.min(display.pixel_height))
                         });
+                    if configuration.fit_window.is_some() || configuration.clipboard_space {
+                        // An odd original display still has an exact input
+                        // space; only the local BGRA target needs even axes.
+                        width &= !1;
+                        height &= !1;
+                    }
                     *window = Some(if configuration.clipboard_space {
                         ViewerWindow::start_with_clipboard_space(
                             &configuration.display,
@@ -753,10 +760,11 @@ impl Desktop {
                     window.ready().await?;
                     let launch =
                         if configuration.fit_window.is_some() || configuration.clipboard_space {
-                            window.fitted_decoder_launch(
+                            window.mapped_decoder_launch(
                                 &configuration.image,
                                 configuration.xauthority.as_deref(),
                                 configuration.worker_epoch,
+                                display,
                             )?
                         } else {
                             window.decoder_launch(
@@ -1324,7 +1332,7 @@ fn check_fitted_layout(
 ) -> Result<(), Error> {
     use fr_client::input::viewport::SurfaceRect;
     use fr_core::input::{DesktopPoint, InputBounds};
-    use fr_media::worker::presentation::{Fit, X11Target};
+    use fr_media::worker::presentation::{MappedX11Target, X11Target};
     let source = InputBounds::new(
         DesktopPoint {
             x: display.x,
@@ -1336,8 +1344,9 @@ fn check_fitted_layout(
     .ok_or(Error::LayoutMismatch)?;
     let target = X11Target::new(window.id, window.width, window.height)
         .map_err(|_| Error::LayoutMismatch)?;
-    let fit = Fit::new(display.pixel_width, display.pixel_height, target)
-        .map_err(|_| Error::LayoutMismatch)?;
+    let fit = MappedX11Target::new(target, display.pixel_width, display.pixel_height)
+        .map_err(|_| Error::LayoutMismatch)?
+        .fit();
     let destination = SurfaceRect::new(
         i32::try_from(fit.x).map_err(|_| Error::LayoutMismatch)?,
         i32::try_from(fit.y).map_err(|_| Error::LayoutMismatch)?,

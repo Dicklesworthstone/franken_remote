@@ -172,7 +172,7 @@ fn save_artifact(
         .connection
         .fit_window
         .map_or(source, |(width, height)| {
-            (width.min(source.0), height.min(source.1))
+            (width.min(source.0) & !1, height.min(source.1) & !1)
         });
     if stamp.frame != observation.completion.frame
         || observation.completion.stage != PresentationStage::SubmittedToCompositor

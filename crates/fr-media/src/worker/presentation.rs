@@ -143,7 +143,7 @@ impl MappedX11Target {
     ) -> Result<(), Error> {
         limits
             .validate_coded_dimensions(width, height)
-            .and_then(|_| limits.validate_coded_dimensions(self.target.width, self.target.height))
+            .and_then(|()| limits.validate_coded_dimensions(self.target.width, self.target.height))
             .map_err(|_| Error::ResourceLimit)?;
         if width < 16
             || height < 16

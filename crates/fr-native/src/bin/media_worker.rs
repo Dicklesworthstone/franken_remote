@@ -35,6 +35,141 @@ mod linux {
         stamp: Stamp,
     }
 
+    #[derive(Clone, Copy)]
+    enum Destination {
+        Native(worker::presentation::X11Target),
+        Fitted(worker::presentation::X11Target),
+        Mapped(worker::presentation::MappedX11Target),
+    }
+    impl Destination {
+        fn target(self) -> worker::presentation::X11Target {
+            match self {
+                Self::Native(target) | Self::Fitted(target) => target,
+                Self::Mapped(target) => target.target(),
+            }
+        }
+        fn sampling(
+            self,
+            configuration: Configuration,
+            limits: ProtocolLimits,
+        ) -> Result<(Option<FittedFrame>, OverlayPlacement), Error> {
+            let (width, height) = (configuration.width, configuration.height);
+            match self {
+                Self::Native(_) => Ok((None, OverlayPlacement::Identity)),
+                Self::Fitted(target) => {
+                    let fitted =
+                        FittedFrame::for_viewport(width, height, target, limits).map_err(native)?;
+                    let placement = fitted.as_ref().map_or(OverlayPlacement::Identity, |frame| {
+                        OverlayPlacement::Fitted {
+                            fit: frame.placement(),
+                            source_width: width,
+                            source_height: height,
+                        }
+                    });
+                    Ok((fitted, placement))
+                }
+                Self::Mapped(target) => {
+                    let fitted = FittedFrame::for_mapped_viewport(width, height, target, limits)
+                        .map_err(native)?;
+                    let (source_width, source_height) = target.display_size();
+                    Ok((
+                        fitted,
+                        OverlayPlacement::Fitted {
+                            fit: target.fit(),
+                            source_width,
+                            source_height,
+                        },
+                    ))
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod mapping_tests {
+        use super::*;
+        use fr_core::ids::CodecConfigurationGeneration;
+        use worker::presentation::{Fit, MappedX11Target, X11Target};
+
+        #[test]
+        fn identity_sampling_still_maps_cursor_from_the_original_display() {
+            let c = Configuration {
+                width: 1920,
+                height: 1080,
+                fps: 30,
+                backend: Backend::SoftwareExplicit,
+                bitrate: 1_000_000,
+                max_access_unit_bytes: 1024 * 1024,
+                generation: CodecConfigurationGeneration::INITIAL,
+            };
+            let target = X11Target::new(1, 1920, 1080).unwrap();
+            let mapped = MappedX11Target::new(target, 5120, 2880).unwrap();
+            let (sample, placement) = Destination::Mapped(mapped)
+                .sampling(c, c.limits().unwrap())
+                .unwrap();
+            assert!(
+                sample.is_none(),
+                "identity sampling must not copy the full picture"
+            );
+            assert_eq!(
+                placement,
+                OverlayPlacement::Fitted {
+                    fit: Fit {
+                        x: 0,
+                        y: 0,
+                        width: 1920,
+                        height: 1080
+                    },
+                    source_width: 5120,
+                    source_height: 2880,
+                }
+            );
+            // Old IPC keeps its original native-pixel cursor contract.
+            for destination in [Destination::Native(target), Destination::Fitted(target)] {
+                let (sample, placement) = destination.sampling(c, c.limits().unwrap()).unwrap();
+                assert!(sample.is_none());
+                assert_eq!(placement, OverlayPlacement::Identity);
+            }
+        }
+
+        #[test]
+        fn rounded_and_shared_pictures_keep_one_immutable_cursor_rectangle() {
+            let target =
+                MappedX11Target::new(X11Target::new(1, 1582, 888).unwrap(), 5120, 2880).unwrap();
+            let mut c = Configuration {
+                width: 1582,
+                height: 888,
+                fps: 30,
+                backend: Backend::SoftwareExplicit,
+                bitrate: 1_000_000,
+                max_access_unit_bytes: 1024 * 1024,
+                generation: CodecConfigurationGeneration::INITIAL,
+            };
+            for (width, height) in [(1582, 888), (640, 360), (5120, 2880)] {
+                c.width = width;
+                c.height = height;
+                let (sample, placement) = Destination::Mapped(target)
+                    .sampling(c, c.limits().unwrap())
+                    .unwrap();
+                assert_eq!(sample.unwrap().placement(), target.fit());
+                assert_eq!(
+                    placement,
+                    OverlayPlacement::Fitted {
+                        fit: target.fit(),
+                        source_width: 5120,
+                        source_height: 2880
+                    }
+                );
+            }
+            c.height = 2882;
+            assert!(
+                Destination::Mapped(target)
+                    .sampling(c, c.limits().unwrap())
+                    .is_err()
+            );
+        }
+    }
+
     // Fixed bounded native inventory stays inline in the single worker owner.
     #[allow(clippy::large_enum_variant)]
     enum Media {
@@ -49,6 +184,9 @@ mod linux {
             /// Recovery identity of the last accepted IDR, inherited by P pictures.
             recovery: Option<RecoveryGeneration>,
             fitted: Option<FittedFrame>,
+            /// Original display-space mapping, even when no sampling copy is
+            /// needed. Cursor coordinates never use rounded codec dimensions.
+            placement: OverlayPlacement,
             /// The single client-rendered remote cursor (parent-supplied state).
             overlay: CursorOverlay,
             /// Last presented 1:1 picture, retained so a cursor move on a static
@@ -59,16 +197,6 @@ mod linux {
             /// Reference-only decoding and cursor movement never replace it.
             presented: Option<Stamp>,
         },
-    }
-    fn placement(fitted: Option<&FittedFrame>) -> OverlayPlacement {
-        fitted.map_or(OverlayPlacement::Identity, |f| {
-            let (source_width, source_height) = f.source();
-            OverlayPlacement::Fitted {
-                fit: f.placement(),
-                source_width,
-                source_height,
-            }
-        })
     }
     fn native(e: NativeError) -> Error {
         match e {
@@ -108,8 +236,7 @@ mod linux {
         role: Role,
         configuration: Configuration,
         record: Option<&[u8]>,
-        target: Option<worker::presentation::X11Target>,
-        fit: bool,
+        destination: Option<Destination>,
         input: BorrowedFd<'_>,
     ) -> Result<Media, Error> {
         let limits = configuration.limits()?;
@@ -121,7 +248,11 @@ mod linux {
                 capture_media(surface, configuration)?
             }
             Role::Present => {
-                let mut surface = match target {
+                let (fitted, placement) = destination
+                    .map_or(Ok((None, OverlayPlacement::Identity)), |destination| {
+                        destination.sampling(configuration, limits)
+                    })?;
+                let mut surface = match destination.map(Destination::target) {
                     Some(target) => X11Surface::present_in(None, target, limits),
                     None => X11Surface::presenter(
                         None,
@@ -145,17 +276,8 @@ mod linux {
                         .map_err(native)?,
                     pending: None,
                     recovery: None,
-                    fitted: if fit {
-                        FittedFrame::for_viewport(
-                            configuration.width,
-                            configuration.height,
-                            target.ok_or(Error::WrongState)?,
-                            limits,
-                        )
-                        .map_err(native)?
-                    } else {
-                        None
-                    },
+                    fitted,
+                    placement,
                     overlay: CursorOverlay::new(),
                     last: None,
                     presented: None,
@@ -191,6 +313,7 @@ mod linux {
                     codec,
                     pending,
                     fitted,
+                    placement,
                     overlay,
                     last,
                     presented,
@@ -220,7 +343,7 @@ mod linux {
                             if !work.display || work.stamp.frame != frame {
                                 return Err(Error::WrongState);
                             }
-                            let place = placement(fitted.as_ref());
+                            let place = *placement;
                             let mut pixels = pixels;
                             // The single client-rendered cursor is composited over a
                             // fresh copy of the decoded picture, then presented.
@@ -306,6 +429,7 @@ mod linux {
                 surface,
                 pending,
                 fitted,
+                placement,
                 overlay,
                 last,
                 presented,
@@ -321,7 +445,7 @@ mod linux {
             let update = worker::overlay::decode(body, limits)?;
             overlay.apply(&update).map_err(native)?;
             if presented.is_some() {
-                let place = placement(fitted.as_ref());
+                let place = *placement;
                 let retained = match fitted {
                     Some(fitted) => Some(fitted.output_mut()),
                     None => last.as_mut(),
@@ -510,17 +634,13 @@ mod linux {
         let (configuration, media, ready) = match (role, first.header.kind) {
             (Role::Capture, Kind::Configure) => {
                 let c = Configuration::decode(first.body())?;
-                (
-                    c,
-                    open(role, c, None, None, false, input.as_fd())?,
-                    Kind::Ready,
-                )
+                (c, open(role, c, None, None, input.as_fd())?, Kind::Ready)
             }
             (Role::Present, Kind::ConfigureDecoder) => {
                 let (c, record) = Configuration::decode_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), None, false, input.as_fd())?,
+                    open(role, c, Some(record), None, input.as_fd())?,
                     Kind::DecoderReady,
                 )
             }
@@ -529,7 +649,13 @@ mod linux {
                     worker::presentation::X11Target::decode_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), Some(target), false, input.as_fd())?,
+                    open(
+                        role,
+                        c,
+                        Some(record),
+                        Some(Destination::Native(target)),
+                        input.as_fd(),
+                    )?,
                     Kind::PresentationReady,
                 )
             }
@@ -538,8 +664,29 @@ mod linux {
                     worker::presentation::X11Target::decode_fitted_decoder(first.body())?;
                 (
                     c,
-                    open(role, c, Some(record), Some(target), true, input.as_fd())?,
+                    open(
+                        role,
+                        c,
+                        Some(record),
+                        Some(Destination::Fitted(target)),
+                        input.as_fd(),
+                    )?,
                     Kind::FittedPresentationReady,
+                )
+            }
+            (Role::Present, Kind::ConfigureMappedPresentation) => {
+                let (c, record, target) =
+                    worker::presentation::MappedX11Target::decode_decoder(first.body())?;
+                (
+                    c,
+                    open(
+                        role,
+                        c,
+                        Some(record),
+                        Some(Destination::Mapped(target)),
+                        input.as_fd(),
+                    )?,
+                    Kind::MappedPresentationReady,
                 )
             }
             _ => return Err(Error::WrongState),

@@ -1,10 +1,10 @@
-//! Explicit CPU nearest-neighbour downscaling for an immutable local viewport.
+//! Explicit CPU nearest-neighbour sampling for an immutable local viewport.
 //! No codec reconfiguration, GPU/zero-copy claim, or visibility witness. This
 //! owner holds exactly one extra bounded BGRA frame and never queues pictures.
 #![forbid(unsafe_code)]
 use super::{BgraFrame, NativeError, frame_len, zeroed};
 use fr_core::limits::ProtocolLimits;
-use fr_media::worker::presentation::{Fit, X11Target};
+use fr_media::worker::presentation::{Fit, MappedX11Target, X11Target};
 
 #[path = "presentation_fit/rows.rs"]
 mod rows;
@@ -24,6 +24,33 @@ impl std::fmt::Debug for FittedFrame {
     }
 }
 impl FittedFrame {
+    /// Sample an admitted picture into the original display-space rectangle.
+    /// Encoded rounding never changes input or cursor placement. A shared
+    /// source may supply a smaller canonical picture; it is sampled upwards
+    /// only into the already bounded target, never beyond the original display.
+    /// Identity sampling needs no second frame even when display coordinates
+    /// are larger than the picture; the worker retains that mapping separately.
+    pub fn for_mapped_viewport(
+        source_width: u32,
+        source_height: u32,
+        target: MappedX11Target,
+        limits: ProtocolLimits,
+    ) -> Result<Option<Self>, NativeError> {
+        target
+            .validate_picture(source_width, source_height, &limits)
+            .map_err(|_| NativeError::InvalidConfiguration)?;
+        let placement = target.fit();
+        let window = target.target();
+        if (source_width, source_height) == (window.width(), window.height())
+            && placement.x == 0
+            && placement.y == 0
+            && (placement.width, placement.height) == (source_width, source_height)
+        {
+            frame_len(source_width, source_height, &limits)?;
+            return Ok(None);
+        }
+        Self::with_placement(source_width, source_height, window, placement, limits).map(Some)
+    }
     /// Select the existing native-size presentation path when fitting is an
     /// identity. That path retains the decoded picture for cursor updates; it
     /// needs neither a fitted allocation nor a full-frame copy before display.
@@ -46,10 +73,19 @@ impl FittedFrame {
         target: X11Target,
         limits: ProtocolLimits,
     ) -> Result<Self, NativeError> {
-        frame_len(source_width, source_height, &limits)?;
-        let length = frame_len(target.width(), target.height(), &limits)?;
         let placement = Fit::new(source_width, source_height, target)
             .map_err(|_| NativeError::InvalidConfiguration)?;
+        Self::with_placement(source_width, source_height, target, placement, limits)
+    }
+    fn with_placement(
+        source_width: u32,
+        source_height: u32,
+        target: X11Target,
+        placement: Fit,
+        limits: ProtocolLimits,
+    ) -> Result<Self, NativeError> {
+        frame_len(source_width, source_height, &limits)?;
+        let length = frame_len(target.width(), target.height(), &limits)?;
         let mut bytes = zeroed(length)?;
         // Opaque black bars agree with the X11 BGRA snapshot representation.
         for pixel in bytes.as_chunks_mut::<4>().0 {
@@ -126,3 +162,7 @@ mod tests;
 #[cfg(test)]
 #[path = "presentation_fit/viewport_tests.rs"]
 mod viewport_tests;
+
+#[cfg(test)]
+#[path = "presentation_fit/mapped_tests.rs"]
+mod mapped_tests;

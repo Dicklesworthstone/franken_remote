@@ -183,7 +183,7 @@ fn input_mapping_must_describe_the_actual_full_native_pixel_image() {
 #[test]
 fn fitted_input_matches_rendered_pixels_and_refuses_letterbox_or_stale_layouts() {
     use fr_client::input::viewport::{Error as ViewportError, LocalPoint};
-    use fr_media::worker::presentation::{Fit, X11Target};
+    use fr_media::worker::presentation::{MappedX11Target, X11Target};
     for (sw, sh, tw, th) in [
         (320, 240, 160, 160),
         (240, 320, 160, 160),
@@ -192,6 +192,10 @@ fn fitted_input_matches_rendered_pixels_and_refuses_letterbox_or_stale_layouts()
         // original full image is fitted into this exact reduced target.
         (640, 480, 592, 312),
         (1920, 1080, 592, 312),
+        // Canonical codec crops need not have the display's exact aspect.
+        (5120, 2880, 1000, 750),
+        (5120, 2880, 1582, 888),
+        (1365, 767, 1000, 750),
     ] {
         let bounds = InputBounds::new(DesktopPoint { x: -320, y: -80 }, sw, sh).unwrap();
         let client = fitted_client(bounds);
@@ -226,7 +230,9 @@ fn fitted_input_matches_rendered_pixels_and_refuses_letterbox_or_stale_layouts()
         let origin = layout.at(LocalPoint::pixels(0, 0));
         assert_eq!(viewport.map(&origin), Err(ViewportError::Unconfirmed));
         viewport.confirm_layout(&layout).unwrap();
-        let fit = Fit::new(sw, sh, X11Target::new(window.id, tw, th).unwrap()).unwrap();
+        let fit = MappedX11Target::new(X11Target::new(window.id, tw, th).unwrap(), sw, sh)
+            .unwrap()
+            .fit();
         for y in 0..th {
             for x in 0..tw {
                 let actual = viewport.map(&layout.at(LocalPoint::pixels(
