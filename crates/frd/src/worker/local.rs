@@ -397,6 +397,9 @@ impl Worker {
                 oneshot::RecvError::Cancelled => Error::Cancelled,
                 _ => Error::PeerClosed,
             })??;
+            if response.header.identity.epoch != identity.epoch {
+                return Err(Error::Protocol(worker::Error::WrongEpoch));
+            }
             if response.header.identity != identity
                 || !super::allowed_reply(kind, response.header.kind)
             {

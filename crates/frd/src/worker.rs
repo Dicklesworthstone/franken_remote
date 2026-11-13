@@ -943,6 +943,10 @@ impl Worker {
                 .await
                 .map_err(|_| Error::PeerClosed)?;
             let h = Header::decode(&bytes, &limits)?;
+            // Epoch before sequence, as worker::Sequence::accept orders them.
+            if h.identity.epoch != identity.epoch {
+                return Err(Error::Protocol(worker::Error::WrongEpoch));
+            }
             if h.identity != identity || h.kind.is_request() {
                 return Err(Error::Protocol(worker::Error::WrongSequence));
             }
