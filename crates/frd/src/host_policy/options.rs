@@ -59,6 +59,10 @@ pub struct RunOptions {
     /// Absolute `fr-input-agent` path. Absent: observation only (unchanged).
     /// Present: a first viewer may take the exclusive controlled share.
     pub input_agent: Option<PathBuf>,
+    /// `--control` (Windows only): a first viewer may take the exclusive
+    /// controlled share, and frd injects its input itself (`windows_input`).
+    /// Linux and macOS name their executor with `input_agent` instead.
+    pub control: bool,
     /// Let that controller's text clipboard follow its lease. CLI parsing
     /// enables this with `input_agent` unless `--no-clipboard` is selected;
     /// explicit `--clipboard` without an input agent is refused by the caller.
@@ -149,6 +153,13 @@ impl RunOptions {
                     return Err(Error::InvalidArgument);
                 }
                 options.directory = true;
+                continue;
+            }
+            if cfg!(windows) && flag == "--control" {
+                if options.control {
+                    return Err(Error::InvalidArgument);
+                }
+                options.control = true;
                 continue;
             }
             if flag == "--adaptive-capture" {
@@ -265,7 +276,7 @@ impl RunOptions {
         if !options.audio && (options.audio_server.is_some() || options.audio_sink.is_some()) {
             return Err(Error::InvalidArgument);
         }
-        if (options.microphone && options.input_agent.is_none())
+        if (options.microphone && options.input_agent.is_none() && !options.control)
             || (!options.microphone && options.microphone_server.is_some())
             || options
                 .microphone_server
@@ -358,13 +369,13 @@ impl RunOptions {
 impl RunOptions {
     /// The first requested capability `frd run` cannot provide on Windows
     /// yet (fr-p2-host-windows-rt1), as a typed refusal `(code, detail)`
-    /// returned before any I/O. A Windows host shares the interactive desktop
-    /// view-only for now. (`parse` already refuses `--send-control` off Linux
-    /// and macOS.)
+    /// returned before any I/O. A Windows host shares the interactive desktop,
+    /// view-only unless `--control`. (`parse` already refuses `--send-control`
+    /// off Linux and macOS, and `--send` without a control executor.)
     #[cfg(windows)]
     #[must_use]
     pub fn windows_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 8] = [
+        let refusals: [(bool, &str, &str); 10] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",
@@ -383,7 +394,17 @@ impl RunOptions {
             (
                 self.input_agent.is_some(),
                 "input_agent_unavailable",
-                "--input-agent has no Windows backend yet; a Windows host is view-only",
+                "a Windows host injects input itself; use --control instead of --input-agent",
+            ),
+            (
+                self.clipboard,
+                "clipboard_unavailable",
+                "--clipboard has no Windows backend yet",
+            ),
+            (
+                self.files.is_some(),
+                "files_unavailable",
+                "--files has no Windows backend yet",
             ),
             (
                 approval == Approval::Local,
@@ -500,6 +521,12 @@ mod tests {
             &["--input-agent"][..],
             &["--input-agent", "--once"][..],
             &["--input-agent", "/a", "--input-agent", "/b"][..],
+            // Windows' own control opt-in names no executor; elsewhere it is
+            // not an option (not even before a value it could swallow).
+            #[cfg(not(windows))]
+            &["--control"][..],
+            #[cfg(not(windows))]
+            &["--control", "--once"][..],
         ] {
             assert!(
                 matches!(parse(refused), Err(Error::InvalidArgument)),

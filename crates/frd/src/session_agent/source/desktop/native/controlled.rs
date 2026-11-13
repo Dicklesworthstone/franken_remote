@@ -103,7 +103,9 @@ impl ControlProfile {
         bitrate: u32,
         backend: Backend,
     ) -> Result<Self, InvalidLaunch> {
-        // Same local-only validation the per-lease launch applies later.
+        // Same local-only validation the per-lease launch applies later. A
+        // Windows host launches nothing: frd injects input itself.
+        #[cfg(not(windows))]
         ProcessLaunch::new(input_agent, display, xauthority, 1)?;
         if fps == 0 || bitrate == 0 {
             return Err(InvalidLaunch);
@@ -573,41 +575,73 @@ impl Decider {
                     return Ok(None);
                 }
                 if pending.native_status().is_none() && pending.view_ready()? {
-                    let epoch =
-                        (self.entropy)().map_err(|()| GrantError::CredentialsUnavailable)?;
-                    let launch = ProcessLaunch::new(
-                        &self.profile.input_agent,
-                        &self.profile.display,
-                        self.profile.xauthority.as_deref(),
-                        epoch,
-                    )
-                    .map_err(|_| GrantError::NativeNotReady)?;
-                    let fence = Fence::default();
-                    let make = input_process::factory(
-                        launch,
-                        self.cx.clone(),
-                        request.target.bounds,
-                        request.target.capabilities,
-                        fence.clone(),
-                    );
-                    let entropy = self.entropy.clone();
-                    pending.approve_fenced(
-                        request.target,
-                        move || {
-                            Some((
-                                InputLeaseId::from_raw(entropy().ok()?),
-                                InputTicketId::from_raw(entropy().ok()?),
-                            ))
-                        },
-                        make,
-                        RemoteSink::native_cleanup,
-                        &fence,
-                    )?;
-                    self.approved = Some(request.target);
+                    #[cfg(windows)]
+                    self.approve_windows(&mut pending, request.target)?;
+                    #[cfg(not(windows))]
+                    {
+                        let epoch =
+                            (self.entropy)().map_err(|()| GrantError::CredentialsUnavailable)?;
+                        let launch = ProcessLaunch::new(
+                            &self.profile.input_agent,
+                            &self.profile.display,
+                            self.profile.xauthority.as_deref(),
+                            epoch,
+                        )
+                        .map_err(|_| GrantError::NativeNotReady)?;
+                        let fence = Fence::default();
+                        let make = input_process::factory(
+                            launch,
+                            self.cx.clone(),
+                            request.target.bounds,
+                            request.target.capabilities,
+                            fence.clone(),
+                        );
+                        let entropy = self.entropy.clone();
+                        pending.approve_fenced(
+                            request.target,
+                            move || {
+                                Some((
+                                    InputLeaseId::from_raw(entropy().ok()?),
+                                    InputTicketId::from_raw(entropy().ok()?),
+                                ))
+                            },
+                            make,
+                            RemoteSink::native_cleanup,
+                            &fence,
+                        )?;
+                        self.approved = Some(request.target);
+                    }
                 }
                 Ok(Some(request.target))
             }
         }
+    }
+}
+
+#[cfg(windows)]
+impl Decider {
+    /// The lease's native owner is frd's own `SendInput` sink, created on the
+    /// input thread for exactly the approved display and operations. There
+    /// is no executor process to fence: the owner's own revocation stops it.
+    fn approve_windows(
+        &mut self,
+        pending: &mut crate::session_startup::ManagedPendingControl<'_>,
+        target: Target,
+    ) -> Result<(), GrantError> {
+        let entropy = self.entropy.clone();
+        pending.approve(
+            target,
+            move || {
+                Some((
+                    InputLeaseId::from_raw(entropy().ok()?),
+                    InputTicketId::from_raw(entropy().ok()?),
+                ))
+            },
+            move || crate::windows_input::open(target.bounds, target.capabilities),
+            crate::windows_input::WindowsInput::native_cleanup,
+        )?;
+        self.approved = Some(target);
+        Ok(())
     }
 }
 

@@ -17,8 +17,8 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 5. **HDR to SDR tone-mapping:** Displays operating in HDR / wide color gamut (WCG) mode with `DXGI_FORMAT_R10G10B10A2_UNORM` or `DXGI_FORMAT_R16G16B16A16_FLOAT` use `DuplicateOutput1` to select SDR or apply qualified ITU-R BT.2446 Method A / Reinhard tone-mapping to 8-bit NV12 / BGRA without altering user OS display settings.
 6. **Session 0 isolation & service split:** The host service (`frd`) runs as a Windows Service in non-interactive Session 0. **The service never captures Session 0 as the user desktop.** It delegates capture and input to an interactive user agent running in the active console session (`WTSGetActiveConsoleSessionId()`).
 7. **Session-bound named pipes:** Inter-process communication between the Session 0 service and the interactive session agent uses session-bound named pipes (`\\.\pipe\frankenremote-session-{session_id}-{token}`) protected by security descriptors that prevent cross-session access.
-8. **SendInput UIPI integrity gating:** User Interface Privilege Isolation (UIPI) prohibits ordinary medium-integrity processes from injecting keyboard/mouse events into elevated (Administrator / High integrity) windows or the Secure Desktop (UAC consent prompt, Ctrl+Alt+Del). Rather than silently failing or pretending input succeeded, the adapter surfaces typed refusals (`PlatformError::Unsupported`).
-9. **Multi-monitor virtual desktop coordinates:** Negative coordinate origins (e.g. secondary monitors positioned to the left or above the primary monitor) and display rotations (`DXGI_MODE_ROTATION`) are translated into normalized `[0, 65535]` coordinate space for `SendInput` with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`.
+8. **SendInput UIPI integrity gating:** User Interface Privilege Isolation (UIPI) prohibits ordinary medium-integrity processes from injecting keyboard/mouse events into elevated (Administrator / High integrity) windows or the Secure Desktop (UAC consent prompt, Ctrl+Alt+Del). Rather than silently failing or pretending input succeeded, frd refuses (2026-11-13, `crates/frd/src/windows_input.rs`): every positive operation while the input desktop is not the ordinary one (`PlatformError::Unavailable`), and every key, button, wheel and text operation while the focused window's process has a higher integrity level than frd's, or one frd cannot read (`PlatformError::Permission`). Pointer moves and releases are not refused for the focused window; releases are never refused.
+9. **Multi-monitor virtual desktop coordinates:** Pointer positions are physical virtual-desktop pixels (per-monitor DPI aware), translated into the normalized `[0, 65535]` space of the union of the displays' rectangles for `SendInput` with `MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK`, negative origins included (`fr_winsys::input`, unit-tested). Rotation needs no separate step there, since monitor rectangles are already in their rotated orientation; no rotated or second display has been tested.
 
 ---
 
@@ -49,13 +49,27 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > it, but no lock, user switch or logoff was performed during a share. The
 > Stop sharing window opened at 150% scaling, and a press ended a live share
 > (docs/observation-indicator.md). Trust roots default to the machine's ROOT
-> certificate store. No input, cursor, audio, service split or HDR path
-> exists. Nothing below is qualified.
+> certificate store. No cursor, audio, service split or HDR path exists.
+> Nothing below is qualified.
+>
+> **2026-11-13: remote control is built but has not been run live.**
+> `frd run --control` lets the first viewer take exclusive control; frd
+> injects keys (by scan code, so the host's layout applies), pointer moves,
+> buttons, line wheel turns and text with `SendInput` itself, on the input
+> owner's thread (`crates/frd/src/windows_input.rs`, `fr_winsys::input`),
+> under the same lease, grant and cleanup as Linux and macOS. Its Stop
+> sharing window then reads "Shared by FrankenRemote; remote control is
+> on." Checked on the machine above: the startup probe, a view-only share
+> from a `--control` host, the window text (picture checked), a Stop
+> sharing press ending such a run, and read-only checks of the desktop name,
+> display rectangle (2256x1504 physical at 150%), pointer and focused
+> window. No input has been injected on a real desktop yet, and no elevated
+> window, lock screen or second display was present for a check.
 
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
 |---|---|---|---|---|---|---|
-| **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | not applicable: view-only | **view-only, one machine; not qualified** |
-| **Windows 10 / Server 2022** | not tested | not implemented | not tested | not implemented | not applicable: view-only | **not tested** |
+| **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | implemented (`--control`), not run against an elevated window | **view-only live; control not run live; one machine; not qualified** |
+| **Windows 10 / Server 2022** | not tested | not implemented | not tested | not implemented | not tested | **not tested** |
 
 ---
 
@@ -90,7 +104,12 @@ When a display or desktop transition occurs:
 > pipes, timer, session reads) and `crates/frd/tests/host_policy_windows.rs`, built
 > for `x86_64-pc-windows-gnu` and run on the machine above, plus the session-state
 > mapping test in `crates/frd/src/session_monitor/windows.rs`, which runs on Linux
-> and macOS (frd's lib tests do not build for Windows yet).
+> and macOS (frd's lib tests do not build for Windows yet). Control (2026-11-13):
+> `crates/frd/src/windows_input/tests.rs` checks the sink's decisions over a
+> recording stand-in for Windows (Linux and macOS); fr-winsys's input tests check
+> the coordinate mapping and, in the logged-on session, the read-only queries; a
+> test that moves the real pointer to each display corner exists but runs only
+> with `FR_TEST_MOVE_POINTER=1`.
 
 Formerly claimed test coverage (`crates/frd/tests/windows_host_adapter_test.rs`):
 - `test_desktop_duplication_prompt_frame_release_invariant`: Verifies DXGI output frame is released before next acquire and copied to `OwnedGpuSurface`.

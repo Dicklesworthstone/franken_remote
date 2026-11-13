@@ -147,8 +147,9 @@ fn run_with_surface(
     {
         let _ = image;
         let stopped = stop.clone();
+        let control = options.input_agent.is_some();
         let mut owner =
-            windows::Owner::start(move || stopped.request()).map_err(Error::Indicator)?;
+            windows::Owner::start(control, move || stopped.request()).map_err(Error::Indicator)?;
         let result = drive(&owner.control(), stop, serve);
         // Keep the window through host teardown, then close it.
         match owner.finish() {

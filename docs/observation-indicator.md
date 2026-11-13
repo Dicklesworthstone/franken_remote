@@ -114,7 +114,8 @@ a small always-on-top window at the bottom right of the primary display's
 work area, above the taskbar, saying "This screen is being shared by
 FrankenRemote." with a Stop sharing button. It never takes focus when it
 appears and shows no text from a peer. It is part of the desktop, so a viewer
-sees it too.
+sees it too. With `frd run --control` the window is wider and reads
+"Shared by FrankenRemote; remote control is on."
 
 Pressing Stop sharing or closing the window is a local revoke: the window
 closes and the host stops through its normal teardown. Every 50 ms frd sends the

@@ -112,6 +112,9 @@ pub mod host_indicator;
 
 #[cfg(host_stack)]
 pub mod session_monitor;
+// A Windows host's remote control: frd's own SendInput sink (tested everywhere).
+#[cfg(any(all(host_stack, windows), test))]
+pub mod windows_input;
 // One persistent SIGINT/SIGTERM wait for `frd run` and the ingress helper.
 #[cfg(host_stack)]
 mod signals;

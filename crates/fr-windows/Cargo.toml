@@ -40,10 +40,6 @@ windows = { version = "=0.62.2", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-[dev-dependencies]
-# The key table's test checks every mapped usage against the protocol's.
-fr-core.workspace = true
-
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 # fr-windows is the Windows platform adapter (AGENTS.md 3.2): the Win32

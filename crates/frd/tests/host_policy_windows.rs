@@ -232,6 +232,11 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
     );
     // Without --trust-roots the machine's ROOT certificate store is used.
     assert_eq!(refusal(&[], Approval::None), None);
+    // frd injects input itself: --control is the control opt-in.
+    let control = run_options(&["--control"]).unwrap();
+    assert!(control.control && control.input_agent.is_none() && !control.clipboard);
+    assert_eq!(refusal(&["--control"], Approval::None), None);
+    assert!(run_options(&["--control", "--control"]).is_err());
     assert_eq!(
         refusal(&plain, Approval::Local),
         Some("local_approval_unavailable")
@@ -261,6 +266,12 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
         (
             &["--observation-indicator", r"C:\fr\indicator.exe"],
             "observation_indicator_unavailable",
+        ),
+        (&["--control", "--clipboard"], "clipboard_unavailable"),
+        (&["--control", "--files", r"C:\drop"], "files_unavailable"),
+        (
+            &["--control", "--microphone"],
+            "microphone_endpoint_unavailable",
         ),
     ] {
         let args: Vec<&str> = plain.iter().chain(extra).copied().collect();

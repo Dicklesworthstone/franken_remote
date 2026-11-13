@@ -41,8 +41,12 @@ use windows::core::{PCWSTR, w};
 const CLOSE: u32 = WM_APP + 1;
 const STOP_BUTTON: u16 = 1;
 const LABEL: u16 = 2;
+const VIEW_TEXT: PCWSTR = w!("This screen is being shared by FrankenRemote.");
+const CONTROL_TEXT: PCWSTR = w!("Shared by FrankenRemote; remote control is on.");
 /// Layout at 96 DPI, scaled to the window's DPI.
 const WIDTH: i32 = 400;
+/// Room for the longer control text on one line.
+const CONTROL_WIDTH: i32 = 470;
 const HEIGHT: i32 = 52;
 const MARGIN: i32 = 12;
 const BUTTON_WIDTH: i32 = 110;
@@ -60,16 +64,17 @@ pub struct Indicator {
 }
 
 impl Indicator {
-    /// Show the window on a new UI thread and return once it is on screen.
+    /// Show the window on a new UI thread and return once it is on screen;
+    /// with `control` its text says a viewer may also control the machine.
     /// `on_stop` runs on that thread, once, when the person presses Stop
     /// sharing or closes the window.
-    pub fn open(on_stop: impl Fn() + Send + 'static) -> io::Result<Self> {
+    pub fn open(control: bool, on_stop: impl Fn() + Send + 'static) -> io::Result<Self> {
         let (opened, receive) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("fr-indicator-ui".into())
             .spawn(move || {
                 ON_STOP.with(|stop| *stop.borrow_mut() = Some(Box::new(on_stop)));
-                match create() {
+                match create(control) {
                     Ok(window) => {
                         let _ = opened.send(Ok(window.0 as isize));
                         pump();
@@ -151,7 +156,7 @@ fn last_error() -> io::Error {
     io::Error::last_os_error()
 }
 
-fn create() -> io::Result<HWND> {
+fn create(control: bool) -> io::Result<HWND> {
     // SAFETY: Win32 window creation on this thread with owned, static or
     // stack-local arguments; every handle stays with this thread's window.
     unsafe {
@@ -169,6 +174,7 @@ fn create() -> io::Result<HWND> {
         if RegisterClassExW(&raw const class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(last_error());
         }
+        let base_width = if control { CONTROL_WIDTH } else { WIDTH };
         let window = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             w!("FrankenRemoteIndicator"),
@@ -176,7 +182,7 @@ fn create() -> io::Result<HWND> {
             WS_POPUP | WS_BORDER,
             0,
             0,
-            WIDTH,
+            base_width,
             HEIGHT,
             None,
             None,
@@ -185,7 +191,7 @@ fn create() -> io::Result<HWND> {
         )?;
         let dpi = i32::try_from(GetDpiForWindow(window)).unwrap_or(96).max(96);
         let scale = |value: i32| value * dpi / 96;
-        let (width, height) = (scale(WIDTH), scale(HEIGHT));
+        let (width, height) = (scale(base_width), scale(HEIGHT));
         // Bottom right of the primary display's work area, above the taskbar.
         let mut area = RECT::default();
         SystemParametersInfoW(
@@ -203,14 +209,20 @@ fn create() -> io::Result<HWND> {
             height,
             SWP_NOACTIVATE,
         )?;
-        controls(window, instance, dpi, (width, height))?;
+        controls(window, instance, dpi, (width, height), control)?;
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         Ok(window)
     }
 }
 
 /// The label and the Stop sharing button, in the system's message font.
-fn controls(window: HWND, instance: HINSTANCE, dpi: i32, size: (i32, i32)) -> io::Result<()> {
+fn controls(
+    window: HWND,
+    instance: HINSTANCE,
+    dpi: i32,
+    size: (i32, i32),
+    control: bool,
+) -> io::Result<()> {
     let scale = |value: i32| value * dpi / 96;
     let (width, height) = size;
     // SAFETY: child windows of this thread's own window, static strings.
@@ -235,7 +247,7 @@ fn controls(window: HWND, instance: HINSTANCE, dpi: i32, size: (i32, i32)) -> io
         let button_width = scale(BUTTON_WIDTH);
         let label = child(
             w!("STATIC"),
-            w!("This screen is being shared by FrankenRemote."),
+            if control { CONTROL_TEXT } else { VIEW_TEXT },
             WINDOW_STYLE::default(),
             LABEL,
             [
@@ -361,6 +373,17 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    fn label(indicator: &Indicator) -> String {
+        use windows::Win32::UI::WindowsAndMessaging::{GetDlgItem, GetWindowTextW};
+        let mut text = [0_u16; 128];
+        // SAFETY: a child of this test's live window and a writable buffer.
+        let length = unsafe {
+            let label = GetDlgItem(Some(indicator.handle()), i32::from(LABEL)).unwrap();
+            GetWindowTextW(label, &mut text)
+        };
+        String::from_utf16_lossy(&text[..usize::try_from(length).unwrap()])
+    }
+
     /// Needs the interactive desktop (run in the logged-on session): the
     /// window opens and answers; a click on Stop sharing (sent the way a
     /// press arrives) runs the callback once, a close message counts as a
@@ -370,11 +393,15 @@ mod tests {
     fn the_window_answers_stops_once_and_closes_without_a_stop() {
         let stops = Arc::new(AtomicUsize::new(0));
         let counted = stops.clone();
-        let indicator = Indicator::open(move || {
+        let indicator = Indicator::open(true, move || {
             counted.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
         assert!(indicator.responsive(Duration::from_millis(250)));
+        assert_eq!(
+            label(&indicator),
+            "Shared by FrankenRemote; remote control is on."
+        );
         let click = WPARAM((BN_CLICKED as usize) << 16 | usize::from(STOP_BUTTON));
         for _ in 0..2 {
             // SAFETY: test-only messages to this test's own window.
@@ -399,10 +426,14 @@ mod tests {
         // Closed by its owner without a press: no stop at all.
         let quiet = Arc::new(AtomicUsize::new(0));
         let counted = quiet.clone();
-        let indicator = Indicator::open(move || {
+        let indicator = Indicator::open(false, move || {
             counted.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
+        assert_eq!(
+            label(&indicator),
+            "This screen is being shared by FrankenRemote."
+        );
         assert!(indicator.close());
         assert_eq!(quiet.load(Ordering::SeqCst), 0);
     }
@@ -412,7 +443,8 @@ mod tests {
     #[test]
     #[ignore = "shows a window on the interactive desktop"]
     fn a_hung_ui_thread_is_not_responsive() {
-        let indicator = Indicator::open(|| thread::sleep(Duration::from_millis(800))).unwrap();
+        let indicator =
+            Indicator::open(false, || thread::sleep(Duration::from_millis(800))).unwrap();
         assert!(indicator.responsive(Duration::from_millis(250)));
         let click = WPARAM((BN_CLICKED as usize) << 16 | usize::from(STOP_BUTTON));
         // SAFETY: a test-only message to this test's own window.

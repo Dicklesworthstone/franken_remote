@@ -104,7 +104,8 @@ pub struct Owner {
     worker: Option<JoinHandle<Result<(), Error>>>,
 }
 impl Owner {
-    pub fn start(on_stop: impl Fn() + Send + Sync + 'static) -> Result<Self, Error> {
+    /// `control`: the run lets a viewer take control, and the window says so.
+    pub fn start(control: bool, on_stop: impl Fn() + Send + Sync + 'static) -> Result<Self, Error> {
         let shared = Arc::new(Shared {
             on_stop: Box::new(on_stop),
             status: Mutex::new(Status::Opening),
@@ -113,7 +114,7 @@ impl Owner {
         let running = shared.clone();
         let Ok(worker) = thread::Builder::new()
             .name("fr-observation-ui".into())
-            .spawn(move || supervise(&running))
+            .spawn(move || supervise(&running, control))
         else {
             shared.stop(Error::Unavailable);
             return Err(Error::Unavailable);
@@ -151,9 +152,9 @@ impl Drop for Owner {
     }
 }
 
-fn supervise(shared: &Arc<Shared>) -> Result<(), Error> {
+fn supervise(shared: &Arc<Shared>, control: bool) -> Result<(), Error> {
     let revoked = shared.clone();
-    let Ok(indicator) = Indicator::open(move || revoked.stop(Error::LocalRevoke)) else {
+    let Ok(indicator) = Indicator::open(control, move || revoked.stop(Error::LocalRevoke)) else {
         shared.stop(Error::Unavailable);
         return Ok(());
     };

@@ -421,19 +421,28 @@ fn grantable(probed: Capabilities) -> Result<Capabilities, Capability> {
     }
 }
 /// One bounded startup probe of the configured `fr-input-agent` on the
-/// selected display, before any runtime, listener or tailnet I/O.
+/// selected display, before any runtime, listener or tailnet I/O. A Windows
+/// host injects input itself (`frd run --control` names frd's own image).
 fn probe_control(options: &Options) -> Result<Option<Capabilities>, Error> {
     let Some(image) = &options.input_agent else {
         return Ok(None);
     };
-    let launch = ProcessLaunch::new(
-        image,
-        &options.display,
-        options.xauthority.as_deref(),
-        random_nonzero_u128()?,
-    )
-    .map_err(|_| Error::Configuration)?;
-    let probed = input_process::probe(&launch).map_err(Error::InputAgentUnavailable)?;
+    #[cfg(windows)]
+    let probed = {
+        let _ = image;
+        crate::windows_input::probe().map_err(Error::InputAgentUnavailable)?
+    };
+    #[cfg(not(windows))]
+    let probed = {
+        let launch = ProcessLaunch::new(
+            image,
+            &options.display,
+            options.xauthority.as_deref(),
+            random_nonzero_u128()?,
+        )
+        .map_err(|_| Error::Configuration)?;
+        input_process::probe(&launch).map_err(Error::InputAgentUnavailable)?
+    };
     grantable(probed)
         .map(Some)
         .map_err(Error::ControlCapabilityMissing)

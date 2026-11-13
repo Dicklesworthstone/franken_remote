@@ -10,6 +10,8 @@ pub mod fs;
 #[cfg(windows)]
 pub mod indicator;
 #[cfg(windows)]
+pub mod input;
+#[cfg(windows)]
 pub mod net;
 #[cfg(windows)]
 pub mod pipe;

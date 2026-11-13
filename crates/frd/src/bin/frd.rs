@@ -79,7 +79,14 @@ OPTIONS:
                     startup: no keys/pointer/buttons on this display refuses
                     (control_capability_missing); no line scrolling (several
                     X screens, wheel buttons unmapped) offers control without
-                    the wheel. Absent: view-only
+                    the wheel. Absent: view-only. Linux and macOS
+    --control       Windows: lets the first viewer take exclusive control; frd
+                    injects keys, pointer, wheel and text itself (SendInput) on
+                    the display it shares. Its Stop sharing window says control
+                    is on; pressing it ends the run. Refused while the lock
+                    screen or a UAC prompt has the input desktop, and for keys,
+                    clicks and text while an elevated window has focus.
+                    Absent: view-only
     --no-clipboard  Disable the default bidirectional text clipboard sharing
                     for --input-agent hosts. Sharing starts only after an actual
                     control grant and a visible Clipboard sharing window at
@@ -989,12 +996,23 @@ fn session_monitor(
     Ok(Some(Configuration { image, selection }))
 }
 
-/// The optional control opt-in: an installed absolute `fr-input-agent`.
+/// The optional control opt-in: an installed absolute `fr-input-agent`, or
+/// on Windows (`--control`) frd's own image, which injects input itself.
 #[cfg(host_stack)]
 fn input_agent(
     options: &frd::host_policy::options::RunOptions,
     json: bool,
 ) -> Result<Option<PathBuf>, ExitCode> {
+    if options.control {
+        return std::env::current_exe().map(Some).map_err(|_| {
+            run_refusal(
+                json,
+                "input_agent_unavailable",
+                "--control: frd could not resolve its own executable",
+                2,
+            )
+        });
+    }
     match &options.input_agent {
         Some(agent) if !(agent.is_absolute() && agent.is_file()) => Err(run_refusal(
             json,

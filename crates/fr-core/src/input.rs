@@ -9,6 +9,7 @@ use core::fmt;
 
 mod text;
 pub use text::{CommittedText, MAX_COMMITTED_TEXT_BYTES, TextError};
+pub mod windows_scan;
 
 /// The complete input view binding. A generation from another view is not usable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

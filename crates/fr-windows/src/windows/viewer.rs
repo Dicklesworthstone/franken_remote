@@ -899,7 +899,7 @@ extern "system" fn window_proc(
                 if !v.session.shared().controlled() {
                     return false;
                 }
-                if let Some(usage) = keys::usage(scan, extended)
+                if let Some(usage) = fr_core::input::windows_scan::usage(scan, extended)
                     && !repeat
                     && !synthetic
                 {
