@@ -8,7 +8,9 @@ mod support;
 #[path = "support/terminal.rs"]
 mod terminal;
 
-use asupersync::{cx::Cx, net::quic_native::NativeQuicUdpConnection, types::CancelKind};
+use asupersync::{
+    bytes::Bytes, cx::Cx, net::quic_native::NativeQuicUdpConnection, types::CancelKind,
+};
 use fr_core::ids::InputLeaseId;
 use fr_transport::quic::*;
 use fr_wire::{
@@ -29,6 +31,45 @@ use crate::terminal::{binding, observe_close, observe_silence, queued_video, raw
 
 #[path = "terminal_close_packet/io_custody.rs"]
 mod io_custody;
+/// A pair whose host connection sent a DATAGRAM before its record owner
+/// existed. Until an owned native turn completes, terminal custody cannot
+/// prove no protected packet is pending, so a registered report refuses at
+/// preparation and sends the close packet, with nothing new on the wire.
+async fn with_native_history(cx: &Cx) -> Pair {
+    let (client, server) = support::native_pair(cx, "localhost", ALPN).await;
+    let (mut client, mut server) = (client.unwrap(), server.unwrap());
+    let earlier = Bytes::from_static(b"native output before the record owner");
+    server
+        .connection_mut()
+        .send_datagram(cx, earlier.clone())
+        .unwrap();
+    server.flush(cx).await.unwrap();
+    assert_eq!(
+        server
+            .connection()
+            .inner()
+            .pending_outbound_datagram_count(),
+        0
+    );
+    assert!(server.connection().inner().datagrams_sent() > 0);
+    // Observe this already-authorized payload before arming the new owner's
+    // fence. History is not proof that an arbitrary incoming native owner has
+    // finished its last UDP send; only a completed owned turn can supply that.
+    let until = clock(cx) + 1_000_000;
+    loop {
+        assert!(clock(cx) < until, "the native fixture did not cross UDP");
+        client
+            .drive_io_once(cx, Duration::from_millis(5))
+            .await
+            .unwrap();
+        if let Some(bytes) = client.connection_mut().recv_datagram() {
+            assert_eq!(bytes, earlier);
+            break;
+        }
+    }
+    terminal::from_native_pair(cx, server, client)
+}
+
 fn arm(pair: &mut Pair, cx: &Cx) -> (RevocationReport, Arc<AtomicBool>) {
     let report = RevocationReport::default();
     let fenced = Arc::new(AtomicBool::new(false));
@@ -53,7 +94,7 @@ fn arm(pair: &mut Pair, cx: &Cx) -> (RevocationReport, Arc<AtomicBool>) {
 fn authority_failure_with_native_video_sends_only_a_close_not_a_successful_report() {
     runtime().block_on(Box::pin(async {
         let cx = Cx::current().unwrap();
-        let mut pair = Box::pin(pair(&cx)).await;
+        let mut pair = Box::pin(with_native_history(&cx)).await;
         let (report, fenced) = arm(&mut pair, &cx);
         queued_video(&mut pair, &cx);
         assert_eq!(pair.local.tick(&cx, || false), Err(Error::Unauthorized));
@@ -73,7 +114,7 @@ fn authority_failure_with_native_video_sends_only_a_close_not_a_successful_repor
 fn the_application_peer_ends_on_close_instead_of_waiting_for_silence_expiry() {
     runtime().block_on(Box::pin(async {
         let cx = Cx::current().unwrap();
-        let mut pair = Box::pin(pair(&cx)).await;
+        let mut pair = Box::pin(with_native_history(&cx)).await;
         let (report, _) = arm(&mut pair, &cx);
         let routes = [pair.control, pair.incoming, pair.bulk].map(|route| StreamRoute {
             outbound: !route.outbound,
@@ -109,7 +150,7 @@ fn the_application_peer_ends_on_close_instead_of_waiting_for_silence_expiry() {
 fn deferred_closed_uses_the_final_reason_not_the_construction_placeholder() {
     runtime().block_on(Box::pin(async {
         let cx = Cx::current().unwrap();
-        let mut pair = Box::pin(pair(&cx)).await;
+        let mut pair = Box::pin(with_native_history(&cx)).await;
         let reporting = ClosedReport::default();
         let fenced = Arc::new(AtomicBool::new(false));
         let signal = fenced.clone();
@@ -147,7 +188,7 @@ fn cleanup_security_loss_or_cancellation_suppresses_the_fallback_packet() {
         let session = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
         let cleanup = rt.request_cx_with_budget(asupersync::types::Budget::INFINITE);
         rt.block_on(Box::pin(async {
-            let mut pair = Box::pin(pair(&session)).await;
+            let mut pair = Box::pin(with_native_history(&session)).await;
             let permitted = Arc::new(AtomicBool::new(true));
             let check = permitted.clone();
             pair.local
@@ -180,7 +221,7 @@ fn delayed_or_abandoned_fallback_does_not_send_or_restart_the_original_budget() 
     for delay in [false, true] {
         runtime().block_on(Box::pin(async {
             let cx = Cx::current().unwrap();
-            let mut pair = Box::pin(pair(&cx)).await;
+            let mut pair = Box::pin(with_native_history(&cx)).await;
             let (reporting, fenced) = arm(&mut pair, &cx);
             queued_video(&mut pair, &cx);
             pair.local.close();

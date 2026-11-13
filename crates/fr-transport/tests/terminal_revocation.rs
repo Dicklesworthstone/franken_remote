@@ -212,8 +212,10 @@ fn native_retained_stream_payload_is_refused_instead_of_flushed_after_revocation
     });
 }
 
+/// A queued DATAGRAM is unreliable media no peer is owed after the fence: it
+/// is discarded unsent, and the report is delivered instead of refused.
 #[test]
-fn native_queued_datagram_is_refused_without_a_post_fence_flush() {
+fn native_queued_datagram_is_discarded_without_a_post_fence_flush() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();
         let mut pair = pair(&cx).await;
@@ -223,7 +225,12 @@ fn native_queued_datagram_is_refused_without_a_post_fence_flush() {
             pair.local
                 .close_with_revocation(&cx, &original, pair.control, binding(), report());
         assert!(pair.local.is_closed());
-        assert_eq!(end.await, Err(Error::Backpressure));
+        // `collect` fails on any record outside the original control route.
+        let (ended, received) =
+            terminal::collect(&cx, &mut pair, end, terminal::decode_revocation).await;
+        assert_eq!(ended, Ok(()));
+        assert_eq!(received, [report()]);
+        // A DATAGRAM may trail the report's packet; give it one more turn.
         pair.peer
             .drive(&cx, Duration::from_millis(10), || true)
             .await

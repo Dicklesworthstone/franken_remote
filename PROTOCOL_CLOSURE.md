@@ -142,9 +142,9 @@ and enter ordered teardown. Only typed Closed and LeaseRevoked records can use
 this drain. A matching original connection is closed synchronously even when the
 returned future is never polled. Foreign connection proofs are non-mutating.
 
-Unstaged application writes are discarded. Any native retained/retransmission
-payload, partial record, or queued outbound datagram refuses rather than flushing
-stale application bytes. The original immutable terminal security gate, cleanup
+Unstaged application writes and queued outbound DATAGRAMs are discarded unsent.
+Any native retained/retransmission payload or partial record refuses rather than
+flushing stale application bytes. The original immutable terminal security gate, cleanup
 context cancellation and 250-ms construction-time deadline remain enforced.
 A previously armed lease-revocation consumer takes precedence over a competing
 Closed report; it cannot be replaced or cause two detached drains. Transport ACK

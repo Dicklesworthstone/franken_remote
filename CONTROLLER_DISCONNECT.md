@@ -18,7 +18,8 @@ The original control parser, unread remainder, consumed offsets and fixed
 connection receive window are transferred. No media/input callback, challenge
 response or application send runs during closing. The existing 32-record bound,
 250-ms construction-time maximum, earlier caller deadline, new-stream refusal,
-and native retained-payload/partial-send/datagram refusal are unchanged. A foreign
+and native retained-payload/partial-send refusal are unchanged (queued datagrams
+are discarded unsent; see PROTOCOL_TRANSPORT_CLOSE.md). A foreign
 connection proof is nonmutating; every matched attempt closes ordinary I/O at
 call time, including invalid and abandoned attempts. Request acknowledgement,
 report fields and transport completion remain independent.

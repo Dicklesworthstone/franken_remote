@@ -2,10 +2,10 @@
 
 `QuicRecords::close_with_request` closes ordinary I/O synchronously and transfers
 only its original socket, inbound control parser/remainder and one fixed
-CloseRequest into a closing exchange. Unstaged application writes are discarded.
-Native retained/retransmission payloads, partially staged writes and queued
-outbound datagrams refuse instead of being flushed after the application fence.
-A lane holding none of them does not refuse, even if it was finished, reset or
+CloseRequest into a closing exchange. Unstaged application writes and queued
+outbound DATAGRAMs are discarded unsent. Native retained/retransmission payloads
+and partially staged writes refuse instead of being flushed after the application
+fence. A lane holding neither does not refuse, even if it was finished, reset or
 retired.
 The caller stops observation/input admission first; this API is not native input
 cleanup and does not authorize a reconnect or replay.

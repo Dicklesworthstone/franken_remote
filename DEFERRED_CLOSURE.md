@@ -8,9 +8,10 @@ fence runs before socket custody or retained application state is released.
 
 This reuses the existing lease-revocation registration and terminal drain. A
 connection can arm only one consumer of either kind. It has no second queue or
-post-fence application write permission. Unstaged records are discarded; unsent
-native payload, partial records, and queued datagrams still refuse reporting. A
-lane holding none of them does not, even if it was finished, reset or retired.
+post-fence application write permission. Unstaged records and queued outbound
+DATAGRAMs are discarded unsent; unsent native payload and partial records still
+refuse reporting. A lane holding neither does not, even if it was finished, reset
+or retired.
 A lane whose bytes were all sent but are not yet all acknowledged is waited on,
 transmitting ACK frames only, for up to half the 250 ms budget; still
 unacknowledged then, the report takes the close-packet fallback (see

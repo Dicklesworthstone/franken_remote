@@ -39,8 +39,18 @@ bounded at half of the frozen budget (125 ms of 250 ms for reports; half of the
 exchange's possibly shorter budget). At the bound a registered report takes the
 close-packet fallback below, with the ORIGINAL budget, and the exchange refuses
 with `Backpressure` as before. Bytes a received ACK declares lost are requeued
-as unsent and never settle here. Unsent bytes, partial records and queued
-datagrams still refuse at once.
+as unsent and never settle here. Unsent bytes and partial records still refuse
+at once.
+
+Queued outbound DATAGRAMs no longer refuse (2026-11-13). DATAGRAMs are
+unreliable media that no peer is owed after the fence, so terminal custody drops
+the queue unsent with asupersync's `discard_outbound_datagrams` (pinned since
+6d998da4a) and continues. Before, one queued DATAGRAM was enough to replace the
+typed report with the close packet: 2 of 40 diagnosed namespace runs of the
+files+clipboard session test lost the host's report that way. In an alternating
+A/B of that test on one Linux host, 7 of 60 runs failed at its report check
+(`real_files.rs:263`) before this change and 0 of 60 after. Payloads already in protected
+packets remain covered by the existing uncertain-custody refusal.
 
 Measured before the change (fr-3d8i census, 2026-10-15, two namespace suites):
 about 9 in 10 close-packet fallbacks were lanes awaiting only an ACK; the October

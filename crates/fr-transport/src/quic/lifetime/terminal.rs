@@ -90,9 +90,9 @@ struct Drain {
 }
 
 /// Lanes holding bytes that were all SENT before the fence but are not yet all
-/// acknowledged. Nothing in them is unsent, a partial write or a queued
-/// datagram, so waiting needs only `acknowledge_io_once`, which transmits ACK
-/// frames and no application data. A lane is settled by the same test
+/// acknowledged. Nothing in them is unsent or a partial write, and queued
+/// DATAGRAMs were already discarded, so waiting needs only
+/// `acknowledge_io_once`, which transmits ACK frames and no application data. A lane is settled by the same test
 /// `terminal_sender` applies: the EMPTY witness, or for a lane other than the
 /// report route, `drained`.
 #[derive(Default)]
@@ -177,11 +177,12 @@ impl QuicRecords {
     /// send/receive callback is invoked, and no new authority can be admitted.
     /// A foreign connection identity is rejected WITHOUT closing that connection.
     ///
-    /// Unstaged application writes are discarded. A partially staged record,
-    /// native pending/retransmission payload, or queued outbound datagram causes
-    /// terminal `Backpressure`: the pinned native API cannot discard that work
-    /// selectively, and flushing it would violate the fence. This result never
-    /// authorizes a retry on the closed owner. Absence of a report is UNKNOWN.
+    /// Unstaged application writes and queued outbound DATAGRAMs are discarded
+    /// unsent. A partially staged record or native pending/retransmission
+    /// payload causes terminal `Backpressure`: the pinned native API cannot
+    /// discard stream work selectively, and flushing it would violate the
+    /// fence. This result never authorizes a retry on the closed owner.
+    /// Absence of a report is UNKNOWN.
     ///
     /// The fixed 250 ms budget starts HERE, not at the first poll or each retry.
     /// `Ok` means transport acknowledgement of this report, not peer application
@@ -214,8 +215,9 @@ impl QuicRecords {
     /// neither performs native cleanup nor converts absent receipts to zero.
     ///
     /// The same terminal-only drain as `close_with_revocation` closes ordinary
-    /// I/O synchronously, discards unstaged writes, refuses retained native data,
-    /// preserves the immutable security gate and starts its 250-ms budget now.
+    /// I/O synchronously, discards unstaged writes and queued DATAGRAMs, refuses
+    /// retained native stream data, preserves the immutable security gate and
+    /// starts its 250-ms budget now.
     /// A pre-registered lease-revocation report takes precedence: refuse this
     /// competing report rather than creating a second post-fence send path.
     /// `Ok` is a transport acknowledgement, not confirmation of remote cleanup.
@@ -315,28 +317,31 @@ impl QuicRecords {
             settle_until: started + DRAIN_US / 2,
         })
     }
-    /// The report route's EMPTY witness. With `settle`, a lane whose bytes were
-    /// all sent but not all acknowledged is returned to wait on instead of
-    /// refusing. Unsent bytes, partial writes and queued datagrams still refuse.
+    /// The report route's EMPTY witness. Queued outbound DATAGRAMs are
+    /// discarded unsent. With `settle`, a lane whose bytes were all sent but not
+    /// all acknowledged is returned to wait on instead of refusing. Unsent bytes
+    /// and partial writes still refuse.
     fn terminal_sender(
         &mut self,
         route: StreamRoute,
         settle: bool,
     ) -> Result<(EmptySendState, Unacknowledged), Error> {
-        let native = self.native.as_ref().ok_or(Error::Closed)?;
+        let native = self.native.as_mut().ok_or(Error::Closed)?;
         // Private protected packets can outlive a failed or dropped native
         // operation after DATAGRAMs leave the visible queue. Only the existing
         // content-free native close fallback may own that uncertain output.
         if self.native_io_unsettled {
             return Err(Error::Backpressure);
         }
+        // DATAGRAMs are unreliable media (RFC 9221) that no peer is owed after
+        // the fence. Dropping the queue keeps them off the wire; refusing
+        // instead sent the close packet in place of the typed report (2 of 40
+        // namespace files+clipboard runs, 2026-11-13). Payloads already in
+        // protected packets are covered by `native_io_unsettled` above.
+        native.connection_mut().discard_outbound_datagrams();
+        let native = &*native;
         let streams = native.connection().inner().streams();
         if streams.len() > self.streams.len()
-            || native
-                .connection()
-                .inner()
-                .pending_outbound_datagram_count()
-                != 0
             || self.pending_writes.iter().any(|write| write.offset != 0)
         {
             return Err(Error::Backpressure);

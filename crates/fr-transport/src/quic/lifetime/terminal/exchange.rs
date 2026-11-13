@@ -71,8 +71,8 @@ impl QuicRecords {
     /// for the original host's Closed report. The caller first stops application
     /// observation/input admission. This API performs no native-input cleanup.
     ///
-    /// Unsent native data, partial writes and queued datagrams refuse rather
-    /// than flushing stale work. Bytes already sent and awaiting only the host's
+    /// Unsent native data and partial writes refuse rather than flushing stale
+    /// work; queued DATAGRAMs are discarded unsent. Bytes already sent and awaiting only the host's
     /// ACK are waited on, transmitting ACK frames only, for up to half the
     /// budget; still unacknowledged then, the exchange refuses. Unstaged writes
     /// are discarded. The original inbound control parser/remainder is TRANSFERRED,
