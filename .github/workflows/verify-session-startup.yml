@@ -30,19 +30,13 @@ jobs:
         run: |
           ./scripts/verify.sh docs
           git diff --check
-      - name: Check actual LocalAPI to QUIC session handoff in an isolated namespace
+      # The native_session_check example (LocalAPI to QUIC handoff in a
+      # network namespace) was staged in September and never landed. Run the
+      # native startup and control tests instead; the nightly display-selection
+      # lane runs every session_startup test.
+      - name: Native session startup and control tests
         run: |
-          cargo build -p frd --example native_session_check --locked --message-format=json > "$RUNNER_TEMP/session-example.jsonl"
-          python3 - <<'PY'
-          import json, os, subprocess
-          from pathlib import Path
-          rows = [json.loads(line) for line in Path(os.environ['RUNNER_TEMP'], 'session-example.jsonl').read_text().splitlines() if line.startswith('{')]
-          paths = {row['executable'] for row in rows if row.get('executable') and row.get('target', {}).get('name') == 'native_session_check'}
-          assert len(paths) == 1
-          executable = Path(next(iter(paths))).resolve(strict=True)
-          assert executable.is_relative_to(Path('target').resolve())
-          # Root authenticates this fixture's Unix peer only. Private namespace
-          # addresses are synthetic; this is not installed Tailscale or TUN proof.
-          script = 'ip link set lo up; ip addr add 100.64.0.1/32 dev lo; ip addr add 100.64.0.2/32 dev lo; exec "$1"'
-          subprocess.run(['sudo', 'unshare', '--net', '--', 'sh', '-eu', '-c', script, 'sh', str(executable)], check=True)
-          PY
+          set -o pipefail
+          cargo test -p frd --lib --locked session_startup::native 2>&1 | tee "$RUNNER_TEMP/startup.log"
+          # A filter that matches nothing must not pass as green.
+          grep -E 'test result: ok\. [1-9][0-9]* passed' "$RUNNER_TEMP/startup.log"

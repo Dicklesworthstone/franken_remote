@@ -1,4 +1,4 @@
-name: Verify client relative input
+name: Verify relative input
 on:
   workflow_dispatch:
   push:
@@ -30,10 +30,11 @@ jobs:
       - name: Verify docs
         run: |
           ./scripts/verify.sh docs
-      - name: Repeat client and native relative-mode regressions
+      # fr-client has no relative-mode tests: its relative_input target was
+      # staged in September and never landed (the client profile is absolute
+      # pointer only). This lane checks the wire and native halves.
+      - name: Repeat wire and native relative-mode regressions
         run: |
-          cargo test -p fr-client --test relative_input --locked -- --test-threads=1
-          cargo test -p fr-client --test relative_input --locked -- --test-threads=8
           cargo test -p fr-wire --test input_submission --locked
           cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=1
           cargo test -p fr-native --features linux-input --lib --test input_x11 --test keyboard_x11 --test input_concurrency --locked -- --test-threads=8
