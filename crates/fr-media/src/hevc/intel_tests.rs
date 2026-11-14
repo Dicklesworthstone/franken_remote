@@ -29,9 +29,14 @@ fn slice(header: &str) -> String {
 }
 
 fn config() -> CodecConfiguration {
+    config_showing(2256, 1504)
+}
+/// A configuration whose visible picture is `width` x `height`, coded in
+/// 16-sample blocks.
+fn config_showing(width: u32, height: u32) -> CodecConfiguration {
     CodecConfiguration::new_baseline(
         CodecConfigurationGeneration::INITIAL,
-        CodedGeometry::from_visible(&ProtocolLimits::ABSOLUTE, 2256, 1504, 16).unwrap(),
+        CodedGeometry::from_visible(&ProtocolLimits::ABSOLUTE, width, height, 16).unwrap(),
         ColorInfo::sdr_bt709(),
         GopPolicy::baseline_for_frame_rate(30).unwrap(),
     )
@@ -227,6 +232,93 @@ fn low_delay_b_admission_keeps_reordering_long_term_and_list_edits_refused() {
     assert_eq!(
         g.validate_annex_b(&au(&[&hex(&b2)]), false),
         Err(HevcError::ReferenceMismatch)
+    );
+}
+
+#[test]
+fn a_whole_coded_frame_is_cropped_to_the_visible_picture_by_the_host() {
+    // The transform encodes the 2256x1504 coded frame of a 2250x1500
+    // picture with no window (it refuses a smaller display aperture).
+    let shown = config_showing(2250, 1500);
+    assert_eq!(
+        (
+            shown.geometry().coded_width(),
+            shown.geometry().coded_height()
+        ),
+        (2256, 1504)
+    );
+    let guard = || HevcGuard::new(shown, ProtocolLimits::ABSOLUTE, 4).unwrap();
+    let uncropped = startup_with(&described(), &hex(PPS));
+    assert_eq!(
+        guard().validate_annex_b(&uncropped, true),
+        Err(HevcError::GeometryMismatch)
+    );
+
+    // The host's order: window, then colour.
+    let raw = startup_with(&hex(SPS), &hex(PPS));
+    let windowed = describe_encoder_window_annex_b(&raw, (2250, 1500)).unwrap();
+    assert_ne!(windowed, raw);
+    let normalized = describe_encoder_colour_annex_b(&windowed, ColorInfo::sdr_bt709()).unwrap();
+    let mut g = guard();
+    assert!(g.validate_annex_b(&normalized, true).unwrap().idr);
+    assert_eq!(
+        g.validate_annex_b(&au(&[&hex(&slice(B1))]), false)
+            .unwrap()
+            .poc_lsb,
+        1
+    );
+    for poc in 2..=4 {
+        assert_eq!(
+            g.validate_annex_b(&au(&[&hex(&later_b(poc))]), false)
+                .unwrap()
+                .poc_lsb,
+            poc
+        );
+    }
+    // A client admits it from the record the host derives.
+    let record = g.decoder_record().unwrap();
+    let mut client =
+        HevcGuard::from_decoder_record(shown, ProtocolLimits::ABSOLUTE, 4, record.bytes()).unwrap();
+    assert!(client.validate_annex_b(&normalized, true).unwrap().idr);
+
+    // The same crop again, or no padding at all: unchanged, never rewritten.
+    let sps = describe_encoder_window(&hex(SPS), (2250, 1500)).unwrap();
+    assert_eq!(describe_encoder_window(&sps, (2250, 1500)).unwrap(), sps);
+    assert_eq!(
+        describe_encoder_window(&hex(SPS), (2256, 1504)).unwrap(),
+        hex(SPS)
+    );
+    // Planted negative: a window one chroma sample short is a valid SPS but
+    // not this configuration's picture, so admission refuses it.
+    let short = describe_encoder_window_annex_b(&raw, (2252, 1500)).unwrap();
+    let short = describe_encoder_colour_annex_b(&short, ColorInfo::sdr_bt709()).unwrap();
+    assert_eq!(
+        guard().validate_annex_b(&short, true),
+        Err(HevcError::GeometryMismatch)
+    );
+    // An encoder's own different window, a picture larger than the coded
+    // frame, or an odd padding is refused, not rewritten. So is a non-SPS.
+    for crop in [
+        (2252, 1500),
+        (2258, 1504),
+        (2256, 1506),
+        (2251, 1500),
+        (2250, 1499),
+    ] {
+        let from = if crop == (2252, 1500) {
+            &sps
+        } else {
+            &hex(SPS)
+        };
+        assert_eq!(
+            describe_encoder_window(from, crop),
+            Err(HevcError::GeometryMismatch),
+            "crop {crop:?}"
+        );
+    }
+    assert_eq!(
+        describe_encoder_window(&hex(PPS), (2250, 1500)),
+        Err(HevcError::UnsupportedSyntax)
     );
 }
 

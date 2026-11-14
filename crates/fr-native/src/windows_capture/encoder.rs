@@ -28,23 +28,22 @@ use windows::Win32::Media::MediaFoundation::{
     IMFMediaType, IMFSample, IMFShutdown, IMFTransform, MEDIA_EVENT_GENERATOR_GET_EVENT_FLAGS,
     MEError, METransformHaveOutput, METransformNeedInput, MF_E_TRANSFORM_STREAM_CHANGE,
     MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-    MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_MPEG2_PROFILE,
-    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
-    MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK,
-    MF_VERSION, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer,
-    MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video,
-    MFNominalRange_16_235, MFOffset, MFSTARTUP_NOSOCKET, MFSampleExtension_CleanPoint, MFStartup,
-    MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG_HARDWARE,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_END_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnum2, MFVideoArea,
-    MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
-    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
-    eAVEncH265VProfile_Main_420_8, eAVEncVideoColorNominalRange_16_235,
-    eAVEncVideoColorPrimaries_BT709, eAVEncVideoColorTransferFunction_22_709,
-    eAVEncVideoColorTransferMatrix_BT709,
+    MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+    MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MFCreateAttributes,
+    MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer,
+    MFCreateSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_NOSOCKET,
+    MFSampleExtension_CleanPoint, MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_END_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MFTEnum2, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
+    MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR, eAVEncH265VProfile_Main_420_8,
+    eAVEncVideoColorNominalRange_16_235, eAVEncVideoColorPrimaries_BT709,
+    eAVEncVideoColorTransferFunction_22_709, eAVEncVideoColorTransferMatrix_BT709,
 };
 use windows::Win32::Media::{TIMERR_NOERROR, timeBeginPeriod, timeEndPeriod};
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
@@ -305,14 +304,18 @@ fn pump(generator: Generator, events: &Sender<Event>) {
 }
 
 impl Encoder {
-    /// Opens the adapter's hardware HEVC encoder for `coded` NV12 pictures
-    /// whose visible part is `picture`, at `fps` and `bitrate` (CBR).
+    /// Opens the adapter's hardware HEVC encoder for `coded` NV12 pictures at
+    /// `fps` and `bitrate` (CBR). The whole coded frame is encoded: Intel's
+    /// transform refuses its NV12 input type (`MF_E_INVALIDMEDIATYPE`) when
+    /// the output's display aperture is smaller than the frame, and with the
+    /// frame set to the visible size it pads to multiples of 8, not to the
+    /// configuration's coding blocks. The caller crops the padding in the SPS
+    /// (`describe_encoder_window_annex_b`).
     #[allow(clippy::too_many_lines, reason = "one ordered transform setup")]
     pub fn open(
         device: &ID3D11Device,
         adapter: (u32, i32),
         coded: (u32, u32),
-        picture: (u32, u32),
         fps: u32,
         bitrate: u32,
     ) -> Result<Self, NativeError> {
@@ -437,24 +440,6 @@ impl Encoder {
                     eAVEncH265VProfile_Main_420_8.0.cast_unsigned(),
                 )
                 .map_err(fail)?;
-            let aperture = MFVideoArea {
-                OffsetX: MFOffset::default(),
-                OffsetY: MFOffset::default(),
-                Area: windows::Win32::Foundation::SIZE {
-                    cx: picture.0.cast_signed(),
-                    cy: picture.1.cast_signed(),
-                },
-            };
-            let aperture_bytes = core::slice::from_raw_parts(
-                (&raw const aperture).cast::<u8>(),
-                size_of::<MFVideoArea>(),
-            );
-            if out_type
-                .SetBlob(&MF_MT_MINIMUM_DISPLAY_APERTURE, aperture_bytes)
-                .is_err()
-            {
-                refused.push("display_aperture");
-            }
             transform
                 .SetOutputType(output, &out_type, 0)
                 .map_err(fail)?;

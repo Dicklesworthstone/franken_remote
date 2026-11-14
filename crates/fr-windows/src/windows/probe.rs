@@ -22,6 +22,8 @@ struct Options {
     fps: u32,
     bitrate: u32,
     display: usize,
+    /// Encode a scaled picture this wide (a viewer's `scaled-picture`).
+    picture_width: Option<u32>,
     /// Encode every tick, even when nothing changed.
     all: bool,
 }
@@ -32,6 +34,7 @@ impl Options {
             fps: 30,
             bitrate: 8_000_000,
             display: 0,
+            picture_width: None,
             all: false,
         };
         loop {
@@ -49,6 +52,7 @@ impl Options {
                         }
                         "--bitrate" => options.bitrate = value.parse().ok()?,
                         "--display" => options.display = value.parse().ok()?,
+                        "--picture-width" => options.picture_width = Some(value.parse().ok()?),
                         _ => return None,
                     }
                     rest = tail;
@@ -105,7 +109,17 @@ fn probe(options: &Options) -> serde_json::Value {
         return json!({"end": "failed", "stage": "display", "displays": list.len()});
     };
     let limits = ProtocolLimits::ABSOLUTE;
-    let config = match CodedGeometry::from_visible(&limits, display.width, display.height, 16)
+    // A scaled picture's height follows fr-wire's canonical rule (the width
+    // times the display's aspect, rounded down to even); open refuses any
+    // other size.
+    let picture = options
+        .picture_width
+        .map_or((display.width, display.height), |width| {
+            let height =
+                u64::from(width) * u64::from(display.height) / u64::from(display.width.max(1));
+            (width, u32::try_from(height).unwrap_or(u32::MAX) & !1)
+        });
+    let config = match CodedGeometry::from_visible(&limits, picture.0, picture.1, 16)
         .map_err(|e| format!("{e:?}"))
         .and_then(|geometry| {
             GopPolicy::baseline_for_frame_rate(options.fps)
@@ -259,6 +273,7 @@ fn probe(options: &Options) -> serde_json::Value {
             "dpi": display.dpi,
             "rotation": display.rotation,
         },
+        "picture": [g.crop_width(), g.crop_height()],
         "coded": [g.coded_width(), g.coded_height()],
         "encoder": {
             "name": encoder.name,

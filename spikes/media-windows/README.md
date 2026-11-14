@@ -9,13 +9,13 @@ This experiment belongs to `fr-p0-media-windows-fbt`, under plan sections 8.3, 9
 The C++ probe in sections 1–4 enumerated the encoder but never encoded or decoded, and the 2026-09-23 reality check flagged its timings. The Rust host path in `fr-native` (`windows-media`, `crates/fr-native/src/windows_capture*`) does encode and decode:
 
 1. Desktop Duplication on the display's adapter, with the pointer drawn in.
-2. BGRA to NV12 on that adapter's D3D11 video processor.
-3. Intel's hardware Media Foundation HEVC transform, opened directly (no FFmpeg).
-4. `HevcGuard` admission, after the host writes the colour description the transform leaves out.
+2. BGRA to NV12 on that adapter's D3D11 video processor, which also scales the display to the session's picture: native pixels, or a canonical smaller picture when the viewer states a box (`scaled-picture`).
+3. Intel's hardware Media Foundation HEVC transform, opened directly (no FFmpeg). It encodes the whole coded frame (the picture rounded up to 16).
+4. `HevcGuard` admission, after the host writes what the transform leaves out: the conformance window that crops the coded frame to the picture, and the colour description.
 5. Viewer-side admission, then the client's Media Foundation hardware decoder.
 
 ```text
-fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] [--display N] [--all]
+fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] [--display N] [--all] [--picture-width N]
 ```
 
 Run it in the interactive session (a scheduled task with an `Interactive` principal from ssh). It prints one JSON document with counts and per-stage timings, and nothing else. `--all` encodes every tick; otherwise it encodes only when Desktop Duplication reports a new image or the pointer moved.
@@ -36,6 +36,7 @@ A forced mid-run IDR is honoured in every run.
 - **Timer A-B-A** (`timer-ab-*`): unit p50 31.3 / 13.4 / 31.3 ms. The transform waits on system timer ticks, so the committed encoder holds a 1 ms timer.
 - **Quality-vs-speed 0 and 33**: no change.
 - **Quality-vs-speed 100**: an IDR that admission refuses (`Limit`); the setting is not used.
+- **Display aperture** (2026-11-13): with a display aperture smaller than the frame on its output type (1620x1080 in 1632x1088), the transform refuses its NV12 input type (`MF_E_INVALIDMEDIATYPE`), also with the aperture on the input or with the sizes split between the two types. With the frame set to the picture it encodes, but pads to multiples of 8 (coded 1624x1080), not to the configuration's 16. Hence step 3's whole coded frame and step 4's host-written window.
 
 Not covered yet: the media_worker Windows host role, fault exercise (access lost, device removed, resize, exhaustion), rotated or multiple displays, HDR, hybrid GPUs, other vendors' transforms.
 

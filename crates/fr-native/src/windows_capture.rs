@@ -25,8 +25,8 @@ use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
     config::{CodecConfiguration, ColorInfo},
     hevc::{
-        HevcGuard, describe_encoder_colour_annex_b, framing::annex_b_to_length_prefixed,
-        strip_encoder_sei,
+        HevcGuard, describe_encoder_colour_annex_b, describe_encoder_window_annex_b,
+        framing::annex_b_to_length_prefixed, strip_encoder_sei,
     },
     worker::UnchangedCapture,
 };
@@ -163,7 +163,9 @@ fn annex_b_idr(bytes: &[u8]) -> Result<bool, NativeError> {
 
 impl WinCapture {
     /// Captures `display` with the coded geometry of `config`, at `fps` and
-    /// `bitrate`. The display's size must equal the visible picture.
+    /// `bitrate`. The visible picture is the display's size or one of its
+    /// canonical scaled pictures (`fr_wire::display::picture`), which the
+    /// converter scales the whole display into.
     pub fn open(
         display: &WinDisplay,
         config: CodecConfiguration,
@@ -175,7 +177,10 @@ impl WinCapture {
         if config.color() != ColorInfo::sdr_bt709()
             || !(1..=240).contains(&fps)
             || !(10_000..=200_000_000).contains(&bitrate)
-            || (g.crop_width(), g.crop_height()) != (display.width, display.height)
+            || !fr_wire::display::picture::is_picture(
+                (display.width, display.height),
+                (g.crop_width(), g.crop_height()),
+            )
         {
             return Err(NativeError::InvalidConfiguration);
         }
@@ -184,16 +189,16 @@ impl WinCapture {
         let source = duplication::Duplicator::open(display)?;
         let picture = (g.crop_width(), g.crop_height());
         let coded = (g.coded_width(), g.coded_height());
-        let converter =
-            convert::Converter::open(source.device(), source.composed(), picture, coded, fps)?;
-        let encoder = encoder::Encoder::open(
+        let converter = convert::Converter::open(
             source.device(),
-            display.adapter,
-            coded,
+            source.composed(),
+            (display.width, display.height),
             picture,
+            coded,
             fps,
-            bitrate,
         )?;
+        let encoder =
+            encoder::Encoder::open(source.device(), display.adapter, coded, fps, bitrate)?;
         Ok(Self {
             source,
             converter,
@@ -337,9 +342,14 @@ impl WinCapture {
         }
         // Intel's transform signals studio range but no primaries, transfer
         // or matrix, and refuses the settings that would add them. Its input
-        // is this converter's BT.709 output, so the SPS says exactly that;
-        // admission then checks the result like any encoder's.
+        // is this converter's BT.709 output, so the SPS says exactly that.
+        // It also encodes the whole coded frame (see `encoder`), so the SPS
+        // crops it to the visible picture. Admission then checks the result
+        // like any encoder's.
         let bytes = if idr {
+            let g = self.config.geometry();
+            let bytes = describe_encoder_window_annex_b(&bytes, (g.crop_width(), g.crop_height()))
+                .map_err(|e| refuse(format!("window:{e:?}")))?;
             describe_encoder_colour_annex_b(&bytes, self.config.color())
                 .map_err(|e| refuse(format!("colour:{e:?}")))?
         } else {

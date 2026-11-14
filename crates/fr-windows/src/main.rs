@@ -16,10 +16,12 @@
 //!   fr-windows directory <stable-id-or-name> [--port N] [--ipv4|--ipv6]
 //!       [--address IP]...
 //!       the host's tailnet directory (JSON).
-//!   fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] [--display N] [--all]
+//!   fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] [--display N]
+//!       [--picture-width N] [--all]
 //!       this machine as a host: Desktop Duplication into the GPU's HEVC
-//!       encoder, admitted and then decoded here. Prints counts and timings
-//!       (JSON). Run it in the interactive session.
+//!       encoder (optionally a scaled picture N pixels wide), admitted and
+//!       then decoded here. Prints counts and timings (JSON). Run it in the
+//!       interactive session.
 //!
 //! `--address` constrains the complete authenticated address set; it never
 //! replaces daemon metadata. Use `--ipv4` or `--ipv6` to select one family.
@@ -51,7 +53,7 @@ const USAGE: &str = "usage: fr-windows hosts\n       fr-windows view <stable-id-
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--seconds N]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \
      [--address IP]...\n       fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] \
-     [--display N] [--all]\n";
+     [--display N] [--picture-width N] [--all]\n";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

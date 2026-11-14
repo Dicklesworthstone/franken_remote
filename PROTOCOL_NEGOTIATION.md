@@ -67,7 +67,8 @@ limit. The viewer independently checks HostCapabilities against its original
 offer, and SessionOpened must acknowledge its exact selection.
 
 `scaled-picture` v1 is optional. A host offers it only when its capture can
-scale (macOS ScreenCaptureKit with VideoToolbox). A viewer that selects it
+scale (macOS ScreenCaptureKit with VideoToolbox; Windows Desktop Duplication,
+scaled by the D3D11 video processor that converts to NV12). A viewer that selects it
 states the largest picture it can show 1:1, each axis in 64..=max_dimension;
 the selection is invalid with the capability and no box, or a box and no
 capability. The host then encodes `Display::picture(box)`: native pixels when

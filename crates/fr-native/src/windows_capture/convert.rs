@@ -1,8 +1,9 @@
 //! BGRA to NV12 on the capture adapter's D3D11 video processor: full-range
 //! RGB in, BT.709 studio-range YCbCr out (the baseline `ColorInfo`), into a
-//! texture of the coded size. The rows and columns past the visible picture
-//! are the processor's black background, so the encoder's padding is never
-//! uninitialised memory.
+//! texture of the coded size. A visible picture smaller than the source is
+//! the whole source scaled by the same processor (a viewer's scaled picture).
+//! The rows and columns past the visible picture are the processor's black
+//! background, so the encoder's padding is never uninitialised memory.
 use crate::NativeError;
 use core::mem::ManuallyDrop;
 use windows::Win32::Foundation::RECT;
@@ -43,12 +44,14 @@ const fn rect(width: u32, height: u32) -> RECT {
 }
 
 impl Converter {
-    /// Converts `source` (BGRA, `picture` sized) into an NV12 texture of
-    /// `coded` size on `device`.
+    /// Converts `source` (BGRA, `size` pixels) into the top-left `picture`
+    /// of an NV12 texture of `coded` size on `device`, scaling when `picture`
+    /// is smaller than `size`.
     #[allow(clippy::too_many_lines, reason = "one ordered processor setup")]
     pub fn open(
         device: &ID3D11Device,
         source: &ID3D11Texture2D,
+        size: (u32, u32),
         picture: (u32, u32),
         coded: (u32, u32),
         fps: u32,
@@ -61,8 +64,8 @@ impl Converter {
         let description = D3D11_VIDEO_PROCESSOR_CONTENT_DESC {
             InputFrameFormat: D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
             InputFrameRate: rate,
-            InputWidth: picture.0,
-            InputHeight: picture.1,
+            InputWidth: size.0,
+            InputHeight: size.1,
             OutputFrameRate: rate,
             OutputWidth: coded.0,
             OutputHeight: coded.1,
@@ -165,13 +168,14 @@ impl Converter {
             );
             // No driver "enhancement": the desktop's pixels, converted only.
             context.VideoProcessorSetStreamAutoProcessingMode(&processor, 0, false);
-            let visible = rect(picture.0, picture.1);
+            let whole_source = rect(size.0, size.1);
             context.VideoProcessorSetStreamSourceRect(
                 &processor,
                 0,
                 true,
-                Some(&raw const visible),
+                Some(&raw const whole_source),
             );
+            let visible = rect(picture.0, picture.1);
             context.VideoProcessorSetStreamDestRect(&processor, 0, true, Some(&raw const visible));
             let whole = rect(coded.0, coded.1);
             context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&raw const whole));

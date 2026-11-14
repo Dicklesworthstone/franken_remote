@@ -727,9 +727,13 @@ fn request(
 }
 
 /// Whether this host's capture can encode a smaller picture than its display
-/// (`scaled-picture`): the macOS capture scales in hardware before it encodes.
+/// (`scaled-picture`): the macOS capture scales in hardware before it encodes,
+/// and the Windows capture's video processor scales while it converts to NV12.
 fn scales_pictures(encoder: Encoder) -> bool {
-    encoder.backend() == fr_media::worker::Backend::VideoToolbox
+    matches!(
+        encoder.backend(),
+        fr_media::worker::Backend::VideoToolbox | fr_media::worker::Backend::MediaFoundation
+    )
 }
 
 /// Pick the only display, or the one at the desktop origin when several exist.

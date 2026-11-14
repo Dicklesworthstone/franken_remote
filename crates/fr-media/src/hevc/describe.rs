@@ -1,8 +1,14 @@
-//! Host-only SPS normalization: write the colour description a HOST encoder
-//! left out. Intel's Media Foundation HEVC transform signals video range but
-//! no primaries, transfer or matrix, and refuses every setting that would add
-//! them. The host knows what it fed the encoder (its own converter's output),
-//! so it states exactly that in the VUI.
+//! Host-only SPS normalization: write what a HOST encoder left out.
+//! - The colour description. Intel's Media Foundation HEVC transform signals
+//!   video range but no primaries, transfer or matrix, and refuses every
+//!   setting that would add them. The host knows what it fed the encoder (its
+//!   own converter's output), so it states exactly that in the VUI.
+//! - The conformance window. The same transform refuses its input type when
+//!   the output's display aperture is smaller than the frame, so a picture
+//!   whose size is not a multiple of the coding block is encoded at the
+//!   padded (coded) size with no window. The host knows the visible picture,
+//!   so it crops the padding in the SPS. Only output cropping changes; the
+//!   coded size, which slice parsing depends on, stays as encoded.
 //!
 //! This walker trusts nothing it produces: the result is admitted by the same
 //! strict `HevcGuard` as any encoder output, and a walk it cannot follow is an
@@ -68,6 +74,17 @@ impl Writer {
     fn write(&mut self, value: u32, count: u32) {
         for shift in (0..count).rev() {
             self.put((value >> shift) & 1);
+        }
+    }
+    /// Unsigned Exp-Golomb.
+    fn ue(&mut self, value: u32) {
+        let coded = u64::from(value) + 1;
+        let bits = 64 - coded.leading_zeros();
+        for _ in 1..bits {
+            self.put(0);
+        }
+        for shift in (0..bits).rev() {
+            self.put(u32::from((coded >> shift) & 1 == 1));
         }
     }
     fn copy(&mut self, from: &Reader, range: core::ops::Range<usize>) {
@@ -282,6 +299,113 @@ pub fn describe_encoder_colour(sps: &[u8], color: ColorInfo) -> Result<Vec<u8>, 
     escape(&w.bytes, &mut out);
     if out.len() > MAX_PARAMETER_BYTES {
         return Err(HevcError::Limit);
+    }
+    Ok(out)
+}
+
+/// The SPS NAL (two-byte header, escaped payload) with a conformance window
+/// that crops its coded 4:2:0 picture to `crop` (width, height) at the right
+/// and bottom edges, when the encoder wrote no window. An SPS that is already
+/// `crop` (no padding, or its own window gives exactly `crop`) is returned
+/// unchanged. Any other window, a coded size smaller than `crop`, an odd
+/// padding or a chroma format other than 4:2:0 is refused, never rewritten.
+pub fn describe_encoder_window(sps: &[u8], crop: (u32, u32)) -> Result<Vec<u8>, HevcError> {
+    if sps.len() < 3 || sps.len() > MAX_PARAMETER_BYTES || (sps[0] >> 1) & 63 != 33 {
+        return Err(HevcError::UnsupportedSyntax);
+    }
+    let mut r = Reader {
+        rbsp: unescape(&sps[2..]),
+        at: 0,
+    };
+    r.skip(4)?;
+    let sub_layers_minus1 = r.read(3)?;
+    if sub_layers_minus1 > 6 {
+        return Err(HevcError::UnsupportedSyntax);
+    }
+    r.skip(1)?;
+    profile_tier_level(&mut r, sub_layers_minus1)?;
+    r.ue()?;
+    if r.ue()? != 1 {
+        return Err(HevcError::UnsupportedSyntax); // Not 4:2:0.
+    }
+    let (width, height) = (r.ue()?, r.ue()?);
+    let site = r.at;
+    if r.bit()? == 1 {
+        // 4:2:0 offsets count chroma samples: two luma columns or rows each.
+        let mut offsets = [0_u32; 4];
+        for offset in &mut offsets {
+            *offset = r.ue()?;
+        }
+        let [left, right, top, bottom] = offsets;
+        let shown = |size: u32, a: u32, b: u32| {
+            a.checked_add(b)
+                .and_then(|sum| sum.checked_mul(2))
+                .and_then(|cut| size.checked_sub(cut))
+        };
+        return if (shown(width, left, right), shown(height, top, bottom))
+            == (Some(crop.0), Some(crop.1))
+        {
+            Ok(sps.to_vec())
+        } else {
+            Err(HevcError::GeometryMismatch)
+        };
+    }
+    if (width, height) == crop {
+        return Ok(sps.to_vec());
+    }
+    let (Some(right), Some(bottom)) = (width.checked_sub(crop.0), height.checked_sub(crop.1))
+    else {
+        return Err(HevcError::GeometryMismatch);
+    };
+    if !right.is_multiple_of(2) || !bottom.is_multiple_of(2) {
+        return Err(HevcError::GeometryMismatch);
+    }
+    let r_bits = r.rbsp.len() * 8;
+    let stop = (0..r_bits)
+        .rev()
+        .find(|&at| (r.rbsp[at / 8] >> (7 - at % 8)) & 1 == 1)
+        .ok_or(HevcError::Truncated)?;
+    if r.at > stop {
+        return Err(HevcError::Truncated);
+    }
+    let mut w = Writer::default();
+    w.copy(&r, 0..site);
+    w.put(1); // conformance_window_flag
+    w.ue(0);
+    w.ue(right / 2);
+    w.ue(0);
+    w.ue(bottom / 2);
+    w.copy(&r, r.at..stop);
+    w.put(1); // rbsp_stop_one_bit
+    while !w.bits.is_multiple_of(8) {
+        w.put(0);
+    }
+    let mut out = Vec::with_capacity(w.bytes.len() + w.bytes.len() / 2 + 2);
+    out.extend_from_slice(&sps[..2]);
+    escape(&w.bytes, &mut out);
+    if out.len() > MAX_PARAMETER_BYTES {
+        return Err(HevcError::Limit);
+    }
+    Ok(out)
+}
+
+/// `describe_encoder_window` applied to every SPS of one Annex B access unit;
+/// every other NAL is copied unchanged with a four-byte start code.
+pub fn describe_encoder_window_annex_b(
+    bytes: &[u8],
+    crop: (u32, u32),
+) -> Result<Vec<u8>, HevcError> {
+    let mut units = super::nal::AnnexB::new(bytes)?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(bytes.len() + 64)
+        .map_err(|_| HevcError::Allocation)?;
+    while let Some(nal) = units.next()? {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        if nal.kind == 33 {
+            out.extend_from_slice(&describe_encoder_window(nal.bytes, crop)?);
+        } else {
+            out.extend_from_slice(nal.bytes);
+        }
     }
     Ok(out)
 }

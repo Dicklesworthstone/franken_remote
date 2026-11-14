@@ -24,7 +24,10 @@ use std::sync::Arc;
 mod describe;
 mod nal;
 mod parameters;
-pub use describe::{describe_encoder_colour, describe_encoder_colour_annex_b};
+pub use describe::{
+    describe_encoder_colour, describe_encoder_colour_annex_b, describe_encoder_window,
+    describe_encoder_window_annex_b,
+};
 #[cfg(test)]
 mod tests;
 
