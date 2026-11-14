@@ -619,7 +619,7 @@ mod system {
     };
     use std::{
         sync::{
-            Arc, Mutex,
+            Arc, Mutex, PoisonError,
             atomic::{AtomicBool, AtomicU64, Ordering},
             mpsc::{self, RecvTimeoutError},
         },
@@ -675,7 +675,7 @@ mod system {
     }
 
     impl System {
-        fn open(control: Control) -> Result<Self, NativeOpenError> {
+        fn open(control: &Control) -> Result<Self, NativeOpenError> {
             let shared = Arc::new(Shared {
                 origin: Instant::now(),
                 answered: AtomicU64::new(0),
@@ -711,23 +711,20 @@ mod system {
             let worker = thread::Builder::new()
                 .name("fr-clipboard-privacy".into())
                 .spawn(move || {
-                    let indicator = taken.lock().unwrap_or_else(|p| p.into_inner()).take();
+                    let indicator = taken.lock().unwrap_or_else(PoisonError::into_inner).take();
                     indicator.is_some_and(|indicator| {
                         supervise(indicator, &watched, &supervising, &stopped)
                     })
                 });
-            let worker = match worker {
-                Ok(worker) => worker,
-                Err(_) => {
-                    shared.off.store(true, Ordering::Release);
-                    control.stop();
-                    let indicator = owner.lock().unwrap_or_else(|p| p.into_inner()).take();
-                    return Err(if indicator.is_some_and(Indicator::finish_close) {
-                        NativeOpenError::Native(PlatformError::Unavailable)
-                    } else {
-                        NativeOpenError::Cleanup
-                    });
-                }
+            let Ok(worker) = worker else {
+                shared.off.store(true, Ordering::Release);
+                control.stop();
+                let indicator = owner.lock().unwrap_or_else(PoisonError::into_inner).take();
+                return Err(if indicator.is_some_and(Indicator::finish_close) {
+                    NativeOpenError::Native(PlatformError::Unavailable)
+                } else {
+                    NativeOpenError::Cleanup
+                });
             };
             Ok(Self {
                 shared,
@@ -830,7 +827,7 @@ mod system {
     -> impl FnOnce(Control, NativeAccess) -> Result<WindowsClipboard, NativeOpenError> + Send + 'static
     {
         move |control, access| {
-            let native = System::open(control)?;
+            let native = System::open(&control)?;
             let shared = native.shared.clone();
             Clipboard::open(native, &ProtocolLimits::ABSOLUTE, move |until| {
                 shared.live() && access.check(until)
