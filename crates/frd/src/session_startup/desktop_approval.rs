@@ -1,11 +1,14 @@
-//! One original host-startup approval backed by the hardened desktop UI child.
-//! Native I/O and child retirement stay on a capacity-one worker. This adapter
+//! One original host-startup approval backed by a child UI or the native
+//! Windows surface. Native I/O and retirement stay on a capacity-one worker.
+//! This adapter
 //! never creates an Approval or grants input: only its supplied original can
 //! consume a result. The enclosing host still services admission and local OS
 //! lifecycle BEFORE calling take_decision. This does not enable the CLI by itself.
 mod io;
 #[cfg(test)]
 mod tests;
+#[cfg(windows)]
+mod windows;
 use super::Approval;
 use crate::input_process::ProcessLaunch;
 use std::{
@@ -94,6 +97,19 @@ impl Prompt {
     /// desktop. The original negotiated role selects view vs control labels.
     /// Validation/spawn failures deny this pending request, never another peer.
     pub fn start(original: Approval, launch: ProcessLaunch) -> Result<Self, Error> {
+        Self::spawn(original, move |shared| io::run(&launch, shared))
+    }
+    /// Native consent in this process's already monitored Windows logon
+    /// session. The UI runs on the same capacity-one worker as child-backed
+    /// consent, and cannot apply a decision or retain authority by itself.
+    #[cfg(windows)]
+    pub fn start_windows(original: Approval) -> Result<Self, Error> {
+        Self::spawn(original, windows::run)
+    }
+    fn spawn(
+        original: Approval,
+        run: impl FnOnce(&Shared) -> Report + Send + 'static,
+    ) -> Result<Self, Error> {
         original.check_pending().map_err(Error::Original)?;
         if let Err(error) = claim() {
             let _ = original.decide(false);
@@ -107,7 +123,7 @@ impl Prompt {
         let running = shared.clone();
         if let Ok(worker) = thread::Builder::new()
             .name("fr-desktop-approval".into())
-            .spawn(move || io::run(&launch, &running))
+            .spawn(move || run(&running))
         {
             Ok(Self {
                 shared,

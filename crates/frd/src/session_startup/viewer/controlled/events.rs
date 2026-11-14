@@ -58,6 +58,10 @@ pub enum Error {
     UnsupportedText,
     StaleTextContext,
     TextNotReady,
+    /// Ordered native keys crossed their original source/view context.
+    StaleInputContext,
+    /// The original view is temporarily unavailable for new native keys.
+    InputNotReady,
     Text(TextError),
 }
 /// A local draft belongs to one original producer and one uninterrupted input
@@ -80,6 +84,11 @@ impl TextContext {
         Weak::ptr_eq(&self.queue, queue)
     }
 }
+
+/// Source and uninterrupted view for queued native physical input. This is
+/// independent of the optional Unicode capability and grants no authority.
+#[derive(Clone, PartialEq, Eq)]
+pub struct InputContext(TextContext);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct TextState {
@@ -119,8 +128,8 @@ impl TextState {
 struct Captured {
     event: Event,
     sampled: ClientInstant,
-    /// A Unicode commit cannot acquire a replacement view while queued.
-    /// Physical positioned events retain their existing checked Layout.
+    /// A Unicode commit or context-bound native key cannot acquire a new view
+    /// while queued. Other positioned events retain their checked Layout.
     text_context: Option<TextState>,
     /// An original native send bound, never a renewed ticket. Releases remain
     /// eligible for cleanup after this bound if the host already holds them.
@@ -179,7 +188,8 @@ impl Queue {
         if self.events.len() == MAX_EVENTS {
             return Err(Error::Overflow);
         }
-        let text_context = matches!(event, Event::Text(_)).then_some(self.context);
+        let text_context =
+            context.or_else(|| matches!(event, Event::Text(_)).then_some(self.context));
         self.events.push_back(Captured {
             event,
             sampled,
@@ -282,6 +292,16 @@ impl Source {
         if !self.supports_text() {
             return Err(Error::UnsupportedText);
         }
+        self.capture_context()
+    }
+    /// Capture before entering a native keyboard callback or waiting for queue
+    /// capacity. A later same-generation resume still changes this identity.
+    pub fn input_context(&self) -> Result<Option<InputContext>, Error> {
+        self.capture_context()
+            .map(|context| context.map(InputContext))
+    }
+    fn capture_context(&self) -> Result<Option<TextContext>, Error> {
+        self.clock()?;
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let queue = shared.lock().map_err(|_| Error::Unavailable)?;
         if self.control.is_stopped() {
@@ -300,6 +320,14 @@ impl Source {
         if !self.supports_text() {
             return Err(Error::UnsupportedText);
         }
+        self.capture_context_ready(context)
+    }
+    pub fn input_context_ready(&self, context: &InputContext) -> Result<bool, Error> {
+        self.capture_context_ready(&context.0)
+            .map_err(input_context_error)
+    }
+    fn capture_context_ready(&self, context: &TextContext) -> Result<bool, Error> {
+        self.clock()?;
         if !context.belongs_to(&self.queue) {
             return Err(Error::StaleTextContext);
         }
@@ -309,6 +337,46 @@ impl Source {
             return Err(Error::Closed);
         }
         queue.context_ready(context.state)
+    }
+    /// Submit one ordered key under the callback's original view and exclusive
+    /// deadline. The receiver retains both until dispatch. Any failure fences
+    /// this source: dependent keys cannot continue after a lost modifier.
+    pub fn push_key_in_context_until(
+        &mut self,
+        context: &InputContext,
+        key: PhysicalKey,
+        transition: KeyTransition,
+        sampled: ClientInstant,
+        until: ClientInstant,
+    ) -> Result<(), Error> {
+        let result = (|| {
+            let current = self.clock()?;
+            not_future(sampled, current)?;
+            if until <= current {
+                return Err(Error::Expired);
+            }
+            let latest = sampled
+                .0
+                .checked_add(MAX_EVENT_AGE_US)
+                .ok_or(Error::Clock)?;
+            if until.0 > latest {
+                return Err(Error::Clock);
+            }
+            if !context.0.belongs_to(&self.queue) {
+                return Err(Error::StaleInputContext);
+            }
+            self.push_bounded(
+                Event::Key { key, transition },
+                sampled,
+                Some(context.0.state),
+                Some(until),
+            )
+            .map_err(input_context_error)
+        })();
+        if result.is_err() {
+            self.stop();
+        }
+        result
     }
     /// Submit a native commit under the context that began its local draft.
     /// Stale/replaced context is a whole-value refusal with no wire identity
@@ -476,6 +544,13 @@ impl Source {
 impl Drop for Source {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+fn input_context_error(error: Error) -> Error {
+    match error {
+        Error::StaleTextContext => Error::StaleInputContext,
+        Error::TextNotReady => Error::InputNotReady,
+        other => other,
     }
 }
 fn not_future(sampled: ClientInstant, current: ClientInstant) -> Result<(), Error> {
@@ -677,6 +752,15 @@ impl Receiver {
                 || (matches!(captured.event, Event::Text(_))
                     && captured.send_until.is_some_and(|until| now >= until))
         }) {
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|captured| !matches!(captured.event, Event::Text(_)))
+            {
+                // A captured modifier/key sequence is indivisible across view
+                // replacement. The original owner's teardown releases holds.
+                return Err(Error::StaleInputContext);
+            }
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
             self.note_refused(&event);
             return Ok(None);

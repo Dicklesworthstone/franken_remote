@@ -1,5 +1,76 @@
 # Implementation status
 
+## Windows adaptive bitrate through the live capture worker (2026-11-14 UTC)
+
+The original Media Foundation capture worker now implements `CaptureAtRate`
+for private and shared adaptive hosts. A target applies only during useful
+capture work, retains the opening bitrate ceiling and both original two-second
+clocks, and is reported only after exact native readback and an admitted IDR.
+An unchanged desktop retains the previous rate; lost source evidence refuses
+capture. Fixed-rate hosting remains the default. See
+[the media commit](https://github.com/Dicklesworthstone/franken_remote/commit/a745f925)
+and [Windows rate transactions](ADAPTIVE_CAPTURE.md#windows-media-foundation-bitrate-transactions).
+
+**Passed:** 1,214 tests across `fr-core`, `fr-wire` and `fr-media`; all 12 portable
+production rate/arbitration tests with strict pedantic Clippy; and strict
+Windows MSVC Clippy for the `fr-native` library and binaries. The ignored native
+hardware rate probe has not run. Windows device behavior and impaired-path
+quality remain unqualified; the broader workspace and combined Windows build
+remain resource-constrained, without a passing result.
+
+## Native Windows display choice, capture and local consent (2026-11-14 UTC)
+
+The Windows viewer now provides `--display choose|primary|only|HANDLE`.
+`choose` opens a bounded modeless native picker from the original approved
+display catalog. Transport and original startup deadlines keep running while
+the user decides. A one-use local request binds each reply to the exact catalog
+and attempt; cancellation, cleanup, close and replacement invalidate it before
+later startup consumption. The mobile C ABI retains primary-display behavior.
+This initial-selection slice passed 49 portable tests, portable strict Clippy
+and pinned formatting. An isolated actual Win32 picker/binding check also
+passed; the three full shared-session integration regressions and real Windows
+multi-display operation remain separate qualification. See
+[the display commit](https://github.com/Dicklesworthstone/franken_remote/commit/58ca090b6979cded00fd60429f2f769d30889f77)
+and [Windows client usage](docs/windows-client.md).
+
+The first full Windows-target integration check reached the actual viewer and
+reported one strict Clippy failure in the picker-open branch
+(`single_match_else`). That branch now uses the suggested equivalent
+`if let`; denial/close behavior and warning enforcement are unchanged.
+The complete hosted rerun remains pending.
+
+The Windows host capture path now owns one full-display GPU texture. It copies
+each new desktop image once before releasing the borrowed DXGI frame and
+composes cursor pixels only in a clipped region using two fixed 256×256 scratch
+textures. Cursor shape, visibility and position come from the same successful
+DXGI acquisition; color, monochrome and masked-color cursors retain their
+semantics without double-drawing an already-composited pointer. New images
+discard old underlays; duplication loss also invalidates cursor state and
+source evidence. Thirteen cursor
+policy tests, six existing freshness tests and isolated actual Windows boundary
+strict Clippy passed. This removes a full-display allocation/copy and full-screen
+GDI mapping in source; a hardware frame-rate benefit and decoded appearance
+remain unmeasured. See
+[the capture commit](https://github.com/Dicklesworthstone/franken_remote/commit/f769230e2c65e0382af911bfa74bffe82848c36d).
+
+Windows `frd run --approval local` now opens a native attributed Allow/Deny
+surface for the original admitted viewing or control request. It uses the
+existing capacity-one approval worker and one-use capability, validates the
+same monitored interactive logon, and preserves original opening/startup
+deadlines and join-before-consume cleanup. Ordinary injected remote mouse
+events cannot approve. Native UI, source visibility and original authority
+are rechecked before acceptance; privileged UIAccess software remains within
+the trusted Windows/user boundary. All twelve production gesture/budget tests,
+including the two reconstructed trailing regressions, now pass with the pinned
+compiler and strict standalone Clippy. The isolated Win32 API check passed
+before executor loss; the recovered production boundary and policy were
+independently compared. Full local Windows feature-union
+checking was SIGKILLed while compiling the broad pinned Windows bindings,
+before first-party code. Complete host integration and real Windows
+input/consent qualification remain unverified. The existing hosted cross-build
+now also selects the host and capture entry points, which the viewer-only
+graph did not compile. See [native consent details](LOCAL_NATIVE_APPROVAL.md).
+
 ## Native Windows committed Unicode text (2026-11-14 UTC)
 
 The Windows viewer now exposes **Input → Send text…**: a native multiline
@@ -29,11 +100,12 @@ spelling was corrected without changing its irreversible overflow behavior.
 The shared no-grant regression exercises the new API; existing source-context
 and capture tests cover continuity and original exclusive deadlines. Source
 review found and repaired reentrant lifecycle and whole-value read gaps.
-The actual Win32 editor and shared session still await the hosted Windows
-cross-Clippy lane: the existing trust-root export requires the macOS builder
-and cannot run unchanged on this Linux executor. No real Windows IME,
-host-insertion or live-tailnet qualification is claimed; `fr-nuqa` stays in
-progress. See [Windows client usage](docs/windows-client.md).
+The actual Win32 editor and shared session passed hosted Windows cross-Clippy
+in the completed [Rust verification run for 8e44fd60](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43573636474),
+which also passed the full Linux workspace checks, strict Clippy and tests.
+Those commands used the existing macOS trust-root export for the Windows target.
+No real Windows IME, host-insertion or live-tailnet qualification is claimed;
+`fr-nuqa` stays in progress. See [Windows client usage](docs/windows-client.md).
 
 ## Established audio send expiry preserves the original desktop (2026-11-14 UTC)
 
@@ -68,9 +140,12 @@ its 1.5-second view age. The production microphone correctly refused stale
 readiness before receiving the peer reset. The corrected test keeps only its
 explicit presentation fixture current on the same original input owner; no
 grant, ticket, send deadline or production authority ordering changes. This
-correction still awaits execution. Exact formatter corrections are applied,
-and the restored workspace passes `cargo fmt --all --check`. These results
-come from completed command logs, not continued-step API success flags.
+correction passed in both the workspace and private-microphone lanes of the
+completed [Rust verification run for 8e44fd60](https://github.com/Dicklesworthstone/franken_remote/actions/runs/43573636474).
+The run's actual Linux aggregate records success for formatting, all-target
+checking, strict Clippy, the full test suite and its additional native/document
+lanes. These results come from completed command logs, not continued-step API
+success flags.
 Native-device, live-tailnet and loaded-host qualification remain unclaimed;
 `fr-jy4e` stays in progress.
 

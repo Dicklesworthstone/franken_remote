@@ -201,9 +201,11 @@ support keeps physical-key control, and a text call returns
   expires or other input intervenes. Oversized whole actions are refused;
   they do not become a backlog for later gestures.
 - Hardware keyboards send HID usages one-for-one (`UIKey.keyCode` are page-7
-  usages). Software-keyboard callbacks that map completely to ASCII use the
-  existing US-layout physical-key path, including sticky modifiers and
-  bounded pacing on later frames.
+  usages). Single ASCII characters and shortcut keys use the US-layout
+  physical-key path, including sticky modifiers. A callback with multiple
+  ASCII characters uses the whole-text path when the host grants that
+  capability and no sticky shortcut modifier is active, so ordinary paste
+  and dictation do not become a long series of physical key presses.
 - A callback containing Unicode or another character without a physical-key
   mapping submits the **entire completed value once**, synchronously through
   `fr_session_text`. Mixed ASCII/Unicode values are never split into a key
@@ -215,7 +217,27 @@ support keeps physical-key control, and a text call returns
   produces a content-free notice, and the value is discarded. A later frame,
   readiness change or reconnect cannot replay it; the user must enter new
   input explicitly.
-- The Rust capture retains one original timestamp and source/view context
+- Physical strokes that wait for capacity retain one opaque Rust capture
+  taken before the original callback is classified or mapped. Every retry
+  keeps its original source, complete view generations, suspension history,
+  stroke index and exclusive input deadline. That deadline is at most the
+  existing 100 ms native-event budget, shortened by the original checked
+  input bound and time spent waiting to capture. A busy stroke has queued
+  no modifier or key effects. Rust reserves capacity for its complete
+  modifier/key/release sequence and releases only modifiers it pressed.
+  An expired stroke, changed context or newer input overtaking a waiting
+  callback ends the original control source; dependent keys are discarded
+  and the normal host-held-state cleanup runs. A delayed shortcut cannot run
+  after an intervening pointer or hardware-key action.
+  A later capture or ticket cannot give the old callback a new lifetime.
+- The physical queue holds at most 4,096 strokes; an oversized callback
+  refuses as a whole before a prefix is queued. Rust also bounds outstanding
+  callback captures to 64. Closing the keyboard, losing focus, replacing the
+  session or ending control clears retained callbacks. A host without text
+  capability retains physical ASCII input with these same limits; a long
+  paste that cannot fit its original deadline is refused rather than typed
+  after a stall. Whole-text refusal never falls back to physical keys.
+- The Rust committed-text capture retains one original timestamp and source/view context
   through its existing bounded queue. A changed or unready context refuses
   the whole capture while keeping physical-key control available. Acceptance
   into that queue is not a guarantee of atomic OS insertion: native delivery
@@ -298,6 +320,15 @@ The unit tests (`cargo test`, `xcodebuild test`) cover the decoder, the ABI,
 name and pin rules, the touch state machines, picture mapping and keyboard
 mapping. They do not show that the app works against a host: that needs a
 live session.
+
+Captured typing adds production-policy regressions for whole-stroke modifier
+ownership, bounded callback custody, unchanged busy retries and consumed
+indices; the source-queue cases cover every view generation, same-view
+suspend/resume, unchanged deadlines and key input without Unicode negotiation.
+Swift tests cover original capture reuse, callback bounds, refusal and session
+replacement, plus the negotiated whole-text paste choice. The source/ABI and
+Swift suites require their normal workspace and Apple builds; standalone Rust
+policy execution does not qualify a live iOS keyboard or host insertion.
 
 Debug builds accept launch arguments for simulator runs without UI
 automation: `-FRConnect <machine>.<tailnet>.ts.net [-FRPort N] [-FRControl]

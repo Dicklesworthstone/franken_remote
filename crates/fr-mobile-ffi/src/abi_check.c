@@ -25,3 +25,18 @@ _Static_assert(offsetof(FrConfig, picture_width) == 24, "FrConfig layout");
 _Static_assert(offsetof(FrConfig, picture_height) == 28, "FrConfig layout");
 _Static_assert(sizeof(bool) == 1, "C bool is Rust bool");
 _Static_assert(sizeof(FrHandle) == 8, "FrHandle is u64");
+
+/* Captured typing has no new structs. Pin its scalar and pointer signatures
+ * too, so a header edit cannot silently change what Swift passes to ffi.rs. */
+_Static_assert(_Generic(&fr_session_begin_typing,
+    int32_t (*_Nonnull)(FrHandle, uint64_t *_Nullable): 1, default: 0),
+    "fr_session_begin_typing signature");
+_Static_assert(_Generic(&fr_session_type_captured,
+    int32_t (*_Nonnull)(FrHandle, uint64_t, uint32_t, uint16_t, uint8_t): 1, default: 0),
+    "fr_session_type_captured signature");
+_Static_assert(_Generic(&fr_session_end_typing,
+    void (*_Nonnull)(FrHandle, uint64_t): 1, default: 0),
+    "fr_session_end_typing signature");
+_Static_assert(_Generic(&fr_session_supports_text,
+    bool (*_Nonnull)(FrHandle): 1, default: 0),
+    "fr_session_supports_text signature");

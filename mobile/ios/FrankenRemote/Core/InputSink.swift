@@ -1,7 +1,7 @@
 import CoreGraphics
 
 /// What an input call did (`FR_*` status codes in fr_mobile.h).
-enum InputStatus: Equatable {
+enum InputStatus: Error, Equatable {
     case sent
     /// Accepted with nothing sent yet (a sub-line scroll, an unchanged key).
     case pending
@@ -14,7 +14,8 @@ enum InputStatus: Equatable {
     /// Control (and so the session) is ending.
     case controlLost
     /// Nothing was accepted: input is busy or its text context is not ready.
-    /// Physical keys may wait; a completed text callback must be discarded.
+    /// Physical strokes may wait only under their original Rust capture;
+    /// a completed text callback must be discarded.
     case busy
     case closed
     case stale
@@ -50,5 +51,10 @@ protocol InputSink: AnyObject {
     @discardableResult func scroll(dx: Double, dy: Double, at point: CGPoint) -> InputStatus
     func scrollEnded()
     @discardableResult func key(_ usage: UInt16, pressed: Bool) -> InputStatus
+    /// One original ASCII callback; the Rust owner fixes its deadline and view.
+    func beginTyping() -> Result<UInt64, InputStatus>
+    @discardableResult func typeCaptured(_ token: UInt64, index: UInt32,
+                                         usage: UInt16, modifiers: UInt8) -> InputStatus
+    func endTyping(_ token: UInt64)
     @discardableResult func text(_ text: String) -> InputStatus
 }

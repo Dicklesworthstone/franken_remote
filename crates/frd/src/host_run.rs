@@ -1004,8 +1004,9 @@ pub fn run_with_policy_and_encoder(
     run_inner(options, report, stop, Some(policy), encoder.into(), None)
 }
 
-/// Local desktop consent backed by the installed UI child and an explicitly
-/// monitored OS session. Saved policy still decides whether a prompt is required;
+/// Local desktop consent backed by the installed UI child (native surface on
+/// Windows) and an explicitly monitored OS session. Saved policy still decides
+/// whether a prompt is required;
 /// this supplies a capability to display it, not approval or unattended fallback.
 pub fn run_with_desktop_approval(
     options: &Options,

@@ -119,3 +119,50 @@ The broader `fr-rc-sec-approval-synthetic-input-t2r` bead remains open: independ
 fencing remote input against pending approval-window geometry is separate work.
 This change rejects the injected decision at the real native consent boundary;
 it does not claim to install that additional cross-owner injection fence.
+
+## Windows host consent
+
+Windows hosts can now use `frd run --encoder mediafoundation --approval local`,
+with `--control` when remote control is locally enabled. The native consent
+window runs in the host process's original monitored interactive logon session;
+it does not require a Unix helper image or change saved approval policy.
+The existing Stop sharing window remains the active share's independent revoke
+surface. Session 0, another logon session, a replacement helper image and
+unavailable session evidence cannot authorize the native consent surface.
+
+One pending admitted request opens one prompt. It displays the authenticated
+node, the installed daemon's name, the local request ordinal, and the exact
+negotiated viewing/control and auxiliary scope. Each complete line is measured
+before enabling Allow; insufficient work area, hidden or failed native UI, and
+invalid attribution refuse the request. No window mapping or native response
+grants observation by itself.
+
+Allow requires a new primary-mouse press and release inside its native button,
+with the original foreground window and ordinary input desktop still current.
+Both edges must have a Win32 mouse source with `IMO_HARDWARE` provenance.
+Ordinary `SendInput` events, including FrankenRemote's input sink, cannot approve
+the request. Posted button notifications, keyboard defaults and untyped input
+do not grant consent. Synthetic motion, focus/capture loss, cancellation and
+window lifecycle changes invalidate partial clicks. Closing or denying the
+prompt refuses its original request; no consent is automatically retried.
+
+Win32 includes input injected by privileged `UIAccess` applications in
+`IMO_HARDWARE`. This is a boundary against the ordinary remote input sink,
+not secure attention or proof of a physical person. The selected desktop user,
+Windows and privileged accessibility software remain trusted. See Microsoft's
+[input-source contract](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ne-winuser-input_message_origin_id).
+
+The existing original startup deadline, the pre-spawn three-second opening
+budget and the thirty-second prompt cap continue while native work runs.
+The UI stays on the retained capacity-one worker; authority checks take no
+native-window lock. A positive answer is usable only after the exact window is
+destroyed, the worker joins, and the original host turn rechecks cancellation,
+session lifecycle, saved policy and the pending one-use `Approval`. Failed
+cleanup retains the occupied slot rather than opening replacement prompts.
+
+Portable policy regressions cover whole-context bounds, opening and total
+expiry, old/future/wrapped message timestamps, one-use decisions, partial-click
+invalidation and cancellation. These checks are distinct from native Windows
+mouse provenance, UI lifecycle and two-machine approval qualification, which
+remain outstanding. The Windows cross-build also compiles the host-only
+consent/capture paths, separately from the existing viewer graph.

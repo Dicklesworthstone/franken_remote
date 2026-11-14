@@ -2,9 +2,10 @@
 //! always-on-top window that tells the person at the machine the screen is
 //! shared, with a button that stops it (closing the window does too). It runs
 //! on its own thread with its own message loop, never takes focus when it
-//! appears, and shows no text from a peer.
+//! appears, and shows no text from a peer. The same window, one row higher
+//! and with a Turn off button, says the controller shares the clipboard.
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     io, mem,
     sync::mpsc,
     thread::{self, JoinHandle},
@@ -41,8 +42,6 @@ use windows::core::{PCWSTR, w};
 const CLOSE: u32 = WM_APP + 1;
 const STOP_BUTTON: u16 = 1;
 const LABEL: u16 = 2;
-const VIEW_TEXT: PCWSTR = w!("This screen is being shared by FrankenRemote.");
-const CONTROL_TEXT: PCWSTR = w!("Shared by FrankenRemote; remote control is on.");
 /// Layout at 96 DPI, scaled to the window's DPI.
 const WIDTH: i32 = 400;
 /// Room for the longer control text on one line.
@@ -52,9 +51,53 @@ const MARGIN: i32 = 12;
 const BUTTON_WIDTH: i32 = 110;
 const BUTTON_HEIGHT: i32 = 30;
 
+/// What a window says, and what its button stops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// The screen is shared; Stop sharing ends the share.
+    View,
+    /// The screen is shared and a viewer may control it.
+    Control,
+    /// The controller shares the clipboard; Turn off ends that sharing. It
+    /// sits one row above the Stop sharing window.
+    Clipboard,
+}
+
+impl Kind {
+    /// The label, the button, the label after a stop, the width at 96 DPI and
+    /// the row counted up from the bottom of the work area.
+    const fn layout(self) -> (PCWSTR, PCWSTR, PCWSTR, i32, i32) {
+        match self {
+            Self::View => (
+                w!("This screen is being shared by FrankenRemote."),
+                w!("Stop sharing"),
+                w!("Stopping the share..."),
+                WIDTH,
+                0,
+            ),
+            Self::Control => (
+                w!("Shared by FrankenRemote; remote control is on."),
+                w!("Stop sharing"),
+                w!("Stopping the share..."),
+                CONTROL_WIDTH,
+                0,
+            ),
+            Self::Clipboard => (
+                w!("Text clipboard sharing is on."),
+                w!("Turn off"),
+                w!("Clipboard sharing is off."),
+                CONTROL_WIDTH,
+                1,
+            ),
+        }
+    }
+}
+
 thread_local! {
     /// The UI thread's stop callback, taken by the first stop.
     static ON_STOP: RefCell<Option<Box<dyn Fn()>>> = RefCell::new(None);
+    /// The UI thread's window kind.
+    static KIND: Cell<Kind> = const { Cell::new(Kind::View) };
 }
 
 /// The open window. Dropping it closes the window without a stop.
@@ -64,17 +107,23 @@ pub struct Indicator {
 }
 
 impl Indicator {
-    /// Show the window on a new UI thread and return once it is on screen;
-    /// with `control` its text says a viewer may also control the machine.
-    /// `on_stop` runs on that thread, once, when the person presses Stop
-    /// sharing or closes the window.
+    /// Show the Stop sharing window on a new UI thread and return once it is
+    /// on screen; with `control` its text says a viewer may also control the
+    /// machine. `on_stop` runs on that thread, once, when the person presses
+    /// Stop sharing or closes the window.
     pub fn open(control: bool, on_stop: impl Fn() + Send + 'static) -> io::Result<Self> {
+        Self::open_kind(if control { Kind::Control } else { Kind::View }, on_stop)
+    }
+
+    /// Show a window of `kind`, as [`Indicator::open`] does.
+    pub fn open_kind(kind: Kind, on_stop: impl Fn() + Send + 'static) -> io::Result<Self> {
         let (opened, receive) = mpsc::channel();
         let thread = thread::Builder::new()
             .name("fr-indicator-ui".into())
             .spawn(move || {
                 ON_STOP.with(|stop| *stop.borrow_mut() = Some(Box::new(on_stop)));
-                match create(control) {
+                KIND.with(|current| current.set(kind));
+                match create(kind) {
                     Ok(window) => {
                         let _ = opened.send(Ok(window.0 as isize));
                         pump();
@@ -99,6 +148,12 @@ impl Indicator {
 
     fn handle(&self) -> HWND {
         HWND(self.window as *mut _)
+    }
+
+    /// The window's handle, valid until [`Indicator::close`]. Its UI thread
+    /// pumps messages, so it can own the clipboard.
+    pub fn window(&self) -> isize {
+        self.window
     }
 
     /// The UI thread answered a message within `timeout` and the window is
@@ -156,7 +211,8 @@ fn last_error() -> io::Error {
     io::Error::last_os_error()
 }
 
-fn create(control: bool) -> io::Result<HWND> {
+fn create(kind: Kind) -> io::Result<HWND> {
+    let (_, _, _, base_width, row) = kind.layout();
     // SAFETY: Win32 window creation on this thread with owned, static or
     // stack-local arguments; every handle stays with this thread's window.
     unsafe {
@@ -174,7 +230,6 @@ fn create(control: bool) -> io::Result<HWND> {
         if RegisterClassExW(&raw const class) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
             return Err(last_error());
         }
-        let base_width = if control { CONTROL_WIDTH } else { WIDTH };
         let window = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             w!("FrankenRemoteIndicator"),
@@ -192,7 +247,8 @@ fn create(control: bool) -> io::Result<HWND> {
         let dpi = i32::try_from(GetDpiForWindow(window)).unwrap_or(96).max(96);
         let scale = |value: i32| value * dpi / 96;
         let (width, height) = (scale(base_width), scale(HEIGHT));
-        // Bottom right of the primary display's work area, above the taskbar.
+        // Bottom right of the primary display's work area, above the taskbar;
+        // a later row stacks above the first.
         let mut area = RECT::default();
         SystemParametersInfoW(
             SPI_GETWORKAREA,
@@ -204,25 +260,26 @@ fn create(control: bool) -> io::Result<HWND> {
             window,
             Some(HWND_TOPMOST),
             area.right - width - scale(MARGIN),
-            area.bottom - height - scale(MARGIN),
+            area.bottom - (row + 1) * (height + scale(MARGIN)),
             width,
             height,
             SWP_NOACTIVATE,
         )?;
-        controls(window, instance, dpi, (width, height), control)?;
+        controls(window, instance, dpi, (width, height), kind)?;
         let _ = ShowWindow(window, SW_SHOWNOACTIVATE);
         Ok(window)
     }
 }
 
-/// The label and the Stop sharing button, in the system's message font.
+/// The label and the button, in the system's message font.
 fn controls(
     window: HWND,
     instance: HINSTANCE,
     dpi: i32,
     size: (i32, i32),
-    control: bool,
+    kind: Kind,
 ) -> io::Result<()> {
+    let (text, button_text, _, _, _) = kind.layout();
     let scale = |value: i32| value * dpi / 96;
     let (width, height) = size;
     // SAFETY: child windows of this thread's own window, static strings.
@@ -247,7 +304,7 @@ fn controls(
         let button_width = scale(BUTTON_WIDTH);
         let label = child(
             w!("STATIC"),
-            if control { CONTROL_TEXT } else { VIEW_TEXT },
+            text,
             WINDOW_STYLE::default(),
             LABEL,
             [
@@ -259,7 +316,7 @@ fn controls(
         )?;
         let button = child(
             w!("BUTTON"),
-            w!("Stop sharing"),
+            button_text,
             WS_TABSTOP | WINDOW_STYLE(BS_PUSHBUTTON as u32),
             STOP_BUTTON,
             [
@@ -317,17 +374,18 @@ fn pump() {
     }
 }
 
-/// The first Stop sharing press or close runs the callback; the window stays
-/// until the host closes it, saying the share is stopping.
+/// The first button press or close runs the callback; the window stays until
+/// the host closes it, saying what stopped.
 fn stop(window: HWND) {
     if let Some(on_stop) = ON_STOP.with(|stop| stop.borrow_mut().take()) {
         on_stop();
+        let (_, _, stopped, _, _) = KIND.with(Cell::get).layout();
         // SAFETY: a child of this thread's live window; a static string.
         unsafe {
             if let Ok(label) =
                 windows::Win32::UI::WindowsAndMessaging::GetDlgItem(Some(window), i32::from(LABEL))
             {
-                let _ = SetWindowTextW(label, w!("Stopping the share..."));
+                let _ = SetWindowTextW(label, stopped);
             }
         }
     }
@@ -436,6 +494,70 @@ mod tests {
         );
         assert!(indicator.close());
         assert_eq!(quiet.load(Ordering::SeqCst), 0);
+    }
+
+    /// The clipboard window: its own text and button, one row above the
+    /// Stop sharing window, says sharing is off after Turn off, and its
+    /// handle can own a clipboard write while its thread pumps.
+    #[test]
+    #[ignore = "shows a window on the interactive desktop and replaces the clipboard"]
+    fn the_clipboard_window_turns_off_once_and_can_own_the_clipboard() {
+        use windows::Win32::UI::WindowsAndMessaging::{GetDlgItem, GetWindowRect, GetWindowTextW};
+        let share = Indicator::open(true, || {}).unwrap();
+        let stops = Arc::new(AtomicUsize::new(0));
+        let counted = stops.clone();
+        let indicator = Indicator::open_kind(Kind::Clipboard, move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+        assert!(indicator.responsive(Duration::from_millis(250)));
+        assert_eq!(label(&indicator), "Text clipboard sharing is on.");
+        let mut text = [0_u16; 32];
+        // SAFETY: a child of this test's live window and a writable buffer.
+        let length = unsafe {
+            GetWindowTextW(
+                GetDlgItem(Some(indicator.handle()), i32::from(STOP_BUTTON)).unwrap(),
+                &mut text,
+            )
+        };
+        assert_eq!(
+            String::from_utf16_lossy(&text[..usize::try_from(length).unwrap()]),
+            "Turn off"
+        );
+        let (mut upper, mut lower) = (RECT::default(), RECT::default());
+        // SAFETY: queries of this test's live windows.
+        unsafe {
+            GetWindowRect(indicator.handle(), &raw mut upper).unwrap();
+            GetWindowRect(share.handle(), &raw mut lower).unwrap();
+        }
+        assert!(upper.bottom <= lower.top, "the clipboard window sits above");
+
+        let written = crate::clipboard::write_text(
+            indicator.window(),
+            "owned",
+            crate::clipboard::sequence(),
+            Duration::from_millis(500),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(crate::clipboard::sequence(), written);
+        assert!(crate::clipboard::owned_by(indicator.window()));
+
+        let click = WPARAM((BN_CLICKED as usize) << 16 | usize::from(STOP_BUTTON));
+        for _ in 0..2 {
+            // SAFETY: test-only messages to this test's own window.
+            unsafe { PostMessageW(Some(indicator.handle()), WM_COMMAND, click, LPARAM(0)) }
+                .unwrap();
+        }
+        let until = Instant::now() + Duration::from_secs(1);
+        while stops.load(Ordering::SeqCst) == 0 && Instant::now() < until {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(indicator.responsive(Duration::from_millis(250)));
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert_eq!(label(&indicator), "Clipboard sharing is off.");
+        assert!(indicator.close());
+        assert!(share.close());
     }
 
     /// A UI thread that stops answering (here: held in its stop callback)

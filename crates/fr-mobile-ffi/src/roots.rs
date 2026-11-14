@@ -1,10 +1,11 @@
-//! The trust roots the iOS client verifies hosts against.
+//! The trust roots the shared native client verifies hosts against.
 //!
 //! Tailscale issues `*.ts.net` machine certificates through Let's Encrypt,
 //! whose chains end at ISRG Root X1 (RSA) or ISRG Root X2 (ECDSA). The app
 //! cannot hand iOS's own trust store to rustls, so it carries exactly these
-//! two public roots. The build copies them from the build Mac's
-//! `SystemRootCertificates` keychain, selected by pinned fingerprint
+//! two public roots. Apple builds copy them from the build Mac's
+//! `SystemRootCertificates` keychain; Windows builds can instead use an
+//! explicit local directory. Both paths verify the exact DER fingerprints
 //! (`build.rs`; the repository keeps no certificate files), and the tests
 //! below check the embedded bytes again. A host whose certificate chains to
 //! any other root is refused. If Let's Encrypt moves Tailscale's chains to a

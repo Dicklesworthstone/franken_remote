@@ -94,6 +94,24 @@ fn struct_layouts_match_the_headers_static_assertions() {
 }
 
 #[test]
+fn captured_typing_rejects_stale_handles_without_writing_or_allocating_a_token() {
+    let mut token = 91;
+    // SAFETY: the first output is valid; the null output is explicitly refused.
+    unsafe {
+        assert_eq!(fr_session_begin_typing(0, &raw mut token), FR_STALE);
+        assert_eq!(
+            fr_session_begin_typing(0, core::ptr::null_mut()),
+            FR_INVALID
+        );
+    }
+    assert_eq!(token, 91);
+    assert_eq!(fr_session_type_captured(0, token, 0, 4, 0), FR_STALE);
+    assert!(!fr_session_supports_text(0));
+    fr_session_end_typing(0, token);
+    fr_session_end_typing(0, token);
+}
+
+#[test]
 fn host_names_are_checked_without_resolving() {
     let good = CString::new("mac-studio.tail1f21e.ts.net").unwrap();
     // DNS names are case-insensitive: typed capitals are accepted (and the

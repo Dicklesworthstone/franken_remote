@@ -122,6 +122,37 @@ fn channel(input: &InputOwner, sender: Role) -> ChannelSession {
     )
     .unwrap()
 }
+/// A host offers only copies made after its lane started (fr-wire's
+/// Synchronizer): start one, then copy. Returns once a separate watcher has
+/// seen the X server announce the new owner, so the host's next poll sees it.
+fn host_then_copy(
+    input: &InputOwner,
+    display: &str,
+    app: &mut X11Clipboard,
+    text: &str,
+) -> ClipboardSynchronizer {
+    let mut sync = ClipboardSynchronizer::new(channel(input, Role::Host), open(display));
+    sync.poll(
+        &mut vec![0; 65_536],
+        &mut Record::default(),
+        || at(0),
+        || panic!("a host offers nothing copied before its lane started"),
+    )
+    .unwrap();
+    let mut probe = open(display);
+    probe.start_watching().unwrap();
+    while probe.poll_change().unwrap().is_some() {}
+    publish(app, text, 1);
+    let until = Instant::now() + Duration::from_secs(4);
+    while probe.poll_change().unwrap().is_none() {
+        assert!(
+            Instant::now() < until,
+            "the X server never announced the copy"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    sync
+}
 #[derive(Default)]
 struct Record {
     bytes: Option<Vec<u8>>,
@@ -367,13 +398,41 @@ fn both_switches_cancel_pending_reads_and_reenable_waits_for_a_new_copy() {
 }
 
 #[test]
+fn a_host_offers_only_copies_made_after_its_lane_started() {
+    let _guard = SERIAL.lock().unwrap();
+    let Some(display) = display() else { return };
+    let input = owner();
+    let mut app = open(&display);
+    publish(&mut app, "copied before the session", 1);
+    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut record = Record::default();
+    let mut scratch = vec![0; 65_536];
+    for _ in 0..20 {
+        app.pump().unwrap();
+        sync.poll(&mut scratch, &mut record, || at(0), || panic!("no offer"))
+            .unwrap();
+        assert!(!sync.is_reading());
+    }
+    assert_eq!(record.accepted, 0);
+    publish(&mut app, "copied during the session", 2);
+    let until = Instant::now() + Duration::from_secs(4);
+    while record.accepted == 0 {
+        assert!(Instant::now() < until, "the new copy was never offered");
+        app.pump().unwrap();
+        sync.poll(&mut scratch, &mut record, || at(0), || Ok(7))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert!(!sync.is_closed());
+}
+
+#[test]
 fn silent_native_read_expires_once_and_never_retries_without_a_change() {
     let _guard = SERIAL.lock().unwrap();
     let Some(display) = display() else { return };
     let input = owner();
     let mut app = open(&display);
-    publish(&mut app, "silent owner", 1);
-    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut sync = host_then_copy(&input, &display, &mut app, "silent owner");
     let mut record = Record::default();
     let mut scratch = vec![0; 65_536];
     let mut ids = 0;
@@ -418,8 +477,7 @@ fn revoke_and_caught_clock_panic_close_native_and_wire_without_changing_new_loca
     for panic in [true, false] {
         let input = owner();
         let mut app = open(&display);
-        publish(&mut app, "still the user's selection", 1);
-        let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+        let mut sync = host_then_copy(&input, &display, &mut app, "still the user's selection");
         let mut record = Record::default();
         let mut scratch = vec![0; 65_536];
         sync.poll(&mut scratch, &mut record, || at(0), || Ok(1))
@@ -460,8 +518,7 @@ fn an_incoming_begin_after_a_local_copy_survives_that_reads_completion() {
     let peer_input = owner();
     let mut peer = channel(&peer_input, Role::Controller);
     let mut app = open(&display);
-    publish(&mut app, &"x".repeat(1_048_576), 1);
-    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut sync = host_then_copy(&input, &display, &mut app, &"x".repeat(1_048_576));
     let mut outgoing = Record::default();
     let mut inbound = Record::default();
     let mut scratch = vec![0; 65_536];
@@ -536,8 +593,7 @@ fn observation_deadline_is_not_reset_when_text_finishes_or_transport_blocks() {
     let Some(display) = display() else { return };
     let input = owner();
     let mut app = open(&display);
-    publish(&mut app, &"x".repeat(131_072), 1);
-    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut sync = host_then_copy(&input, &display, &mut app, &"x".repeat(131_072));
     let mut record = Record::default();
     let mut scratch = vec![0; 65_536];
     sync.poll(&mut scratch, &mut record, || at(0), || Ok(1))
@@ -591,8 +647,7 @@ fn a_new_selection_retires_started_outbound_text_before_backpressure_clears() {
     let Some(display) = display() else { return };
     let input = owner();
     let mut app = open(&display);
-    publish(&mut app, "old text already started", 1);
-    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut sync = host_then_copy(&input, &display, &mut app, "old text already started");
     let mut record = Record::default();
     let mut scratch = vec![0; 65_536];
     let mut ids = 0;
@@ -656,8 +711,7 @@ fn identifier_failure_and_malformed_inbound_records_fail_closed() {
     let Some(display) = display() else { return };
     let input = owner();
     let mut app = open(&display);
-    publish(&mut app, "must not leave native read", 1);
-    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut sync = host_then_copy(&input, &display, &mut app, "must not leave native read");
     let mut record = Record::default();
     let mut scratch = vec![0x55; 65_536];
     assert!(matches!(
@@ -688,8 +742,7 @@ fn off_on_during_id_acquisition_cancels_without_destroying_the_channel() {
     let Some(display) = display() else { return };
     let input = owner();
     let mut app = open(&display);
-    publish(&mut app, "interrupted copy", 1);
-    let mut sync = ClipboardSynchronizer::new(channel(&input, Role::Host), open(&display));
+    let mut sync = host_then_copy(&input, &display, &mut app, "interrupted copy");
     let switch = sync.peer_switch();
     let mut record = Record::default();
     let mut scratch = vec![0; 65_536];

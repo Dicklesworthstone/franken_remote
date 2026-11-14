@@ -2,7 +2,8 @@
 //! one display through DXGI Desktop Duplication on the adapter that drives
 //! it, converted to NV12 by that adapter's D3D11 video processor and encoded
 //! to HEVC by the hardware Media Foundation encoder registered for the same
-//! adapter. The picture stays in GPU memory until the encoder's bitstream.
+//! adapter. There is no full-frame CPU readback: only the separate pointer's
+//! bounded rectangle is mapped for composition on the owned desktop texture.
 //! Every unit passes the same strict `HevcGuard` as the Linux and macOS
 //! encoders (after the host writes the colour description an encoder left
 //! out), and leaves as four-byte-length NALs.
@@ -14,12 +15,15 @@
 //! a new image; denied or unserviced capture never becomes a fresh timestamp.
 //! Rotated displays are refused for now.
 mod convert;
+mod cursor;
+mod cursor_region;
 mod duplication;
 mod encoder;
 mod freshness;
 mod parent;
+mod plan;
 
-use crate::NativeError;
+use crate::{NativeError, capture_rate::Rate};
 use fr_core::{ids::RecoveryGeneration, limits::ProtocolLimits};
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
@@ -97,7 +101,7 @@ pub struct CaptureStatistics {
 pub struct StageTimes {
     /// Desktop Duplication: acquire, copy, release.
     pub poll: u32,
-    /// Copy and pointer drawing.
+    /// Bounded cursor rectangle restoration and composition.
     pub compose: u32,
     /// BGRA to NV12 submission.
     pub convert: u32,
@@ -124,7 +128,10 @@ pub struct WinCapture {
     last_observed: Option<u64>,
     /// The pointer as drawn into the last encoded picture.
     drawn: Option<duplication::Pointer>,
-    bitrate: u32,
+    ceiling_bitrate: u32,
+    rate: Rate,
+    /// Rate-aware IPC may report the opening target only after native readback.
+    rate_checked: bool,
     statistics: CaptureStatistics,
     stages: StageTimes,
     /// Why the last unit was refused: the check and the NAL types it held.
@@ -232,7 +239,9 @@ impl WinCapture {
             last_request: None,
             last_observed: None,
             drawn: None,
-            bitrate,
+            ceiling_bitrate: bitrate,
+            rate: Rate::new(bitrate),
+            rate_checked: false,
             statistics: CaptureStatistics::default(),
             stages: StageTimes::default(),
             refusal: None,
@@ -246,7 +255,7 @@ impl WinCapture {
 
     #[must_use]
     pub const fn bitrate(&self) -> u32 {
-        self.bitrate
+        self.rate.applied_bitrate()
     }
 
     /// Why the capture closed on a refused unit, if it did.
@@ -268,15 +277,6 @@ impl WinCapture {
         self.stages
     }
 
-    /// Sets a new mean bitrate (at most the opening one) for later pictures.
-    pub fn set_bitrate(&mut self, bitrate: u32) -> Result<u32, NativeError> {
-        if !(10_000..=200_000_000).contains(&bitrate) {
-            return Err(NativeError::InvalidConfiguration);
-        }
-        self.bitrate = self.encoder.set_bitrate(bitrate)?;
-        Ok(self.bitrate)
-    }
-
     /// Captures the display after this request and encodes it as `frame`.
     /// `observed_micros` is the parent's pre-request lower bound. A failure
     /// closes the capture: no later request can splice a broken chain.
@@ -287,9 +287,45 @@ impl WinCapture {
         force_idr: bool,
         only_if_changed: bool,
     ) -> Result<Captured, NativeError> {
+        // Legacy replies cannot report a rate transaction. Cancel a still
+        // deferred target instead of allowing a later legacy IDR to apply it.
+        self.capture_request(frame, observed_micros, force_idr, only_if_changed, None)
+    }
+
+    /// Attempt a target on this original capture credit, within the opening
+    /// ceiling. A healthy static source and the two-clock dwell can defer it;
+    /// `bitrate()` changes only after native readback and a validated IDR.
+    pub fn capture_with_bitrate(
+        &mut self,
+        frame: FrameId,
+        observed_micros: u64,
+        force_idr: bool,
+        only_if_changed: bool,
+        bitrate: u32,
+    ) -> Result<Captured, NativeError> {
+        self.capture_request(
+            frame,
+            observed_micros,
+            force_idr,
+            only_if_changed,
+            Some(bitrate),
+        )
+    }
+
+    fn capture_request(
+        &mut self,
+        frame: FrameId,
+        observed_micros: u64,
+        force_idr: bool,
+        only_if_changed: bool,
+        bitrate: Option<u32>,
+    ) -> Result<Captured, NativeError> {
         if self.closed {
             return Err(NativeError::Closed);
         }
+        self.rate
+            .request_with_ceiling(bitrate.unwrap_or(self.bitrate()), self.ceiling_bitrate)
+            .map_err(|()| NativeError::InvalidConfiguration)?;
         if self.last_request.is_some_and(|last| frame <= last)
             || self
                 .last_observed
@@ -300,7 +336,17 @@ impl WinCapture {
         }
         self.last_request = Some(frame);
         self.last_observed = Some(observed_micros);
-        let result = self.capture_inner(frame, observed_micros, force_idr, only_if_changed);
+        let result = (|| {
+            if bitrate.is_some() && !self.rate_checked {
+                // An accepted configuration request alone is not evidence
+                // that this hardware honors or even exposes its rate target.
+                if self.encoder.bitrate()? != self.bitrate() {
+                    return Err(NativeError::Unavailable);
+                }
+                self.rate_checked = true;
+            }
+            self.capture_inner(frame, observed_micros, force_idr, only_if_changed)
+        })();
         if result.is_err() {
             self.closed = true;
         }
@@ -314,7 +360,6 @@ impl WinCapture {
         force_idr: bool,
         only_if_changed: bool,
     ) -> Result<Captured, NativeError> {
-        let force_idr = force_idr || self.last_output.is_none();
         let wait = if self.source.has_picture() {
             0
         } else {
@@ -323,20 +368,38 @@ impl WinCapture {
         let began = Instant::now();
         let observation = self.source.poll(wait)?;
         let polled = Instant::now();
-        let capture = observation.capture(force_idr || !only_if_changed);
-        if capture == freshness::Capture::Refuse {
-            return Err(NativeError::Unavailable);
-        }
         let pointer = self.source.pointer();
         let pointer_moved = self.drawn != Some(pointer);
-        if capture == freshness::Capture::Unchanged && !pointer_moved {
-            let reference = self.last_output.ok_or(NativeError::Codec)?;
-            self.statistics.unchanged += 1;
-            return Ok(Captured::Unchanged(UnchangedCapture {
-                candidate: frame,
-                reference,
-                observed_micros,
-            }));
+        // Source evidence and useful work precede any property change. A rate
+        // proposal cannot manufacture a frame on an unchanged desktop.
+        let work = plan::Work {
+            observation,
+            pointer_changed: pointer_moved,
+            only_if_changed,
+            picture: if self.last_output.is_none() {
+                plan::Picture::First
+            } else if force_idr {
+                plan::Picture::Recovery
+            } else {
+                plan::Picture::Following
+            },
+        };
+        let (target, force_idr) = match work.plan(&self.rate, observed_micros, Instant::now()) {
+            plan::Plan::Refuse => return Err(NativeError::Unavailable),
+            plan::Plan::Unchanged => {
+                let reference = self.last_output.ok_or(NativeError::Codec)?;
+                self.statistics.unchanged += 1;
+                return Ok(Captured::Unchanged(UnchangedCapture {
+                    candidate: frame,
+                    reference,
+                    observed_micros,
+                }));
+            }
+            plan::Plan::Encode { bitrate, force_idr } => (bitrate, force_idr),
+        };
+        let changing_rate = target != self.bitrate();
+        if changing_rate && self.encoder.set_bitrate(target)? != target {
+            return Err(NativeError::Unavailable);
         }
         let composing = Instant::now();
         self.source.compose(pointer)?;
@@ -350,14 +413,58 @@ impl WinCapture {
             converted + ENCODE_TIMEOUT,
         )?;
         let encoded = Instant::now();
-        let types = nal_types(&bytes);
+        let unit = self.admit(&bytes, clean, force_idr, frame, observed_micros)?;
+        let idr = unit.is_idr();
+        if changing_rate {
+            // A transform may renegotiate while producing output. Validate
+            // its receipt again after the original bitstream guard admitted
+            // this IDR, before publishing either the new rate or its pixels.
+            let actual = self.encoder.bitrate()?;
+            if actual != target {
+                return Err(NativeError::Unavailable);
+            }
+            self.rate
+                .confirm(target, actual, idr, observed_micros, Instant::now())
+                .map_err(|()| NativeError::UnsupportedBitstream)?;
+        }
+        self.statistics.encoded += 1;
+        if idr {
+            self.statistics.idr += 1;
+            if !force_idr {
+                self.statistics.unrequested_idr += 1;
+            }
+        }
+        if observation == freshness::Observation::Unchanged {
+            self.statistics.pointer_only += 1;
+        }
+        self.last_output = Some(frame);
+        self.drawn = Some(pointer);
+        self.stages = StageTimes {
+            poll: micros(began, polled),
+            compose: micros(composing, composed),
+            convert: micros(composed, converted),
+            encode: micros(converted, encoded),
+            admit: micros(encoded, Instant::now()),
+        };
+        Ok(Captured::Unit(unit))
+    }
+
+    fn admit(
+        &mut self,
+        bytes: &[u8],
+        clean: bool,
+        force_idr: bool,
+        frame: FrameId,
+        observed_micros: u64,
+    ) -> Result<EncodedAccessUnit, NativeError> {
+        let types = nal_types(bytes);
         let mut refuse = |check: String| {
             self.refusal = Some(format!("{check} nal_types={types:?} clean_point={clean}"));
             NativeError::UnsupportedBitstream
         };
         // Encoder metadata SEI is not needed to decode; admission refuses
         // anything else outside the baseline.
-        let bytes = strip_encoder_sei(&bytes).map_err(|e| refuse(format!("strip_sei:{e:?}")))?;
+        let bytes = strip_encoder_sei(bytes).map_err(|e| refuse(format!("strip_sei:{e:?}")))?;
         let idr = annex_b_idr(&bytes).map_err(|_| refuse("picture_type".into()))?;
         if idr != clean || (force_idr && !idr) {
             return Err(refuse(format!("idr={idr} forced={force_idr}")));
@@ -391,7 +498,7 @@ impl WinCapture {
                 references: self.last_output.ok_or(NativeError::UnsupportedBitstream)?,
             }
         };
-        let unit = EncodedAccessUnit::new(
+        EncodedAccessUnit::new(
             &self.limits,
             frame,
             kind,
@@ -399,27 +506,7 @@ impl WinCapture {
             observed_micros,
             bytes,
         )
-        .map_err(|_| NativeError::Codec)?;
-        self.statistics.encoded += 1;
-        if idr {
-            self.statistics.idr += 1;
-            if !force_idr {
-                self.statistics.unrequested_idr += 1;
-            }
-        }
-        if observation == freshness::Observation::Unchanged {
-            self.statistics.pointer_only += 1;
-        }
-        self.last_output = Some(frame);
-        self.drawn = Some(pointer);
-        self.stages = StageTimes {
-            poll: micros(began, polled),
-            compose: micros(composing, composed),
-            convert: micros(composed, converted),
-            encode: micros(converted, encoded),
-            admit: micros(encoded, Instant::now()),
-        };
-        Ok(Captured::Unit(unit))
+        .map_err(|_| NativeError::Codec)
     }
 }
 
@@ -447,5 +534,97 @@ mod tests {
             annex_b_idr(&[0, 0, 0, 1, 0x26, 1, 0xaa, 0, 0, 0, 1, 0x02, 1, 0xbb]),
             Err(NativeError::UnsupportedBitstream)
         );
+    }
+
+    #[test]
+    #[ignore = "requires a logged-in Windows desktop and its hardware HEVC encoder"]
+    fn native_rate_capture_keeps_the_original_decoder_and_rate_dwell() {
+        use super::{Captured, WinCapture, displays};
+        use fr_core::{ids::CodecConfigurationGeneration, limits::ProtocolLimits};
+        use fr_media::{
+            access_unit::FrameId,
+            hevc::HevcGuard,
+            worker::{Backend, Configuration},
+        };
+        use std::time::Duration;
+
+        let limits = ProtocolLimits::ABSOLUTE;
+        let display = displays()
+            .unwrap()
+            .into_iter()
+            .find(|d| d.left == 0 && d.top == 0 && d.rotation == 0)
+            .expect("an unrotated primary display");
+        let config = Configuration {
+            width: display.width,
+            height: display.height,
+            fps: 30,
+            backend: Backend::MediaFoundation,
+            bitrate: 8_000_000,
+            max_access_unit_bytes: limits.max_encoded_access_unit_bytes(),
+            generation: CodecConfigurationGeneration::INITIAL,
+        }
+        .codec()
+        .unwrap();
+        let mut capture = WinCapture::open(&display, config, limits, 30, 8_000_000).unwrap();
+        let mut guard = HevcGuard::new(config, limits, 4).unwrap();
+        let mut admit = |result: Captured, frame: u64, require_idr: bool| {
+            let Captured::Unit(unit) = result else {
+                panic!("unconditional capture must produce an access unit")
+            };
+            assert_eq!(unit.frame(), FrameId::from_raw(frame));
+            assert_eq!(unit.config_generation(), config.generation());
+            assert!(!require_idr || unit.is_idr());
+            guard
+                .validate_length_prefixed(unit.bytes(), unit.is_idr())
+                .unwrap();
+        };
+        // A pending cut cannot change the first decoder configuration.
+        admit(
+            capture
+                .capture_with_bitrate(FrameId::from_raw(1), 1, true, false, 4_000_000)
+                .unwrap(),
+            1,
+            true,
+        );
+        assert_eq!(capture.bitrate(), 8_000_000);
+        admit(
+            capture
+                .capture_with_bitrate(FrameId::from_raw(2), 2, false, false, 4_000_000)
+                .unwrap(),
+            2,
+            true,
+        );
+        assert_eq!(capture.bitrate(), 4_000_000);
+        admit(
+            capture
+                .capture_with_bitrate(FrameId::from_raw(3), 3, false, false, 2_000_000)
+                .unwrap(),
+            3,
+            false,
+        );
+        assert_eq!(capture.bitrate(), 4_000_000);
+        assert!(matches!(
+            capture.capture_with_bitrate(FrameId::from_raw(4), 4, true, false, 8_000_001),
+            Err(NativeError::InvalidConfiguration)
+        ));
+        // A legacy capture cancels pending intent even after both clocks
+        // would permit it. The refused request consumed no frame identity.
+        std::thread::sleep(Duration::from_millis(2_010));
+        admit(
+            capture
+                .capture(FrameId::from_raw(4), 3_000_000, false, false)
+                .unwrap(),
+            4,
+            false,
+        );
+        assert_eq!(capture.bitrate(), 4_000_000);
+        admit(
+            capture
+                .capture_with_bitrate(FrameId::from_raw(5), 3_000_001, false, false, 8_000_000)
+                .unwrap(),
+            5,
+            true,
+        );
+        assert_eq!(capture.bitrate(), 8_000_000);
     }
 }

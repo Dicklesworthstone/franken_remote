@@ -97,6 +97,43 @@ fn unsupported_text_refuses_before_admission_and_keeps_physical_keys_usable() {
         assert!(shutdown.handoff_safe());
     });
 }
+
+#[test]
+fn original_context_keys_work_without_negotiating_the_unicode_capability() {
+    run(|client, host| async move {
+        let mut state = Box::pin(fixture(&client, &host)).await;
+        let mut source = state.viewer.capture_input().unwrap();
+        assert!(!source.supports_text());
+        let context = source.input_context().unwrap().unwrap();
+        assert_eq!(source.input_context_ready(&context), Ok(true));
+        let driver = state.driver.take().unwrap();
+        let ((), shutdown) = Box::pin(support::both(
+            async {
+                let at = source.clock().unwrap();
+                let until = ClientInstant(at.0 + events::MAX_EVENT_AGE_US);
+                for transition in [KeyTransition::Press, KeyTransition::Release] {
+                    source
+                        .push_key_in_context_until(
+                            &context,
+                            PhysicalKey::new(4).unwrap(),
+                            transition,
+                            at,
+                            until,
+                        )
+                        .unwrap();
+                }
+                finish_actions(&mut state, &client, &host, 1).await;
+                assert_eq!(state.effects.lock().unwrap().operations, key_operations());
+                source.stop();
+                state.viewer.close();
+                state.host.close();
+            },
+            driver,
+        ))
+        .await;
+        assert!(shutdown.handoff_safe());
+    });
+}
 #[test]
 fn invalid_commits_are_refused_whole_without_a_wire_identity_or_effect() {
     for (value, reason) in [

@@ -244,9 +244,13 @@ impl<N: NativeClipboard> Synchronizer<N> {
             let bootstrap = self.native.watch().map_err(SyncError::Native)?;
             self.watching = true;
             // Re-enable never automatically replays the interrupted selection.
-            // Initial attachment observes the current selection once; later
-            // subscriptions wait for a genuine new copy after their bootstrap.
-            self.bootstrap_floor = if self.started { bootstrap } else { 0 };
+            // A controller's initial attachment offers its current selection
+            // once. A host's waits for a genuine new copy, like any later
+            // subscription: text copied there before the session is not sent
+            // unasked, and the two startup selections cannot cross and swap
+            // the controller's own clipboard for the host's older text.
+            let host = self.channel.outgoing.sender == crate::clipboard::Role::Host;
+            self.bootstrap_floor = if self.started || host { bootstrap } else { 0 };
             self.started = true;
             if !self.admit(clock())? {
                 return Ok(false);

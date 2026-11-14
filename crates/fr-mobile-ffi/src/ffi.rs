@@ -256,6 +256,7 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         port: config.port,
         control: config.control,
         picture,
+        display: crate::session::DisplayChoice::Primary,
     }) else {
         return FR_BUSY;
     };
@@ -564,6 +565,65 @@ pub extern "C" fn fr_session_scroll_end(handle: FrHandle) {
 #[unsafe(no_mangle)]
 pub extern "C" fn fr_session_key(handle: FrHandle, usage: u16, pressed: bool) -> i32 {
     input(handle, |s| s.shared().key(usage, pressed))
+}
+
+/// Capture the original source, uninterrupted view and exclusive send bound
+/// before a completed ASCII callback is mapped or queued. Call once per
+/// callback. A refusal writes no token and must not be retried as a new capture.
+///
+/// # Safety
+/// `out` is NULL or writable for one u64. Tokens contain no pointers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_begin_typing(handle: FrHandle, out: *mut u64) -> i32 {
+    if out.is_null() {
+        return FR_INVALID;
+    }
+    let Some(session) = lookup(handle) else {
+        return FR_STALE;
+    };
+    match session.shared().begin_typing() {
+        Ok(token) => {
+            // SAFETY: non-null and writable per this function's contract.
+            unsafe { out.write(token) };
+            FR_OK
+        }
+        Err(error) => code(error),
+    }
+}
+
+/// Type one physical stroke under the original callback. `index` starts at
+/// zero and advances only after FR_OK/FR_PENDING. FR_BUSY queued no transition:
+/// retry the same index, usage and modifiers with this same token only. Other
+/// refusals end this callback. The eight modifier bits name HID 0xE0..=0xE7.
+#[unsafe(no_mangle)]
+pub extern "C" fn fr_session_type_captured(
+    handle: FrHandle,
+    token: u64,
+    index: u32,
+    usage: u16,
+    modifiers: u8,
+) -> i32 {
+    input(handle, |session| {
+        session
+            .shared()
+            .type_captured(token, index, usage, modifiers)
+    })
+}
+
+/// Release one callback's bounded capture metadata. Idempotent; stale tokens
+/// never address a successor's capture. This does not undo admitted input.
+#[unsafe(no_mangle)]
+pub extern "C" fn fr_session_end_typing(handle: FrHandle, token: u64) {
+    if let Some(session) = lookup(handle) {
+        session.shared().end_typing(token);
+    }
+}
+
+/// Whether the original current grant includes committed text. Readiness is
+/// still checked by fr_session_text; false is not permission to guess Unicode.
+#[unsafe(no_mangle)]
+pub extern "C" fn fr_session_supports_text(handle: FrHandle) -> bool {
+    lookup(handle).is_some_and(|session| session.shared().supports_text())
 }
 
 /// Capture one complete Unicode callback synchronously. `FR_UNSUPPORTED`

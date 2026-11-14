@@ -120,6 +120,50 @@ Six portable tests include the exact production freshness policy and passed
 with strict standalone Clippy on 2026-11-14. They verify the evidence decisions;
 they do not execute DXGI or qualify a physical Windows transition.
 
+### Cursor composition and copy bounds
+
+The Windows capture path now copies each new duplicated image into one owned
+BGRA desktop texture, then releases the borrowed DXGI frame before conversion
+or encoding. It no longer copies that desktop into a second full-display
+texture or maps a full-display GDI surface to draw the cursor. A separate
+pointer uses two fixed 256×256 BGRA scratch textures: a clean GPU underlay and
+a mapped composition patch. Only the clipped pointer rectangle is copied to
+the patch and read/written by the CPU. The rest of the desktop stays on the
+GPU. Oversized or malformed native shapes refuse capture instead of allocating
+beyond the 256 KiB shape limit or truncating the pointer.
+
+Shape and position come from the same acquired DXGI frame. Invisible or
+already-composited pointers receive no additional overlay; a zero mouse-update
+timestamp retains the last successfully released update of that duplication.
+Pointer-only motion restores the old underlay before saving the new one, and
+new images or access loss discard that saved background. Color alpha,
+monochrome AND/XOR masks and masked-color inversion retain their distinct
+semantics. Thirteen portable tests exercise the production pixel and ownership
+policy, including overlapping motion, clipping, hiding, forced-IDR redraw and
+replacement images. They pass with the pinned nightly and strict standalone
+Clippy. This establishes copy elimination and policy correctness in source;
+native D3D execution and any frame-rate improvement still require measurement.
+
+### Adaptive bitrate
+
+The live Media Foundation worker now implements `CaptureAtRate` for private and
+shared hosts using `--adaptive-capture`
+([a745f925](https://github.com/Dicklesworthstone/franken_remote/commit/a745f925)).
+Fixed-rate hosting remains the default. Changes retain the opening bitrate
+ceiling, the original two-second host/worker-clock dwell and the existing source
+and decoder configuration. Only useful capture work can apply a target; exact
+native property readback and an admitted IDR precede its applied-rate receipt.
+Unchanged capture keeps the old rate, and lost source evidence refuses capture.
+See [Windows rate transactions](../ADAPTIVE_CAPTURE.md#windows-media-foundation-bitrate-transactions).
+
+**Evidence (2026-11-14):** 1,214 `fr-core`/`fr-wire`/`fr-media` tests passed, as
+did all 12 portable production rate/arbitration tests with strict pedantic
+Clippy and strict Windows MSVC Clippy for the `fr-native` library and binaries.
+The ignored native hardware rate probe remains unrun; these checks do not
+qualify Windows hardware rate changes or impaired-path quality. The broader
+workspace and combined Windows build remain resource-constrained, without a
+passing result.
+
 ---
 
 ## 4. Verification Evidence

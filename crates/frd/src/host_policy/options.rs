@@ -64,9 +64,9 @@ pub struct RunOptions {
     /// Linux and macOS name their executor with `input_agent` instead.
     pub control: bool,
     /// Let that controller's text clipboard follow its lease. CLI parsing
-    /// enables this with `input_agent` unless `--no-clipboard` is selected;
-    /// explicit `--clipboard` without an input agent is refused by the caller.
-    /// The separately launched native role requires its own visible Off
+    /// enables this with `input_agent` (Windows: `control`) unless
+    /// `--no-clipboard` is selected; explicit `--clipboard` without either is
+    /// refused by the caller. The native owner requires its own visible Off
     /// surface; an unavailable clipboard keeps the input session usable.
     pub clipboard: bool,
     /// Local enable of host playback audio (off by default). Only an admitted
@@ -239,7 +239,7 @@ impl RunOptions {
                 _ => return Err(Error::InvalidArgument),
             }
         }
-        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some());
+        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some() || options.control);
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
         // macOS requires a host-lifetime Stop sharing surface in addition to
@@ -372,10 +372,10 @@ impl RunOptions {
     /// returned before any I/O. A Windows host shares the interactive desktop,
     /// view-only unless `--control`. (`parse` already refuses `--send-control`
     /// off Linux and macOS, and `--send` without a control executor.)
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     #[must_use]
-    pub fn windows_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 10] = [
+    pub fn windows_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
+        let refusals: [(bool, &str, &str); 8] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",
@@ -397,19 +397,9 @@ impl RunOptions {
                 "a Windows host injects input itself; use --control instead of --input-agent",
             ),
             (
-                self.clipboard,
-                "clipboard_unavailable",
-                "--clipboard has no Windows backend yet",
-            ),
-            (
                 self.files.is_some(),
                 "files_unavailable",
                 "--files has no Windows backend yet",
-            ),
-            (
-                approval == Approval::Local,
-                "local_approval_unavailable",
-                "a Windows host has no local approval prompt yet; use --approval none",
             ),
             (
                 self.audio || self.audio_server.is_some() || self.audio_sink.is_some(),
@@ -589,6 +579,50 @@ mod tests {
             options.macos_refusal(approval).map(|(code, _)| code),
             Some("audio_source_unsupported")
         );
+    }
+
+    #[test]
+    fn windows_local_approval_does_not_enable_unavailable_capabilities() {
+        let options = RunOptions::default();
+        assert_eq!(options.windows_refusal(Approval::None), None);
+        assert_eq!(options.windows_refusal(Approval::Local), None);
+        for (options, expected) in [
+            (
+                RunOptions {
+                    audio: true,
+                    ..RunOptions::default()
+                },
+                "audio_source_unavailable",
+            ),
+            (
+                RunOptions {
+                    microphone: true,
+                    ..RunOptions::default()
+                },
+                "microphone_endpoint_unavailable",
+            ),
+            (
+                RunOptions {
+                    headless: true,
+                    ..RunOptions::default()
+                },
+                "no_display",
+            ),
+            (
+                RunOptions {
+                    observation_indicator: Some("C:\\other-ui.exe".into()),
+                    ..RunOptions::default()
+                },
+                "observation_indicator_unavailable",
+            ),
+        ] {
+            assert_eq!(
+                options
+                    .windows_refusal(Approval::Local)
+                    .map(|(code, _)| code),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

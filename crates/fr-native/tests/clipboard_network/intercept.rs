@@ -14,6 +14,9 @@ pub struct Pause {
     pub enabled: AtomicBool,
     pub entered: AtomicBool,
     pub release: AtomicBool,
+    /// Set once the worker's real X11 subscription exists. A host offers only
+    /// copies made after it, so tests copy on a host once this is set.
+    pub watched: AtomicBool,
 }
 pub struct Native {
     pub clipboard: X11Clipboard,
@@ -34,7 +37,9 @@ impl NativeClipboard for Native {
     type Text = ReadText;
     type Error = SynchronizationError;
     fn watch(&mut self) -> Result<u64, Self::Error> {
-        NativeClipboard::watch(&mut self.clipboard)
+        let bootstrap = NativeClipboard::watch(&mut self.clipboard)?;
+        self.pause.watched.store(true, Ordering::Release);
+        Ok(bootstrap)
     }
     fn changes(&mut self) -> Result<NativeChanges, Self::Error> {
         NativeClipboard::changes(&mut self.clipboard)

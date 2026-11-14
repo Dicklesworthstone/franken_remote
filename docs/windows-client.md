@@ -6,11 +6,34 @@ viewer uses Media Foundation decode and D3D11 presentation. The same session
 core serves the iOS app, whose named connection path remains available through
 its existing C interface.
 
-Build on Windows with the repository's pinned Rust toolchain:
+Build on Windows with the repository's pinned Rust toolchain. Supply the two
+public ISRG root certificates as local PEM files in one absolute directory:
+`isrg-root-x1.pem` and `isrg-root-x2.pem`. Use the ISRG Root X1 and X2 roots
+from your installed system trust data or their official distribution, not an
+intermediate certificate or a combined CA bundle. Set that directory explicitly
+before building:
 
 ```powershell
+$env:FR_MOBILE_ISRG_ROOTS_DIR = 'C:\build-inputs\isrg-roots'
 cargo build --locked --release -p fr-windows
 ```
+
+This input is used only for Windows targets, including cross-compilation.
+The build accepts exactly one certificate per file, bounded to 8 KiB of PEM
+and 4 KiB of DER, and checks the decoded DER against these existing SHA-256
+pins before embedding either certificate:
+
+| File | SHA-256 of DER |
+|---|---|
+| `isrg-root-x1.pem` | `96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6` |
+| `isrg-root-x2.pem` | `69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470` |
+
+A missing, malformed, extra, swapped or different certificate fails the build;
+the directory cannot add another trust anchor. There are no build-time
+downloads. If this variable is absent on a build Mac, Windows cross-builds
+continue to export the same pinned roots from the system keychain. Apple
+targets always use that keychain path. Runtime hostname and certificate-chain
+verification use the same two embedded roots on every supported platform.
 
 Run the resulting executable in the interactive desktop session. Tailscale
 must be installed, signed in and running on this machine. The remote host must
@@ -63,11 +86,92 @@ address families.
 the connection. These flags never add an address absent from the authenticated
 metadata.
 
-`view` starts an observing session. `--control` requests control through the
-existing host admission and grant flow. `--seconds N` requests an orderly close
+`view` starts an observing session. `--control` opens a control-capable profile
+and requests control once through the existing host admission and grant flow.
+`--seconds N` requests an orderly close
 after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
+
+## Request or stop control in the viewer
+
+The native **Input** menu now contains **Request control**, **Stop control and
+disconnect**, and **Send text…**. The window title shows whether it is waiting
+for a ready view, viewing, requesting control, controlling, or stopping. A
+request is not a grant: keys and pointer actions stay local until the host has
+granted control and the original input producer is attached.
+
+Start with `--control` to make explicit control requests available. If an
+automatic reconnect or a permitted resize opens a replacement view, it retains
+that control-capable profile but starts viewing. Open **Input → Request
+control** to make a fresh choice for that current view. A connection started
+without `--control` remains observation-only, and its Request action is
+disabled. Neither receiving a picture nor reopening a connection restores the
+earlier control request.
+
+Request is enabled only while the shared session has current visible-view
+evidence. Each menu choice belongs to its original view and is consumed once.
+A stale native command, lost readiness, hidden window, changed mapping or
+replacement connection invalidates it. The original native queue age and the
+session's bounded callback wait count against the same request lifetime; a
+delayed command is never automatically retried. Reopen the menu for a fresh
+choice after the view is ready again.
+
+**Stop control and disconnect** cancels a pending request or fences the
+original input source immediately, before native composition cleanup. It then
+closes that connection through the existing bounded cleanup path. Ending
+control ends the session; Stop does not silently reopen another view or grant.
+The menu remains local even while the remote desktop is controlled.
+
+Switching to another application or minimizing the viewer invalidates pending
+control choices and ends any granted control. Returning to the application
+cannot restore it. A view-only session can remain connected. Existing resize
+rules still require successful original cleanup before reopening; a controlled
+resize that cannot establish orderly closure ends the session instead.
+
+## Choose a remote display
+
+```text
+fr-windows view remote.example.ts.net --display choose
+fr-windows view remote.example.ts.net --control --display choose
+fr-windows view remote.example.ts.net --display only
+```
+
+`--display choose` opens a native display picker after the host has approved
+observation and supplied its current display catalog. Each button shows the
+display's pixel size, desktop position, scale and rotation. Choose one to start
+video; **Cancel**, Escape, or closing the picker ends that connection. The
+picker remains responsive while the session continues network and deadline
+processing. The existing 30-second startup budget includes time spent choosing;
+it does not restart when a picker appears or a button is pressed.
+
+The available policies are:
+
+| Option | Selection |
+|---|---|
+| `--display choose` | A fresh native choice from the current approved catalog. |
+| `--display primary` | The display at desktop origin `(0, 0)`, otherwise the first approved entry. This is the default. |
+| `--display only` | The sole approved display; multiple displays refuse as ambiguous. |
+| `--display HANDLE` | An exact nonzero decimal host catalog handle, if present in this connection's catalog. This is not a Windows monitor number or picker row number. |
+
+An empty catalog, a missing explicit handle, or a catalog that changes while
+the picker is open refuses selection; it never opens another display as a
+fallback. An explicit `HANDLE` is re-evaluated against each fresh catalog,
+matching the `fr` CLI: its number is not a permanent physical-monitor identity.
+The host still decides which displays are shared and permitted by local approval.
+
+Each picker belongs to one connection attempt and one complete catalog. A
+choice is consumed once. Reconnection and a permitted resize reopen read a
+fresh catalog; `choose` opens a new picker and an older window cannot answer or
+cancel it. Existing resize rules still resume viewing only. The selected
+display's own signed origin and geometry feed the existing pointer mapping,
+including displays left of or above the desktop origin.
+
+This selects the display before video starts. To choose a different display
+later, close the viewer and run the command again. Selecting a display does
+not itself request control; `--control` retains the existing separate grant
+and visible-view requirements. The existing mobile C interface retains its
+primary-display default.
 
 ## Send Unicode and IME text
 
@@ -169,6 +273,12 @@ interactive session and prints counts and timings.
 
 ## Validation scope
 
+`cargo test -p fr-mobile-ffi --test build_roots --locked` exercises the actual
+build-time PEM parser, byte bounds and wrong-certificate rejection on every
+build host. With `FR_MOBILE_ISRG_ROOTS_DIR` set to the two public local roots,
+add `-- --ignored` to check both published pins and reject swaps and changed
+certificate bytes. This never uses a live host or changes runtime trust.
+
 Portable command-line regressions live in
 `crates/fr-windows/src/options.rs`. Installed target selection and named-route
 compatibility regressions live in
@@ -187,3 +297,22 @@ IME/lifecycle and host-delivery qualification.
 Those checks cover selection and route policy. They do not establish native
 Windows pipe access, GPU behavior or live tailnet connectivity on a particular
 machine; native platform qualification remains necessary.
+
+Control-choice regressions exercise the actual portable ownership policy in
+`crates/fr-mobile-ffi/src/session/control_request.rs` and the original native
+menu timestamp policy in `crates/fr-windows/src/control.rs`. They cover one-use
+submission, exact expiry, repeated readiness polls, hidden/replaced views,
+cross-session tokens, native timestamp wrapping and stale popup commands.
+Shared-session regressions also cover observation-only refusal, no input grant
+from a request, lifecycle retirement and input-failure fencing. The real
+Windows menu, focus transitions, reconnection and host grant still need native
+qualification; portable policy tests do not establish those device results.
+
+The actual shared display-selection policy is also exercised by portable
+`fr-windows` tests: primary/explicit selection, empty and ambiguous catalogs,
+missing handles, complete metadata changes, one-use replies, cross-session and
+cross-attempt isolation, cancellation and the full eight-display bound. Shared
+session regressions cover approval-callback publication, no input grant from
+selection, stale cancellation and close before consumption. The native picker
+still requires Windows UI and a real multi-display host for platform
+qualification; these source tests do not claim that hardware run.

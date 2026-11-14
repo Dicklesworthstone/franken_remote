@@ -24,11 +24,17 @@ pub(super) fn require(request: &mut crate::native_connection::host::Request) {
     request.session.startup_timeout = STARTUP_BUDGET;
 }
 
-/// Locally installed session-UI image. Supplying it enables neither approval
+/// Locally selected consent surface. Supplying it enables neither approval
 /// nor sharing; the current saved/explicit policy still selects the mode.
 #[derive(Debug, Clone)]
 pub struct Configuration {
-    image: PathBuf,
+    backend: Backend,
+}
+#[derive(Debug, Clone)]
+enum Backend {
+    Child(PathBuf),
+    #[cfg(windows)]
+    Windows,
 }
 impl Configuration {
     pub fn new(image: &Path) -> Result<Self, Error> {
@@ -36,8 +42,16 @@ impl Configuration {
             return Err(Error::Configuration);
         }
         Ok(Self {
-            image: image.to_owned(),
+            backend: Backend::Child(image.to_owned()),
         })
+    }
+    /// Use the native surface in the current Windows logon session. No UI is
+    /// opened until one original admitted request actually requires consent.
+    #[cfg(windows)]
+    pub fn windows() -> Self {
+        Self {
+            backend: Backend::Windows,
+        }
     }
     pub(super) fn validate(&self, options: &Options) -> Result<(), Error> {
         // Do not approve a desktop whose lock/logout/switch boundary is absent
@@ -48,25 +62,65 @@ impl Configuration {
             .ok_or(Error::LocalApprovalUnavailable)?;
         #[cfg(unix)]
         let same_user = monitor.selection.uid == rustix::process::geteuid().as_raw();
-        // No Windows session monitor exists yet to bind a user to
-        // (fr-p2-host-windows-rt1), so a Windows host never gets here.
         #[cfg(windows)]
-        let same_user = false;
+        let same_user = windows_session_matches(
+            &monitor.selection,
+            &monitor.image,
+            fr_winsys::session::current().ok(),
+        );
         if monitor.selection.display != options.display
             || !same_user
             || monitor.selection.validate().is_err()
         {
             return Err(Error::LocalApprovalUnavailable);
         }
-        ProcessLaunch::new(
-            &self.image,
-            &options.display,
-            options.xauthority.as_deref(),
-            1,
-        )
-        .map(|_| ())
-        .map_err(|_| Error::Configuration)
+        match &self.backend {
+            Backend::Child(image) => {
+                if cfg!(windows) {
+                    return Err(Error::LocalApprovalUnavailable);
+                }
+                ProcessLaunch::new(image, &options.display, options.xauthority.as_deref(), 1)
+                    .map(|_| ())
+                    .map_err(|_| Error::Configuration)
+            }
+            #[cfg(windows)]
+            Backend::Windows if options.xauthority.is_none() => Ok(()),
+            #[cfg(windows)]
+            Backend::Windows => Err(Error::LocalApprovalUnavailable),
+        }
     }
+    fn prompt(
+        &self,
+        original: Approval,
+        display: &str,
+        xauthority: Option<&Path>,
+    ) -> Result<Prompt, ()> {
+        match &self.backend {
+            Backend::Child(image) => {
+                let epoch = super::random_nonzero_u128().map_err(|_| ())?;
+                let launch =
+                    ProcessLaunch::new(image, display, xauthority, epoch).map_err(|_| ())?;
+                Prompt::start(original, launch).map_err(|_| ())
+            }
+            #[cfg(windows)]
+            Backend::Windows => Prompt::start_windows(original).map_err(|_| ()),
+        }
+    }
+}
+
+/// A native prompt has no helper identity and must belong to this exact
+/// process session. The continuously supervised logon fingerprint and console
+/// state remain the monitor's job; this check cannot replace that evidence.
+#[cfg(any(windows, test))]
+fn windows_session_matches(
+    selection: &crate::session_monitor::Selection,
+    monitor_image: &Path,
+    current: Option<u32>,
+) -> bool {
+    selection.platform == crate::session_monitor::Platform::Windows
+        && selection.validate().is_ok()
+        && monitor_image.as_os_str().is_empty()
+        && current.is_some_and(|id| id != 0 && selection.session == id.to_string())
 }
 
 pub(super) fn required(epoch: Option<&live::Lease>) -> Result<bool, Error> {
@@ -166,23 +220,11 @@ impl Owner {
             return LocalAction::Stop;
         };
         if let Some(original) = original {
-            let launch = self.configuration.as_ref().ok_or(()).and_then(|config| {
-                super::random_nonzero_u128()
-                    .map_err(|_| ())
-                    .and_then(|epoch| {
-                        ProcessLaunch::new(
-                            &config.image,
-                            &self.display,
-                            self.xauthority.as_deref(),
-                            epoch,
-                        )
-                        .map_err(|_| ())
-                    })
+            self.prompt = self.configuration.as_ref().and_then(|config| {
+                config
+                    .prompt(original.clone(), &self.display, self.xauthority.as_deref())
+                    .ok()
             });
-            self.prompt = match launch {
-                Ok(launch) => Prompt::start(original.clone(), launch).ok(),
-                Err(()) => None,
-            };
             if self.prompt.is_none() {
                 let _ = original.decide(false);
                 self.release_inbox();
@@ -284,6 +326,7 @@ mod tests {
         }
     }
     #[test]
+    #[cfg(unix)]
     fn local_consent_requires_the_same_monitored_desktop_and_user() {
         use crate::session_monitor::{Configuration as Monitor, Selection};
         let ui = Configuration::new(Path::new("/unprovisioned/fr-observation-indicator")).unwrap();
@@ -306,6 +349,83 @@ mod tests {
         options.session_monitor.as_mut().unwrap().selection.uid ^= 1;
         assert_eq!(ui.validate(&options), Err(Error::LocalApprovalUnavailable));
         assert!(Configuration::new(Path::new("relative-ui")).is_err());
+    }
+    #[test]
+    fn windows_consent_never_approves_another_session_or_helper() {
+        use crate::session_monitor::{Platform, Selection};
+        let selected = Selection {
+            platform: Platform::Windows,
+            session: "3".into(),
+            uid: 0,
+            seat: String::new(),
+            display: String::new(),
+        };
+        let native = Path::new("");
+        assert!(windows_session_matches(&selected, native, Some(3)));
+        for current in [None, Some(0), Some(2), Some(u32::MAX)] {
+            assert!(!windows_session_matches(&selected, native, current));
+        }
+        assert!(!windows_session_matches(
+            &selected,
+            Path::new("C:\\another.exe"),
+            Some(3)
+        ));
+        for changed in [
+            Selection {
+                platform: Platform::Linux,
+                ..selected.clone()
+            },
+            Selection {
+                platform: Platform::Macos,
+                ..selected.clone()
+            },
+            Selection {
+                session: "03".into(),
+                ..selected.clone()
+            },
+            Selection {
+                session: "4294967296".into(),
+                ..selected.clone()
+            },
+            Selection {
+                session: "0".into(),
+                ..selected.clone()
+            },
+            Selection {
+                uid: 3,
+                ..selected.clone()
+            },
+            Selection {
+                seat: "seat0".into(),
+                ..selected.clone()
+            },
+            Selection {
+                display: ":0".into(),
+                ..selected.clone()
+            },
+        ] {
+            assert!(!windows_session_matches(&changed, native, Some(3)));
+        }
+    }
+    #[test]
+    #[cfg(windows)]
+    fn native_windows_consent_requires_current_session_monitor_and_no_child_identity() {
+        let mut options = options();
+        options.display.clear();
+        let ui = Configuration::windows();
+        assert_eq!(ui.validate(&options), Err(Error::LocalApprovalUnavailable));
+        options.session_monitor = Some(crate::session_monitor::Configuration {
+            image: PathBuf::new(),
+            selection: crate::session_monitor::Selection::windows().unwrap(),
+        });
+        assert_eq!(ui.validate(&options), Ok(()));
+        let child = Configuration::new(Path::new("C:\\other-ui.exe")).unwrap();
+        assert_eq!(
+            child.validate(&options),
+            Err(Error::LocalApprovalUnavailable)
+        );
+        options.session_monitor.as_mut().unwrap().image = "C:\\other-monitor.exe".into();
+        assert_eq!(ui.validate(&options), Err(Error::LocalApprovalUnavailable));
     }
     #[test]
     fn requiring_consent_changes_neither_peer_scope_nor_live_input_budgets() {

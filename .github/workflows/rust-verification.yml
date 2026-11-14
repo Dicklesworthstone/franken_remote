@@ -502,6 +502,13 @@ jobs:
           rustup target add x86_64-pc-windows-gnu
           brew install mingw-w64
           cargo clippy -p fr-windows -p fr-mobile-ffi --features fr-mobile-ffi/windows-session --all-targets --target x86_64-pc-windows-gnu --locked -- -D warnings
+      # Native local consent and capture are host-only feature paths; the
+      # Windows viewer graph alone does not compile these entry points.
+      - name: Cross-check the Windows host and native boundaries (deny warnings)
+        run: |
+          cargo clippy -p fr-winsys --all-targets --target x86_64-pc-windows-gnu --locked -- -D warnings
+          cargo clippy -p frd --features windows-host --lib --bin frd --target x86_64-pc-windows-gnu --locked -- -D warnings
+          cargo clippy -p fr-native --no-default-features --features windows-host-media --lib --bin fr-media-worker --target x86_64-pc-windows-gnu --locked -- -D warnings
       - name: Test (platform-neutral)
         run: cargo test --workspace --locked --no-fail-fast
 

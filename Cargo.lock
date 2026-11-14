@@ -618,6 +618,7 @@ name = "fr-mobile-ffi"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "base64",
  "fr-client",
  "fr-core",
  "fr-media",
@@ -626,6 +627,7 @@ dependencies = [
  "fr-wire",
  "frd",
  "serde_json",
+ "sha2 0.11.0",
  "windows",
 ]
 
@@ -679,6 +681,7 @@ dependencies = [
  "fr-mobile-ffi",
  "fr-native",
  "fr-tailnet",
+ "fr-wire",
  "serde_json",
  "windows",
 ]

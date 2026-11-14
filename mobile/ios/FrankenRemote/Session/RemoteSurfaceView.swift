@@ -7,8 +7,8 @@ import UIKit
 /// Raw touches go to `TouchInterpreter` (no gesture recognizers: they would
 /// delay taps and fight each other). Hardware key presses become HID usages
 /// one-for-one with no client-side repeat; software keyboard characters
-/// become US-layout key presses. A complete callback containing Unicode goes
-/// to the host's granted text input once, without queueing, splitting or retry.
+/// become US-layout key presses. Unicode and negotiated multi-character paste
+/// go to the host's text input once, without queueing, splitting or retry.
 final class RemoteSurfaceView: UIView, UIKeyInput {
     let metalView = MTKView()
     let interpreter = TouchInterpreter()
@@ -19,14 +19,17 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     private var softwareKeyboard = false
     private var heldKeys: Set<UInt16> = []
     /// Software-keyboard input waiting for the host's input queue (a paste
-    /// arrives faster than the host takes keys): sent in order on later
-    /// refreshes. Bounded; never logged.
+    /// arrives faster than the host takes keys): every later refresh retains
+    /// the original Rust capture, view and exclusive deadline. Never logged.
     private var typing = TypingQueue()
     /// How far the keyboard (with its extra-keys bar) covers the view's
     /// bottom edge: the picture's content area stops above it.
     private var keyboardOverlap: CGFloat = 0
 
     weak var session: RemoteSession? {
+        willSet {
+            if session !== newValue { releaseKeys() }
+        }
         didSet {
             interpreter.sink = session
             renderer?.session = session
@@ -227,6 +230,7 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
             extraKeys.show(modifiers)
             if isFirstResponder { reloadInputViews() } else { becomeFirstResponder() }
         } else {
+            typing.clear()
             modifiers.clear()
             if isFirstResponder { reloadInputViews() }
             onKeyboardHidden?()
@@ -258,7 +262,15 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
 
     func insertText(_ text: String) {
         guard let session, !text.isEmpty else { return }
-        if UnicodeCommit.needsText(for: text) {
+        // Capture before validation/classification can wait or the source can
+        // change. A direct text callback discards this unused physical token.
+        let physical = TypingCapture.capture(into: session)
+        guard UnicodeCommit.valid(text) else {
+            session.notice = "That keyboard callback is too large or contains an unsupported character. Nothing was sent."
+            return
+        }
+        if UnicodeCommit.usesText(for: text, supported: session.supportsText,
+                                 modifiersActive: !modifiers.active.isEmpty) {
             // One original UIKeyInput completion. Refuse the whole callback
             // before queuing a prefix or consuming any sticky modifier.
             let status = UnicodeCommit.submit(
@@ -268,15 +280,25 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
             if let notice = UnicodeCommit.notice(for: status) { session.notice = notice }
             return
         }
+        // Capture BEFORE converting the completed callback. Mapping time and
+        // every busy wait consume this same Rust-owned source/view deadline.
+        let capture: TypingCapture
+        switch physical {
+        case .success(let original): capture = original
+        case .failure:
+            session.notice = "Typing was not sent because the current input view is unavailable."
+            return
+        }
         var items: [TypingQueue.Item] = []
+        var nextModifiers = modifiers
         for character in text {
-            let held = modifiers.active.map(\.usage)
+            let held = nextModifiers.active.map(\.usage)
             if let stroke = KeyboardMap.stroke(for: character) {
                 items.append(.stroke(stroke.usage, modifiers: stroke.shift ? held + [HIDUsage.leftShift] : held))
-                modifiers.consume()
+                nextModifiers.consume()
             }
         }
-        enqueue(items)
+        if enqueue(items, capture: capture) { modifiers = nextModifiers }
         extraKeys.show(modifiers)
     }
 
@@ -285,17 +307,26 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     }
 
     private func typeExtra(_ usage: UInt16) {
-        guard session != nil else { return }
-        enqueue([.stroke(usage, modifiers: modifiers.active.map(\.usage))])
-        modifiers.consume()
+        guard let session else { return }
+        switch TypingCapture.capture(into: session) {
+        case .success(let capture):
+            if enqueue([.stroke(usage, modifiers: modifiers.active.map(\.usage))], capture: capture) {
+                modifiers.consume()
+            }
+        case .failure:
+            session.notice = "That key was not sent because the current input view is unavailable."
+        }
         extraKeys.show(modifiers)
     }
 
-    private func enqueue(_ items: [TypingQueue.Item]) {
-        if !typing.append(items) {
-            session?.notice = "That's too much text to type at once. Only the start was sent."
+    @discardableResult
+    private func enqueue(_ items: [TypingQueue.Item], capture: TypingCapture) -> Bool {
+        guard typing.append(items, capture: capture) else {
+            session?.notice = "That keyboard callback does not fit the typing queue. None of it was sent."
+            return false
         }
         drainTyping()
+        return true
     }
 
     /// Send queued typing until the host's input queue backs up again.
@@ -304,7 +335,10 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
             typing.clear()
             return
         }
-        _ = typing.drain(into: session)
+        let outcome = typing.drain(into: session)
+        if outcome.refusal != nil {
+            session.notice = "Queued typing lost its original input deadline or view. Remaining keys were discarded."
+        }
     }
 
     // Hardware keyboards: one press, one release, no repeat.

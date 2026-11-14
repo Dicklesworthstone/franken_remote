@@ -18,7 +18,8 @@
 //! controller's text clipboard follows the same lease: the lane is offered only
 //! after the grant and attaches only under the active input attachment; its X11
 //! owner is another per-lane child of the same image (`--clipboard` role, see
-//! `clipboard_process`). Revocation or expiry fences it with the lease.
+//! `clipboard_process`). On Windows frd owns it itself, behind its own Turn off
+//! window (`windows_clipboard`). Revocation or expiry fences it with the lease.
 //!
 //! With the operator's drop directory (`frd run --files DIR`), a controller
 //! that asked to send files gets the one-use file lane on the same session,
@@ -487,28 +488,45 @@ pub(super) fn served(failed: bool) -> Report {
 /// Configure the controller-only clipboard on this publication before its
 /// managed service starts. Nothing opens now: the native factory runs on the
 /// clipboard worker only after the grant and bilateral readiness, and spawns
-/// the image's `--clipboard` role. `None` when the controller did not select
-/// clipboard (typed absence on its side), or when setup was refused.
+/// the image's `--clipboard` role (Windows: opens frd's own clipboard window
+/// and owner). `None` when the controller did not select clipboard (typed
+/// absence on its side), or when setup was refused.
 fn configure_clipboard(
     publisher: &mut NativePublisher,
     profile: &ControlProfile,
     cx: &Cx,
     ids: Entropy,
 ) -> Option<crate::native_clipboard::Control> {
-    let launch = ProcessLaunch::new(
-        &profile.input_agent,
-        &profile.display,
-        profile.xauthority.as_deref(),
-        ids().ok()?,
-    )
-    .ok()?;
-    let configuration = crate::native_clipboard::Configuration::new_with_control(
-        true,
-        Duration::from_secs(2),
-        clipboard_process::factory_with_control(launch, cx.clone()),
-        move || ids().map_err(|()| fr_wire::clipboard::session::synchronize::IdentifierFailure),
-    )
-    .ok()?;
+    let new_id =
+        move || ids().map_err(|()| fr_wire::clipboard::session::synchronize::IdentifierFailure);
+    #[cfg(windows)]
+    let configuration = {
+        let _ = (profile, cx);
+        crate::native_clipboard::Configuration::new_with_guard(
+            true,
+            Duration::from_secs(2),
+            crate::windows_clipboard::factory(),
+            new_id,
+        )
+        .ok()?
+    };
+    #[cfg(not(windows))]
+    let configuration = {
+        let launch = ProcessLaunch::new(
+            &profile.input_agent,
+            &profile.display,
+            profile.xauthority.as_deref(),
+            new_id().ok()?,
+        )
+        .ok()?;
+        crate::native_clipboard::Configuration::new_with_control(
+            true,
+            Duration::from_secs(2),
+            clipboard_process::factory_with_control(launch, cx.clone()),
+            new_id,
+        )
+        .ok()?
+    };
     publisher.configure_clipboard(configuration).ok()
 }
 /// Clean means never started or an observed join with successful disk cleanup.

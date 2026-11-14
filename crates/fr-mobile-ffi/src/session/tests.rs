@@ -90,11 +90,18 @@ fn input_is_refused_until_control_is_granted() {
         InputResult::NotControlled
     );
     assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    assert_eq!(shared.begin_typing(), Err(InputResult::NotControlled));
+    assert_eq!(
+        shared.type_captured(1, 0, 0x04, 0),
+        InputResult::NotControlled
+    );
+    shared.end_typing(1);
     assert!(matches!(
         shared.capture_input(),
         Err(InputResult::NotControlled)
     ));
     assert_eq!(shared.text("a"), InputResult::NotControlled);
+    assert!(!shared.supports_text());
     assert!(matches!(
         shared.begin_text(),
         Err(InputResult::NotControlled)
@@ -154,6 +161,176 @@ fn releasing_control_closes_the_session_and_stops_any_pending_request() {
     let other = Shared::new();
     other.set_visible(false);
     assert!(!other.close.load(Ordering::SeqCst));
+}
+
+#[test]
+fn native_control_choice_needs_the_original_ready_view_and_never_grants_input() {
+    let shared = Shared::new();
+    assert_eq!(shared.control_state(), ControlState::WaitingForView);
+    assert!(shared.control_request().is_none());
+    shared.refresh_control_request(true).unwrap();
+    assert!(shared.control_request().is_none());
+    shared.set_visible(true);
+    shared.refresh_control_request(true).unwrap();
+    assert_eq!(shared.control_state(), ControlState::Viewing);
+    let request = shared.control_request().unwrap();
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    assert_eq!(shared.control_state(), ControlState::Requesting);
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    assert!(shared.take_control_request().unwrap());
+    assert!(!shared.take_control_request().unwrap());
+    assert_eq!(shared.control_state(), ControlState::Requesting);
+    assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    assert!(!shared.controlled());
+    shared.close();
+    assert_eq!(shared.control_state(), ControlState::Closing);
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+}
+
+#[test]
+fn observation_only_profile_never_offers_or_queues_control() {
+    let view_only = Shared::with_control(false);
+    view_only.set_visible(true);
+    view_only.refresh_control_request(true).unwrap();
+    view_only.request_control();
+    assert!(view_only.control_request().is_none());
+    assert!(!view_only.want_control.load(Ordering::SeqCst));
+    assert_eq!(view_only.control_state(), ControlState::Unavailable);
+    assert!(!view_only.take_control_request().unwrap());
+}
+
+#[test]
+fn hiding_and_retirement_discard_queued_and_unused_control_choices() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    shared.request_control();
+    shared.set_visible(false);
+    shared.set_visible(true);
+    shared.refresh_control_request(true).unwrap();
+    assert!(!shared.take_control_request().unwrap());
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    let next = shared.control_request().unwrap();
+    assert!(shared.request_control_for(&next, Duration::ZERO));
+    shared.retire_control_request();
+    shared.refresh_control_request(true).unwrap();
+    assert!(!shared.take_control_request().unwrap());
+    assert!(!shared.request_control_for(&next, Duration::ZERO));
+}
+
+#[test]
+fn expired_native_gesture_or_original_input_failure_cannot_queue_control() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    assert!(!shared.request_control_for(&request, control_request::MAX_GESTURE_AGE));
+    assert!(!shared.take_control_request().unwrap());
+    shared.input_failed();
+    shared.request_control();
+    shared.refresh_control_request(true).unwrap();
+    assert!(shared.control_request().is_none());
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    assert_eq!(shared.control_state(), ControlState::Closing);
+}
+
+fn display_catalog() -> Catalog {
+    Catalog::new(
+        1,
+        &[Display {
+            handle: 19,
+            geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+            x: -1920,
+            y: 32,
+            pixel_width: 1920,
+            pixel_height: 1080,
+            logical_width: 1920,
+            logical_height: 1080,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
+        }],
+        &fr_core::limits::ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap()
+}
+
+#[test]
+fn display_choice_requires_the_approved_callback_and_never_grants_input() {
+    let shared = Shared::new();
+    assert!(shared.display_request().is_none());
+    shared.begin_display().unwrap();
+    assert!(shared.display_request().is_none());
+    let catalog = display_catalog();
+    assert_eq!(
+        shared.choose_display(DisplayChoice::Choose, &catalog),
+        Ok(None)
+    );
+    let request = shared.display_request().unwrap();
+    assert!(shared.display_request_current(&request));
+    assert_eq!(
+        shared.select_display(&request, 20),
+        Err(DisplayError::MissingDisplay)
+    );
+    assert_eq!(shared.select_display(&request, 19), Ok(()));
+    assert!(shared.display_request().is_none());
+    assert_eq!(
+        shared.choose_display(DisplayChoice::Choose, &catalog),
+        Ok(Some(19))
+    );
+    assert!(!shared.controlled());
+    assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+}
+
+#[test]
+fn stale_picker_cancel_cannot_close_a_new_attempt_with_identical_metadata() {
+    let shared = Shared::new();
+    let catalog = display_catalog();
+    shared.begin_display().unwrap();
+    shared
+        .choose_display(DisplayChoice::Choose, &catalog)
+        .unwrap();
+    let old = shared.display_request().unwrap();
+    shared.retire_display();
+    shared.begin_display().unwrap();
+    shared
+        .choose_display(DisplayChoice::Choose, &catalog)
+        .unwrap();
+    let current = shared.display_request().unwrap();
+    assert_eq!(shared.cancel_display(&old), Err(DisplayError::StaleRequest));
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert!(shared.display_request_current(&current));
+    assert_eq!(shared.cancel_display(&current), Ok(()));
+    assert!(shared.close.load(Ordering::SeqCst));
+    assert!(shared.display_request().is_none());
+    assert_eq!(
+        shared.select_display(&current, 19),
+        Err(DisplayError::Closed)
+    );
+    assert_eq!(shared.begin_display(), Err(ObserverError::Application));
+}
+
+#[test]
+fn local_close_discards_a_queued_display_choice_before_startup_can_consume_it() {
+    let shared = Shared::new();
+    let catalog = display_catalog();
+    shared.begin_display().unwrap();
+    shared
+        .choose_display(DisplayChoice::Choose, &catalog)
+        .unwrap();
+    let request = shared.display_request().unwrap();
+    shared.select_display(&request, 19).unwrap();
+    shared.close();
+    assert_eq!(
+        shared.choose_display(DisplayChoice::Choose, &catalog),
+        Err(())
+    );
+    assert!(!shared.display_request_current(&request));
+    assert!(shared.display_request().is_none());
 }
 
 #[test]
@@ -315,4 +492,24 @@ fn presentation_failure_closes_a_view_only_owner_and_preserves_earlier_stops() {
         LocalStop::from_code(earlier.local_stop.load(Ordering::SeqCst)),
         Some(LocalStop::Hidden),
     );
+}
+
+#[test]
+fn legacy_control_installation_cannot_finish_after_its_attempt_retired() {
+    let shared = Shared::new();
+    // Reproduce a native call interrupted before acquiring the requests lock.
+    let original = shared.control_retirement.capture().unwrap();
+    shared.retire_control_request();
+    shared.request_control_at(original);
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+    // A new explicit call can wait for this attempt's first visible frame.
+    shared.request_control();
+    assert!(shared.want_control.load(Ordering::SeqCst));
+    let interrupted = shared.control_retirement.capture().unwrap();
+    shared.retire_control_request();
+    shared.request_control_at(interrupted);
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+    shared.close();
+    shared.request_control();
+    assert!(!shared.want_control.load(Ordering::SeqCst));
 }

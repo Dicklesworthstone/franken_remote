@@ -88,11 +88,12 @@ OPTIONS:
                     clicks and text while an elevated window has focus.
                     Absent: view-only
     --no-clipboard  Disable the default bidirectional text clipboard sharing
-                    for --input-agent hosts. Sharing starts only after an actual
-                    control grant and a visible Clipboard sharing window at
-                    both ends. Turn off or close either window to end clipboard
-                    sharing. The desktop normally continues; a transfer that
-                    cannot stop independently closes the connection safely.
+                    for --input-agent (Windows: --control) hosts. Sharing
+                    starts only after an actual control grant and a visible
+                    Clipboard sharing window at both ends. Turn off or close
+                    either window to end clipboard sharing. The desktop
+                    normally continues; a transfer that cannot stop
+                    independently closes the connection safely.
                     Unsupported clipboard keeps control usable.
                     --clipboard explicitly selects the default. View-only
                     sessions never expose either clipboard
@@ -744,12 +745,13 @@ fn execute_run(args: &[String], json: bool) -> ExitCode {
         }
         Err(error) => return local_policy::refusal(error, json),
     };
-    if options.clipboard && options.input_agent.is_none() {
+    if options.clipboard && options.input_agent.is_none() && !options.control {
         return run_refusal(
             json,
             "clipboard_requires_input_agent",
             "--clipboard shares the controller's clipboard for the life of its input lease; \
-             it needs --input-agent (a view-only share never exposes the clipboard)",
+             it needs --input-agent, or --control on Windows (a view-only share never \
+             exposes the clipboard)",
             2,
         );
     }

@@ -27,7 +27,7 @@ use fr_transport::quic::{Disposition, Route, clipboard::ClipboardChannel};
 use fr_wire::{attachment::MediaRole, clipboard::session::synchronize::Received, control::Granted};
 use frd::clipboard_quic::{Bridge, State, WorkerTask};
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
     thread::ThreadId,
     time::{Duration, Instant},
 };
@@ -147,6 +147,13 @@ impl World {
         assert_eq!(b.unwrap(), State::Active, "viewer {:?}", c.reason());
     }
     async fn transfer(&mut self, from: usize, text: &str, id: u64) {
+        // A host offers only copies made after its worker started watching;
+        // text already on its clipboard when the lane started stays local.
+        let until = Instant::now() + Duration::from_secs(2);
+        while from == 0 && !self.pauses[0].watched.load(Ordering::Acquire) {
+            assert!(Instant::now() < until, "host worker never started watching");
+            self.turn().await;
+        }
         copy(&mut self.apps[from], text, id);
         self.complete_transfer(from, text).await;
     }
@@ -290,7 +297,6 @@ fn successive_copies_in_both_directions_keep_the_original_workers_and_channel() 
 
 #[test]
 fn blocked_native_preparation_is_fenced_without_blocking_control_or_overwriting_local_copy() {
-    use std::sync::atomic::Ordering;
     runtime().block_on(async {
         let mut w = World::new(2048).await;
         w.transfer(0, "keep this local value", 1).await;
