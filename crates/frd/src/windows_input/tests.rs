@@ -21,8 +21,11 @@ struct Fake {
     elevated_foreground: bool,
     result: Sent,
     calls: Rc<RefCell<Vec<Call>>>,
+    move_preparation: Option<Box<dyn FnMut() -> Result<(), PlatformError>>>,
 }
 impl Native for Fake {
+    type PreparedMove = DesktopPoint;
+
     fn displays(&mut self) -> Result<Vec<InputBounds>, PlatformError> {
         Ok(self.displays.clone())
     }
@@ -41,8 +44,14 @@ impl Native for Fake {
     fn text(&mut self, scalar: char) -> Sent {
         self.record(Call::Text(scalar))
     }
-    fn move_to(&mut self, point: DesktopPoint) -> Sent {
-        self.record(Call::Move(point))
+    fn prepare_move_to(&mut self, point: DesktopPoint) -> Result<DesktopPoint, PlatformError> {
+        if let Some(prepare) = &mut self.move_preparation {
+            prepare()?;
+        }
+        Ok(point)
+    }
+    fn move_to(&mut self, prepared: DesktopPoint) -> Sent {
+        self.record(Call::Move(prepared))
     }
     fn button(&mut self, button: PointerButton, down: bool) -> Sent {
         self.record(Call::Button(button, down))
@@ -86,6 +95,7 @@ impl Harness {
             elevated_foreground: false,
             result: Sent::All,
             calls: calls.clone(),
+            move_preparation: None,
         };
         Self {
             sink: WindowsInput::open(fake, main_display(), implemented()).unwrap(),
@@ -131,6 +141,7 @@ fn a_lease_binds_only_an_exact_display_and_implemented_operations() {
                 elevated_foreground: false,
                 result: Sent::All,
                 calls: h.calls.clone(),
+                move_preparation: None,
             },
             b,
             caps,
@@ -464,4 +475,239 @@ fn only_the_prepared_operation_is_sent_and_dropping_releases_everything() {
     let calls = h.calls.clone();
     drop(h);
     assert_eq!(calls.borrow().len(), 2);
+}
+
+#[test]
+fn prepared_moves_are_single_use_and_cancelled_on_every_refusal() {
+    let mut h = Harness::new();
+    let movement = Operation::Absolute(point(30, 40));
+    h.sink.prepare(movement).unwrap();
+    assert!(h.sink.prepared_move.is_some());
+    h.sink.cancel_prepared();
+    assert!(h.sink.prepared_move.is_none());
+    assert_eq!(
+        h.sink.submit(movement),
+        Submission::NotSubmitted(PlatformError::Unsupported)
+    );
+
+    h.sink.prepare(movement).unwrap();
+    assert_eq!(
+        h.sink.submit(Operation::Absolute(point(50, 60))),
+        Submission::NotSubmitted(PlatformError::Unsupported)
+    );
+    assert!(h.sink.prepared_move.is_none());
+    assert_eq!(h.taken(), []);
+
+    assert_eq!(h.run(movement), Ok(Submission::Submitted));
+    assert!(h.sink.prepared_move.is_none());
+    assert_eq!(
+        h.sink.submit(movement),
+        Submission::NotSubmitted(PlatformError::Unsupported)
+    );
+    assert_eq!(h.taken(), [Call::Move(point(30, 40))]);
+
+    h.sink.prepare(movement).unwrap();
+    h.fake().move_preparation = Some(Box::new(|| Err(PlatformError::GeometryChanged)));
+    assert_eq!(h.sink.prepare(movement), Err(PlatformError::GeometryChanged));
+    assert!(h.sink.prepared_move.is_none());
+    assert_eq!(
+        h.sink.submit(movement),
+        Submission::NotSubmitted(PlatformError::Unsupported)
+    );
+    assert_eq!(h.taken(), []);
+}
+
+fn input_owner() -> (
+    fr_core::input_submission::InputSession,
+    fr_core::input::InputCredentials,
+) {
+    use fr_core::{
+        authority::{AuthorityPolicy, SessionAuthority},
+        ids::{
+            CodecConfigurationGeneration, DisplayGeometryGeneration, InputLeaseId, InputTicketId,
+            RecoveryGeneration, RemoteSessionId, ViewportMappingGeneration,
+        },
+        input::{InputCredentials, InputView},
+        input_submission::InputSession,
+        time::HostInstant,
+    };
+
+    let credentials = InputCredentials {
+        session: RemoteSessionId::from_raw(11),
+        lease: InputLeaseId::from_raw(12),
+        ticket: InputTicketId::from_raw(13),
+        view: InputView {
+            geometry: DisplayGeometryGeneration::INITIAL,
+            viewport: ViewportMappingGeneration::INITIAL,
+            configuration: CodecConfigurationGeneration::INITIAL,
+            recovery: RecoveryGeneration::INITIAL,
+        },
+    };
+    let now = HostInstant::ORIGIN;
+    let mut authority =
+        SessionAuthority::new(credentials.session, AuthorityPolicy::plan_defaults());
+    authority.mark_capabilities_checked().unwrap();
+    authority.authorize_observation(now).unwrap();
+    authority.mark_view_ready(now).unwrap();
+    authority.grant_lease(credentials.lease, now).unwrap();
+    authority
+        .issue_input_ticket(credentials.lease, credentials.ticket, now)
+        .unwrap();
+    let owner =
+        InputSession::new(authority, credentials, main_display(), implemented(), now).unwrap();
+    (owner, credentials)
+}
+
+#[test]
+fn native_move_preparation_cannot_spend_the_original_click_or_scroll_deadline() {
+    use fr_core::{
+        input::{InputEvent, InputRequest},
+        input_sequence::InputOutcome,
+        input_submission::Dispatch,
+        time::HostInstant,
+    };
+    use std::cell::Cell;
+
+    for event in [
+        InputEvent::Button {
+            button: PointerButton::Primary,
+            pressed: true,
+            position: point(30, 40),
+            barrier: 0,
+        },
+        InputEvent::Scroll {
+            x: 0,
+            y: LINE,
+            unit: ScrollUnit::Lines,
+            position: point(30, 40),
+            barrier: 0,
+        },
+    ] {
+        for prepared_at in [999_999, 1_000_000, 1_000_001] {
+            let (mut owner, credentials) = input_owner();
+            let mut h = Harness::new();
+            let now = Rc::new(Cell::new(100));
+            let prepared_now = now.clone();
+            h.fake().move_preparation = Some(Box::new(move || {
+                prepared_now.set(prepared_at);
+                Ok(())
+            }));
+            let dispatched = owner
+                .dispatch(
+                    InputRequest {
+                        credentials,
+                        sequence: 0,
+                        event,
+                    },
+                    &mut h.sink,
+                    || HostInstant::from_micros(now.get()),
+                )
+                .unwrap();
+            let Dispatch::Completed(receipt) = dispatched else {
+                panic!("the original request must report its outcome");
+            };
+            if prepared_at < 1_000_000 {
+                assert_eq!(receipt.outcome, InputOutcome::SubmittedToOs);
+                assert_eq!(receipt.submitted_operations, 2);
+                let action = match event {
+                    InputEvent::Button { .. } => Call::Button(PointerButton::Primary, true),
+                    _ => Call::Scroll(0, -120),
+                };
+                assert_eq!(h.taken(), [Call::Move(point(30, 40)), action]);
+            } else {
+                assert_eq!(receipt.outcome, InputOutcome::ExpiredBeforeSubmission);
+                assert_eq!(receipt.submitted_operations, 0);
+                assert_eq!(owner.held_count(), 0);
+                assert!(owner.monitor().is_revoked());
+                assert_eq!(h.taken(), []);
+            }
+            assert!(h.sink.prepared_move.is_none());
+            assert!(h.sink.prepared.is_none());
+        }
+    }
+}
+
+#[test]
+fn revoke_during_native_move_preparation_preserves_earlier_held_key_cleanup() {
+    use fr_core::{
+        input::{InputEvent, InputRequest},
+        input_sequence::InputOutcome,
+        input_submission::{Dispatch, Refusal},
+        time::HostInstant,
+    };
+
+    let (mut owner, credentials) = input_owner();
+    let mut h = Harness::new();
+    let request = |sequence, event| InputRequest {
+        credentials,
+        sequence,
+        event,
+    };
+    let pressed = owner
+        .dispatch(
+            request(
+                0,
+                InputEvent::Key {
+                    key: PhysicalKey::new(A).unwrap(),
+                    transition: KeyTransition::Press,
+                },
+            ),
+            &mut h.sink,
+            || HostInstant::from_micros(100),
+        )
+        .unwrap();
+    assert!(matches!(
+        pressed,
+        Dispatch::Completed(fr_core::input_submission::Receipt {
+            outcome: InputOutcome::SubmittedToOs,
+            submitted_operations: 1,
+            refusal: None,
+            ..
+        })
+    ));
+    assert_eq!(owner.held_count(), 1);
+    h.taken();
+
+    let revoke = owner.revoke_handle();
+    h.fake().move_preparation = Some(Box::new(move || {
+        revoke.revoke();
+        Ok(())
+    }));
+    let dispatched = owner
+        .dispatch(
+            request(
+                1,
+                InputEvent::Button {
+                    button: PointerButton::Primary,
+                    pressed: true,
+                    position: point(30, 40),
+                    barrier: 0,
+                },
+            ),
+            &mut h.sink,
+            || HostInstant::from_micros(200),
+        )
+        .unwrap();
+    let Dispatch::Completed(receipt) = dispatched else {
+        panic!("the revoked request must report its outcome");
+    };
+    assert_eq!(receipt.outcome, InputOutcome::CancelledBeforeSubmission);
+    assert_eq!(receipt.refusal, Some(Refusal::Revoked));
+    assert_eq!(receipt.submitted_operations, 0);
+    assert_eq!(h.taken(), []);
+    assert!(h.sink.prepared_move.is_none());
+
+    let cleanup = owner.cleanup(&mut h.sink);
+    assert_eq!(cleanup.submitted_releases, 1);
+    assert_eq!(cleanup.remaining, 0);
+    assert_eq!(
+        h.taken(),
+        [Call::Key(
+            Key::Scan {
+                code: 0x1E,
+                extended: false
+            },
+            false
+        )]
+    );
 }

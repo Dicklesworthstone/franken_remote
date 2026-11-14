@@ -266,22 +266,47 @@ pub fn text(scalar: char) -> Result<(), NotInserted> {
     send(&inputs)
 }
 
-/// Move the pointer to physical pixel (`x`, `y`) of the virtual desktop.
+/// One absolute move whose display enumeration and coordinate conversion are
+/// complete. The authority owner must perform its final check AFTER preparation
+/// and immediately before consuming this value. It is deliberately not Clone:
+/// a prepared move is submitted at most once, never retried under a new lease.
+pub struct PreparedMove {
+    input: INPUT,
+}
+impl PreparedMove {
+    /// Prepare a physical virtual-desktop pixel without injecting anything.
+    /// Native display queries and thread DPI changes happen here, before the
+    /// caller's final authority/deadline check, never in `submit`.
+    pub fn new(x: i32, y: i32) -> io::Result<Self> {
+        let desktop = virtual_desktop(&monitors()?).ok_or(io::ErrorKind::NotFound)?;
+        let (Some(nx), Some(ny)) = (
+            normalized(x, desktop.left, desktop.width),
+            normalized(y, desktop.top, desktop.height),
+        ) else {
+            return Err(io::ErrorKind::InvalidInput.into());
+        };
+        Ok(Self {
+            input: mouse(
+                nx,
+                ny,
+                0,
+                MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+            ),
+        })
+    }
+
+    /// Submit exactly the prepared normalized move. No display query, thread
+    /// DPI change, coordinate remapping or retry follows authorization.
+    pub fn submit(self) -> Result<(), NotInserted> {
+        send(&[self.input])
+    }
+}
+
+/// Move the pointer without a remote authority boundary (local diagnostics).
+/// Remote input owners must use [`PreparedMove`] and check authority between
+/// `new` and `submit`.
 pub fn move_to(x: i32, y: i32) -> Result<(), NotInserted> {
-    let _aware = PerMonitor::enter();
-    let desktop = virtual_desktop(&monitors()?).ok_or(io::ErrorKind::NotFound)?;
-    let (Some(nx), Some(ny)) = (
-        normalized(x, desktop.left, desktop.width),
-        normalized(y, desktop.top, desktop.height),
-    ) else {
-        return Err(io::ErrorKind::InvalidInput.into());
-    };
-    send(&[mouse(
-        nx,
-        ny,
-        0,
-        MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
-    )])
+    PreparedMove::new(x, y)?.submit()
 }
 
 /// Press or release one button where the pointer is.

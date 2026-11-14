@@ -1,5 +1,25 @@
 # Implementation status
 
+## Windows native input prepares before its final deadline check (2026-11-14 UTC)
+
+Absolute mouse movement previously enumerated monitors, entered a native DPI
+scope and normalized coordinates inside submission, after the input owner's
+final authorization check. A blocked query could therefore consume the original
+ticket lifetime before SendInput. The Windows sink now builds a single-use
+PreparedMove during preparation. Submission consumes that value and calls
+SendInput directly; cancellation, refusal and cleanup discard it without replay.
+
+Three new production-owner regressions cover single-use/cancelled preparation,
+click and scroll at just-before/exactly-at/after the original deadline, and
+revocation during preparation with an earlier held key still released by
+cleanup. Independent source review checked the actual InputSession API and
+deadline semantics. The initial focused compile found a test-only must-use
+result, which was corrected; its final rerun and native Clippy were interrupted
+by loss of the execution environment. These new tests and native System wiring
+remain unverified by execution here. Existing hosted checks cover the portable
+sink and native fr-winsys library; full Windows host wiring still needs its
+own feature-enabled build. The qualification bead remains open (`fr-6kx2`).
+
 ## Windows capture refuses obsolete desktop pixels (2026-11-14 UTC)
 
 After Desktop Duplication access loss, a recreated interface no longer makes

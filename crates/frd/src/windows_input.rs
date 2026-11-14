@@ -42,6 +42,10 @@ pub enum Sent {
 
 /// What the sink asks of Windows; [`System`] is the real one.
 pub trait Native {
+    /// A fully prepared absolute move. Construction may query Windows; moving
+    /// it into `move_to` may only submit the already prepared native operation.
+    type PreparedMove;
+
     /// Every display's physical rectangle.
     fn displays(&mut self) -> Result<Vec<InputBounds>, PlatformError>;
     fn cursor(&mut self) -> Result<DesktopPoint, PlatformError>;
@@ -51,7 +55,8 @@ pub trait Native {
     fn foreground_outranks_us(&mut self) -> bool;
     fn key(&mut self, key: Key, down: bool) -> Sent;
     fn text(&mut self, scalar: char) -> Sent;
-    fn move_to(&mut self, point: DesktopPoint) -> Sent;
+    fn prepare_move_to(&mut self, point: DesktopPoint) -> Result<Self::PreparedMove, PlatformError>;
+    fn move_to(&mut self, prepared: Self::PreparedMove) -> Sent;
     fn button(&mut self, button: PointerButton, down: bool) -> Sent;
     /// Wheel deltas, 120 per notch: positive right, positive away from the user.
     fn scroll(&mut self, horizontal: i32, vertical: i32) -> Sent;
@@ -93,6 +98,7 @@ pub struct WindowsInput<N: Native> {
     /// there. `None`: the real pointer, which must be on the display.
     position: Option<DesktopPoint>,
     prepared: Option<Operation>,
+    prepared_move: Option<N::PreparedMove>,
 }
 
 impl<N: Native> WindowsInput<N> {
@@ -116,6 +122,7 @@ impl<N: Native> WindowsInput<N> {
             buttons: [false; 5],
             position: None,
             prepared: None,
+            prepared_move: None,
         })
     }
 
@@ -220,7 +227,10 @@ impl<N: Native> WindowsInput<N> {
                 sent
             }
             Operation::Absolute(point) => {
-                let sent = self.native.move_to(point);
+                let Some(prepared) = self.prepared_move.take() else {
+                    return Submission::NotSubmitted(PlatformError::Unsupported);
+                };
+                let sent = self.native.move_to(prepared);
                 match sent {
                     Sent::All => self.position = Some(point),
                     Sent::Partly => self.position = None,
@@ -269,6 +279,7 @@ impl<N: Native> WindowsInput<N> {
     /// left held; false means a release was not confirmed.
     pub fn native_cleanup(&mut self) -> bool {
         self.prepared = None;
+        self.prepared_move = None;
         for usage in 0..self.keys.len() {
             if self.keys[usage]
                 && let Some(key) = u16::try_from(usage).ok().and_then(native_key)
@@ -298,9 +309,15 @@ impl<N: Native> WindowsInput<N> {
 impl<N: Native> InputSink for WindowsInput<N> {
     fn prepare(&mut self, operation: Operation) -> Result<(), PlatformError> {
         self.prepared = None;
+        self.prepared_move = None;
         self.check(operation)?;
         if !operation.is_release() {
             self.check_native(operation)?;
+        }
+        if let Operation::Absolute(point) = operation {
+            // Display enumeration and normalization can stall. Finish them
+            // before InputSession samples the original authority deadline.
+            self.prepared_move = Some(self.native.prepare_move_to(point)?);
         }
         self.prepared = Some(operation);
         Ok(())
@@ -309,12 +326,14 @@ impl<N: Native> InputSink for WindowsInput<N> {
     /// a cleanup release): only a prepared operation is sent.
     fn submit(&mut self, operation: Operation) -> Submission {
         if self.prepared.take() != Some(operation) {
+            self.prepared_move = None;
             return Submission::NotSubmitted(PlatformError::Unsupported);
         }
         self.send(operation)
     }
     fn cancel_prepared(&mut self) {
         self.prepared = None;
+        self.prepared_move = None;
     }
 }
 
@@ -341,6 +360,8 @@ impl System {
 
 #[cfg(windows)]
 impl Native for System {
+    type PreparedMove = fr_winsys::input::PreparedMove;
+
     fn displays(&mut self) -> Result<Vec<InputBounds>, PlatformError> {
         let displays = fr_winsys::input::monitors().map_err(|_| PlatformError::Unavailable)?;
         Ok(displays
@@ -380,8 +401,11 @@ impl Native for System {
     fn text(&mut self, scalar: char) -> Sent {
         Self::sent(fr_winsys::input::text(scalar))
     }
-    fn move_to(&mut self, point: DesktopPoint) -> Sent {
-        Self::sent(fr_winsys::input::move_to(point.x, point.y))
+    fn prepare_move_to(&mut self, point: DesktopPoint) -> Result<Self::PreparedMove, PlatformError> {
+        fr_winsys::input::PreparedMove::new(point.x, point.y).map_err(|_| PlatformError::Unavailable)
+    }
+    fn move_to(&mut self, prepared: Self::PreparedMove) -> Sent {
+        Self::sent(prepared.submit())
     }
     fn button(&mut self, button: PointerButton, down: bool) -> Sent {
         use fr_winsys::input::Button as B;
