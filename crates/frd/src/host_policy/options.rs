@@ -372,10 +372,10 @@ impl RunOptions {
     /// returned before any I/O. A Windows host shares the interactive desktop,
     /// view-only unless `--control`. (`parse` already refuses `--send-control`
     /// off Linux and macOS, and `--send` without a control executor.)
-    #[cfg(windows)]
+    #[cfg(any(windows, test))]
     #[must_use]
-    pub fn windows_refusal(&self, approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 10] = [
+    pub fn windows_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
+        let refusals: [(bool, &str, &str); 9] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",
@@ -405,11 +405,6 @@ impl RunOptions {
                 self.files.is_some(),
                 "files_unavailable",
                 "--files has no Windows backend yet",
-            ),
-            (
-                approval == Approval::Local,
-                "local_approval_unavailable",
-                "a Windows host has no local approval prompt yet; use --approval none",
             ),
             (
                 self.audio || self.audio_server.is_some() || self.audio_sink.is_some(),
@@ -589,6 +584,57 @@ mod tests {
             options.macos_refusal(approval).map(|(code, _)| code),
             Some("audio_source_unsupported")
         );
+    }
+
+    #[test]
+    fn windows_local_approval_does_not_enable_unavailable_capabilities() {
+        let options = RunOptions::default();
+        assert_eq!(options.windows_refusal(Approval::None), None);
+        assert_eq!(options.windows_refusal(Approval::Local), None);
+        for (options, expected) in [
+            (
+                RunOptions {
+                    audio: true,
+                    ..RunOptions::default()
+                },
+                "audio_source_unavailable",
+            ),
+            (
+                RunOptions {
+                    microphone: true,
+                    ..RunOptions::default()
+                },
+                "microphone_endpoint_unavailable",
+            ),
+            (
+                RunOptions {
+                    clipboard: true,
+                    ..RunOptions::default()
+                },
+                "clipboard_unavailable",
+            ),
+            (
+                RunOptions {
+                    headless: true,
+                    ..RunOptions::default()
+                },
+                "no_display",
+            ),
+            (
+                RunOptions {
+                    observation_indicator: Some("C:\\other-ui.exe".into()),
+                    ..RunOptions::default()
+                },
+                "observation_indicator_unavailable",
+            ),
+        ] {
+            assert_eq!(
+                options
+                    .windows_refusal(Approval::Local)
+                    .map(|(code, _)| code),
+                Some(expected)
+            );
+        }
     }
 
     #[test]

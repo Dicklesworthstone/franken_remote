@@ -4,6 +4,10 @@
 //!
 //! Every unsafe block states the invariant that makes it sound.
 #[cfg(windows)]
+pub mod approval;
+#[cfg(any(windows, test))]
+mod approval_policy;
+#[cfg(windows)]
 pub mod certs;
 #[cfg(windows)]
 pub mod fs;

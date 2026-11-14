@@ -5,13 +5,17 @@ use frd::{
     host_policy::{Approval, options::RunOptions},
     host_run::approval::Configuration,
 };
+#[cfg(not(windows))]
 use std::path::Path;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", windows)))]
 const REQUIRED: &str = "local approval requires --logind-session for the shared desktop and an installed fr-observation-indicator beside frd; headless sharing and the separate --observation-indicator wrapper cannot use this consent profile";
 #[cfg(target_os = "macos")]
 const REQUIRED: &str = "local approval requires the installed fr-observation-indicator and the original monitored graphical login session; no unattended fallback is used";
+#[cfg(windows)]
+const REQUIRED: &str = "local approval requires this process's monitored interactive Windows logon session and its native consent window";
 
+#[cfg(not(windows))]
 pub fn configuration(
     options: &RunOptions,
     mode: Approval,
@@ -34,6 +38,32 @@ pub fn configuration(
         .filter(|path| path.is_absolute() && path.is_file());
     selected(mode, eligible, image.as_deref())
 }
+#[cfg(windows)]
+pub fn configuration(
+    options: &RunOptions,
+    mode: Approval,
+) -> Result<Option<Configuration>, &'static str> {
+    if windows_eligible(options) {
+        // No window, native observation or approval is created here. The
+        // original host validates this process's session and supervises its
+        // logon before any admitted request may open the native prompt.
+        Ok(Some(Configuration::windows()))
+    } else if mode == Approval::Local {
+        Err(REQUIRED)
+    } else {
+        Ok(None)
+    }
+}
+#[cfg(any(windows, test))]
+fn windows_eligible(options: &RunOptions) -> bool {
+    !options.headless
+        && options.display.is_none()
+        && options.logind_session.is_none()
+        && options.logind_seat.is_none()
+        && options.session_monitor.is_none()
+        && options.observation_indicator.is_none()
+}
+#[cfg(not(windows))]
 fn eligible(options: &RunOptions) -> bool {
     if cfg!(target_os = "macos") {
         // The mandatory native monitor is resolved by macos_run and checked
@@ -45,6 +75,7 @@ fn eligible(options: &RunOptions) -> bool {
             && options.observation_indicator.is_none()
     }
 }
+#[cfg(not(windows))]
 fn selected(
     mode: Approval,
     eligible: bool,
@@ -69,6 +100,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(not(windows))]
     fn desktop_approval_missing_or_unmonitored_ui_never_becomes_unattended() {
         for (eligible, image) in [
             (false, None),
@@ -88,6 +120,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(windows))]
     fn desktop_approval_availability_preserves_current_and_future_policy_choices() {
         for mode in [Approval::None, Approval::Local] {
             assert!(
@@ -103,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", windows)))]
     fn desktop_approval_incompatible_profiles_refuse_before_ui_discovery() {
         for (headless, indicator, session) in [
             (true, None, Some("c2")),
@@ -126,6 +159,61 @@ mod tests {
             );
             assert!(configuration(&options, Approval::None).unwrap().is_none());
         }
+    }
+
+    #[test]
+    fn windows_consent_uses_only_the_original_native_session_surface() {
+        let options = RunOptions::default();
+        assert!(windows_eligible(&options));
+        for changed in [
+            RunOptions {
+                headless: true,
+                ..RunOptions::default()
+            },
+            RunOptions {
+                display: Some(":0".into()),
+                ..RunOptions::default()
+            },
+            RunOptions {
+                logind_session: Some("c2".into()),
+                ..RunOptions::default()
+            },
+            RunOptions {
+                logind_seat: Some("seat0".into()),
+                ..RunOptions::default()
+            },
+            RunOptions {
+                session_monitor: Some("C:\\other-monitor.exe".into()),
+                ..RunOptions::default()
+            },
+            RunOptions {
+                observation_indicator: Some("C:\\other-ui.exe".into()),
+                ..RunOptions::default()
+            },
+        ] {
+            assert!(!windows_eligible(&changed));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_local_and_later_saved_policy_use_native_consent_without_a_helper() {
+        for mode in [Approval::None, Approval::Local] {
+            assert!(
+                configuration(&RunOptions::default(), mode)
+                    .unwrap()
+                    .is_some()
+            );
+        }
+        let options = RunOptions {
+            headless: true,
+            ..RunOptions::default()
+        };
+        assert_eq!(
+            configuration(&options, Approval::Local).err(),
+            Some(REQUIRED)
+        );
+        assert!(configuration(&options, Approval::None).unwrap().is_none());
     }
 
     #[test]

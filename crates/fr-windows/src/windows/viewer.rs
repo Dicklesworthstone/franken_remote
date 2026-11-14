@@ -704,12 +704,11 @@ impl Viewer {
         let Some(request) = self.session.shared().display_request() else {
             return;
         };
-        match display::Picker::open(hwnd, self.session.shared_handle(), request) {
-            Ok(picker) => self.display_picker = Some(picker),
-            Err(_) => {
-                eprintln!("fr-windows: display_picker_unavailable");
-                self.close();
-            }
+        if let Ok(picker) = display::Picker::open(hwnd, self.session.shared_handle(), request) {
+            self.display_picker = Some(picker);
+        } else {
+            eprintln!("fr-windows: display_picker_unavailable");
+            self.close();
         }
     }
     fn open_text(&mut self, hwnd: HWND) {

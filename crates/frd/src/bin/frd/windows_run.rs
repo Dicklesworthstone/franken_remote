@@ -2,7 +2,8 @@
 //! interactive one, read by the Windows capture worker (Desktop Duplication
 //! into Media Foundation HEVC), and identity comes from tailscaled's named
 //! pipe. Options whose backends exist only on Linux or macOS so far are typed
-//! refusals before any I/O, never ignored; a Windows host is view-only.
+//! refusals before any I/O, never ignored. Observation and control can both
+//! require local native consent on the original monitored logon session.
 // These keep the Linux functions' signatures so the shared run calls either.
 #![allow(clippy::unnecessary_wraps)]
 
