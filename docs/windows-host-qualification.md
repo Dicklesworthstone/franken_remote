@@ -144,6 +144,40 @@ replacement images. They pass with the pinned nightly and strict standalone
 Clippy. This establishes copy elimination and policy correctness in source;
 native D3D execution and any frame-rate improvement still require measurement.
 
+### Encoder event and output bounds
+
+The Media Foundation event pump forwards at most 32 payload-free events through
+a nonblocking bounded inbox. A full inbox permanently fails that encoder;
+dropping an event cannot make the remaining sequence look healthy. Accumulated
+input credits have a separate 32-credit bound, so consuming events cannot hide
+unbounded native announcements. The capture owner closes after an encode error.
+
+Every event wait retains the encode request's original deadline. The inbox
+checks that deadline before and after receiving, including already queued
+events. The encoder also checks it before input submission, around output
+processing and renegotiation, and before copying a locked output buffer.
+Returning from a native call after expiry cannot start another output operation
+or turn a late unit into success. A hung foreign call still requires the
+existing media-process supervisor; these checks do not cancel a driver call.
+
+The selected protocol's access-unit byte limit reaches the encoder at open.
+Caller-owned output buffers are checked before allocation, including after a
+stream-type change. Transform-owned samples have their total length checked
+before contiguous-buffer conversion; locked lengths are checked against both
+the actual buffer capacity and the selected limit before reserving or copying
+bytes. This bounds application-owned output allocations, not the driver's
+private memory. A successful buffer lock always reaches unlock on validation,
+allocation or deadline failure. The encoder owns the event thread before
+fallible streaming-start messages, so failed startup retains shutdown custody.
+
+Nine portable tests exercise event ordering, overflow, producer shutdown,
+expired queued events, the original empty-wait deadline, native failure,
+accumulated credits and output sizes. The helper passed all nine tests and
+strict standalone Clippy with the pinned nightly before a final test-cleanup
+improvement; that improvement and the final native deadline placements could
+not be rerun after the execution environment disconnected. Windows compilation
+and native driver execution remain unverified for this change.
+
 ### Adaptive bitrate
 
 The live Media Foundation worker now implements `CaptureAtRate` for private and

@@ -88,6 +88,10 @@ mod macos_clipboard_state;
 // Windows host capture: Desktop Duplication into Media Foundation HEVC.
 #[cfg(all(windows, feature = "windows-media"))]
 pub mod windows_capture;
+// The real encoder's event and allocation bounds are exercised on every host.
+#[cfg(any(test, all(windows, feature = "windows-media")))]
+#[path = "windows_capture/bounds.rs"]
+mod windows_encoder_bounds;
 // Pure keycode data: compiled for tests everywhere so ordinary CI checks it.
 #[cfg(any(
     test,

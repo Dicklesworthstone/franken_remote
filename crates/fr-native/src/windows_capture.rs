@@ -226,8 +226,14 @@ impl WinCapture {
             coded,
             fps,
         )?;
-        let encoder =
-            encoder::Encoder::open(source.device(), display.adapter, coded, fps, bitrate)?;
+        let encoder = encoder::Encoder::open(
+            source.device(),
+            display.adapter,
+            coded,
+            fps,
+            bitrate,
+            limits.max_encoded_access_unit_bytes(),
+        )?;
         Ok(Self {
             source,
             converter,

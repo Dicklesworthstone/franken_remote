@@ -6,13 +6,17 @@
 //!
 //! Hardware transforms are asynchronous: they announce `METransformNeedInput`
 //! and `METransformHaveOutput` through their event generator. A pump thread
-//! blocks on that generator and forwards events, so every wait here has a
-//! deadline and nothing polls. Low-latency mode with no reordering gives one
-//! unit per picture; `encode` submits one picture and returns its unit.
-use crate::NativeError;
+//! blocks on that generator and forwards a bounded number of payload-free
+//! events without blocking on its consumer. Overflow is terminal. Every wait
+//! and queued result keeps the original encode deadline. Low-latency mode with
+//! no reordering gives one unit per picture; `encode` submits one picture and
+//! returns its unit within the selected access-unit byte limit.
+use crate::{
+    NativeError,
+    windows_encoder_bounds::{self as bounds, Credits, Event, Inbox, OutputLimit, Sender},
+};
 use core::mem::ManuallyDrop;
 use std::sync::OnceLock;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::Instant;
 use windows::Win32::Foundation::{RPC_E_CHANGED_MODE, VARIANT_TRUE};
@@ -69,13 +73,6 @@ pub struct EncoderIdentity {
     pub provides_samples: bool,
 }
 
-enum Event {
-    NeedInput,
-    HaveOutput,
-    Failed,
-    Ended,
-}
-
 /// The transform's event generator, moved to the pump thread. Media
 /// Foundation event generators are free-threaded (any thread may call
 /// `GetEvent`); this wrapper only carries the reference across.
@@ -127,14 +124,15 @@ impl Drop for FineTimer {
 pub struct Encoder {
     transform: IMFTransform,
     codec: Option<ICodecAPI>,
-    events: Receiver<Event>,
+    events: Inbox,
     pump: Option<JoinHandle<()>>,
     _manager: IMFDXGIDeviceManager,
     input: u32,
     output: u32,
     output_bytes: u32,
+    output_limit: OutputLimit,
     /// `METransformNeedInput` announcements not yet answered.
-    credits: u32,
+    credits: Credits,
     time: i64,
     duration: i64,
     identity: EncoderIdentity,
@@ -275,7 +273,7 @@ fn find(adapter: (u32, i32)) -> Result<IMFActivate, NativeError> {
     }
 }
 
-fn pump(generator: Generator, events: &Sender<Event>) {
+fn pump(generator: Generator, events: &Sender) {
     let Generator(generator) = generator;
     // SAFETY: this thread's apartment; failure leaves GetEvent to refuse.
     let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
@@ -297,10 +295,25 @@ fn pump(generator: Generator, events: &Sender<Event>) {
             Ok(_) => continue,
             Err(_) => Event::Failed,
         };
-        if events.send(forward).is_err() {
+        if !events.send(forward) {
             return;
         }
     }
+}
+
+const fn event_failure(failure: bounds::Failure) -> NativeError {
+    match failure {
+        bounds::Failure::Expired => NativeError::NeedDrain,
+        bounds::Failure::Overflow | bounds::Failure::Codec => NativeError::Codec,
+        bounds::Failure::Closed => NativeError::Closed,
+    }
+}
+
+const fn provides_samples(flags: u32) -> bool {
+    flags
+        & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+            .cast_unsigned()
+        != 0
 }
 
 impl Encoder {
@@ -318,7 +331,10 @@ impl Encoder {
         coded: (u32, u32),
         fps: u32,
         bitrate: u32,
+        max_output_bytes: u32,
     ) -> Result<Self, NativeError> {
+        let output_limit =
+            OutputLimit::new(max_output_bytes).ok_or(NativeError::InvalidConfiguration)?;
         startup()?;
         let activate = find(adapter)?;
         let fail = |_| NativeError::Unavailable;
@@ -447,23 +463,23 @@ impl Encoder {
             describe(&in_type, &MFVideoFormat_NV12, coded, fps).map_err(fail)?;
             transform.SetInputType(input, &in_type, 0).map_err(fail)?;
             let info = transform.GetOutputStreamInfo(output).map_err(fail)?;
-            let provides = info.dwFlags
-                & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
-                    .cast_unsigned()
-                != 0;
+            let provides = provides_samples(info.dwFlags);
+            let output_bytes = if provides {
+                0
+            } else {
+                output_limit
+                    .buffer_capacity(info.cbSize)
+                    .ok_or(NativeError::UnsupportedBitstream)?
+            };
             let generator = Generator(transform.cast::<IMFMediaEventGenerator>().map_err(fail)?);
-            let (sender, events) = mpsc::channel();
+            let (sender, events) = bounds::channel();
             let pump = std::thread::Builder::new()
                 .name("fr-mf-events".into())
                 .spawn(move || pump(generator, &sender))
                 .map_err(|_| NativeError::Allocation)?;
-            transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-                .map_err(fail)?;
-            transform
-                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-                .map_err(fail)?;
-            Ok(Self {
+            // Give the pump an owner before any fallible streaming message.
+            // A failed start then follows the same shutdown and pump cleanup path.
+            let encoder = Self {
                 transform,
                 codec: api,
                 events,
@@ -471,8 +487,9 @@ impl Encoder {
                 _manager: manager,
                 input,
                 output,
-                output_bytes: info.cbSize.max(1 << 20),
-                credits: 0,
+                output_bytes,
+                output_limit,
+                credits: Credits::default(),
                 time: 0,
                 duration: 10_000_000 / i64::from(fps.max(1)),
                 identity: EncoderIdentity {
@@ -482,7 +499,16 @@ impl Encoder {
                 },
                 shut_down: false,
                 _timer: timer,
-            })
+            };
+            encoder
+                .transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .map_err(fail)?;
+            encoder
+                .transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .map_err(fail)?;
+            Ok(encoder)
         }
     }
 
@@ -491,13 +517,7 @@ impl Encoder {
     }
 
     fn next(&mut self, deadline: Instant) -> Result<Event, NativeError> {
-        let left = deadline.saturating_duration_since(Instant::now());
-        match self.events.recv_timeout(left) {
-            Ok(Event::Failed) => Err(NativeError::Codec),
-            Ok(Event::Ended) | Err(RecvTimeoutError::Disconnected) => Err(NativeError::Closed),
-            Ok(event) => Ok(event),
-            Err(RecvTimeoutError::Timeout) => Err(NativeError::NeedDrain),
-        }
+        self.events.next(deadline).map_err(event_failure)
     }
 
     /// The current mean bitrate property, not measured delivery throughput.
@@ -547,9 +567,10 @@ impl Encoder {
         micros: u64,
         deadline: Instant,
     ) -> Result<(Vec<u8>, bool), NativeError> {
-        while self.credits == 0 {
+        self.events.check(deadline).map_err(event_failure)?;
+        while !self.credits.available() {
             match self.next(deadline)? {
-                Event::NeedInput => self.credits += 1,
+                Event::NeedInput => self.credits.grant().map_err(event_failure)?,
                 // An output before any input of this call would belong to an
                 // earlier picture: the one-in, one-out contract broke.
                 _ => return Err(NativeError::Codec),
@@ -585,17 +606,18 @@ impl Encoder {
             sample
                 .SetSampleDuration(self.duration)
                 .map_err(|_| NativeError::Codec)?;
+            self.events.check(deadline).map_err(event_failure)?;
             self.transform
                 .ProcessInput(self.input, &sample, 0)
                 .map_err(|_| NativeError::Codec)?;
         }
-        self.credits -= 1;
+        self.credits.consume().map_err(event_failure)?;
         self.time = time;
         loop {
             match self.next(deadline)? {
-                Event::NeedInput => self.credits += 1,
+                Event::NeedInput => self.credits.grant().map_err(event_failure)?,
                 Event::HaveOutput => {
-                    if let Some(unit) = self.take()? {
+                    if let Some(unit) = self.take(deadline)? {
                         return Ok(unit);
                     }
                 }
@@ -605,7 +627,9 @@ impl Encoder {
     }
 
     /// One `ProcessOutput`; `None` after an output type renegotiation.
-    fn take(&mut self) -> Result<Option<(Vec<u8>, bool)>, NativeError> {
+    #[allow(clippy::too_many_lines, reason = "one ordered native output operation")]
+    fn take(&mut self, deadline: Instant) -> Result<Option<(Vec<u8>, bool)>, NativeError> {
+        self.events.check(deadline).map_err(event_failure)?;
         let own = if self.identity.provides_samples {
             None
         } else {
@@ -620,6 +644,7 @@ impl Encoder {
                 Some(sample)
             }
         };
+        self.events.check(deadline).map_err(event_failure)?;
         let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
             dwStreamID: self.output,
             pSample: ManuallyDrop::new(own),
@@ -637,6 +662,7 @@ impl Encoder {
             drop(ManuallyDrop::take(&mut entry.pEvents));
             (result, ManuallyDrop::take(&mut entry.pSample))
         };
+        self.events.check(deadline).map_err(event_failure)?;
         match result {
             Ok(()) => {}
             Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
@@ -646,10 +672,25 @@ impl Encoder {
                         .transform
                         .GetOutputAvailableType(self.output, 0)
                         .map_err(|_| NativeError::Codec)?;
+                    self.events.check(deadline).map_err(event_failure)?;
                     self.transform
                         .SetOutputType(self.output, &kind, 0)
                         .map_err(|_| NativeError::Codec)?;
+                    self.events.check(deadline).map_err(event_failure)?;
+                    let info = self
+                        .transform
+                        .GetOutputStreamInfo(self.output)
+                        .map_err(|_| NativeError::Codec)?;
+                    self.identity.provides_samples = provides_samples(info.dwFlags);
+                    self.output_bytes = if self.identity.provides_samples {
+                        0
+                    } else {
+                        self.output_limit
+                            .buffer_capacity(info.cbSize)
+                            .ok_or(NativeError::UnsupportedBitstream)?
+                    };
                 }
+                self.events.check(deadline).map_err(event_failure)?;
                 return Ok(None);
             }
             Err(_) => return Err(NativeError::Codec),
@@ -659,23 +700,42 @@ impl Encoder {
         // the copy leaves this block.
         unsafe {
             let clean = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) != 0;
+            let total = sample.GetTotalLength().map_err(|_| NativeError::Codec)?;
+            self.output_limit
+                .length(total)
+                .ok_or(NativeError::UnsupportedBitstream)?;
+            self.events.check(deadline).map_err(event_failure)?;
             let buffer = sample
                 .ConvertToContiguousBuffer()
                 .map_err(|_| NativeError::Codec)?;
+            self.events.check(deadline).map_err(event_failure)?;
             let mut data = core::ptr::null_mut();
+            let mut capacity = 0_u32;
             let mut length = 0_u32;
             buffer
-                .Lock(&raw mut data, None, Some(&raw mut length))
+                .Lock(&raw mut data, Some(&raw mut capacity), Some(&raw mut length))
                 .map_err(|_| NativeError::Codec)?;
-            let bytes = if data.is_null() {
-                Vec::new()
-            } else {
-                core::slice::from_raw_parts(data, length as usize).to_vec()
-            };
+            // Keep every fallible check inside the closure so a successful
+            // Lock always reaches Unlock, including allocation failures.
+            let bytes = (|| -> Result<Vec<u8>, NativeError> {
+                let length = self
+                    .output_limit
+                    .locked_length(length, capacity)
+                    .ok_or(NativeError::UnsupportedBitstream)?;
+                if data.is_null() {
+                    return Err(NativeError::UnsupportedBitstream);
+                }
+                self.events.check(deadline).map_err(event_failure)?;
+                let mut bytes = Vec::new();
+                bytes
+                    .try_reserve_exact(length)
+                    .map_err(|_| NativeError::Allocation)?;
+                bytes.extend_from_slice(core::slice::from_raw_parts(data, length));
+                Ok(bytes)
+            })();
             buffer.Unlock().map_err(|_| NativeError::Codec)?;
-            if bytes.is_empty() {
-                return Err(NativeError::UnsupportedBitstream);
-            }
+            let bytes = bytes?;
+            self.events.check(deadline).map_err(event_failure)?;
             Ok(Some((bytes, clean)))
         }
     }
