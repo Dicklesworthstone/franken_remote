@@ -286,24 +286,87 @@ fn an_exact_drained_witness_releases_obsolete_egress_before_maintenance() {
     });
 }
 
+/// A newer copy (here) and the peer's crossing publication (the wire owner's
+/// receive path) mark the same in-flight payload superseded. Both ends offer
+/// their selection at start, so this is the ordinary startup race.
 #[test]
-fn a_superseded_record_retained_by_quic_still_retires_the_lane() {
+fn a_superseded_record_retained_by_quic_keeps_the_lane_and_orders_its_cancel() {
     runtime().block_on(async {
         let mut f = Fixture::new().await;
         f.offer(401);
         assert_eq!(f.pump(), Pump::RecordAccepted);
         assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
         assert!(!f.bridge.lane.send_drained(&f.link.h).unwrap());
+        assert!(f.bridge.inflight.iter().any(Option::is_some));
         f.offer(402);
-        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Retired));
-        assert_eq!(
-            f.bridge.reason(),
-            Some(Error::Session(SessionError::Clipboard(
-                fr_core::clipboard::Error::LocalChanged
-            )))
-        );
+        assert!(f.bridge.permits_io());
+        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
+        assert_eq!(f.bridge.reason(), None);
+        assert!(f.bridge.shared.gate.is_open());
         assert!(!f.link.h.is_closed());
+        // The unfinished original still gets its ordered Cancel first.
+        assert!(matches!(f.pump(), Pump::CancelAccepted(_)));
+        assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        assert!(!f.link.h.is_closed());
+        f.stop();
+    });
+}
+
+#[test]
+fn a_superseded_record_retained_by_quic_does_not_fence_an_active_io_turn() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        f.offer(403);
+        assert_eq!(f.pump(), Pump::RecordAccepted);
+        assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        assert!(f.bridge.inflight.iter().any(Option::is_some));
+        let sender = channel(&mut f.seed);
+        let mut checks = 0;
+        // drive's third check is inside poll_io: a retirement request there
+        // closes the connection (see the stop test above).
+        let result = f
+            .link
+            .h
+            .drive(&f.cx, Duration::ZERO, || {
+                checks += 1;
+                if checks == 3 {
+                    sender
+                        .offer(
+                            404,
+                            "copied during io",
+                            None,
+                            HostInstant::from_micros(clock(&f.cx)),
+                        )
+                        .unwrap();
+                }
+                f.bridge.permits_io()
+            })
+            .await;
+        assert!(checks >= 3);
+        assert_eq!(result, Ok(()));
+        assert!(!f.link.h.is_closed());
+        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
+        assert_eq!(f.bridge.reason(), None);
+        f.stop();
+    });
+}
+
+#[test]
+fn turning_sharing_off_with_superseded_bytes_in_flight_still_retires_the_lane() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        f.offer(405);
+        assert_eq!(f.pump(), Pump::RecordAccepted);
+        assert_eq!(f.bridge.service(&mut f.link.h, || true), Ok(State::Active));
+        assert!(!f.bridge.lane.send_drained(&f.link.h).unwrap());
+        f.offer(406);
+        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Active));
+        let (local, _) = f.bridge.shared.gate.switches();
+        local.set_enabled(false);
+        assert_eq!(f.bridge.maintain(&mut f.link.h), Ok(State::Retired));
+        assert_eq!(f.bridge.reason(), Some(Error::SwitchChanged));
         assert!(!f.bridge.shared.gate.is_open());
+        assert!(!f.link.h.is_closed());
         f.stop();
     });
 }

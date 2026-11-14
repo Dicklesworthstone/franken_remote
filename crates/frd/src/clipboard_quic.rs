@@ -7,7 +7,7 @@ use fr_client::{
     input::{ClientInstant, InputClient},
 };
 use fr_core::{
-    clipboard::{ClipboardSwitch, PlatformError},
+    clipboard::{ClipboardSwitch, Error as ClipboardError, PlatformError},
     input_submission::InputSession,
     time::HostInstant,
 };
@@ -429,7 +429,18 @@ impl Bridge {
             return Err(Error::SwitchChanged);
         }
         for (permit, until) in self.inflight.iter().flatten() {
-            permit.check_operation(host).map_err(Error::Session)?;
+            // A newer local copy, or the peer's publication crossing this item,
+            // supersedes records QUIC already holds. They were authorized when
+            // admitted and the wire owner orders a Cancel behind an unfinished
+            // item, so supersession alone fences nothing: both ends offer their
+            // selection at start, and treating the crossing as terminal ended
+            // the lane, or the whole connection inside an I/O turn. The close
+            // and switch checks above and the permit's own expiry, which it
+            // checks before supersession, keep their terminal handling.
+            match permit.check_operation(host) {
+                Ok(()) | Err(SessionError::Clipboard(ClipboardError::LocalChanged)) => {}
+                Err(error) => return Err(Error::Session(error)),
+            }
             if local >= *until {
                 return Err(Error::HandoffExpired);
             }

@@ -282,12 +282,21 @@ still require retirement, including failures first detected within an active
 I/O operation.
 
 The current network join remains conservative: a switch transition (including
-an off/on cycle), queued work outside the safe cases above, or
-superseded in-flight payload retires
-the optional clipboard pair. It does not silently reopen the consumed channel
+an off/on cycle) or queued work outside the safe cases above retires the
+optional clipboard pair. It does not silently reopen the consumed channel
 or replay buffered text when a switch is re-enabled. Input and viewing continue
 when retirement is performed between I/O turns. The mutable connection check
 also services a retirement request before staging the next native prefix.
+
+Supersession alone is not terminal for records QUIC already holds. A newer
+local copy, or the peer's publication crossing an outgoing item, marks that
+item's payload superseded; its admitted records were authorized when admitted,
+and the wire owner orders a Cancel behind an unfinished item. Both ends offer
+their current selection when the lane starts, so crossing items are the normal
+startup case: treating them as terminal retired the lane, and inside an active
+I/O turn closed the whole connection, in live Mac-to-Windows sessions. Close,
+switch transitions and the permit's own expiry (checked before supersession)
+remain terminal for retained records.
 
 A terminal clipboard loss can instead arrive after a prefix was staged, just
 before an already-held native I/O future is polled. The pinned native future may
