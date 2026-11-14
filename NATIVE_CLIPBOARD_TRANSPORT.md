@@ -291,10 +291,11 @@ also services a retirement request before staging the next native prefix.
 Supersession alone is not terminal for records QUIC already holds. A newer
 local copy, or the peer's publication crossing an outgoing item, marks that
 item's payload superseded; its admitted records were authorized when admitted,
-and the wire owner orders a Cancel behind an unfinished item. Both ends offer
-their current selection when the lane starts, so crossing items are the normal
-startup case: treating them as terminal retired the lane, and inside an active
-I/O turn closed the whole connection, in live Mac-to-Windows sessions. Close,
+and the wire owner orders a Cancel behind an unfinished item. Items cross
+whenever both ends copy within about a round trip; before hosts stopped offering
+their pre-session selection, every startup crossed. Treating a crossing as
+terminal retired the lane, and inside an active I/O turn closed the whole
+connection, in live Mac-to-Windows sessions. Close,
 switch transitions and the permit's own expiry (checked before supersession)
 remain terminal for retained records.
 

@@ -137,8 +137,13 @@ fn queue_original_copy(
     state: &RefCell<Selection>,
     complete: bool,
 ) -> Handoff {
-    state.borrow_mut().copy("original");
     let mut handoff = Handoff::default();
+    // Start watching first: a host never offers text copied before it.
+    native
+        .poll(&mut [0; 1024], &mut handoff, || at(10_000), || Ok(41))
+        .unwrap();
+    assert_eq!(handoff.gate.calls, 0);
+    state.borrow_mut().copy("original");
     let records = if complete { 3 } else { 1 };
     for _ in 0..records {
         native
@@ -146,6 +151,42 @@ fn queue_original_copy(
             .unwrap();
     }
     handoff
+}
+
+/// Both ends start with text on their clipboards. Only the controller offers
+/// it, so the startup selections cannot cross and swap the controller's own
+/// clipboard for the host's older text; either end offers a later copy.
+#[test]
+fn only_the_controller_offers_text_copied_before_the_lane_started() {
+    for (role, offered) in [(Role::Host, false), (Role::Controller, true)] {
+        let input = owner(10_000_000);
+        let state = Rc::new(RefCell::new(Selection::default()));
+        state.borrow_mut().copy("before the session");
+        let mut native = Synchronizer::new(session(&input, role), Native(state.clone()));
+        let mut gate = Gate::default();
+        let committed = |gate: &Gate| {
+            !gate.last.is_empty()
+                && matches!(
+                    decode(&gate.last, context(role), &ProtocolLimits::ABSOLUTE)
+                        .unwrap()
+                        .body,
+                    Body::Commit { .. }
+                )
+        };
+        for now in 1..=6 {
+            poll(&mut native, &mut gate, now * 1_000);
+        }
+        assert_eq!(state.borrow().reads, usize::from(offered), "{role:?}");
+        assert_eq!(committed(&gate), offered, "{role:?}");
+        state.borrow_mut().copy("during the session");
+        for now in 7..=12 {
+            poll(&mut native, &mut gate, now * 1_000);
+        }
+        assert_eq!(state.borrow().reads, usize::from(offered) + 1, "{role:?}");
+        assert!(committed(&gate), "{role:?}");
+        assert_eq!(state.borrow().publications, 0);
+        assert!(!native.is_closed());
+    }
 }
 
 #[test]

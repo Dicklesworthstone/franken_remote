@@ -217,8 +217,12 @@ authority projection and its native integration are described below.
 `fr_native::clipboard::ClipboardSynchronizer::new(channel, native)` owns an
 already admitted `ChannelSession` and its `X11Clipboard`. It watches server-authored
 XFixes version-1 selection changes, starts bounded reads automatically, and
-queues complete text without manual `begin_read` calls. The initial attachment
-observes the current selection once. Idle turns do not request clipboard text;
+queues complete text without manual `begin_read` calls. A controller's initial
+attachment offers its current selection once; a host's offers only copies made
+after it started watching. Text copied on the host before the session is not
+sent unasked, and the two startup selections cannot cross and swap the
+controller's own clipboard for the host's older text. A re-enabled lane on
+either end waits for a new copy. Idle turns do not request clipboard text;
 even same-app copies of identical bytes are new native revisions. Exact own
 publication stamps suppress echoes without hashing or retaining text history.
 
