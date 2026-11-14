@@ -647,7 +647,7 @@ mod tests {
         assert_eq!(upload.report().batch, 0);
         assert_eq!(upload.report().receipt_name(), "none");
         assert_eq!(upload.report().published_bytes(), None);
-        assert!(upload.reports().is_empty());
+        assert_eq!(upload.reports(), [] as [Report; 0]);
         assert!(upload.is_success(), "no file was requested");
         upload.configure_with(|_| panic!("refused intake replayed"));
     }
@@ -662,7 +662,7 @@ mod tests {
             upload.submit(PreparedUpload { request, bytes: 13 }),
             Err(FileSendError::Closed),
         );
-        assert!(upload.reports().is_empty());
+        assert_eq!(upload.reports(), [] as [Report; 0]);
         assert!(!upload.ready());
         let source = selected();
         let request = source.lock().request.take().unwrap();

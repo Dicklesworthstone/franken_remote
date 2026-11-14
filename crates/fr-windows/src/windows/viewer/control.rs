@@ -88,7 +88,7 @@ pub(super) fn visible(visible: bool) {
 }
 
 /// Reflect a worker's already-scoped negative fence in this UI only. Repeating
-/// Shared::set_visible here could apply an old notification to a later attempt.
+/// `Shared::set_visible` here could apply an old notification to a later attempt.
 pub(super) fn reflect_hidden() {
     VISIBLE.with(|current| current.set(false));
     invalidate_display();

@@ -474,18 +474,8 @@ enum Reopen {
     No,
 }
 
-/// Events, then the newest picture if there is one. (finished, drew)
-fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
-    sync_file_focus(v, hwnd);
-    if let Some(scope) = ACTIVATION_PENDING.with(Cell::get) {
-        if v.closing || v.reopen.pending() || control::activation_scope() != Some(scope) {
-            ACTIVATION_PENDING.with(|pending| pending.set(None));
-        // SAFETY: compare the current foreground HWND to this live viewer.
-        } else if unsafe { GetForegroundWindow() } == hwnd {
-            ACTIVATION_PENDING.with(|pending| pending.set(None));
-            control::visible(true);
-        }
-    }
+/// Collect a finished file-picker worker and refresh the upload menu.
+fn poll_file_choice(v: &mut Viewer, hwnd: HWND) {
     // Remember the pending worker before polling can collect it. Collection
     // after the original cleanup bound must remain a failure, including when
     // the source/transfer checks inside poll waited across that bound.
@@ -510,6 +500,21 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     if let Some(menu) = &mut v.upload_menu {
         menu.refresh();
     }
+}
+
+/// Events, then the newest picture if there is one. (finished, drew)
+fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    sync_file_focus(v, hwnd);
+    if let Some(scope) = ACTIVATION_PENDING.with(Cell::get) {
+        if v.closing || v.reopen.pending() || control::activation_scope() != Some(scope) {
+            ACTIVATION_PENDING.with(|pending| pending.set(None));
+        // SAFETY: compare the current foreground HWND to this live viewer.
+        } else if unsafe { GetForegroundWindow() } == hwnd {
+            ACTIVATION_PENDING.with(|pending| pending.set(None));
+            control::visible(true);
+        }
+    }
+    poll_file_choice(v, hwnd);
     let can_change_display = v.can_change_display();
     v.input_menu.display_available(can_change_display);
     v.input_menu.refresh(v.session.shared());
@@ -1466,8 +1471,7 @@ extern "system" fn window_proc(
         WM_ACTIVATEAPP if wparam.0 == 0 => {
             ACTIVATION_PENDING.with(|pending| pending.set(None));
             let picker = u32::try_from(lparam.0)
-                .ok()
-                .is_some_and(|thread| upload::picker_deactivated(thread, control::lifetime()));
+                .is_ok_and(|thread| upload::picker_deactivated(thread, control::lifetime()));
             if !picker {
                 upload::retire_choice();
                 control::visible(false);
