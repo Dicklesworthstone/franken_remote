@@ -1,5 +1,33 @@
 # Implementation status
 
+## Windows choices retain their original gesture and connection (2026-11-14 UTC)
+
+The machine chooser retains its accepted native message timestamp through
+queued callbacks and window destruction. Final consumption rechecks that same
+event age as well as the original discovery/chooser deadline. A stalled cleanup
+cannot turn an expired click into a later connection.
+
+Change Display now binds its local popup to the exact internal connection
+attempt, not only the shared session object and native mapping lifetime. An
+internal reconnect can reuse that object; an older popup can no longer close
+or replace the newer attempt. Current-attempt drawn evidence is required, and
+native refresh and deferred processing recheck the original identities. The
+existing cleanup proof, replacement bounds and fresh approved catalog remain.
+
+These are narrow follow-ups to the concurrently delivered machine chooser and
+runtime switching, preserving their implementations. Both the machine picker
+and upload menu use the error constructor exposed by the actual pinned Windows
+bindings. The earlier three native SendMessageW signature corrections are also
+retained.
+
+**Passed:** all 85 portable `fr-windows` tests and strict all-target Clippy;
+pinned workspace formatting; actual final machine-picker source with real
+fr-client/fr-core and Windows 0.62.2 in all-target Windows GNU cross-Clippy.
+New regressions cover a reused shared owner with a different attempt and the
+exclusive native gesture-age boundary after cleanup. Full native-session
+integration and live Windows UI/transfer behavior remain separate qualification.
+
+
 ## Explicit Windows file uploads (2026-11-14 UTC)
 
 `fr-windows view [HOST] --control --send FILE` now connects one explicitly

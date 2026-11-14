@@ -841,6 +841,7 @@ impl Viewer {
             && self.keys.is_empty()
             && !self.buttons.iter().any(|held| *held)
             && control::visible_now()
+            && control::display_ready(self.session.shared())
             && matches!(
                 self.session.shared().control_state(),
                 ControlState::Unavailable | ControlState::Viewing | ControlState::Controlled
@@ -860,6 +861,7 @@ impl Viewer {
             || self.display_picker.is_some()
             || !control::visible_now()
             || request.lifetime != control::lifetime()
+            || request.attempt != self.session.shared().frames.app_id(0)
         {
             self.reopen_refusal.get_or_insert(Refusal::Cancelled);
             self.close();

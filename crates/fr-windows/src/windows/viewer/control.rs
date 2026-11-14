@@ -56,6 +56,17 @@ pub(super) fn visible_now() -> bool {
     VISIBLE.with(Cell::get) && lifetime() != u64::MAX
 }
 
+/// A retained picture from a prior internal connection attempt cannot offer
+/// a new display action. View-only sessions have no control-readiness token.
+pub(super) fn display_ready(original: &Shared) -> bool {
+    ready_attempt(original).is_some()
+}
+
+fn ready_attempt(original: &Shared) -> Option<u64> {
+    let attempt = original.frames.app_id(0);
+    (original.frames.drawn() > attempt && original.frames.app_id(0) == attempt).then_some(attempt)
+}
+
 pub(super) fn invalidate_display() {
     LIFETIME.with(|lifetime| lifetime.set(lifetime.get().saturating_add(1)));
     DISPLAY_CHOICE.with(|choice| *choice.borrow_mut() = None);
@@ -115,11 +126,19 @@ pub(super) fn change_display(message: u32) -> Option<change_display::Request<Sha
     let mut choice = DISPLAY_CHOICE.with(|choice| choice.borrow_mut().take())?;
     let original = ORIGINAL.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))?;
     let available = visible_now()
+        && display_ready(&original)
         && matches!(
             original.control_state(),
             ControlState::Unavailable | ControlState::Viewing | ControlState::Controlled
         );
-    let request = choice.take(&original, lifetime(), available, message, input_ticks())?;
+    let request = choice.take(
+        &original,
+        lifetime(),
+        original.frames.app_id(0),
+        available,
+        message,
+        input_ticks(),
+    )?;
     request.original.close();
     Some(request)
 }
@@ -190,15 +209,31 @@ impl Menu {
     }
 
     pub(super) fn opened(&mut self, original: &Arc<Shared>) {
+        // Capture before native refresh, which can reenter a window lifecycle
+        // callback. Neither that callback nor a reconnect renews this popup.
+        let attempt = ready_attempt(original);
+        let native_lifetime = lifetime();
         self.refresh(original);
         let choice = original.control_request();
         let opened = input_ticks();
         self.choice = choice.map(|request| Choice::new(request, opened));
         STOP_ORIGINAL.with(|slot| *slot.borrow_mut() = Some(Arc::downgrade(original)));
-        DISPLAY_CHOICE.with(|slot| {
-            *slot.borrow_mut() = (self.display_available && visible_now())
-                .then(|| change_display::MenuChoice::new(Arc::clone(original), lifetime(), opened));
-        });
+        let display_choice = attempt
+            .filter(|attempt| {
+                self.display_available
+                    && visible_now()
+                    && lifetime() == native_lifetime
+                    && ready_attempt(original) == Some(*attempt)
+            })
+            .map(|attempt| {
+                change_display::MenuChoice::new(
+                    Arc::clone(original),
+                    native_lifetime,
+                    attempt,
+                    opened,
+                )
+            });
+        DISPLAY_CHOICE.with(|slot| *slot.borrow_mut() = display_choice);
     }
 
     pub(super) fn display_available(&mut self, available: bool) {

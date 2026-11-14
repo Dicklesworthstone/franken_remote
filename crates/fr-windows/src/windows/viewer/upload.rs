@@ -50,7 +50,9 @@ impl Menu {
         let popup = unsafe {
             let menu = GetMenu(hwnd);
             if menu.is_invalid() {
-                return Err(windows::core::Error::from_win32());
+                return Err(windows::core::Error::from_hresult(
+                    windows::Win32::Foundation::E_FAIL,
+                ));
             }
             let popup = CreatePopupMenu()?;
             let attached = AppendMenuW(popup, MF_STRING | MF_GRAYED, PHASE, w!("Selected"))

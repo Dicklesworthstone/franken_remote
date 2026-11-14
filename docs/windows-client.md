@@ -51,7 +51,7 @@ all consume that same budget; the connection's startup budget begins only
 after the choice and confirmed picker cleanup have completed.
 
 The click must come from after this picker was shown and remain fresh when
-the native selection read completes. Cancel, Escape or a queued close can
+the native selection read and window cleanup complete. Cancel, Escape or a queued close can
 still cancel a pending Connect during the same native event batch. A queue
 flood, clock regression, expired snapshot or unconfirmed window cleanup
 refuses the choice. The command reports the reason and asks you to start a
@@ -249,6 +249,11 @@ command and prevents a replacement once it expires. Completion JSON records
 `display_changes` and any content-free `reopen_refusal` separately from the
 original session's ending. Runtime and live Windows multi-monitor
 qualification remain pending.
+
+A Change display popup also belongs to one internal connection attempt. If the
+shared session reconnects while the popup is open, that old choice is refused.
+The replacement must have a picture drawn from its own attempt before a fresh
+display choice becomes available.
 
 ## Send Unicode and IME text
 
@@ -474,7 +479,7 @@ Portable machine-picker lifecycle regressions live in
 one-use selection, empty and invalid rows, cancellation after Connect, queued
 event freshness and timestamp wrap, clock regression, original-deadline
 expiry through setup and cleanup, and repeated selection/show attempts.
-The actual package's 83 portable tests and strict all-target Clippy passed with
+The actual package's 85 portable tests and strict all-target Clippy passed with
 the pinned toolchain after integration with the explicit Windows uploader.
 The real window, cancellation ordering and blocked or failed native
 destruction still require Windows desktop qualification.

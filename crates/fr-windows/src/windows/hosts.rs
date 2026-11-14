@@ -306,7 +306,9 @@ fn open(choice: Choice) -> windows::core::Result<Picker> {
                 Some(LPARAM(label.as_ptr() as isize)),
             );
             if usize::try_from(added.0).ok() != Some(index) {
-                return Err(windows::core::Error::from_win32());
+                return Err(windows::core::Error::from_hresult(
+                    windows::Win32::Foundation::E_FAIL,
+                ));
             }
         }
         SendMessageW(

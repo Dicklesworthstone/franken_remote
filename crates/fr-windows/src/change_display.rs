@@ -9,40 +9,50 @@ use std::sync::Arc;
 pub struct MenuChoice<T> {
     choice: Choice<Arc<T>>,
     lifetime: u64,
+    attempt: u64,
 }
 
 pub struct Request<T> {
     pub original: Arc<T>,
     pub lifetime: u64,
+    pub attempt: u64,
     /// Original message time, including the native clock's rounding margin.
     pub at: u64,
 }
 
 impl<T> MenuChoice<T> {
-    pub fn new(original: Arc<T>, lifetime: u64, opened: u64) -> Self {
+    pub fn new(original: Arc<T>, lifetime: u64, attempt: u64, opened: u64) -> Self {
         Self {
             choice: Choice::new(original, opened),
             lifetime,
+            attempt,
         }
     }
 
     /// Spend the choice even on refusal. A popup from an earlier owner or
-    /// native mapping cannot close the current owner or authorize another dial.
+    /// native mapping or connection attempt cannot close the current owner or
+    /// authorize another dial. An internal reconnect retains the same Arc.
     pub fn take(
         &mut self,
         current: &Arc<T>,
         lifetime: u64,
+        attempt: u64,
         available: bool,
         message: u32,
         now: u64,
     ) -> Option<Request<T>> {
         let (original, age) = self.choice.take(message, now)?;
-        if !available || self.lifetime != lifetime || !Arc::ptr_eq(&original, current) {
+        if !available
+            || self.lifetime != lifetime
+            || self.attempt != attempt
+            || !Arc::ptr_eq(&original, current)
+        {
             return None;
         }
         Some(Request {
             original,
             lifetime,
+            attempt,
             at: now.checked_sub(u64::try_from(age.as_millis()).ok()?)?,
         })
     }
@@ -232,12 +242,13 @@ mod tests {
     #[test]
     fn menu_choice_keeps_the_exact_owner_native_lifetime_and_message_age() {
         let original = Arc::new(7);
-        let mut choice = MenuChoice::new(Arc::clone(&original), 3, 1_000);
-        let request = choice.take(&original, 3, true, 1_020, 1_040).unwrap();
+        let mut choice = MenuChoice::new(Arc::clone(&original), 3, 9, 1_000);
+        let request = choice.take(&original, 3, 9, true, 1_020, 1_040).unwrap();
         assert!(Arc::ptr_eq(&original, &request.original));
         assert_eq!(request.lifetime, 3);
+        assert_eq!(request.attempt, 9);
         assert_eq!(request.at, 1_004); // 1020 minus the 16 ms rounding margin
-        assert!(choice.take(&original, 3, true, 1_050, 1_050).is_none());
+        assert!(choice.take(&original, 3, 9, true, 1_050, 1_050).is_none());
     }
 
     #[test]
@@ -249,13 +260,13 @@ mod tests {
             (&original, 4, true),
             (&original, 3, false),
         ] {
-            let mut choice = MenuChoice::new(Arc::clone(&original), 3, 1_000);
+            let mut choice = MenuChoice::new(Arc::clone(&original), 3, 9, 1_000);
             assert!(
                 choice
-                    .take(current, lifetime, available, 1_020, 1_040)
+                    .take(current, lifetime, 9, available, 1_020, 1_040)
                     .is_none()
             );
-            assert!(choice.take(&original, 3, true, 1_050, 1_050).is_none());
+            assert!(choice.take(&original, 3, 9, true, 1_050, 1_050).is_none());
         }
     }
 
@@ -263,9 +274,24 @@ mod tests {
     fn stale_and_same_tick_native_commands_never_start_a_replacement_budget() {
         let original = Arc::new(());
         for (message, now) in [(999, 1_020), (1_000, 1_020), (1_020, 1_104), (1_050, 1_040)] {
-            let mut choice = MenuChoice::new(Arc::clone(&original), 1, 1_000);
-            assert!(choice.take(&original, 1, true, message, now).is_none());
+            let mut choice = MenuChoice::new(Arc::clone(&original), 1, 9, 1_000);
+            assert!(choice.take(&original, 1, 9, true, message, now).is_none());
         }
+    }
+
+    #[test]
+    fn an_internal_reconnect_cannot_redeem_the_same_owners_old_popup() {
+        let original = Arc::new(());
+        let mut choice = MenuChoice::new(Arc::clone(&original), 3, 9, 1_000);
+        // Native owner and mapping are unchanged, but the shared session has
+        // started another connection attempt. Even a fresh event is refused.
+        assert!(choice.take(&original, 3, 10, true, 1_020, 1_040).is_none());
+        // Refusal consumes the choice; no later snapshot can revive it.
+        assert!(choice.take(&original, 3, 9, true, 1_050, 1_050).is_none());
+        let mut fresh = MenuChoice::new(Arc::clone(&original), 3, 10, 1_100);
+        let request = fresh.take(&original, 3, 10, true, 1_120, 1_140).unwrap();
+        assert_eq!(request.attempt, 10);
+        assert!(Arc::ptr_eq(&original, &request.original));
     }
 
     #[test]

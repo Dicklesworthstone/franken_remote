@@ -27,7 +27,7 @@ pub(crate) enum Error {
 #[derive(Clone, Copy)]
 enum Decision {
     Waiting,
-    Chosen(usize),
+    Chosen { row: usize, message: u32 },
     Refused(Error),
     Consumed,
 }
@@ -79,14 +79,14 @@ impl Choice {
         } else if self.catalog.get(row).is_err() {
             Decision::Refused(Error::InvalidChoice)
         } else {
-            Decision::Chosen(row)
+            Decision::Chosen { row, message }
         };
     }
 
     /// A chosen row is provisional until the queued native batch and cleanup
     /// complete. Cancellation and native failures can still invalidate it.
     pub(crate) fn refuse(&mut self, error: Error) {
-        if matches!(self.decision, Decision::Waiting | Decision::Chosen(_)) {
+        if matches!(self.decision, Decision::Waiting | Decision::Chosen { .. }) {
             self.decision = Decision::Refused(error);
         }
     }
@@ -96,6 +96,12 @@ impl Choice {
             self.refuse(Error::ClockChanged);
         } else if now >= self.deadline {
             self.refuse(Error::Expired);
+        } else if let Decision::Chosen { message, .. } = self.decision
+            && message_time(message, now).is_err()
+        {
+            // Queue draining and native destruction consume the same original
+            // gesture lifetime. Neither may make a stale click connect later.
+            self.refuse(Error::StaleEvent);
         }
         self.last_now = now;
         !matches!(self.decision, Decision::Waiting)
@@ -106,7 +112,7 @@ impl Choice {
     pub(crate) fn take(&mut self, now: u64) -> Result<Candidate, Error> {
         self.complete(now);
         match std::mem::replace(&mut self.decision, Decision::Consumed) {
-            Decision::Chosen(row) => self
+            Decision::Chosen { row, .. } => self
                 .catalog
                 .get(row)
                 .cloned()
@@ -220,6 +226,24 @@ mod tests {
         let mut timely = shown();
         timely.choose(0, 120_998, 120_999);
         assert_eq!(timely.take(120_999).unwrap().stable_id(), "n-a");
+    }
+
+    #[test]
+    fn cleanup_preserves_the_original_native_events_exclusive_age_bound() {
+        let mut timely = shown();
+        timely.choose(0, 1_020, 1_021);
+        // The native clock's 16 ms rounding margin is part of its 100 ms
+        // exclusive limit; destruction cannot give the click another budget.
+        assert_eq!(timely.take(1_103).unwrap().stable_id(), "n-a");
+
+        let mut expired = shown();
+        expired.choose(0, 1_020, 1_021);
+        assert_eq!(expired.take(1_104), Err(Error::StaleEvent));
+        assert_eq!(expired.take(1_105), Err(Error::AlreadyUsed));
+
+        let mut stalled = shown();
+        stalled.choose(0, 1_020, 1_021);
+        assert_eq!(stalled.take(120_999), Err(Error::StaleEvent));
     }
 
     #[test]
