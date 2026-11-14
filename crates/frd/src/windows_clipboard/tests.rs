@@ -12,6 +12,8 @@ use std::{
 /// The Win32 clipboard as the owner sees it: the number is checked once
 /// open, a write is five changes (empty, set, three synthesized formats).
 #[derive(Default)]
+// Encoding, ownership and cleanup faults are independently injected.
+#[allow(clippy::struct_excessive_bools)]
 struct Board {
     sequence: u32,
     text: Option<String>,

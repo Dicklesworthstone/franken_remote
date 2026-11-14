@@ -71,6 +71,8 @@ fn context() -> Context {
 }
 
 #[derive(Default)]
+// Settlement, native operation and cleanup faults are independently injected.
+#[allow(clippy::struct_excessive_bools)]
 struct Os {
     text: Option<String>,
     revision: u64,

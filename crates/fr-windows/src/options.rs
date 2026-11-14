@@ -43,8 +43,8 @@ pub(crate) struct Options {
     pub addresses: Vec<IpAddr>,
     pub family: Family,
     pub control: bool,
-    /// With `--control`, share the text clipboard (default on; a host that
-    /// does not share its clipboard drops it). `--no-clipboard` turns it off.
+    /// With `--control`, share text with a host that also enables clipboard.
+    /// Defaults on; `--no-clipboard` disables it for this command.
     pub clipboard: bool,
     pub seconds: Option<u64>,
     pub display: DisplayChoice,
@@ -153,6 +153,22 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_defaults_on_for_control_and_explicit_off_is_order_independent() {
+        assert!(parse(&["--control"], true).unwrap().clipboard);
+        for args in [
+            ["--control", "--no-clipboard"],
+            ["--no-clipboard", "--control"],
+        ] {
+            let options = parse(&args, true).unwrap();
+            assert!(options.control);
+            assert!(!options.clipboard);
+        }
+        assert!(!parse(&["--no-clipboard"], true).unwrap().clipboard);
+        assert!(parse(&["--no-clipboard", "--no-clipboard"], true).is_none());
+        assert!(parse(&["--no-clipboard"], false).is_none());
+    }
+
+    #[test]
     fn exact_addresses_and_explicit_family_choices_are_retained() {
         let options = parse(
             &[
@@ -190,7 +206,6 @@ mod tests {
             vec!["--ipv4", "--ipv6"],
             vec!["--ipv4", "--ipv4"],
             vec!["--control", "--control"],
-            vec!["--no-clipboard", "--no-clipboard"],
             vec!["--port", "1", "--port", "2"],
             vec!["--seconds", "1", "--seconds", "2"],
             vec!["--address", "100.64.0.2", "--address", "100.64.0.2"],
@@ -215,20 +230,7 @@ mod tests {
             assert!(parse(&args, true).is_none(), "{args:?}");
         }
         assert!(parse(&["--control"], false).is_none());
-        assert!(parse(&["--no-clipboard"], false).is_none());
         assert!(parse(&["--seconds", "1"], false).is_none());
-    }
-
-    #[test]
-    fn clipboard_is_on_by_default_and_turned_off_only_by_its_flag() {
-        assert!(parse(&["--control"], true).unwrap().clipboard);
-        for args in [
-            vec!["--control", "--no-clipboard"],
-            vec!["--no-clipboard", "--control"],
-        ] {
-            let options = parse(&args, true).unwrap();
-            assert!(options.control && !options.clipboard, "{args:?}");
-        }
     }
 
     #[test]

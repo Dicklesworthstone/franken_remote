@@ -71,6 +71,7 @@ ends the command with an explanatory, content-free error.
 ```text
 fr-windows view remote.example.ts.net
 fr-windows view remote.example.ts.net --control
+fr-windows view remote.example.ts.net --control --no-clipboard
 fr-windows view remote.example.ts.net --ipv6
 fr-windows view n-selected --ipv4 --port 8443 --seconds 30
 ```
@@ -128,38 +129,6 @@ control choices and ends any granted control. Returning to the application
 cannot restore it. A view-only session can remain connected. Existing resize
 rules still require successful original cleanup before reopening; a controlled
 resize that cannot establish orderly closure ends the session instead.
-
-## Share the text clipboard
-
-```text
-fr-windows view remote.example.ts.net --control
-fr-windows view remote.example.ts.net --control --no-clipboard
-```
-
-With `--control`, the viewer shares Unicode text both ways with a host that
-shares its own clipboard: a Windows host running `frd run --control`, or a
-Linux X11 host with `--input-agent` (its `fr-input-agent` built with the
-`linux-clipboard` feature). Hosts without a clipboard drop the lane and control
-still works. `--no-clipboard` turns it off. A view-only session never shares
-the clipboard.
-
-While sharing, a small window says "Text clipboard sharing is on." and has a
-**Turn off** button. It is frd's own clipboard owner, the same one a Windows
-host shows. Turn off, closing that window, or the window not answering within
-250 ms stops sharing for the rest of the session. Control continues.
-
-- Text on the Windows clipboard when control starts is sent once. The host's
-  own earlier clipboard is not sent; only copies made there after the lane
-  starts arrive.
-- A copy made on the host arrives on the Windows clipboard within about a
-  second. Switching to a local app to paste it ends control (above), but the
-  text stays on the Windows clipboard.
-- Only the first controlled view shares. A reconnect or resize reopen does not
-  reopen the clipboard.
-
-The completion JSON carries a content-free `clipboard` object: `requested`,
-`configured`, `active`, received counts (`received`, `received_unknown`,
-`refused`), `off` and `reason`.
 
 ## Choose a remote display
 
@@ -253,6 +222,57 @@ It does not promise atomic host insertion. Existing host scalar-level
 partial/uncertain outcomes still apply, and neither the original value nor an
 unconfirmed suffix is retried automatically.
 
+## Share the text clipboard
+
+`--control` enables the optional text clipboard by default. Add
+`--no-clipboard` to keep it off for that command. Observing sessions do not
+offer clipboard capability or open the local clipboard. The host must also
+enable the same optional capability, admit control, and complete bilateral
+clipboard readiness. A host that omits clipboard still permits its ordinary
+negotiated keyboard, pointer and direct-text capabilities.
+
+A Windows host enables its clipboard with `frd run --control`. An X11 host
+needs `--input-agent` and a `fr-input-agent` built with the `linux-clipboard`
+feature. The controller offers its current local text once when the lane
+starts; the host sends only copies made after its lane starts, preserving the
+controller's initial selection instead of swapping both pre-session values.
+
+Once the lane starts, its independent **Text clipboard sharing is on.** window
+provides **Turn off** on this Windows machine. The host has its own local Off
+control. The window does not activate over the viewer; its independent
+supervisor fences clipboard publication if the window closes or stops
+responding. Turn off retires only this clipboard lane. Ordinary control can
+continue. Closing, minimizing or switching away from the viewer fences the
+original clipboard immediately along with the existing input lifecycle.
+
+The existing native adapter copies validated Unicode text in both directions,
+up to **1 MiB of UTF-8 per item**. It checks the local clipboard revision
+around reads and final publication, preserves source labels to suppress echoes,
+and discards superseded or expired work. Clipboard text remains in the bounded
+clipboard worker. It is never routed through keyboard synthesis or the local
+Send text editor; updating a clipboard does not paste into an application.
+
+Each command retains its original configured clipboard owner. Turn off,
+retirement, a viewing reconnect or a permitted resize cannot restart that owner
+or replay an earlier clipboard value. Start a new controlling command to
+enable sharing again. A replacement view still requires its own explicit
+**Input → Request control** choice for keyboard and pointer input.
+
+The completion JSON includes a `clipboard` object with `requested`,
+`configured`, historical `native_started`, `received_submitted`,
+`received_unknown`, `received_refused`, `cleanup`, and a typed content-free
+`reason`. The three receipt counters describe host-to-local publication:
+submitted to the Windows API, uncertain effect, or refused. Native startup
+does not claim publication. Counters survive Off, later failures and permitted
+viewing reopens; no text, clipboard item identifiers or revision values appear
+in the report.
+
+The session reaps clipboard, media and input owners under the original cleanup
+deadline before any reconnect. Pending native cleanup ends the command with a
+failure and prevents a replacement session. The original session thread keeps
+the same stopped owner until its native cleanup actually completes; a later
+completion cannot change the earlier failure into success.
+
 ## Explicit address constraints
 
 `--address IP` remains repeatable, up to eight distinct addresses. It now
@@ -317,6 +337,28 @@ compatibility regressions live in
 `crates/fr-mobile-ffi/src/session/connection/tests.rs`. The exact address
 selector's metadata, fresh-read and renewal regressions live in `fr-tailnet`.
 
+Clipboard policy regressions cover the default and explicit opt-out, optional
+clipboard/Text composition with legacy-host negotiation, initial invisibility
+versus actual visibility loss, publication-result retention, and cleanup
+states that must prevent a replacement. The production Win32 owner and its
+native cleanup protocol are shared with the Windows host. Cross-target build
+checks exercise the actual client wiring. Bidirectional copies, real
+clipboard managers, the independent Off window and blocked native teardown
+still require Windows desktop qualification; portable tests do not establish
+those OS observations.
+
+Earlier native evidence is retained separately: revision `1dc02ae3` was run
+on 2026-11-14 as a Windows viewer on `oldsurface` controlling the X11 host on
+`ts2` at `dd06a4ae` for 75 seconds. The controller's pre-session text reached
+the host, the host's pre-session text stayed local, new copies crossed in
+both directions, and Turn off blocked later copies while ordinary control
+continued. One host-to-Windows copy arrived in about 0.5 seconds in that run.
+The `fr-p2-shared-clipboard-wgd` bead records the run and limits: an X11 input
+agent built without clipboard support never started the lane, and stopping
+the lane emptied its Xvfb-owned selection without a clipboard manager. This
+earlier run does not qualify the subsequent retained-cleanup changes, other
+Windows clipboard managers, or an iOS or macOS host clipboard implementation.
+
 The native editor's portable whole-value and one-use-context regressions live
 in `crates/fr-windows/src/text.rs` and compile on every host, including Linux.
 The shared session's no-grant test also exercises the new original-draft API.
@@ -339,16 +381,6 @@ Shared-session regressions also cover observation-only refusal, no input grant
 from a request, lifecycle retirement and input-failure fencing. The real
 Windows menu, focus transitions, reconnection and host grant still need native
 qualification; portable policy tests do not establish those device results.
-
-Clipboard offer regressions live in
-`crates/fr-mobile-ffi/src/session/control_policy.rs` (the added markers are
-exactly the optional clipboard set, and intersecting with frd's real host
-offers selects the lane only when the host shares) and
-`crates/fr-mobile-ffi/src/session/clipboard.rs` (later attempts drop the
-markers; a required marker is refused, never dropped). The Win32 owner itself
-is frd's `windows_clipboard`, qualified live on the Windows host. The viewer
-was run live against a Linux X11 host on 2026-11-14 (see the
-`fr-p2-shared-clipboard-wgd` bead for the run and its limits).
 
 The actual shared display-selection policy is also exercised by portable
 `fr-windows` tests: primary/explicit selection, empty and ambiguous catalogs,

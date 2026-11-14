@@ -31,7 +31,7 @@ use crate::{
 };
 use fr_mobile_ffi::{
     events::{Event, kind, state},
-    session::{CapturedInput, CapturedKey, Config, InputResult, Session, end},
+    session::{CapturedInput, CapturedKey, ClipboardReport, Config, InputResult, Session, end},
     video,
 };
 use std::{
@@ -133,6 +133,8 @@ struct Stats {
     earlier_decoded: u64,
     earlier_decode_micros: u64,
     earlier_presented: u64,
+    /// The original configured clipboard's evidence survives a viewing resize.
+    clipboard: Option<ClipboardReport>,
     /// The first session's time to its first view.
     first_view_micros: Option<u64>,
     /// Longest wait from a reopen's request to its first drawn picture.
@@ -321,6 +323,15 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.text = None;
     v.display_picker = None;
     let mut next = config.clone();
+    let clipboard = v.session.shared().clipboard_report();
+    if clipboard.configured || clipboard.reason.is_some() {
+        stats.clipboard.get_or_insert(clipboard);
+    }
+    if stats.clipboard.is_some() {
+        // A replacement view cannot restart the command's retired clipboard,
+        // including after its independent privacy window's Turn off action.
+        next.clipboard = false;
+    }
     // Retain only the offered profile. Session::start grants and requests
     // nothing: a resized view needs a new explicit local menu choice.
     let size = client_size(hwnd);
@@ -518,7 +529,17 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         micros_to_ms(intervals[index])
     };
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
-    let clipboard = shared.clipboard();
+    let clipboard = stats.clipboard.unwrap_or_else(|| shared.clipboard_report());
+    let clipboard = serde_json::json!({
+        "requested": clipboard.requested,
+        "configured": clipboard.configured,
+        "native_started": clipboard.native_started,
+        "received_submitted": clipboard.received_submitted,
+        "received_unknown": clipboard.received_unknown,
+        "received_refused": clipboard.received_refused,
+        "cleanup": clipboard.cleanup_name(),
+        "reason": clipboard.reason.map(|reason| format!("{reason:?}")),
+    });
     let mut json = String::new();
     let _ = write!(
         json,
@@ -527,9 +548,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1},\"max\":{:.1}}},\
          \"reopens\":{},\"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
-         \"clipboard\":{{\"requested\":{},\"configured\":{},\"active\":{},\"received\":{},\
-         \"received_unknown\":{},\"refused\":{},\"off\":{},\"reason\":{}}},\
-         \"seconds\":{:.1}}}",
+         \"seconds\":{:.1},\"clipboard\":{}}}",
         end_name(code),
         shared
             .detail()
@@ -558,17 +577,8 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         stats.reopens,
         micros_to_ms(stats.reopen_gap_micros),
         micros_to_ms(shared.first_view_micros()),
-        clipboard.requested,
-        clipboard.configured,
-        clipboard.active,
-        clipboard.received_submitted,
-        clipboard.received_unknown,
-        clipboard.received_refused,
-        clipboard.off,
-        clipboard
-            .reason
-            .map_or_else(|| "null".to_owned(), |reason| format!("\"{reason:?}\"")),
         elapsed.as_secs_f64(),
+        clipboard,
     );
     let _ = writeln!(std::io::stdout().lock(), "{json}");
     if stats.drawn > 0 && matches!(code, end::OK | end::CANCELLED) {

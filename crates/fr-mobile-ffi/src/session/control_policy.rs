@@ -10,17 +10,18 @@ use fr_core::{
 use fr_wire::negotiation::{Error, Offer};
 use frd::session_startup::viewer_events::Error as CaptureError;
 
-/// `clipboard` adds the three OPTIONAL clipboard markers to a control offer;
-/// a host without clipboard drops them and control still negotiates.
 pub(super) fn offer(control: bool, clipboard: bool) -> Result<Offer, Error> {
-    match (control, clipboard) {
+    if control {
         // This must be the original reconnect offer. An application callback
         // may remove optional markers later, but cannot add a new one.
-        (true, false) => fr_client::native::control_offer_with_text(),
-        (true, true) => {
-            fr_wire::control::with_committed_text(fr_client::native::control_offer_with_clipboard())
-        }
-        (false, _) => Ok(fr_client::native::observation_offer()),
+        let original = if clipboard {
+            fr_client::native::control_offer_with_clipboard()
+        } else {
+            fr_client::native::control_offer()
+        };
+        fr_wire::control::with_committed_text(original)
+    } else {
+        Ok(fr_client::native::observation_offer())
     }
 }
 
@@ -125,6 +126,61 @@ mod tests {
     }
 
     #[test]
+    fn clipboard_is_optional_and_composes_with_text_without_changing_legacy_input() {
+        let client = offer(true, true).unwrap();
+        let without = offer(true, false).unwrap();
+        for (name, version) in [
+            (
+                fr_wire::attachment::CLIPBOARD_CAPABILITY,
+                fr_wire::attachment::CLIPBOARD_VERSION,
+            ),
+            (fr_wire::clipboard::CAPABILITY, fr_wire::clipboard::VERSION),
+            (
+                fr_wire::clipboard::startup::CAPABILITY,
+                fr_wire::clipboard::startup::VERSION,
+            ),
+        ] {
+            assert!(
+                client
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == name && cap.version == version && !cap.required)
+            );
+            assert!(!without.capabilities.iter().any(|cap| cap.name == name));
+        }
+        assert!(
+            client
+                .capabilities
+                .iter()
+                .any(|cap| cap.name == TEXT_CAPABILITY && !cap.required)
+        );
+        let legacy = with_line_scroll(host_offer(true));
+        assert_eq!(
+            legacy.intersect(&client).unwrap(),
+            legacy.intersect(&without).unwrap()
+        );
+        let text = with_committed_text(legacy).unwrap();
+        assert_eq!(
+            text.intersect(&client).unwrap(),
+            text.intersect(&without).unwrap()
+        );
+        assert_eq!(offer(false, true).unwrap(), offer(false, false).unwrap());
+        assert!(client.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+        let bilateral = with_committed_text(with_line_scroll(host_offer_with(true, true)))
+            .unwrap()
+            .intersect(&client)
+            .unwrap();
+        for name in [
+            TEXT_CAPABILITY,
+            fr_wire::attachment::CLIPBOARD_CAPABILITY,
+            fr_wire::clipboard::CAPABILITY,
+            fr_wire::clipboard::startup::CAPABILITY,
+        ] {
+            assert!(bilateral.capabilities.iter().any(|cap| cap.name == name));
+        }
+    }
+
+    #[test]
     fn clipboard_adds_only_optional_markers_selected_only_with_a_clipboard_host() {
         let plain = offer(true, false).unwrap();
         let clipboard = offer(true, true).unwrap();
@@ -138,8 +194,8 @@ mod tests {
                 .iter()
                 .all(|cap| clipboard.capabilities.contains(cap))
         );
-        // The lane's three markers plus the auxiliary-lane bulk-record
-        // extension, all optional.
+        // Preserve the upstream exact-set regression, including the optional
+        // bulk-record extension used by this separate auxiliary lane.
         let mut added: Vec<_> = clipboard
             .capabilities
             .iter()
@@ -162,8 +218,6 @@ mod tests {
             expected
         );
         assert!(clipboard.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
-        // A host sharing its clipboard selects the lane; one that does not
-        // drops it, and control and text still negotiate.
         for host_clipboard in [true, false] {
             let host = with_committed_text(with_line_scroll(host_offer_with(true, host_clipboard)))
                 .unwrap();

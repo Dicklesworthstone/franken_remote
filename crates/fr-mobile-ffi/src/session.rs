@@ -58,10 +58,7 @@ use fr_media::{
         Configuration as WorkerConfiguration, Error as WorkerError, overlay::Update as CursorUpdate,
     },
 };
-use fr_wire::{
-    display::{Catalog, Display},
-    negotiation::Offer,
-};
+use fr_wire::display::{Catalog, Display};
 use frd::{
     media::PresentationStage,
     native_connection::{
@@ -156,14 +153,14 @@ pub struct Config {
     pub target: connection::Target,
     pub port: u16,
     pub control: bool,
+    /// Optional native clipboard for a controlling Windows client. Observation
+    /// and other platforms never configure or advertise this Windows adapter.
+    pub clipboard: bool,
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
     pub picture: Option<(u32, u32)>,
     /// Select only from each attempt's current approved display catalog.
     pub display: DisplayChoice,
-    /// With `control`, share the text clipboard with a host that offers it
-    /// (Windows; elsewhere nothing opens). Ignored without `control`.
-    pub clipboard: bool,
 }
 
 /// The granted producer frd owns for this session (see `NativeCapture`).
@@ -221,6 +218,7 @@ pub struct Shared {
     pub frames: FrameSlot,
     pub cursor: Mutex<Cursor>,
     granted: Mutex<Option<Granted>>,
+    clipboard: clipboard::Clipboard,
     close: AtomicBool,
     want_control: AtomicBool,
     control_capable: bool,
@@ -247,19 +245,23 @@ pub struct Shared {
     end: AtomicU32,
     started: Instant,
     first_view_micros: AtomicU64,
-    clipboard: Mutex<ClipboardReport>,
 }
 impl Shared {
     #[cfg(test)]
     fn new() -> Self {
         Self::with_control(true)
     }
+    #[cfg(test)]
     fn with_control(control_capable: bool) -> Self {
+        Self::with_clipboard(control_capable, false)
+    }
+    fn with_clipboard(control_capable: bool, clipboard: bool) -> Self {
         Self {
             events: Events::default(),
             frames: FrameSlot::default(),
             cursor: Mutex::default(),
             granted: Mutex::default(),
+            clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
             control_capable,
@@ -281,13 +283,13 @@ impl Shared {
             end: AtomicU32::new(u32::MAX),
             started: Instant::now(),
             first_view_micros: AtomicU64::new(0),
-            clipboard: Mutex::default(),
         }
     }
     /// Orderly close: a serving session sends its close; anything earlier
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
+        self.clipboard.stop();
         self.retire_control_request();
         self.retire_display();
         self.stop_control(None);
@@ -332,6 +334,7 @@ impl Shared {
         selection.cancel(request)?;
         self.close.store(true, Ordering::SeqCst);
         drop(selection);
+        self.clipboard.stop();
         self.stop_control(None);
         Ok(())
     }
@@ -374,6 +377,7 @@ impl Shared {
     pub fn set_visible(&self, visible: bool) {
         let was = self.visible.swap(visible, Ordering::SeqCst);
         if !visible {
+            self.clipboard.hide(was);
             if was {
                 self.hides.fetch_add(1, Ordering::SeqCst);
             }
@@ -534,24 +538,17 @@ impl Shared {
     pub fn first_view_micros(&self) -> u64 {
         self.first_view_micros.load(Ordering::Relaxed)
     }
-    /// Content-free clipboard evidence, final once the session ended.
-    pub fn clipboard(&self) -> ClipboardReport {
-        self.clipboard
-            .lock()
-            .map(|report| *report)
-            .unwrap_or_default()
-    }
-    fn publish_clipboard(&self, report: ClipboardReport) {
-        if let Ok(mut slot) = self.clipboard.lock() {
-            *slot = report;
-        }
-    }
     /// The `end::*` code once the session ended, else `u32::MAX`.
     pub fn end_code(&self) -> u32 {
         self.end.load(Ordering::SeqCst)
     }
     pub fn controlled(&self) -> bool {
         self.granted.lock().is_ok_and(|g| g.is_some())
+    }
+    /// Original optional clipboard evidence. This contains no clipboard text,
+    /// local revision, item identifier or input authority.
+    pub fn clipboard_report(&self) -> ClipboardReport {
+        self.clipboard.report()
     }
     /// Fence the granted source now (focus loss, backgrounding, close).
     /// `reason`: this device stopped a live grant (not a close it asked
@@ -562,6 +559,7 @@ impl Shared {
             Err(poisoned) => poisoned.into_inner().take(),
         };
         if dropped.is_some() {
+            self.clipboard.retire();
             if let Some(reason) = reason {
                 self.note_local_stop(reason);
             }
@@ -999,7 +997,7 @@ pub struct Session {
 }
 impl Session {
     pub fn start(config: Config) -> std::io::Result<Self> {
-        let shared = Arc::new(Shared::with_control(config.control));
+        let shared = Arc::new(Shared::with_clipboard(config.control, config.clipboard));
         let worker = shared.clone();
         let control = config.control;
         // Detached: the thread owns its share of the state and ends on its
@@ -1043,6 +1041,7 @@ impl Drop for Session {
 }
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
+    shared.clipboard.stop();
     shared.retire_control_request();
     shared.retire_display();
     shared.stop_control(None);
@@ -1097,16 +1096,7 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let mut epoch = [0_u8; 16];
     cx.random_bytes(&mut epoch);
     let epoch = u128::from_be_bytes(epoch).max(1);
-    let clipboard = control && config.clipboard;
-    let mut app = Mobile::new(
-        shared.clone(),
-        control,
-        clipboard,
-        config.display,
-        local,
-        epoch,
-        watch,
-    );
+    let mut app = Mobile::new(shared.clone(), control, config.display, local, epoch, watch);
     let cfg = Configuration {
         port: config.port,
         family: target.family(),
@@ -1117,7 +1107,7 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let Ok(offer) = control_policy::offer(control, clipboard) else {
+    let Ok(offer) = control_policy::offer(control, shared.clipboard.report().requested) else {
         return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
     let operation = async {
@@ -1178,6 +1168,11 @@ fn run(shared: &Arc<Shared>, config: Config) {
     shared.frames.clear();
     shared.orderly_closed.store(orderly, Ordering::SeqCst);
     finish(shared, code, detail);
+    // A failed bounded cleanup has already ended this command unsuccessfully.
+    // Keep the original observer on its original session thread until its
+    // clipboard worker actually returns; dropping a pending handle would detach
+    // native teardown. This never restores success or permits another attempt.
+    runtime.block_on(app.retain_clipboard());
 }
 
 fn publish_pin(shared: &Shared, watch: Option<&PinWatch>) {
@@ -1426,7 +1421,6 @@ fn attach(
 struct Mobile {
     shared: Arc<Shared>,
     control: bool,
-    clipboard: clipboard::Clipboard,
     display: DisplayChoice,
     close_cx: Cx,
     epoch: u128,
@@ -1436,23 +1430,20 @@ struct Mobile {
     native_started: Rc<Cell<bool>>,
     service_succeeded: bool,
     terminal: Option<ObserverError>,
+    clipboard_cleanup: Option<Deadline>,
 }
 impl Mobile {
     fn new(
         shared: Arc<Shared>,
         control: bool,
-        clipboard: bool,
         display: DisplayChoice,
         close_cx: Cx,
         epoch: u128,
         watch: Option<PinWatch>,
     ) -> Self {
-        let clipboard = clipboard::Clipboard::new(clipboard);
-        shared.publish_clipboard(clipboard.report());
         Self {
             shared,
             control,
-            clipboard,
             display,
             close_cx,
             epoch,
@@ -1462,16 +1453,49 @@ impl Mobile {
             native_started: Rc::default(),
             service_succeeded: false,
             terminal: None,
+            clipboard_cleanup: None,
+        }
+    }
+
+    async fn retain_clipboard(&mut self) {
+        let Some(deadline) = self.clipboard_cleanup else {
+            return;
+        };
+        let Some(observer) = self.observer.as_mut() else {
+            return;
+        };
+        while self.shared.clipboard.pending() {
+            // Reaping first observes completion, even after this exact original
+            // deadline expired. We never renew the clipboard's cleanup budget.
+            let _ = observer.reap_clipboard(&self.close_cx, deadline).await;
+            for _ in 0..2 {
+                let _ = observer.collect_clipboard();
+                self.shared.clipboard.collect();
+            }
+            if self.shared.clipboard.pending() {
+                if let Some(timer) = self.close_cx.timer_driver() {
+                    sleep(timer.now(), Duration::from_millis(25)).await;
+                } else {
+                    // Even a failed runtime clock cannot justify detaching
+                    // pending native teardown. Only this retired owner waits.
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
         }
     }
 }
 
 impl Application for Mobile {
     type Output = ();
-    /// Only the initial controlling attempt may open the clipboard; later
-    /// attempts stop offering its optional markers.
-    fn offer(&mut self, _attempt: u8, original: &Offer) -> Result<Offer, CallbackError> {
-        self.clipboard.offer(original).map_err(|()| CallbackError)
+    fn offer(
+        &mut self,
+        _attempt: u8,
+        original: &fr_wire::negotiation::Offer,
+    ) -> Result<fr_wire::negotiation::Offer, CallbackError> {
+        self.shared
+            .clipboard
+            .offer(original)
+            .map_err(|()| CallbackError)
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
@@ -1525,13 +1549,11 @@ impl Application for Mobile {
         let opened = opening.await?;
         let display = opened.display();
         let observer = self.observer.insert(opened);
-        if self.control {
-            // Before serving: nothing opens until the control grant and
-            // bilateral readiness, on frd's clipboard worker.
-            self.clipboard.configure(observer, &self.close_cx);
-            self.shared.publish_clipboard(self.clipboard.report());
-        }
-        let clipboard = &mut self.clipboard;
+        self.shared
+            .clipboard
+            .configure(observer, &self.close_cx, || {
+                !self.shared.close.load(Ordering::SeqCst)
+            });
         self.shared.serving.store(true, Ordering::SeqCst);
         let shared = self.shared.clone();
         let mut viewing = false;
@@ -1557,8 +1579,9 @@ impl Application for Mobile {
             let mut hides_at_request = 0;
             let mut announced_control = false;
             let ui = move |state: InteractiveViewerState<'_>, frame: Option<Presentation>| {
-                // A full receipt slot defers the next received copy.
-                clipboard.collect();
+                // Free the bounded content-free receipt slot on every turn,
+                // including while viewing, requesting, stopping or hidden.
+                shared.clipboard.collect();
                 if shared.close.load(Ordering::SeqCst) {
                     shared.events.state(state::CLOSING, attempt_number);
                     return Ok(ControlFlow::Break(fr_wire::closure::Reason::Requested));
@@ -1690,6 +1713,8 @@ impl Application for Mobile {
             .store(false, Ordering::SeqCst);
         self.shared.retire_display();
         self.shared.stop_control(None);
+        self.shared.clipboard.retire();
+        self.clipboard_cleanup = Some(deadline);
         self.shared.serving.store(false, Ordering::SeqCst);
         async move {
             let result = match self.observer.as_mut() {
@@ -1699,9 +1724,15 @@ impl Application for Mobile {
                     let media = observer.reap_media(cx, deadline).await;
                     let input = observer.reap_input_capture(cx, deadline).await;
                     let files = observer.reap_files(cx, deadline).await;
-                    let clipboard = self.clipboard.reap(observer, cx, deadline).await;
-                    self.shared.publish_clipboard(self.clipboard.report());
-                    media.is_ok() && input.is_ok() && files.is_ok() && clipboard
+                    let clipboard = observer.reap_clipboard(cx, deadline).await;
+                    for _ in 0..2 {
+                        let _ = observer.collect_clipboard();
+                        self.shared.clipboard.collect();
+                    }
+                    media.is_ok()
+                        && input.is_ok()
+                        && files.is_ok()
+                        && clipboard::cleanup_finished(clipboard)
                 }
                 // Approval and display selection precede the deferred native
                 // factory; once it started, losing it proves no cleanup.
