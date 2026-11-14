@@ -1,6 +1,9 @@
 //! Compiles the `VideoToolbox` decode glue (`src/vt_decode.c`) for iOS devices,
 //! the iOS simulator and the macOS host (whose tests decode the same way).
 //! System frameworks only; the SDK comes from `xcrun`, never a download.
+#[path = "build_support/roots.rs"]
+mod roots;
+
 use std::{env, path::PathBuf, process::Command};
 
 /// The app's deployment floor (mobile/ios project: iOS 17).
@@ -10,6 +13,8 @@ const MACOS_MINIMUM: &str = "14.0";
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
+    println!("cargo::rerun-if-changed=build_support/roots.rs");
+    println!("cargo::rerun-if-env-changed={}", roots::LOCAL_ROOTS_ENV);
     println!("cargo::rerun-if-changed=src/vt_decode.c");
     println!("cargo::rerun-if-changed=src/abi_check.c");
     println!("cargo::rerun-if-changed=include/fr_mobile.h");
@@ -30,10 +35,10 @@ fn main() {
             "macosx",
             format!("{}-apple-macos{MACOS_MINIMUM}", clang_arch(&arch)),
         ),
-        // Windows: the same bundled roots, exported on the build Mac (the
-        // Windows client is cross-built); no VideoToolbox glue.
+        // Windows: exactly the same pinned roots, either explicitly supplied
+        // locally or exported from a build Mac. No VideoToolbox glue.
         ("windows", _) => {
-            export_roots(&PathBuf::from(env::var_os("OUT_DIR").unwrap()));
+            windows_roots(&PathBuf::from(env::var_os("OUT_DIR").unwrap()));
             return;
         }
         _ => return,
@@ -82,20 +87,30 @@ fn main() {
 
 /// macOS's own trust anchors (part of the OS, not user-editable).
 const SYSTEM_ROOTS: &str = "/System/Library/Keychains/SystemRootCertificates.keychain";
-/// The two public roots the app trusts, by name and the SHA-256 of their DER
-/// encoding as Let's Encrypt publishes it (`src/roots.rs` checks them again).
-const ISRG_ROOTS: [(&str, &str, &str); 2] = [
-    (
-        "ISRG Root X1",
-        "96BCEC06264976F37460779ACF28C5A7CFE8A3C0AAE11A8FFCEE05C0BDDF08C6",
-        "isrg-root-x1.pem",
-    ),
-    (
-        "ISRG Root X2",
-        "69729B8E15A86EFC177A57AFB7171DFC64ADD28C2FCA8CF1507E34453CCB1470",
-        "isrg-root-x2.pem",
-    ),
-];
+
+fn windows_roots(out: &std::path::Path) {
+    if let Some(directory) = env::var_os(roots::LOCAL_ROOTS_ENV) {
+        let directory = PathBuf::from(directory);
+        for root in roots::ISRG_ROOTS {
+            println!(
+                "cargo::rerun-if-changed={}",
+                directory.join(root.file).display()
+            );
+        }
+        let validated = roots::local_roots(&directory)
+            .unwrap_or_else(|error| panic!("{}: {error}", roots::LOCAL_ROOTS_ENV));
+        for (root, pem) in roots::ISRG_ROOTS.into_iter().zip(validated) {
+            std::fs::write(out.join(root.file), pem).expect("write OUT_DIR pinned root");
+        }
+    } else if cfg!(target_os = "macos") {
+        export_roots(out);
+    } else {
+        panic!(
+            "Windows builds off macOS require {}: an absolute local directory containing isrg-root-x1.pem and isrg-root-x2.pem with the existing pinned DER fingerprints",
+            roots::LOCAL_ROOTS_ENV,
+        );
+    }
+}
 
 /// Copy the two ISRG roots out of the build Mac's system trust store into
 /// `OUT_DIR` for `src/roots.rs` to embed. The repository keeps no
@@ -103,7 +118,12 @@ const ISRG_ROOTS: [(&str, &str, &str); 2] = [
 /// with each pinned fingerprint fails the build.
 fn export_roots(out: &std::path::Path) {
     println!("cargo::rerun-if-changed={SYSTEM_ROOTS}");
-    for (name, fingerprint, file) in ISRG_ROOTS {
+    for root in roots::ISRG_ROOTS {
+        let roots::Root {
+            name,
+            fingerprint,
+            file,
+        } = root;
         let output = Command::new("/usr/bin/security")
             .args([
                 "find-certificate",
@@ -146,7 +166,9 @@ fn export_roots(out: &std::path::Path) {
             "{SYSTEM_ROOTS} has {} certificates named {name} with SHA-256 {fingerprint}",
             matching.len()
         );
-        std::fs::write(out.join(file), &matching[0]).expect("write OUT_DIR root");
+        let pem = roots::validate_pem(matching[0].as_bytes(), root)
+            .unwrap_or_else(|error| panic!("system {name}: {error}"));
+        std::fs::write(out.join(file), pem).expect("write OUT_DIR root");
     }
 }
 

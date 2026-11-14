@@ -6,11 +6,34 @@ viewer uses Media Foundation decode and D3D11 presentation. The same session
 core serves the iOS app, whose named connection path remains available through
 its existing C interface.
 
-Build on Windows with the repository's pinned Rust toolchain:
+Build on Windows with the repository's pinned Rust toolchain. Supply the two
+public ISRG root certificates as local PEM files in one absolute directory:
+`isrg-root-x1.pem` and `isrg-root-x2.pem`. Use the ISRG Root X1 and X2 roots
+from your installed system trust data or their official distribution, not an
+intermediate certificate or a combined CA bundle. Set that directory explicitly
+before building:
 
 ```powershell
+$env:FR_MOBILE_ISRG_ROOTS_DIR = 'C:\build-inputs\isrg-roots'
 cargo build --locked --release -p fr-windows
 ```
+
+This input is used only for Windows targets, including cross-compilation.
+The build accepts exactly one certificate per file, bounded to 8 KiB of PEM
+and 4 KiB of DER, and checks the decoded DER against these existing SHA-256
+pins before embedding either certificate:
+
+| File | SHA-256 of DER |
+|---|---|
+| `isrg-root-x1.pem` | `96bcec06264976f37460779acf28c5a7cfe8a3c0aae11a8ffcee05c0bddf08c6` |
+| `isrg-root-x2.pem` | `69729b8e15a86efc177a57afb7171dfc64add28c2fca8cf1507e34453ccb1470` |
+
+A missing, malformed, extra, swapped or different certificate fails the build;
+the directory cannot add another trust anchor. There are no build-time
+downloads. If this variable is absent on a build Mac, Windows cross-builds
+continue to export the same pinned roots from the system keychain. Apple
+targets always use that keychain path. Runtime hostname and certificate-chain
+verification use the same two embedded roots on every supported platform.
 
 Run the resulting executable in the interactive desktop session. Tailscale
 must be installed, signed in and running on this machine. The remote host must
@@ -212,6 +235,12 @@ the local Desktop Duplication, hardware HEVC encode and decode path in the
 interactive session and prints counts and timings.
 
 ## Validation scope
+
+`cargo test -p fr-mobile-ffi --test build_roots --locked` exercises the actual
+build-time PEM parser, byte bounds and wrong-certificate rejection on every
+build host. With `FR_MOBILE_ISRG_ROOTS_DIR` set to the two public local roots,
+add `-- --ignored` to check both published pins and reject swaps and changed
+certificate bytes. This never uses a live host or changes runtime trust.
 
 Portable command-line regressions live in
 `crates/fr-windows/src/options.rs`. Installed target selection and named-route
