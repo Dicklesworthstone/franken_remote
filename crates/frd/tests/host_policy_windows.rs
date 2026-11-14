@@ -237,10 +237,8 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
     assert!(control.control && control.input_agent.is_none() && !control.clipboard);
     assert_eq!(refusal(&["--control"], Approval::None), None);
     assert!(run_options(&["--control", "--control"]).is_err());
-    assert_eq!(
-        refusal(&plain, Approval::Local),
-        Some("local_approval_unavailable")
-    );
+    // A Windows host prompts on its own desktop for --approval local.
+    assert_eq!(refusal(&plain, Approval::Local), None);
     for (extra, code) in [
         (&["--software-explicit"][..], "software_encoder_unavailable"),
         (&["--headless"], "no_display"),

@@ -23,6 +23,16 @@ use windows::{
 pub(super) const REQUEST: usize = 0x4670;
 pub(super) const STOP: usize = 0x4671;
 
+/// Menu command ids are `WM_COMMAND`'s 16-bit low word; `EnableMenuItem` takes
+/// them as `u32`.
+const fn item(id: usize) -> u32 {
+    assert!(id <= 0xffff);
+    #[allow(clippy::cast_possible_truncation)] // bounded just above
+    {
+        id as u32
+    }
+}
+
 thread_local! {
     static ORIGINAL: RefCell<Option<Weak<Shared>>> = const { RefCell::new(None) };
     static STOP_ORIGINAL: RefCell<Option<Weak<Shared>>> = const { RefCell::new(None) };
@@ -82,7 +92,7 @@ pub(super) struct Menu {
 }
 
 impl Menu {
-    /// Ownership of the menu transfers to hwnd only after SetMenu succeeds.
+    /// Ownership of the menu transfers to `hwnd` only after `SetMenu` succeeds.
     pub(super) fn install(hwnd: HWND, title: &str) -> Result<Self> {
         // SAFETY: all handles are created here on this UI thread. Failure
         // destroys only the newly owned menu tree; the window owns it after
@@ -167,12 +177,12 @@ impl Menu {
         unsafe {
             let _ = EnableMenuItem(
                 self.popup,
-                REQUEST as u32,
+                item(REQUEST),
                 MF_BYCOMMAND | enabled(state == ControlState::Viewing),
             );
             let _ = EnableMenuItem(
                 self.popup,
-                STOP as u32,
+                item(STOP),
                 MF_BYCOMMAND
                     | enabled(matches!(
                         state,
@@ -181,7 +191,7 @@ impl Menu {
             );
             let _ = EnableMenuItem(
                 self.popup,
-                text::OPEN as u32,
+                item(text::OPEN),
                 MF_BYCOMMAND | enabled(state == ControlState::Controlled),
             );
             let _ = SetWindowTextW(
