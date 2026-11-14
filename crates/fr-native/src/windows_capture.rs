@@ -2,7 +2,8 @@
 //! one display through DXGI Desktop Duplication on the adapter that drives
 //! it, converted to NV12 by that adapter's D3D11 video processor and encoded
 //! to HEVC by the hardware Media Foundation encoder registered for the same
-//! adapter. The picture stays in GPU memory until the encoder's bitstream.
+//! adapter. There is no full-frame CPU readback: only the separate pointer's
+//! bounded rectangle is mapped for composition on the owned desktop texture.
 //! Every unit passes the same strict `HevcGuard` as the Linux and macOS
 //! encoders (after the host writes the colour description an encoder left
 //! out), and leaves as four-byte-length NALs.
@@ -14,6 +15,8 @@
 //! a new image; denied or unserviced capture never becomes a fresh timestamp.
 //! Rotated displays are refused for now.
 mod convert;
+mod cursor;
+mod cursor_region;
 mod duplication;
 mod encoder;
 mod freshness;
@@ -97,7 +100,7 @@ pub struct CaptureStatistics {
 pub struct StageTimes {
     /// Desktop Duplication: acquire, copy, release.
     pub poll: u32,
-    /// Copy and pointer drawing.
+    /// Bounded cursor rectangle restoration and composition.
     pub compose: u32,
     /// BGRA to NV12 submission.
     pub convert: u32,

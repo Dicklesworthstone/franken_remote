@@ -1,20 +1,21 @@
 //! Desktop Duplication of one output, on a D3D11 device created for the
 //! adapter that drives it. The duplicated image is copied into an owned
 //! texture and the frame released at once, so the compositor never waits on
-//! this process. Desktop Duplication leaves the pointer out of the image; it
-//! is drawn into a second, GDI-compatible copy before conversion.
+//! this process. A separate DXGI pointer is composed only in its bounded
+//! rectangle on that owned texture. Already-composited pointers are left
+//! alone; no second full-display copy or full-surface GDI mapping is needed.
+use super::cursor::Cursor;
 use super::freshness::{Frame, Observation, Source};
 use crate::NativeError;
-use std::collections::HashMap;
-use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, POINT};
+use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_RESOURCE_MISC_GDI_COMPATIBLE, D3D11_SDK_VERSION,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device,
-    ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_CREATE_DEVICE_VIDEO_SUPPORT, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread,
+    ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_ROTATE90,
@@ -24,17 +25,15 @@ use windows::Win32::Graphics::Dxgi::Common::{
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT,
     DXGI_OUTDUPL_FRAME_INFO, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1, IDXGIOutputDuplication,
-    IDXGIResource, IDXGISurface1,
+    IDXGIResource,
 };
-use windows::Win32::Graphics::Gdi::DeleteObject;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
     SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    CURSOR_SHOWING, CURSORINFO, DI_NORMAL, DrawIconEx, GetCursorInfo, GetIconInfo, HICON, ICONINFO,
-};
 use windows::core::Interface;
+
+pub(super) use super::cursor_region::Pointer;
 
 /// One output (monitor) of one adapter. Coordinates and sizes are physical
 /// pixels: listing makes the process per-monitor DPI aware first.
@@ -140,29 +139,19 @@ pub fn displays() -> Result<Vec<WinDisplay>, NativeError> {
     }
 }
 
-/// The pointer as last drawn: shape handle, position on this display, shown.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pointer {
-    shape: isize,
-    x: i32,
-    y: i32,
-    visible: bool,
-}
-
 pub struct Duplicator {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     output: IDXGIOutput1,
     /// None after access loss, until the selected output is duplicated again.
     duplication: Option<IDXGIOutputDuplication>,
-    /// The last duplicated desktop image, without the pointer.
+    /// The last duplicated desktop image, with a separate pointer composed
+    /// only after capture succeeds. The cursor owns its small clean underlay.
     desktop: ID3D11Texture2D,
-    /// `desktop` plus the pointer; the converter's input.
-    composed: ID3D11Texture2D,
     display: WinDisplay,
     /// Evidence belongs to `duplication`, never to the cached GPU texture.
     source: Source,
-    hotspots: HashMap<isize, POINT>,
+    cursor: Cursor,
     /// Desktop images acquired (new presents, not pointer-only updates).
     pub acquired: u64,
     /// Duplications recreated after `DXGI_ERROR_ACCESS_LOST`.
@@ -175,7 +164,6 @@ pub struct Duplicator {
 fn texture(
     device: &ID3D11Device,
     (width, height): (u32, u32),
-    gdi: bool,
 ) -> Result<ID3D11Texture2D, NativeError> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width,
@@ -190,11 +178,7 @@ fn texture(
         Usage: D3D11_USAGE_DEFAULT,
         BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0).cast_unsigned(),
         CPUAccessFlags: 0,
-        MiscFlags: if gdi {
-            D3D11_RESOURCE_MISC_GDI_COMPATIBLE.0.cast_unsigned()
-        } else {
-            0
-        },
+        MiscFlags: 0,
     };
     let mut texture = None;
     // SAFETY: a valid description and out pointer on a live device.
@@ -247,15 +231,14 @@ impl Duplicator {
         let duplication = duplicate(&output, &device, display)?.ok_or(NativeError::Unavailable)?;
         let size = (display.width, display.height);
         Ok(Self {
-            desktop: texture(&device, size, false)?,
-            composed: texture(&device, size, true)?,
+            desktop: texture(&device, size)?,
             device,
             context,
             output,
             duplication: Some(duplication),
             display: *display,
             source: Source::default(),
-            hotspots: HashMap::new(),
+            cursor: Cursor::default(),
             acquired: 0,
             recreated: 0,
             refused_desktops: 0,
@@ -266,7 +249,7 @@ impl Duplicator {
         &self.device
     }
     pub const fn composed(&self) -> &ID3D11Texture2D {
-        &self.composed
+        &self.desktop
     }
     pub const fn has_picture(&self) -> bool {
         self.source.has_image()
@@ -300,17 +283,20 @@ impl Duplicator {
                 }
                 Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
                     self.source.invalidate();
+                    self.cursor.invalidate();
                     self.duplication = None;
                     continue;
                 }
                 Err(_) => {
                     self.source.invalidate();
+                    self.cursor.invalidate();
                     return Err(NativeError::Unavailable);
                 }
             }
             let copied = (|| {
+                let pointer = self.cursor.acquire(&duplication, &info)?;
                 if info.LastPresentTime == 0 {
-                    return Ok(false);
+                    return Ok((false, pointer));
                 }
                 let image: ID3D11Texture2D = resource
                     .as_ref()
@@ -320,19 +306,22 @@ impl Duplicator {
                 // SAFETY: both textures are BGRA of the display's size on the
                 // same device; the copy is queued before the frame is released.
                 unsafe { self.context.CopyResource(&self.desktop, &image) };
-                Ok(true)
+                Ok((true, pointer))
             })();
             drop(resource);
             // SAFETY: the frame acquired above, released exactly once, also
             // when copying failed or the callback contained only a pointer.
             let released = unsafe { duplication.ReleaseFrame() };
             let frame = match &copied {
-                Ok(true) => Frame::Image,
-                Ok(false) => Frame::PointerOnly,
+                Ok((true, _)) => Frame::Image,
+                Ok((false, _)) => Frame::PointerOnly,
                 Err(_) => Frame::Failed,
             };
             let observation = self.source.released(frame, released.is_ok());
-            let copied = copied?;
+            if observation == Observation::Unknown {
+                self.cursor.invalidate();
+            }
+            let (copied, pointer) = copied?;
             match released {
                 Ok(()) => {}
                 Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
@@ -342,6 +331,11 @@ impl Duplicator {
                     continue;
                 }
                 Err(_) => return Err(NativeError::Unavailable),
+            }
+            if let Err(error) = self.cursor.released(pointer, copied) {
+                self.source.invalidate();
+                self.cursor.invalidate();
+                return Err(error);
             }
             if copied {
                 self.acquired += 1;
@@ -356,6 +350,7 @@ impl Duplicator {
     /// A refusing desktop is never followed or represented by cached pixels.
     fn reduplicate(&mut self) -> Result<bool, NativeError> {
         self.source.invalidate();
+        self.cursor.invalidate();
         let Some(duplication) = duplicate(&self.output, &self.device, &self.display)? else {
             self.refused_desktops += 1;
             return Ok(false);
@@ -365,93 +360,24 @@ impl Duplicator {
         Ok(true)
     }
 
-    /// Where the pointer is now, relative to this display.
-    pub fn pointer(&self) -> Pointer {
-        let mut info = CURSORINFO {
-            cbSize: u32::try_from(size_of::<CURSORINFO>()).unwrap_or(0),
-            ..Default::default()
-        };
-        // SAFETY: a sized, writable CURSORINFO.
-        let shown = unsafe { GetCursorInfo(&raw mut info) }.is_ok()
-            && info.flags.0 & CURSOR_SHOWING.0 != 0
-            && !info.hCursor.is_invalid();
-        let (x, y) = (
-            info.ptScreenPos.x - self.display.left,
-            info.ptScreenPos.y - self.display.top,
-        );
-        let inside = (0..i32::try_from(self.display.width).unwrap_or(i32::MAX)).contains(&x)
-            && (0..i32::try_from(self.display.height).unwrap_or(i32::MAX)).contains(&y);
-        if shown && inside {
-            Pointer {
-                shape: info.hCursor.0 as isize,
-                x,
-                y,
-                visible: true,
-            }
-        } else {
-            Pointer {
-                shape: 0,
-                x: 0,
-                y: 0,
-                visible: false,
-            }
-        }
+    /// The last successfully released DXGI pointer update for this output.
+    pub(super) const fn pointer(&self) -> Pointer {
+        self.cursor.pointer()
     }
 
-    fn hotspot(&mut self, shape: isize) -> POINT {
-        *self.hotspots.entry(shape).or_insert_with(|| {
-            let mut info = ICONINFO::default();
-            // SAFETY: a live shared cursor handle and a writable ICONINFO;
-            // the bitmaps it returns are this process's to delete.
-            unsafe {
-                if GetIconInfo(HICON(shape as *mut _), &raw mut info).is_err() {
-                    return POINT::default();
-                }
-                if !info.hbmMask.is_invalid() {
-                    let _ = DeleteObject(info.hbmMask.into());
-                }
-                if !info.hbmColor.is_invalid() {
-                    let _ = DeleteObject(info.hbmColor.into());
-                }
-            }
-            POINT {
-                x: i32::try_from(info.xHotspot).unwrap_or(0),
-                y: i32::try_from(info.yHotspot).unwrap_or(0),
-            }
-        })
-    }
-
-    /// The converter's input: the last desktop image with `pointer` drawn
-    /// in by GDI (every cursor kind: colour, alpha, monochrome, inverting).
-    pub fn compose(&mut self, pointer: Pointer) -> Result<(), NativeError> {
-        // SAFETY: same-size BGRA textures on one device.
-        unsafe { self.context.CopyResource(&self.composed, &self.desktop) };
-        if !pointer.visible {
-            return Ok(());
+    /// Restore the previous pointer rectangle and compose the current one.
+    /// The input is the exact state sampled by `pointer`, not a global OS
+    /// cursor sampled later than the duplicated image.
+    pub(super) fn compose(&mut self, pointer: Pointer) -> Result<(), NativeError> {
+        if pointer != self.cursor.pointer() || !self.source.has_image() {
+            return Err(NativeError::Unavailable);
         }
-        let hot = self.hotspot(pointer.shape);
-        let surface: IDXGISurface1 = self.composed.cast().map_err(|_| NativeError::Unavailable)?;
-        // SAFETY: the GDI-compatible texture is not bound anywhere while its
-        // DC is held; the DC is released before the texture is used again.
-        unsafe {
-            let dc = surface.GetDC(false).map_err(|_| NativeError::Unavailable)?;
-            let drawn = DrawIconEx(
-                dc,
-                pointer.x - hot.x,
-                pointer.y - hot.y,
-                HICON(pointer.shape as *mut _),
-                0,
-                0,
-                0,
-                None,
-                DI_NORMAL,
-            );
-            surface
-                .ReleaseDC(None)
-                .map_err(|_| NativeError::Unavailable)?;
-            drawn.map_err(|_| NativeError::Unavailable)?;
-        }
-        Ok(())
+        self.cursor.compose(
+            &self.device,
+            &self.context,
+            &self.desktop,
+            (self.display.width, self.display.height),
+        )
     }
 }
 
