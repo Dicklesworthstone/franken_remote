@@ -22,6 +22,21 @@ impl Rate {
     pub(crate) const fn request(&mut self, bitrate: u32) {
         self.requested = bitrate;
     }
+    /// The original native configuration remains the ceiling, even after a
+    /// lower rate has been applied. Invalid requests cannot replace a pending
+    /// valid target or consume its dwell.
+    #[cfg(any(test, all(windows, feature = "windows-media")))]
+    pub(crate) fn request_with_ceiling(&mut self, bitrate: u32, ceiling: u32) -> Result<(), ()> {
+        if !(10_000..=200_000_000).contains(&ceiling) || !(10_000..=ceiling).contains(&bitrate) {
+            return Err(());
+        }
+        self.request(bitrate);
+        Ok(())
+    }
+    #[cfg(any(test, all(windows, feature = "windows-media")))]
+    pub(crate) const fn applied_bitrate(&self) -> u32 {
+        self.applied
+    }
     pub(crate) fn due(&self, host: u64, worker: Instant, bootstrapped: bool) -> Option<u32> {
         if !bootstrapped || self.requested == self.applied {
             return None;
@@ -47,7 +62,11 @@ impl Rate {
     /// Confirm a synchronous native transaction only after source and bitstream
     /// validation. An unchanged/P-picture result can retain the old setting,
     /// but cannot claim a changed rate. Deferral never charges a new dwell.
-    #[cfg(any(test, all(target_os = "macos", feature = "macos-media")))]
+    #[cfg(any(
+        test,
+        all(target_os = "macos", feature = "macos-media"),
+        all(windows, feature = "windows-media")
+    ))]
     pub(crate) fn confirm(
         &mut self,
         target: u32,
@@ -158,5 +177,45 @@ mod tests {
         // A blocked dwell passes only the old target into native code. A reply
         // claiming the not-yet-admitted proposal cannot bypass that decision.
         assert_eq!(rate.confirm(8_000_000, 4_000_000, true, 10, start), Err(()));
+    }
+
+    #[test]
+    fn native_targets_preserve_the_opening_ceiling_and_invalid_requests_preserve_intent() {
+        let start = Instant::now();
+        let mut rate = Rate::new(8_000_000);
+        rate.request_with_ceiling(4_000_000, 8_000_000).unwrap();
+        for invalid in [0, 9_999, 8_000_001, 200_000_001, u32::MAX] {
+            assert_eq!(rate.request_with_ceiling(invalid, 8_000_000), Err(()));
+            assert_eq!(rate.due(10, start, true), Some(4_000_000));
+            assert_eq!(rate.applied_bitrate(), 8_000_000);
+        }
+        rate.confirm(4_000_000, 4_000_000, true, 10, start).unwrap();
+        // The opening limit, not the current rate, admits a later recovery
+        // toward full quality; it cannot skip either original clock's dwell.
+        rate.request_with_ceiling(8_000_000, 8_000_000).unwrap();
+        assert_eq!(rate.due(2_000_009, start + DWELL, true), None);
+        assert_eq!(rate.due(2_000_010, start + DWELL, true), Some(8_000_000));
+        assert_eq!(rate.applied_bitrate(), 4_000_000);
+        for invalid_ceiling in [0, 9_999, 200_000_001, u32::MAX] {
+            assert_eq!(rate.request_with_ceiling(10_000, invalid_ceiling), Err(()));
+            assert_eq!(rate.due(2_000_010, start + DWELL, true), Some(8_000_000));
+        }
+    }
+
+    #[test]
+    fn a_legacy_capture_cancels_pending_rate_work_without_changing_the_applied_receipt() {
+        let start = Instant::now();
+        let mut rate = Rate::new(8_000_000);
+        rate.request_with_ceiling(4_000_000, 8_000_000).unwrap();
+        assert_eq!(rate.due(10, start, true), Some(4_000_000));
+        rate.request(rate.applied_bitrate());
+        assert_eq!(rate.due(10, start, true), None);
+        assert_eq!(rate.applied_bitrate(), 8_000_000);
+        rate.request_with_ceiling(4_000_000, 8_000_000).unwrap();
+        rate.confirm(4_000_000, 4_000_000, true, 10, start).unwrap();
+        rate.request_with_ceiling(2_000_000, 8_000_000).unwrap();
+        rate.request(rate.applied_bitrate());
+        assert_eq!(rate.due(2_000_010, start + DWELL, true), None);
+        assert_eq!(rate.applied_bitrate(), 4_000_000);
     }
 }

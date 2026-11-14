@@ -97,11 +97,12 @@ fn request_encoding_preserves_candidate_time_and_all_force_conditional_modes() {
 }
 
 #[test]
-fn rate_preflight_preserves_original_cap_for_software_and_videotoolbox() {
+fn rate_preflight_preserves_original_cap_for_every_implemented_backend() {
     let mut configuration = request(None).configuration;
     for backend in [
         worker::Backend::SoftwareExplicit,
         worker::Backend::VideoToolbox,
+        worker::Backend::MediaFoundation,
     ] {
         configuration.backend = backend;
         for rate in [10_000, 4_000_000, 8_000_000] {
@@ -122,6 +123,39 @@ fn rate_preflight_preserves_original_cap_for_software_and_videotoolbox() {
         );
         assert_eq!(validate_bitrate(configuration, None), Ok(()));
     }
+}
+
+#[test]
+fn windows_rate_capture_keeps_original_identity_and_distinguishes_deferred_actual_rate() {
+    let mut request = request(Some(4_000_000));
+    request.configuration.backend = worker::Backend::MediaFoundation;
+    validate_bitrate(request.configuration, request.bitrate).unwrap();
+    let (kind, payload) = request.payload().unwrap();
+    assert_eq!(kind, Kind::CaptureAtRate);
+    let capture = worker::rate::Capture::decode(&payload).unwrap();
+    assert_eq!(capture.bitrate, 4_000_000);
+    assert_eq!(capture.frame, request.frame);
+    assert_eq!(capture.observed_micros, request.observed_micros);
+
+    let (content, actual) = request
+        .response(Kind::RateUnchanged, unchanged(&request, Some(8_000_000)))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(content, Content::Unchanged(_)));
+    assert_eq!(actual, Some(8_000_000));
+
+    let (content, actual) = request
+        .response(Kind::RateUnit, unit(&request, Some(4_000_000), true))
+        .unwrap()
+        .unwrap();
+    let Content::Encoded(unit) = content else {
+        panic!("the applied transaction supplies the encoded picture")
+    };
+    assert_eq!(actual, Some(4_000_000));
+    assert!(unit.is_idr());
+    assert_eq!(unit.frame(), request.frame);
+    assert_eq!(unit.config_generation(), request.configuration.generation);
+    assert_eq!(unit.capture_micros(), request.observed_micros);
 }
 
 #[test]

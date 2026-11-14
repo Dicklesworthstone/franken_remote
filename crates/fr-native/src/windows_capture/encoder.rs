@@ -53,7 +53,7 @@ use windows::Win32::System::Threading::{
     ProcessPowerThrottling, SetProcessInformation,
 };
 use windows::Win32::System::Variant::{
-    VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4,
+    VARIANT, VARIANT_0, VARIANT_0_0, VARIANT_0_0_0, VT_BOOL, VT_UI4, VariantClear,
 };
 use windows::core::{GUID, Interface};
 
@@ -500,7 +500,29 @@ impl Encoder {
         }
     }
 
-    /// New mean bitrate; returns the value the transform reports back.
+    /// The current mean bitrate property, not measured delivery throughput.
+    /// A differently typed VARIANT is not a valid UINT32 property receipt.
+    pub fn bitrate(&self) -> Result<u32, NativeError> {
+        let codec = self.codec.as_ref().ok_or(NativeError::Unavailable)?;
+        // SAFETY: GetValue initializes the variant; its discriminator is
+        // checked before reading the union. The caller owns and clears every
+        // successful result, including a refused non-scalar native value.
+        unsafe {
+            let mut value = codec
+                .GetValue(&CODECAPI_AVEncCommonMeanBitRate)
+                .map_err(|_| NativeError::Unavailable)?;
+            let bitrate = if value.Anonymous.Anonymous.vt == VT_UI4 {
+                Some(value.Anonymous.Anonymous.Anonymous.ulVal)
+            } else {
+                None
+            };
+            VariantClear(&raw mut value).map_err(|_| NativeError::Unavailable)?;
+            bitrate.ok_or(NativeError::Unavailable)
+        }
+    }
+
+    /// Set and read back the mean bitrate. The capture owner still requires
+    /// the exact target and a validated IDR before acknowledging this change.
     pub fn set_bitrate(&self, bitrate: u32) -> Result<u32, NativeError> {
         let codec = self.codec.as_ref().ok_or(NativeError::Unavailable)?;
         // SAFETY: property calls on the live transform.
@@ -508,11 +530,8 @@ impl Encoder {
             codec
                 .SetValue(&CODECAPI_AVEncCommonMeanBitRate, &ui4(bitrate))
                 .map_err(|_| NativeError::Unavailable)?;
-            let value = codec
-                .GetValue(&CODECAPI_AVEncCommonMeanBitRate)
-                .map_err(|_| NativeError::Unavailable)?;
-            Ok(value.Anonymous.Anonymous.Anonymous.ulVal)
         }
+        self.bitrate()
     }
 
     /// Encodes `nv12` and returns its Annex B unit and whether the transform

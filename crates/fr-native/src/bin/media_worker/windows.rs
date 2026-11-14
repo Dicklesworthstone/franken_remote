@@ -125,6 +125,29 @@ impl Share {
                     Captured::Unchanged(proof) => Ok((Kind::Unchanged, proof.encode()?)),
                 }
             }
+            Kind::CaptureAtRate => {
+                let c = worker::rate::Capture::decode(request.body())?;
+                let captured = self
+                    .capture
+                    .capture_with_bitrate(
+                        c.frame,
+                        c.observed_micros,
+                        c.force_idr,
+                        c.only_if_changed,
+                        c.bitrate,
+                    )
+                    .map_err(native)?;
+                let bitrate = self.capture.bitrate();
+                match captured {
+                    Captured::Unit(unit) => {
+                        Ok((Kind::RateUnit, worker::rate::unit_payload(&unit, bitrate)?))
+                    }
+                    Captured::Unchanged(proof) => Ok((
+                        Kind::RateUnchanged,
+                        worker::rate::unchanged_payload(proof, bitrate)?,
+                    )),
+                }
+            }
             _ => Err(Error::WrongState),
         }
     }

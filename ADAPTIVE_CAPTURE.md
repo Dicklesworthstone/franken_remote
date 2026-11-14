@@ -1,12 +1,13 @@
 # Adaptive capture and encoder bitrate
 
 This implements opt-in capture pacing and bitrate-control transactions for the
-software encoder and macOS VideoToolbox, following plan section 13 and beads
-`fr-p1-adaptive-v0-qgi` and `fr-rc-media-wire-controller-qej`. Both use the existing
-continuous host session, source and QUIC sender. The bitrate controller responds
+software encoder, macOS VideoToolbox and Windows Media Foundation, following plan
+section 13 and beads `fr-p1-adaptive-v0-qgi` and `fr-rc-media-wire-controller-qej`.
+They use the existing continuous host session, source and QUIC sender.
+The bitrate controller responds
 to measured send-admission pressure with bounded encoder targets. Offered-byte
-reductions have been measured for software HEVC; native macOS rate-change
-qualification remains pending. Resolution changes, end-to-end latency control
+reductions have been measured for software HEVC; native macOS and Windows
+rate-change qualification remains pending. Resolution changes, end-to-end latency control
 and per-path aggregate-bandwidth estimation remain incomplete.
 
 ## Local host selection
@@ -27,11 +28,10 @@ through their `--` arguments, including on hosts that do not offer control.
 
 The original controlled publisher receives the existing measured source-work,
 send-admission, retention-credit and negotiated decoder-load samples. Collected
-native input retains its existing bounded idle wake path. Software and
-VideoToolbox can change their bitrate targets within the original local ceiling;
-NVENC and VA-API retain their fixed bitrate. Resolution and the exact decoder
-configuration stay fixed. An
-observer-first share uses the
+native input retains its existing bounded idle wake path. Software, VideoToolbox
+and Media Foundation can change their bitrate targets within the original local
+ceiling; NVENC and VA-API retain their fixed bitrate. Resolution and the exact
+decoder configuration stay fixed. An observer-first share uses the
 same pacing state machine in its original shared publisher, with measured source
 work, genuine changed/unchanged observations and aggregate capture credit. A
 healthy eligible subscriber keeps the source eligible while a lagging subscriber
@@ -161,7 +161,8 @@ serving owner are refused without replacing the controller. Existing callers
 retain their fixed policy until they explicitly enable adaptation. These public
 library calls enable capture cadence only and preserve legacy worker messages.
 Native host startup additionally enables the bitrate controller for an explicitly
-selected software or VideoToolbox encoder when `--adaptive-capture` is selected.
+selected software, VideoToolbox or Media Foundation encoder when
+`--adaptive-capture` is selected.
 NVENC and VA-API retain cadence adaptation without native bitrate transactions.
 
 For an independently owned shared source, call
@@ -294,8 +295,8 @@ was 24 KB and the IDR fell from 85 to 69 KB. VA-API keeps its libavcodec default
 (not measured).
 
 Remaining work includes live impaired-path qualification of software bitrate
-changes, native VideoToolbox rate-change qualification, runtime resolution
-changes, NVENC/VA-API bitrate transactions and hardware quantizer control,
+changes, native VideoToolbox and Media Foundation rate-change qualification,
+runtime resolution changes, NVENC/VA-API bitrate transactions and hardware quantizer control,
 platform presentation feedback, aggregate host/path budgets, qualified
 damage-event and local-input wakeup, and platform/GUI policy selection. Collected
 remote-input wakeup is implemented separately in
@@ -429,6 +430,51 @@ This test has not run in the Linux session. A current macOS build and execution
 remain required before claiming native rate-change qualification or bitrate and
 quality improvements. The software measurements above do not establish either
 result for VideoToolbox.
+
+## Windows Media Foundation bitrate transactions
+
+The Windows host now carries `--adaptive-capture` decisions through the same
+original `CaptureAtRate` worker operation as software and VideoToolbox. Its
+configured `--bitrate` is a permanent ceiling; lowering the target never raises
+that ceiling or prevents a later qualified return toward it. Fixed-rate hosting
+remains the default. The source, D3D device, encoder, decoder configuration and
+native capture deadline keep their original ownership and bounds.
+
+The first picture bootstraps at the configured rate. After that, a pending
+target can apply only when current Desktop Duplication evidence already requires
+an encode: changed pixels, a cursor redraw, an unconditional capture or an
+admitted recovery. An unchanged desktop returns its previous rate. Unknown or
+lost capture evidence refuses before a target or forced IDR can use retained
+pixels. Both the host observation clock and the native worker clock must witness
+the same two-second dwell between actual changes. A legacy capture explicitly
+cancels deferred rate intent, because its reply cannot report a transition.
+
+The native adapter sets and reads back Media Foundation's
+[`AVEncCommonMeanBitRate`](https://learn.microsoft.com/en-us/windows/win32/codecapi/avenccommonmeanbitrate-property)
+property, accepting only the specified UINT32 value and exact target. Before its
+first rate-aware receipt, it also verifies the opening value. It requires an
+actual IDR admitted by the existing `HevcGuard` under the original parameter sets
+and reads back the property again after encoding. A native refusal, changed
+readback, failed source operation or incompatible picture closes the original
+capture owner; no different encoder is substituted. The receipt describes a
+configured mean target, never measured throughput or guaranteed picture quality.
+
+The portable regression in `crates/fr-native/tests/windows_capture_rate.rs`
+executes the exact production capture decision and shared rate policy, including
+idle suppression, unknown-source refusal, cursor/recovery capture, bootstrap,
+both clocks, original ceilings, cancelled targets and IDR receipt requirements.
+Its 12 tests and strict pedantic Clippy passed on the pinned nightly. Parent
+capture-protocol tests also cover Media Foundation preflight and the distinction
+between deferred and applied rate replies on unchanged frame/configuration/time
+identities; those require the daemon test lane.
+
+The ignored native test
+`native_rate_capture_keeps_the_original_decoder_and_rate_dwell` exercises the
+real Windows adapter, independently admits its units, checks 8 to 4 Mbit/s and
+4 to 8 Mbit/s IDRs, rejects an over-ceiling target, and verifies dwell and legacy
+cancellation. It requires a logged-in Windows desktop and hardware HEVC, and has
+not run in this Linux session. Windows device behavior and impaired-path quality
+remain unqualified by the portable tests.
 
 ## Software settle-to-sharp
 

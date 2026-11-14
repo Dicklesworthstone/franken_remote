@@ -53,7 +53,7 @@ pub enum Kind {
     ConfigureAudio = 18,
     /// Audio-role pull of already encoded packets; empty body.
     ReadAudio = 19,
-    /// Capture with a bounded software bitrate target; replies report actual rate.
+    /// Capture with a bounded native bitrate target; replies report actual rate.
     CaptureAtRate = 20,
     /// Copy the exact retained presentation named by a bounded identity tuple.
     ReadPresentation = 21,
@@ -397,7 +397,10 @@ impl Backend {
     /// an IPC operation, not a device capability: native property application,
     /// the unchanged decoder configuration and an actual IDR must still pass.
     pub const fn accepts_rate_capture(self) -> bool {
-        matches!(self, Self::SoftwareExplicit | Self::VideoToolbox)
+        matches!(
+            self,
+            Self::SoftwareExplicit | Self::VideoToolbox | Self::MediaFoundation
+        )
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

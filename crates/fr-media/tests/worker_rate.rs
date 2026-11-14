@@ -4,7 +4,7 @@ use fr_core::{
 };
 use fr_media::{
     access_unit::{EncodedAccessUnit, FrameId, FrameKind},
-    worker::{self, Header, Identity, Kind, Record, rate},
+    worker::{self, Backend, Header, Identity, Kind, Record, rate},
 };
 use std::io::Cursor;
 
@@ -15,6 +15,20 @@ fn request() -> rate::Capture {
         force_idr: true,
         only_if_changed: true,
         bitrate: 1_000_000,
+    }
+}
+
+#[test]
+fn capture_rate_selects_only_backends_with_a_native_transaction() {
+    for backend in [
+        Backend::SoftwareExplicit,
+        Backend::VideoToolbox,
+        Backend::MediaFoundation,
+    ] {
+        assert!(backend.accepts_rate_capture());
+    }
+    for backend in [Backend::Nvenc, Backend::Vaapi] {
+        assert!(!backend.accepts_rate_capture());
     }
 }
 fn unit(kind: FrameKind) -> EncodedAccessUnit {
