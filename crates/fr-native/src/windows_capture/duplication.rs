@@ -356,17 +356,13 @@ impl Duplicator {
     /// A refusing desktop is never followed or represented by cached pixels.
     fn reduplicate(&mut self) -> Result<bool, NativeError> {
         self.source.invalidate();
-        match duplicate(&self.output, &self.device, &self.display)? {
-            Some(duplication) => {
-                self.duplication = Some(duplication);
-                self.recreated += 1;
-                Ok(true)
-            }
-            None => {
-                self.refused_desktops += 1;
-                Ok(false)
-            }
-        }
+        let Some(duplication) = duplicate(&self.output, &self.device, &self.display)? else {
+            self.refused_desktops += 1;
+            return Ok(false);
+        };
+        self.duplication = Some(duplication);
+        self.recreated += 1;
+        Ok(true)
     }
 
     /// Where the pointer is now, relative to this display.

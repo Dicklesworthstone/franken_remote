@@ -364,7 +364,7 @@ pub unsafe extern "C" fn fr_directory_fetch(
             // internal failure rather than skip the one callback. A panic in
             // the fetch (a debug build unwinds) still calls back once.
             let fetched = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                directory::fetch(request)
+                directory::fetch(&request)
             }));
             let json = fetched
                 .ok()

@@ -134,7 +134,7 @@ fn hosts() -> ExitCode {
 /// One fetch, printed as the session core's JSON document. Exit 0 only when
 /// the host listed its directory.
 fn directory(target: Target, port: u16) -> ExitCode {
-    let json = fetch(Request { target, port });
+    let json = fetch(&Request { target, port });
     let listed =
         serde_json::from_str::<serde_json::Value>(&json).is_ok_and(|value| value["status"] == "ok");
     if writeln!(std::io::stdout().lock(), "{json}").is_err() {

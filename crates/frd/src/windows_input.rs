@@ -55,7 +55,8 @@ pub trait Native {
     fn foreground_outranks_us(&mut self) -> bool;
     fn key(&mut self, key: Key, down: bool) -> Sent;
     fn text(&mut self, scalar: char) -> Sent;
-    fn prepare_move_to(&mut self, point: DesktopPoint) -> Result<Self::PreparedMove, PlatformError>;
+    fn prepare_move_to(&mut self, point: DesktopPoint)
+    -> Result<Self::PreparedMove, PlatformError>;
     fn move_to(&mut self, prepared: Self::PreparedMove) -> Sent;
     fn button(&mut self, button: PointerButton, down: bool) -> Sent;
     /// Wheel deltas, 120 per notch: positive right, positive away from the user.
@@ -401,8 +402,12 @@ impl Native for System {
     fn text(&mut self, scalar: char) -> Sent {
         Self::sent(fr_winsys::input::text(scalar))
     }
-    fn prepare_move_to(&mut self, point: DesktopPoint) -> Result<Self::PreparedMove, PlatformError> {
-        fr_winsys::input::PreparedMove::new(point.x, point.y).map_err(|_| PlatformError::Unavailable)
+    fn prepare_move_to(
+        &mut self,
+        point: DesktopPoint,
+    ) -> Result<Self::PreparedMove, PlatformError> {
+        fr_winsys::input::PreparedMove::new(point.x, point.y)
+            .map_err(|_| PlatformError::Unavailable)
     }
     fn move_to(&mut self, prepared: Self::PreparedMove) -> Sent {
         Self::sent(prepared.submit())

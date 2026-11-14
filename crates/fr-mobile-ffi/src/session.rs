@@ -830,9 +830,8 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let offer = match control_policy::offer(control) {
-        Ok(offer) => offer,
-        Err(_) => return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into())),
+    let Ok(offer) = control_policy::offer(control) else {
+        return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
     let operation = async {
         match (control, target.selector()) {

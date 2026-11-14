@@ -508,7 +508,10 @@ fn prepared_moves_are_single_use_and_cancelled_on_every_refusal() {
 
     h.sink.prepare(movement).unwrap();
     h.fake().move_preparation = Some(Box::new(|| Err(PlatformError::GeometryChanged)));
-    assert_eq!(h.sink.prepare(movement), Err(PlatformError::GeometryChanged));
+    assert_eq!(
+        h.sink.prepare(movement),
+        Err(PlatformError::GeometryChanged)
+    );
     assert!(h.sink.prepared_move.is_none());
     assert_eq!(
         h.sink.submit(movement),

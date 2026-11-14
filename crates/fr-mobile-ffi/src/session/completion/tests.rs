@@ -312,7 +312,9 @@ fn presentation_failure_closes_viewing_and_never_allows_resize_replacement() {
         Ok(()),
         Err(Failure::Cancelled),
         Err(Failure::Notification),
-        Err(Failure::Connection(frd::native_connection::Error::Cancelled)),
+        Err(Failure::Connection(
+            frd::native_connection::Error::Cancelled,
+        )),
         Err(Failure::Observation(ObserverError::Application)),
     ] {
         assert_eq!(

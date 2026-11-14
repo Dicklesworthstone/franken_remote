@@ -50,12 +50,12 @@ pub enum Outcome {
 }
 
 /// Fetch on the calling thread (the FFI gives it its own); returns the JSON.
-pub fn fetch(request: Request) -> String {
+pub fn fetch(request: &Request) -> String {
     let via = request.target.certificate_name().to_owned();
     to_json(&via, &run(request))
 }
 
-fn run(request: Request) -> Outcome {
+fn run(request: &Request) -> Outcome {
     let Ok(runtime) = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
         .build()
