@@ -86,7 +86,10 @@ mod tests {
 
     fn parse(args: &[&str], view: bool) -> Option<Options> {
         Options::parse(
-            &args.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>(),
+            &args
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>(),
             view,
             47819,
         )
@@ -180,10 +183,7 @@ mod tests {
             args.push(format!("100.64.0.{last}"));
         }
         assert_eq!(
-            Options::parse(&args, false, 47819)
-                .unwrap()
-                .addresses
-                .len(),
+            Options::parse(&args, false, 47819).unwrap().addresses.len(),
             8
         );
         args.extend(["--address".to_owned(), "100.64.0.9".to_owned()]);

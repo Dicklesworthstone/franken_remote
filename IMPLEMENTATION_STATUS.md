@@ -1,5 +1,54 @@
 # Implementation status
 
+## Complete iOS Unicode callbacks without delayed replay (2026-11-14 UTC)
+
+The shared native control profile now includes the optional committed-text
+boundary in its original reconnect offer and requests Text only through the
+existing negotiated capability intersection. Hosts without that boundary retain
+physical-key control. The existing C ABI functions, layouts and status values
+are unchanged.
+
+An iOS callback containing Unicode or any character without a physical-key
+mapping now submits its entire original value synchronously once. Unicode no
+longer enters the Swift typing queue. Pending ASCII, held hardware/sticky
+modifiers, embedded NUL and an oversized UTF-8 value refuse before any prefix or
+modifier effect. The 4,096-byte bound is checked on both sides of the C-string
+boundary. Rust retains its first sample and exact source/view TextContext;
+changed or temporarily unready contexts refuse without ending physical-key
+control. Immediate refusal produces content-free feedback and retains no text
+for a later refresh or reconnect.
+
+The default keyboard admits supported committed callbacks. This remains
+UIKeyInput rather than a full UITextInput composition/preedit implementation.
+Admission to the bounded source is not proof of atomic host insertion, and no
+per-action receipt UI is added. The existing host's partial-effect and no-replay
+semantics remain intact. See [the iOS input guide](docs/ios-client.md#input).
+
+Nine regressions were added: one portable native-profile offer/codec/legacy
+negotiation case, four control-policy cases and four Swift keyboard cases.
+Independent review checked the actual callback, context, refusal and ABI paths,
+including preservation of the preceding wheel reset. These tests remain
+unexecuted: the focused Cargo attempt first hit disk exhaustion; an alternate
+output path began dependency compilation but produced no test result before
+the execution environment became unavailable. Native iOS/host delivery is not
+qualified by this slice; the broader iOS bead remains open.
+
+### Verification update for the preceding Windows slices
+
+All 31 tests in the rebased production Windows portable modules passed under
+nightly-2026-08-31 with rustc --test -D warnings: geometry/mapping, original
+capture, bounded key queues, four CLI cases and six fractional-wheel cases.
+This standalone run does not compile cfg(windows) bindings or the native
+session integration. The nine native Target and seven selector/fresh-read/
+renewal tests remain unexecuted.
+
+The exact pinned formatter successfully produced the final form of all 20 Rust
+files touched in this session, and its corrections are applied here. A separate
+follow-up check could not start after the environment disappeared. Full
+workspace checks, strict Clippy, native builds and live platform qualification
+remain pending; the existing GitHub verification workflows continue to cover
+these gates after publication. No dependency versions or workflow policy changed.
+
 ## Fractional wheel input retains its original expiry (2026-11-14 UTC)
 
 A native wheel fraction can no longer wait indefinitely and become a new scroll

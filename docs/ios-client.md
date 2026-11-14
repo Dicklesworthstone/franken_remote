@@ -184,25 +184,47 @@ nearest evidence there; device builds never use it).
 
 ## Input
 
-The app requests the host's grant profile without key repeat: keys, absolute
-pointer, buttons and line scroll. It never synthesizes repeat; a held key
-stays held until released. Pixel scroll and text are sent only if a host
-grants them (today's hosts do not; the calls return `FR_UNSUPPORTED`).
+The app requests keys, absolute pointer, buttons, line scroll and optional
+committed Unicode text. It never synthesizes repeat; a held key stays held
+until released. The original connection offer advertises the optional
+committed-text boundary. The requested operations are then intersected with
+the host's negotiated profile before the control request: a host without text
+support keeps physical-key control, and a text call returns
+`FR_UNSUPPORTED`. Pixel-precise scrolling remains unrequested.
 
 - Positions are encoded picture pixels. The app undoes its own zoom, pan,
   letterbox, rotation and safe-area placement (`PictureMapper`); a point
   outside the picture is refused (`FR_OUTSIDE`), never moved onto an edge.
   A drag that leaves the picture releases at its last point inside.
-- Scrolling sends whole 16.16 lines and keeps the remainder; at most 16 lines
-  per event, the rest queued.
+- Scrolling sends whole 16.16 lines, at most 16 per axis in one event.
+  Fractional carry retains its earliest input deadline and clears when it
+  expires or other input intervenes. Oversized whole actions are refused;
+  they do not become a backlog for later gestures.
 - Hardware keyboards send HID usages one-for-one (`UIKey.keyCode` are page-7
-  usages). The software keyboard maps printable ASCII to US-layout keys plus
-  Shift. Anything else goes to the host's text input if granted, and is
-  otherwise refused with a message that never quotes it: the app never
-  guesses the host's layout. Software-keyboard input (a paste) waits in order
-  while the host's input queue is backed up (`FR_BUSY`) and goes on the next
-  frames; it never overflows frd's bounded queue. While the keyboard is up,
-  the picture stays above it.
+  usages). Software-keyboard callbacks that map completely to ASCII use the
+  existing US-layout physical-key path, including sticky modifiers and
+  bounded pacing on later frames.
+- A callback containing Unicode or another character without a physical-key
+  mapping submits the **entire completed value once**, synchronously through
+  `fr_session_text`. Mixed ASCII/Unicode values are never split into a key
+  prefix and a text suffix. The limit is 4,096 UTF-8 bytes; an empty, oversized
+  or embedded-NUL value is refused whole.
+- Unicode never enters the app's typing queue. Pending ASCII keys, hardware
+  keys held down or active sticky modifiers refuse the new value before any
+  prefix or modifier side effect. An unsupported, busy or unavailable host
+  produces a content-free notice, and the value is discarded. A later frame,
+  readiness change or reconnect cannot replay it; the user must enter new
+  input explicitly.
+- The Rust capture retains one original timestamp and source/view context
+  through its existing bounded queue. A changed or unready context refuses
+  the whole capture while keeping physical-key control available. Acceptance
+  into that queue is not a guarantee of atomic OS insertion: native delivery
+  can still fail or report a partial effect, and those outcomes are never
+  replayed automatically.
+- The view uses the default keyboard with `UIKeyInput`. This handles complete
+  committed callbacks from supported keyboards or paste; it does not add a
+  `UITextInput` composition or preedit implementation. While the keyboard is
+  up, the picture stays above it.
   The extra-keys bar has Esc, Tab, sticky Ctrl/Opt/Cmd/Shift (tap: next key;
   tap again: locked; again: off), arrows, forward delete, Home/End, Page
   Up/Down and F1–F12.
@@ -332,7 +354,9 @@ own screen.
   60 fps host; the live session above is view-only, in the simulator.
 - Reaching an IPv6-only host saved by name only, without a listing.
 - Pixel-precise scrolling (the app sends line scrolls; macOS hosts now offer
-  pixel scrolls) and Unicode text (hosts do not grant it yet).
+  pixel scrolls), a full native text-composition interface, and live device
+  qualification of the committed-Unicode callback path. The callback and
+  negotiation regressions establish source policy, not native OS insertion.
 - iPad pointer devices as a real mouse (hover, secondary click), clipboard,
   audio and display switching.
 - Release signing, App Store entitlements and a device-tested build.

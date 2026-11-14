@@ -80,6 +80,68 @@ fn explicit_mac_pixel_scroll_fits_all_current_clipboard_file_profiles_and_keeps_
     assert!(control::with_pixel_scroll(observation_offer()).is_err());
 }
 
+#[test]
+fn committed_unicode_offer_roundtrips_and_keeps_legacy_control() {
+    use fr_client::native::control_offer_with_text;
+    use fr_core::input_submission::Capability;
+
+    let original = control_offer();
+    let text = control_offer_with_text().unwrap();
+    assert_eq!(text.role, Role::RequestControl);
+    assert_eq!(text.limits, original.limits);
+    assert!(text.capabilities.len() <= negotiation::MAX_CAPABILITIES);
+    assert!(
+        original
+            .capabilities
+            .iter()
+            .filter(|cap| cap.required)
+            .all(|cap| text.capabilities.contains(cap))
+    );
+    assert!(text.capabilities.iter().any(|cap| {
+        cap.name == control::TEXT_CAPABILITY
+            && cap.version == control::TEXT_VERSION
+            && !cap.required
+    }));
+    let encoded = bytes(&Message::ClientHello(text.clone()));
+    assert_eq!(
+        negotiation::decode(&encoded, negotiation::MAX_RECORD, 0).unwrap(),
+        Message::ClientHello(text.clone())
+    );
+
+    let mut different_version = text.clone();
+    different_version
+        .capabilities
+        .iter_mut()
+        .find(|cap| cap.name == control::TEXT_CAPABILITY)
+        .unwrap()
+        .version = control::TEXT_VERSION + 1;
+    for host in [original, different_version] {
+        for selected in [
+            host.intersect(&text).unwrap(),
+            text.intersect(&host).unwrap(),
+        ] {
+            let allowed = control::requestable(&selected.capabilities);
+            assert!(!allowed.contains(Capability::Text));
+            for capability in [
+                Capability::Keys,
+                Capability::Absolute,
+                Capability::Buttons,
+                Capability::LineScroll,
+            ] {
+                assert!(allowed.contains(capability), "{capability:?}");
+            }
+        }
+    }
+    let selected = text.intersect(&text).unwrap();
+    assert!(control::requestable(&selected.capabilities).contains(Capability::Text));
+    assert!(
+        observation_offer()
+            .capabilities
+            .iter()
+            .all(|cap| cap.name != control::TEXT_CAPABILITY)
+    );
+}
+
 fn bytes(message: &Message) -> Vec<u8> {
     let mut bytes = vec![0; negotiation::MAX_RECORD];
     let n = negotiation::encode(message, negotiation::MAX_RECORD, &mut bytes).unwrap();

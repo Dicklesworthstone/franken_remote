@@ -70,15 +70,14 @@ final class KeyboardTests: XCTestCase {
             return .sent
         }
         XCTAssertTrue(queue.append([.stroke(0x04, modifiers: []), .stroke(0x05, modifiers: []),
-                                    .stroke(0x06, modifiers: []), .text("é")]))
+                                    .stroke(0x06, modifiers: [])]))
         var outcome = queue.drain(into: sink)
         XCTAssertEqual(outcome.sent, 2)
         XCTAssertTrue(outcome.busy)
-        XCTAssertEqual(queue.count, 2, "c and é wait; planted negative: none dropped")
+        XCTAssertEqual(queue.count, 1, "c waits; planted negative: none dropped")
         allow = 5
         outcome = queue.drain(into: sink)
         XCTAssertEqual(outcome.sent, 1)
-        XCTAssertTrue(outcome.unsupported, "text the host does not take")
         XCTAssertTrue(queue.isEmpty)
         let pressed = sink.calls.compactMap { call -> UInt16? in
             if case .key(let usage, true) = call { return usage } else { return nil }
@@ -108,6 +107,76 @@ final class KeyboardTests: XCTestCase {
         refusing.keyResult = .controlLost
         XCTAssertEqual(KeyTyper.type(0x06, modifiers: [], into: refusing), .controlLost)
         XCTAssertEqual(refusing.calls, [.key(0x06, true)])
+    }
+
+    func testUnicodeCallbackIsWholeAndAsciiKeepsItsPhysicalKeyPath() {
+        XCTAssertFalse(UnicodeCommit.needsText(for: "ASCII A-z 123\t\r\n"))
+        XCTAssertTrue(UnicodeCommit.needsText(for: "ASCII é"))
+        XCTAssertTrue(UnicodeCommit.needsText(for: "e\u{301}🙂"))
+        let sink = RecordingSink()
+        sink.textResult = .sent
+        let value = "ASCII e\u{301} é 漢🙂\r\n"
+        XCTAssertEqual(UnicodeCommit.submit(value, pendingKeys: false, heldKeys: false,
+                                            modifiersActive: false, into: sink), .sent)
+        XCTAssertEqual(sink.calls, [.text(value)], "one callback, no ASCII prefix or key synthesis")
+        guard case .text(let captured)? = sink.calls.first else { return XCTFail("one text call") }
+        XCTAssertEqual(Array(captured.utf8), Array(value.utf8), "no normalization or splitting")
+        XCTAssertNil(UnicodeCommit.notice(for: .sent))
+    }
+
+    func testUnicodeCannotOvertakePendingAsciiOrConsumeModifiers() {
+        var queue = TypingQueue()
+        XCTAssertTrue(queue.append([.stroke(HIDUsage.a, modifiers: [])]))
+        let sink = RecordingSink()
+        sink.textResult = .sent
+        XCTAssertEqual(UnicodeCommit.submit("é", pendingKeys: !queue.isEmpty, heldKeys: false,
+                                            modifiersActive: false, into: sink), .busy)
+        XCTAssertTrue(sink.calls.isEmpty, "refuse before draining a prefix")
+        XCTAssertEqual(queue.count, 1)
+        _ = queue.drain(into: sink)
+        XCTAssertEqual(sink.calls, [.key(HIDUsage.a, true), .key(HIDUsage.a, false)])
+        // Finishing older keys never retries the refused Unicode callback.
+        for (held, modifier) in [(true, false), (false, true), (true, true)] {
+            let blocked = RecordingSink()
+            XCTAssertEqual(UnicodeCommit.submit("é", pendingKeys: false, heldKeys: held,
+                                                modifiersActive: modifier, into: blocked), .busy)
+            XCTAssertTrue(blocked.calls.isEmpty)
+        }
+    }
+
+    func testBusyAndUnsupportedUnicodeAreAttemptedOnceWithoutKeyFallback() {
+        for status: InputStatus in [.busy, .unsupported, .notControlled, .controlLost, .closed, .stale] {
+            let sink = RecordingSink()
+            sink.textResult = status
+            let value = "prefix é suffix"
+            XCTAssertEqual(UnicodeCommit.submit(value, pendingKeys: false, heldKeys: false,
+                                                modifiersActive: false, into: sink), status)
+            XCTAssertEqual(sink.calls, [.text(value)])
+            XCTAssertNotNil(UnicodeCommit.notice(for: status))
+            // A later refresh only drains physical keys. The refused commit
+            // is not retained anywhere for a new context or timestamp.
+            var queue = TypingQueue()
+            sink.textResult = .sent
+            _ = queue.drain(into: sink)
+            XCTAssertEqual(sink.calls, [.text(value)])
+        }
+    }
+
+    func testUnicodeByteBoundAndNulRefuseWholeBeforeTheCStringBoundary() {
+        let exact = String(repeating: "🙂", count: UnicodeCommit.maxBytes / 4)
+        XCTAssertEqual(exact.utf8.count, UnicodeCommit.maxBytes)
+        let accepted = RecordingSink()
+        accepted.textResult = .sent
+        XCTAssertEqual(UnicodeCommit.submit(exact, pendingKeys: false, heldKeys: false,
+                                            modifiersActive: false, into: accepted), .sent)
+        XCTAssertEqual(accepted.calls, [.text(exact)])
+        for value in ["", "before\u{0}after", exact + "a"] {
+            let refused = RecordingSink()
+            XCTAssertEqual(UnicodeCommit.submit(value, pendingKeys: false, heldKeys: false,
+                                                modifiersActive: false, into: refused), .invalid)
+            XCTAssertTrue(refused.calls.isEmpty, "no truncated prefix")
+        }
+        XCTAssertNotNil(UnicodeCommit.notice(for: .invalid))
     }
 
     func testOnlyUsagesTheHostAcceptsAreSendable() {

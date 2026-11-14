@@ -7,8 +7,8 @@ import UIKit
 /// Raw touches go to `TouchInterpreter` (no gesture recognizers: they would
 /// delay taps and fight each other). Hardware key presses become HID usages
 /// one-for-one with no client-side repeat; software keyboard characters
-/// become US-layout key presses, and anything else goes to the host's text
-/// input only if the host granted it (never a guessed layout).
+/// become US-layout key presses. A complete callback containing Unicode goes
+/// to the host's granted text input once, without queueing, splitting or retry.
 final class RemoteSurfaceView: UIView, UIKeyInput {
     let metalView = MTKView()
     let interpreter = TouchInterpreter()
@@ -251,21 +251,29 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
     var smartQuotesType: UITextSmartQuotesType = .no
     var smartDashesType: UITextSmartDashesType = .no
     var smartInsertDeleteType: UITextSmartInsertDeleteType = .no
-    var keyboardType: UIKeyboardType = .asciiCapable
+    var keyboardType: UIKeyboardType = .default
     var returnKeyType: UIReturnKeyType = .default
 
     var hasText: Bool { true }
 
     func insertText(_ text: String) {
-        guard session != nil else { return }
+        guard let session, !text.isEmpty else { return }
+        if UnicodeCommit.needsText(for: text) {
+            // One original UIKeyInput completion. Refuse the whole callback
+            // before queuing a prefix or consuming any sticky modifier.
+            let status = UnicodeCommit.submit(
+                text, pendingKeys: !typing.isEmpty, heldKeys: !heldKeys.isEmpty,
+                modifiersActive: !modifiers.active.isEmpty, into: session
+            )
+            if let notice = UnicodeCommit.notice(for: status) { session.notice = notice }
+            return
+        }
         var items: [TypingQueue.Item] = []
         for character in text {
             let held = modifiers.active.map(\.usage)
             if let stroke = KeyboardMap.stroke(for: character) {
                 items.append(.stroke(stroke.usage, modifiers: stroke.shift ? held + [HIDUsage.leftShift] : held))
                 modifiers.consume()
-            } else {
-                items.append(.text(String(character)))
             }
         }
         enqueue(items)
@@ -296,11 +304,7 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
             typing.clear()
             return
         }
-        let outcome = typing.drain(into: session)
-        if outcome.unsupported {
-            // Content-free: never quote what was typed.
-            session.notice = "Some characters can't be sent: this host takes key presses only, and the app won't guess the host's keyboard layout."
-        }
+        _ = typing.drain(into: session)
     }
 
     // Hardware keyboards: one press, one release, no repeat.

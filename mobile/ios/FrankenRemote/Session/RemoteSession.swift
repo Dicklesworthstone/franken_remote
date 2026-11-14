@@ -319,7 +319,8 @@ final class RemoteSession: ObservableObject, InputSink {
     }
 
     @discardableResult func text(_ text: String) -> InputStatus {
-        InputStatus(code: text.withCString { fr_session_text(handle, $0) })
+        guard UnicodeCommit.valid(text) else { return .invalid }
+        return InputStatus(code: text.withCString { fr_session_text(handle, $0) })
     }
 
     @discardableResult func releaseAllKeys() -> InputStatus {

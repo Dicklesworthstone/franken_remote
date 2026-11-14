@@ -566,11 +566,14 @@ pub extern "C" fn fr_session_key(handle: FrHandle, usage: u16, pressed: bool) ->
     input(handle, |s| s.shared().key(usage, pressed))
 }
 
-/// Commit Unicode text. `FR_UNSUPPORTED` unless the host granted text
-/// input; the app never guesses a keyboard layout to type it instead.
+/// Capture one complete Unicode callback synchronously. `FR_UNSUPPORTED`
+/// unless the host granted text; `FR_BUSY` admits none of the value. A refused
+/// commit must be discarded, never split, queued or automatically retried.
 ///
 /// # Safety
-/// `utf8` is NULL or NUL-terminated.
+/// `utf8` is NULL or NUL-terminated. The caller must reject embedded NUL
+/// before crossing this C string boundary so no prefix substitutes for a
+/// complete commit. Empty or over-4096-byte values return `FR_INVALID`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fr_session_text(handle: FrHandle, utf8: *const c_char) -> i32 {
     // SAFETY: forwarded contract.

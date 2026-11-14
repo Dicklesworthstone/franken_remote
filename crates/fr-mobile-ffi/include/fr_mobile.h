@@ -40,9 +40,9 @@ extern "C" {
 #define FR_CONTROL_LOST (-5)  /* control (and so the session) is ending */
 #define FR_CLOSED (-6)
 #define FR_BUSY (-7)          /* start: all session slots in use, or no thread;
-                                 key press/text: the host's input queue is
-                                 backed up, nothing sent: send it again next
-                                 frame */
+                                 input: nothing accepted. Physical keys may
+                                 wait; completed text must be discarded,
+                                 never queued or retried automatically. */
 #define FR_STALE (-8)         /* the handle names no live session */
 
 /* Event kinds. */
@@ -164,6 +164,9 @@ int32_t fr_session_button(FrHandle session, uint32_t button, bool pressed,
 int32_t fr_session_scroll(FrHandle session, double dx, double dy, double x, double y);
 void fr_session_scroll_end(FrHandle session);
 int32_t fr_session_key(FrHandle session, uint16_t usage, bool pressed);
+/* One completed Unicode callback, captured synchronously once. utf8 is
+ * nonempty, at most 4096 UTF-8 bytes and contains no embedded NUL. Refusal
+ * admits none of the value; never split, queue or automatically retry it. */
 int32_t fr_session_text(FrHandle session, const char *_Nullable utf8);
 int32_t fr_session_release_all(FrHandle session);
 

@@ -6,14 +6,15 @@
 //! The app's main thread never blocks on the session. It polls events,
 //! copies the newest picture, reports what it actually drew, and pushes input;
 //! each input call takes one short lock and either queues one event in frd's
-//! bounded source or refuses. A new key press or text while that source is
-//! backed up answers `Busy` (the app sends it again on a later frame, so a
-//! paste never overflows it); any other refused push ends control (frd's
-//! contract for a native producer); so do closing, backgrounding and an
-//! invisible view. Ending control ends the session (`CONTROL_STOPPED` when
+//! bounded source or refuses. Physical key bursts may wait in the app while
+//! that source is busy. A completed Unicode value is captured synchronously
+//! once, or refused whole; the app never queues or retries it. Other native
+//! input failures end control (frd's contract for a producer); so do closing,
+//! backgrounding and an invisible view. Ending control ends the session (`CONTROL_STOPPED` when
 //! this device stopped it); viewing again is a new session.
 mod completion;
 pub mod connection;
+mod control_policy;
 mod key_capture;
 
 #[cfg(test)]
@@ -21,6 +22,7 @@ use completion::classify;
 pub use completion::end;
 pub(crate) use completion::tailnet_end;
 use completion::{LocalStop, ending, requested_terminal};
+use control_policy::requested_capabilities;
 
 use crate::{
     events::{self, Event, Events, kind, state},
@@ -35,7 +37,7 @@ use asupersync::{
 };
 use fr_client::input::viewport::SurfaceRect;
 use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, ScrollUnit};
-use fr_core::input_submission::{Capabilities, Capability};
+use fr_core::input_submission::Capability;
 use fr_media::{
     access_unit::EncodedAccessUnit,
     freshness::ClockPolicy,
@@ -87,8 +89,8 @@ pub enum InputResult {
     Invalid,
     /// The push failed: control (and with it this session) is ending.
     ControlLost,
-    /// A new press or text was not sent because frd's input queue is backed
-    /// up ([`PACED_EVENTS`]); send it again on a later frame.
+    /// Nothing was accepted because input is busy or the text context is not
+    /// ready. Physical keys may be paced; completed text must be discarded.
     Busy,
 }
 
@@ -132,16 +134,6 @@ impl CapturedKey {
         self.capture = self.capture.with_queue_age(age)?;
         Some(self)
     }
-}
-
-/// The control request this app makes: the host's grant profile minus
-/// `Repeat` (the app never synthesizes key repeat; held keys stay held).
-fn requested_capabilities() -> Capabilities {
-    Capabilities::default()
-        .with(Capability::Keys)
-        .with(Capability::Absolute)
-        .with(Capability::Buttons)
-        .with(Capability::LineScroll)
 }
 
 #[derive(Clone)]
@@ -480,11 +472,10 @@ impl Shared {
                     unit: ScrollUnit::Lines,
                 },
             };
-            match g.source.push_until(
-                event,
-                ClientInstant(sampled),
-                ClientInstant(until),
-            ) {
+            match g
+                .source
+                .push_until(event, ClientInstant(sampled), ClientInstant(until))
+            {
                 Ok(()) => InputResult::Sent,
                 Err(_) => InputResult::ControlLost,
             }
@@ -620,26 +611,31 @@ impl Shared {
         self.close();
     }
 
-    /// Committed Unicode text, only where the host granted `Text`.
+    /// One complete Unicode value captured synchronously by the caller. A
+    /// refused value must be discarded, never queued or captured again later.
     pub fn text(&self, text: &str) -> InputResult {
+        if !control_policy::valid_text(text) {
+            return InputResult::Invalid;
+        }
         self.with_granted(|g| {
             if !g.source.supports_text() {
                 return InputResult::Unsupported;
             }
             g.scroll.reset();
-            if paced(g) {
+            if paced(g) || g.keys.iter().any(|held| *held) || g.buttons.iter().any(|held| *held) {
                 return InputResult::Busy;
             }
             let Ok(sampled) = g.source.clock() else {
                 return InputResult::ControlLost;
             };
-            match g.source.commit_text(text, sampled) {
-                Ok(()) => InputResult::Sent,
-                Err(frd::session_startup::viewer_events::Error::UnsupportedText) => {
-                    InputResult::Unsupported
-                }
-                Err(_) => InputResult::ControlLost,
-            }
+            let context = match g.source.text_context() {
+                Ok(Some(context)) => context,
+                Ok(None) => return InputResult::Busy,
+                Err(error) => return control_policy::text_result(Err(error)),
+            };
+            // Both the original timestamp and the exact source/view context
+            // survive the canonical queue. Renewal cannot restamp this commit.
+            control_policy::text_result(g.source.commit_text_in_context(&context, text, sampled))
         })
     }
     /// Release every key this session pressed (keyboard hidden, focus
@@ -834,10 +830,9 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let offer = if control {
-        fr_client::native::control_offer()
-    } else {
-        fr_client::native::observation_offer()
+    let offer = match control_policy::offer(control) {
+        Ok(offer) => offer,
+        Err(_) => return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into())),
     };
     let operation = async {
         match (control, target.selector()) {
@@ -881,14 +876,7 @@ fn run(shared: &Arc<Shared>, config: Config) {
             }
             (false, None) => {
                 client
-                    .run_named_observing(
-                        cx.clone(),
-                        runtime.handle(),
-                        cfg,
-                        offer,
-                        policy,
-                        &mut app,
-                    )
+                    .run_named_observing(cx.clone(), runtime.handle(), cfg, offer, policy, &mut app)
                     .await
             }
         }

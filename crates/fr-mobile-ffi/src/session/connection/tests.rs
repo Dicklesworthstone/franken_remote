@@ -52,30 +52,23 @@ fn exact_node_id_and_normalized_name_retain_the_same_identity() {
 #[test]
 fn selection_is_owned_and_a_new_snapshot_cannot_retarget_it() {
     let original = snapshot();
-    let retained = Target::installed(
-        &original,
-        "n-selected",
-        Vec::new(),
-        AddressFamily::Ipv6,
-    )
-    .unwrap();
+    let retained =
+        Target::installed(&original, "n-selected", Vec::new(), AddressFamily::Ipv6).unwrap();
     drop(original);
     let renamed = discovery(vec![peer("n-selected", "renamed.fixture.ts.net")]);
     let replacement = discovery(vec![peer("n-replacement", "remote.fixture.ts.net")]);
-    assert!(Target::installed(
-        &renamed,
-        "remote.fixture.ts.net",
-        Vec::new(),
-        AddressFamily::Ipv6
-    )
-    .is_err());
-    assert!(Target::installed(
-        &replacement,
-        "n-selected",
-        Vec::new(),
-        AddressFamily::Ipv6
-    )
-    .is_err());
+    assert!(
+        Target::installed(
+            &renamed,
+            "remote.fixture.ts.net",
+            Vec::new(),
+            AddressFamily::Ipv6
+        )
+        .is_err()
+    );
+    assert!(
+        Target::installed(&replacement, "n-selected", Vec::new(), AddressFamily::Ipv6).is_err()
+    );
     let copied = retained.clone();
     let Some(PeerSelector::Pinned {
         stable_id,
@@ -100,13 +93,8 @@ fn missing_short_invalid_and_ambiguous_choices_never_fall_back_to_dns() {
         "https://remote.fixture.ts.net",
     ] {
         assert_eq!(
-            Target::installed(
-                &snapshot(),
-                selection,
-                Vec::new(),
-                AddressFamily::Automatic
-            )
-            .unwrap_err(),
+            Target::installed(&snapshot(), selection, Vec::new(), AddressFamily::Automatic)
+                .unwrap_err(),
             Error::IdentityMismatch
         );
     }
@@ -157,13 +145,7 @@ fn duplicate_and_malformed_discovery_rows_refuse_the_whole_snapshot() {
             .collect(),
     );
     assert_eq!(
-        Target::installed(
-            &oversized,
-            "n-0",
-            Vec::new(),
-            AddressFamily::Automatic
-        )
-        .unwrap_err(),
+        Target::installed(&oversized, "n-0", Vec::new(), AddressFamily::Automatic).unwrap_err(),
         Error::MalformedMetadata
     );
 }

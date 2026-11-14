@@ -99,6 +99,13 @@ pub fn control_offer() -> Offer {
     )
 }
 
+/// Control with the optional whole committed-Unicode boundary. A host without
+/// that exact boundary keeps physical-key control and cannot grant text. This
+/// must be the original offer before the reconnect supervisor freezes it.
+pub fn control_offer_with_text() -> Result<Offer, fr_wire::negotiation::Error> {
+    control::with_committed_text(control_offer())
+}
+
 /// `control_offer` plus the three OPTIONAL text-clipboard boundaries (the
 /// clipboard attachment role, its record codec and bilateral readiness). A
 /// host without clipboard drops them and control still negotiates; the

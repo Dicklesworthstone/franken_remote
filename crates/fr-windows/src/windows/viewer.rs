@@ -308,9 +308,12 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
     // A local resize/move invalidates its coordinate mapping immediately.
     // Redraw the one retained picture even on a static desktop, preserving
     // that picture's ORIGINAL frame id; this creates no new source evidence.
-    let after = if v.mapping.is_some() { *last_sequence } else { 0 };
-    let Some((raw, info)) = shared.frames.take_newer(after, shared.full_range())
-    else {
+    let after = if v.mapping.is_some() {
+        *last_sequence
+    } else {
+        0
+    };
+    let Some((raw, info)) = shared.frames.take_newer(after, shared.full_range()) else {
         return (false, false);
     };
     *last_sequence = info.sequence;
@@ -328,8 +331,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
         return (false, false);
     };
     v.picture = (info.width, info.height);
-    if v
-        .mapping
+    if v.mapping
         .as_ref()
         .is_none_or(|mapping| !mapping.same_layout(dest, v.picture))
     {
@@ -774,13 +776,7 @@ impl Viewer {
         }
         false
     }
-    fn scroll(
-        &mut self,
-        hwnd: HWND,
-        (dx, dy): (f64, f64),
-        (x, y): (i32, i32),
-        message_time: u32,
-    ) {
+    fn scroll(&mut self, hwnd: HWND, (dx, dy): (f64, f64), (x, y): (i32, i32), message_time: u32) {
         let Some((captured, at)) = self.capture_mouse(message_time, true) else {
             return;
         };

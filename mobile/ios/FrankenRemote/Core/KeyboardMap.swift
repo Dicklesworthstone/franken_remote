@@ -174,15 +174,58 @@ struct KeyTyper {
     }
 }
 
-/// Software-keyboard input waiting for the host, sent in order. The core
-/// answers `.busy` while the host's input queue is backed up (a paste
-/// arrives faster than the host takes keys): the drain stops there and the
-/// rest goes on a later call. Bounded; holds what the user typed, so it is
-/// never logged or quoted.
+
+/// Completed Unicode callbacks use one immediate attempt. There is no retained
+/// text, delayed retry, layout fallback or partial-commit prefix in this policy.
+enum UnicodeCommit {
+    /// Same complete UTF-8 bound as fr_core::input::MAX_COMMITTED_TEXT_BYTES.
+    static let maxBytes = 4096
+
+    static func needsText(for text: String) -> Bool {
+        text.contains { KeyboardMap.stroke(for: $0) == nil }
+    }
+
+    static func valid(_ text: String) -> Bool {
+        guard !text.isEmpty,
+              text.utf8.prefix(maxBytes + 1).count <= maxBytes else { return false }
+        // The existing C ABI takes a C string; NUL would silently truncate it.
+        return !text.utf8.contains(0)
+    }
+
+    /// Preserve the order of already queued ASCII keys and the meaning of
+    /// sticky/hardware modifiers. A refusal consumes none of those states.
+    static func submit(_ text: String, pendingKeys: Bool, heldKeys: Bool,
+                       modifiersActive: Bool, into sink: InputSink) -> InputStatus {
+        guard valid(text) else { return .invalid }
+        guard !pendingKeys, !heldKeys, !modifiersActive else { return .busy }
+        return sink.text(text)
+    }
+
+    static func notice(for status: InputStatus) -> String? {
+        switch status {
+        case .sent, .pending:
+            return nil
+        case .busy:
+            return "Unicode text was not sent while input is busy or keys are held. Release modifiers and type it again when the view is ready."
+        case .unsupported:
+            return "This host did not enable Unicode text input. The text was not sent."
+        case .invalid:
+            return "That text is empty, too large, or contains an unsupported character. Nothing was sent."
+        case .notControlled, .controlLost, .closed, .stale:
+            return "Unicode text was not sent because control is unavailable."
+        case .outside:
+            return "Unicode text could not be accepted in the current view. Nothing was sent."
+        }
+    }
+}
+
+/// ASCII software-keyboard keys waiting for the host, sent in order. The core
+/// answers `.busy` while the host's input queue is backed up: the drain stops
+/// there and the rest goes on a later call. Unicode commits cannot enter this
+/// queue. Bounded; holds what the user typed, so it is never logged or quoted.
 struct TypingQueue {
     enum Item: Equatable {
         case stroke(UInt16, modifiers: [UInt16])
-        case text(String)
     }
     /// Most items waiting at once; more are refused.
     static let capacity = 4096
@@ -209,8 +252,6 @@ struct TypingQueue {
 
     struct Outcome: Equatable {
         var sent = 0
-        /// Text the host does not take (key presses only) was dropped.
-        var unsupported = false
         /// Stopped at a busy host; the rest waits.
         var busy = false
     }
@@ -225,8 +266,6 @@ struct TypingQueue {
             switch item {
             case .stroke(let usage, let modifiers):
                 status = KeyTyper.type(usage, modifiers: modifiers, into: sink)
-            case .text(let text):
-                status = sink.text(text)
             }
             switch status {
             case .busy:
@@ -237,7 +276,6 @@ struct TypingQueue {
                 outcome.sent += 1
                 head += 1
             case .unsupported, .outside, .invalid:
-                if case .text = item { outcome.unsupported = true }
                 head += 1
             case .notControlled, .controlLost, .closed, .stale:
                 clear()

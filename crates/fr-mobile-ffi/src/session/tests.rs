@@ -73,11 +73,11 @@ fn the_control_request_never_asks_for_client_side_repeat() {
         Capability::Absolute,
         Capability::Buttons,
         Capability::LineScroll,
+        Capability::Text,
     ] {
         assert!(caps.contains(capability), "{capability:?}");
     }
     assert!(!caps.contains(Capability::Repeat));
-    assert!(!caps.contains(Capability::Text));
 }
 
 #[test]
@@ -95,6 +95,12 @@ fn input_is_refused_until_control_is_granted() {
         Err(InputResult::NotControlled)
     ));
     assert_eq!(shared.text("a"), InputResult::NotControlled);
+    assert_eq!(shared.text(""), InputResult::Invalid);
+    assert_eq!(shared.text("before\0after"), InputResult::Invalid);
+    assert_eq!(
+        shared.text(&"a".repeat(fr_core::input::MAX_COMMITTED_TEXT_BYTES + 1)),
+        InputResult::Invalid
+    );
     assert_eq!(shared.release_all(), InputResult::NotControlled);
     // Values the protocol cannot carry are refused before the grant check.
     assert_eq!(shared.button(5, true, 1.0, 1.0), InputResult::Invalid);
