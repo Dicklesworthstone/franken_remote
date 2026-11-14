@@ -17,14 +17,21 @@ native callback fences invalidate local cancellation/overflow and stop the
 original source on window/session lifecycle loss, including reentrant calls.
 This leaves the existing C ABI and physical-key path intact.
 
-Ten portable policy regressions cover exact Unicode conversion, independent
+Ten portable regressions cover exact Unicode conversion, independent
 UTF-16/UTF-8 bounds, consumed or invalidated draft custody, lifecycle loss and
-text changes during a native read. The shared no-grant regression exercises
-the new API; existing source-context and capture
-tests cover continuity and original exclusive deadlines. Source review found
-and repaired reentrant lifecycle gaps before publication. New tests and the
-actual Win32 code await existing hosted compiler/Clippy/test execution after
-the local execution service became unavailable. No real Windows IME,
+text changes during a native read. All ten passed on the repository-pinned
+nightly after the execution service recovered. The same source passed
+`cargo fmt --all --check` and portable
+`cargo clippy -p fr-windows --all-targets --offline --locked -- -D warnings`.
+The pinned compiler's atomic revision API is `try_update`; the deprecated
+spelling was corrected without changing its irreversible overflow behavior.
+
+The shared no-grant regression exercises the new API; existing source-context
+and capture tests cover continuity and original exclusive deadlines. Source
+review found and repaired reentrant lifecycle and whole-value read gaps.
+The actual Win32 editor and shared session still await the hosted Windows
+cross-Clippy lane: the existing trust-root export requires the macOS builder
+and cannot run unchanged on this Linux executor. No real Windows IME,
 host-insertion or live-tailnet qualification is claimed; `fr-nuqa` stays in
 progress. See [Windows client usage](docs/windows-client.md).
 
@@ -42,17 +49,30 @@ microphone output retain their connection fences.
 
 Regressions exercise queued and native-staged records in both directions,
 original control and sibling traffic, late-admission races, source-demand and
-output cleanup, and preservation of the original microphone owners. These
-full local metadata check was SIGKILLed in unchanged pinned Asupersync, then
-the execution service became unavailable. The portable four-crate check and
-formatting pass preceded these changes. Hosted verification for audio source
+output cleanup, and preservation of the original microphone owners. Local
+workspace checking and a later focused transport test build both ended in
+SIGKILL while compiling unchanged pinned Asupersync. The focused attempt used
+serial compiler frontend/backend work and stopped before any project tests;
+its measured peak process-group RSS was 7.6 GiB. The kill's cause was not exposed.
+
+Completed hosted native-audio and native-client jobs for audio source
 commit [903d02d2](https://github.com/Dicklesworthstone/franken_remote/commit/903d02d2a5d6881a79d85392db47d762c3d07e20)
-is still running at this update. Its continued-step API conclusions do not
-establish compiler/test success; the completed job logs and aggregate verdict
-are required. The completed macOS native-audio job passed. The separate pinned
-formatter's four test-file corrections are included with the Windows feature.
-No native-device,
-live-tailnet or loaded-host qualification is claimed; `fr-jy4e` stays in progress.
+passed their actual logged checks and test commands. The completed Linux Rust
+job confirms successful all-target/all-feature Check and strict Clippy, plus
+128 passing media-attachment tests including every new transport send-expiry
+case and passing host-owner expiry regressions. The full run was red on
+formatting and one new client fixture, repeated in the private-microphone lane.
+
+That fixture waited 2.1 seconds without new presentation evidence, exceeding
+its 1.5-second view age. The production microphone correctly refused stale
+readiness before receiving the peer reset. The corrected test keeps only its
+explicit presentation fixture current on the same original input owner; no
+grant, ticket, send deadline or production authority ordering changes. This
+correction still awaits execution. Exact formatter corrections are applied,
+and the restored workspace passes `cargo fmt --all --check`. These results
+come from completed command logs, not continued-step API success flags.
+Native-device, live-tailnet and loaded-host qualification remain unclaimed;
+`fr-jy4e` stays in progress.
 
 ## Complete iOS Unicode callbacks without delayed replay (2026-11-14 UTC)
 

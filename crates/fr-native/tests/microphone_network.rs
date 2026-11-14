@@ -173,7 +173,15 @@ fn peer_send_expiry_stops_the_microphone_without_recording_or_losing_control() {
         assert_eq!(link.host.usage().retained_send_records, 1);
         // Expire the real host record before it leaves. Only its native reset
         // crosses the network; the controller must retain the sender's cause.
-        asupersync::time::sleep(cx.now(), Duration::from_millis(2100)).await;
+        // Keep the explicit presentation fixture current on this same input
+        // owner. Its view age is shorter than reliable-send custody; allowing
+        // it to lapse would correctly stop the microphone before peer I/O.
+        // No grant, ticket or retained-send deadline is renewed here.
+        for serial in 1..=3 {
+            asupersync::time::sleep(cx.now(), Duration::from_millis(700)).await;
+            let elapsed = u64::try_from(origin.elapsed().as_micros()).unwrap();
+            authority::ready(&mut input, serial, elapsed);
+        }
         link.host.tick(&cx, || true).unwrap();
         assert!(host.send_expired(&link.host));
         let until = network::clock(&cx) + 500_000;

@@ -96,7 +96,7 @@ impl Lifetime {
     pub fn changed(&self) {
         if self
             .revision
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
                 value.checked_add(1)
             })
             .is_err()
