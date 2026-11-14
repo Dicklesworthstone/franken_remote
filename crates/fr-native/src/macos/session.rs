@@ -769,6 +769,31 @@ impl Session {
     pub fn files(&self) -> Ref<'_, files::Files> {
         self.files.borrow()
     }
+    /// The original control offer with the optional precise-scroll and
+    /// committed-text capabilities this session's policy requests. They must
+    /// be in the ORIGINAL: each attempt's [`Application::offer`] may only
+    /// remove from it, and the reconnect loop refuses a selection holding any
+    /// capability the original lacks (that refusal ended every macOS control
+    /// attempt as `Notification` while they were added per attempt).
+    /// Observation, or an offer that does not request control, is unchanged.
+    pub fn control_offer(&self, offer: Offer) -> Result<Offer, fr_wire::negotiation::Error> {
+        let Some(policy) = self.control else {
+            return Ok(offer);
+        };
+        if offer.role != fr_wire::negotiation::Role::RequestControl {
+            return Ok(offer);
+        }
+        let offer = if policy.capabilities.contains(Capability::PixelScroll) {
+            fr_wire::control::with_pixel_scroll(offer)?
+        } else {
+            offer
+        };
+        if policy.capabilities.contains(Capability::Text) {
+            fr_wire::control::with_committed_text(offer)
+        } else {
+            Ok(offer)
+        }
+    }
     /// Select the original foreground owner's comparison identity before file
     /// setup. An already configured or cancelled endpoint cannot be rebound.
     pub fn file_command_connection(
@@ -1548,22 +1573,11 @@ impl Application for Session {
         }
         // Remove only unavailable optional file/clipboard choices. Keep the
         // original role, limits, required gates and other options exact.
+        // Nothing is added here: the reconnect loop refuses a selection with
+        // any capability its original lacks. Optional control capabilities
+        // belong in the original (`control_offer`).
         let mut offer = original.clone();
         offer.capabilities.retain(|cap| keep(&cap.name));
-        if self
-            .control
-            .is_some_and(|policy| policy.capabilities.contains(Capability::PixelScroll))
-            && offer.role == fr_wire::negotiation::Role::RequestControl
-        {
-            offer = fr_wire::control::with_pixel_scroll(offer).map_err(|_| CallbackError)?;
-        }
-        if self
-            .control
-            .is_some_and(|policy| policy.capabilities.contains(Capability::Text))
-            && offer.role == fr_wire::negotiation::Role::RequestControl
-        {
-            offer = fr_wire::control::with_committed_text(offer).map_err(|_| CallbackError)?;
-        }
         Ok(offer)
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
@@ -2644,6 +2658,45 @@ mod tests {
         session.terminal = Some(error(adverse));
         assert_eq!(session.terminal_failure(), Some(error(adverse)));
         assert_eq!(session.completion_action(), Err(CallbackError));
+    }
+
+    /// A control session's attempts only ever remove from the original offer:
+    /// frd's reconnect loop refuses a selection holding any capability its
+    /// original lacks. Adding precise scroll and committed text per attempt
+    /// made every macOS control connection end `Notification` before dialing.
+    #[test]
+    fn a_control_session_selects_only_capabilities_its_original_offer_holds() {
+        let mut session = Session::new(
+            Some(ControlPolicy::default()),
+            ObserverPolicy::default(),
+            Box::new(|_| Ok(None)),
+            1,
+            "control offer fixture".to_owned(),
+        );
+        let original = session
+            .control_offer(fr_client::native::control_offer())
+            .unwrap();
+        for name in [
+            fr_wire::control::PIXEL_SCROLL_CAPABILITY,
+            fr_wire::control::TEXT_CAPABILITY,
+        ] {
+            assert!(
+                original
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == name && !cap.required),
+                "the original control offer requests optional {name}"
+            );
+        }
+        for attempt in 1..=3 {
+            assert_eq!(session.offer(attempt, &original).unwrap(), original);
+        }
+        // An original without them (an older caller) stays without them.
+        let plain = fr_client::native::control_offer();
+        assert_eq!(session.offer(1, &plain).unwrap(), plain);
+        // Observation is never widened into a control request.
+        let observing = fr_client::native::observation_offer();
+        assert_eq!(session.control_offer(observing.clone()).unwrap(), observing);
     }
 
     #[test]

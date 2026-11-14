@@ -268,6 +268,15 @@ fn connect_selected(
         // Drop the Ref before handing the mutable session to its supervisor.
         // Clipboard and file consent are independent original choices.
         let offer = playback::offer(session.files().offer(connection.clipboard), audio.is_some())?;
+        // The session's precise-scroll and text capabilities join the ORIGINAL
+        // offer (playback reserved their room): each attempt may only remove.
+        let offer = session.control_offer(offer).map_err(|_| {
+            Failure::new(
+                "control_capability_limit",
+                "The selected Mac control profile cannot fit its precise-scroll and text capabilities. Use --no-clipboard or select fewer file directions.",
+                2,
+            )
+        })?;
         let operation = client.run_control_capable(
             cx.clone(),
             runtime.handle(),
