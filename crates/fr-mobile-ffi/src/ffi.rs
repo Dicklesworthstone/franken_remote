@@ -256,6 +256,7 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         port: config.port,
         control: config.control,
         picture,
+        display: crate::session::DisplayChoice::Primary,
     }) else {
         return FR_BUSY;
     };

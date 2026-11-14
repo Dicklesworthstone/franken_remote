@@ -69,6 +69,50 @@ after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
 
+## Choose a remote display
+
+```text
+fr-windows view remote.example.ts.net --display choose
+fr-windows view remote.example.ts.net --control --display choose
+fr-windows view remote.example.ts.net --display only
+```
+
+`--display choose` opens a native display picker after the host has approved
+observation and supplied its current display catalog. Each button shows the
+display's pixel size, desktop position, scale and rotation. Choose one to start
+video; **Cancel**, Escape, or closing the picker ends that connection. The
+picker remains responsive while the session continues network and deadline
+processing. The existing 30-second startup budget includes time spent choosing;
+it does not restart when a picker appears or a button is pressed.
+
+The available policies are:
+
+| Option | Selection |
+|---|---|
+| `--display choose` | A fresh native choice from the current approved catalog. |
+| `--display primary` | The display at desktop origin `(0, 0)`, otherwise the first approved entry. This is the default. |
+| `--display only` | The sole approved display; multiple displays refuse as ambiguous. |
+| `--display HANDLE` | An exact nonzero decimal host catalog handle, if present in this connection's catalog. This is not a Windows monitor number or picker row number. |
+
+An empty catalog, a missing explicit handle, or a catalog that changes while
+the picker is open refuses selection; it never opens another display as a
+fallback. An explicit `HANDLE` is re-evaluated against each fresh catalog,
+matching the `fr` CLI: its number is not a permanent physical-monitor identity.
+The host still decides which displays are shared and permitted by local approval.
+
+Each picker belongs to one connection attempt and one complete catalog. A
+choice is consumed once. Reconnection and a permitted resize reopen read a
+fresh catalog; `choose` opens a new picker and an older window cannot answer or
+cancel it. Existing resize rules still resume viewing only. The selected
+display's own signed origin and geometry feed the existing pointer mapping,
+including displays left of or above the desktop origin.
+
+This selects the display before video starts. To choose a different display
+later, close the viewer and run the command again. Selecting a display does
+not itself request control; `--control` retains the existing separate grant
+and visible-view requirements. The existing mobile C interface retains its
+primary-display default.
+
 ## Send Unicode and IME text
 
 During a controlled session, choose **Input → Send text…** from the viewer's
@@ -187,3 +231,12 @@ IME/lifecycle and host-delivery qualification.
 Those checks cover selection and route policy. They do not establish native
 Windows pipe access, GPU behavior or live tailnet connectivity on a particular
 machine; native platform qualification remains necessary.
+
+The actual shared display-selection policy is also exercised by portable
+`fr-windows` tests: primary/explicit selection, empty and ambiguous catalogs,
+missing handles, complete metadata changes, one-use replies, cross-session and
+cross-attempt isolation, cancellation and the full eight-display bound. Shared
+session regressions cover approval-callback publication, no input grant from
+selection, stale cancellation and close before consumption. The native picker
+still requires Windows UI and a real multi-display host for platform
+qualification; these source tests do not claim that hardware run.

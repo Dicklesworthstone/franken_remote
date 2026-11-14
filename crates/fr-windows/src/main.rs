@@ -9,7 +9,7 @@
 //!   fr-windows hosts
 //!       a local machine-choice snapshot (JSON), without remote probes.
 //!   fr-windows view <stable-id-or-name> [--port N] [--ipv4|--ipv6]
-//!       [--address IP]... [--control] [--seconds N]
+//!       [--address IP]... [--control] [--seconds N] [--display primary|only|choose|HANDLE]
 //!       one session in a native window: Media Foundation (DXVA) decode and
 //!       a D3D11 swap chain, 1:1 when the picture fits. Prints a JSON
 //!       completion document (counts and timings, no content) at the end.
@@ -49,10 +49,17 @@ mod key_capture_policy;
 #[path = "../../fr-mobile-ffi/src/input/scroll.rs"]
 mod scroll_capture_policy;
 
+// Exercise the same original-catalog selection used by the native session
+// without compiling its platform decoder or async runtime on portable hosts.
+#[cfg(test)]
+#[path = "../../fr-mobile-ffi/src/session/display.rs"]
+mod display_selection_policy;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows hosts\n       fr-windows view <stable-id-or-full-name> \
-     [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--seconds N]\n       \
+     [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--seconds N] \
+     [--display primary|only|choose|HANDLE]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \
      [--address IP]...\n       fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] \
      [--display N] [--picture-width N] [--all]\n";

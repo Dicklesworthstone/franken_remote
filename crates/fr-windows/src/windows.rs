@@ -4,7 +4,7 @@ mod viewer;
 
 use crate::{
     USAGE,
-    options::{Family, Options},
+    options::{DisplayChoice, Family, Options},
 };
 use fr_mobile_ffi::directory::{Request, fetch};
 use fr_mobile_ffi::session::{
@@ -66,6 +66,12 @@ pub fn run(args: &[String]) -> ExitCode {
         port: options.port,
         control: options.control,
         picture: None,
+        display: match options.display {
+            DisplayChoice::Primary => fr_mobile_ffi::session::DisplayChoice::Primary,
+            DisplayChoice::Only => fr_mobile_ffi::session::DisplayChoice::Only,
+            DisplayChoice::Choose => fr_mobile_ffi::session::DisplayChoice::Choose,
+            DisplayChoice::Handle(handle) => fr_mobile_ffi::session::DisplayChoice::Handle(handle),
+        },
     };
     viewer::run(config, &title, options.seconds)
 }

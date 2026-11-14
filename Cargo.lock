@@ -679,6 +679,7 @@ dependencies = [
  "fr-mobile-ffi",
  "fr-native",
  "fr-tailnet",
+ "fr-wire",
  "serde_json",
  "windows",
 ]

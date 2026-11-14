@@ -11,6 +11,31 @@ pub(crate) enum Family {
     Ipv6,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DisplayChoice {
+    #[default]
+    Primary,
+    Only,
+    Choose,
+    Handle(u128),
+}
+
+impl DisplayChoice {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "primary" => Some(Self::Primary),
+            "only" => Some(Self::Only),
+            "choose" => Some(Self::Choose),
+            value if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => value
+                .parse()
+                .ok()
+                .filter(|handle| *handle != 0)
+                .map(Self::Handle),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Options {
     pub port: u16,
@@ -19,6 +44,7 @@ pub(crate) struct Options {
     pub family: Family,
     pub control: bool,
     pub seconds: Option<u64>,
+    pub display: DisplayChoice,
 }
 
 impl Options {
@@ -29,8 +55,10 @@ impl Options {
             family: Family::Automatic,
             control: false,
             seconds: None,
+            display: DisplayChoice::Primary,
         };
         let mut port_set = false;
+        let mut display_set = false;
         loop {
             match rest {
                 [] => return Some(options),
@@ -70,6 +98,10 @@ impl Options {
                         "--seconds" if view && options.seconds.is_none() => {
                             options.seconds = Some(value.parse().ok().filter(|s| *s != 0)?);
                         }
+                        "--display" if view && !display_set => {
+                            options.display = DisplayChoice::parse(value)?;
+                            display_set = true;
+                        }
                         _ => return None,
                     }
                     rest = tail;
@@ -105,6 +137,7 @@ mod tests {
                 family: Family::Automatic,
                 control: false,
                 seconds: None,
+                display: DisplayChoice::Primary,
             })
         );
         assert_eq!(parse(&[], false), parse(&[], true));
@@ -188,5 +221,40 @@ mod tests {
         );
         args.extend(["--address".to_owned(), "100.64.0.9".to_owned()]);
         assert!(Options::parse(&args, false, 47819).is_none());
+    }
+
+    #[test]
+    fn display_choice_is_explicit_and_does_not_change_control_or_address_policy() {
+        for (value, expected) in [
+            ("primary", DisplayChoice::Primary),
+            ("only", DisplayChoice::Only),
+            ("choose", DisplayChoice::Choose),
+            ("7", DisplayChoice::Handle(7)),
+            (
+                "340282366920938463463374607431768211455",
+                DisplayChoice::Handle(u128::MAX),
+            ),
+        ] {
+            let options = parse(&["--display", value, "--control", "--ipv6"], true).unwrap();
+            assert_eq!(options.display, expected);
+            assert!(options.control);
+            assert_eq!(options.family, Family::Ipv6);
+            assert_eq!(options.addresses, [] as [IpAddr; 0]);
+            assert!(parse(&["--display", value], false).is_none());
+        }
+        for args in [
+            vec!["--display"],
+            vec!["--display", "0"],
+            vec!["--display", "-1"],
+            vec!["--display", "+1"],
+            vec!["--display", "1.0"],
+            vec!["--display", "0x1"],
+            vec!["--display", "first"],
+            vec!["--display", "340282366920938463463374607431768211456"],
+            vec!["--display", "primary", "--display", "only"],
+            vec!["--display", "choose", "--display", "choose"],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
     }
 }

@@ -15,6 +15,7 @@
 mod completion;
 pub mod connection;
 mod control_policy;
+mod display;
 mod key_capture;
 mod text;
 
@@ -24,6 +25,10 @@ pub use completion::end;
 pub(crate) use completion::tailnet_end;
 use completion::{LocalStop, ending, requested_terminal};
 use control_policy::requested_capabilities;
+pub use display::{
+    Choice as DisplayChoice, Error as DisplayError, MAX_CHOICES as MAX_DISPLAY_CHOICES,
+    Request as DisplayRequest,
+};
 pub use text::{CapturedText, TextDraft};
 
 use crate::{
@@ -146,6 +151,8 @@ pub struct Config {
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
     pub picture: Option<(u32, u32)>,
+    /// Select only from each attempt's current approved display catalog.
+    pub display: DisplayChoice,
 }
 
 /// The granted producer frd owns for this session (see `NativeCapture`).
@@ -216,6 +223,7 @@ pub struct Shared {
     hardware: AtomicI32,
     pin: Mutex<Option<String>>,
     detail: Mutex<Option<String>>,
+    display_selection: Mutex<display::Selection>,
     end: AtomicU32,
     started: Instant,
     first_view_micros: AtomicU64,
@@ -240,6 +248,7 @@ impl Shared {
             hardware: AtomicI32::new(-1),
             pin: Mutex::default(),
             detail: Mutex::default(),
+            display_selection: Mutex::default(),
             end: AtomicU32::new(u32::MAX),
             started: Instant::now(),
             first_view_micros: AtomicU64::new(0),
@@ -249,7 +258,75 @@ impl Shared {
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
+        self.retire_display();
         self.stop_control(None);
+    }
+    /// A new native picker request, published only after host approval. The
+    /// original startup budget and transport continue while the UI decides.
+    pub fn display_request(&self) -> Option<DisplayRequest> {
+        let selection = self.display_selection.lock().ok()?;
+        if self.close.load(Ordering::SeqCst) || self.finished() {
+            return None;
+        }
+        selection.request()
+    }
+    pub fn display_request_current(&self, request: &DisplayRequest) -> bool {
+        self.display_selection.lock().is_ok_and(|selection| {
+            !self.close.load(Ordering::SeqCst) && !self.finished() && selection.current(request)
+        })
+    }
+    /// Queue one handle from this exact original catalog. Acceptance does not
+    /// grant observation, input, a new deadline, or permission to switch later.
+    pub fn select_display(
+        &self,
+        request: &DisplayRequest,
+        handle: u128,
+    ) -> Result<(), DisplayError> {
+        let mut selection = self
+            .display_selection
+            .lock()
+            .map_err(|_| DisplayError::Closed)?;
+        if self.close.load(Ordering::SeqCst) || self.finished() {
+            return Err(DisplayError::Closed);
+        }
+        selection.submit(request, handle)
+    }
+    /// Cancel only this still-current picker. A delayed old window cannot
+    /// cancel the replacement attempt or a choice already submitted once.
+    pub fn cancel_display(&self, request: &DisplayRequest) -> Result<(), DisplayError> {
+        let mut selection = self
+            .display_selection
+            .lock()
+            .map_err(|_| DisplayError::Closed)?;
+        selection.cancel(request)?;
+        self.close.store(true, Ordering::SeqCst);
+        drop(selection);
+        self.stop_control(None);
+        Ok(())
+    }
+    fn begin_display(&self) -> Result<(), ObserverError> {
+        let mut selection = self
+            .display_selection
+            .lock()
+            .map_err(|_| ObserverError::Application)?;
+        if self.close.load(Ordering::SeqCst) || self.finished() {
+            return Err(ObserverError::Application);
+        }
+        selection.begin();
+        Ok(())
+    }
+    fn choose_display(&self, choice: DisplayChoice, catalog: &Catalog) -> Result<Option<u128>, ()> {
+        let mut selection = self.display_selection.lock().map_err(|_| ())?;
+        if self.close.load(Ordering::SeqCst) || self.finished() {
+            return Err(());
+        }
+        selection.poll(choice, catalog).map_err(|_| ())
+    }
+    fn retire_display(&self) {
+        self.display_selection
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire();
     }
     pub fn finished(&self) -> bool {
         self.finished.load(Ordering::SeqCst)
@@ -793,7 +870,20 @@ impl Drop for Session {
 }
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
+    shared.retire_display();
     shared.stop_control(None);
+    let display_failure = shared
+        .display_selection
+        .lock()
+        .ok()
+        .and_then(|selection| selection.failure());
+    let detail = match display_failure {
+        Some(failure) => Some(format!(
+            "DisplaySelection({failure:?}); {}",
+            detail.as_deref().unwrap_or("SessionEnded")
+        )),
+        None => detail,
+    };
     if let Ok(mut slot) = shared.detail.lock() {
         *slot = detail;
     }
@@ -833,7 +923,7 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let mut epoch = [0_u8; 16];
     cx.random_bytes(&mut epoch);
     let epoch = u128::from_be_bytes(epoch).max(1);
-    let mut app = Mobile::new(shared.clone(), control, local, epoch, watch);
+    let mut app = Mobile::new(shared.clone(), control, config.display, local, epoch, watch);
     let cfg = Configuration {
         port: config.port,
         family: target.family(),
@@ -1066,17 +1156,6 @@ fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>
     Some(id)
 }
 
-/// The primary display: the one at the desktop origin, else the first.
-#[allow(clippy::unnecessary_wraps)] // frd's display selector signature
-fn choose_display(catalog: &Catalog) -> Result<Option<u128>, ()> {
-    let displays = catalog.displays();
-    Ok(displays
-        .iter()
-        .find(|d| d.x == 0 && d.y == 0)
-        .or_else(|| displays.first())
-        .map(|d| d.handle))
-}
-
 /// What attaching the granted source did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Attach {
@@ -1162,6 +1241,7 @@ fn attach(
 struct Mobile {
     shared: Arc<Shared>,
     control: bool,
+    display: DisplayChoice,
     close_cx: Cx,
     epoch: u128,
     watch: Option<PinWatch>,
@@ -1175,6 +1255,7 @@ impl Mobile {
     fn new(
         shared: Arc<Shared>,
         control: bool,
+        display: DisplayChoice,
         close_cx: Cx,
         epoch: u128,
         watch: Option<PinWatch>,
@@ -1182,6 +1263,7 @@ impl Mobile {
         Self {
             shared,
             control,
+            display,
             close_cx,
             epoch,
             watch,
@@ -1203,6 +1285,7 @@ impl Application for Mobile {
         }
         self.started = true;
         self.service_succeeded = false;
+        self.shared.begin_display()?;
         self.shared.frames.begin_attempt();
         publish_pin(&self.shared, self.watch.as_ref());
         let attempt_number = u32::from(attempt);
@@ -1214,6 +1297,8 @@ impl Application for Mobile {
         let shared = self.shared.clone();
         let native_started = self.native_started.clone();
         let approvals = self.shared.clone();
+        let selection = self.shared.clone();
+        let display_choice = self.display;
         let opening = viewer.observe_with_renderer(
             move |display, _original| async move {
                 native_started.set(true);
@@ -1234,7 +1319,7 @@ impl Application for Mobile {
             },
             ObserverPolicy::default(),
             self.control.then(ClockPolicy::default),
-            choose_display,
+            move |catalog| selection.choose_display(display_choice, catalog),
             move |_notice| {
                 approvals
                     .events
@@ -1394,6 +1479,7 @@ impl Application for Mobile {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
         // Fence at call time: no input outlives the attempt.
+        self.shared.retire_display();
         self.shared.stop_control(None);
         self.shared.serving.store(false, Ordering::SeqCst);
         async move {

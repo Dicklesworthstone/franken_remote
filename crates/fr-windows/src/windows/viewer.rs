@@ -19,6 +19,7 @@
 //! input source cancels its owner, so controlled resize cannot prove that
 //! orderly close and may terminate instead. Control requires a fresh
 //! explicit invocation, never replay of the earlier --control choice.
+mod display;
 mod text;
 
 use super::render::Renderer;
@@ -94,6 +95,8 @@ struct Viewer {
     redial_at: Option<Instant>,
     /// One local composition, permanently bound to its opening source/view.
     text: Option<text::Editor>,
+    /// One modeless choice from this attempt's host-approved catalog.
+    display_picker: Option<display::Picker>,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -184,6 +187,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             reopen_asked: None,
             redial_at: None,
             text: None,
+            display_picker: None,
         });
     });
     // SAFETY: showing the window this thread created.
@@ -194,6 +198,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let mut viewer = VIEWER.with(|cell| cell.borrow_mut().take());
     if let Some(viewer) = &mut viewer {
         viewer.text = None;
+        viewer.display_picker = None;
     }
     // SAFETY: destroying the window this thread created; the viewer (and
     // with it the swap chain) is already out of the window procedure's
@@ -244,6 +249,15 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
                     continue;
                 }
             }
+            let picker =
+                with_viewer(|v| v.display_picker.as_ref().map(display::Picker::window)).flatten();
+            if let Some(picker) = picker {
+                // SAFETY: our live modeless picker, outside the Viewer borrow;
+                // keyboard/button callbacks keep the original request identity.
+                if unsafe { IsDialogMessageW(picker, &raw const msg) }.as_bool() {
+                    continue;
+                }
+            }
             // SAFETY: a message this thread just removed from its queue.
             unsafe {
                 let _ = TranslateMessage(&raw const msg);
@@ -252,7 +266,7 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
         }
         // A sent close may also arrive during a queue read that returns empty.
         drain_close();
-        let Some((finished, drew)) = with_viewer(|v| step(v, &mut stats, &mut last_sequence))
+        let Some((finished, drew)) = with_viewer(|v| step(v, &mut stats, &mut last_sequence, hwnd))
         else {
             return stats;
         };
@@ -293,6 +307,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.redial_at = None;
     v.reopen = false;
     v.text = None;
+    v.display_picker = None;
     let mut next = config.clone();
     // The earlier input consent ended with its original grant. A resize
     // may reopen a view but cannot request or restore control automatically.
@@ -337,7 +352,8 @@ enum Reopen {
 const REDIAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// Events, then the newest picture if there is one. (finished, drew)
-fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bool) {
+fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    v.update_display_picker(hwnd);
     if !v.keys.is_empty() {
         v.send_keys();
     }
@@ -674,8 +690,30 @@ fn key_result(result: InputResult) -> Result<bool, ()> {
 }
 
 impl Viewer {
+    fn update_display_picker(&mut self, hwnd: HWND) {
+        if self
+            .display_picker
+            .as_ref()
+            .is_some_and(|picker| !picker.current())
+        {
+            self.display_picker = None;
+        }
+        if self.display_picker.is_some() || self.closing || self.reopen {
+            return;
+        }
+        let Some(request) = self.session.shared().display_request() else {
+            return;
+        };
+        match display::Picker::open(hwnd, self.session.shared_handle(), request) {
+            Ok(picker) => self.display_picker = Some(picker),
+            Err(_) => {
+                eprintln!("fr-windows: display_picker_unavailable");
+                self.close();
+            }
+        }
+    }
     fn open_text(&mut self, hwnd: HWND) {
-        if self.closing || self.reopen {
+        if self.closing || self.reopen || self.display_picker.is_some() {
             return;
         }
         // Reopening is a new explicit local choice. No content or context from
@@ -935,6 +973,7 @@ impl Viewer {
         self.keys.clear();
         self.session.shared().close();
         self.text = None;
+        self.display_picker = None;
     }
     /// The client area is now `size` (a drag ended, or a maximize or
     /// restore): reopen when the host would send a different picture.
@@ -988,6 +1027,7 @@ extern "system" fn window_proc(
         }
         WM_CLOSE => {
             CLOSE_PENDING.with(|pending| pending.set(true));
+            display::close_owner();
             text::close_owner();
             drain_close();
             // An orderly close: the loop ends once the session finishes.
@@ -1001,6 +1041,7 @@ extern "system" fn window_proc(
             true
         }
         WM_DESTROY => {
+            display::close_owner();
             text::close_owner();
             // SAFETY: ends this thread's message loop.
             unsafe { PostQuitMessage(0) };

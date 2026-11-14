@@ -156,6 +156,102 @@ fn releasing_control_closes_the_session_and_stops_any_pending_request() {
     assert!(!other.close.load(Ordering::SeqCst));
 }
 
+fn display_catalog() -> Catalog {
+    Catalog::new(
+        1,
+        &[Display {
+            handle: 19,
+            geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+            x: -1920,
+            y: 32,
+            pixel_width: 1920,
+            pixel_height: 1080,
+            logical_width: 1920,
+            logical_height: 1080,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
+        }],
+        &fr_core::limits::ProtocolLimits::ABSOLUTE,
+    )
+    .unwrap()
+}
+
+#[test]
+fn display_choice_requires_the_approved_callback_and_never_grants_input() {
+    let shared = Shared::new();
+    assert!(shared.display_request().is_none());
+    shared.begin_display().unwrap();
+    assert!(shared.display_request().is_none());
+    let catalog = display_catalog();
+    assert_eq!(
+        shared.choose_display(DisplayChoice::Choose, &catalog),
+        Ok(None)
+    );
+    let request = shared.display_request().unwrap();
+    assert!(shared.display_request_current(&request));
+    assert_eq!(
+        shared.select_display(&request, 20),
+        Err(DisplayError::MissingDisplay)
+    );
+    assert_eq!(shared.select_display(&request, 19), Ok(()));
+    assert!(shared.display_request().is_none());
+    assert_eq!(
+        shared.choose_display(DisplayChoice::Choose, &catalog),
+        Ok(Some(19))
+    );
+    assert!(!shared.controlled());
+    assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+}
+
+#[test]
+fn stale_picker_cancel_cannot_close_a_new_attempt_with_identical_metadata() {
+    let shared = Shared::new();
+    let catalog = display_catalog();
+    shared.begin_display().unwrap();
+    shared
+        .choose_display(DisplayChoice::Choose, &catalog)
+        .unwrap();
+    let old = shared.display_request().unwrap();
+    shared.retire_display();
+    shared.begin_display().unwrap();
+    shared
+        .choose_display(DisplayChoice::Choose, &catalog)
+        .unwrap();
+    let current = shared.display_request().unwrap();
+    assert_eq!(shared.cancel_display(&old), Err(DisplayError::StaleRequest));
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert!(shared.display_request_current(&current));
+    assert_eq!(shared.cancel_display(&current), Ok(()));
+    assert!(shared.close.load(Ordering::SeqCst));
+    assert!(shared.display_request().is_none());
+    assert_eq!(
+        shared.select_display(&current, 19),
+        Err(DisplayError::Closed)
+    );
+    assert_eq!(shared.begin_display(), Err(ObserverError::Application));
+}
+
+#[test]
+fn local_close_discards_a_queued_display_choice_before_startup_can_consume_it() {
+    let shared = Shared::new();
+    let catalog = display_catalog();
+    shared.begin_display().unwrap();
+    shared
+        .choose_display(DisplayChoice::Choose, &catalog)
+        .unwrap();
+    let request = shared.display_request().unwrap();
+    shared.select_display(&request, 19).unwrap();
+    shared.close();
+    assert_eq!(
+        shared.choose_display(DisplayChoice::Choose, &catalog),
+        Err(())
+    );
+    assert!(!shared.display_request_current(&request));
+    assert!(shared.display_request().is_none());
+}
+
 #[test]
 fn a_submitted_picture_counts_as_shown_once_the_app_has_drawn_it() {
     use fr_media::access_unit::FrameId;

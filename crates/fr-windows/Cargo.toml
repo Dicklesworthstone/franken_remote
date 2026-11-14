@@ -18,6 +18,10 @@ path = "src/main.rs"
 # Portable native text validation uses the protocol's one committed-text bound.
 fr-core.workspace = true
 
+[dev-dependencies]
+# Run the actual shared approved-catalog selection on portable CI hosts.
+fr-wire.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
 # `capture-probe`: the Windows host media path (Desktop Duplication into a
