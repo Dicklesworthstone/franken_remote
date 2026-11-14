@@ -59,7 +59,19 @@ unsafe extern "C" {
         actual_height: *mut u32,
     ) -> *mut c_void;
     fn fr_viewer_window_close(handle: *mut c_void);
-    fn fr_viewer_screen_area(display: *const c_char, width: *mut u32, height: *mut u32) -> c_int;
+    fn fr_viewer_screen_area(
+        display: *const c_char,
+        width: *mut u32,
+        height: *mut u32,
+        root_width: *mut u32,
+        root_height: *mut u32,
+    ) -> c_int;
+    fn fr_viewer_clipboard_limit(
+        root_width: u32,
+        root_height: u32,
+        width: *mut u32,
+        height: *mut u32,
+    ) -> c_int;
     fn fr_viewer_window_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_viewer_window_resize_offer(handle: *mut c_void, width: u32, height: u32) -> c_int;
     fn fr_viewer_window_resized(handle: *mut c_void, width: *mut u32, height: *mut u32) -> c_int;
@@ -616,22 +628,55 @@ impl Drop for Native<'_> {
         }
     }
 }
-/// The local X screen's usable size in physical pixels (even axes): the root
-/// window, narrowed to the window manager's work area when it publishes one.
-/// `None` when the display is not local or cannot be read. A viewer window can
-/// never be larger than this; it bounds the default picture box.
+/// The local X screen as a viewer window sees it, in physical pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenArea {
+    /// The usable size (even axes): the root window, narrowed to the window
+    /// manager's work area when it publishes one. A viewer window can never
+    /// be larger; it bounds the default picture box.
+    pub usable: (u32, u32),
+    /// The root window's own size.
+    pub root: (u32, u32),
+}
+
+/// The local screen's [`ScreenArea`]. `None` when the display is not local
+/// or cannot be read.
 #[must_use]
-pub fn screen_area(display: &str) -> Option<(u32, u32)> {
+pub fn screen_area(display: &str) -> Option<ScreenArea> {
     if !local_display(display) {
         return None;
     }
     let native = CString::new(display).ok()?;
-    let (mut width, mut height) = (0_u32, 0_u32);
-    // SAFETY: a NUL-terminated display name and two writable scalars; the
+    let (mut width, mut height, mut root_width, mut root_height) = (0_u32, 0_u32, 0_u32, 0_u32);
+    // SAFETY: a NUL-terminated display name and four writable scalars; the
     // native call opens, reads and closes its own connection.
-    let read = unsafe { fr_viewer_screen_area(native.as_ptr(), &raw mut width, &raw mut height) };
+    let read = unsafe {
+        fr_viewer_screen_area(
+            native.as_ptr(),
+            &raw mut width,
+            &raw mut height,
+            &raw mut root_width,
+            &raw mut root_height,
+        )
+    };
     let (width, height) = (width & !1, height & !1);
-    (read == 1 && width >= 16 && height >= 16).then_some((width, height))
+    (read == 1 && width >= 16 && height >= 16).then_some(ScreenArea {
+        usable: (width, height),
+        root: (root_width, root_height),
+    })
+}
+
+/// The largest window a control session's viewer opens beside its clipboard
+/// panel on a root of `root` pixels (even axes), the rule the native window
+/// itself applies; `None` when the panel does not fit and the window keeps
+/// the ordinary policy.
+#[must_use]
+pub fn clipboard_limit(root: (u32, u32)) -> Option<(u32, u32)> {
+    let (mut width, mut height) = (0_u32, 0_u32);
+    // SAFETY: two writable scalars; pure arithmetic in the native layout.
+    let fits =
+        unsafe { fr_viewer_clipboard_limit(root.0, root.1, &raw mut width, &raw mut height) };
+    (fits == 1).then_some((width, height))
 }
 pub(crate) fn local_display(display: &str) -> bool {
     let Some(number) = display.strip_prefix(':') else {

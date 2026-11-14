@@ -69,12 +69,29 @@ static uint32_t root_cardinal(xcb_connection_t *c, xcb_window_t root, const char
     free(r);
     return value;
 }
+/* The largest viewer window beside the control clipboard panel on a root of
+ * root_width x root_height (even axes), or 0 when the panel does not fit
+ * there and the window keeps the ordinary policy. One rule for the window
+ * opened below and for the picture box the Rust owner states to the host. */
+int fr_viewer_clipboard_limit(uint32_t root_width, uint32_t root_height,
+                              uint32_t *width, uint32_t *height) {
+    if (!width || !height) return 0;
+    *width = *height = 0;
+    const uint32_t beside = 2u * FR_CLIPBOARD_MARGIN;
+    const uint32_t below = (uint32_t)FR_CLIPBOARD_HEIGHT + FR_CLIPBOARD_GAP + 2u * FR_CLIPBOARD_MARGIN;
+    if (root_width < (uint32_t)FR_CLIPBOARD_WIDTH || root_height < below + 16u) return 0;
+    *width = (root_width - beside) & ~1u;
+    *height = (root_height - below) & ~1u;
+    return 1;
+}
 /* The local screen's usable size: the root window, narrowed to the window
  * manager's _NET_WORKAREA for the current desktop when one is published (so
- * panels are left out). Read-only: one short connection, no window. */
-int fr_viewer_screen_area(const char *display, uint32_t *width, uint32_t *height) {
-    if (!display || !width || !height) return 0;
-    *width = *height = 0;
+ * panels are left out), and the root's own size. Read-only: one short
+ * connection, no window. */
+int fr_viewer_screen_area(const char *display, uint32_t *width, uint32_t *height,
+                          uint32_t *root_width, uint32_t *root_height) {
+    if (!display || !width || !height || !root_width || !root_height) return 0;
+    *width = *height = *root_width = *root_height = 0;
     int screen = 0;
     xcb_connection_t *c = xcb_connect(display, &screen);
     if (!c || xcb_connection_has_error(c)) {
@@ -88,6 +105,7 @@ int fr_viewer_screen_area(const char *display, uint32_t *width, uint32_t *height
         return 0;
     }
     uint32_t w = it.data->width_in_pixels, h = it.data->height_in_pixels;
+    uint32_t full_w = w, full_h = h;
     xcb_window_t root = it.data->root;
     uint32_t desktop = root_cardinal(c, root, "_NET_CURRENT_DESKTOP", 0, 0);
     if (desktop < 64) {
@@ -103,6 +121,7 @@ int fr_viewer_screen_area(const char *display, uint32_t *width, uint32_t *height
     xcb_disconnect(c);
     if (!ok) return 0;
     *width = w; *height = h;
+    *root_width = full_w; *root_height = full_h;
     return 1;
 }
 void fr_viewer_window_close(struct fr_viewer_window *h) {
@@ -132,14 +151,12 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
     while (screen-- > 0 && it.rem) xcb_screen_next(&it);
     if (!it.rem || it.data->root_depth != 24) goto fail;
     int16_t origin = 0;
-    if (clipboard_space && it.data->width_in_pixels >= FR_CLIPBOARD_WIDTH &&
-        it.data->height_in_pixels >= FR_CLIPBOARD_HEIGHT + FR_CLIPBOARD_GAP + 2 * FR_CLIPBOARD_MARGIN + 16) {
-        uint32_t max_width = ((uint32_t)it.data->width_in_pixels - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
-        uint32_t max_height = ((uint32_t)it.data->height_in_pixels -
-            FR_CLIPBOARD_HEIGHT - FR_CLIPBOARD_GAP - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
+    uint32_t limit_width = 0, limit_height = 0;
+    if (clipboard_space && fr_viewer_clipboard_limit(it.data->width_in_pixels,
+            it.data->height_in_pixels, &limit_width, &limit_height)) {
         origin = FR_CLIPBOARD_MARGIN;
-        if (width > max_width) width = max_width;
-        if (height > max_height) height = max_height;
+        if (width > limit_width) width = limit_width;
+        if (height > limit_height) height = limit_height;
     }
     /* An unsupported local screen keeps the ordinary viewing policy. The
      * optional clipboard may refuse independently; it never creates overlap. */
@@ -148,9 +165,8 @@ static struct fr_viewer_window *viewer_window_open(const char *display,
     h->max_width = it.data->width_in_pixels & ~1u;
     h->max_height = it.data->height_in_pixels & ~1u;
     if (origin) {
-        h->max_width = ((uint32_t)it.data->width_in_pixels - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
-        h->max_height = ((uint32_t)it.data->height_in_pixels -
-            FR_CLIPBOARD_HEIGHT - FR_CLIPBOARD_GAP - 2 * FR_CLIPBOARD_MARGIN) & ~1u;
+        h->max_width = limit_width;
+        h->max_height = limit_height;
     }
     h->window = xcb_generate_id(h->c);
     uint32_t values[] = { it.data->black_pixel,

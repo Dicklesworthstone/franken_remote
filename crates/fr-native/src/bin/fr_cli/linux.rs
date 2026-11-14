@@ -629,8 +629,12 @@ fn desktop_configuration(
         // previous behaviour.
         None => configuration.with_local_screen_box(),
     };
+    // The clipboard panel narrows the window, so it also caps the box the
+    // host fits its picture into (with or without --fit).
     let configuration = if connection.control && connection.clipboard {
-        configuration.with_clipboard_space()
+        configuration
+            .with_clipboard_space()
+            .with_local_clipboard_limit()
     } else {
         configuration
     };

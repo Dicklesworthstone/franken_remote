@@ -41,6 +41,7 @@ pub struct Configuration {
     display_picker: bool,
     fit_window: Option<(u32, u32)>,
     screen_box: Option<(u32, u32)>,
+    clipboard_limit: Option<(u32, u32)>,
     clipboard_space: bool,
     capture_system_shortcuts: bool,
     initial_snapshot: bool,
@@ -62,6 +63,7 @@ impl Configuration {
             display_picker: false,
             fit_window: None,
             screen_box: None,
+            clipboard_limit: None,
             clipboard_space: false,
             capture_system_shortcuts: false,
             initial_snapshot: false,
@@ -98,7 +100,31 @@ impl Configuration {
     #[must_use]
     pub fn with_local_screen_box(self) -> Self {
         match viewer_window::screen_area(&self.display) {
-            Some((width, height)) => self.with_screen_box(width, height),
+            Some(area) => self.with_screen_box(area.usable.0, area.usable.1),
+            None => self,
+        }
+    }
+    /// The largest window the viewer opens beside the control clipboard
+    /// panel ([`Self::with_clipboard_space`]). With that panel, the stated
+    /// picture box is capped at it, so a scaling host sends the picture the
+    /// smaller window shows instead of one the viewer scales down. A limit no
+    /// local window could have is ignored.
+    #[must_use]
+    pub fn with_clipboard_limit(mut self, width: u32, height: u32) -> Self {
+        if fr_media::worker::presentation::X11Target::new(1, width, height).is_ok() {
+            self.clipboard_limit = Some((width, height));
+        }
+        self
+    }
+    /// [`Self::with_clipboard_limit`] for this local display's root window
+    /// ([`viewer_window::clipboard_limit`]). An unreadable screen, or one too
+    /// small for the panel, keeps the uncapped box.
+    #[must_use]
+    pub fn with_local_clipboard_limit(self) -> Self {
+        match viewer_window::screen_area(&self.display)
+            .and_then(|area| viewer_window::clipboard_limit(area.root))
+        {
+            Some((width, height)) => self.with_clipboard_limit(width, height),
             None => self,
         }
     }
@@ -117,9 +143,19 @@ impl Configuration {
     fn fitted(&self, width: u32, height: u32) -> bool {
         self.window_box(width, height).is_some() || self.clipboard_space
     }
-    /// The picture box stated to the host: the explicit fit, else the screen.
+    /// The picture box stated to the host: the explicit fit, else the screen,
+    /// capped beside the clipboard panel when the viewer reserves it (the
+    /// window it then shows pictures in).
     fn picture_box(&self) -> Option<(u32, u32)> {
-        self.fit_window.or(self.screen_box)
+        let (width, height) = self.fit_window.or(self.screen_box)?;
+        Some(
+            match self.clipboard_limit.filter(|_| self.clipboard_space) {
+                Some((limit_width, limit_height)) => {
+                    (width.min(limit_width), height.min(limit_height))
+                }
+                None => (width, height),
+            },
+        )
     }
     /// Explicitly export the first presented viewport during observation-only
     /// startup. Pixels remain bounded and private until taken by the caller;

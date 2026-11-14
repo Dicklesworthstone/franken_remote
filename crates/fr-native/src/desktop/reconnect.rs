@@ -308,6 +308,7 @@ impl<U> Session<U> {
             configuration.display_picker = base.display_picker || self.select_fresh_display;
             configuration.fit_window = base.fit_window;
             configuration.screen_box = base.screen_box;
+            configuration.clipboard_limit = base.clipboard_limit;
             configuration.clipboard_space = base.clipboard_space;
             configuration.capture_system_shortcuts = base.capture_system_shortcuts;
             configuration.initial_snapshot = base.initial_snapshot;

@@ -285,6 +285,91 @@ fn screen_box_fits_only_displays_larger_than_the_screen_as_the_host_does() {
     );
 }
 
+#[test]
+fn a_control_viewer_states_the_window_beside_its_clipboard_panel_as_its_box() {
+    let configuration = || Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap();
+    let host = fr_wire::display::Display {
+        handle: 1,
+        geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+        x: 0,
+        y: 0,
+        pixel_width: 2256,
+        pixel_height: 1504,
+        logical_width: 2256,
+        logical_height: 1504,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    };
+    // viewer_window.c's layout: the panel takes 48 columns and 168 rows of
+    // a 1920x1080 root; it does not fit a root under 640 wide or 184 high.
+    let limit = crate::viewer_window::clipboard_limit((1920, 1080));
+    assert_eq!(limit, Some((1872, 912)));
+    assert_eq!(
+        crate::viewer_window::clipboard_limit((1921, 1081)),
+        Some((1872, 912))
+    );
+    // The window tests/viewer_window_x11.rs opens on a 640x480 root.
+    assert_eq!(
+        crate::viewer_window::clipboard_limit((640, 480)),
+        Some((592, 312))
+    );
+    assert_eq!(crate::viewer_window::clipboard_limit((639, 1080)), None);
+    assert_eq!(crate::viewer_window::clipboard_limit((1920, 183)), None);
+    let (width, height) = limit.unwrap();
+
+    // View only (no panel): the whole screen, as before.
+    let screen = || {
+        configuration()
+            .with_screen_box(1920, 1080)
+            .with_clipboard_limit(width, height)
+    };
+    assert_eq!(screen().picture_box(), Some((1920, 1080)));
+    // Control with the panel: the 1872x912 window. A 2256x1504 host then
+    // sends 1370x912, which the window's 1368x912 picture rectangle shows
+    // about 1:1, instead of 1622x1080 scaled down by 0.84.
+    let control = screen().with_clipboard_space();
+    assert_eq!(control.picture_box(), Some((1872, 912)));
+    assert_eq!(host.picture(control.picture_box()), Ok((1370, 912)));
+    assert_eq!(host.picture(screen().picture_box()), Ok((1622, 1080)));
+    // An explicit fit is capped the same way; a smaller one is kept.
+    let fit = |w, h| {
+        configuration()
+            .with_fitted_window(w, h)
+            .unwrap()
+            .with_clipboard_limit(width, height)
+            .with_clipboard_space()
+    };
+    assert_eq!(fit(1920, 1080).picture_box(), Some((1872, 912)));
+    assert_eq!(fit(960, 540).picture_box(), Some((960, 540)));
+    // No limit read (or a limit no window could have): uncapped, as before.
+    assert_eq!(
+        configuration()
+            .with_screen_box(1920, 1080)
+            .with_clipboard_limit(8, 8)
+            .with_clipboard_space()
+            .picture_box(),
+        Some((1920, 1080))
+    );
+    // Every later attempt keeps the limit and states the capped box.
+    let mut session = Session::new(
+        control,
+        ObserverPolicy::default(),
+        Mode::Observe,
+        SummaryUi::default(),
+    );
+    for attempt in [1, 2, 32] {
+        assert_eq!(
+            session.configuration(attempt).unwrap().picture_box(),
+            Some((1872, 912))
+        );
+    }
+    assert_eq!(
+        Application::picture(&mut session, 1, None),
+        Some((1872, 912))
+    );
+}
+
 #[derive(Default)]
 struct SummaryUi(Vec<(u8, CleanupSummary)>);
 impl Ui for SummaryUi {
