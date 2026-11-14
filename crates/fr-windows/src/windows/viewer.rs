@@ -57,9 +57,9 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageTime, IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG, MsgWaitForMultipleObjects,
-    PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW,
-    SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW,
+    GetForegroundWindow, GetMessageTime, IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG,
+    MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT,
+    RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
     WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE,
     WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST,
@@ -117,6 +117,9 @@ thread_local! {
     // A nested native callback may find VIEWER borrowed. Closure remains due
     // before the pump processes another input event or replaces the session.
     static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
+    // Activation messages describe a transition. Restore visible observation
+    // only after the pump sees this original viewer actually in foreground.
+    static ACTIVATION_PENDING: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
     /// The original owner was already fenced by the independent menu handler.
     /// UI cleanup may wait until a nested native callback releases Viewer.
     static CHANGE_PENDING: RefCell<Option<(Cause, change_display::Request<Shared>)>> =
@@ -473,6 +476,16 @@ enum Reopen {
 
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    sync_file_focus(v, hwnd);
+    if let Some(scope) = ACTIVATION_PENDING.with(Cell::get) {
+        if v.closing || v.reopen.pending() || control::activation_scope() != Some(scope) {
+            ACTIVATION_PENDING.with(|pending| pending.set(None));
+        // SAFETY: compare the current foreground HWND to this live viewer.
+        } else if unsafe { GetForegroundWindow() } == hwnd {
+            ACTIVATION_PENDING.with(|pending| pending.set(None));
+            control::visible(true);
+        }
+    }
     // Remember the pending worker before polling can collect it. Collection
     // after the original cleanup bound must remain a failure, including when
     // the source/transfer checks inside poll waited across that bound.
@@ -488,6 +501,9 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
             file_available,
         );
     }
+    // The worker may have fenced its original grant while poll collected it.
+    // Its independent pending notification survives that collection.
+    sync_file_focus(v, hwnd);
     if collecting_file_cleanup {
         v.file_cleanup_expired();
     }
@@ -864,6 +880,23 @@ fn key_result(result: InputResult) -> Result<bool, ()> {
         InputResult::Sent | InputResult::Pending => Ok(true),
         InputResult::Busy => Ok(false),
         _ => Err(()),
+    }
+}
+
+fn sync_file_focus(viewer: &mut Viewer, hwnd: HWND) {
+    if upload::picker_focus_lost(control::lifetime()) {
+        ACTIVATION_PENDING.with(|pending| pending.set(None));
+        control::reflect_hidden();
+        text::deactivate();
+        viewer.text_deactivated();
+        // Auxiliary source cleanup can delay this negative notification until
+        // after a genuine return to the viewer. Preserve that actual current
+        // observation through a new scoped pump check; the retired grant is
+        // never restored, and no old activation message is reused.
+        // SAFETY: scalar comparison against this still-live original viewer.
+        if unsafe { GetForegroundWindow() } == hwnd {
+            ACTIVATION_PENDING.with(|pending| pending.set(control::activation_scope()));
+        }
     }
 }
 
@@ -1431,14 +1464,20 @@ extern "system" fn window_proc(
             true
         }
         WM_ACTIVATEAPP if wparam.0 == 0 => {
-            upload::retire_choice();
-            control::visible(false);
-            text::deactivate();
-            with_viewer(Viewer::text_deactivated);
+            ACTIVATION_PENDING.with(|pending| pending.set(None));
+            let picker = u32::try_from(lparam.0)
+                .ok()
+                .is_some_and(|thread| upload::picker_deactivated(thread, control::lifetime()));
+            if !picker {
+                upload::retire_choice();
+                control::visible(false);
+                text::deactivate();
+                with_viewer(Viewer::text_deactivated);
+            }
             false
         }
         WM_ACTIVATEAPP => {
-            control::visible(true);
+            ACTIVATION_PENDING.with(|pending| pending.set(control::activation_scope()));
             false
         }
         WM_CLOSE => {

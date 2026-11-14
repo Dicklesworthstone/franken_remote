@@ -436,6 +436,29 @@ fn hiding_counts_once_per_visible_spell_and_without_a_grant_stops_nothing() {
 }
 
 #[test]
+fn a_retired_file_chooser_cannot_hide_a_new_view_or_spend_its_control_choice() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    let clipboard = shared.clipboard_report();
+    // An orphaned original token represents a callback whose granted source
+    // has already retired. It is not evidence of a live native input grant.
+    let original = Arc::new(AtomicBool::new(false));
+    assert!(!shared.hide_file_source(&original));
+    assert!(original.load(Ordering::SeqCst));
+    assert!(shared.visible.load(Ordering::SeqCst));
+    assert_eq!(shared.hides.load(Ordering::SeqCst), 0);
+    assert_eq!(shared.local_stop.load(Ordering::SeqCst), 0);
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert_eq!(shared.clipboard_report(), clipboard);
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    // Even a repeated late callback cannot cancel the new explicit request.
+    assert!(!shared.hide_file_source(&original));
+    assert!(shared.take_control_request().unwrap());
+}
+
+#[test]
 fn the_end_code_says_who_ended_the_session() {
     let hidden = Some(LocalStop::Hidden);
     let observed = Failure::Observation(ObserverError::Application);

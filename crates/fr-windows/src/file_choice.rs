@@ -6,6 +6,99 @@ pub const CHOICE_MS: u64 = 120_000;
 pub const ACCEPTED_MS: u64 = 2_000;
 pub const MAX_PATH_UNITS: usize = 32_768;
 
+/// The two native input queues belong to one explicit original dialog. A
+/// process ID is insufficient: unrelated windows in this process do not gain
+/// an exemption from the ordinary background/control fence.
+#[derive(Clone, Copy)]
+pub struct Focus {
+    owner_thread: u32,
+    owner_window: usize,
+    lifetime: u64,
+    worker_thread: Option<u32>,
+    dialog_window: Option<usize>,
+    published: bool,
+    worker_live: bool,
+}
+
+impl Focus {
+    pub fn new(owner_thread: u32, owner_window: usize, lifetime: u64) -> Option<Self> {
+        (owner_thread != 0 && owner_window != 0 && lifetime != u64::MAX).then_some(Self {
+            owner_thread,
+            owner_window,
+            lifetime,
+            worker_thread: None,
+            dialog_window: None,
+            published: false,
+            worker_live: false,
+        })
+    }
+
+    pub fn publish(&mut self) -> bool {
+        if self.published {
+            return false;
+        }
+        self.published = true;
+        true
+    }
+
+    pub fn register_worker(&mut self, thread: u32) -> bool {
+        if !self.published
+            || thread == 0
+            || thread == self.owner_thread
+            || self.worker_thread.is_some()
+        {
+            return false;
+        }
+        self.worker_thread = Some(thread);
+        self.worker_live = true;
+        true
+    }
+
+    pub fn register_dialog(&mut self, thread: u32, window: usize) -> bool {
+        if !self.allows_picker(thread, self.lifetime)
+            || window == 0
+            || window == self.owner_window
+            || self.dialog_window.is_some()
+        {
+            return false;
+        }
+        self.dialog_window = Some(window);
+        true
+    }
+
+    pub fn allows_picker(&self, thread: u32, lifetime: u64) -> bool {
+        self.published
+            && self.worker_live
+            && self.lifetime == lifetime
+            && self.worker_thread == Some(thread)
+    }
+
+    pub fn allows_owner(&self, thread: u32) -> bool {
+        self.worker_live && thread != 0 && thread == self.owner_thread
+    }
+
+    pub fn current(&self, lifetime: u64) -> bool {
+        self.published && self.lifetime == lifetime
+    }
+
+    pub fn owner_foreground(&self, thread: u32, root: usize) -> bool {
+        thread == self.owner_thread && root == self.owner_window
+    }
+
+    pub fn foreground(&self, thread: u32, root: usize) -> bool {
+        self.owner_foreground(thread, root)
+            || (self.worker_live
+                && self.worker_thread == Some(thread)
+                && self.dialog_window == Some(root))
+    }
+
+    /// Retire before the native thread terminates; a retained join handle does
+    /// not prevent Windows from reusing its numeric thread ID.
+    pub fn finish_worker(&mut self) {
+        self.worker_live = false;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     Cancelled,
@@ -138,6 +231,57 @@ mod tests {
         let mut choice = Choice::new(now).unwrap();
         choice.shown(now).unwrap();
         choice
+    }
+
+    #[test]
+    fn a_worker_cannot_receive_focus_before_its_original_choice_is_published() {
+        let mut focus = Focus::new(10, 100, 5).unwrap();
+        assert!(!focus.register_worker(20));
+        assert!(!focus.allows_picker(20, 5));
+        assert!(focus.publish());
+        assert!(!focus.publish());
+        assert!(!focus.register_worker(0));
+        assert!(!focus.register_worker(10));
+        assert!(focus.register_worker(20));
+        assert!(focus.allows_picker(20, 5));
+        assert!(!focus.register_worker(21));
+        for (thread, lifetime) in [(0, 5), (21, 5), (20, 6)] {
+            assert!(!focus.allows_picker(thread, lifetime));
+        }
+    }
+
+    #[test]
+    fn only_original_viewer_and_dialog_roots_can_retain_choice_focus() {
+        let mut focus = Focus::new(10, 100, 5).unwrap();
+        focus.publish();
+        focus.register_worker(20);
+        assert!(!focus.register_dialog(21, 200));
+        assert!(!focus.register_dialog(20, 0));
+        assert!(focus.register_dialog(20, 200));
+        assert!(!focus.register_dialog(20, 201));
+        assert!(focus.allows_owner(10));
+        assert!(focus.foreground(10, 100));
+        assert!(focus.foreground(20, 200));
+        for (thread, window) in [(0, 100), (10, 101), (20, 201), (21, 200), (20, 100)] {
+            assert!(!focus.foreground(thread, window));
+        }
+        assert!(!focus.allows_owner(0));
+        assert!(!focus.allows_owner(21));
+        assert!(!focus.owner_foreground(20, 200));
+    }
+
+    #[test]
+    fn an_exited_worker_id_cannot_be_reused_as_an_activation_exemption() {
+        let mut focus = Focus::new(10, 100, 5).unwrap();
+        focus.publish();
+        focus.register_worker(20);
+        focus.register_dialog(20, 200);
+        focus.finish_worker();
+        assert!(!focus.allows_picker(20, 5));
+        assert!(!focus.allows_owner(10));
+        assert!(!focus.foreground(20, 200));
+        assert!(!focus.register_worker(20));
+        assert!(focus.owner_foreground(10, 100));
     }
 
     #[test]

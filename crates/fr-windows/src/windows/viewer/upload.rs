@@ -38,6 +38,9 @@ thread_local! {
     // commands can never affect a subsequently selected file.
     static ACTION: RefCell<Option<BatchChoice>> = const { RefCell::new(None) };
     static PICKER_STOP: RefCell<Option<Weak<AtomicBool>>> = const { RefCell::new(None) };
+    // Keep a completed worker's negative notification until UI synchronization;
+    // collecting Choosing must not discard an external foreground-loss signal.
+    static PICKER_FOCUS: RefCell<Option<Arc<file_picker::Focus>>> = const { RefCell::new(None) };
 }
 
 fn action(change: impl FnOnce(&Upload, u8)) {
@@ -79,6 +82,26 @@ pub(super) fn retire_choice() {
             stop.store(true, Ordering::SeqCst);
         }
     });
+}
+
+/// Application activation is per input thread, including threads in this same
+/// process. Only the published original chooser may receive this handoff.
+pub(super) fn picker_deactivated(thread: u32, lifetime: u64) -> bool {
+    PICKER_FOCUS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|focus| focus.allows_picker(thread, lifetime))
+    })
+}
+
+/// Scoped worker-side hiding has already fenced its exact original grant.
+/// The UI consumes this only for its matching native lifetime and attempt.
+pub(super) fn picker_focus_lost(lifetime: u64) -> bool {
+    PICKER_FOCUS.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .is_some_and(|focus| focus.take_hidden(lifetime))
+    })
 }
 
 struct Choosing {
@@ -209,12 +232,19 @@ impl Menu {
         let Ok(context) = shared.begin_file_choice() else {
             return false;
         };
-        let Ok(picker) = file_picker::Picker::open(request.at) else {
+        let Ok(picker) = file_picker::Picker::open(
+            request.at,
+            Arc::clone(&request.original),
+            context.clone(),
+            self.hwnd,
+            request.lifetime,
+        ) else {
             self.last_choice = "native_unavailable";
             return false;
         };
         let stop = picker.cancellation();
         PICKER_STOP.with(|slot| *slot.borrow_mut() = Some(Arc::downgrade(&stop)));
+        PICKER_FOCUS.with(|slot| *slot.borrow_mut() = Some(picker.focus()));
         self.choosing = Some(Choosing {
             original: request.original,
             context,
@@ -226,6 +256,9 @@ impl Menu {
         self.last_choice = "choosing";
         self.available = false;
         self.displayed = None;
+        if let Some(choosing) = &mut self.choosing {
+            choosing.picker.start();
+        }
         true
     }
 
@@ -413,6 +446,7 @@ impl Drop for Menu {
             self.cleanup_failed = true;
         }
         PICKER_STOP.with(|slot| *slot.borrow_mut() = None);
+        PICKER_FOCUS.with(|slot| *slot.borrow_mut() = None);
         ACTION.with(|slot| *slot.borrow_mut() = None);
         // Native window owns the popup. A stuck cancelled picker worker is
         // retained separately until its actual join; never called clean here.

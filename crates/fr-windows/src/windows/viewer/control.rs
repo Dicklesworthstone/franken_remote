@@ -87,6 +87,20 @@ pub(super) fn visible(visible: bool) {
     });
 }
 
+/// Reflect a worker's already-scoped negative fence in this UI only. Repeating
+/// Shared::set_visible here could apply an old notification to a later attempt.
+pub(super) fn reflect_hidden() {
+    VISIBLE.with(|current| current.set(false));
+    invalidate_display();
+}
+
+/// Identity for a deferred native activation. A replacement or internal
+/// reconnect cannot consume a visibility notification from the old owner.
+pub(super) fn activation_scope() -> Option<(u64, u64)> {
+    let original = ORIGINAL.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))?;
+    Some((lifetime(), original.frames.app_id(0)))
+}
+
 pub(super) fn invalidate_choice() {
     invalidate_display();
     ORIGINAL.with(|slot| {

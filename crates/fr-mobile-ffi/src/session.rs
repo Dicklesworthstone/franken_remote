@@ -145,7 +145,13 @@ pub struct CapturedKey {
 
 /// One file chooser's original input source and uninterrupted visible view.
 /// Contains no file path, ticket, or authority and is never refreshed in place.
-pub struct FileChoiceContext(frd::session_startup::viewer_events::InputContext);
+#[derive(Clone)]
+pub struct FileChoiceContext {
+    input: frd::session_startup::viewer_events::InputContext,
+    /// Exact original grant identity, retained even after that grant is gone.
+    /// A native callback may stop this token, never a replacement source.
+    stop: Arc<AtomicBool>,
+}
 impl CapturedKey {
     /// Charge native queue time without changing the original source or stamp.
     pub fn with_queue_age(mut self, age: Duration) -> Option<Self> {
@@ -608,7 +614,10 @@ impl Shared {
             {
                 return InputResult::Busy;
             }
-            captured = Some(FileChoiceContext(context));
+            captured = Some(FileChoiceContext {
+                input: context,
+                stop: Arc::clone(&granted.stop),
+            });
             InputResult::Sent
         });
         if result == InputResult::Sent {
@@ -622,21 +631,68 @@ impl Shared {
     /// refusal nor a later ready check refreshes this original context.
     pub fn file_choice_ready(&self, context: &FileChoiceContext) -> Result<bool, InputResult> {
         let mut ready = None;
-        let result =
-            self.with_granted(
-                |granted| match granted.source.input_context_ready(&context.0) {
-                    Ok(current) => {
-                        ready = Some(current);
-                        InputResult::Sent
-                    }
-                    Err(_) => InputResult::Invalid,
-                },
-            );
+        let result = self.with_granted(|granted| {
+            if !Arc::ptr_eq(&context.stop, &granted.stop) {
+                return InputResult::Invalid;
+            }
+            match granted.source.input_context_ready(&context.input) {
+                Ok(current) => {
+                    ready = Some(current);
+                    InputResult::Sent
+                }
+                Err(_) => InputResult::Invalid,
+            }
+        });
         if result == InputResult::Sent {
             ready.ok_or(InputResult::Invalid)
         } else {
             Err(result)
         }
+    }
+    /// A native chooser lost focus outside its original viewer. Stop only its
+    /// captured grant, including while waiting for the source lock. A retired
+    /// chooser cannot hide a later attempt, cancel its request, or drop a new
+    /// grant on the same Shared. This never restores visibility or control.
+    ///
+    /// True means this call removed the matching original grant. False can
+    /// also mean another callback already observed its stop and removed it.
+    pub fn hide_file_choice(&self, context: &FileChoiceContext) -> bool {
+        self.hide_file_source(&context.stop)
+    }
+
+    fn hide_file_source(&self, original: &Arc<AtomicBool>) -> bool {
+        original.store(true, Ordering::SeqCst);
+        let (was_visible, dropped) = {
+            let mut slot = self
+                .granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Some(granted) = slot.as_ref() else {
+                return false;
+            };
+            if !Arc::ptr_eq(original, &granted.stop) {
+                return false;
+            }
+            let was_visible = self.visible.swap(false, Ordering::SeqCst);
+            if was_visible {
+                self.hides.fetch_add(1, Ordering::SeqCst);
+            }
+            // Publish the original reason before cancellation can wake its
+            // serving/cleanup owner. Never borrow upload/clipboard while the
+            // granted lock is held: final file admission takes them first.
+            self.note_local_stop(LocalStop::Hidden);
+            granted.source.stop();
+            (was_visible, slot.take())
+        };
+        self.clipboard.hide(was_visible);
+        self.clipboard.retire();
+        if let Some(upload) = &self.upload {
+            upload.retire();
+        }
+        self.retire_control_request();
+        self.events.state(state::CONTROL_ENDED, 0);
+        drop(dropped);
+        true
     }
     /// Fence the granted source now (focus loss, backgrounding, close).
     /// `reason`: this device stopped a live grant (not a close it asked

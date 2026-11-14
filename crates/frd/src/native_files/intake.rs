@@ -92,7 +92,8 @@ impl SendIntake {
 
     /// Recheck an original local choice immediately before admission, after
     /// waiting for the intake lock. The callback may only check local choice
-    /// state in a reviewed lock order: no native/file I/O or callbacks into
+    /// state in a reviewed lock order; bounded native scalar clock/foreground
+    /// reads may not pump messages. No native UI/file I/O or callbacks into
     /// this intake. The original transfer clock is resampled after it returns.
     /// Refusal consumes the request without replacing the original pending
     /// selection, granting authority, or renewing any transfer deadline.

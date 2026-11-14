@@ -2,8 +2,8 @@
 
 ## Connected Windows file selection and control-to-view handoff (2026-11-14 UTC)
 
-A controlling Windows viewer now offers **File transfer → Choose file to
-send…** without requiring a preselected `--send` argument. One native dialog
+A controlling Windows viewer now offers **File transfer → Pick and send one
+file…** without requiring a preselected `--send` argument. One native dialog
 worker keeps the presentation thread responsive, then pins the selected regular
 file through the existing Windows handle-custody boundary. The original upload
 intake admits at most nine explicit single-file batches and retains each batch's
@@ -19,6 +19,15 @@ contains bounded receipt history and chooser cleanup, without file paths or
 contents. No Windows receiving, directory sending, drag-and-drop or reconnect
 resumption is added.
 
+The original picker is registered before its worker can create a native
+window, so activation of that exact UI thread does not cancel its own choice.
+The actual common-dialog parent observes external focus loss and fences only
+the captured grant, even if the Shared owner has moved to another attempt.
+The viewer's deferred activation is scoped to its native lifetime and attempt;
+final file admission checks the original viewer's actual foreground window.
+Subclass removal and native destruction are required cleanup evidence, and
+worker-thread identity is retired before the thread can exit or be reused.
+
 **Input → Stop control and keep viewing** now fences the original native input
 and closes its controlled connection before opening a fresh observing session.
 The underlying source is retained through its terminal exchange; emergency
@@ -26,12 +35,13 @@ source loss still cancels. Replacement requires positive original service and
 cleanup, retains the existing cooldown/replacement/invocation bounds, and starts
 without replaying control, clipboard or files. Closing the window disconnects.
 
-**Passed:** all 93 portable Windows-client tests and strict all-target Clippy;
-seven new chooser-policy regressions; actual picker/menu/policy sources in a
+**Passed:** all 96 portable Windows-client tests and strict all-target Clippy;
+ten new chooser-policy regressions; actual picker/menu/policy sources in a
 narrow Windows GNU strict-Clippy check against Windows 0.62.2. That native
 compile fixture substitutes the external Shared/Upload API and does not
 establish full session integration. Thirteen upload-owner tests, two final
-intake-admission tests and two original UDP/TLS close regressions are present
+intake-admission tests, two original UDP/TLS close regressions and one stale
+file-choice source-fence regression are present
 but unexecuted locally: the unchanged pinned Asupersync compilation was killed
 before reaching project code, including an isolated one-job reduced-memory
 attempt. Complete workspace/runtime and real Windows chooser, transfer and

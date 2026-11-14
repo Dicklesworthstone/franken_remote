@@ -401,9 +401,10 @@ impl Upload {
 
     /// Charge the original local choice through both bounded owner locks.
     /// The predicate may only check local choice state in the reviewed order
-    /// upload -> intake -> granted source -> input queue. No native/file work
-    /// or callbacks into this upload/intake are permitted. The intake resamples
-    /// its original transfer clock after the predicate returns.
+    /// upload -> intake -> granted source -> input queue. Bounded native scalar
+    /// clock/foreground reads may not pump messages. No native UI/file work or
+    /// callbacks into this upload/intake are permitted. The intake resamples its
+    /// original transfer clock after the predicate returns.
     pub fn submit_if(
         &self,
         prepared: PreparedUpload,

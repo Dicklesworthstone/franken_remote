@@ -365,8 +365,8 @@ completion cannot change the earlier failure into success.
 
 ## Send files from the connected desktop
 
-Start a controlling viewer with `--control`, then open **File transfer → Choose
-file to send…** after the host grants control. Choose one regular file in the
+Start a controlling viewer with `--control`, then open **File transfer → Pick
+and send one file…** after the host grants control. Choose one regular file in the
 native Windows dialog. The original session negotiates an optional file lane
 even without `--send`; no file is opened or read merely by connecting. A host
 that does not offer files leaves this action unavailable without preventing
@@ -379,6 +379,12 @@ attempt and window lifetime. A real view suspension/recovery, hidden window,
 close or replacement cancels the choice; a temporary compositor candidate gap
 does not invent a new view. The actual Send admission rechecks the original
 context after lock waits. There is no queued choice that becomes valid later.
+
+Focus can move between the viewer and its open file dialog. Switching to
+another application cancels the choice and ends the original control grant.
+Returning does not restore that grant. A delayed dialog callback cannot hide
+or end control on a replacement connection, and sending also requires the
+original viewer to be back in the foreground after the dialog has closed.
 
 The dialog has one original two-minute budget. Its accepted native gesture has
 a further two-second bound covering native destruction, selected-handle
@@ -429,7 +435,7 @@ uncertain result into success. A transport or authority failure can still end
 the containing session under its existing rules.
 
 A command admits at most nine explicit single-file selections, including an
-initial `--send`. After a batch finishes, **Choose file to send…** becomes
+initial `--send`. After a batch finishes, **Pick and send one file…** becomes
 available again only if the original lane remains ready. Earlier publication
 receipts and failures remain in bounded history. A cancelled or failed batch
 is never silently repeated.
