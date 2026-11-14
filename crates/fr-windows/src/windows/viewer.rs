@@ -21,12 +21,12 @@
 //! explicit invocation, never replay of the earlier --control choice.
 use super::render::Renderer;
 use crate::{
-    geometry::{Rect, host_scales, picture_point, reopen_for},
+    geometry::{Mapping, StaleMapping, host_scales, reopen_for},
     keys,
 };
 use fr_mobile_ffi::{
     events::{Event, kind, state},
-    session::{CapturedKey, Config, InputResult, Session, end},
+    session::{CapturedInput, CapturedKey, Config, InputResult, Session, end},
     video,
 };
 use std::{
@@ -53,8 +53,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
     WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST,
     WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
     WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
@@ -65,7 +65,7 @@ struct Viewer {
     renderer: Renderer,
     /// The last drawn picture's size and place (input maps through these).
     picture: (u32, u32),
-    dest: Option<Rect>,
+    mapping: Option<Mapping>,
     /// Held buttons (`session.button` indices) and the last pointer point.
     buttons: [bool; 5],
     last_point: (f64, f64),
@@ -148,7 +148,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             session,
             renderer,
             picture: (0, 0),
-            dest: None,
+            mapping: None,
             buttons: [false; 5],
             last_point: (0.0, 0.0),
             keys: keys::Deferred::default(),
@@ -266,7 +266,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     stats.reopens += 1;
     // The reopen's own wait is not a frame interval.
     stats.last_draw = None;
-    v.dest = None;
+    v.mapping = None;
     v.picture = (0, 0);
     v.buttons = [false; 5];
     v.keys = keys::Deferred::default();
@@ -305,9 +305,11 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
     if shared.finished() {
         return (true, false);
     }
-    let Some((raw, info)) = shared
-        .frames
-        .take_newer(*last_sequence, shared.full_range())
+    // A local resize/move invalidates its coordinate mapping immediately.
+    // Redraw the one retained picture even on a static desktop, preserving
+    // that picture's ORIGINAL frame id; this creates no new source evidence.
+    let after = if v.mapping.is_some() { *last_sequence } else { 0 };
+    let Some((raw, info)) = shared.frames.take_newer(after, shared.full_range())
     else {
         return (false, false);
     };
@@ -325,8 +327,14 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
         stats.draw_failures += 1;
         return (false, false);
     };
-    v.dest = Some(dest);
     v.picture = (info.width, info.height);
+    if v
+        .mapping
+        .as_ref()
+        .is_none_or(|mapping| !mapping.same_layout(dest, v.picture))
+    {
+        v.mapping = Some(Mapping::new(dest, v.picture, input_ticks()));
+    }
     if v.scales.is_none() {
         v.scales = host_scales(v.display, v.stated, v.picture);
     }
@@ -585,6 +593,20 @@ fn input_ticks() -> u64 {
     unsafe { GetTickCount64() }
 }
 
+/// Sample after the original source clock, so queue age also charges native
+/// calls or lock waits between those samples. Shared by every message kind.
+fn message_age(message: u32) -> Result<(u64, Duration), keys::QueueError> {
+    let now = input_ticks();
+    let at = keys::message_time(message, now)?;
+    Ok((at, Duration::from_millis(now - at + keys::TICK_MARGIN_MS)))
+}
+
+/// Read before any nested message lookup or native coordinate conversion.
+fn current_message_time() -> u32 {
+    // SAFETY: the creation time of this thread's current queued message.
+    unsafe { GetMessageTime() }.cast_unsigned()
+}
+
 fn key_result(result: InputResult) -> Result<bool, ()> {
     match result {
         InputResult::Sent | InputResult::Pending => Ok(true),
@@ -597,41 +619,87 @@ impl Viewer {
     /// The picture point under `(x, y)`. While a button is held the window
     /// has the mouse captured, and points past the picture's edge clamp to
     /// it, so a drag that leaves the picture still releases.
-    fn point(&self, x: i32, y: i32) -> Option<(f64, f64)> {
-        let dest = self.dest?;
-        let (x, y) = if self.buttons.iter().any(|b| *b) {
-            (
-                x.clamp(dest.left, dest.right - 1),
-                y.clamp(dest.top, dest.bottom - 1),
-            )
-        } else {
-            (x, y)
-        };
-        picture_point(dest, self.picture, x, y)
+    fn point(&self, at: u64, x: i32, y: i32) -> Result<Option<(f64, f64)>, StaleMapping> {
+        self.mapping
+            .as_ref()
+            .ok_or(StaleMapping)?
+            .point(at, x, y, self.buttons.iter().any(|b| *b))
     }
-    fn pointer(&mut self, x: i32, y: i32) {
+    /// Capture the original grant before any native conversion or key drain.
+    /// Replaceable old motion may be discarded; losing an ordered transition
+    /// instead fences control and delegates held-state cleanup to its owner.
+    fn capture_mouse(&mut self, message_time: u32, ordered: bool) -> Option<(CapturedInput, u64)> {
+        if self.closing || self.reopen {
+            return None;
+        }
+        let capture = match self.session.shared().capture_input() {
+            Ok(capture) => capture,
+            Err(InputResult::NotControlled) => return None,
+            Err(_) => {
+                self.input_failed();
+                return None;
+            }
+        };
+        let aged = message_age(message_time)
+            .ok()
+            .and_then(|(at, age)| capture.with_queue_age(age).map(|capture| (capture, at)));
+        let Some(captured) = aged else {
+            if ordered {
+                self.input_failed();
+            }
+            return None;
+        };
+        self.after_keys(ordered).then_some(captured)
+    }
+    fn pointer(&mut self, x: i32, y: i32, message_time: u32) {
         // Replaceable motion may wait for a busy key; it must not overtake
         // the key and give frd a newer capture stamp ahead of that key.
-        if !self.after_keys(false) {
+        let Some((captured, at)) = self.capture_mouse(message_time, false) else {
             return;
-        }
-        if let Some((px, py)) = self.point(x, y) {
+        };
+        if let Ok(Some((px, py))) = self.point(at, x, y) {
             self.last_point = (px, py);
-            let _ = self.session.shared().pointer(px, py);
+            if self.session.shared().captured_pointer(captured, px, py) == InputResult::ControlLost
+            {
+                self.input_failed();
+            }
         }
     }
-    fn button(&mut self, hwnd: HWND, index: usize, pressed: bool, x: i32, y: i32) {
-        if !self.after_keys(true) {
+    fn button(
+        &mut self,
+        hwnd: HWND,
+        index: usize,
+        pressed: bool,
+        (x, y): (i32, i32),
+        message_time: u32,
+    ) {
+        let Some((captured, at)) = self.capture_mouse(message_time, true) else {
             return;
-        }
-        let Some((px, py)) = self.point(x, y) else {
-            return;
+        };
+        let (px, py) = match self.point(at, x, y) {
+            Ok(Some(point)) => point,
+            Ok(None) => return,
+            Err(StaleMapping) => {
+                self.input_failed();
+                return;
+            }
         };
         self.last_point = (px, py);
         let Ok(wire) = u32::try_from(index) else {
             return;
         };
-        let _ = self.session.shared().button(wire, pressed, px, py);
+        match self
+            .session
+            .shared()
+            .captured_button(captured, wire, pressed, px, py)
+        {
+            InputResult::Sent | InputResult::Pending => {}
+            InputResult::NotControlled | InputResult::Unsupported | InputResult::Outside => return,
+            _ => {
+                self.input_failed();
+                return;
+            }
+        }
         self.buttons[index] = pressed;
         // SAFETY: capture for this thread's own window while any button is
         // held, released when none is.
@@ -655,12 +723,10 @@ impl Viewer {
             self.input_failed();
             return;
         };
-        let now = input_ticks();
-        let Ok(at) = keys::message_time(message_time, now) else {
+        let Ok((at, age)) = message_age(message_time) else {
             self.input_failed();
             return;
         };
-        let age = Duration::from_millis(now - at + keys::TICK_MARGIN_MS);
         let Some(captured) = captured.with_queue_age(age) else {
             self.input_failed();
             return;
@@ -707,12 +773,37 @@ impl Viewer {
         }
         false
     }
-    fn scroll(&mut self, dx: f64, dy: f64, x: i32, y: i32) {
-        if !self.after_keys(true) {
+    fn scroll(
+        &mut self,
+        hwnd: HWND,
+        (dx, dy): (f64, f64),
+        (x, y): (i32, i32),
+        message_time: u32,
+    ) {
+        let Some((captured, at)) = self.capture_mouse(message_time, true) else {
+            return;
+        };
+        // Wheel points are screen coordinates. Retain the original source
+        // and deadline before this call, and never guess after native failure.
+        let mut point = POINT { x, y };
+        // SAFETY: this thread's live window and a writable point.
+        if !unsafe { ScreenToClient(hwnd, &raw mut point) }.as_bool() {
+            self.input_failed();
             return;
         }
-        if let Some((px, py)) = self.point(x, y) {
-            let _ = self.session.shared().scroll(dx, dy, px, py);
+        match self.point(at, point.x, point.y) {
+            Ok(Some((px, py))) => {
+                if self
+                    .session
+                    .shared()
+                    .captured_scroll(captured, dx, dy, px, py)
+                    == InputResult::ControlLost
+                {
+                    self.input_failed();
+                }
+            }
+            Ok(None) => {}
+            Err(StaleMapping) => self.input_failed(),
         }
     }
     fn input_failed(&mut self) {
@@ -796,6 +887,7 @@ extern "system" fn window_proc(
             let settled = matches!(u32::try_from(wparam.0), Ok(SIZE_MAXIMIZED | SIZE_RESTORED));
             with_viewer(|v| {
                 if minimized {
+                    v.mapping = None;
                     v.session.shared().set_visible(false);
                 } else {
                     v.session.shared().set_visible(true);
@@ -803,13 +895,27 @@ extern "system" fn window_proc(
                         u32::try_from(width).unwrap_or(0),
                         u32::try_from(height).unwrap_or(0),
                     );
-                    let _ = v.renderer.resize(size);
+                    // Invalidate before the native resize, including a return
+                    // to an earlier size. Old queued coordinates never acquire
+                    // the subsequently redrawn mapping.
+                    v.mapping = None;
+                    if v.renderer.resize(size).is_err() {
+                        v.session.shared().presentation_failed();
+                        v.close();
+                        return;
+                    }
                     if settled && !v.sizing {
                         v.resized(size);
                     }
                 }
             });
             true
+        }
+        WM_MOVE => {
+            // Wheel messages carry screen coordinates: moving the window
+            // changes their conversion even when its client size is identical.
+            with_viewer(|v| v.mapping = None);
+            false
         }
         WM_ENTERSIZEMOVE => {
             with_viewer(|v| v.sizing = true);
@@ -830,12 +936,14 @@ extern "system" fn window_proc(
             true
         }
         WM_MOUSEMOVE => {
+            let time = current_message_time();
             let (x, y) = point_of(lparam);
-            with_viewer(|v| v.pointer(x, y));
+            with_viewer(|v| v.pointer(x, y, time));
             true
         }
         WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP | WM_MBUTTONDOWN
         | WM_MBUTTONUP | WM_XBUTTONDOWN | WM_XBUTTONUP => {
+            let time = current_message_time();
             let index = match message {
                 WM_LBUTTONDOWN | WM_LBUTTONUP => 0,
                 WM_RBUTTONDOWN | WM_RBUTTONUP => 1,
@@ -849,20 +957,19 @@ extern "system" fn window_proc(
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
             );
             let (x, y) = point_of(lparam);
-            with_viewer(|v| v.button(hwnd, index, pressed, x, y));
+            with_viewer(|v| v.button(hwnd, index, pressed, (x, y), time));
             if matches!(message, WM_XBUTTONDOWN | WM_XBUTTONUP) {
                 return LRESULT(1);
             }
             true
         }
         WM_MOUSEWHEEL | WM_MOUSEHWHEEL => {
+            let time = current_message_time();
             #[allow(clippy::cast_possible_wrap, reason = "GET_WHEEL_DELTA_WPARAM")]
             let delta = f64::from(words(wparam.0 as isize).1) / 120.0;
             // Wheel points are screen coordinates.
             let (sx, sy) = point_of(lparam);
-            let mut point = POINT { x: sx, y: sy };
-            // SAFETY: a live window and a writable point.
-            let _ = unsafe { ScreenToClient(hwnd, &raw mut point) };
+
             // Forward (positive) is up; the session's positive y is down.
             // A right tilt is positive x.
             let (dx, dy) = if message == WM_MOUSEWHEEL {
@@ -870,15 +977,14 @@ extern "system" fn window_proc(
             } else {
                 (delta, 0.0)
             };
-            with_viewer(|v| v.scroll(dx, dy, point.x, point.y));
+            with_viewer(|v| v.scroll(hwnd, (dx, dy), (sx, sy), time));
             true
         }
         WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
             let (scan, extended) = key_bits(lparam);
             let pressed = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
             // Read BEFORE peeking at another message for AltGr detection.
-            // SAFETY: the creation time of this thread's current message.
-            let time = unsafe { GetMessageTime() }.cast_unsigned();
+            let time = current_message_time();
             // Bit 30: the key was already down (auto-repeat). The session
             // never sends repeats; the host repeats a held key itself.
             let repeat = pressed && (lparam.0 >> 30) & 1 == 1;

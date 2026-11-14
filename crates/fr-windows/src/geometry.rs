@@ -10,6 +10,60 @@ pub struct Rect {
     pub bottom: i32,
 }
 
+/// One actually presented window-to-picture mapping. A resize invalidates it
+/// before native work; presenting the retained picture establishes a new one.
+/// Native messages queued under the earlier placement never use the new one.
+/// No Debug: positions are private input state.
+pub struct Mapping {
+    dest: Rect,
+    picture: (u32, u32),
+    /// Suspend-inclusive native tick, sampled after presentation succeeded.
+    presented_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StaleMapping;
+
+impl Mapping {
+    pub const fn new(dest: Rect, picture: (u32, u32), presented_at: u64) -> Self {
+        Self {
+            dest,
+            picture,
+            presented_at,
+        }
+    }
+
+    /// Ordinary pictures with the same placement do not restart input's local
+    /// mapping lifetime. Returning to the same size after invalidation does.
+    pub fn same_layout(&self, dest: Rect, picture: (u32, u32)) -> bool {
+        self.dest == dest && self.picture == picture
+    }
+
+    /// `Err` is a stale mapping, `Ok(None)` an ordinary letterbox/outside point.
+    /// Refuse the presentation's own tick too: coarse native timestamps cannot
+    /// establish whether a same-tick event preceded or followed the change.
+    pub fn point(
+        &self,
+        message_at: u64,
+        x: i32,
+        y: i32,
+        dragging: bool,
+    ) -> Result<Option<(f64, f64)>, StaleMapping> {
+        if message_at <= self.presented_at {
+            return Err(StaleMapping);
+        }
+        let (x, y) = if dragging {
+            (
+                x.clamp(self.dest.left, self.dest.right - 1),
+                y.clamp(self.dest.top, self.dest.bottom - 1),
+            )
+        } else {
+            (x, y)
+        };
+        Ok(picture_point(self.dest, self.picture, x, y))
+    }
+}
+
 /// The picture's place in a `window`-sized client area: 1:1 and centred
 /// whenever it fits (never upscaled, so text stays crisp), otherwise the
 /// largest centred aspect-preserving fit. `None` for an empty size.
@@ -92,6 +146,42 @@ pub fn host_scales(display: (u32, u32), stated: (u32, u32), picture: (u32, u32))
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_coordinates_cannot_use_a_newly_presented_resize_mapping() {
+        let picture = (1280, 720);
+        let original = Mapping::new(fit(picture, (1920, 1200)).unwrap(), picture, 1_000);
+        assert_eq!(original.point(1_001, 320, 240, false), Ok(Some((0.5, 0.5))));
+        let resized = Mapping::new(fit(picture, (1280, 720)).unwrap(), picture, 1_020);
+        // (320,240) names a different desktop pixel after resize. An old
+        // native message must not be interpreted at that new location.
+        assert!(resized.point(1_019, 320, 240, false).is_err());
+        assert!(resized.point(1_020, 320, 240, false).is_err());
+        assert_eq!(
+            resized.point(1_021, 320, 240, false),
+            Ok(Some((320.5, 240.5)))
+        );
+        // Returning to the old geometry is still a fresh mapping lifetime.
+        let restored = Mapping::new(fit(picture, (1920, 1200)).unwrap(), picture, 1_040);
+        assert!(restored.point(1_001, 320, 240, false).is_err());
+    }
+
+    #[test]
+    fn a_timely_drag_clamps_for_release_but_letterbox_clicks_are_not_stale() {
+        let picture = (1280, 720);
+        let dest = fit(picture, (1920, 1200)).unwrap();
+        let mapping = Mapping::new(dest, picture, 1_000);
+        assert_eq!(mapping.point(1_001, 0, 0, false), Ok(None));
+        assert_eq!(mapping.point(1_001, 0, 0, true), Ok(Some((0.5, 0.5))));
+        assert_eq!(
+            mapping.point(1_001, i32::MAX, i32::MAX, true),
+            Ok(Some((1279.5, 719.5)))
+        );
+        assert!(mapping.point(999, 0, 0, true).is_err());
+        assert!(mapping.same_layout(dest, picture));
+        assert!(!mapping.same_layout(dest, (640, 360)));
+        assert!(!mapping.same_layout(fit(picture, (1280, 720)).unwrap(), picture));
+    }
 
     #[test]
     fn a_picture_proves_whether_the_host_scales_only_when_it_can() {

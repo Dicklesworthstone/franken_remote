@@ -26,14 +26,16 @@ pub mod end {
     pub const HOST_BUSY: u32 = 12;
 }
 
-/// Why this device stopped control (`CONTROL_STOPPED`'s detail). The first
-/// reason recorded wins.
+/// Why this device stopped its native session. Control stops name
+/// `CONTROL_STOPPED`; a failed presentation surface names `SESSION_FAILED`.
+/// The first reason recorded wins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub(super) enum LocalStop {
     Hidden = 1,
     InputRefused = 2,
     PictureChanged = 3,
+    PresentationFailed = 4,
 }
 impl LocalStop {
     pub(super) const fn from_code(code: u32) -> Option<Self> {
@@ -41,6 +43,7 @@ impl LocalStop {
             1 => Some(Self::Hidden),
             2 => Some(Self::InputRefused),
             3 => Some(Self::PictureChanged),
+            4 => Some(Self::PresentationFailed),
             _ => None,
         }
     }
@@ -89,6 +92,20 @@ pub(super) fn ending(
         };
     }
     match (result, stopped) {
+        // A lost native surface closes the original owner, including when it
+        // never held control or was still connecting. Its own cancellation is
+        // not successful viewing. The authenticated reports above, connection
+        // refusals and cleanup failures still outrank this local cause.
+        (
+            Ok(())
+            | Err(
+                Failure::Cancelled
+                | Failure::Notification
+                | Failure::Connection(frd::native_connection::Error::Cancelled)
+                | Failure::Observation(_),
+            ),
+            Some(LocalStop::PresentationFailed),
+        ) => (end::SESSION_FAILED, Some("PresentationFailed".into())),
         // The first local control stop stays visible when a later window
         // close races it. Asking to close does not undo the earlier failure.
         (Ok(()) | Err(Failure::Observation(_)), Some(reason)) => {

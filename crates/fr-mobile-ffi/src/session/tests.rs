@@ -90,6 +90,10 @@ fn input_is_refused_until_control_is_granted() {
         InputResult::NotControlled
     );
     assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    assert!(matches!(
+        shared.capture_input(),
+        Err(InputResult::NotControlled)
+    ));
     assert_eq!(shared.text("a"), InputResult::NotControlled);
     assert_eq!(shared.release_all(), InputResult::NotControlled);
     // Values the protocol cannot carry are refused before the grant check.
@@ -279,4 +283,26 @@ fn the_end_code_says_who_ended_the_session() {
     // A close during a reconnect (the status callback refuses to go on).
     assert_eq!(classify(Failure::Notification, true), end::OK);
     assert_ne!(classify(Failure::Notification, false), end::OK);
+}
+
+#[test]
+fn presentation_failure_closes_a_view_only_owner_and_preserves_earlier_stops() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.request_control();
+    shared.presentation_failed();
+    assert!(shared.close.load(Ordering::SeqCst));
+    assert!(!shared.want_control.load(Ordering::SeqCst));
+    assert_eq!(
+        LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst)),
+        Some(LocalStop::PresentationFailed),
+    );
+    let earlier = Shared::new();
+    earlier.note_local_stop(LocalStop::Hidden);
+    earlier.presentation_failed();
+    assert!(earlier.close.load(Ordering::SeqCst));
+    assert_eq!(
+        LocalStop::from_code(earlier.local_stop.load(Ordering::SeqCst)),
+        Some(LocalStop::Hidden),
+    );
 }

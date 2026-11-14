@@ -1,5 +1,31 @@
 # Implementation status
 
+## Windows mouse events retain their original capture and mapping (2026-11-14 UTC)
+
+Windows mouse motion, buttons and wheel events now retain the same original
+source identity and exclusive age bound as captured keys. Capture precedes
+native coordinate conversion and draining earlier keys; GetMessageTime queue
+age shortens that bound instead of stamping delayed input as fresh. The token
+also retains the granted picture layout. Stale ordered transitions fence the
+original control owner so its held-state cleanup runs.
+
+A resize or window move immediately invalidates the local coordinate mapping.
+Only successful presentation installs its replacement, and native messages from
+before that presentation (including its ambiguous clock tick) cannot use it.
+The viewer redraws the retained picture on a static desktop with its original
+frame ID. Failed native resize now closes even a view-only session with a
+PresentationFailed cause; authenticated host reports and cleanup/connection
+failures retain precedence.
+
+Six additional portable regressions cover capture-age consumption and source
+replacement, resize mappings and drag release, and presentation-failure
+completion. The no-grant API test also covers generic native capture. Independent
+source review checked the real layout/source APIs and completion precedence;
+execution, pinned formatting and strict Clippy of this slice remain pending
+because the executor became unavailable. Existing push workflows cover the
+portable tests and cross-compile the actual Windows viewer. No native runtime
+qualification is claimed; `fr-znp3` remains in progress.
+
 ## Windows native input prepares before its final deadline check (2026-11-14 UTC)
 
 Absolute mouse movement previously enumerated monitors, entered a native DPI

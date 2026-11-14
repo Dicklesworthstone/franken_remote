@@ -1,5 +1,6 @@
-//! One original input source and exclusive deadline for a captured native key.
-//! No key content, OS calls or authority are stored in this token.
+//! One original input source and exclusive deadline for a native event.
+//! Shared by keys, absolute motion, buttons and wheel input. No event content,
+//! OS calls or authority are stored in this token.
 #![forbid(unsafe_code)]
 
 use std::{
@@ -39,7 +40,7 @@ impl Capture {
     /// that whole age then also charges any lock wait or interrupted sample.
     pub(super) fn with_queue_age(mut self, age: Duration) -> Option<Self> {
         let age = u64::try_from(age.as_nanos().div_ceil(1_000)).ok()?;
-        // A key created before this source attached cannot become input for
+        // An event created before this source attached cannot become input for
         // the new grant merely because Windows dispatches it afterward.
         if self.sampled.checked_sub(age)? < self.opened {
             return None;
@@ -112,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn a_key_from_before_grant_attachment_never_belongs_to_the_new_source() {
+    fn an_event_from_before_grant_attachment_never_belongs_to_the_new_source() {
         let source = Arc::new(AtomicBool::new(false));
         assert!(Capture::new(&source, 1_000, 999, 100).is_none());
         assert!(
@@ -127,5 +128,33 @@ mod tests {
             .unwrap();
         assert_eq!(captured.bounds(), (1_040, 1_100));
         assert!(captured.current(&source, 1_041));
+    }
+
+    #[test]
+    fn coordinate_conversion_or_key_drain_cannot_refresh_a_native_action() {
+        let original = Arc::new(AtomicBool::new(false));
+        let captured = Capture::new(&original, 800_000, 1_000_000, 100_000)
+            .unwrap()
+            .with_queue_age(Duration::from_millis(60))
+            .unwrap();
+        // The original native mouse message already spent 60 ms queued.
+        // Coordinate conversion and draining earlier keys consume another
+        // 40 ms; checking the current source cannot renew those 100 ms.
+        assert!(captured.current(&original, 1_039_999));
+        assert!(!captured.current(&original, 1_040_000));
+        assert_eq!(captured.bounds(), (1_000_000, 1_040_000));
+    }
+
+    #[test]
+    fn retained_native_actions_never_attach_to_a_recreated_grant() {
+        let original = Arc::new(AtomicBool::new(false));
+        let captured = Capture::new(&original, 900, 1_000, 100).unwrap();
+        drop(original);
+        // The Weak keeps the old allocation identity distinct even when a
+        // replacement grant has exactly the same numerical clock values.
+        for _ in 0..16 {
+            let replacement = Arc::new(AtomicBool::new(false));
+            assert!(!captured.current(&replacement, 1_001));
+        }
     }
 }

@@ -73,11 +73,12 @@ fn only_successful_original_service_and_cleanup_permit_replacement() {
         LocalStop::Hidden,
         LocalStop::InputRefused,
         LocalStop::PictureChanged,
+        LocalStop::PresentationFailed,
     ] {
         assert_eq!(LocalStop::from_code(stopped as u32), Some(stopped));
         assert!(!orderly_closed(Ok(()), true, true, Some(stopped), None));
     }
-    for code in [0, 4, u32::MAX] {
+    for code in [0, 5, u32::MAX] {
         assert_eq!(LocalStop::from_code(code), None);
     }
     for failure in [
@@ -302,4 +303,46 @@ fn connection_refusals_keep_their_reason_even_after_a_local_close() {
         }
     }
     assert_eq!(classify(Failure::Cancelled, false), end::CANCELLED);
+}
+
+#[test]
+fn presentation_failure_closes_viewing_and_never_allows_resize_replacement() {
+    let stopped = Some(LocalStop::PresentationFailed);
+    for result in [
+        Ok(()),
+        Err(Failure::Cancelled),
+        Err(Failure::Notification),
+        Err(Failure::Connection(frd::native_connection::Error::Cancelled)),
+        Err(Failure::Observation(ObserverError::Application)),
+    ] {
+        assert_eq!(
+            ending(result, true, stopped, None),
+            (end::SESSION_FAILED, Some("PresentationFailed".into())),
+        );
+        assert!(!orderly_closed(result, true, true, stopped, None));
+    }
+    // A renderer failure cannot conceal the original host's report, a failed
+    // cleanup, or a refused connection even though it also requested closure.
+    for terminal in adverse() {
+        assert_eq!(
+            ending(Err(Failure::Cancelled), true, stopped, Some(terminal)),
+            (
+                end::SESSION_FAILED,
+                Some(format!("{:?}", Failure::Observation(terminal))),
+            ),
+        );
+    }
+    for failure in [Failure::Cleanup, Failure::CleanupExpired] {
+        assert_eq!(
+            ending(Err(failure), true, stopped, None),
+            (end::INTERNAL, Some(format!("{failure:?}"))),
+        );
+    }
+    let refused = Failure::Connection(frd::native_connection::Error::Tailnet(
+        fr_tailnet::Error::PeerCertificateRejected,
+    ));
+    assert_eq!(
+        ending(Err(refused), true, stopped, None),
+        (end::TLS_REFUSED, Some(format!("{refused:?}"))),
+    );
 }

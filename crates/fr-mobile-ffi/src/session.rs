@@ -54,7 +54,7 @@ use frd::{
         ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
         Presentation, Viewer,
         viewer_events::{
-            ClientInstant, Event as InputEvent, Layout, LocalPoint, NativeCapture,
+            ClientInstant, Event as InputEvent, Layout, LocalPoint, Located, NativeCapture,
             PositionedAction, Source,
         },
     },
@@ -91,6 +91,31 @@ pub enum InputResult {
     Busy,
 }
 
+/// A native event's original input source, picture mapping and exclusive send
+/// deadline. Capture BEFORE native coordinate conversion or queue waits, then
+/// charge the event's native queue age. This token grants no authority.
+/// No Debug: the mapping belongs to private input state.
+pub struct CapturedInput {
+    capture: key_capture::Capture,
+    layout: Layout,
+    picture: (u32, u32),
+}
+impl CapturedInput {
+    /// Charge time already spent in the native event queue. Call once, after
+    /// capture, with the native clock sampled after the source-clock sample.
+    pub fn with_queue_age(mut self, age: Duration) -> Option<Self> {
+        self.capture = self.capture.with_queue_age(age)?;
+        Some(self)
+    }
+
+    fn current(&self, granted: &Granted) -> bool {
+        granted
+            .source
+            .clock()
+            .is_ok_and(|now| self.capture.current(&granted.stop, now.0))
+    }
+}
+
 /// A single key captured from one original grant. Busy retries must retain this
 /// exact value; creating another capture would grant old input a new lifetime.
 /// No Debug: physical keys are content, never diagnostics.
@@ -98,11 +123,10 @@ pub struct CapturedKey {
     slot: usize,
     key: fr_core::input::PhysicalKey,
     pressed: bool,
-    capture: key_capture::Capture,
+    capture: CapturedInput,
 }
 impl CapturedKey {
-    /// Charge time already spent in the native event queue. Call once, after
-    /// capture, with the native clock sampled after the source-clock sample.
+    /// Charge native queue time without changing the original source or stamp.
     pub fn with_queue_age(mut self, age: Duration) -> Option<Self> {
         self.capture = self.capture.with_queue_age(age)?;
         Some(self)
@@ -328,38 +352,73 @@ impl Shared {
 
     /// Absolute pointer at encoded picture pixel `(x, y)`.
     pub fn pointer(&self, x: f64, y: f64) -> InputResult {
-        self.with_granted(|g| {
+        self.pointer_inner(None, x, y)
+    }
+    /// One native motion under the source, mapping and deadline captured before
+    /// its native queue/coordinate work. The token is consumed, never renewed.
+    pub fn captured_pointer(&self, captured: CapturedInput, x: f64, y: f64) -> InputResult {
+        self.pointer_inner(Some(captured), x, y)
+    }
+    fn pointer_inner(&self, captured: Option<CapturedInput>, x: f64, y: f64) -> InputResult {
+        self.with_granted(move |g| {
+            if captured.as_ref().is_some_and(|capture| !capture.current(g)) {
+                return InputResult::ControlLost;
+            }
             if !g.source.capabilities().contains(Capability::Absolute) {
                 return InputResult::Unsupported;
             }
-            let Some((sx, sy)) = input::subpixel_point(g.picture, x, y) else {
+            let Some(location) = locate(g, captured.as_ref(), x, y) else {
                 return InputResult::Outside;
             };
-            let event = InputEvent::Pointer(g.layout.at(LocalPoint::subpixels(sx, sy)));
-            push(g, event)
+            push_captured(g, InputEvent::Pointer(location), captured.as_ref())
         })
     }
     /// A button transition at encoded picture pixel `(x, y)`. A press of a
     /// held button or a release of an unheld one sends nothing.
     pub fn button(&self, index: u32, pressed: bool, x: f64, y: f64) -> InputResult {
+        self.button_inner(None, index, pressed, x, y)
+    }
+    /// A button transition with its original native source and send bound.
+    /// Expiry/replacement fences control so the original owner releases holds.
+    pub fn captured_button(
+        &self,
+        captured: CapturedInput,
+        index: u32,
+        pressed: bool,
+        x: f64,
+        y: f64,
+    ) -> InputResult {
+        self.button_inner(Some(captured), index, pressed, x, y)
+    }
+    fn button_inner(
+        &self,
+        captured: Option<CapturedInput>,
+        index: u32,
+        pressed: bool,
+        x: f64,
+        y: f64,
+    ) -> InputResult {
         let Some((slot, button)) = input::button(index) else {
             return InputResult::Invalid;
         };
-        self.with_granted(|g| {
+        self.with_granted(move |g| {
+            if captured.as_ref().is_some_and(|capture| !capture.current(g)) {
+                return InputResult::ControlLost;
+            }
             if !g.source.capabilities().contains(Capability::Buttons) {
                 return InputResult::Unsupported;
             }
-            let Some((sx, sy)) = input::subpixel_point(g.picture, x, y) else {
+            let Some(location) = locate(g, captured.as_ref(), x, y) else {
                 return InputResult::Outside;
             };
             if g.buttons[slot] == pressed {
                 return InputResult::Pending;
             }
             let event = InputEvent::Positioned {
-                location: g.layout.at(LocalPoint::subpixels(sx, sy)),
+                location,
                 action: PositionedAction::Button { button, pressed },
             };
-            let result = push(g, event);
+            let result = push_captured(g, event, captured.as_ref());
             if result == InputResult::Sent {
                 g.buttons[slot] = pressed;
             }
@@ -369,25 +428,50 @@ impl Shared {
     /// Scroll by `dx`, `dy` lines (fractional; positive y scrolls down) at
     /// encoded picture pixel `(x, y)`; whole lines are sent, the rest kept.
     pub fn scroll(&self, dx: f64, dy: f64, x: f64, y: f64) -> InputResult {
-        self.with_granted(|g| {
+        self.scroll_inner(None, dx, dy, x, y)
+    }
+    /// Scroll under the original native capture, including its picture mapping.
+    /// Stale input never contributes a fractional remainder to a later gesture.
+    pub fn captured_scroll(
+        &self,
+        captured: CapturedInput,
+        dx: f64,
+        dy: f64,
+        x: f64,
+        y: f64,
+    ) -> InputResult {
+        self.scroll_inner(Some(captured), dx, dy, x, y)
+    }
+    fn scroll_inner(
+        &self,
+        captured: Option<CapturedInput>,
+        dx: f64,
+        dy: f64,
+        x: f64,
+        y: f64,
+    ) -> InputResult {
+        self.with_granted(move |g| {
+            if captured.as_ref().is_some_and(|capture| !capture.current(g)) {
+                return InputResult::ControlLost;
+            }
             if !g.source.capabilities().contains(Capability::LineScroll) {
                 return InputResult::Unsupported;
             }
-            let Some((sx, sy)) = input::subpixel_point(g.picture, x, y) else {
+            let Some(location) = locate(g, captured.as_ref(), x, y) else {
                 return InputResult::Outside;
             };
             let Some((lx, ly)) = g.scroll.add(dx, dy) else {
                 return InputResult::Pending;
             };
             let event = InputEvent::Positioned {
-                location: g.layout.at(LocalPoint::subpixels(sx, sy)),
+                location,
                 action: PositionedAction::Scroll {
                     x: lx,
                     y: ly,
                     unit: ScrollUnit::Lines,
                 },
             };
-            push(g, event)
+            push_captured(g, event, captured.as_ref())
         })
     }
     /// Forget a scroll gesture's fractional remainder.
@@ -436,15 +520,7 @@ impl Shared {
             if !g.source.capabilities().contains(Capability::Keys) {
                 return InputResult::Unsupported;
             }
-            let Ok(sampled) = g.source.clock() else {
-                return InputResult::ControlLost;
-            };
-            let Some(capture) = key_capture::Capture::new(
-                &g.stop,
-                g.opened.0,
-                sampled.0,
-                frd::session_startup::viewer_events::MAX_EVENT_AGE_US,
-            ) else {
+            let Some(capture) = capture_input(g) else {
                 return InputResult::ControlLost;
             };
             captured = Some(CapturedKey {
@@ -458,15 +534,28 @@ impl Shared {
         captured.ok_or(result)
     }
 
+    /// Retain this exact source and mapping before entering native coordinate
+    /// conversion or other potentially delayed work. The shell must account for
+    /// native queue age before submitting with a `captured_*` method.
+    pub fn capture_input(&self) -> Result<CapturedInput, InputResult> {
+        let mut captured = None;
+        let result = self.with_granted(|g| {
+            captured = capture_input(g);
+            if captured.is_some() {
+                InputResult::Pending
+            } else {
+                InputResult::ControlLost
+            }
+        });
+        captured.ok_or(result)
+    }
+
     /// Retry one captured key without a new timestamp, deadline or source.
     /// Expiry and source replacement fence control, allowing its original
     /// owner to release held input instead of sending dependent keys late.
     pub fn captured_key(&self, captured: &CapturedKey) -> InputResult {
         self.with_granted(|g| {
-            let Ok(now) = g.source.clock() else {
-                return InputResult::ControlLost;
-            };
-            if !captured.capture.current(&g.stop, now.0) {
+            if !captured.capture.current(g) {
                 return InputResult::ControlLost;
             }
             if g.keys[captured.slot] == captured.pressed {
@@ -480,21 +569,18 @@ impl Shared {
             } else {
                 KeyTransition::Release
             };
-            let (sampled, until) = captured.capture.bounds();
-            match g.source.push_until(
+            let result = push_captured(
+                g,
                 InputEvent::Key {
                     key: captured.key,
                     transition,
                 },
-                ClientInstant(sampled),
-                ClientInstant(until),
-            ) {
-                Ok(()) => {
-                    g.keys[captured.slot] = captured.pressed;
-                    InputResult::Sent
-                }
-                Err(_) => InputResult::ControlLost,
+                Some(&captured.capture),
+            );
+            if result == InputResult::Sent {
+                g.keys[captured.slot] = captured.pressed;
             }
+            result
         })
     }
 
@@ -504,6 +590,15 @@ impl Shared {
         self.want_control.store(false, Ordering::SeqCst);
         self.note_local_stop(LocalStop::InputRefused);
         self.stop_control(Some(LocalStop::InputRefused));
+    }
+
+    /// The native presentation surface failed. Fence before closing even for a
+    /// view-only session, and retain the failure instead of claiming user close.
+    /// Authenticated host reports and cleanup failures keep their precedence.
+    pub fn presentation_failed(&self) {
+        self.want_control.store(false, Ordering::SeqCst);
+        self.note_local_stop(LocalStop::PresentationFailed);
+        self.close();
     }
 
     /// Committed Unicode text, only where the host granted `Text`.
@@ -556,6 +651,45 @@ impl Shared {
             }
             InputResult::Sent
         })
+    }
+}
+
+fn capture_input(g: &Granted) -> Option<CapturedInput> {
+    let sampled = g.source.clock().ok()?;
+    let capture = key_capture::Capture::new(
+        &g.stop,
+        g.opened.0,
+        sampled.0,
+        frd::session_startup::viewer_events::MAX_EVENT_AGE_US,
+    )?;
+    Some(CapturedInput {
+        capture,
+        layout: g.layout.clone(),
+        picture: g.picture,
+    })
+}
+
+fn locate(g: &Granted, captured: Option<&CapturedInput>, x: f64, y: f64) -> Option<Located> {
+    let (layout, picture) = captured.map_or((&g.layout, g.picture), |c| (&c.layout, c.picture));
+    let (sx, sy) = input::subpixel_point(picture, x, y)?;
+    Some(layout.at(LocalPoint::subpixels(sx, sy)))
+}
+
+fn push_captured(
+    g: &mut Granted,
+    event: InputEvent,
+    captured: Option<&CapturedInput>,
+) -> InputResult {
+    let Some(captured) = captured else {
+        return push(g, event);
+    };
+    let (sampled, until) = captured.capture.bounds();
+    match g
+        .source
+        .push_until(event, ClientInstant(sampled), ClientInstant(until))
+    {
+        Ok(()) => InputResult::Sent,
+        Err(_) => InputResult::ControlLost,
     }
 }
 
