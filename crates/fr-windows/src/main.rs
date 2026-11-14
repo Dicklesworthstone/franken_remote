@@ -41,6 +41,10 @@ mod options;
 #[path = "../../fr-mobile-ffi/src/session/key_capture.rs"]
 mod key_capture_policy;
 
+#[cfg(test)]
+#[path = "../../fr-mobile-ffi/src/input/scroll.rs"]
+mod scroll_capture_policy;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows hosts\n       fr-windows view <stable-id-or-full-name> \

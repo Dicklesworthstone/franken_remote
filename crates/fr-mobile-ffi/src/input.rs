@@ -7,11 +7,8 @@
 //! accumulates fractional lines and sends only whole lines (the host's
 //! granted `LineScroll`), keeping the remainder.
 
-/// The protocol's signed 16.16 line.
-pub const LINE: i32 = 1 << 16;
-/// Whole lines sent in one scroll event, per axis (frd bounds a scroll action
-/// to 32 wheel steps in total).
-pub const MAX_LINES_PER_EVENT: i32 = 16;
+mod scroll;
+pub use scroll::{LINE, LineScroller, MAX_LINES_PER_EVENT};
 
 /// `(x, y)` in 1/256 picture pixels for a point inside the `width` x
 /// `height` picture; None outside it or for a non-finite input.
@@ -28,62 +25,6 @@ pub fn subpixel_point(picture: (u32, u32), x: f64, y: f64) -> Option<(i64, i64)>
     #[allow(clippy::cast_possible_truncation)]
     let scale = |v: f64, n: u32| ((v * 256.0).floor() as i64).min(i64::from(n) * 256 - 1);
     Some((scale(x, width), scale(y, height)))
-}
-
-/// Fractional line accumulation for touch scrolling. Positive `y` scrolls
-/// DOWN (content moves up), positive `x` scrolls RIGHT, as in the protocol.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
-pub struct LineScroller {
-    x: f64,
-    y: f64,
-}
-impl LineScroller {
-    /// Add `dx`, `dy` lines; returns whole lines in 16.16 when at least one
-    /// line accumulated on some axis. Non-finite input is ignored. Each axis
-    /// sends at most [`MAX_LINES_PER_EVENT`] lines; the rest stays queued
-    /// in the remainder for the next event, never sent fractionally. The
-    /// remainder is bounded at four events' worth per axis: scrolling past
-    /// that before the host takes it is dropped (a stuck or runaway
-    /// gesture), not queued without limit.
-    pub fn add(&mut self, dx: f64, dy: f64) -> Option<(i32, i32)> {
-        if dx.is_finite() {
-            self.x += dx;
-        }
-        if dy.is_finite() {
-            self.y += dy;
-        }
-        // Bound a runaway remainder (a stuck gesture) to a few events' worth.
-        let cap = f64::from(MAX_LINES_PER_EVENT * 4);
-        self.x = self.x.clamp(-cap, cap);
-        self.y = self.y.clamp(-cap, cap);
-        let whole = |acc: &mut f64| {
-            // Gesture deltas are binary fractions of decimal steps: a sum
-            // within rounding error of a whole line counts as that line.
-            let snapped = if (*acc - acc.round()).abs() < 1e-9 {
-                acc.round()
-            } else {
-                *acc
-            };
-            let lines = snapped.trunc().clamp(
-                -f64::from(MAX_LINES_PER_EVENT),
-                f64::from(MAX_LINES_PER_EVENT),
-            );
-            *acc -= lines;
-            // Bounded by the clamp above.
-            #[allow(clippy::cast_possible_truncation)]
-            let lines = lines as i32;
-            lines * LINE
-        };
-        let (x, y) = (whole(&mut self.x), whole(&mut self.y));
-        (x != 0 || y != 0).then_some((x, y))
-    }
-    /// Forget the remainder (a new gesture, or control ended).
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-    pub const fn remainder(&self) -> (f64, f64) {
-        (self.x, self.y)
-    }
 }
 
 /// The protocol's pointer buttons by the app's index (0 primary, 1

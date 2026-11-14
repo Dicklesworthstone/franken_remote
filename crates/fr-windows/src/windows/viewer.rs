@@ -334,6 +334,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bo
         .is_none_or(|mapping| !mapping.same_layout(dest, v.picture))
     {
         v.mapping = Some(Mapping::new(dest, v.picture, input_ticks()));
+        shared.scroll_end();
     }
     if v.scales.is_none() {
         v.scales = host_scales(v.display, v.stated, v.picture);
@@ -658,10 +659,10 @@ impl Viewer {
             return;
         };
         if let Ok(Some((px, py))) = self.point(at, x, y) {
-            self.last_point = (px, py);
-            if self.session.shared().captured_pointer(captured, px, py) == InputResult::ControlLost
-            {
-                self.input_failed();
+            match self.session.shared().captured_pointer(captured, px, py) {
+                InputResult::Sent => self.last_point = (px, py),
+                InputResult::ControlLost => self.input_failed(),
+                _ => {}
             }
         }
     }
@@ -684,7 +685,6 @@ impl Viewer {
                 return;
             }
         };
-        self.last_point = (px, py);
         let Ok(wire) = u32::try_from(index) else {
             return;
         };
@@ -700,6 +700,7 @@ impl Viewer {
                 return;
             }
         }
+        self.last_point = (px, py);
         self.buttons[index] = pressed;
         // SAFETY: capture for this thread's own window while any button is
         // held, released when none is.
@@ -899,6 +900,7 @@ extern "system" fn window_proc(
                     // to an earlier size. Old queued coordinates never acquire
                     // the subsequently redrawn mapping.
                     v.mapping = None;
+                    v.session.shared().scroll_end();
                     if v.renderer.resize(size).is_err() {
                         v.session.shared().presentation_failed();
                         v.close();
@@ -914,7 +916,10 @@ extern "system" fn window_proc(
         WM_MOVE => {
             // Wheel messages carry screen coordinates: moving the window
             // changes their conversion even when its client size is identical.
-            with_viewer(|v| v.mapping = None);
+            with_viewer(|v| {
+                v.mapping = None;
+                v.session.shared().scroll_end();
+            });
             false
         }
         WM_ENTERSIZEMOVE => {

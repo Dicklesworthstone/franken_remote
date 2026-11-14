@@ -366,6 +366,7 @@ impl Shared {
             let Some(location) = locate(g, captured.as_ref(), x, y) else {
                 return InputResult::Outside;
             };
+            g.scroll.reset();
             push_captured(g, InputEvent::Pointer(location), captured.as_ref())
         })
     }
@@ -407,6 +408,7 @@ impl Shared {
             let Some(location) = locate(g, captured.as_ref(), x, y) else {
                 return InputResult::Outside;
             };
+            g.scroll.reset();
             if g.buttons[slot] == pressed {
                 return InputResult::Pending;
             }
@@ -447,17 +449,28 @@ impl Shared {
         y: f64,
     ) -> InputResult {
         self.with_granted(move |g| {
-            if captured.as_ref().is_some_and(|capture| !capture.current(g)) {
+            // Immediate mobile input and native queued input both retain one
+            // original source bound. A later fraction may only shorten it.
+            let Some(captured) = captured.or_else(|| capture_input(g)) else {
+                return InputResult::ControlLost;
+            };
+            if !captured.current(g) {
                 return InputResult::ControlLost;
             }
             if !g.source.capabilities().contains(Capability::LineScroll) {
                 return InputResult::Unsupported;
             }
-            let Some(location) = locate(g, captured.as_ref(), x, y) else {
+            let Some(location) = locate(g, Some(&captured), x, y) else {
                 return InputResult::Outside;
             };
-            let Some((lx, ly)) = g.scroll.add(dx, dy) else {
-                return InputResult::Pending;
+            let Ok(now) = g.source.clock() else {
+                return InputResult::ControlLost;
+            };
+            let (sampled, until) = captured.capture.bounds();
+            let (lx, ly, until) = match g.scroll.add_captured(dx, dy, now.0, until) {
+                Ok(Some(lines)) => lines,
+                Ok(None) => return InputResult::Pending,
+                Err(_) => return InputResult::ControlLost,
             };
             let event = InputEvent::Positioned {
                 location,
@@ -467,7 +480,14 @@ impl Shared {
                     unit: ScrollUnit::Lines,
                 },
             };
-            push_captured(g, event, captured.as_ref())
+            match g.source.push_until(
+                event,
+                ClientInstant(sampled),
+                ClientInstant(until),
+            ) {
+                Ok(()) => InputResult::Sent,
+                Err(_) => InputResult::ControlLost,
+            }
         })
     }
     /// Forget a scroll gesture's fractional remainder.
@@ -487,6 +507,7 @@ impl Shared {
             if !g.source.capabilities().contains(Capability::Keys) {
                 return InputResult::Unsupported;
             }
+            g.scroll.reset();
             if g.keys[slot] == pressed {
                 return InputResult::Pending;
             }
@@ -516,6 +537,7 @@ impl Shared {
             if !g.source.capabilities().contains(Capability::Keys) {
                 return InputResult::Unsupported;
             }
+            g.scroll.reset();
             let Some(capture) = capture_input(g) else {
                 return InputResult::ControlLost;
             };
@@ -554,6 +576,7 @@ impl Shared {
             if !captured.capture.current(g) {
                 return InputResult::ControlLost;
             }
+            g.scroll.reset();
             if g.keys[captured.slot] == captured.pressed {
                 return InputResult::Pending;
             }
@@ -603,6 +626,7 @@ impl Shared {
             if !g.source.supports_text() {
                 return InputResult::Unsupported;
             }
+            g.scroll.reset();
             if paced(g) {
                 return InputResult::Busy;
             }
@@ -624,6 +648,7 @@ impl Shared {
     /// first failure, if any.
     pub fn release_all(&self) -> InputResult {
         self.with_granted(|g| {
+            g.scroll.reset();
             for slot in 0..256_usize {
                 if g.keys[slot] {
                     let Ok(usage) = u16::try_from(slot) else {

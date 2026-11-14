@@ -1,5 +1,28 @@
 # Implementation status
 
+## Fractional wheel input retains its original expiry (2026-11-14 UTC)
+
+A native wheel fraction can no longer wait indefinitely and become a new scroll
+when another fraction arrives later. Accumulation retains the earliest exclusive
+deadline, drops expired carry, refuses oversized whole-action backlogs, and
+submits through the existing original-source `push_until` path. The newest
+capture's original sample preserves ordered-source timestamp monotonicity;
+only its deadline can be shortened by an earlier contribution.
+
+Pointer, button, key, text and release boundaries clear carry. Windows mapping
+invalidation and replacement also clear it. Refused native submission drops the
+original granted owner, so consumed fractions cannot survive for replay. Local
+last-pointer state changes only after accepted pointer/button input. This builds
+on the current mouse capture and mapping implementation without replacing it.
+
+Six deterministic tests of this exact wheel-policy module passed on the pinned
+nightly earlier in this session, covering combined bounds, exact expiry,
+intervening actions, invalid/oversized deltas, shorter new bounds and both axes.
+The rebased shared-session and native-viewer wiring received independent source
+review. The complete rebased portable suite, strict Clippy and actual Windows
+build/runtime remain pending because the execution service is unavailable;
+`fr-znp3` remains in progress.
+
 ## Windows installed-Tailscale machine discovery and connections (2026-11-14 UTC)
 
 The native Windows client now lists a bounded local machine snapshot with
