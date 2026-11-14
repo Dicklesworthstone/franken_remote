@@ -223,6 +223,7 @@ fn convert(error: Error) -> viewer::Error {
         Error::Closed => viewer::Error::Closed,
         Error::InvalidRecord => viewer::Error::InvalidRecord,
         Error::ReceiveExpired => viewer::Error::ReceiveExpired,
+        Error::SendExpired => viewer::Error::SendExpired,
         Error::EgressExpired => viewer::Error::EgressExpired,
         Error::Consent(error) => viewer::Error::Consent(error),
         Error::Transport(error) => viewer::Error::Transport(error),

@@ -130,6 +130,73 @@ fn receive_expiry_stops_the_original_microphone_without_recording_or_losing_cont
 }
 
 #[test]
+fn peer_send_expiry_stops_the_microphone_without_recording_or_losing_control() {
+    run_test!(cx, {
+        let mut link = Link::new(&cx).await;
+        let (host, client) = link.microphone(&cx).await;
+        let (mut input, origin) = link.controller(&cx).await;
+        let mut uplink = link.uplink(
+            &cx,
+            client,
+            &mut input,
+            origin,
+            Path::new("/nonexistent/private-pulse"),
+        );
+        let original = link.client.binding();
+        let until = network::clock(&cx) + 1_000_000;
+        while link.host.usage().retained_send_records != 0
+            || link.client.usage().retained_send_records != 0
+        {
+            assert!(network::clock(&cx) < until);
+            link.drive(&cx).await;
+        }
+        let mut stop = [0; audio::AUDIO_STOP_RECORD_BYTES];
+        audio::encode_stop(
+            &audio::AudioStop {
+                direction: AudioDirection::Uplink,
+                generation: AudioGeneration::from_raw(1),
+                reason: fr_core::audio::AudioStopReason::HostDisabled,
+            },
+            CHANNEL,
+            &mut stop,
+        )
+        .unwrap();
+        host.send_control_prepared(
+            &mut link.host,
+            &cx,
+            &stop,
+            network::clock(&cx) + 100_000,
+            || true,
+            || Ok::<_, ()>(()),
+        )
+        .unwrap();
+        assert_eq!(link.host.usage().retained_send_records, 1);
+        // Expire the real host record before it leaves. Only its native reset
+        // crosses the network; the controller must retain the sender's cause.
+        asupersync::time::sleep(cx.now(), Duration::from_millis(2100)).await;
+        link.host.tick(&cx, || true).unwrap();
+        assert!(host.send_expired(&link.host));
+        let until = network::clock(&cx) + 500_000;
+        while uplink.state() != State::Stopped {
+            assert!(network::clock(&cx) < until, "audio retirement did not reach its owner");
+            link.drive_uplink(&cx, &mut uplink).await;
+        }
+        assert_eq!(uplink.reason(), Some(Error::SendExpired));
+        assert!(uplink.retirement().is_none());
+        assert!(
+            uplink
+                .begin_talk(MicTalkMode::OpenMic { active: true })
+                .is_err()
+        );
+        uplink.maintain(&mut link.client).unwrap();
+        assert_eq!(uplink.reason(), Some(Error::SendExpired));
+        assert!(link.client.is_bound_to(&original));
+        assert!(!link.client.is_closed());
+        link.assert_original_control_usable(&cx).await;
+    });
+}
+
+#[test]
 fn constructor_permission_and_selection_refusals_retire_only_the_proven_optional_lane() {
     for changed_selection in [false, true] {
         run_test!(cx, {

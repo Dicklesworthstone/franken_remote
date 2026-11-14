@@ -137,7 +137,7 @@ pub enum Error {
     TooLarge,
     Backpressure,
     Expired,
-    /// The original completed clipboard or file pair exceeded a retained
+    /// The original completed clipboard, file or audio pair exceeded a retained
     /// reliable-send deadline and retired between native I/O operations. The
     /// connection remains open; this is neither receive expiry nor a publication receipt.
     SendExpired,
@@ -767,8 +767,9 @@ impl QuicRecords {
     /// admission: a record already past it is refused. An admitted reliable
     /// record must then be staged and acknowledged by max(send-by, admission +
     /// [`delivery_allowance_us`] for this path). Between settled native I/O
-    /// operations, expiry retires an ACTIVE Clipboard, Files or `FilesDownload`
-    /// pair; other retained expiry closes the connection. Expiry during native
+    /// operations, expiry retires an ACTIVE clipboard, file or audio pair;
+    /// other retained expiry closes the connection. Microphone datagram custody
+    /// still requires its original native-output fence. Expiry during native
     /// I/O always closes it. A late acknowledgement is a slow path, not a stale
     /// record: receivers judge
     /// lateness by the record's own timestamps and deadlines.

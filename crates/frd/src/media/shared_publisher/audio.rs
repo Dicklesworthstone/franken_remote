@@ -299,8 +299,9 @@ impl EntryAudio {
                 // The final admission check can retire the pair after the
                 // pre-service check. Only this original pair's expiry witness
                 // permits treating WrongRoute as an optional audio failure.
-                Err(quic::Error::WrongRoute)
-                    if transport.audio_receive_expired(lanes.replies) == Ok(true) =>
+                Err(quic::Error::WrongRoute | quic::Error::Expired)
+                    if transport.audio_receive_expired(lanes.replies) == Ok(true)
+                        || transport.audio_send_expired(lanes.replies) == Ok(true) =>
                 {
                     self.close();
                     return Ok(());

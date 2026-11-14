@@ -116,6 +116,16 @@ witness. A held configuration or reply cannot start native resources, grant
 consent, or implicitly reopen talk after this terminal retirement. Original input
 and playback continue only while their own authority remains valid.
 
+A retained reliable configuration, reply or stop that exceeds its original
+send deadline between settled native I/O operations also retires only the
+original microphone pair. Its distinct `SendExpired` cause appears as
+`microphone_send_expired`, including when the peer initiates the retirement.
+Playback has the corresponding `audio_send_expired` outcome. Both owners stop
+their original native work, clear pending replies and preserve cleanup receipts.
+Consumed attachment identities stay retired; no timeout reopens talk or retries
+a configuration. A transport error without the original retirement witness
+cannot acquire this optional-failure meaning.
+
 The native-output privacy fence still takes precedence: queued outgoing
 microphone datagrams or unsettled protected output require the original
 connection to close, because removing a stream or route cannot retract them.

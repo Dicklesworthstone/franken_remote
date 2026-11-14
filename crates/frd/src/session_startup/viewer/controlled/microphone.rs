@@ -44,6 +44,8 @@ pub enum Error {
     InvalidRecord,
     /// The original optional microphone attachment's receive framing expired.
     ReceiveExpired,
+    /// The original optional microphone attachment's reliable-send custody expired.
+    SendExpired,
     EgressExpired,
     Order,
     CaptureTransport,

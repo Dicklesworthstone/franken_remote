@@ -58,6 +58,8 @@ pub enum Error {
     InvalidRecord,
     /// Only the original optional microphone pair exceeded its receive deadline.
     ReceiveExpired,
+    /// Only the original optional microphone pair exceeded its reliable-send deadline.
+    SendExpired,
     EgressExpired,
     Capture(transmit::Error),
     Consent(uplink::Error),
@@ -532,19 +534,9 @@ impl Uplink {
         // A send's final admission check can retire the pair after the owner
         // preflight. Preserve its exact terminal cause without relabeling a
         // closed parent, lost authority, or retained microphone output.
-        let reason = if matches!(
-            reason,
-            Error::Transport(
-                quic::Error::Closed
-                    | quic::Error::WrongRoute
-                    | quic::Error::Stream(fr_wire::stream::StreamError::Expired)
-            )
-        ) && self.lane.is_retired(q) == Ok(true)
-            && self.lane.receive_expired(q)
-        {
-            Error::ReceiveExpired
-        } else {
-            reason
+        let reason = match reason {
+            Error::Transport(error) => self.retired_reason(q, error).unwrap_or(reason),
+            _ => reason,
         };
         self.reason = Some(reason);
         self.retire(q)?;
@@ -552,6 +544,30 @@ impl Uplink {
             return Err(reason);
         }
         Ok(())
+    }
+    /// Only an original, actually retired pair can turn a transport failure
+    /// into an optional microphone end. A closed parent or lost authority
+    /// never acquires that meaning from a stale numeric route.
+    fn retired_reason(&self, q: &QuicRecords, error: quic::Error) -> Option<Error> {
+        if self.lane.is_retired(q) != Ok(true) {
+            return None;
+        }
+        let receive = self.lane.receive_expired(q);
+        let send = self.lane.send_expired(q);
+        if matches!(error, quic::Error::Closed | quic::Error::WrongRoute)
+            || (error == quic::Error::Stream(fr_wire::stream::StreamError::Expired) && receive)
+            || (error == quic::Error::SendExpired && send)
+        {
+            Some(if receive {
+                Error::ReceiveExpired
+            } else if send {
+                Error::SendExpired
+            } else {
+                Error::Closed
+            })
+        } else {
+            None
+        }
     }
     /// Consume exact native drain witnesses before other session lanes run.
     /// This never starts capture or refreshes an admitted packet's deadline.
@@ -578,12 +594,7 @@ impl Uplink {
         }
         self.publish_guard();
         if let Err(error) = self.lane.check(q) {
-            if self.lane.is_retired(q) == Ok(true) {
-                let reason = if self.lane.receive_expired(q) {
-                    Error::ReceiveExpired
-                } else {
-                    Error::Closed
-                };
+            if let Some(reason) = self.retired_reason(q, error) {
                 return self.fail(q, reason);
             }
             return Err(Error::Transport(error));
@@ -869,19 +880,10 @@ impl Uplink {
             },
         );
         if let Err(error) = received {
-            if self.lane.is_retired(q) == Ok(true)
-                && (matches!(error, quic::Error::WrongRoute | quic::Error::Closed)
-                    || (error == quic::Error::Stream(fr_wire::stream::StreamError::Expired)
-                        && self.lane.receive_expired(q)))
-            {
+            if let Some(reason) = self.retired_reason(q, error) {
                 // An original configuration witness may close inside a gate.
                 // Only the existing retired reservation proves optional
                 // isolation; parent-control closure and closed q stay fatal.
-                let reason = if self.lane.receive_expired(q) {
-                    Error::ReceiveExpired
-                } else {
-                    Error::Closed
-                };
                 return self.fail(q, reason);
             }
             return Err(Error::Transport(error));

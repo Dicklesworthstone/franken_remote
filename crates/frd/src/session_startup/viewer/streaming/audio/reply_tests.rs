@@ -301,6 +301,7 @@ fn permanent_transport_refusal_is_not_a_decoder_restart() {
     for failure in [
         quic::Error::Unauthorized,
         quic::Error::WrongRoute,
+        quic::Error::SendExpired,
         quic::Error::Stream(fr_wire::stream::StreamError::Expired),
     ] {
         let (mut audio, calls, _) = configured();
@@ -315,21 +316,27 @@ fn permanent_transport_refusal_is_not_a_decoder_restart() {
 }
 
 #[test]
-fn receive_expiry_during_reply_admission_fences_the_output_without_a_restart() {
-    let (mut audio, calls, script) = configured();
-    audio
-        .service_reply(1, &mut live(), &mut |_, _, _, _| {
-            Err(reply::SendFailure::ReceiveExpired)
-        })
-        .unwrap();
-    assert_eq!(audio.state, State::Ended);
-    assert!(audio.pending_reply.is_none() && audio.stop.is_none() && audio.output.is_none());
-    assert_eq!(calls.borrow().ended, [AudioEnd::ReceiveExpired]);
-    assert_eq!(calls.borrow().dropped, 1);
-    assert_eq!(calls.borrow().resets, 0);
-    assert_eq!(script.borrow().admitted, 0);
-    assert_eq!(turn(&mut audio, 2, true), Vec::<(Vec<u8>, u64)>::new());
-    assert_eq!(script.borrow().services, 1);
+fn optional_expiry_during_reply_admission_fences_the_output_without_a_restart() {
+    for end in [AudioEnd::ReceiveExpired, AudioEnd::SendExpired] {
+        let (mut audio, calls, script) = configured();
+        audio
+            .service_reply(1, &mut live(), &mut |_, _, _, _| {
+                Err(if end == AudioEnd::ReceiveExpired {
+                    reply::SendFailure::ReceiveExpired
+                } else {
+                    reply::SendFailure::SendExpired
+                })
+            })
+            .unwrap();
+        assert_eq!(audio.state, State::Ended);
+        assert!(audio.pending_reply.is_none() && audio.stop.is_none() && audio.output.is_none());
+        assert_eq!(calls.borrow().ended, [end]);
+        assert_eq!(calls.borrow().dropped, 1);
+        assert_eq!(calls.borrow().resets, 0);
+        assert_eq!(script.borrow().admitted, 0);
+        assert_eq!(turn(&mut audio, 2, true), Vec::<(Vec<u8>, u64)>::new());
+        assert_eq!(script.borrow().services, 1);
+    }
 }
 
 #[test]

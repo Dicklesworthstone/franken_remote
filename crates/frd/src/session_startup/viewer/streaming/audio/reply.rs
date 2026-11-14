@@ -11,10 +11,11 @@ const CAPACITY: usize = if wire::AUDIO_CONFIGURED_RECORD_BYTES > wire::AUDIO_STO
     wire::AUDIO_STOP_RECORD_BYTES
 };
 
-/// Only the original transport adapter can prove optional receive retirement.
+/// Only the original transport adapter can prove optional expiry retirement.
 /// A generic transport expiry may instead have closed the entire connection.
 pub(super) enum SendFailure {
     ReceiveExpired,
+    SendExpired,
     Transport(quic::Error),
 }
 
@@ -209,6 +210,10 @@ impl ViewerAudio {
             Err(SendFailure::Transport(quic::Error::Backpressure)) => Ok(false),
             Err(SendFailure::ReceiveExpired) => {
                 self.retired(AudioEnd::ReceiveExpired);
+                Ok(false)
+            }
+            Err(SendFailure::SendExpired) => {
+                self.retired(AudioEnd::SendExpired);
                 Ok(false)
             }
             Err(SendFailure::Transport(error)) => {

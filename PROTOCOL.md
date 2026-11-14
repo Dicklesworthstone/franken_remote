@@ -530,8 +530,18 @@ terminal cause through QUIC reset/stop codes `0x46524145` (AudioDown) or
 `0x46525545` (AudioUp). These codes grant no retry, renewal, or new talk epoch.
 Playback/source owners fence their queues and native work before another audio
 service or admission; video, input and the other audio direction remain
-independent. Critical-stream expiry, malformed framing, unfinished attachment
-deadlines and retained-send failures keep their connection-failure behavior.
+independent.
+
+A retained reliable-send deadline on a completed audio pair likewise retires
+only that direction when native I/O has settled. Reset/stop codes `0x46524153`
+(AudioDown) and `0x46525553` (AudioUp) preserve this distinct send-expiry cause
+at both endpoints. Unsent and retransmittable stream work is withdrawn; an
+already-delivered record is not recalled or given a fresh lifetime. Native
+playback/capture owners stop the original epoch and retain cleanup evidence.
+No configuration, reply or talk request is automatically retried.
+
+Critical-stream expiry, malformed framing, unfinished attachment deadlines,
+and expiry during unsettled native I/O keep their connection-failure behavior.
 AudioUp retirement still closes the original connection if native outgoing
 microphone datagrams or unsettled protected output cannot be withdrawn;
 removing routes cannot authorize those bytes to leave later.

@@ -26,6 +26,10 @@ const AUDIO_RETIRED: u64 = 0x4652_4144;
 const MICROPHONE_RETIRED: u64 = 0x4652_4155;
 const AUDIO_RECEIVE_EXPIRED: u64 = 0x4652_4145;
 const MICROPHONE_RECEIVE_EXPIRED: u64 = 0x4652_5545;
+// Reliable configuration/reply/stop custody on the original ACTIVE direction.
+// Neither code changes sample validity, talk consent or the native-output fence.
+const AUDIO_SEND_EXPIRED: u64 = 0x4652_4153;
+const MICROPHONE_SEND_EXPIRED: u64 = 0x4652_5553;
 
 fn receive_expiry_code(role: MediaRole) -> Option<u64> {
     match role {
@@ -43,12 +47,11 @@ fn send_expiry_code(role: MediaRole) -> Option<u64> {
     match role {
         MediaRole::Clipboard => Some(CLIPBOARD_SEND_EXPIRED),
         MediaRole::Files | MediaRole::FilesDownload => Some(FILES_SEND_EXPIRED),
-        MediaRole::Configuration
-        | MediaRole::Recovery
-        | MediaRole::Video
-        | MediaRole::Input
-        | MediaRole::AudioDown
-        | MediaRole::AudioUp => None,
+        MediaRole::AudioDown => Some(AUDIO_SEND_EXPIRED),
+        MediaRole::AudioUp => Some(MICROPHONE_SEND_EXPIRED),
+        MediaRole::Configuration | MediaRole::Recovery | MediaRole::Video | MediaRole::Input => {
+            None
+        }
     }
 }
 
@@ -156,6 +159,20 @@ impl QuicRecords {
     /// connection identity: its session owner must supply its original checked
     /// connection. A closed connection is not evidence of optional retirement.
     pub fn audio_receive_expired(&self, inbound: crate::quic::StreamRoute) -> Result<bool, Error> {
+        self.audio_expired(inbound, Expiry::Receive)
+    }
+    /// Read retained reliable-send expiry for this exact original audio pair,
+    /// locally or reported by its peer. The inbound route identifies the pair,
+    /// never an interchangeable numeric binding on another connection. This
+    /// terminal evidence neither renews a deadline nor acknowledges playback.
+    pub fn audio_send_expired(&self, inbound: crate::quic::StreamRoute) -> Result<bool, Error> {
+        self.audio_expired(inbound, Expiry::Send)
+    }
+    fn audio_expired(
+        &self,
+        inbound: crate::quic::StreamRoute,
+        expiry: Expiry,
+    ) -> Result<bool, Error> {
         if self.is_closed() {
             return Err(Error::Closed);
         }
@@ -171,7 +188,7 @@ impl QuicRecords {
                     && matches!(r.role, MediaRole::AudioDown | MediaRole::AudioUp)
             })
             .ok_or(Error::WrongRoute)?;
-        Ok(reservation.retired() && reservation.expiry == Some(Expiry::Receive))
+        Ok(reservation.retired() && reservation.expiry == Some(expiry))
     }
     /// Run before framing/retained-record deadline checks. A peer's reset/FIN
     /// cancels this media/optional pair; it is not EOF on the critical input stream.

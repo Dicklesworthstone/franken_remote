@@ -40,6 +40,8 @@ pub enum Error {
     Protocol,
     /// The original completed optional microphone pair exceeded its receive deadline.
     ReceiveExpired,
+    /// The original completed microphone pair exceeded its reliable-send deadline.
+    SendExpired,
     SetupExpired,
     AcknowledgementExpired,
     AcknowledgementUnknown,
@@ -480,10 +482,13 @@ impl Host {
         let optional = self.lane.is_retired(q) == Ok(true)
             && (matches!(error, quic::Error::Closed | quic::Error::WrongRoute)
                 || (error == quic::Error::Stream(fr_wire::stream::StreamError::Expired)
-                    && self.lane.receive_expired(q)));
+                    && self.lane.receive_expired(q))
+                || (error == quic::Error::SendExpired && self.lane.send_expired(q)));
         if optional {
             let reason = if self.lane.receive_expired(q) {
                 Error::ReceiveExpired
+            } else if self.lane.send_expired(q) {
+                Error::SendExpired
             } else {
                 Error::Transport(error)
             };

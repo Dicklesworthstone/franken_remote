@@ -249,6 +249,57 @@ fn blocked_microphone_configuration_expiry_retires_only_its_original_owner() {
 }
 
 #[test]
+fn microphone_reply_send_expiry_preserves_the_original_input_owner() {
+    runtime().block_on(async {
+        let mut f = Fixture::new().await;
+        let mut host = f.host(true, absent_launch()).unwrap();
+        let original = f.link.h.binding();
+        let mut stop = [0; audio::AUDIO_STOP_RECORD_BYTES];
+        audio::encode_stop(
+            &audio::AudioStop {
+                direction: AudioDirection::Uplink,
+                generation: AudioGeneration::from_raw(1),
+                reason: AudioStopReason::HostDisabled,
+            },
+            host.lane.channel(),
+            &mut stop,
+        )
+        .unwrap();
+        assert_eq!(
+            host.lane
+                .send_control_prepared(
+                    &mut f.link.h,
+                    &f.cx,
+                    &stop,
+                    clock(&f.cx) + 100_000,
+                    || true,
+                    || Ok::<_, ()>(()),
+                )
+                .unwrap(),
+            SendAdmission::Accepted
+        );
+        assert_eq!(f.link.h.usage().retained_send_records, 1);
+        asupersync::time::sleep(f.cx.now(), Duration::from_millis(2100)).await;
+        f.link.h.tick(&f.cx, || host.permits_io()).unwrap();
+        assert_eq!(host.maintain(&mut f.link.h).unwrap(), State::Retired);
+        assert_eq!(host.reason(), Some(Error::SendExpired));
+        assert!(host.control().is_stopped());
+        assert!(host.retirement().is_none());
+        assert_eq!(host.statistics(), Statistics::default());
+        assert!(!f.input.control().is_stopped());
+        assert!(f.input_pair.0.completed_on(&f.link.h).is_ok());
+        assert!(f.link.h.is_bound_to(&original));
+        assert!(!f.link.h.is_closed());
+        assert_eq!(
+            host.transport_refusal(&mut f.link.h, quic::Error::WrongRoute)
+                .unwrap(),
+            State::Retired
+        );
+        assert_eq!(host.reason(), Some(Error::SendExpired));
+    });
+}
+
+#[test]
 fn local_microphone_permission_refusal_retires_the_completed_pair_before_native_setup() {
     runtime().block_on(async {
         let mut f = Fixture::new().await;

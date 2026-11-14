@@ -361,6 +361,7 @@ mod output {
             ViewerAudioEnd::NoOutput => "local_output_not_configured",
             ViewerAudioEnd::Local => "local_output_failed",
             ViewerAudioEnd::ReceiveExpired => "audio_receive_expired",
+            ViewerAudioEnd::SendExpired => "audio_send_expired",
             ViewerAudioEnd::ChannelClosed => "audio_channel_closed",
         }
     }

@@ -148,6 +148,9 @@ impl AudioUpChannel {
         if self.receive_expired(q) {
             return Err(Error::Stream(fr_wire::stream::StreamError::Expired));
         }
+        if self.send_expired(q) {
+            return Err(Error::SendExpired);
+        }
         if q.is_closed() || !self.attachment.is_complete() {
             return Err(Error::Closed);
         }
@@ -171,6 +174,13 @@ impl AudioUpChannel {
     /// or use it to reopen capture, consent, or transport admission.
     pub fn receive_expired(&self, q: &QuicRecords) -> bool {
         self.attachment.receive_expired(q)
+    }
+    /// This exact completed microphone pair retired at its original reliable
+    /// send deadline, locally or as reported by its peer. Native sample custody
+    /// remains independently fenced; no replacement consent or replay follows.
+    /// A foreign or closed connection cannot supply optional-retirement evidence.
+    pub fn send_expired(&self, q: &QuicRecords) -> bool {
+        self.attachment.send_expired(q)
     }
     /// Positive evidence that only this exact optional pair was retired while
     /// its original parent control pair remains open. A generic `Closed` error
@@ -263,14 +273,15 @@ impl AudioUpChannel {
         if direction != AudioDirection::Uplink {
             return Err(Error::WrongRoute);
         }
-        q.send_prepared(
+        let result = q.send_prepared(
             cx,
             Route::Stream(self.routes.outbound),
             bytes,
             until,
             authorize,
             prepared,
-        )
+        );
+        self.send_result(q, result)
     }
     pub fn send_packet_prepared<E>(
         &self,
@@ -290,14 +301,27 @@ impl AudioUpChannel {
         if packet.direction != AudioDirection::Uplink {
             return Err(Error::WrongRoute);
         }
-        q.send_prepared(
+        let result = q.send_prepared(
             cx,
             Route::Datagram(route),
             bytes,
             until,
             authorize,
             prepared,
-        )
+        );
+        self.send_result(q, result)
+    }
+    fn send_result<T>(&self, q: &QuicRecords, result: Result<T, Error>) -> Result<T, Error> {
+        // Admission may retire this original pair after its preflight, even
+        // when a per-record callback refuses. Keep its terminal cause instead
+        // of a missing-route or newly attempted record's deadline. Authority
+        // failures and uncertain native output retain their connection fence.
+        match result {
+            Ok(_) | Err(Error::WrongRoute | Error::Expired) if self.send_expired(q) => {
+                Err(Error::SendExpired)
+            }
+            other => other,
+        }
     }
     /// At most one handler invocation on this exact lane. Readiness is per route
     /// so native packet backpressure does not block reliable mute/configuration.

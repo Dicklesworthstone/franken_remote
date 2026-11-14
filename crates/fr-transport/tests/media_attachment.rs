@@ -66,11 +66,14 @@ struct Link {
 }
 impl Link {
     async fn new(cx: &Cx) -> Self {
-        let (c, h) = support::native_pair(cx, "localhost", ALPN).await;
         let policy = Policy {
             critical_send_records: 1,
             ..Policy::default()
         };
+        Self::with_policy(cx, policy).await
+    }
+    async fn with_policy(cx: &Cx, policy: Policy) -> Self {
+        let (c, h) = support::native_pair(cx, "localhost", ALPN).await;
         let (mut c, cr) = QuicRecords::bootstrap(c.unwrap(), cx, policy).unwrap();
         let (mut h, hr) = QuicRecords::bootstrap(h.unwrap(), cx, policy).unwrap();
         let cr = c.bind_control(cx, cr, 7, 4096, || true).unwrap();

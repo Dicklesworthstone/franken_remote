@@ -6,7 +6,7 @@ use crate::audio_up;
 use fr_transport::quic::audio::AudioUpChannel;
 use fr_wire::stream::StreamError;
 
-async fn quiet(l: &mut Link, cx: &Cx) {
+pub(super) async fn quiet(l: &mut Link, cx: &Cx) {
     let until = clock(cx) + 1_000_000;
     while l.h.usage().retained_send_records != 0 || l.c.usage().retained_send_records != 0 {
         assert!(clock(cx) < until, "original records did not drain");
@@ -14,7 +14,7 @@ async fn quiet(l: &mut Link, cx: &Cx) {
     }
 }
 
-fn endpoint(l: &mut Link, host: bool) -> &mut QuicRecords {
+pub(super) fn endpoint(l: &mut Link, host: bool) -> &mut QuicRecords {
     if host { &mut l.h } else { &mut l.c }
 }
 
@@ -253,13 +253,15 @@ fn ordinary_audio_retirement_does_not_claim_receive_expiry() {
         c.retire_audio(&mut l.c, &cx).unwrap();
         assert_eq!(l.h.audio_receive_expired(ha.inbound), Ok(false));
         assert_eq!(l.c.audio_receive_expired(ca.inbound), Ok(false));
+        assert_eq!(l.h.audio_send_expired(ha.inbound), Ok(false));
+        assert_eq!(l.c.audio_send_expired(ca.inbound), Ok(false));
         assert!(!l.h.is_closed());
         assert!(!l.c.is_closed());
     });
 }
 
 #[test]
-fn retained_audio_send_expiry_still_closes_the_connection() {
+fn retained_parent_send_expiry_still_closes_the_audio_connection() {
     run_test!(cx, {
         let mut l = Link::new(&cx).await;
         audio_up::enable(&mut l);
@@ -268,8 +270,8 @@ fn retained_audio_send_expiry_still_closes_the_connection() {
         quiet(&mut l, &cx).await;
         l.h.send(
             &cx,
-            Route::Stream(ha.outbound),
-            &record(0x60, 9, 52),
+            Route::Stream(l.hr.outbound),
+            &record(0x12, 7, 52),
             clock(&cx) + 100_000,
             || true,
         )
@@ -279,6 +281,7 @@ fn retained_audio_send_expiry_still_closes_the_connection() {
         assert_eq!(l.h.tick(&cx, || true), Err(Error::Expired));
         assert!(l.h.is_closed());
         assert_eq!(l.h.audio_receive_expired(ha.inbound), Err(Error::Closed));
+        assert_eq!(l.h.audio_send_expired(ha.inbound), Err(Error::Closed));
     });
 }
 

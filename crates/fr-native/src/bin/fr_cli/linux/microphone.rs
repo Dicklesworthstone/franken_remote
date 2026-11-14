@@ -414,6 +414,7 @@ fn error_code(error: mic::Error) -> &'static str {
         }
         mic::Error::EgressExpired => "microphone_speech_expired",
         mic::Error::ReceiveExpired => "microphone_receive_expired",
+        mic::Error::SendExpired => "microphone_send_expired",
         _ => "microphone_failed",
     }
 }
@@ -432,6 +433,11 @@ mod tests {
             error_code(mic::Error::Transport(fr_transport::quic::Error::Stream(
                 fr_wire::stream::StreamError::Expired,
             ))),
+            "microphone_failed"
+        );
+        assert_eq!(error_code(mic::Error::SendExpired), "microphone_send_expired");
+        assert_eq!(
+            error_code(mic::Error::Transport(fr_transport::quic::Error::SendExpired)),
             "microphone_failed"
         );
         assert_eq!(

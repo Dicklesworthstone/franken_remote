@@ -71,6 +71,7 @@ fn completed_owner_preserves_selection_and_rejects_equal_id_foreign_connections(
         let _foreign_audio = attach(&mut foreign, &cx, MediaRole::AudioUp, 9).await;
         let before = foreign.h.usage();
         assert_eq!(host.check(&foreign.h), Err(Error::WrongRoute));
+        assert!(!host.send_expired(&foreign.h));
         assert_eq!(host.is_retired(&foreign.h), Err(Error::WrongRoute));
         assert_eq!(
             host.control_send_drained(&foreign.h),
@@ -386,5 +387,132 @@ fn cloned_retirement_request_preserves_parent_and_cannot_retarget_equal_bindings
         l.h.tick(&cx, || true).unwrap();
         assert_eq!(host.is_retired(&l.h), Ok(true));
         assert!(!l.h.is_closed());
+    });
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn microphone_prepared_refusal_preserves_original_send_expiry_at_both_admission_gates() {
+    for packet_send in [false, true] {
+        for refused_at in [1, 2] {
+            run_test!(cx, {
+                let mut l = Link::with_policy(
+                    &cx,
+                    Policy {
+                        critical_send_records: 2,
+                        ..Policy::default()
+                    },
+                )
+                .await;
+                enable(&mut l);
+                let _input = attach(&mut l, &cx, MediaRole::Input, 8).await;
+                let (h, c, _, _) = attach(&mut l, &cx, MediaRole::AudioUp, 9).await;
+                let host = AudioUpChannel::new(&l.h, h).unwrap();
+                let client = AudioUpChannel::new(&l.c, c).unwrap();
+                quiet(&mut l, &cx).await;
+                client
+                    .send_control_prepared(
+                        &mut l.c,
+                        &cx,
+                        &configuration(9, AudioDirection::Uplink),
+                        clock(&cx) + 100_000,
+                        || true,
+                        || Ok::<_, ()>(()),
+                    )
+                    .unwrap();
+                let mut calls = 0;
+                let prepared = || {
+                    calls += 1;
+                    if calls == refused_at {
+                        // Simulate a thread stall during one of the two final
+                        // permit checks, while an older record keeps custody.
+                        std::thread::sleep(Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US));
+                        Err(7_u8)
+                    } else {
+                        Ok(())
+                    }
+                };
+                let until = clock(&cx) + 4_000_000;
+                let result = if packet_send {
+                    client.send_packet_prepared(
+                        &mut l.c,
+                        &cx,
+                        &packet(9),
+                        until,
+                        || true,
+                        prepared,
+                    )
+                } else {
+                    client.send_control_prepared(
+                        &mut l.c,
+                        &cx,
+                        &stop(9),
+                        until,
+                        || true,
+                        prepared,
+                    )
+                };
+                assert_eq!(result, Err(Error::SendExpired));
+                assert_eq!(calls, refused_at);
+                assert!(client.send_expired(&l.c));
+                assert!(!l.c.is_closed());
+                assert!(client.control_send_drained(&l.c).unwrap());
+                assert!(client.datagrams_send_drained(&l.c).unwrap());
+                let until = clock(&cx) + 1_000_000;
+                while !host.send_expired(&l.h) {
+                    assert!(clock(&cx) < until);
+                    l.drive(&cx).await;
+                }
+                assert_eq!(
+                    host.dispatch(
+                        &mut l.h,
+                        &cx,
+                        || true,
+                        |_| true,
+                        |_, _, _| panic!("an expired or refused audio record escaped"),
+                    ),
+                    Err(Error::SendExpired)
+                );
+            });
+        }
+    }
+}
+
+#[test]
+fn microphone_admission_expiry_does_not_retire_the_live_audio_pair() {
+    run_test!(cx, {
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let _input = attach(&mut l, &cx, MediaRole::Input, 8).await;
+        let (_h, c, _, _) = attach(&mut l, &cx, MediaRole::AudioUp, 9).await;
+        let client = AudioUpChannel::new(&l.c, c).unwrap();
+        quiet(&mut l, &cx).await;
+        assert_eq!(
+            client.send_control_prepared(
+                &mut l.c,
+                &cx,
+                &configuration(9, AudioDirection::Uplink),
+                clock(&cx),
+                || true,
+                || Ok::<_, ()>(()),
+            ),
+            Err(Error::Expired)
+        );
+        assert_eq!(
+            client.send_packet_prepared(
+                &mut l.c,
+                &cx,
+                &packet(9),
+                clock(&cx),
+                || true,
+                || Ok::<_, ()>(()),
+            ),
+            Err(Error::Expired)
+        );
+        assert!(!client.send_expired(&l.c));
+        assert_eq!(client.is_retired(&l.c), Ok(false));
+        client.check(&l.c).unwrap();
+        assert_eq!(l.c.usage().retained_send_records, 0);
+        assert!(client.datagrams_send_drained(&l.c).unwrap());
     });
 }

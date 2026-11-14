@@ -31,6 +31,8 @@ pub enum AudioEnd {
     Local,
     /// This original optional audio pair reached its first-byte receive deadline.
     ReceiveExpired,
+    /// This original optional audio pair exceeded a retained reliable-send deadline.
+    SendExpired,
     /// The original audio pair was retired without a usable `AudioStop` record.
     ChannelClosed,
 }
@@ -318,8 +320,15 @@ impl ViewerAudio {
             now_us,
             &mut || cx.checkpoint().is_ok() && live(),
             &mut |route, bytes, until, permitted| match q.send(cx, route, bytes, until, permitted) {
-                Err(quic::Error::WrongRoute) if q.audio_receive_expired(inbound) == Ok(true) => {
+                Err(quic::Error::WrongRoute | quic::Error::Expired)
+                    if q.audio_receive_expired(inbound) == Ok(true) =>
+                {
                     Err(reply::SendFailure::ReceiveExpired)
+                }
+                Err(quic::Error::WrongRoute | quic::Error::Expired)
+                    if q.audio_send_expired(inbound) == Ok(true) =>
+                {
+                    Err(reply::SendFailure::SendExpired)
                 }
                 result => result.map_err(reply::SendFailure::Transport),
             },
@@ -335,14 +344,26 @@ impl ViewerAudio {
         cx: &Cx,
         live: &mut dyn FnMut() -> bool,
     ) -> Result<bool, Error> {
-        // Retire expired framing before any native output callback. A missing
-        // audio route cannot leave queued playback alive, or turn its pending
+        // Retire expired framing and retained sends before any output callback.
+        // A missing route cannot leave playback alive or turn its pending
         // acknowledgement into a WrongRoute failure of the desktop session.
         if let Err(error) = q.tick(cx, &mut *live) {
             self.close();
             return Err(Error::Transport(error));
         }
-        let expired = match q.audio_receive_expired(self.lanes.control) {
+        let expired = match q
+            .audio_receive_expired(self.lanes.control)
+            .and_then(|receive| {
+                q.audio_send_expired(self.lanes.control).map(|send| {
+                    if receive {
+                        Some(AudioEnd::ReceiveExpired)
+                    } else if send {
+                        Some(AudioEnd::SendExpired)
+                    } else {
+                        None
+                    }
+                })
+            }) {
             Ok(expired) => expired,
             Err(error) => {
                 self.close();
@@ -352,7 +373,7 @@ impl ViewerAudio {
         let routes_missing = !q.has_route(Route::Stream(self.lanes.control))
             || !q.has_route(Route::Stream(self.lanes.replies))
             || !q.has_route(Route::Datagram(self.lanes.packets));
-        let ended = if expired || routes_missing {
+        let ended = if expired.is_some() || routes_missing {
             true
         } else {
             match q.receive_ended(self.lanes.control) {
@@ -364,11 +385,7 @@ impl ViewerAudio {
             }
         };
         if ended {
-            self.retired(if expired {
-                AudioEnd::ReceiveExpired
-            } else {
-                AudioEnd::ChannelClosed
-            });
+            self.retired(expired.unwrap_or(AudioEnd::ChannelClosed));
             return Ok(false);
         }
         Ok(true)

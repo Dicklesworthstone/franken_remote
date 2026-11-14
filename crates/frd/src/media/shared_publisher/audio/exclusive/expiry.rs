@@ -94,6 +94,40 @@ async fn fixture(
 }
 
 #[test]
+fn expired_configuration_send_stops_source_demand_without_ending_observation() {
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let (mut link, feed, _lanes, _pair) = Box::pin(fixture(&cx)).await;
+        let original = link.h.binding();
+        assert_eq!(feed.service_exclusive(&mut link.h).unwrap().accepted, 1);
+        assert_eq!(link.h.usage().retained_send_records, 1);
+        // Leave the actual admitted configuration undriven. No transport ACK
+        // or output-readiness evidence exists for it.
+        asupersync::time::sleep(cx.now(), Duration::from_millis(2100)).await;
+        let report = feed.service_exclusive(&mut link.h).unwrap();
+        assert_eq!(report.accepted, 0);
+        assert!(!report.pending);
+        assert!(!feed.demand().unwrap());
+        let FeedTarget::Exclusive(shared) = &feed.target else {
+            unreachable!()
+        };
+        {
+            let state = shared.lock().unwrap();
+            assert!(state.closed && state.ring.is_empty());
+            assert!(state.audio.lane.is_stopped());
+            assert!(state.audio.control_offer.is_none());
+            state.owner.check().unwrap();
+            assert_eq!(link.h.audio_send_expired(state.lanes.replies), Ok(true));
+            assert_eq!(link.h.audio_receive_expired(state.lanes.replies), Ok(false));
+        }
+        assert_eq!(link.h.usage().retained_send_records, 0);
+        assert!(link.h.is_bound_to(&original));
+        assert!(!link.h.is_closed());
+        assert_eq!(feed.service_exclusive(&mut link.h).unwrap().accepted, 0);
+    });
+}
+
+#[test]
 fn expired_reply_fences_source_demand_and_ring_before_an_idle_turn() {
     runtime().block_on(async {
         let cx = Cx::current().unwrap();

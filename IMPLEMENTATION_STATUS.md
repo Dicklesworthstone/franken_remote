@@ -1,5 +1,27 @@
 # Implementation status
 
+## Established audio send expiry preserves the original desktop (2026-11-14 UTC)
+
+Completed AudioDown and AudioUp pairs now retire independently when their
+original reliable-send deadline expires between settled native I/O operations.
+The transport withdraws that direction's unsent/retransmittable stream work,
+retains consumed identities, and conveys a distinct send-expiry cause to its
+peer. Playback and microphone owners stop the original native work before
+another callback; completion distinguishes `audio_send_expired` and
+`microphone_send_expired`. No original deadline, consent or retry policy changes.
+Critical and incomplete exchanges, authority loss, unsettled I/O and retained
+microphone output retain their connection fences.
+
+Regressions exercise queued and native-staged records in both directions,
+original control and sibling traffic, late-admission races, source-demand and
+output cleanup, and preservation of the original microphone owners. These
+new tests are not yet executed: the full local metadata check was SIGKILLed
+in unchanged pinned Asupersync, then the execution service became unavailable.
+The portable four-crate check and formatting pass preceded these changes.
+The recovered source was reviewed against the exact GitHub base; existing
+push checks provide the next compiler/runtime verdict. No native-device,
+live-tailnet or loaded-host qualification is claimed; `fr-jy4e` stays in progress.
+
 ## Complete iOS Unicode callbacks without delayed replay (2026-11-14 UTC)
 
 The shared native control profile now includes the optional committed-text

@@ -499,6 +499,75 @@ async fn hold_audio_stop(f: &mut Fixture, h: &Cx) -> quic::StreamRoute {
 }
 
 #[test]
+fn expired_audio_reply_send_fences_playback_and_preserves_the_original_viewer() {
+    run(|c, h| async move {
+        let mut f = Box::pin(fixture(&c, &h)).await;
+        configure(&mut f, &h, 1).await;
+        let until = now(&c).unwrap() + 500_000;
+        while f.viewer.io().unwrap().0.usage().retained_send_records != 0
+            || f.host.io().unwrap().0.usage().retained_send_records != 0
+        {
+            assert!(
+                now(&c).unwrap() < until,
+                "initial audio exchange did not drain"
+            );
+            turn(&mut f).await;
+        }
+        let q = f.viewer.io().unwrap().0;
+        let original = q.binding();
+        let lanes = f.media.audio_lanes(q).unwrap().unwrap();
+        let mut stop = [0; wire::AUDIO_STOP_RECORD_BYTES];
+        wire::encode_stop(
+            &wire::AudioStop {
+                direction: AudioDirection::Downlink,
+                generation: AudioGeneration::from_raw(1),
+                reason: AudioStopReason::DeviceChanged,
+            },
+            lanes.binding,
+            &mut stop,
+        )
+        .unwrap();
+        q.send(
+            &c,
+            Route::Stream(lanes.replies),
+            &stop,
+            now(&c).unwrap() + 100_000,
+            || true,
+        )
+        .unwrap();
+        assert_eq!(q.usage().retained_send_records, 1);
+        asupersync::time::sleep(c.now(), Duration::from_millis(2100)).await;
+        let services = f.calls.borrow().serviced;
+        f.calls.borrow_mut().queued = 3;
+        // Service the production output owner before any parent drive. Its
+        // preflight must retire the pair before rendering the queued sound.
+        let q = f.viewer.io().unwrap().0;
+        f.audio
+            .service(q, &c, now(&c).unwrap(), &mut || c.checkpoint().is_ok())
+            .unwrap();
+        {
+            let calls = f.calls.borrow();
+            assert_eq!(calls.serviced, services);
+            assert_eq!(calls.queued, 0);
+            assert_eq!(calls.rendered, 0);
+            assert_eq!(calls.dropped, 1);
+            assert_eq!(calls.ended, [AudioEnd::SendExpired]);
+            assert_eq!(calls.resets, 0);
+        }
+        assert_eq!(q.audio_send_expired(lanes.control), Ok(true));
+        assert_eq!(q.audio_receive_expired(lanes.control), Ok(false));
+        assert!(q.is_bound_to(&original));
+        assert!(!q.is_closed());
+        for _ in 0..3 {
+            turn(&mut f).await;
+        }
+        assert!(!f.viewer.is_closed());
+        assert!(!c.is_cancel_requested());
+        assert_eq!(f.calls.borrow().dropped, 1);
+    });
+}
+
+#[test]
 fn expired_audio_record_fences_playback_without_ending_the_original_viewer() {
     run(|c, h| async move {
         let mut f = Box::pin(fixture_with_policy(
