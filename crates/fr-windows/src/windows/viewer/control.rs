@@ -36,7 +36,8 @@ const fn item(id: usize) -> u32 {
 
 thread_local! {
     static ORIGINAL: RefCell<Option<Weak<Shared>>> = const { RefCell::new(None) };
-    static STOP_ORIGINAL: RefCell<Option<Weak<Shared>>> = const { RefCell::new(None) };
+    static STOP_CHOICE: RefCell<Option<change_display::MenuChoice<Shared>>> =
+        const { RefCell::new(None) };
     static DISPLAY_CHOICE: RefCell<Option<change_display::MenuChoice<Shared>>> =
         const { RefCell::new(None) };
     static LIFETIME: Cell<u64> = const { Cell::new(0) };
@@ -70,6 +71,7 @@ fn ready_attempt(original: &Shared) -> Option<u64> {
 pub(super) fn invalidate_display() {
     LIFETIME.with(|lifetime| lifetime.set(lifetime.get().saturating_add(1)));
     DISPLAY_CHOICE.with(|choice| *choice.borrow_mut() = None);
+    STOP_CHOICE.with(|choice| *choice.borrow_mut() = None);
 }
 
 /// Window lifecycle checks need no mutable access to Viewer or any codec.
@@ -94,21 +96,26 @@ pub(super) fn invalidate_choice() {
     });
 }
 
-/// Stop only the owner from the popup that offered it. A delayed callback
-/// cannot close a replacement session or create a control request.
-pub(super) fn stop() -> bool {
-    invalidate_display();
-    let Some(original) =
-        STOP_ORIGINAL.with(|slot| slot.borrow_mut().take().and_then(|owner| owner.upgrade()))
-    else {
-        return false;
-    };
-    original.release_control();
-    ORIGINAL.with(|slot| {
-        slot.borrow()
-            .as_ref()
-            .is_some_and(|current| current.ptr_eq(&Arc::downgrade(&original)))
-    })
+/// Fence only the popup's exact original input owner before any renderer or
+/// editor cleanup. A later native callback cannot close a replacement or start
+/// another dial; fresh viewing still requires this owner's positive cleanup.
+pub(super) fn stop(message: u32) -> Option<change_display::Request<Shared>> {
+    let mut choice = STOP_CHOICE.with(|choice| choice.borrow_mut().take())?;
+    let original = ORIGINAL.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))?;
+    let available = visible_now()
+        && display_ready(&original)
+        && original.control_state() == ControlState::Controlled;
+    let request = choice.take(
+        &original,
+        lifetime(),
+        original.frames.app_id(0),
+        available,
+        message,
+        input_ticks(),
+    )?;
+    DISPLAY_CHOICE.with(|choice| *choice.borrow_mut() = None);
+    request.original.release_control();
+    Some(request)
 }
 
 pub(super) fn close() {
@@ -169,7 +176,7 @@ impl Menu {
             };
             let attached = AppendMenuW(popup, MF_STRING, REQUEST, w!("&Request control"))
                 .and_then(|()| {
-                    AppendMenuW(popup, MF_STRING, STOP, w!("&Stop control and disconnect"))
+                    AppendMenuW(popup, MF_STRING, STOP, w!("&Stop control and keep viewing"))
                 })
                 .and_then(|()| AppendMenuW(popup, MF_SEPARATOR, 0, w!("")))
                 .and_then(|()| AppendMenuW(popup, MF_STRING, text::OPEN, w!("Send &text…")))
@@ -217,7 +224,22 @@ impl Menu {
         let choice = original.control_request();
         let opened = input_ticks();
         self.choice = choice.map(|request| Choice::new(request, opened));
-        STOP_ORIGINAL.with(|slot| *slot.borrow_mut() = Some(Arc::downgrade(original)));
+        let stop_choice = attempt
+            .filter(|attempt| {
+                original.control_state() == ControlState::Controlled
+                    && visible_now()
+                    && lifetime() == native_lifetime
+                    && ready_attempt(original) == Some(*attempt)
+            })
+            .map(|attempt| {
+                change_display::MenuChoice::new(
+                    Arc::clone(original),
+                    native_lifetime,
+                    attempt,
+                    opened,
+                )
+            });
+        STOP_CHOICE.with(|slot| *slot.borrow_mut() = stop_choice);
         let display_choice = attempt
             .filter(|attempt| {
                 self.display_available
@@ -295,11 +317,7 @@ impl Menu {
             let _ = EnableMenuItem(
                 self.popup,
                 item(STOP),
-                MF_BYCOMMAND
-                    | enabled(matches!(
-                        state,
-                        ControlState::Requesting | ControlState::Controlled
-                    )),
+                MF_BYCOMMAND | enabled(state == ControlState::Controlled),
             );
             let _ = EnableMenuItem(
                 self.popup,

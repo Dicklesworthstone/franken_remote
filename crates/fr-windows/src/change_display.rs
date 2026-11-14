@@ -1,4 +1,4 @@
-//! Original native display choices and bounded replacement-session ownership.
+//! Original native viewing choices and bounded replacement-session ownership.
 //! A replacement needs positive cleanup from its original session; elapsed time
 //! and a user-visible successful cancellation cannot stand in for that proof.
 #![forbid(unsafe_code)]
@@ -68,6 +68,8 @@ pub const REDIAL_MS: u64 = 400;
 pub enum Cause {
     Resize,
     Display,
+    /// End the original input owner and open fresh viewing after actual cleanup.
+    StopControl,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -196,7 +198,7 @@ impl Replacements {
             return Action::None;
         };
         let refusal =
-            if !visible || (pending.cause == Cause::Display && lifetime != pending.lifetime) {
+            if !visible || (pending.cause != Cause::Resize && lifetime != pending.lifetime) {
                 Some(Refusal::Cancelled)
             } else if now < pending.last {
                 Some(Refusal::Clock)
@@ -324,18 +326,20 @@ mod tests {
 
     #[test]
     fn cancellation_or_failed_cleanup_never_becomes_success_by_waiting() {
-        for (lifetime, visible, finished, orderly, refused) in [
-            (4, true, true, true, Refusal::Cancelled),
-            (3, false, true, true, Refusal::Cancelled),
-            (3, true, true, false, Refusal::Cleanup),
-        ] {
-            let mut replacements = Replacements::default();
-            replacements.request(Cause::Display, 3, 1_000).unwrap();
-            assert_eq!(
-                replacements.poll(1_100, lifetime, visible, finished, orderly),
-                Action::Refused(refused)
-            );
-            assert_eq!(replacements.poll(2_000, 3, true, true, true), Action::None);
+        for cause in [Cause::Display, Cause::StopControl] {
+            for (lifetime, visible, finished, orderly, refused) in [
+                (4, true, true, true, Refusal::Cancelled),
+                (3, false, true, true, Refusal::Cancelled),
+                (3, true, true, false, Refusal::Cleanup),
+            ] {
+                let mut replacements = Replacements::default();
+                replacements.request(cause, 3, 1_000).unwrap();
+                assert_eq!(
+                    replacements.poll(1_100, lifetime, visible, finished, orderly),
+                    Action::Refused(refused)
+                );
+                assert_eq!(replacements.poll(2_000, 3, true, true, true), Action::None);
+            }
         }
         let mut replacements = Replacements::default();
         replacements.request(Cause::Display, 3, 1_000).unwrap();
@@ -374,8 +378,10 @@ mod tests {
         let mut replacements = Replacements::default();
         for (cause, at, choose) in [
             (Cause::Resize, 1_000, false),
-            (Cause::Display, 2_000, true),
-            (Cause::Resize, 3_000, true),
+            (Cause::StopControl, 2_000, false),
+            (Cause::Display, 3_000, true),
+            (Cause::StopControl, 4_000, true),
+            (Cause::Resize, 5_000, true),
         ] {
             replacements.request(cause, 3, at).unwrap();
             assert_eq!(replacements.request(cause, 3, at), Err(Refusal::Busy));
@@ -411,6 +417,37 @@ mod tests {
         assert_eq!(opening.check(30_000), Err(Refusal::Expired));
         assert_eq!(opening.check(10_399), Err(Refusal::Clock));
         assert_eq!(replacements.poll(10_500, 3, true, true, true), Action::None);
+    }
+
+    #[test]
+    fn stopping_control_needs_original_cleanup_and_cannot_renew_the_budget() {
+        let mut replacements = Replacements::default();
+        replacements.request(Cause::StopControl, 3, 1_000).unwrap();
+        assert_eq!(
+            replacements.poll(1_100, 3, true, false, false),
+            Action::Waiting
+        );
+        assert_eq!(
+            replacements.poll(1_200, 3, true, true, true),
+            Action::Waiting
+        );
+        let Action::Open(opening) = replacements.poll(1_600, 3, true, true, true) else {
+            panic!("successful original close permits fresh viewing");
+        };
+        assert_eq!(opening.cause, Cause::StopControl);
+        assert!(!opening.choose_display);
+        assert_eq!(opening.check(10_999), Ok(()));
+        assert_eq!(opening.check(11_000), Err(Refusal::Expired));
+        assert_eq!(replacements.poll(1_700, 3, true, true, true), Action::None);
+
+        let mut late = Replacements::default();
+        late.request(Cause::StopControl, 3, 1_000).unwrap();
+        assert_eq!(late.poll(10_900, 3, true, true, true), Action::Waiting);
+        assert_eq!(
+            late.poll(11_000, 3, true, true, true),
+            Action::Refused(Refusal::Expired)
+        );
+        assert_eq!(late.poll(11_400, 3, true, true, true), Action::None);
     }
 
     #[test]

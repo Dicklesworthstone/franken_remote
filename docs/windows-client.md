@@ -135,7 +135,7 @@ and the typed ending.
 ## Request or stop control in the viewer
 
 The native **Input** menu now contains **Request control**, **Stop control and
-disconnect**, and **Send text…**. The window title shows whether it is waiting
+keep viewing**, **Change display…**, and **Send text…**. The window title shows whether it is waiting
 for a ready view, viewing, requesting control, controlling, or stopping. A
 request is not a grant: keys and pointer actions stay local until the host has
 granted control and the original input producer is attached.
@@ -156,11 +156,20 @@ session's bounded callback wait count against the same request lifetime; a
 delayed command is never automatically retried. Reopen the menu for a fresh
 choice after the view is ready again.
 
-**Stop control and disconnect** cancels a pending request or fences the
-original input source immediately, before native composition cleanup. It then
-closes that connection through the existing bounded cleanup path. Ending
-control ends the session; Stop does not silently reopen another view or grant.
-The menu remains local even while the remote desktop is controlled.
+**Stop control and keep viewing** is available after control has been granted.
+It fences that original input source immediately, then closes the controlled
+connection through its existing terminal exchange and bounded cleanup. Only
+positive original service and cleanup results permit a fresh viewing connection
+to the same selected machine. The new view requires the normal host admission
+and approval again. It does not request control, restart the clipboard or send
+any file selection again. **Request control** remains a separate fresh choice.
+
+The Stop choice is bound to the original session, connection attempt, native
+window lifetime and menu gesture. Failed cleanup, a hidden window or expiry
+ends the connection instead of reopening. The existing ten-second replacement
+budget, finite replacement count and invocation-wide `--seconds` still apply.
+Close the window to disconnect completely, including while a control request
+is pending. The final JSON counts completed handoffs in `control_releases`.
 
 Switching to another application or minimizing the viewer invalidates pending
 control choices and ends any granted control. Returning to the application

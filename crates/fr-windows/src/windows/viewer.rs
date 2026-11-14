@@ -15,9 +15,9 @@
 //! fresh source to each new viewer. Only a host seen scaling gets a reopen:
 //! one that sends native pixels would send the same picture again after
 //! seconds without one. Reopen requires successful retirement and the
-//! original requested close; it resumes viewing only. Stopping an active
-//! input source cancels its owner, so controlled resize cannot prove that
-//! orderly close and may terminate instead. A reopened control-capable view
+//! original requested close; it resumes viewing only. Native requested close
+//! fences input while retaining the original owner through its terminal
+//! exchange. A failed cleanup still terminates instead. A reopened control-capable view
 //! exposes a fresh Input → Request control choice, never replay of the earlier
 //! --control choice.
 mod control;
@@ -116,7 +116,7 @@ thread_local! {
     static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
     /// The original owner was already fenced by the independent menu handler.
     /// UI cleanup may wait until a nested native callback releases Viewer.
-    static CHANGE_PENDING: RefCell<Option<change_display::Request<Shared>>> =
+    static CHANGE_PENDING: RefCell<Option<(Cause, change_display::Request<Shared>)>> =
         const { RefCell::new(None) };
 }
 /// Runs `f` on the viewer unless it is absent or already borrowed (a
@@ -138,8 +138,8 @@ fn drain_close() {
     let mut requested = CHANGE_PENDING.with(|pending| pending.borrow_mut().take());
     if requested.is_some() {
         with_viewer(|viewer| {
-            if let Some(request) = requested.take() {
-                viewer.change_display(&request);
+            if let Some((cause, request)) = requested.take() {
+                viewer.replace_requested(cause, &request);
             }
         });
         // A native callback can enter while Viewer is borrowed. Preserve the
@@ -155,6 +155,7 @@ struct Stats {
     /// Sessions reopened for a new picture size.
     reopens: u64,
     display_changes: u64,
+    control_releases: u64,
     /// Counts of the sessions before the current one.
     earlier_decoded: u64,
     earlier_decode_micros: u64,
@@ -388,6 +389,9 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // A replacement view cannot resend the original explicit file. Its menu
     // retains only the original transfer's cancellation and receipt evidence.
     next.upload = None;
+    if opening.cause == Cause::StopControl {
+        next.clipboard = false;
+    }
     if opening.choose_display {
         next.display = fr_mobile_ffi::session::DisplayChoice::Choose;
     }
@@ -434,6 +438,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         .get_or_insert(shared.first_view_micros());
     stats.reopens += 1;
     stats.display_changes += u64::from(opening.cause == Cause::Display);
+    stats.control_releases += u64::from(opening.cause == Cause::StopControl);
     // The reopen's own wait is not a frame interval.
     stats.last_draw = None;
     v.mapping = None;
@@ -639,7 +644,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{},\
-         \"reopens\":{},\"display_changes\":{},\"reopen_refusal\":{},\
+         \"reopens\":{},\"display_changes\":{},\"control_releases\":{},\"reopen_refusal\":{},\
          \"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
          \"seconds\":{:.1},\"clipboard\":{},\"upload\":{}}}",
         end_name(code),
@@ -666,6 +671,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         interval_ms,
         stats.reopens,
         stats.display_changes,
+        stats.control_releases,
         viewer.reopen_refusal.map_or_else(
             || "null".to_owned(),
             |reason| format!("{:?}", reason.name()),
@@ -850,15 +856,14 @@ impl Viewer {
 
     /// The independent native handler has already fenced this exact owner.
     /// A later lifecycle event may still cancel replacement, never revive it.
-    fn change_display(&mut self, request: &change_display::Request<Shared>) {
+    fn replace_requested(&mut self, cause: Cause, request: &change_display::Request<Shared>) {
         if !Arc::ptr_eq(&request.original, &self.session.shared_handle()) {
             return;
         }
         if self.closing
             || self.sizing
-            || self.mapping.is_none()
-            || self.text.is_some()
-            || self.display_picker.is_some()
+            || (cause == Cause::Display
+                && (self.mapping.is_none() || self.text.is_some() || self.display_picker.is_some()))
             || !control::visible_now()
             || request.lifetime != control::lifetime()
             || request.attempt != self.session.shared().frames.app_id(0)
@@ -867,10 +872,7 @@ impl Viewer {
             self.close();
             return;
         }
-        if let Err(reason) = self
-            .reopen
-            .request(Cause::Display, request.lifetime, request.at)
-        {
+        if let Err(reason) = self.reopen.request(cause, request.lifetime, request.at) {
             self.reopen_refusal.get_or_insert(reason);
             self.close();
             return;
@@ -1260,16 +1262,23 @@ extern "system" fn window_proc(
         WM_COMMAND if wparam.0 & 0xffff == control::STOP => {
             // Fence the popup's original owner before borrowing Viewer or
             // clearing native composition. No pending input can survive Stop.
-            if control::stop() {
-                CLOSE_PENDING.with(|pending| pending.set(true));
+            let time = current_message_time();
+            if let Some(request) = control::stop(time) {
+                CHANGE_PENDING.with(|pending| {
+                    *pending.borrow_mut() = Some((Cause::StopControl, request));
+                });
                 drain_close();
+            } else {
+                eprintln!("fr-windows: control_stop_expired_or_unavailable");
             }
             true
         }
         WM_COMMAND if wparam.0 & 0xffff == control::CHANGE_DISPLAY => {
             let time = current_message_time();
             if let Some(request) = control::change_display(time) {
-                CHANGE_PENDING.with(|pending| *pending.borrow_mut() = Some(request));
+                CHANGE_PENDING.with(|pending| {
+                    *pending.borrow_mut() = Some((Cause::Display, request));
+                });
                 drain_close();
             } else {
                 eprintln!("fr-windows: display_choice_expired_or_unavailable");
