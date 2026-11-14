@@ -10,15 +10,11 @@ use fr_core::{
 use fr_wire::negotiation::{Error, Offer};
 use frd::session_startup::viewer_events::Error as CaptureError;
 
-pub(super) fn offer(control: bool, clipboard: bool) -> Result<Offer, Error> {
+pub(super) fn offer(control: bool, clipboard: bool, files: bool) -> Result<Offer, Error> {
     if control {
         // This must be the original reconnect offer. An application callback
         // may remove optional markers later, but cannot add a new one.
-        let original = if clipboard {
-            fr_client::native::control_offer_with_clipboard()
-        } else {
-            fr_client::native::control_offer()
-        };
+        let original = fr_client::native::control_offer_with_auxiliary(clipboard, files, false);
         fr_wire::control::with_committed_text(original)
     } else {
         Ok(fr_client::native::observation_offer())
@@ -64,7 +60,7 @@ mod tests {
     #[test]
     fn original_control_offer_adds_only_optional_text_and_preserves_required_gates() {
         let original = fr_client::native::control_offer();
-        let selected = offer(true, false).unwrap();
+        let selected = offer(true, false, false).unwrap();
         assert_eq!(selected.role, original.role);
         assert_eq!(selected.versions, original.versions);
         assert_eq!(selected.profile, original.profile);
@@ -85,14 +81,14 @@ mod tests {
         );
         assert!(selected.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
         assert_eq!(
-            offer(false, true).unwrap(),
+            offer(false, true, true).unwrap(),
             fr_client::native::observation_offer()
         );
     }
 
     #[test]
     fn actual_host_offer_intersection_keeps_legacy_control_and_selects_text_only_bilaterally() {
-        let client = offer(true, false).unwrap();
+        let client = offer(true, false, false).unwrap();
         let legacy = with_line_scroll(host_offer(true));
         let text = with_committed_text(legacy.clone()).unwrap();
         let mut wrong_version = text.clone();
@@ -127,8 +123,8 @@ mod tests {
 
     #[test]
     fn clipboard_is_optional_and_composes_with_text_without_changing_legacy_input() {
-        let client = offer(true, true).unwrap();
-        let without = offer(true, false).unwrap();
+        let client = offer(true, true, false).unwrap();
+        let without = offer(true, false, false).unwrap();
         for (name, version) in [
             (
                 fr_wire::attachment::CLIPBOARD_CAPABILITY,
@@ -164,7 +160,10 @@ mod tests {
             text.intersect(&client).unwrap(),
             text.intersect(&without).unwrap()
         );
-        assert_eq!(offer(false, true).unwrap(), offer(false, false).unwrap());
+        assert_eq!(
+            offer(false, true, true).unwrap(),
+            offer(false, false, false).unwrap()
+        );
         assert!(client.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
         let bilateral = with_committed_text(with_line_scroll(host_offer_with(true, true)))
             .unwrap()
@@ -182,8 +181,8 @@ mod tests {
 
     #[test]
     fn clipboard_adds_only_optional_markers_selected_only_with_a_clipboard_host() {
-        let plain = offer(true, false).unwrap();
-        let clipboard = offer(true, true).unwrap();
+        let plain = offer(true, false, false).unwrap();
+        let clipboard = offer(true, true, false).unwrap();
         assert_eq!(
             (clipboard.role, &clipboard.versions, &clipboard.limits),
             (plain.role, &plain.versions, &plain.limits)
@@ -231,6 +230,62 @@ mod tests {
             assert!(requested.contains(Capability::Keys));
             assert!(requested.contains(Capability::Text));
         }
+    }
+
+    #[test]
+    fn explicit_files_compose_with_text_and_clipboard_only_on_a_controlling_peer() {
+        let original = offer(true, true, false).unwrap();
+        let upload = offer(true, true, true).unwrap();
+        assert!(upload.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+        assert!(
+            original
+                .capabilities
+                .iter()
+                .all(|cap| upload.capabilities.contains(cap))
+        );
+        let file_names = [
+            fr_wire::attachment::FILES_CAPABILITY,
+            fr_wire::files::CAPABILITY,
+            fr_wire::files::CHANNEL_SCOPE_CAPABILITY,
+        ];
+        for name in file_names {
+            assert!(
+                upload
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == name && !cap.required)
+            );
+            assert!(!original.capabilities.iter().any(|cap| cap.name == name));
+        }
+        for enabled in [true, false] {
+            let host = with_committed_text(with_line_scroll(
+                frd::session_startup::host_offer_with_files(true, true, false, enabled),
+            ))
+            .unwrap();
+            let selected = host.intersect(&upload).unwrap();
+            for name in file_names {
+                assert_eq!(
+                    selected.capabilities.iter().any(|cap| cap.name == name),
+                    enabled
+                );
+            }
+            assert!(
+                selected
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == TEXT_CAPABILITY)
+            );
+            assert!(
+                selected
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap.name == fr_wire::clipboard::CAPABILITY)
+            );
+        }
+        assert_eq!(
+            offer(false, true, true).unwrap(),
+            fr_client::native::observation_offer()
+        );
     }
 
     #[test]

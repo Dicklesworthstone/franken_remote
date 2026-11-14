@@ -718,6 +718,24 @@ impl StreamingViewer {
             result
         }
     }
+    /// Fence before a nonblocking collection of the original disk owners.
+    /// Useful after a bounded reap expired: only already-finished workers are
+    /// joined, with their original receipts retained. This grants no authority
+    /// or new deadline, and cannot turn the earlier timeout into success.
+    pub fn collect_files(&mut self) -> Option<Result<(), fr_files::sender::Error>> {
+        self.close();
+        let Some(viewer) = self.peer.controlled() else {
+            if let Some(lane) = &mut self.files {
+                lane.without_control();
+            }
+            return Some(Ok(()));
+        };
+        let result = viewer.try_finish_file_cleanup();
+        if let Some(lane) = &self.files {
+            lane.observe(viewer);
+        }
+        result
+    }
     pub fn worker_id(&self) -> Option<u32> {
         self.presenter.worker_id()
     }

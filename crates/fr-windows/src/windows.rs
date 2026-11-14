@@ -74,12 +74,26 @@ pub fn run(args: &[String]) -> ExitCode {
     if !view {
         return directory(target, options.port);
     }
+    let upload = if let Some(path) = &options.send {
+        match fr_mobile_ffi::session::Upload::select(path) {
+            Ok(upload) => Some(upload),
+            Err(error) => {
+                eprintln!(
+                    "fr-windows: file_selection_refused ({error:?}). Select one regular file; no remote session was opened."
+                );
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        None
+    };
     let title = format!("FrankenRemote - {}", target.certificate_name());
     let config = Config {
         target,
         port: options.port,
         control: options.control,
         clipboard: options.control && options.clipboard,
+        upload,
         picture: None,
         display: match options.display {
             DisplayChoice::Primary => fr_mobile_ffi::session::DisplayChoice::Primary,
@@ -108,9 +122,7 @@ fn choice_failed(error: hosts::Error) -> ExitCode {
         hosts::Error::CleanupIncomplete => {
             "The picker could not confirm that its window closed. Close the application before retrying."
         }
-        _ => {
-            "Run the command again, or use 'fr-windows hosts' and supply an explicit destination."
-        }
+        _ => "Run the command again, or use 'fr-windows hosts' and supply an explicit destination.",
     };
     eprintln!("fr-windows: machine choice refused ({error:?}). {guidance}");
     ExitCode::from(1)

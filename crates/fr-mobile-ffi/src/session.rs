@@ -18,6 +18,7 @@ pub mod connection;
 mod control_policy;
 mod control_request;
 mod display;
+mod files;
 mod key_capture;
 mod text;
 mod typing;
@@ -34,6 +35,7 @@ pub use display::{
     Choice as DisplayChoice, Error as DisplayError, MAX_CHOICES as MAX_DISPLAY_CHOICES,
     Request as DisplayRequest,
 };
+pub use files::{Report as UploadReport, Upload};
 pub use text::{CapturedText, TextDraft};
 
 use crate::{
@@ -156,6 +158,9 @@ pub struct Config {
     /// Optional native clipboard for a controlling Windows client. Observation
     /// and other platforms never configure or advertise this Windows adapter.
     pub clipboard: bool,
+    /// One explicit, already selected local file. Clones retain its original
+    /// one-use owner; replacement sessions must omit it rather than replay it.
+    pub upload: Option<Arc<Upload>>,
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
     pub picture: Option<(u32, u32)>,
@@ -219,6 +224,7 @@ pub struct Shared {
     pub cursor: Mutex<Cursor>,
     granted: Mutex<Option<Granted>>,
     clipboard: clipboard::Clipboard,
+    upload: Option<Arc<Upload>>,
     close: AtomicBool,
     want_control: AtomicBool,
     control_capable: bool,
@@ -253,15 +259,16 @@ impl Shared {
     }
     #[cfg(test)]
     fn with_control(control_capable: bool) -> Self {
-        Self::with_clipboard(control_capable, false)
+        Self::with_auxiliary(control_capable, false, None)
     }
-    fn with_clipboard(control_capable: bool, clipboard: bool) -> Self {
+    fn with_auxiliary(control_capable: bool, clipboard: bool, upload: Option<Arc<Upload>>) -> Self {
         Self {
             events: Events::default(),
             frames: FrameSlot::default(),
             cursor: Mutex::default(),
             granted: Mutex::default(),
             clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
+            upload,
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
             control_capable,
@@ -290,6 +297,7 @@ impl Shared {
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
         self.clipboard.stop();
+        self.cancel_upload();
         self.retire_control_request();
         self.retire_display();
         self.stop_control(None);
@@ -335,6 +343,7 @@ impl Shared {
         self.close.store(true, Ordering::SeqCst);
         drop(selection);
         self.clipboard.stop();
+        self.cancel_upload();
         self.stop_control(None);
         Ok(())
     }
@@ -379,6 +388,7 @@ impl Shared {
         if !visible {
             self.clipboard.hide(was);
             if was {
+                self.cancel_upload();
                 self.hides.fetch_add(1, Ordering::SeqCst);
             }
             self.retire_control_request();
@@ -550,6 +560,15 @@ impl Shared {
     pub fn clipboard_report(&self) -> ClipboardReport {
         self.clipboard.report()
     }
+    /// Original upload evidence, including its final host receipt after the
+    /// view closes. Contains no file path, basename, or contents.
+    pub fn upload_report(&self) -> Option<UploadReport> {
+        self.upload.as_ref().map(|upload| upload.report())
+    }
+    /// Cancel only the selected upload; the original desktop remains alive.
+    pub fn cancel_upload(&self) -> bool {
+        self.upload.as_ref().is_some_and(|upload| upload.cancel())
+    }
     /// Fence the granted source now (focus loss, backgrounding, close).
     /// `reason`: this device stopped a live grant (not a close it asked
     /// for, and not the attempt's own cleanup).
@@ -560,6 +579,7 @@ impl Shared {
         };
         if dropped.is_some() {
             self.clipboard.retire();
+            self.cancel_upload();
             if let Some(reason) = reason {
                 self.note_local_stop(reason);
             }
@@ -997,7 +1017,25 @@ pub struct Session {
 }
 impl Session {
     pub fn start(config: Config) -> std::io::Result<Self> {
-        let shared = Arc::new(Shared::with_clipboard(config.control, config.clipboard));
+        if let Some(upload) = &config.upload {
+            if !config.control {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "file upload requires control",
+                ));
+            }
+            if !upload.bind() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "file selection already belongs to its original session",
+                ));
+            }
+        }
+        let shared = Arc::new(Shared::with_auxiliary(
+            config.control,
+            config.clipboard,
+            config.upload.clone(),
+        ));
         let worker = shared.clone();
         let control = config.control;
         // Detached: the thread owns its share of the state and ends on its
@@ -1042,6 +1080,9 @@ impl Drop for Session {
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
     shared.clipboard.stop();
+    if let Some(upload) = &shared.upload {
+        upload.finish();
+    }
     shared.retire_control_request();
     shared.retire_display();
     shared.stop_control(None);
@@ -1107,7 +1148,11 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let Ok(offer) = control_policy::offer(control, shared.clipboard.report().requested) else {
+    let Ok(offer) = control_policy::offer(
+        control,
+        shared.clipboard.report().requested,
+        shared.upload.is_some(),
+    ) else {
         return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
     let operation = async {
@@ -1170,9 +1215,9 @@ fn run(shared: &Arc<Shared>, config: Config) {
     finish(shared, code, detail);
     // A failed bounded cleanup has already ended this command unsuccessfully.
     // Keep the original observer on its original session thread until its
-    // clipboard worker actually returns; dropping a pending handle would detach
-    // native teardown. This never restores success or permits another attempt.
-    runtime.block_on(app.retain_clipboard());
+    // clipboard/file workers actually return; dropping pending handles would
+    // detach native teardown. This never restores success or permits another attempt.
+    runtime.block_on(app.retain_auxiliary());
 }
 
 fn publish_pin(shared: &Shared, watch: Option<&PinWatch>) {
@@ -1431,6 +1476,7 @@ struct Mobile {
     service_succeeded: bool,
     terminal: Option<ObserverError>,
     clipboard_cleanup: Option<Deadline>,
+    files_pending: bool,
 }
 impl Mobile {
     fn new(
@@ -1454,25 +1500,34 @@ impl Mobile {
             service_succeeded: false,
             terminal: None,
             clipboard_cleanup: None,
+            files_pending: false,
         }
     }
 
-    async fn retain_clipboard(&mut self) {
+    async fn retain_auxiliary(&mut self) {
         let Some(deadline) = self.clipboard_cleanup else {
             return;
         };
         let Some(observer) = self.observer.as_mut() else {
             return;
         };
-        while self.shared.clipboard.pending() {
+        while self.shared.clipboard.pending() || self.files_pending {
             // Reaping first observes completion, even after this exact original
             // deadline expired. We never renew the clipboard's cleanup budget.
             let _ = observer.reap_clipboard(&self.close_cx, deadline).await;
+            if self.files_pending
+                && let Some(result) = observer.collect_files()
+            {
+                self.files_pending = false;
+                if let Some(upload) = &self.shared.upload {
+                    upload.cleaned(result);
+                }
+            }
             for _ in 0..2 {
                 let _ = observer.collect_clipboard();
                 self.shared.clipboard.collect();
             }
-            if self.shared.clipboard.pending() {
+            if self.shared.clipboard.pending() || self.files_pending {
                 if let Some(timer) = self.close_cx.timer_driver() {
                     sleep(timer.now(), Duration::from_millis(25)).await;
                 } else {
@@ -1492,10 +1547,15 @@ impl Application for Mobile {
         _attempt: u8,
         original: &fr_wire::negotiation::Offer,
     ) -> Result<fr_wire::negotiation::Offer, CallbackError> {
-        self.shared
+        let offered = self
+            .shared
             .clipboard
             .offer(original)
-            .map_err(|()| CallbackError)
+            .map_err(|()| CallbackError)?;
+        match &self.shared.upload {
+            Some(upload) => upload.offer(&offered).map_err(|()| CallbackError),
+            None => Ok(offered),
+        }
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
@@ -1554,6 +1614,9 @@ impl Application for Mobile {
             .configure(observer, &self.close_cx, || {
                 !self.shared.close.load(Ordering::SeqCst)
             });
+        if let Some(upload) = &self.shared.upload {
+            upload.configure(observer);
+        }
         self.shared.serving.store(true, Ordering::SeqCst);
         let shared = self.shared.clone();
         let mut viewing = false;
@@ -1714,6 +1777,9 @@ impl Application for Mobile {
         self.shared.retire_display();
         self.shared.stop_control(None);
         self.shared.clipboard.retire();
+        if let Some(upload) = &self.shared.upload {
+            upload.retire();
+        }
         self.clipboard_cleanup = Some(deadline);
         self.shared.serving.store(false, Ordering::SeqCst);
         async move {
@@ -1724,6 +1790,20 @@ impl Application for Mobile {
                     let media = observer.reap_media(cx, deadline).await;
                     let input = observer.reap_input_capture(cx, deadline).await;
                     let files = observer.reap_files(cx, deadline).await;
+                    if let (Some(upload), Err(error)) = (&self.shared.upload, files) {
+                        // Retain the original bounded cleanup failure even if
+                        // the source finishes immediately afterward. A later
+                        // join is collection, not a repaired transfer result.
+                        upload.cleaned(Err(error));
+                    }
+                    // Reap may time out before polling a just-finished source.
+                    // Collect without a renewed wait budget, retaining the
+                    // original timeout as failure even if joining now succeeds.
+                    let collected_files = observer.collect_files();
+                    self.files_pending = collected_files.is_none();
+                    if let (Some(upload), Some(result)) = (&self.shared.upload, collected_files) {
+                        upload.cleaned(result);
+                    }
                     let clipboard = observer.reap_clipboard(cx, deadline).await;
                     for _ in 0..2 {
                         let _ = observer.collect_clipboard();

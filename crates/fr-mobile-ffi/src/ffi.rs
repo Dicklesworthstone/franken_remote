@@ -296,6 +296,7 @@ unsafe fn start(
         port: config.port,
         control: config.control,
         clipboard: false,
+        upload: None,
         picture,
         display,
     }) else {

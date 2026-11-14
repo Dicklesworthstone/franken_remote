@@ -1,5 +1,41 @@
 # Implementation status
 
+## Explicit Windows file uploads (2026-11-14 UTC)
+
+`fr-windows view [HOST] --control --send FILE` now connects one explicitly
+selected regular file to the original controlled ATP upload. The native File
+transfer menu shows state, queued bytes, actual publication receipt and cleanup,
+and cancels only that upload. An already published or uncertain effect is
+never rewritten as cancellation. Host refusal details such as Conflict,
+Permission and Integrity remain visible without paths or file contents.
+
+The shared session consumes the selected handle once, offers optional Files
+alongside existing text/clipboard, and starts source work only after the
+original control grant and attachment. A refused or configured selection is
+never replayed on reconnect. Viewing replacements omit the upload while
+retaining its original menu and receipts. Shutdown uses the original cleanup
+deadline and retains stopped disk owners through eventual nonblocking collection;
+a missed deadline stays failed after a later join. The C ABI configures no upload.
+
+The final JSON includes a content-free upload result. With `--send`, success
+requires a durable host publication receipt and completed original source
+cleanup as well as a successful desktop result; queued bytes cannot satisfy it.
+This slice targets the existing Linux/macOS file receivers. Windows receive
+directories, directory sending, downloads and drag-and-drop are not added.
+
+**Passed:** all 83 portable Windows-client tests and strict all-target Clippy
+after preserving the concurrently landed picker cleanup; pinned workspace
+formatting; all 16 portable
+`fr-winsys` tests and strict Clippy; isolated actual Windows file-boundary
+all-target cross-Clippy, including compilation of its native regression tests.
+Eight upload owner/receipt regressions and bilateral Files/text/clipboard
+negotiation tests are added in the shared session. They require the full native
+session graph and remain unrun locally because the pinned Asupersync graph
+exceeds this execution environment's resources. Hosted full Windows integration
+and a live Windows-to-host transfer remain separate, pending qualification.
+See [Windows upload usage](docs/windows-client.md#send-one-file-to-the-host).
+
+
 ## Windows selected-file handle custody (2026-11-14 UTC)
 
 Windows native file selection now retains the actual read-only disk handle and

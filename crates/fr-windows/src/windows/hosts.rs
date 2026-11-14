@@ -21,13 +21,14 @@ use windows::{
             Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN},
             WindowsAndMessaging::{
                 BN_CLICKED, BS_DEFPUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-                DestroyWindow, DispatchMessageW, GetMessageTime, HMENU, IDC_ARROW, IsDialogMessageW,
-                LBN_DBLCLK, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LB_ADDSTRING,
-                LB_GETCURSEL, LB_SETHORIZONTALEXTENT, LoadCursorW, MSG, MsgWaitForMultipleObjects,
-                PM_NOREMOVE, PM_REMOVE, PeekMessageW, QS_ALLINPUT, RegisterClassExW, SW_SHOW,
-                SendMessageW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-                WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_QUIT, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
-                WS_CHILD, WS_HSCROLL, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+                DestroyWindow, DispatchMessageW, GetMessageTime, HMENU, IDC_ARROW,
+                IsDialogMessageW, LB_ADDSTRING, LB_GETCURSEL, LB_SETHORIZONTALEXTENT, LBN_DBLCLK,
+                LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LoadCursorW, MSG,
+                MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
+                RegisterClassExW, SW_SHOW, SendMessageW, ShowWindow, TranslateMessage,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN,
+                WM_QUIT, WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_HSCROLL, WS_SYSMENU,
+                WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
             },
         },
     },
@@ -71,7 +72,7 @@ impl State {
         };
         // SAFETY: this UI thread owns a live, single-selection list box. The
         // message returns an ordinal and receives no borrowed buffer.
-        let row = unsafe { SendMessageW(list, LB_GETCURSEL, WPARAM(0), LPARAM(0)) }.0;
+        let row = unsafe { SendMessageW(list, LB_GETCURSEL, None, None) }.0;
         let Ok(row) = usize::try_from(row) else {
             // No selection is not a new machine choice. Let the user select.
             return;
@@ -301,8 +302,8 @@ fn open(choice: Choice) -> windows::core::Result<Picker> {
             let added = SendMessageW(
                 list,
                 LB_ADDSTRING,
-                WPARAM(0),
-                LPARAM(label.as_ptr() as isize),
+                None,
+                Some(LPARAM(label.as_ptr() as isize)),
             );
             if usize::try_from(added.0).ok() != Some(index) {
                 return Err(windows::core::Error::from_win32());
@@ -311,13 +312,15 @@ fn open(choice: Choice) -> windows::core::Result<Picker> {
         SendMessageW(
             list,
             LB_SETHORIZONTALEXTENT,
-            WPARAM(usize::try_from(scale(2800)).unwrap_or(2800)),
-            LPARAM(0),
+            Some(WPARAM(usize::try_from(scale(2800)).unwrap_or(2800))),
+            None,
         );
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
-            w!("Select a row, then Connect or Enter. No desktop has been opened. Choice expires within two minutes."),
+            w!(
+                "Select a row, then Connect or Enter. No desktop has been opened. Choice expires within two minutes."
+            ),
             WS_CHILD | WS_VISIBLE,
             scale(20),
             scale(365),
@@ -332,7 +335,9 @@ fn open(choice: Choice) -> windows::core::Result<Picker> {
             WINDOW_EX_STYLE(0),
             w!("BUTTON"),
             w!("Connect"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP
+            WS_CHILD
+                | WS_VISIBLE
+                | WS_TABSTOP
                 | WINDOW_STYLE(u32::try_from(BS_DEFPUSHBUTTON).unwrap_or(0)),
             scale(500),
             scale(400),

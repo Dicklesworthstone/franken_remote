@@ -349,6 +349,68 @@ failure and prevents a replacement session. The original session thread keeps
 the same stopped owner until its native cleanup actually completes; a later
 completion cannot change the earlier failure into success.
 
+## Send one file to the host
+
+```powershell
+fr-windows view remote.example.ts.net --control --send 'C:\Users\me\Documents\draft.txt'
+fr-windows view --control --send 'C:\Users\me\Documents\Résumé final.txt'
+```
+
+`--send FILE` selects one regular file before the remote session starts. It
+requires `--control`, may appear once, and also works with the native machine
+chooser. The host must separately enable its existing file receiver with
+`frd run ... --files DIR`, alongside the host's normal control configuration.
+Use a Linux or macOS receiver for this workflow; this does not add a Windows
+receive directory, downloads, directory uploads or drag-and-drop.
+
+The sender retains the selected read-only Windows handle and its actual file
+identity. It never reopens the source pathname during transfer. Conflicting
+writes and renames are denied while that original handle or its duplicates
+remain open. Directories, leaf reparse points, device namespaces, alternate
+streams and explicitly mapped network drives are refused. Ordinary relative
+paths resolve against the original working directory. The existing portable
+basename checks still apply; no remote-supplied path selects local content.
+
+No file contents are read until the host grants control and the original
+optional file attachment is ready. Hashing and reads use the existing bounded
+disk worker, ATP object protocol, quotas and session authorization. The host
+stages privately and publishes without overwriting an existing destination;
+a conflicting name is a refusal. The transfer does not open the received file.
+If the host does not negotiate files, ordinary viewing and control can still
+continue, and the upload reports that refusal.
+
+The native **File transfer** menu shows the original upload's state, queued
+bytes, host receipt and source-cleanup state. **Cancel this upload** requests
+file-only cancellation and leaves the desktop connection running. Cancellation
+cannot retract a file the host already published, erase its receipt, or turn an
+uncertain result into success. A transport or authority failure can still end
+the containing session under its existing rules.
+
+A resize, Change display or reconnect never sends this selection again. The
+menu and final report retain the original transfer's evidence across a permitted
+viewing replacement; that replacement has no upload configured. After a refusal,
+cancellation or uncertain publication, another send requires a new explicit
+command and selection. Closing, minimizing, or switching away from an active
+controlled viewer also fences its original file work through the existing
+control lifecycle.
+
+The completion JSON adds `upload` (`null` when no file was selected). It contains
+`selected_bytes`, `configured`, `phase`, `cancel_requested`, `queued_bytes`,
+`total_bytes`, `receipt`, `receipt_detail`, `published_bytes`, `cleanup`,
+`reason`, and `succeeded`.
+These fields contain no path, filename or contents. Queued bytes are not proof
+of host publication. Receipts distinguish durable host publication, publication
+with unknown durability, refusal, interruption before publication, and unknown
+publication. With `--send`, exit status zero additionally requires the one file's
+durable host receipt and successful original source cleanup; successful video
+alone cannot make a refused or unfinished upload look successful.
+
+File cleanup shares the original session cleanup deadline. If that deadline
+expires, the command fails and no replacement session starts. The original
+session thread retains the stopped file owner and nonblockingly collects it
+when its actual worker returns. Later collection cannot repair the earlier
+failure or supply a new transfer deadline.
+
 ## Explicit address constraints
 
 `--address IP` remains repeatable, up to eight distinct addresses. It now
@@ -412,8 +474,8 @@ Portable machine-picker lifecycle regressions live in
 one-use selection, empty and invalid rows, cancellation after Connect, queued
 event freshness and timestamp wrap, clock regression, original-deadline
 expiry through setup and cleanup, and repeated selection/show attempts.
-The lifecycle changes and these new tests have not yet been built or executed
-with the pinned toolchain: the execution environment became unavailable.
+The actual package's 83 portable tests and strict all-target Clippy passed with
+the pinned toolchain after integration with the explicit Windows uploader.
 The real window, cancellation ordering and blocked or failed native
 destruction still require Windows desktop qualification.
 

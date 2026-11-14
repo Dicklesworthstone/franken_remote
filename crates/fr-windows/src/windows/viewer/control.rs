@@ -196,9 +196,8 @@ impl Menu {
         self.choice = choice.map(|request| Choice::new(request, opened));
         STOP_ORIGINAL.with(|slot| *slot.borrow_mut() = Some(Arc::downgrade(original)));
         DISPLAY_CHOICE.with(|slot| {
-            *slot.borrow_mut() = (self.display_available && visible_now()).then(|| {
-                change_display::MenuChoice::new(Arc::clone(original), lifetime(), opened)
-            });
+            *slot.borrow_mut() = (self.display_available && visible_now())
+                .then(|| change_display::MenuChoice::new(Arc::clone(original), lifetime(), opened));
         });
     }
 

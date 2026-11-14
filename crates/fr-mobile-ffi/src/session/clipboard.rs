@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn only_an_unspent_requested_clipboard_keeps_its_markers() {
-        let original = super::super::control_policy::offer(true, true).unwrap();
+        let original = super::super::control_policy::offer(true, true, false).unwrap();
         assert!(names(&original).into_iter().any(clipboard_capability));
         let fresh = Clipboard::new(true);
         assert!(fresh.available());
@@ -419,7 +419,7 @@ mod tests {
 
     #[test]
     fn a_required_clipboard_marker_is_never_silently_dropped() {
-        let mut original = super::super::control_policy::offer(true, true).unwrap();
+        let mut original = super::super::control_policy::offer(true, true, false).unwrap();
         for cap in &mut original.capabilities {
             if clipboard_capability(&cap.name) {
                 cap.required = true;

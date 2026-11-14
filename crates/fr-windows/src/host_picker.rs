@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn empty_and_invalid_rows_never_fall_back_or_recover() {
         let mut empty = Choice::new(Catalog::new(Vec::new()).unwrap(), 1_000).unwrap();
-        assert!(empty.candidates().is_empty());
+        assert_eq!(empty.candidates(), []);
         empty.shown(1_010);
         empty.choose(0, 1_020, 1_021);
         assert_eq!(empty.take(1_022), Err(Error::InvalidChoice));
@@ -193,12 +193,7 @@ mod tests {
 
     #[test]
     fn queued_before_show_same_tick_future_and_stale_events_are_terminal() {
-        for (message, now) in [
-            (999, 1_020),
-            (1_010, 1_020),
-            (1_021, 1_020),
-            (1_020, 1_104),
-        ] {
+        for (message, now) in [(999, 1_020), (1_010, 1_020), (1_021, 1_020), (1_020, 1_104)] {
             let mut choice = shown();
             choice.choose(0, message, now);
             choice.choose(1, 1_200, 1_201);

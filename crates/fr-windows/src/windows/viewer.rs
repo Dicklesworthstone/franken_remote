@@ -23,6 +23,7 @@
 mod control;
 mod display;
 mod text;
+mod upload;
 
 use super::render::Renderer;
 use crate::{
@@ -105,6 +106,8 @@ struct Viewer {
     display_picker: Option<display::Picker>,
     /// Visible ownership state and an original one-use local menu choice.
     input_menu: control::Menu,
+    /// Original selected file and its evidence survive every viewing replacement.
+    upload_menu: Option<upload::Menu>,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -188,6 +191,17 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
         let _ = unsafe { DestroyWindow(hwnd) };
         return refuse("input_menu_unavailable");
     };
+    let upload_menu = if let Some(original) = &config.upload {
+        if let Ok(menu) = upload::Menu::install(hwnd, Arc::clone(original)) {
+            Some(menu)
+        } else {
+            // SAFETY: our window, before any remote session starts.
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return refuse("file_menu_unavailable");
+        }
+    } else {
+        None
+    };
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
@@ -218,6 +232,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             text: None,
             display_picker: None,
             input_menu,
+            upload_menu,
         });
     });
     // SAFETY: showing the window this thread created.
@@ -339,7 +354,13 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
 /// resize keeps that policy after the first explicit switch.
 fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reopen {
     let finished = v.session.shared().finished();
-    let no_replacement = || if finished { Reopen::No } else { Reopen::Waiting };
+    let no_replacement = || {
+        if finished {
+            Reopen::No
+        } else {
+            Reopen::Waiting
+        }
+    };
     if v.closing {
         return no_replacement();
     }
@@ -364,6 +385,9 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.text = None;
     v.display_picker = None;
     let mut next = config.clone();
+    // A replacement view cannot resend the original explicit file. Its menu
+    // retains only the original transfer's cancellation and receipt evidence.
+    next.upload = None;
     if opening.choose_display {
         next.display = fr_mobile_ffi::session::DisplayChoice::Choose;
     }
@@ -379,10 +403,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // Retain only the offered profile. Session::start grants and requests
     // nothing: a resized view needs a new explicit local menu choice.
     let size = client_size(hwnd);
-    if CLOSE_PENDING.with(Cell::get)
-        || !control::visible_now()
-        || control::lifetime() != lifetime
-    {
+    if CLOSE_PENDING.with(Cell::get) || !control::visible_now() || control::lifetime() != lifetime {
         v.reopen_refusal.get_or_insert(Refusal::Cancelled);
         v.close();
         return Reopen::No;
@@ -435,6 +456,9 @@ enum Reopen {
 
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    if let Some(menu) = &mut v.upload_menu {
+        menu.refresh();
+    }
     let can_change_display = v.can_change_display();
     v.input_menu.display_available(can_change_display);
     v.input_menu.refresh(v.session.shared());
@@ -605,6 +629,9 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         "cleanup": clipboard.cleanup_name(),
         "reason": clipboard.reason.map(|reason| format!("{reason:?}")),
     });
+    let upload_report = viewer.upload_menu.as_ref().map(upload::Menu::report);
+    let upload_ok = upload_report.is_none_or(|report| report.is_success());
+    let upload = upload::document(upload_report);
     let mut json = String::new();
     let _ = write!(
         json,
@@ -614,7 +641,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"frame_interval_ms\":{},\
          \"reopens\":{},\"display_changes\":{},\"reopen_refusal\":{},\
          \"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
-         \"seconds\":{:.1},\"clipboard\":{}}}",
+         \"seconds\":{:.1},\"clipboard\":{},\"upload\":{}}}",
         end_name(code),
         shared
             .detail()
@@ -647,11 +674,13 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         micros_to_ms(shared.first_view_micros()),
         elapsed.as_secs_f64(),
         clipboard,
+        upload,
     );
     let _ = writeln!(std::io::stdout().lock(), "{json}");
     if stats.drawn > 0
         && matches!(code, end::OK | end::CANCELLED)
         && viewer.reopen_refusal.is_none()
+        && upload_ok
     {
         ExitCode::SUCCESS
     } else {
@@ -1204,6 +1233,9 @@ extern "system" fn window_proc(
     let handled = match message {
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
+                if let Some(menu) = &mut v.upload_menu {
+                    menu.refresh();
+                }
                 if v.input_menu.is_popup(wparam.0) {
                     let available = v.can_change_display();
                     v.input_menu.display_available(available);
@@ -1211,6 +1243,12 @@ extern "system" fn window_proc(
                 }
             });
             false
+        }
+        WM_COMMAND if wparam.0 & 0xffff == upload::CANCEL => {
+            // Stop the original file even during a nested native callback.
+            // This cannot request control, close the desktop, or start a retry.
+            upload::cancel();
+            true
         }
         WM_COMMAND if wparam.0 & 0xffff == control::REQUEST => {
             let time = current_message_time();

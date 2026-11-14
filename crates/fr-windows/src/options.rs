@@ -1,7 +1,7 @@
 //! Bounded command-line options shared by Windows and portable regression tests.
 #![forbid(unsafe_code)]
 
-use std::net::IpAddr;
+use std::{net::IpAddr, path::PathBuf};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Family {
@@ -48,6 +48,8 @@ pub(crate) struct Options {
     pub clipboard: bool,
     pub seconds: Option<u64>,
     pub display: DisplayChoice,
+    /// One explicit regular file; consumed once by the original control grant.
+    pub send: Option<PathBuf>,
 }
 
 /// A missing viewing destination requests one local native machine choice.
@@ -92,12 +94,13 @@ impl Options {
             clipboard: true,
             seconds: None,
             display: DisplayChoice::Primary,
+            send: None,
         };
         let mut port_set = false;
         let mut display_set = false;
         loop {
             match rest {
-                [] => return Some(options),
+                [] => return (options.send.is_none() || options.control).then_some(options),
                 [flag, tail @ ..] if view && flag == "--control" && !options.control => {
                     options.control = true;
                     rest = tail;
@@ -141,6 +144,9 @@ impl Options {
                         "--display" if view && !display_set => {
                             options.display = DisplayChoice::parse(value)?;
                             display_set = true;
+                        }
+                        "--send" if view && options.send.is_none() && !value.is_empty() => {
+                            options.send = Some(PathBuf::from(value));
                         }
                         _ => return None,
                     }
@@ -196,8 +202,7 @@ mod tests {
     #[test]
     fn explicit_destinations_keep_the_existing_view_and_directory_paths() {
         for (verb, view) in [("view", true), ("directory", false)] {
-            let args = [verb, "host.tail.ts.net", "--port", "9443", "--ipv4"]
-                .map(str::to_owned);
+            let args = [verb, "host.tail.ts.net", "--port", "9443", "--ipv4"].map(str::to_owned);
             let command = ConnectionCommand::parse(&args, 8443).unwrap();
             assert_eq!(command.view, view);
             assert_eq!(command.selection, Some("host.tail.ts.net"));
@@ -236,6 +241,7 @@ mod tests {
                 clipboard: true,
                 seconds: None,
                 display: DisplayChoice::Primary,
+                send: None,
             })
         );
         assert_eq!(parse(&[], false), parse(&[], true));
@@ -255,6 +261,35 @@ mod tests {
         assert!(!parse(&["--no-clipboard"], true).unwrap().clipboard);
         assert!(parse(&["--no-clipboard", "--no-clipboard"], true).is_none());
         assert!(parse(&["--no-clipboard"], false).is_none());
+    }
+
+    #[test]
+    fn a_single_explicit_file_requires_control_in_either_option_order() {
+        for args in [
+            vec!["--control", "--send", "C:\\Users\\me\\draft.txt"],
+            vec!["--send", "C:\\Users\\me\\draft.txt", "--control"],
+        ] {
+            let options = parse(&args, true).unwrap();
+            assert!(options.control);
+            assert_eq!(
+                options.send,
+                Some(PathBuf::from("C:\\Users\\me\\draft.txt"))
+            );
+        }
+        let unicode = "C:\\Users\\me\\Résumé final.txt";
+        assert_eq!(
+            parse(&["--control", "--send", unicode], true).unwrap().send,
+            Some(PathBuf::from(unicode))
+        );
+        for args in [
+            vec!["--send", "file.txt"],
+            vec!["--control", "--send"],
+            vec!["--control", "--send", ""],
+            vec!["--control", "--send", "a", "--send", "b"],
+        ] {
+            assert!(parse(&args, true).is_none());
+        }
+        assert!(parse(&["--send", "file.txt"], false).is_none());
     }
 
     #[test]

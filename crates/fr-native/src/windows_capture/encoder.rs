@@ -713,7 +713,11 @@ impl Encoder {
             let mut capacity = 0_u32;
             let mut length = 0_u32;
             buffer
-                .Lock(&raw mut data, Some(&raw mut capacity), Some(&raw mut length))
+                .Lock(
+                    &raw mut data,
+                    Some(&raw mut capacity),
+                    Some(&raw mut length),
+                )
                 .map_err(|_| NativeError::Codec)?;
             // Keep every fallible check inside the closure so a successful
             // Lock always reaches Unlock, including allocation failures.

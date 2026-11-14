@@ -272,6 +272,11 @@ impl NativeObserver {
     ) -> impl Future<Output = Result<(), super::super::FileSendError>> + 'a {
         self.viewer.reap_files(cleanup, deadline)
     }
+    /// Retire and nonblockingly collect original file owners, including after
+    /// the original bounded cleanup wait expired. No transfer is restarted.
+    pub fn collect_files(&mut self) -> Option<Result<(), super::super::FileSendError>> {
+        self.viewer.collect_files()
+    }
     pub const fn display(&self) -> Display {
         self.display
     }

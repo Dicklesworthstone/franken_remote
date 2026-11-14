@@ -15,6 +15,13 @@ fn reserved(component: &[u16]) -> bool {
         .split(|unit| *unit == u16::from(b'.'))
         .next()
         .unwrap_or_default();
+    // Win32 device-name handling must not be reached through a stem padded
+    // with spaces before its extension. Refuse this ambiguous spelling too.
+    let end = base
+        .iter()
+        .rposition(|unit| *unit != u16::from(b' '))
+        .map_or(0, |index| index + 1);
+    let base = &base[..end];
     let matches = |name: &[u8]| {
         base.len() == name.len()
             && base.iter().zip(name).all(|(unit, ascii)| {
@@ -114,12 +121,16 @@ mod tests {
         for name in [
             "CON",
             "con.txt",
+            "CON .txt",
             "NUL",
+            "NUL  .txt",
             "aux.log",
             "PRN",
             "COM1",
+            "COM1 .txt",
             "com9.txt",
             "LPT1",
+            "LPT1  .log",
             "LPT9",
             "COM¹",
             "LPT².log",

@@ -185,19 +185,18 @@ impl Replacements {
         let Some(pending) = &mut self.pending else {
             return Action::None;
         };
-        let refusal = if !visible
-            || (pending.cause == Cause::Display && lifetime != pending.lifetime)
-        {
-            Some(Refusal::Cancelled)
-        } else if now < pending.last {
-            Some(Refusal::Clock)
-        } else if now >= pending.until {
-            Some(Refusal::Expired)
-        } else if finished && !orderly {
-            Some(Refusal::Cleanup)
-        } else {
-            None
-        };
+        let refusal =
+            if !visible || (pending.cause == Cause::Display && lifetime != pending.lifetime) {
+                Some(Refusal::Cancelled)
+            } else if now < pending.last {
+                Some(Refusal::Clock)
+            } else if now >= pending.until {
+                Some(Refusal::Expired)
+            } else if finished && !orderly {
+                Some(Refusal::Cleanup)
+            } else {
+                None
+            };
         if let Some(refusal) = refusal {
             self.pending = None;
             return Action::Refused(refusal);
@@ -206,7 +205,9 @@ impl Replacements {
         if !finished {
             return Action::Waiting;
         }
-        let ready = pending.ready_at.get_or_insert(now.saturating_add(REDIAL_MS));
+        let ready = pending
+            .ready_at
+            .get_or_insert(now.saturating_add(REDIAL_MS));
         if now < *ready {
             return Action::Waiting;
         }
