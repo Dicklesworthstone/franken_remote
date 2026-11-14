@@ -202,7 +202,7 @@ const fn item(id: usize) -> u32 {
 }
 
 /// One content-free snapshot. Only an actual host receipt describes publication.
-pub(super) fn document(report: Option<UploadReport>) -> serde_json::Value {
+pub(super) fn document(report: Option<&UploadReport>) -> serde_json::Value {
     report.map_or(serde_json::Value::Null, |report| {
         let progress = report.snapshot.and_then(|snapshot| snapshot.current);
         serde_json::json!({

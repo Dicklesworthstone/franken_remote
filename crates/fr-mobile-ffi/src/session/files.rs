@@ -166,7 +166,7 @@ fn file_capability(name: &str) -> bool {
 
 struct State {
     request: Option<SendRequest>,
-    /// Bind at Session::start, before any thread/connection can race another
+    /// Bind at `Session::start`, before any thread/connection can race another
     /// clone for this choice. An internal retry stays within that same owner.
     bound: bool,
     attempted: bool,

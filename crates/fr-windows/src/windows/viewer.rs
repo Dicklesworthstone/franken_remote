@@ -139,7 +139,7 @@ fn drain_close() {
     if requested.is_some() {
         with_viewer(|viewer| {
             if let Some(request) = requested.take() {
-                viewer.change_display(request);
+                viewer.change_display(&request);
             }
         });
         // A native callback can enter while Viewer is borrowed. Preserve the
@@ -631,7 +631,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
     });
     let upload_report = viewer.upload_menu.as_ref().map(upload::Menu::report);
     let upload_ok = upload_report.is_none_or(|report| report.is_success());
-    let upload = upload::document(upload_report);
+    let upload = upload::document(upload_report.as_ref());
     let mut json = String::new();
     let _ = write!(
         json,
@@ -850,7 +850,7 @@ impl Viewer {
 
     /// The independent native handler has already fenced this exact owner.
     /// A later lifecycle event may still cancel replacement, never revive it.
-    fn change_display(&mut self, request: change_display::Request<Shared>) {
+    fn change_display(&mut self, request: &change_display::Request<Shared>) {
         if !Arc::ptr_eq(&request.original, &self.session.shared_handle()) {
             return;
         }

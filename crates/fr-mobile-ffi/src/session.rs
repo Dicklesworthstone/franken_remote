@@ -1463,6 +1463,9 @@ fn attach(
 
 /// frd's per-attempt application: open the presenter after approval and
 /// display selection, serve until closed, and clean up every native owner.
+// Independent per-attempt facts (role, start, service result, pending files),
+// not one state machine.
+#[allow(clippy::struct_excessive_bools)]
 struct Mobile {
     shared: Arc<Shared>,
     control: bool,
