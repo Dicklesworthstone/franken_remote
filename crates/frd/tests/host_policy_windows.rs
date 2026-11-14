@@ -232,10 +232,25 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
     );
     // Without --trust-roots the machine's ROOT certificate store is used.
     assert_eq!(refusal(&[], Approval::None), None);
-    // frd injects input itself: --control is the control opt-in.
+    // frd injects input itself: --control is the control opt-in, and the
+    // controller's clipboard follows it unless --no-clipboard.
     let control = run_options(&["--control"]).unwrap();
-    assert!(control.control && control.input_agent.is_none() && !control.clipboard);
+    assert!(control.control && control.input_agent.is_none() && control.clipboard);
     assert_eq!(refusal(&["--control"], Approval::None), None);
+    assert_eq!(refusal(&["--control", "--clipboard"], Approval::None), None);
+    assert!(
+        !run_options(&["--control", "--no-clipboard"])
+            .unwrap()
+            .clipboard
+    );
+    assert!(
+        !run_options(&["--no-clipboard", "--control"])
+            .unwrap()
+            .clipboard
+    );
+    // View-only shares never expose the clipboard (frd refuses an explicit
+    // --clipboard without --control before any I/O).
+    assert!(!run_options(&[]).unwrap().clipboard);
     assert!(run_options(&["--control", "--control"]).is_err());
     // A Windows host prompts on its own desktop for --approval local.
     assert_eq!(refusal(&plain, Approval::Local), None);
@@ -265,7 +280,6 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
             &["--observation-indicator", r"C:\fr\indicator.exe"],
             "observation_indicator_unavailable",
         ),
-        (&["--control", "--clipboard"], "clipboard_unavailable"),
         (&["--control", "--files", r"C:\drop"], "files_unavailable"),
         (
             &["--control", "--microphone"],

@@ -10,6 +10,8 @@ mod approval_policy;
 #[cfg(windows)]
 pub mod certs;
 #[cfg(windows)]
+pub mod clipboard;
+#[cfg(windows)]
 pub mod fs;
 #[cfg(windows)]
 pub mod indicator;

@@ -64,9 +64,9 @@ pub struct RunOptions {
     /// Linux and macOS name their executor with `input_agent` instead.
     pub control: bool,
     /// Let that controller's text clipboard follow its lease. CLI parsing
-    /// enables this with `input_agent` unless `--no-clipboard` is selected;
-    /// explicit `--clipboard` without an input agent is refused by the caller.
-    /// The separately launched native role requires its own visible Off
+    /// enables this with `input_agent` (Windows: `control`) unless
+    /// `--no-clipboard` is selected; explicit `--clipboard` without either is
+    /// refused by the caller. The native owner requires its own visible Off
     /// surface; an unavailable clipboard keeps the input session usable.
     pub clipboard: bool,
     /// Local enable of host playback audio (off by default). Only an admitted
@@ -239,7 +239,7 @@ impl RunOptions {
                 _ => return Err(Error::InvalidArgument),
             }
         }
-        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some());
+        options.clipboard = clipboard.unwrap_or(options.input_agent.is_some() || options.control);
         let _ = options.selected_encoder()?;
         let _ = options.video_profile()?;
         // macOS requires a host-lifetime Stop sharing surface in addition to
@@ -375,7 +375,7 @@ impl RunOptions {
     #[cfg(any(windows, test))]
     #[must_use]
     pub fn windows_refusal(&self, _approval: Approval) -> Option<(&'static str, &'static str)> {
-        let refusals: [(bool, &str, &str); 9] = [
+        let refusals: [(bool, &str, &str); 8] = [
             (
                 self.software_explicit,
                 "software_encoder_unavailable",
@@ -395,11 +395,6 @@ impl RunOptions {
                 self.input_agent.is_some(),
                 "input_agent_unavailable",
                 "a Windows host injects input itself; use --control instead of --input-agent",
-            ),
-            (
-                self.clipboard,
-                "clipboard_unavailable",
-                "--clipboard has no Windows backend yet",
             ),
             (
                 self.files.is_some(),
@@ -605,13 +600,6 @@ mod tests {
                     ..RunOptions::default()
                 },
                 "microphone_endpoint_unavailable",
-            ),
-            (
-                RunOptions {
-                    clipboard: true,
-                    ..RunOptions::default()
-                },
-                "clipboard_unavailable",
             ),
             (
                 RunOptions {
