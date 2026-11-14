@@ -17,8 +17,10 @@
 //! seconds without one. Reopen requires successful retirement and the
 //! original requested close; it resumes viewing only. Stopping an active
 //! input source cancels its owner, so controlled resize cannot prove that
-//! orderly close and may terminate instead. Control requires a fresh
-//! explicit invocation, never replay of the earlier --control choice.
+//! orderly close and may terminate instead. A reopened control-capable view
+//! exposes a fresh Input → Request control choice, never replay of the earlier
+//! --control choice.
+mod control;
 mod display;
 mod text;
 
@@ -55,10 +57,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
     WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
-    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST,
+    WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
+    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
+    WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -97,6 +100,8 @@ struct Viewer {
     text: Option<text::Editor>,
     /// One modeless choice from this attempt's host-approved catalog.
     display_picker: Option<display::Picker>,
+    /// Visible ownership state and an original one-use local menu choice.
+    input_menu: control::Menu,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -152,11 +157,11 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let Ok(hwnd) = create_window(title) else {
         return refuse("window_unavailable");
     };
-    if text::install_menu(hwnd).is_err() {
+    let Ok(input_menu) = control::Menu::install(hwnd, title) else {
         // SAFETY: our UI-thread window, before it owns a session or resources.
         let _ = unsafe { DestroyWindow(hwnd) };
         return refuse("input_menu_unavailable");
-    }
+    };
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
@@ -166,9 +171,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let Ok(renderer) = Renderer::new(&gpu.device, hwnd, size) else {
         return refuse("swap_chain_unavailable");
     };
-    if control {
-        session.shared().request_control();
-    }
+    control::bind(&session.shared_handle());
     VIEWER.with(|cell| {
         *cell.borrow_mut() = Some(Viewer {
             session,
@@ -188,11 +191,20 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             redial_at: None,
             text: None,
             display_picker: None,
+            input_menu,
         });
     });
     // SAFETY: showing the window this thread created.
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
-    with_viewer(|v| v.session.shared().set_visible(true));
+    with_viewer(|v| {
+        v.session.shared().set_visible(true);
+        // Only the original invocation uses --control automatically. Native
+        // window creation and its initial size events have already settled.
+        if control {
+            v.session.shared().request_control();
+        }
+        v.input_menu.refresh(v.session.shared());
+    });
     let started = Instant::now();
     let stats = pump(seconds, hwnd, &config);
     let mut viewer = VIEWER.with(|cell| cell.borrow_mut().take());
@@ -309,16 +321,19 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.text = None;
     v.display_picker = None;
     let mut next = config.clone();
-    // The earlier input consent ended with its original grant. A resize
-    // may reopen a view but cannot request or restore control automatically.
-    next.control = false;
+    // Retain only the offered profile. Session::start grants and requests
+    // nothing: a resized view needs a new explicit local menu choice.
     let size = client_size(hwnd);
+    if CLOSE_PENDING.with(Cell::get) {
+        return Reopen::No;
+    }
     next.picture = Some(size);
     let Ok(session) = Session::start(next) else {
         return Reopen::No;
     };
     v.stated = size;
     let old = std::mem::replace(&mut v.session, session);
+    control::bind(&v.session.shared_handle());
     let shared = old.shared();
     let (decoded, decode_micros) = shared.frames.decode_stats();
     stats.earlier_decoded += decoded;
@@ -335,6 +350,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.buttons = [false; 5];
     v.keys = keys::Deferred::default();
     v.session.shared().set_visible(true);
+    v.input_menu.refresh(v.session.shared());
     Reopen::Started
 }
 
@@ -353,6 +369,7 @@ const REDIAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    v.input_menu.refresh(v.session.shared());
     v.update_display_picker(hwnd);
     if !v.keys.is_empty() {
         v.send_keys();
@@ -690,6 +707,23 @@ fn key_result(result: InputResult) -> Result<bool, ()> {
 }
 
 impl Viewer {
+    fn request_control(&mut self, message: u32) {
+        if self.closing
+            || self.reopen
+            || self.text.is_some()
+            || self.display_picker.is_some()
+            || self.mapping.is_none()
+            || !self.keys.is_empty()
+            || self.buttons.iter().any(|held| *held)
+        {
+            return;
+        }
+        if !self.input_menu.request(self.session.shared(), message) {
+            eprintln!("fr-windows: control_choice_expired_or_unavailable");
+        }
+        self.input_menu.refresh(self.session.shared());
+    }
+
     fn update_display_picker(&mut self, hwnd: HWND) {
         if self
             .display_picker
@@ -1015,18 +1049,46 @@ extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let handled = match message {
+        WM_INITMENUPOPUP => {
+            with_viewer(|v| {
+                if v.input_menu.is_popup(wparam.0) {
+                    v.input_menu.opened(&v.session.shared_handle());
+                }
+            });
+            false
+        }
+        WM_COMMAND if wparam.0 & 0xffff == control::REQUEST => {
+            let time = current_message_time();
+            with_viewer(|v| v.request_control(time));
+            true
+        }
+        WM_COMMAND if wparam.0 & 0xffff == control::STOP => {
+            // Fence the popup's original owner before borrowing Viewer or
+            // clearing native composition. No pending input can survive Stop.
+            if control::stop() {
+                CLOSE_PENDING.with(|pending| pending.set(true));
+                drain_close();
+            }
+            true
+        }
         WM_COMMAND if wparam.0 & 0xffff == text::OPEN => {
             with_viewer(|v| v.open_text(hwnd));
             true
         }
         WM_ACTIVATEAPP if wparam.0 == 0 => {
+            control::visible(false);
             text::deactivate();
             with_viewer(Viewer::text_deactivated);
+            false
+        }
+        WM_ACTIVATEAPP => {
+            control::visible(true);
             false
         }
         WM_CLOSE => {
             CLOSE_PENDING.with(|pending| pending.set(true));
             display::close_owner();
+            control::close();
             text::close_owner();
             drain_close();
             // An orderly close: the loop ends once the session finishes.
@@ -1040,6 +1102,7 @@ extern "system" fn window_proc(
             true
         }
         WM_DESTROY => {
+            control::close();
             display::close_owner();
             text::close_owner();
             // SAFETY: ends this thread's message loop.
@@ -1050,8 +1113,12 @@ extern "system" fn window_proc(
             // Fence an open editor before any nested native work or Viewer
             // borrow; old text cannot outlive hiding or a mapping change.
             text::deactivate();
+            control::invalidate_choice();
             let (width, height) = point_of(lparam);
             let minimized = wparam.0 == SIZE_MINIMIZED as usize;
+            if minimized {
+                control::visible(false);
+            }
             // Maximize and restore arrive outside any drag; a drag's own
             // sizes wait for WM_EXITSIZEMOVE.
             let settled = matches!(u32::try_from(wparam.0), Ok(SIZE_MAXIMIZED | SIZE_RESTORED));
@@ -1085,6 +1152,7 @@ extern "system" fn window_proc(
             true
         }
         WM_MOVE => {
+            control::invalidate_choice();
             // Wheel messages carry screen coordinates: moving the window
             // changes their conversion even when its client size is identical.
             with_viewer(|v| {
@@ -1094,6 +1162,7 @@ extern "system" fn window_proc(
             false
         }
         WM_ENTERSIZEMOVE => {
+            control::invalidate_choice();
             text::deactivate();
             with_viewer(|v| v.sizing = true);
             false

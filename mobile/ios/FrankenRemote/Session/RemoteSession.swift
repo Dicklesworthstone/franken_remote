@@ -318,6 +318,24 @@ final class RemoteSession: ObservableObject, InputSink {
         InputStatus(code: fr_session_key(handle, usage, pressed))
     }
 
+    func beginTyping() -> Result<UInt64, InputStatus> {
+        var token: UInt64 = 0
+        let status = InputStatus(code: fr_session_begin_typing(handle, &token))
+        guard status == .sent else { return .failure(status) }
+        return token != 0 ? .success(token) : .failure(.invalid)
+    }
+
+    @discardableResult func typeCaptured(_ token: UInt64, index: UInt32,
+                                         usage: UInt16, modifiers: UInt8) -> InputStatus {
+        InputStatus(code: fr_session_type_captured(handle, token, index, usage, modifiers))
+    }
+
+    func endTyping(_ token: UInt64) {
+        fr_session_end_typing(handle, token)
+    }
+
+    var supportsText: Bool { fr_session_supports_text(handle) }
+
     @discardableResult func text(_ text: String) -> InputStatus {
         guard UnicodeCommit.valid(text) else { return .invalid }
         return InputStatus(code: text.withCString { fr_session_text(handle, $0) })

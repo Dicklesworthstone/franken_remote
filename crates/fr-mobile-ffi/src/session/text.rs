@@ -33,6 +33,17 @@ impl CapturedText {
 }
 
 impl Shared {
+    /// The current host-granted text capability only. This never proves view
+    /// readiness; the one-shot text call still applies every original gate.
+    pub fn supports_text(&self) -> bool {
+        let mut supported = false;
+        let _ = self.with_granted(|g| {
+            supported = g.source.supports_text();
+            InputResult::Pending
+        });
+        supported
+    }
+
     /// Begin one local composition under the current granted source and view.
     /// Unsupported text or held/pending input refuses without affecting keys.
     pub fn begin_text(&self) -> Result<TextDraft, InputResult> {
@@ -167,6 +178,13 @@ fn draft_ready(g: &Granted, context: &TextContext) -> Result<bool, InputResult> 
 pub(super) fn refresh_window(viewer: &mut ControlledViewer, shared: &Shared) {
     let until = viewer.input_capture_context().ok().map(|(_, until)| until);
     let _ = shared.with_granted(|g| {
+        g.key_window = until.and_then(|until| {
+            g.source
+                .input_context()
+                .ok()
+                .flatten()
+                .map(|context| (context, until))
+        });
         g.text_window = until.and_then(|until| {
             g.source
                 .text_context()

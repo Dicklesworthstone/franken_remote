@@ -31,6 +31,8 @@ mod windows;
 
 // Platform-neutral pieces of the viewer, tested on every CI host.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod control;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod geometry;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
@@ -54,6 +56,11 @@ mod scroll_capture_policy;
 #[cfg(test)]
 #[path = "../../fr-mobile-ffi/src/session/display.rs"]
 mod display_selection_policy;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../fr-mobile-ffi/src/session/control_request.rs"]
+mod control_request_policy;
 
 use std::process::ExitCode;
 

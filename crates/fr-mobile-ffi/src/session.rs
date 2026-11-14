@@ -15,9 +15,11 @@
 mod completion;
 pub mod connection;
 mod control_policy;
+mod control_request;
 mod display;
 mod key_capture;
 mod text;
+mod typing;
 
 #[cfg(test)]
 use completion::classify;
@@ -25,6 +27,7 @@ pub use completion::end;
 pub(crate) use completion::tailnet_end;
 use completion::{LocalStop, ending, requested_terminal};
 use control_policy::requested_capabilities;
+pub use control_request::{Request as ControlRequest, State as ControlState};
 pub use display::{
     Choice as DisplayChoice, Error as DisplayError, MAX_CHOICES as MAX_DISPLAY_CHOICES,
     Request as DisplayRequest,
@@ -191,6 +194,11 @@ struct Granted {
         frd::session_startup::viewer_events::TextContext,
         ClientInstant,
     )>,
+    key_window: Option<(
+        frd::session_startup::viewer_events::InputContext,
+        ClientInstant,
+    )>,
+    typing: input::typing::Batches<typing::Capture>,
 }
 impl Drop for Granted {
     fn drop(&mut self) {
@@ -207,6 +215,10 @@ pub struct Shared {
     granted: Mutex<Option<Granted>>,
     close: AtomicBool,
     want_control: AtomicBool,
+    control_capable: bool,
+    control_requests: Mutex<control_request::Requests>,
+    control_retirement: control_request::Retirement,
+    requesting_control: AtomicBool,
     visible: AtomicBool,
     /// How many times the view went from visible to hidden: a control
     /// request made before a hide never completes after it.
@@ -229,7 +241,11 @@ pub struct Shared {
     first_view_micros: AtomicU64,
 }
 impl Shared {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_control(true)
+    }
+    fn with_control(control_capable: bool) -> Self {
         Self {
             events: Events::default(),
             frames: FrameSlot::default(),
@@ -237,6 +253,10 @@ impl Shared {
             granted: Mutex::default(),
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
+            control_capable,
+            control_requests: Mutex::default(),
+            control_retirement: control_request::Retirement::default(),
+            requesting_control: AtomicBool::new(false),
             visible: AtomicBool::new(false),
             hides: AtomicU64::new(0),
             local_stop: AtomicU32::new(0),
@@ -258,6 +278,7 @@ impl Shared {
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
+        self.retire_control_request();
         self.retire_display();
         self.stop_control(None);
     }
@@ -346,11 +367,141 @@ impl Shared {
             if was {
                 self.hides.fetch_add(1, Ordering::SeqCst);
             }
+            self.retire_control_request();
             self.stop_control(Some(LocalStop::Hidden));
         }
     }
+    /// The legacy native/FFI choice can wait for this attempt's first view.
+    /// Hiding, attempt retirement and reconnect discard it; they never carry
+    /// the choice into another attempt. Native menus use the scoped API below.
     pub fn request_control(&self) {
-        self.want_control.store(true, Ordering::SeqCst);
+        let Some(original) = self.control_retirement.capture() else {
+            return;
+        };
+        self.request_control_at(original);
+    }
+    fn request_control_at(&self, original: u64) {
+        let Ok(_requests) = self.control_requests.lock() else {
+            return;
+        };
+        if self.control_retirement.current(original)
+            && self.control_capable
+            && !self.close.load(Ordering::SeqCst)
+            && self.local_stop.load(Ordering::SeqCst) == 0
+            && !self.finished()
+        {
+            self.want_control.store(true, Ordering::SeqCst);
+        }
+    }
+    /// A one-use request bound to the current ready, visible view. Merely
+    /// obtaining or submitting it grants no input authority.
+    pub fn control_request(&self) -> Option<ControlRequest> {
+        let requests = self.control_requests.lock().ok()?;
+        if !self.control_capable
+            || !self.visible.load(Ordering::SeqCst)
+            || self.close.load(Ordering::SeqCst)
+            || self.local_stop.load(Ordering::SeqCst) != 0
+            || self.finished()
+        {
+            return None;
+        }
+        requests.request()
+    }
+    /// Submit a current native menu choice once with its original queue age.
+    /// The 250 ms bound includes this lock wait and the session callback wait.
+    pub fn request_control_for(&self, request: &ControlRequest, queue_age: Duration) -> bool {
+        let sampled = Instant::now();
+        let Some(remaining) = control_request::MAX_GESTURE_AGE.checked_sub(queue_age) else {
+            return false;
+        };
+        let Some(until) = sampled.checked_add(remaining) else {
+            return false;
+        };
+        let Ok(mut requests) = self.control_requests.lock() else {
+            return false;
+        };
+        if !self.control_capable
+            || !self.visible.load(Ordering::SeqCst)
+            || self.close.load(Ordering::SeqCst)
+            || self.local_stop.load(Ordering::SeqCst) != 0
+            || self.finished()
+        {
+            return false;
+        }
+        requests.submit(request, Instant::now(), until)
+    }
+    /// Current local control stage. A request, fresh image or negotiation is
+    /// distinct from an attached host grant; UI labels use this snapshot.
+    pub fn control_state(&self) -> ControlState {
+        if self.finished() {
+            return ControlState::Ended;
+        }
+        if self.close.load(Ordering::SeqCst) || self.local_stop.load(Ordering::SeqCst) != 0 {
+            return ControlState::Closing;
+        }
+        if !self.control_capable {
+            return ControlState::Unavailable;
+        }
+        if self.controlled() {
+            return ControlState::Controlled;
+        }
+        if self.requesting_control.load(Ordering::SeqCst)
+            || self.want_control.load(Ordering::SeqCst)
+        {
+            return ControlState::Requesting;
+        }
+        self.control_requests
+            .lock()
+            .map_or(ControlState::WaitingForView, |requests| {
+                if requests.pending() {
+                    ControlState::Requesting
+                } else if requests.request().is_some() {
+                    ControlState::Viewing
+                } else {
+                    ControlState::WaitingForView
+                }
+            })
+    }
+    /// Native mapping or lifecycle changes invalidate old menu choices before
+    /// native cleanup. The next ready callback can offer a new local choice.
+    pub fn retire_control_request(&self) {
+        self.control_retirement.retire();
+        let mut requests = self
+            .control_requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.want_control.store(false, Ordering::SeqCst);
+        requests.retire();
+    }
+    fn refresh_control_request(&self, ready: bool) -> Result<(), ()> {
+        let mut requests = self.control_requests.lock().map_err(|_| ())?;
+        requests.ready(
+            ready
+                && self.control_capable
+                && self.visible.load(Ordering::SeqCst)
+                && !self.close.load(Ordering::SeqCst)
+                && self.local_stop.load(Ordering::SeqCst) == 0
+                && !self.finished(),
+        );
+        Ok(())
+    }
+    fn take_control_request(&self) -> Result<bool, ()> {
+        let mut requests = self.control_requests.lock().map_err(|_| ())?;
+        if !self.visible.load(Ordering::SeqCst)
+            || self.close.load(Ordering::SeqCst)
+            || self.local_stop.load(Ordering::SeqCst) != 0
+        {
+            requests.retire();
+            self.want_control.store(false, Ordering::SeqCst);
+            return Ok(false);
+        }
+        let explicit = requests.take(Instant::now());
+        let requested = self.want_control.swap(false, Ordering::SeqCst) || explicit;
+        if requested {
+            requests.retire();
+            self.requesting_control.store(true, Ordering::SeqCst);
+        }
+        Ok(requested)
     }
     /// Ending control ends the session (frd's contract); this asks for the
     /// orderly close and fences input now.
@@ -826,7 +977,7 @@ pub struct Session {
 }
 impl Session {
     pub fn start(config: Config) -> std::io::Result<Self> {
-        let shared = Arc::new(Shared::new());
+        let shared = Arc::new(Shared::with_control(config.control));
         let worker = shared.clone();
         let control = config.control;
         // Detached: the thread owns its share of the state and ends on its
@@ -870,6 +1021,7 @@ impl Drop for Session {
 }
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
+    shared.retire_control_request();
     shared.retire_display();
     shared.stop_control(None);
     let display_failure = shared
@@ -1216,6 +1368,8 @@ fn attach(
                 buttons: [false; 5],
                 scroll: LineScroller::default(),
                 text_window: None,
+                key_window: None,
+                typing: input::typing::Batches::default(),
             };
             // Re-checked under the lock `set_visible` and `close` fence
             // through: one that ran after the check above found nothing to
@@ -1362,7 +1516,9 @@ impl Application for Mobile {
                 let fresh = shown(&shared, &mut pending, frame).filter(|f| last_shown != Some(*f));
                 match state {
                     InteractiveViewerState::Viewing(view) => {
+                        let original_hides = shared.hides.load(Ordering::SeqCst);
                         let Some(frame) = fresh.or(last_shown) else {
+                            shared.refresh_control_request(false)?;
                             return Ok(ControlFlow::Continue(()));
                         };
                         if !mapped {
@@ -1375,14 +1531,13 @@ impl Application for Mobile {
                             last_shown = Some(frame);
                         }
                         announce_view(&shared);
-                        if !requested
-                            && shared.want_control.load(Ordering::SeqCst)
+                        let ready = !requested
                             && shared.visible.load(Ordering::SeqCst)
-                            && view.evidence().is_ok()
-                        {
-                            shared.want_control.store(false, Ordering::SeqCst);
+                            && view.evidence().is_ok();
+                        shared.refresh_control_request(ready)?;
+                        if ready && shared.take_control_request()? {
                             requested = true;
-                            hides_at_request = shared.hides.load(Ordering::SeqCst);
+                            hides_at_request = original_hides;
                             view.request_control().map_err(|_| ())?;
                             shared
                                 .events
@@ -1479,6 +1634,10 @@ impl Application for Mobile {
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
         // Fence at call time: no input outlives the attempt.
+        self.shared.retire_control_request();
+        self.shared
+            .requesting_control
+            .store(false, Ordering::SeqCst);
         self.shared.retire_display();
         self.shared.stop_control(None);
         self.shared.serving.store(false, Ordering::SeqCst);
@@ -1528,6 +1687,10 @@ impl Application for Mobile {
                     .state(state::AUTHENTICATED, u32::from(attempt));
             }
             Status::Reconnecting { attempt, .. } | Status::Reopening { attempt } => {
+                self.shared.retire_control_request();
+                self.shared
+                    .requesting_control
+                    .store(false, Ordering::SeqCst);
                 if closing {
                     return Err(CallbackError);
                 }

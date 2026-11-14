@@ -164,6 +164,19 @@ int32_t fr_session_button(FrHandle session, uint32_t button, bool pressed,
 int32_t fr_session_scroll(FrHandle session, double dx, double dy, double x, double y);
 void fr_session_scroll_end(FrHandle session);
 int32_t fr_session_key(FrHandle session, uint16_t usage, bool pressed);
+/* Capture once BEFORE mapping/queueing a completed ASCII callback. Refusal
+ * writes no token; never recapture that callback later. At most 64 outstanding
+ * callbacks and 4096 strokes per callback. The original exclusive input bound
+ * and source/view context cannot be renewed. */
+int32_t fr_session_begin_typing(FrHandle session, uint64_t *_Nullable out);
+/* One complete stroke: modifiers bits 0..7 name HID 0xE0..0xE7. index starts
+ * at zero and advances only after FR_OK/FR_PENDING. FR_BUSY queued nothing:
+ * retry only this same token/index/usage/modifiers, never a fresh capture. */
+int32_t fr_session_type_captured(FrHandle session, uint64_t token, uint32_t index,
+                                 uint16_t usage, uint8_t modifiers);
+void fr_session_end_typing(FrHandle session, uint64_t token);
+/* Current negotiated capability only; fr_session_text still checks readiness. */
+bool fr_session_supports_text(FrHandle session);
 /* One completed Unicode callback, captured synchronously once. utf8 is
  * nonempty, at most 4096 UTF-8 bytes and contains no embedded NUL. Refusal
  * admits none of the value; never split, queue or automatically retry it. */

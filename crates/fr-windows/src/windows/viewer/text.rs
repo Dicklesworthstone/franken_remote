@@ -24,11 +24,10 @@ use windows::{
                 KeyboardAndMouse::{EnableWindow, SetFocus},
             },
             WindowsAndMessaging::{
-                AppendMenuW, BN_CLICKED, CreateMenu, CreatePopupMenu, CreateWindowExW,
-                DefWindowProcW, DestroyMenu, DestroyWindow, EN_CHANGE, EN_ERRSPACE, EN_MAXTEXT,
-                ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetWindowRect, GetWindowTextLengthW,
-                GetWindowTextW, HMENU, IDC_ARROW, LoadCursorW, MF_POPUP, MF_STRING,
-                RegisterClassExW, SW_SHOW, SendMessageW, SetMenu, SetWindowTextW, ShowWindow,
+                BN_CLICKED, CreateWindowExW, DefWindowProcW, DestroyWindow, EN_CHANGE, EN_ERRSPACE,
+                EN_MAXTEXT, ES_AUTOVSCROLL, ES_MULTILINE, ES_WANTRETURN, GetWindowRect,
+                GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW, LoadCursorW,
+                RegisterClassExW, SW_SHOW, SendMessageW, SetWindowTextW, ShowWindow,
                 WINDOW_EX_STYLE, WINDOW_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND, WNDCLASSEXW,
                 WS_BORDER, WS_CAPTION, WS_CHILD, WS_POPUP, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
                 WS_VSCROLL,
@@ -122,34 +121,6 @@ pub(super) fn close_owner() {
         if let Some(original) = state.original.upgrade() {
             original.close();
         }
-    }
-}
-
-/// Ownership of the menu transfers to hwnd only after `SetMenu` succeeds.
-pub(super) fn install_menu(hwnd: HWND) -> Result<()> {
-    // SAFETY: all handles are created here on the UI thread; failed attachment
-    // destroys only this newly owned menu tree, never another window's menu.
-    unsafe {
-        let menu = CreateMenu()?;
-        let popup = match CreatePopupMenu() {
-            Ok(popup) => popup,
-            Err(error) => {
-                let _ = DestroyMenu(menu);
-                return Err(error);
-            }
-        };
-        let attached = AppendMenuW(popup, MF_STRING, OPEN, w!("Send &text…"))
-            .and_then(|()| AppendMenuW(menu, MF_POPUP, popup.0 as usize, w!("&Input")));
-        if let Err(error) = attached {
-            let _ = DestroyMenu(popup);
-            let _ = DestroyMenu(menu);
-            return Err(error);
-        }
-        if let Err(error) = SetMenu(hwnd, Some(menu)) {
-            let _ = DestroyMenu(menu);
-            return Err(error);
-        }
-        Ok(())
     }
 }
 

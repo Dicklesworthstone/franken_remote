@@ -1,5 +1,23 @@
 # Implementation status
 
+## Windows adaptive bitrate through the live capture worker (2026-11-14 UTC)
+
+The original Media Foundation capture worker now implements `CaptureAtRate`
+for private and shared adaptive hosts. A target applies only during useful
+capture work, retains the opening bitrate ceiling and both original two-second
+clocks, and is reported only after exact native readback and an admitted IDR.
+An unchanged desktop retains the previous rate; lost source evidence refuses
+capture. Fixed-rate hosting remains the default. See
+[the media commit](https://github.com/Dicklesworthstone/franken_remote/commit/a745f925)
+and [Windows rate transactions](ADAPTIVE_CAPTURE.md#windows-media-foundation-bitrate-transactions).
+
+**Passed:** 1,214 tests across `fr-core`, `fr-wire` and `fr-media`; all 12 portable
+production rate/arbitration tests with strict pedantic Clippy; and strict
+Windows MSVC Clippy for the `fr-native` library and binaries. The ignored native
+hardware rate probe has not run. Windows device behavior and impaired-path
+quality remain unqualified; the broader workspace and combined Windows build
+remain resource-constrained, without a passing result.
+
 ## Native Windows display choice, capture and local consent (2026-11-14 UTC)
 
 The Windows viewer now provides `--display choose|primary|only|HANDLE`.
@@ -42,11 +60,11 @@ same monitored interactive logon, and preserves original opening/startup
 deadlines and join-before-consume cleanup. Ordinary injected remote mouse
 events cannot approve. Native UI, source visibility and original authority
 are rechecked before acceptance; privileged UIAccess software remains within
-the trusted Windows/user boundary. All twelve portable gesture/budget tests,
-portable strict Clippy and the isolated Win32 API check passed before executor
-loss. The production boundary and policy were recovered from retained source
-and independently compared; two trailing regression bodies were recreated
-equivalently and have not yet been rerun. Full local Windows feature-union
+the trusted Windows/user boundary. All twelve production gesture/budget tests,
+including the two reconstructed trailing regressions, now pass with the pinned
+compiler and strict standalone Clippy. The isolated Win32 API check passed
+before executor loss; the recovered production boundary and policy were
+independently compared. Full local Windows feature-union
 checking was SIGKILLed while compiling the broad pinned Windows bindings,
 before first-party code. Complete host integration and real Windows
 input/consent qualification remain unverified. The existing hosted cross-build

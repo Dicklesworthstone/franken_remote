@@ -8,6 +8,7 @@
 //! granted `LineScroll`), keeping the remainder.
 
 mod scroll;
+pub(crate) mod typing;
 pub use scroll::{LINE, LineScroller, MAX_LINES_PER_EVENT};
 
 /// `(x, y)` in 1/256 picture pixels for a point inside the `width` x

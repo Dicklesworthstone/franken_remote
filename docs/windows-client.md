@@ -86,11 +86,48 @@ address families.
 the connection. These flags never add an address absent from the authenticated
 metadata.
 
-`view` starts an observing session. `--control` requests control through the
-existing host admission and grant flow. `--seconds N` requests an orderly close
+`view` starts an observing session. `--control` opens a control-capable profile
+and requests control once through the existing host admission and grant flow.
+`--seconds N` requests an orderly close
 after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
+
+## Request or stop control in the viewer
+
+The native **Input** menu now contains **Request control**, **Stop control and
+disconnect**, and **Send text…**. The window title shows whether it is waiting
+for a ready view, viewing, requesting control, controlling, or stopping. A
+request is not a grant: keys and pointer actions stay local until the host has
+granted control and the original input producer is attached.
+
+Start with `--control` to make explicit control requests available. If an
+automatic reconnect or a permitted resize opens a replacement view, it retains
+that control-capable profile but starts viewing. Open **Input → Request
+control** to make a fresh choice for that current view. A connection started
+without `--control` remains observation-only, and its Request action is
+disabled. Neither receiving a picture nor reopening a connection restores the
+earlier control request.
+
+Request is enabled only while the shared session has current visible-view
+evidence. Each menu choice belongs to its original view and is consumed once.
+A stale native command, lost readiness, hidden window, changed mapping or
+replacement connection invalidates it. The original native queue age and the
+session's bounded callback wait count against the same request lifetime; a
+delayed command is never automatically retried. Reopen the menu for a fresh
+choice after the view is ready again.
+
+**Stop control and disconnect** cancels a pending request or fences the
+original input source immediately, before native composition cleanup. It then
+closes that connection through the existing bounded cleanup path. Ending
+control ends the session; Stop does not silently reopen another view or grant.
+The menu remains local even while the remote desktop is controlled.
+
+Switching to another application or minimizing the viewer invalidates pending
+control choices and ends any granted control. Returning to the application
+cannot restore it. A view-only session can remain connected. Existing resize
+rules still require successful original cleanup before reopening; a controlled
+resize that cannot establish orderly closure ends the session instead.
 
 ## Choose a remote display
 
@@ -260,6 +297,16 @@ IME/lifecycle and host-delivery qualification.
 Those checks cover selection and route policy. They do not establish native
 Windows pipe access, GPU behavior or live tailnet connectivity on a particular
 machine; native platform qualification remains necessary.
+
+Control-choice regressions exercise the actual portable ownership policy in
+`crates/fr-mobile-ffi/src/session/control_request.rs` and the original native
+menu timestamp policy in `crates/fr-windows/src/control.rs`. They cover one-use
+submission, exact expiry, repeated readiness polls, hidden/replaced views,
+cross-session tokens, native timestamp wrapping and stale popup commands.
+Shared-session regressions also cover observation-only refusal, no input grant
+from a request, lifecycle retirement and input-failure fencing. The real
+Windows menu, focus transitions, reconnection and host grant still need native
+qualification; portable policy tests do not establish those device results.
 
 The actual shared display-selection policy is also exercised by portable
 `fr-windows` tests: primary/explicit selection, empty and ambiguous catalogs,

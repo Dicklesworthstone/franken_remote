@@ -10,11 +10,17 @@ final class RecordingSink: InputSink {
         case scroll(Double, Double, CGPoint)
         case scrollEnded
         case key(UInt16, Bool)
+        case stroke(UInt64, UInt32, UInt16, UInt8)
         case text(String)
     }
     var calls: [Call] = []
     var keyResult = InputStatus.sent
     var textResult = InputStatus.unsupported
+    var captureRefusal: InputStatus?
+    var capturesCreated: UInt64 = 0
+    var capturesEnded: [UInt64] = []
+    var strokeResult = InputStatus.sent
+    var strokeAnswer: ((UInt64, UInt32, UInt16, UInt8) -> InputStatus)?
     /// Per-call answer for keys when set (usage, pressed) -> status.
     var keyAnswer: ((UInt16, Bool) -> InputStatus)?
 
@@ -30,6 +36,16 @@ final class RecordingSink: InputSink {
         calls.append(.key(usage, pressed))
         return keyAnswer?(usage, pressed) ?? keyResult
     }
+    func beginTyping() -> Result<UInt64, InputStatus> {
+        if let captureRefusal { return .failure(captureRefusal) }
+        capturesCreated += 1
+        return .success(capturesCreated)
+    }
+    func typeCaptured(_ token: UInt64, index: UInt32, usage: UInt16, modifiers: UInt8) -> InputStatus {
+        calls.append(.stroke(token, index, usage, modifiers))
+        return strokeAnswer?(token, index, usage, modifiers) ?? strokeResult
+    }
+    func endTyping(_ token: UInt64) { capturesEnded.append(token) }
     func text(_ text: String) -> InputStatus { calls.append(.text(text)); return textResult }
 
     var buttons: [Call] { calls.filter { if case .button = $0 { return true } else { return false } } }

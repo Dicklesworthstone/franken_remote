@@ -43,34 +43,30 @@ final class KeyboardTests: XCTestCase {
         XCTAssertEqual(m.active, [.option, .shift])
     }
 
-    func testTypingNeverReleasesAKeyItDidNotPress() {
-        // Shift is already held on a hardware keyboard: the core answers
-        // pending. Planted negative (the old typer): releasing it here
-        // would let go of the user's own key.
+    func testTypingHandsOneWholeStrokeToRustWithoutIndependentModifierEffects() throws {
+        var queue = TypingQueue()
         let sink = RecordingSink()
-        sink.keyAnswer = { usage, pressed in usage == HIDUsage.leftShift && pressed ? .pending : .sent }
-        XCTAssertEqual(KeyTyper.type(0x04, modifiers: [HIDUsage.leftShift], into: sink), .sent)
-        XCTAssertEqual(sink.calls, [.key(HIDUsage.leftShift, true), .key(0x04, true), .key(0x04, false)])
-        // A busy host: nothing typed, every press it made released.
-        let busy = RecordingSink()
-        busy.keyAnswer = { usage, pressed in usage == 0x04 && pressed ? .busy : .sent }
-        XCTAssertEqual(KeyTyper.type(0x04, modifiers: [HIDUsage.leftGUI], into: busy), .busy)
-        XCTAssertEqual(busy.calls, [.key(HIDUsage.leftGUI, true), .key(0x04, true), .key(HIDUsage.leftGUI, false)])
+        XCTAssertTrue(queue.append([.stroke(4, modifiers: [HIDUsage.leftShift, HIDUsage.leftGUI,
+                                                           HIDUsage.leftShift])],
+                                   capture: try TypingCapture.capture(into: sink).get()))
+        XCTAssertEqual(queue.drain(into: sink).sent, 1)
+        XCTAssertEqual(sink.calls, [.stroke(1, 0, 4, 0b1010)])
+        XCTAssertEqual(sink.capturesCreated, 1)
+        XCTAssertEqual(sink.capturesEnded, [1])
     }
 
-    func testQueuedTypingWaitsForABusyHostAndKeepsItsOrder() {
+    func testQueuedTypingWaitsUnderItsOriginalCaptureAndKeepsItsIndices() throws {
         var queue = TypingQueue()
         let sink = RecordingSink()
         var allow = 2
-        // The host takes two presses, then is busy until allowed again.
-        sink.keyAnswer = { _, pressed in
-            guard pressed else { return .sent }
+        sink.strokeAnswer = { _, _, _, _ in
             if allow == 0 { return .busy }
             allow -= 1
             return .sent
         }
         XCTAssertTrue(queue.append([.stroke(0x04, modifiers: []), .stroke(0x05, modifiers: []),
-                                    .stroke(0x06, modifiers: [])]))
+                                    .stroke(0x06, modifiers: [])],
+                                   capture: try TypingCapture.capture(into: sink).get()))
         var outcome = queue.drain(into: sink)
         XCTAssertEqual(outcome.sent, 2)
         XCTAssertTrue(outcome.busy)
@@ -79,34 +75,70 @@ final class KeyboardTests: XCTestCase {
         outcome = queue.drain(into: sink)
         XCTAssertEqual(outcome.sent, 1)
         XCTAssertTrue(queue.isEmpty)
-        let pressed = sink.calls.compactMap { call -> UInt16? in
-            if case .key(let usage, true) = call { return usage } else { return nil }
-        }
-        XCTAssertEqual(pressed, [0x04, 0x05, 0x06, 0x06], "in order; c retried once")
-        // Bounded: an over-long paste keeps its start.
-        var long = TypingQueue()
-        XCTAssertFalse(long.append(Array(repeating: .stroke(0x04, modifiers: []), count: TypingQueue.capacity + 1)))
-        XCTAssertEqual(long.count, TypingQueue.capacity)
-        // Control gone drops the rest.
-        let lost = RecordingSink()
-        lost.keyResult = .controlLost
-        _ = long.drain(into: lost)
-        XCTAssertTrue(long.isEmpty)
+        XCTAssertEqual(sink.calls, [.stroke(1, 0, 4, 0), .stroke(1, 1, 5, 0),
+                                    .stroke(1, 2, 6, 0), .stroke(1, 2, 6, 0)])
+        XCTAssertEqual(sink.capturesCreated, 1, "busy never recaptures a callback")
     }
 
-    func testTypingPressesModifiersAroundTheKeyAndAlwaysReleasesThem() {
+    func testOversizedCallbackIsRefusedWholeWithoutAQueuedPrefix() throws {
+        var long = TypingQueue()
         let sink = RecordingSink()
-        let result = KeyTyper.type(0x06, modifiers: [HIDUsage.leftGUI, HIDUsage.leftShift], into: sink)
-        XCTAssertEqual(result, .sent)
-        XCTAssertEqual(sink.calls, [
-            .key(0xE3, true), .key(0xE1, true), .key(0x06, true), .key(0x06, false),
-            .key(0xE1, false), .key(0xE3, false),
-        ])
-        // A refused key still releases what was pressed.
-        let refusing = RecordingSink()
-        refusing.keyResult = .controlLost
-        XCTAssertEqual(KeyTyper.type(0x06, modifiers: [], into: refusing), .controlLost)
-        XCTAssertEqual(refusing.calls, [.key(0x06, true)])
+        XCTAssertFalse(long.append(Array(repeating: .stroke(4, modifiers: []), count: TypingQueue.capacity + 1),
+                                    capture: try TypingCapture.capture(into: sink).get()))
+        XCTAssertTrue(long.isEmpty)
+        XCTAssertTrue(sink.calls.isEmpty)
+        XCTAssertEqual(sink.capturesEnded, [1])
+        XCTAssertTrue(long.append([.stroke(4, modifiers: [])], capture: try TypingCapture.capture(into: sink).get()))
+        XCTAssertFalse(long.append(Array(repeating: .stroke(5, modifiers: []), count: TypingQueue.capacity),
+                                    capture: try TypingCapture.capture(into: sink).get()))
+        XCTAssertEqual(long.count, 1)
+        XCTAssertEqual(long.drain(into: sink).sent, 1)
+        XCTAssertEqual(sink.calls, [.stroke(2, 0, 4, 0)])
+    }
+
+    func testExpiredOriginalTypingDropsTheSuffixWithoutRecapture() throws {
+        var queue = TypingQueue()
+        let sink = RecordingSink()
+        sink.strokeResult = .busy
+        XCTAssertTrue(queue.append([.stroke(4, modifiers: [HIDUsage.leftGUI]), .stroke(5, modifiers: [])],
+                                   capture: try TypingCapture.capture(into: sink).get()))
+        XCTAssertTrue(queue.drain(into: sink).busy)
+        // Rust's actual exclusive deadline/context enforcement has separate
+        // source tests. The shell must obey this refusal without recapturing.
+        sink.strokeResult = .controlLost
+        XCTAssertEqual(queue.drain(into: sink).refusal, .controlLost)
+        XCTAssertTrue(queue.isEmpty)
+        sink.strokeResult = .sent
+        XCTAssertEqual(queue.drain(into: sink).sent, 0)
+        XCTAssertEqual(sink.calls, [.stroke(1, 0, 4, 8), .stroke(1, 0, 4, 8)])
+        XCTAssertEqual(sink.capturesCreated, 1)
+        XCTAssertEqual(sink.capturesEnded, [1])
+    }
+
+    func testReplacementSessionCannotUseAnOldCaptureAndClearingRetiresIt() throws {
+        var queue = TypingQueue()
+        let original = RecordingSink()
+        let replacement = RecordingSink()
+        XCTAssertTrue(queue.append([.stroke(4, modifiers: [])],
+                                   capture: try TypingCapture.capture(into: original).get()))
+        XCTAssertEqual(queue.drain(into: replacement).refusal, .stale)
+        XCTAssertTrue(original.calls.isEmpty)
+        XCTAssertTrue(replacement.calls.isEmpty)
+        XCTAssertEqual(original.capturesEnded, [1])
+        XCTAssertEqual(replacement.capturesCreated, 0)
+        XCTAssertTrue(queue.append([.stroke(5, modifiers: [])],
+                                   capture: try TypingCapture.capture(into: original).get()))
+        queue.clear()
+        XCTAssertEqual(original.capturesEnded, [1, 2])
+        XCTAssertTrue(queue.isEmpty)
+    }
+
+    func testRefusedCaptureDoesNotCreateRetryableTyping() {
+        let sink = RecordingSink()
+        sink.captureRefusal = .busy
+        if case .success = TypingCapture.capture(into: sink) { XCTFail("must refuse") }
+        XCTAssertEqual(sink.capturesCreated, 0)
+        XCTAssertTrue(sink.calls.isEmpty)
     }
 
     func testUnicodeCallbackIsWholeAndAsciiKeepsItsPhysicalKeyPath() {
@@ -124,17 +156,34 @@ final class KeyboardTests: XCTestCase {
         XCTAssertNil(UnicodeCommit.notice(for: .sent))
     }
 
-    func testUnicodeCannotOvertakePendingAsciiOrConsumeModifiers() {
+    func testNegotiatedAsciiPasteUsesWholeTextOnceAndKeepsShortcutSemantics() {
+        XCTAssertTrue(UnicodeCommit.usesText(for: "paste once", supported: true, modifiersActive: false))
+        XCTAssertFalse(UnicodeCommit.usesText(for: "paste once", supported: false, modifiersActive: false))
+        XCTAssertFalse(UnicodeCommit.usesText(for: "ab", supported: true, modifiersActive: true))
+        XCTAssertFalse(UnicodeCommit.usesText(for: "a", supported: true, modifiersActive: false))
+        XCTAssertTrue(UnicodeCommit.usesText(for: "é", supported: false, modifiersActive: true))
+        for status: InputStatus in [.sent, .busy, .unsupported, .controlLost] {
+            let sink = RecordingSink()
+            sink.textResult = status
+            XCTAssertEqual(UnicodeCommit.submit("paste once", pendingKeys: false, heldKeys: false,
+                                                modifiersActive: false, into: sink), status)
+            XCTAssertEqual(sink.calls, [.text("paste once")])
+            XCTAssertEqual(sink.capturesCreated, 0, "no physical-key fallback or retry")
+        }
+    }
+
+    func testUnicodeCannotOvertakePendingAsciiOrConsumeModifiers() throws {
         var queue = TypingQueue()
-        XCTAssertTrue(queue.append([.stroke(HIDUsage.a, modifiers: [])]))
         let sink = RecordingSink()
+        XCTAssertTrue(queue.append([.stroke(HIDUsage.a, modifiers: [])],
+                                   capture: try TypingCapture.capture(into: sink).get()))
         sink.textResult = .sent
         XCTAssertEqual(UnicodeCommit.submit("é", pendingKeys: !queue.isEmpty, heldKeys: false,
                                             modifiersActive: false, into: sink), .busy)
         XCTAssertTrue(sink.calls.isEmpty, "refuse before draining a prefix")
         XCTAssertEqual(queue.count, 1)
         _ = queue.drain(into: sink)
-        XCTAssertEqual(sink.calls, [.key(HIDUsage.a, true), .key(HIDUsage.a, false)])
+        XCTAssertEqual(sink.calls, [.stroke(1, 0, HIDUsage.a, 0)])
         // Finishing older keys never retries the refused Unicode callback.
         for (held, modifier) in [(true, false), (false, true), (true, true)] {
             let blocked = RecordingSink()

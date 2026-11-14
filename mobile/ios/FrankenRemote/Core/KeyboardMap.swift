@@ -134,48 +134,40 @@ struct StickyModifiers: Equatable {
     mutating func clear() { levels.removeAll() }
 }
 
-/// Types keys through a sink: modifiers down, key down, key up, modifiers up
-/// (reverse order). No repeat is ever generated.
-struct KeyTyper {
-    /// Press-and-release `usage` with `modifiers` held. Returns the first
-    /// failure, if any (`.busy`: nothing was typed, send it again later).
-    /// Only keys this call pressed are released: a key already down
-    /// (`.pending`, e.g. held on a hardware keyboard) stays its owner's.
-    @discardableResult
-    static func type(_ usage: UInt16, modifiers: [UInt16], into sink: InputSink) -> InputStatus {
-        var pressed: [UInt16] = []
-        var seen: [UInt16] = []
-        var result = InputStatus.sent
-        for modifier in modifiers where !seen.contains(modifier) {
-            seen.append(modifier)
-            let status = sink.key(modifier, pressed: true)
-            if status == .sent {
-                pressed.append(modifier)
-            } else if status != .pending {
-                result = status
-                break
-            }
-        }
-        if result == .sent {
-            let down = sink.key(usage, pressed: true)
-            if down == .sent {
-                let up = sink.key(usage, pressed: false)
-                if up != .sent, up != .pending { result = up }
-            } else {
-                // `.pending`: already held elsewhere; a release here would
-                // let go of the user's own key, so nothing is typed.
-                result = down
-            }
-        }
-        for modifier in pressed.reversed() {
-            sink.key(modifier, pressed: false)
-        }
-        return result
+/// Opaque custody of one original callback. Rust owns its source, view,
+/// deadline, consumed indices and whole-stroke sequencing. The UI cannot
+/// renew the token or transfer it to another session while waiting.
+final class TypingCapture {
+    private weak var owner: InputSink?
+    private let token: UInt64
+
+    private init(owner: InputSink, token: UInt64) {
+        self.owner = owner
+        self.token = token
     }
+
+    static func capture(into sink: InputSink) -> Result<TypingCapture, InputStatus> {
+        sink.beginTyping().flatMap { token in
+            token == 0 ? .failure(.invalid) : .success(TypingCapture(owner: sink, token: token))
+        }
+    }
+
+    func stroke(_ usage: UInt16, modifiers: [UInt16], index: UInt32,
+                into sink: InputSink) -> InputStatus {
+        guard let owner, owner === sink else { return .stale }
+        var mask: UInt8 = 0
+        for modifier in modifiers {
+            guard (0xE0...0xE7).contains(modifier) else { return .invalid }
+            mask |= UInt8(1 << (modifier - 0xE0))
+        }
+        return owner.typeCaptured(token, index: index, usage: usage, modifiers: mask)
+    }
+
+    deinit { owner?.endTyping(token) }
 }
 
 
-/// Completed Unicode callbacks use one immediate attempt. There is no retained
+/// Completed text callbacks use one immediate attempt. There is no retained
 /// text, delayed retry, layout fallback or partial-commit prefix in this policy.
 enum UnicodeCommit {
     /// Same complete UTF-8 bound as fr_core::input::MAX_COMMITTED_TEXT_BYTES.
@@ -183,6 +175,14 @@ enum UnicodeCommit {
 
     static func needsText(for text: String) -> Bool {
         text.contains { KeyboardMap.stroke(for: $0) == nil }
+    }
+
+    /// A paste/dictation callback can carry many ASCII characters. When the
+    /// host grants whole text and no shortcut modifier is active, send it
+    /// once instead of stretching physical keys across an input deadline.
+    /// Refusal never falls back to keys. Single ASCII keys keep their mapping.
+    static func usesText(for text: String, supported: Bool, modifiersActive: Bool) -> Bool {
+        needsText(for: text) || (supported && !modifiersActive && text.count > 1)
     }
 
     static func valid(_ text: String) -> Bool {
@@ -206,23 +206,22 @@ enum UnicodeCommit {
         case .sent, .pending:
             return nil
         case .busy:
-            return "Unicode text was not sent while input is busy or keys are held. Release modifiers and type it again when the view is ready."
+            return "Text was not sent while input is busy or keys are held. Release modifiers and type it again when the view is ready."
         case .unsupported:
             return "This host did not enable Unicode text input. The text was not sent."
         case .invalid:
             return "That text is empty, too large, or contains an unsupported character. Nothing was sent."
         case .notControlled, .controlLost, .closed, .stale:
-            return "Unicode text was not sent because control is unavailable."
+            return "Text was not sent because control is unavailable."
         case .outside:
-            return "Unicode text could not be accepted in the current view. Nothing was sent."
+            return "Text could not be accepted in the current view. Nothing was sent."
         }
     }
 }
 
-/// ASCII software-keyboard keys waiting for the host, sent in order. The core
-/// answers `.busy` while the host's input queue is backed up: the drain stops
-/// there and the rest goes on a later call. Unicode commits cannot enter this
-/// queue. Bounded; holds what the user typed, so it is never logged or quoted.
+/// ASCII strokes waiting under their original Rust capture. Busy retries never
+/// recapture, and any expired/refused stroke drops the remaining dependent
+/// input. Unicode commits cannot enter this queue. Private, bounded contents.
 struct TypingQueue {
     enum Item: Equatable {
         case stroke(UInt16, modifiers: [UInt16])
@@ -230,19 +229,26 @@ struct TypingQueue {
     /// Most items waiting at once; more are refused.
     static let capacity = 4096
 
-    private var items: [Item] = []
+    private struct Pending {
+        let item: Item
+        let capture: TypingCapture
+        let index: UInt32
+    }
+    private var items: [Pending] = []
     private var head = 0
 
     var isEmpty: Bool { head >= items.count }
     var count: Int { items.count - head }
 
-    /// Queue `new` after what is waiting. False when some did not fit
-    /// (those are dropped, the rest kept in order).
-    mutating func append(_ new: [Item]) -> Bool {
+    /// A callback is either retained whole or refused before any prefix goes.
+    mutating func append(_ new: [Item], capture: TypingCapture) -> Bool {
         compact()
         let room = max(0, Self.capacity - count)
-        items.append(contentsOf: new.prefix(room))
-        return new.count <= room
+        guard !new.isEmpty, new.count <= room else { return false }
+        items.append(contentsOf: new.enumerated().map { index, item in
+            Pending(item: item, capture: capture, index: UInt32(index))
+        })
+        return true
     }
 
     mutating func clear() {
@@ -254,6 +260,9 @@ struct TypingQueue {
         var sent = 0
         /// Stopped at a busy host; the rest waits.
         var busy = false
+        /// Content-free refusal. Earlier admitted strokes remain effects;
+        /// the unsubmitted suffix was discarded and is never retried.
+        var refusal: InputStatus?
     }
 
     /// Send in order until the host is busy or everything went. Control
@@ -261,11 +270,12 @@ struct TypingQueue {
     mutating func drain(into sink: InputSink) -> Outcome {
         var outcome = Outcome()
         while head < items.count {
-            let item = items[head]
+            let pending = items[head]
             let status: InputStatus
-            switch item {
+            switch pending.item {
             case .stroke(let usage, let modifiers):
-                status = KeyTyper.type(usage, modifiers: modifiers, into: sink)
+                status = pending.capture.stroke(usage, modifiers: modifiers,
+                                                index: pending.index, into: sink)
             }
             switch status {
             case .busy:
@@ -275,9 +285,8 @@ struct TypingQueue {
             case .sent, .pending:
                 outcome.sent += 1
                 head += 1
-            case .unsupported, .outside, .invalid:
-                head += 1
-            case .notControlled, .controlLost, .closed, .stale:
+            case .unsupported, .outside, .invalid, .notControlled, .controlLost, .closed, .stale:
+                outcome.refusal = status
                 clear()
                 return outcome
             }

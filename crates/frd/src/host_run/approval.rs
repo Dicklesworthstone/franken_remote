@@ -420,7 +420,10 @@ mod tests {
         });
         assert_eq!(ui.validate(&options), Ok(()));
         let child = Configuration::new(Path::new("C:\\other-ui.exe")).unwrap();
-        assert_eq!(child.validate(&options), Err(Error::LocalApprovalUnavailable));
+        assert_eq!(
+            child.validate(&options),
+            Err(Error::LocalApprovalUnavailable)
+        );
         options.session_monitor.as_mut().unwrap().image = "C:\\other-monitor.exe".into();
         assert_eq!(ui.validate(&options), Err(Error::LocalApprovalUnavailable));
     }
