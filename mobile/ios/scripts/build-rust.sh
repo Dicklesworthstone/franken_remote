@@ -11,6 +11,7 @@
 #   FR_CARGO             cargo to run (default: $HOME/.cargo/bin/cargo)
 #   FR_CARGO_TARGET_DIR  cargo target directory (default: <repo>/target/ios-app)
 #   FR_CARGO_CONFIG      extra `cargo --config` file (e.g. a local [patch])
+#   FR_CARGO_JOBS        maximum concurrent Cargo jobs (default: 2)
 #
 # Debug builds use cargo's dev profile at opt-level 2 (fast enough for live
 # video and QUIC); Release uses the workspace release profile (LTO).
@@ -64,10 +65,11 @@ for arch in $archs; do
         DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}" \
         IPHONEOS_DEPLOYMENT_TARGET=17.0 \
         CARGO_TARGET_DIR="$target_dir" \
+        CARGO_BUILD_JOBS="${FR_CARGO_JOBS:-2}" \
         CARGO_PROFILE_DEV_OPT_LEVEL=2 \
         CARGO_PROFILE_DEV_DEBUG=line-tables-only \
         "$cargo" ${FR_CARGO_CONFIG:+--config} ${FR_CARGO_CONFIG:+"$FR_CARGO_CONFIG"} \
-            build -p fr-mobile-ffi --lib --features session \
+            build --locked -p fr-mobile-ffi --lib --features session \
             --target "$triple" $profile_args)
     triples="$triples $triple"
 done

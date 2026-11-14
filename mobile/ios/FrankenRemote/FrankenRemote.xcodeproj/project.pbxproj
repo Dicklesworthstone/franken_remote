@@ -301,7 +301,9 @@
 		4C54177739AB047F6DB6E60C /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = AU8V2Z6NKY;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -314,7 +316,7 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
 				LIBRARY_SEARCH_PATHS = "$(TARGET_TEMP_DIR)/fr-rust";
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = ("-lfr_mobile_ffi", "-framework", VideoToolbox, "-framework", CoreMedia, "-framework", CoreVideo, "-framework", Security, "-framework", SystemConfiguration);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.frankenremote.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -327,7 +329,9 @@
 		B72B9023142C2751FFFA0DF3 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = AU8V2Z6NKY;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Info.plist;
@@ -340,7 +344,7 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");
 				LIBRARY_SEARCH_PATHS = "$(TARGET_TEMP_DIR)/fr-rust";
-				MARKETING_VERSION = 0.1;
+				MARKETING_VERSION = 1.0;
 				OTHER_LDFLAGS = ("-lfr_mobile_ffi", "-framework", VideoToolbox, "-framework", CoreMedia, "-framework", CoreVideo, "-framework", Security, "-framework", SystemConfiguration);
 				PRODUCT_BUNDLE_IDENTIFIER = dev.frankenremote.ios;
 				PRODUCT_NAME = "$(TARGET_NAME)";
