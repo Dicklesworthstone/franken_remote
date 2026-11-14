@@ -4,6 +4,8 @@
 //! module opens no listener, invents no grant, and never retries an action.
 pub mod audio;
 pub mod authority;
+/// Fixed-memory compositor-submission timing, shared by native viewers.
+pub mod cadence;
 pub mod clock;
 pub mod cursor;
 pub mod input;

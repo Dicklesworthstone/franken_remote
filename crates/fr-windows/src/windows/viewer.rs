@@ -142,8 +142,8 @@ struct Stats {
     drawn: u64,
     draw_failures: u64,
     last_draw: Option<Instant>,
-    /// Microseconds between consecutive draws.
-    intervals: Vec<u64>,
+    /// Fixed-memory timing summary; no per-frame history survives a draw.
+    intervals: fr_client::cadence::FrameCadence,
     picture: (u32, u32),
     display: (u32, u32),
 }
@@ -449,7 +449,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     if let Some(last) = stats.last_draw {
         stats
             .intervals
-            .push(u64::try_from(now.duration_since(last).as_micros()).unwrap_or(u64::MAX));
+            .record(u64::try_from(now.duration_since(last).as_micros()).unwrap_or(u64::MAX));
     }
     stats.last_draw = Some(now);
     stats.drawn += 1;
@@ -519,15 +519,18 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         decoded + stats.earlier_decoded,
         decode_micros + stats.earlier_decode_micros,
     );
-    let mut intervals = stats.intervals.clone();
-    intervals.sort_unstable();
-    let percentile = |p: usize| -> f64 {
-        if intervals.is_empty() {
-            return 0.0;
-        }
-        let index = (intervals.len() - 1) * p / 100;
-        micros_to_ms(intervals[index])
-    };
+    // Quantiles are conservative upper bounds from 1 ms buckets. Above
+    // 250 ms the overflow bucket reports the actual maximum, never a clipped
+    // stall. Report construction neither clones nor sorts frame history.
+    let interval_ms = serde_json::json!({
+        "p50": stats.intervals.quantile_upper_ms(500),
+        "p95": stats.intervals.quantile_upper_ms(950),
+        "p99": stats.intervals.quantile_upper_ms(990),
+        "max": stats.intervals.max_us().map(micros_to_ms),
+        "percentile_kind": "upper_bound",
+        "bucket_ms": 1,
+        "samples": stats.intervals.gaps(),
+    });
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
     let clipboard = stats.clipboard.unwrap_or_else(|| shared.clipboard_report());
     let clipboard = serde_json::json!({
@@ -546,7 +549,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         "{{\"status\":\"ended\",\"end\":\"{}\",\"detail\":{},\"drawn\":{},\"draw_failures\":{},\
          \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
-         \"frame_interval_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1},\"max\":{:.1}}},\
+         \"frame_interval_ms\":{},\
          \"reopens\":{},\"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
          \"seconds\":{:.1},\"clipboard\":{}}}",
         end_name(code),
@@ -570,10 +573,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         stats.picture.1,
         viewer.renderer.size().0,
         viewer.renderer.size().1,
-        percentile(50),
-        percentile(95),
-        percentile(99),
-        intervals.last().map_or(0.0, |m| micros_to_ms(*m)),
+        interval_ms,
         stats.reopens,
         micros_to_ms(stats.reopen_gap_micros),
         micros_to_ms(shared.first_view_micros()),
