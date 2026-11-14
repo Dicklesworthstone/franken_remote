@@ -518,6 +518,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         micros_to_ms(intervals[index])
     };
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
+    let clipboard = shared.clipboard();
     let mut json = String::new();
     let _ = write!(
         json,
@@ -526,6 +527,8 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{{\"p50\":{:.1},\"p95\":{:.1},\"p99\":{:.1},\"max\":{:.1}}},\
          \"reopens\":{},\"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
+         \"clipboard\":{{\"requested\":{},\"configured\":{},\"active\":{},\"received\":{},\
+         \"received_unknown\":{},\"refused\":{},\"off\":{},\"reason\":{}}},\
          \"seconds\":{:.1}}}",
         end_name(code),
         shared
@@ -555,6 +558,16 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         stats.reopens,
         micros_to_ms(stats.reopen_gap_micros),
         micros_to_ms(shared.first_view_micros()),
+        clipboard.requested,
+        clipboard.configured,
+        clipboard.active,
+        clipboard.received_submitted,
+        clipboard.received_unknown,
+        clipboard.received_refused,
+        clipboard.off,
+        clipboard
+            .reason
+            .map_or_else(|| "null".to_owned(), |reason| format!("\"{reason:?}\"")),
         elapsed.as_secs_f64(),
     );
     let _ = writeln!(std::io::stdout().lock(), "{json}");

@@ -65,7 +65,7 @@ mod control_request_policy;
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows hosts\n       fr-windows view <stable-id-or-full-name> \
-     [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--seconds N] \
+     [--port N] [--ipv4|--ipv6] [--address IP]... [--control [--no-clipboard]] [--seconds N] \
      [--display primary|only|choose|HANDLE]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \
      [--address IP]...\n       fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] \

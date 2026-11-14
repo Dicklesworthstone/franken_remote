@@ -257,6 +257,8 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         control: config.control,
         picture,
         display: crate::session::DisplayChoice::Primary,
+        // No iOS clipboard owner yet: the C ABI never requests one.
+        clipboard: false,
     }) else {
         return FR_BUSY;
     };
@@ -592,7 +594,7 @@ pub unsafe extern "C" fn fr_session_begin_typing(handle: FrHandle, out: *mut u64
 }
 
 /// Type one physical stroke under the original callback. `index` starts at
-/// zero and advances only after FR_OK/FR_PENDING. FR_BUSY queued no transition:
+/// zero and advances only after `FR_OK`/`FR_PENDING`. `FR_BUSY` queued no transition:
 /// retry the same index, usage and modifiers with this same token only. Other
 /// refusals end this callback. The eight modifier bits name HID 0xE0..=0xE7.
 #[unsafe(no_mangle)]
@@ -620,7 +622,7 @@ pub extern "C" fn fr_session_end_typing(handle: FrHandle, token: u64) {
 }
 
 /// Whether the original current grant includes committed text. Readiness is
-/// still checked by fr_session_text; false is not permission to guess Unicode.
+/// still checked by `fr_session_text`; false is not permission to guess Unicode.
 #[unsafe(no_mangle)]
 pub extern "C" fn fr_session_supports_text(handle: FrHandle) -> bool {
     lookup(handle).is_some_and(|session| session.shared().supports_text())

@@ -65,6 +65,7 @@ pub fn run(args: &[String]) -> ExitCode {
         target,
         port: options.port,
         control: options.control,
+        clipboard: options.control && options.clipboard,
         picture: None,
         display: match options.display {
             DisplayChoice::Primary => fr_mobile_ffi::session::DisplayChoice::Primary,

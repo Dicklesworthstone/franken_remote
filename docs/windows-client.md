@@ -129,6 +129,38 @@ cannot restore it. A view-only session can remain connected. Existing resize
 rules still require successful original cleanup before reopening; a controlled
 resize that cannot establish orderly closure ends the session instead.
 
+## Share the text clipboard
+
+```text
+fr-windows view remote.example.ts.net --control
+fr-windows view remote.example.ts.net --control --no-clipboard
+```
+
+With `--control`, the viewer shares Unicode text both ways with a host that
+shares its own clipboard: a Windows host running `frd run --control`, or a
+Linux X11 host with `--input-agent` (its `fr-input-agent` built with the
+`linux-clipboard` feature). Hosts without a clipboard drop the lane and control
+still works. `--no-clipboard` turns it off. A view-only session never shares
+the clipboard.
+
+While sharing, a small window says "Text clipboard sharing is on." and has a
+**Turn off** button. It is frd's own clipboard owner, the same one a Windows
+host shows. Turn off, closing that window, or the window not answering within
+250 ms stops sharing for the rest of the session. Control continues.
+
+- Text on the Windows clipboard when control starts is sent once. The host's
+  own earlier clipboard is not sent; only copies made there after the lane
+  starts arrive.
+- A copy made on the host arrives on the Windows clipboard within about a
+  second. Switching to a local app to paste it ends control (above), but the
+  text stays on the Windows clipboard.
+- Only the first controlled view shares. A reconnect or resize reopen does not
+  reopen the clipboard.
+
+The completion JSON carries a content-free `clipboard` object: `requested`,
+`configured`, `active`, received counts (`received`, `received_unknown`,
+`refused`), `off` and `reason`.
+
 ## Choose a remote display
 
 ```text
@@ -307,6 +339,16 @@ Shared-session regressions also cover observation-only refusal, no input grant
 from a request, lifecycle retirement and input-failure fencing. The real
 Windows menu, focus transitions, reconnection and host grant still need native
 qualification; portable policy tests do not establish those device results.
+
+Clipboard offer regressions live in
+`crates/fr-mobile-ffi/src/session/control_policy.rs` (the added markers are
+exactly the optional clipboard set, and intersecting with frd's real host
+offers selects the lane only when the host shares) and
+`crates/fr-mobile-ffi/src/session/clipboard.rs` (later attempts drop the
+markers; a required marker is refused, never dropped). The Win32 owner itself
+is frd's `windows_clipboard`, qualified live on the Windows host. The viewer
+was run live against a Linux X11 host on 2026-11-14 (see the
+`fr-p2-shared-clipboard-wgd` bead for the run and its limits).
 
 The actual shared display-selection policy is also exercised by portable
 `fr-windows` tests: primary/explicit selection, empty and ambiguous catalogs,

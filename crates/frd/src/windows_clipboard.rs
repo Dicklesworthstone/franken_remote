@@ -1,5 +1,7 @@
-//! A Windows host's text clipboard for the controller (`frd run --control`).
-//! frd owns it itself, on the clipboard worker thread, through
+//! The Windows text clipboard on either end of a controlled session: a host's
+//! for its controller (`frd run --control`), or a controlling viewer's own
+//! (fr-windows `--control`, through fr-mobile-ffi's session). frd owns it
+//! itself, on the clipboard worker thread, through
 //! `fr_winsys::clipboard`: Win32's clipboard loads no library frd must keep
 //! out of process, so there is no helper child. The rules are the macOS
 //! owner's (`fr_native::macos_clipboard`): change metadata (the window
