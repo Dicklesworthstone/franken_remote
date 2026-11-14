@@ -58,7 +58,17 @@ pub trait NativeClipboard: ClipboardSink {
     fn poll_read(&mut self) -> Result<Option<Self::Text>, Self::Error>;
     fn cancel_read(&mut self);
     fn suspend(&mut self) -> Result<(), Self::Error>;
+    /// Fence native admission and request teardown once. An asynchronous
+    /// adapter keeps its original resources until `poll_close` completes.
     fn close(&mut self);
+    /// Inspect teardown without blocking, restarting it or extending a deadline.
+    /// `None` means the original owner must be retained and polled again. A
+    /// completed error is retained just like success; neither means it is safe
+    /// to detach a still-running native thread. The default is only for adapters
+    /// whose `close` synchronously completes all native cleanup.
+    fn poll_close(&mut self) -> Option<Result<(), Self::Error>> {
+        Some(Ok(()))
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentifierFailure;
@@ -190,6 +200,12 @@ impl<N: NativeClipboard> Synchronizer<N> {
             self.closed = true;
             self.native.close();
         }
+    }
+    /// Fence first, then inspect the original native owner's cleanup. Repeated
+    /// calls never repeat `NativeClipboard::close` or create a new lifetime.
+    pub fn poll_close(&mut self) -> Option<Result<(), N::Error>> {
+        self.close();
+        self.native.poll_close()
     }
     fn retire_read(&mut self) {
         self.reading = None;

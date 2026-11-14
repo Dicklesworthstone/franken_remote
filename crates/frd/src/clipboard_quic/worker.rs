@@ -1,8 +1,8 @@
 //! The OS owner never enters a QUIC callback, even when an incoming Commit waits.
 use super::{
     Arc, ChannelSession, ClientInstant, ControllerClipboard, ControllerSynchronizer, Cx, Duration,
-    Error, HostInstant, IdentifierFailure, NativeClipboard, PlatformError, Received, Synchronizer,
-    shared,
+    Error, HostInstant, IdentifierFailure, NativeClipboard, NativeOpenError, PlatformError,
+    Received, Synchronizer, shared,
 };
 use fr_core::clipboard::ClipboardSwitch;
 use fr_wire::clipboard::session::egress::Transport;
@@ -115,18 +115,26 @@ impl WorkerSeed {
     /// Initialization must target the locally approved OS session/display and
     /// must not read clipboard text. The resulting native owner need not be Send.
     pub fn open<N: NativeClipboard>(
-        mut self,
+        self,
         factory: impl FnOnce() -> Result<N, PlatformError>,
+    ) -> Result<Worker<N>, Error> {
+        self.open_with_cleanup(move || factory().map_err(NativeOpenError::Native))
+    }
+
+    fn open_with_cleanup<N: NativeClipboard>(
+        mut self,
+        factory: impl FnOnce() -> Result<N, NativeOpenError>,
     ) -> Result<Worker<N>, Error> {
         self.clock.sample_maintenance(&self.cx)?;
         ready(&self.clock, &self.cx)?;
-        let native = factory().map_err(Error::NativeSetup)?;
+        let native = factory().map_err(Error::from)?;
         let owner = match self.session.take().ok_or(Error::Closed)? {
             Session::Host(session) => Native::Host(Synchronizer::new(session, native)),
             Session::Controller(session) => Native::Controller(session.into_native(native)),
         };
         let mut worker = Worker {
             owner,
+            closed: false,
             shared: self.shared.clone(),
             clock: self.clock.clone(),
             cx: self.cx.clone(),
@@ -138,7 +146,7 @@ impl WorkerSeed {
             ],
         };
         if let Err(error) = ready(&worker.clock, &worker.cx) {
-            worker.close();
+            worker.finish_close()?;
             return Err(error);
         }
         Ok(worker)
@@ -146,10 +154,22 @@ impl WorkerSeed {
     /// `factory` runs entirely on the new native thread, after the original
     /// authority check. `new_id` supplies qualified randomness, never text/IDs
     /// received from the peer. Dropping the handle stops admission, not the OS.
-    pub fn spawn<N, F, I>(self, factory: F, mut new_id: I) -> Result<WorkerTask, Error>
+    pub fn spawn<N, F, I>(self, factory: F, new_id: I) -> Result<WorkerTask, Error>
     where
         N: NativeClipboard + 'static,
         F: FnOnce() -> Result<N, PlatformError> + Send + 'static,
+        I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
+    {
+        self.spawn_with_cleanup(move || factory().map_err(NativeOpenError::Native), new_id)
+    }
+
+    /// As `spawn`, with a distinct failed-cleanup result from a native factory
+    /// which had already created resources before setup failed. The factory
+    /// retains those original resources until their actual completion.
+    pub fn spawn_with_cleanup<N, F, I>(self, factory: F, mut new_id: I) -> Result<WorkerTask, Error>
+    where
+        N: NativeClipboard + 'static,
+        F: FnOnce() -> Result<N, NativeOpenError> + Send + 'static,
         I: FnMut() -> Result<u128, IdentifierFailure> + Send + 'static,
     {
         let shared = self.shared.clone();
@@ -159,14 +179,21 @@ impl WorkerSeed {
             .name("fr-clipboard".into())
             .spawn(move || {
                 let _ = self.shared.wake.set(thread::current());
-                let mut worker = self.open(factory)?;
+                let mut worker = self.open_with_cleanup(factory)?;
                 opened.store(true, Ordering::Release);
-                while worker.shared.gate.is_open() {
-                    worker.step(&mut new_id)?;
+                let result = loop {
+                    if !worker.shared.gate.is_open() {
+                        break Ok(());
+                    }
+                    if let Err(error) = worker.step(&mut new_id) {
+                        break Err(error);
+                    }
                     thread::park_timeout(Duration::from_millis(1));
-                }
-                worker.close();
-                Ok(())
+                };
+                // An error is also a teardown request, not permission to drop
+                // a still-running native owner or report the thread reaped.
+                worker.finish_close()?;
+                result
             })
             .map_err(|_| {
                 shared.stop();
@@ -220,6 +247,7 @@ enum Native<N: NativeClipboard> {
 /// deferred ingress stay in the shared slot; only execution removes its record.
 pub struct Worker<N: NativeClipboard> {
     owner: Native<N>,
+    closed: bool,
     shared: Arc<Shared>,
     clock: Clock,
     cx: Cx,
@@ -227,11 +255,36 @@ pub struct Worker<N: NativeClipboard> {
 }
 impl<N: NativeClipboard> Worker<N> {
     pub fn close(&mut self) {
+        if std::mem::replace(&mut self.closed, true) {
+            return;
+        }
         self.shared.stop();
         self.scratch.fill(0);
         match &mut self.owner {
             Native::Host(n) => n.close(),
             Native::Controller(n) => n.close(),
+        }
+    }
+    /// Nonblocking completion inspection. The native adapter retains its
+    /// original resources while pending; no item or cleanup deadline is reset.
+    pub fn poll_close(&mut self) -> Option<Result<(), Error>> {
+        self.close();
+        match &mut self.owner {
+            Native::Host(n) => n.poll_close(),
+            Native::Controller(n) => n.poll_close(),
+        }
+        .map(|result| result.map_err(|_| Error::NativeCleanup))
+    }
+    /// Run only on the native clipboard thread. The application can fence
+    /// immediately and bound its own reap wait while this one original worker
+    /// retains a stuck native resource; no replacement worker is created here.
+    fn finish_close(&mut self) -> Result<(), Error> {
+        self.close();
+        loop {
+            if let Some(result) = self.poll_close() {
+                return result;
+            }
+            thread::park_timeout(Duration::from_millis(5));
         }
     }
     /// Call during traffic AND silence on the interactive worker. Returns only

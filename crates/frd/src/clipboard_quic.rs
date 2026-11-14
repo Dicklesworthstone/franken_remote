@@ -28,6 +28,24 @@ mod worker;
 use shared::{Clock, Outgoing, Shared, Turn};
 pub use worker::{NativeAccess, Worker, WorkerControl, WorkerSeed, WorkerTask};
 
+/// Local factory outcomes, never wire encodings. A failed open must retain all
+/// native work until it is joined and distinguish failed cleanup from ordinary
+/// platform unavailability; otherwise a caller could admit a replacement owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeOpenError {
+    Native(PlatformError),
+    Cleanup,
+}
+
+impl From<NativeOpenError> for Error {
+    fn from(error: NativeOpenError) -> Self {
+        match error {
+            NativeOpenError::Native(error) => Self::NativeSetup(error),
+            NativeOpenError::Cleanup => Self::NativeCleanup,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
     WrongConnection,
@@ -41,6 +59,9 @@ pub enum Error {
     Poisoned,
     Thread,
     Native,
+    /// The original native owner completed teardown with a failure. Pending
+    /// native work remains owned by the worker and cannot produce this result.
+    NativeCleanup,
     Panicked,
     HandoffExpired,
     /// The original clipboard pair reached its fixed framing deadline.

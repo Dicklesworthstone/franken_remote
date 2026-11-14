@@ -167,7 +167,9 @@ impl Clipboard {
             let _ = observer.collect_clipboard();
             self.collect();
         }
-        matches!(reaped, Ok(Cleanup::NotStarted | Cleanup::Finished(_)))
+        matches!(reaped, Ok(Cleanup::NotStarted | Cleanup::Finished(Ok(()))))
+            || matches!(reaped, Ok(Cleanup::Finished(Err(error)))
+                if !matches!(error, Error::NativeCleanup | Error::Panicked))
     }
 }
 
@@ -177,7 +179,7 @@ fn configure(
     entropy: &asupersync::cx::Cx,
 ) -> Result<Control, Error> {
     let entropy = entropy.clone();
-    let configuration = frd::native_clipboard::Configuration::new_with_guard(
+    let configuration = frd::native_clipboard::Configuration::new_with_guard_and_cleanup(
         true,
         std::time::Duration::from_secs(2),
         frd::windows_clipboard::factory(),

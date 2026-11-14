@@ -83,6 +83,10 @@ struct Os {
     unsettled: bool,
     suspends: usize,
     closes: usize,
+    cleanup_pending: bool,
+    cleanup_failed: bool,
+    cleanup_polls: usize,
+    watch_failed: bool,
 }
 struct Recording {
     os: Arc<Mutex<Os>>,
@@ -112,8 +116,13 @@ impl NativeClipboard for Recording {
     type Text = Text;
     type Error = ();
     fn watch(&mut self) -> Result<u64, ()> {
-        self.os.lock().unwrap().watches += 1;
-        Ok(self.seen)
+        let mut os = self.os.lock().unwrap();
+        os.watches += 1;
+        if os.watch_failed {
+            Err(())
+        } else {
+            Ok(self.seen)
+        }
     }
     fn changes(&mut self) -> Result<NativeChanges, ()> {
         let mut os = self.os.lock().unwrap();
@@ -170,7 +179,14 @@ impl NativeClipboard for Recording {
     fn close(&mut self) {
         self.os.lock().unwrap().closes += 1;
     }
+    fn poll_close(&mut self) -> Option<Result<(), ()>> {
+        let mut os = self.os.lock().unwrap();
+        os.cleanup_polls += 1;
+        (!os.cleanup_pending).then_some(if os.cleanup_failed { Err(()) } else { Ok(()) })
+    }
 }
+
+mod cleanup;
 
 struct Fixture {
     clock: Arc<VirtualClock>,

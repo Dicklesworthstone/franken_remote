@@ -132,6 +132,7 @@ fn receive_expiry_precedes_collection_of_a_finished_fenced_worker() {
 fn receive_expiry_does_not_replace_a_specific_earlier_native_or_authority_failure() {
     for earlier in [
         Error::Native,
+        Error::NativeCleanup,
         Error::NativeSetup(PlatformError::Unavailable),
         Error::HandoffExpired,
         Error::Cancelled,
