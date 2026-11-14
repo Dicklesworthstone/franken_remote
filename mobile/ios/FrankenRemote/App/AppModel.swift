@@ -27,6 +27,9 @@ final class AppModel: ObservableObject {
     /// finish (`connect`), shown on the home screen while it waits.
     @Published private(set) var starting: SessionStart?
     private var connectTask: Task<Void, Never>?
+    private var displaySwitchTask: Task<Void, Never>?
+    @Published private(set) var switchingDisplay = false
+    @Published private(set) var displaySwitchError: String?
 
     @Published private(set) var session: RemoteSession?
     /// A session the app closed when it went to the background (or a start
@@ -90,6 +93,7 @@ final class AppModel: ObservableObject {
     /// the fetch (one short exchange, at most three seconds) and the host's
     /// cooldown first.
     func connect(_ host: SavedHost, control: Bool) {
+        cancelDisplaySwitch()
         reconnectOffer = nil
         startError = nil
         session?.close()
@@ -136,10 +140,10 @@ final class AppModel: ObservableObject {
                 UInt32(min(bounds.width, bounds.height)))
     }
 
-    private func start(_ host: SavedHost, control: Bool) {
+    private func start(_ host: SavedHost, control: Bool, requestControl: Bool? = nil) {
         do {
             let next = try RemoteSession(host: host, control: control,
-                                         requestControl: control && settings.controlOnConnect,
+                                         requestControl: control && (requestControl ?? settings.controlOnConnect),
                                          screen: Self.screenPixels())
             next.$observedPin
                 .compactMap { $0 }
@@ -152,6 +156,57 @@ final class AppModel: ObservableObject {
         } catch {
             startError = "The app could not start a session right now."
         }
+    }
+
+    /// A display switch is a new observing session to the original pinned
+    /// host, after the old service has actually cleaned up. No saved catalog
+    /// or input intent survives; control remains available as a fresh action.
+    func changeDisplay(_ original: RemoteSession) {
+        guard session === original, original.phase.isViewing, !switchingDisplay else { return }
+        guard let host = original.displaySwitchHost() else {
+            original.notice = "The current machine's identity is unavailable. Disconnect before choosing another display."
+            return
+        }
+        cancelStart()
+        cancelDisplaySwitch()
+        switchingDisplay = true
+        original.notice = nil
+        // Close first: hiding a still-controlled view is a separate failure,
+        // not evidence that the user's orderly close completed.
+        original.close()
+        original.setVisible(false)
+        displaySwitchTask = Task { @MainActor [weak self, original] in
+            let clock = ContinuousClock()
+            let began = clock.now
+            var reopen = DisplayReopen()
+            while !Task.isCancelled {
+                guard let self, self.session === original, self.switchingDisplay else { return }
+                original.pump()
+                switch reopen.poll(status: original.reopenStatus, elapsed: began.duration(to: clock.now)) {
+                case .waiting:
+                    try? await Task.sleep(for: .milliseconds(50))
+                case .ready:
+                    self.displaySwitchTask = nil
+                    self.switchingDisplay = false
+                    self.subscriptions.removeAll()
+                    self.session = nil
+                    self.start(host, control: original.controlCapable, requestControl: false)
+                    return
+                case .refused:
+                    self.displaySwitchTask = nil
+                    self.switchingDisplay = false
+                    self.displaySwitchError = "The previous session did not confirm a clean close. No new display session was opened."
+                    return
+                }
+            }
+        }
+    }
+
+    private func cancelDisplaySwitch() {
+        displaySwitchTask?.cancel()
+        displaySwitchTask = nil
+        switchingDisplay = false
+        displaySwitchError = nil
     }
 
     /// Saved machines to ask for the directory, most recently used first: at
@@ -235,6 +290,7 @@ final class AppModel: ObservableObject {
     }
 
     func disconnect() {
+        cancelDisplaySwitch()
         cancelStart()
         session?.close()
         session = nil
@@ -245,6 +301,7 @@ final class AppModel: ObservableObject {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .background:
+            cancelDisplaySwitch()
             // Never keep control (or a view) running unseen: close, and offer
             // to reconnect when the user comes back.
             // A start still waiting would open the session unseen: drop it too.
@@ -256,7 +313,11 @@ final class AppModel: ObservableObject {
             }
             session = nil
             subscriptions.removeAll()
-        case .inactive, .active:
+        case .inactive:
+            // A scheduled replacement must not open behind Control Center,
+            // a notification, or another app, even if the scene stays loaded.
+            cancelDisplaySwitch()
+        case .active:
             break
         @unknown default:
             break

@@ -32,6 +32,8 @@ fn every_header_constant_matches_the_rust_value() {
         expected.push((name.to_owned(), value.into()));
     }
     for (name, value) in [
+        ("FR_DISPLAY_PRIMARY", FR_DISPLAY_PRIMARY),
+        ("FR_DISPLAY_CHOOSE", FR_DISPLAY_CHOOSE),
         ("FR_EVENT_STATE", kind::STATE),
         ("FR_EVENT_PIN", kind::PIN),
         ("FR_EVENT_VIDEO", kind::VIDEO),
@@ -62,6 +64,10 @@ fn every_header_constant_matches_the_rust_value() {
     ] {
         expected.push((name.to_owned(), value.into()));
     }
+    expected.push((
+        "FR_MAX_DISPLAYS".into(),
+        i64::try_from(FR_MAX_DISPLAYS).unwrap(),
+    ));
     let mut found = defines();
     found.sort();
     expected.sort();
@@ -91,6 +97,65 @@ fn struct_layouts_match_the_headers_static_assertions() {
     assert_eq!(offset_of!(FrConfig, pin), 16);
     assert_eq!(offset_of!(FrConfig, picture_width), 24);
     assert_eq!(offset_of!(FrConfig, picture_height), 28);
+    assert_eq!(size_of::<FrDisplayRequest>(), 16);
+    assert_eq!(offset_of!(FrDisplayRequest, count), 8);
+    assert_eq!(size_of::<FrDisplayInfo>(), 40);
+    assert_eq!(offset_of!(FrDisplayInfo, x), 16);
+    assert_eq!(offset_of!(FrDisplayInfo, scale_numerator), 24);
+    assert_eq!(offset_of!(FrDisplayInfo, rotation), 32);
+}
+
+#[test]
+fn display_bridge_rejects_bad_handles_and_modes_without_changing_outputs() {
+    let mut request = FrDisplayRequest {
+        token: 91,
+        count: 3,
+        reserved: 7,
+    };
+    let original = request;
+    let mut info = FrDisplayInfo {
+        x: -1920,
+        rotation: 2,
+        ..FrDisplayInfo::default()
+    };
+    let original_info = info;
+    let host = CString::new("mac.tailtest.ts.net").unwrap();
+    let config = config(&host, 18443, None);
+    let mut handle = 91;
+    // SAFETY: outputs are valid or NULL; the config and its string are valid.
+    unsafe {
+        assert!(!fr_session_display_request(0, &raw mut request));
+        assert!(!fr_session_display_request(0, core::ptr::null_mut()));
+        assert!(!fr_session_display_info(0, 91, 0, &raw mut info));
+        assert!(!fr_session_display_info(
+            0,
+            91,
+            u32::MAX,
+            core::ptr::null_mut()
+        ));
+        assert_eq!(
+            fr_session_start_with_display(&raw const config, u32::MAX, &raw mut handle),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_session_start_with_display(core::ptr::null(), FR_DISPLAY_CHOOSE, &raw mut handle),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_session_start_with_display(
+                &raw const config,
+                FR_DISPLAY_CHOOSE,
+                core::ptr::null_mut()
+            ),
+            FR_INVALID
+        );
+    }
+    assert_eq!(request, original);
+    assert_eq!(info, original_info);
+    assert_eq!(handle, 91);
+    assert_eq!(fr_session_select_display(0, 91, 0), FR_STALE);
+    assert_eq!(fr_session_cancel_display(0, 91), FR_STALE);
+    assert_eq!(fr_session_reopen_status(0), FR_STALE);
 }
 
 #[test]

@@ -350,6 +350,19 @@ final class TouchInterpreter {
         pointerMovedAt = nil
     }
 
+    /// Retire all gestures against their old owner before installing another
+    /// session. Even an identically sized new display needs a new picture and
+    /// an explicit grant; old releases, inertia and tap history cannot follow.
+    func replaceSink(_ next: InputSink?) {
+        reset()
+        controlling = false
+        lastTick = nil
+        lastTap = nil
+        scrollAnchor = nil
+        mapper.setPicture(.zero)
+        sink = next
+    }
+
     // MARK: Internals
 
     private func releaseHeld() {

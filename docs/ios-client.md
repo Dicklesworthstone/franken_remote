@@ -182,6 +182,59 @@ simulator's Metal has no presentation feedback, so simulator builds report a
 frame when the GPU completes the command buffer that presents it (the
 nearest evidence there; device builds never use it).
 
+## Approved display selection
+
+The app opens a host with `fr_session_start_with_display` and
+`FR_DISPLAY_CHOOSE`. A catalog containing one approved display opens it
+directly. With several displays, a native sheet lists every approved row
+(at most eight), with pixel resolution, desktop position, scale and
+rotation. This runs before the first frame: the session screen polls startup
+even when Metal has no picture or the picker covers its surface. Host
+approval, catalog validation and the original startup deadlines continue
+while the user chooses; opening a picker grants no input authority.
+The remote surface remains hidden through the sheet's actual dismissal,
+so a frame behind the picker cannot count as observed. As with any hidden
+view, this retires a queued control-on-connect request; after choosing from
+multiple displays the user takes control with a fresh **Control** action.
+
+The C bridge copies a complete catalog using one nonzero, never-reused local
+request token. The original host aliases, geometry generations and catalog
+remain in Rust's existing bounded `DisplayRequest`. Row reads, selection
+and cancellation must name that exact request. An incomplete copy is never
+displayed, an accepted selection is consumed once, and a delayed tap or
+sheet dismissal cannot act on a replacement attempt with identical rows.
+Interactive dismissal and Cancel close the original still-pending startup.
+The existing `FrConfig` layout and `fr_session_start` primary-display
+behavior remain compatible with earlier callers.
+
+**View options → Change display…** closes the current session first. The
+app retains its original handle until `fr_session_reopen_status` confirms
+that both its service and bounded cleanup succeeded; an ended UI event,
+including `FR_END_OK` after a cancelled dial, is insufficient. A failed or
+unconfirmed cleanup refuses the switch. The UI waits at most ten seconds
+and, after successful cleanup, uses the same cancellation-bound 400 ms host
+listener cooldown as the Windows viewer and directory handoff (fr-w4yu).
+Disconnect, scene inactivity and backgrounding cancel the pending switch.
+
+The replacement opens the original host name, port, dial mode and observed
+address pin, even if its saved-machine row changed meanwhile. It obtains a
+fresh approved catalog and starts observing. A control-capable session
+stays capable of a fresh **Control** action, but the automatic control-on-
+connect preference does not carry into a display switch. Queued typing,
+held keys, sticky modifiers, gestures, inertia and the old picture mapping
+are retired with their original owner; even an identically sized display
+starts with a new mapping. This changes one selected full display by opening
+a new session; it does not add simultaneous multi-display streams or an
+in-place protocol switch.
+
+Evidence: portable Rust selection tests cover one/many displays, original
+request identity, token exhaustion, catalog changes and consumed choices.
+C/Rust layout and prototype assertions cover the new bridge. Swift tests
+cover bounded complete catalog copies, cleanup/cooldown/refusal sequencing,
+original pinned destinations and gesture owner replacement. Apple SDK
+builds, XCTest execution and live iPhone/iPad display switching still need
+native qualification; source policy is not hardware evidence.
+
 ## Input
 
 The app requests keys, absolute pointer, buttons, line scroll and optional
@@ -388,6 +441,7 @@ own screen.
   pixel scrolls), a full native text-composition interface, and live device
   qualification of the committed-Unicode callback path. The callback and
   negotiation regressions establish source policy, not native OS insertion.
-- iPad pointer devices as a real mouse (hover, secondary click), clipboard,
-  audio and display switching.
+- iPad pointer devices as a real mouse (hover, secondary click), clipboard
+  and audio. Approved display selection and cleanup-confirmed switching
+  are implemented above; native device qualification remains outstanding.
 - Release signing, App Store entitlements and a device-tested build.

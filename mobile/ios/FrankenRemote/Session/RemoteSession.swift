@@ -119,6 +119,8 @@ final class RemoteSession: ObservableObject, InputSink {
     @Published private(set) var detail: String = ""
     /// The pin this session observed (for saving with the host).
     @Published private(set) var observedPin: String?
+    /// One original catalog awaiting a choice, published only after approval.
+    @Published private(set) var displaySelection: DisplaySelection?
 
     private var wantsControl: Bool
     private(set) var everViewed = false
@@ -141,7 +143,7 @@ final class RemoteSession: ObservableObject, InputSink {
                                       direct: host.dialsDirectly, pin: pin,
                                       picture_width: screen.width,
                                       picture_height: screen.height)
-                return fr_session_start(&config, &out)
+                return fr_session_start_with_display(&config, UInt32(FR_DISPLAY_CHOOSE), &out)
             }
             if let pin = host.pin {
                 return pin.withCString { start($0) }
@@ -169,7 +171,50 @@ final class RemoteSession: ObservableObject, InputSink {
         while fr_session_poll_event(handle, &event) {
             apply(event)
         }
+        pollDisplays()
     }
+
+    private func pollDisplays() {
+        var request = FrDisplayRequest()
+        guard !phase.isEnded, fr_session_display_request(handle, &request) else {
+            if displaySelection != nil { displaySelection = nil }
+            return
+        }
+        if displaySelection?.token == request.token { return }
+        let next = DisplaySelection.copy(request) { token, index in
+            var info = FrDisplayInfo()
+            return fr_session_display_info(handle, token, index, &info) ? info : nil
+        }
+        if next != displaySelection { displaySelection = next }
+    }
+
+    func selectDisplay(_ selection: DisplaySelection, index: UInt32) {
+        guard displaySelection?.token == selection.token else { return }
+        let status = fr_session_select_display(handle, selection.token, index)
+        if status == FR_OK {
+            displaySelection = nil
+        } else {
+            notice = "That display choice is no longer available. Choose from the current list."
+            pollDisplays()
+        }
+    }
+
+    /// The sheet's cancel and interactive dismissal retain their original
+    /// request. A stale dismissal cannot cancel a replacement attempt.
+    func cancelDisplay(_ selection: DisplaySelection) {
+        let status = fr_session_cancel_display(handle, selection.token)
+        if displaySelection?.token == selection.token { displaySelection = nil }
+        if status == FR_OK { setPhase(.closing) }
+    }
+
+    /// Read the original core pin directly in case an event was coalesced.
+    /// The next viewing session keeps this target and the offered profile,
+    /// but no pending control intent, input, catalog or selected host alias.
+    func displaySwitchHost() -> SavedHost? {
+        DisplayReopen.pinnedHost(host, observedPin: copyString(fr_session_copy_pin))
+    }
+
+    var reopenStatus: Int32 { fr_session_reopen_status(handle) }
 
     private func apply(_ event: FrEvent) {
         switch Int32(bitPattern: event.kind) {
@@ -293,6 +338,8 @@ final class RemoteSession: ObservableObject, InputSink {
     func close() {
         _ = fr_session_release_all(handle)
         _ = fr_session_close(handle)
+        displaySelection = nil
+        setPhase(.closing)
     }
 
     // MARK: InputSink

@@ -25,6 +25,31 @@ _Static_assert(offsetof(FrConfig, picture_width) == 24, "FrConfig layout");
 _Static_assert(offsetof(FrConfig, picture_height) == 28, "FrConfig layout");
 _Static_assert(sizeof(bool) == 1, "C bool is Rust bool");
 _Static_assert(sizeof(FrHandle) == 8, "FrHandle is u64");
+_Static_assert(sizeof(FrDisplayRequest) == 16, "FrDisplayRequest size");
+_Static_assert(offsetof(FrDisplayRequest, count) == 8, "FrDisplayRequest layout");
+_Static_assert(sizeof(FrDisplayInfo) == 40, "FrDisplayInfo size");
+_Static_assert(offsetof(FrDisplayInfo, x) == 16, "FrDisplayInfo layout");
+_Static_assert(offsetof(FrDisplayInfo, scale_numerator) == 24, "FrDisplayInfo layout");
+_Static_assert(offsetof(FrDisplayInfo, rotation) == 32, "FrDisplayInfo layout");
+
+_Static_assert(_Generic(&fr_session_start_with_display,
+    int32_t (*_Nonnull)(const FrConfig *_Nullable, uint32_t, FrHandle *_Nullable): 1, default: 0),
+    "fr_session_start_with_display signature");
+_Static_assert(_Generic(&fr_session_display_request,
+    bool (*_Nonnull)(FrHandle, FrDisplayRequest *_Nullable): 1, default: 0),
+    "fr_session_display_request signature");
+_Static_assert(_Generic(&fr_session_display_info,
+    bool (*_Nonnull)(FrHandle, uint64_t, uint32_t, FrDisplayInfo *_Nullable): 1, default: 0),
+    "fr_session_display_info signature");
+_Static_assert(_Generic(&fr_session_select_display,
+    int32_t (*_Nonnull)(FrHandle, uint64_t, uint32_t): 1, default: 0),
+    "fr_session_select_display signature");
+_Static_assert(_Generic(&fr_session_cancel_display,
+    int32_t (*_Nonnull)(FrHandle, uint64_t): 1, default: 0),
+    "fr_session_cancel_display signature");
+_Static_assert(_Generic(&fr_session_reopen_status,
+    int32_t (*_Nonnull)(FrHandle): 1, default: 0),
+    "fr_session_reopen_status signature");
 
 /* Captured typing has no new structs. Pin its scalar and pointer signatures
  * too, so a header edit cannot silently change what Swift passes to ffi.rs. */

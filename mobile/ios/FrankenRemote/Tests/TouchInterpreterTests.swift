@@ -18,6 +18,33 @@ final class TouchInterpreterTests: XCTestCase {
 
     private var middle: CGPoint { CGPoint(x: 192, y: 400) }
 
+    func testSessionReplacementReleasesOnlyTheOldGestureOwnerAndDropsItsMapping() {
+        let next = RecordingSink()
+        touch.controlling = true
+        _ = touch.began(1, at: middle, time: 0)
+        _ = touch.tick(time: 0.51)
+        XCTAssertEqual(sink.buttons, [.button(.primary, true, CGPoint(x: 960, y: 540))])
+
+        touch.replaceSink(next)
+        XCTAssertEqual(sink.buttons.last, .button(.primary, false, CGPoint(x: 960, y: 540)))
+        XCTAssertTrue(next.calls.isEmpty, "cleanup belongs to the original session")
+        XCTAssertFalse(touch.controlling)
+        XCTAssertTrue(touch.isIdle)
+        XCTAssertFalse(touch.hasPointer)
+        XCTAssertFalse(touch.mapper.isReady)
+
+        // Even a later grant with identical picture dimensions cannot turn
+        // the old finger's final callback into an action on this display.
+        touch.mapper.setPicture(CGSize(width: 1920, height: 1080))
+        touch.controlling = true
+        _ = touch.ended(1, at: middle, time: 1)
+        _ = touch.tick(time: 1.1)
+        XCTAssertTrue(next.calls.isEmpty)
+        _ = touch.began(2, at: middle, time: 2)
+        _ = touch.ended(2, at: middle, time: 2.1)
+        XCTAssertEqual(next.buttons.count, 2)
+    }
+
     // MARK: Trackpad
 
     func testTrackpadTapClicksAtThePointerNotTheFinger() {

@@ -3,14 +3,17 @@
 #![forbid(unsafe_code)]
 
 use fr_wire::display::{Catalog, Display};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 pub const MAX_CHOICES: usize = fr_wire::display::MAX_DISPLAYS;
 
 /// Re-evaluated against the current approved catalog on every attempt.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
-    /// Preserve the mobile client's default: desktop origin, else first row.
+    /// Preserve the original C ABI's default: desktop origin, else first row.
     #[default]
     Primary,
     /// Refuse unless the approved catalog contains exactly one display.
@@ -19,6 +22,8 @@ pub enum Choice {
     Handle(u128),
     /// Wait for a new native choice from this attempt's complete catalog.
     Choose,
+    /// Open a sole approved display; otherwise require a new native choice.
+    ChooseIfMultiple,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +43,17 @@ pub enum Error {
 #[derive(Clone)]
 pub struct Request {
     identity: Arc<()>,
+    token: u64,
     catalog: Catalog,
 }
 
 impl Request {
+    /// Opaque local identity for native bridges that cannot retain an Arc.
+    /// Never reused, including across session owners with identical catalogs.
+    pub const fn token(&self) -> u64 {
+        self.token
+    }
+
     pub fn displays(&self) -> &[Display] {
         self.catalog.displays()
     }
@@ -49,6 +61,16 @@ impl Request {
     fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.identity, &other.identity) && self.catalog == other.catalog
     }
+}
+
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+fn next_token(counter: &AtomicU64) -> Option<u64> {
+    counter
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+            next.checked_add(1)
+        })
+        .ok()
 }
 
 /// One bounded request/reply, shared only through the original session lock.
@@ -165,11 +187,17 @@ impl Selection {
                 .find(handle)
                 .map(|display| Some(display.handle))
                 .ok_or(Error::MissingDisplay),
-            Choice::Choose => {
-                self.original.get_or_insert_with(|| Request {
-                    identity: Arc::new(()),
-                    catalog: *catalog,
-                });
+            Choice::ChooseIfMultiple if displays.len() == 1 => {
+                Ok(displays.first().map(|display| display.handle))
+            }
+            Choice::Choose | Choice::ChooseIfMultiple => {
+                if self.original.is_none() {
+                    self.original = Some(Request {
+                        identity: Arc::new(()),
+                        token: next_token(&NEXT_REQUEST).ok_or(Error::Closed)?,
+                        catalog: *catalog,
+                    });
+                }
                 Ok(self.answer.take())
             }
         }
@@ -230,6 +258,7 @@ mod tests {
             Choice::Only,
             Choice::Handle(1),
             Choice::Choose,
+            Choice::ChooseIfMultiple,
         ] {
             let mut selection = started();
             assert_eq!(selection.poll(choice, &empty), Err(Error::NoDisplays));
@@ -255,6 +284,57 @@ mod tests {
         assert_eq!(selection.poll(Choice::Choose, &catalog), Ok(Some(7)));
         assert_eq!(selection.submit(&request, 7), Err(Error::StaleRequest));
         assert_eq!(selection.poll(Choice::Choose, &catalog), Err(Error::Closed));
+    }
+
+    #[test]
+    fn mobile_opens_one_display_but_multiple_displays_require_one_current_choice() {
+        let one = catalog(1, &[display(19, -1920, 32)]);
+        let mut selection = started();
+        assert_eq!(selection.poll(Choice::ChooseIfMultiple, &one), Ok(Some(19)));
+        assert!(selection.request().is_none());
+
+        let two = catalog(2, &[display(7, -1920, 0), display(19, 0, 0)]);
+        selection.begin();
+        assert_eq!(selection.poll(Choice::ChooseIfMultiple, &two), Ok(None));
+        let request = selection.request().unwrap();
+        selection.submit(&request, 7).unwrap();
+        assert_eq!(selection.poll(Choice::ChooseIfMultiple, &two), Ok(Some(7)));
+        assert!(selection.request().is_none());
+        assert_eq!(selection.cancel(&request), Err(Error::StaleRequest));
+        assert_eq!(
+            selection.poll(Choice::ChooseIfMultiple, &two),
+            Err(Error::Closed)
+        );
+    }
+
+    #[test]
+    fn bridge_tokens_stay_original_and_never_rebind_to_another_equal_catalog() {
+        let catalog = catalog(1, &[display(7, 0, 0), display(u128::MAX, -1920, 0)]);
+        let mut selection = started();
+        selection.poll(Choice::ChooseIfMultiple, &catalog).unwrap();
+        let original = selection.request().unwrap();
+        assert_ne!(original.token(), 0);
+        selection.poll(Choice::ChooseIfMultiple, &catalog).unwrap();
+        assert_eq!(selection.request().unwrap().token(), original.token());
+        assert_eq!(original.clone().token(), original.token());
+
+        let mut other = started();
+        other.poll(Choice::ChooseIfMultiple, &catalog).unwrap();
+        assert_ne!(other.request().unwrap().token(), original.token());
+        assert_eq!(other.submit(&original, 7), Err(Error::StaleRequest));
+        selection.begin();
+        selection.poll(Choice::ChooseIfMultiple, &catalog).unwrap();
+        assert_ne!(selection.request().unwrap().token(), original.token());
+        assert_eq!(selection.cancel(&original), Err(Error::StaleRequest));
+    }
+
+    #[test]
+    fn bridge_token_exhaustion_refuses_without_wrapping_or_touching_global_state() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(next_token(&counter), Some(u64::MAX - 1));
+        assert_eq!(next_token(&counter), None);
+        assert_eq!(next_token(&counter), None);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
     }
 
     #[test]

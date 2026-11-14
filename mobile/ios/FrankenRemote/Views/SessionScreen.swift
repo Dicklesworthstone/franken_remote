@@ -14,19 +14,24 @@ struct SessionScreen: View {
     @State private var zoomCommand: SessionSurface.ZoomCommand?
     @State private var hideTask: Task<Void, Never>?
     @State private var stats = SessionStats()
+    @State private var displayPicker: DisplaySelection?
+    @State private var displayPickerVisible = false
 
     var body: some View {
         ZStack(alignment: .top) {
             SessionSurface(session: session, mode: settings.touchMode, settings: settings,
                            keyboard: $keyboard, zoom: $zoomCommand,
-                           visible: scenePhase == .active && !session.phase.isEnded)
+                           visible: scenePhase == .active && !session.phase.isEnded
+                               && session.phase != .closing && !model.switchingDisplay
+                               && displayPicker == nil && !displayPickerVisible)
                 .ignoresSafeArea()
             if !session.phase.isViewing {
                 StatusCard(session: session, retry: retry, close: close)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
             if toolbarVisible || !session.phase.isViewing {
-                SessionToolbar(session: session, keyboard: $keyboard, zoom: $zoomCommand, close: close)
+                SessionToolbar(session: session, keyboard: $keyboard, zoom: $zoomCommand,
+                               close: close, changeDisplay: changeDisplay)
                     .transition(.move(edge: .top).combined(with: .opacity))
             } else {
                 Button {
@@ -71,6 +76,28 @@ struct SessionScreen: View {
             UIApplication.shared.isIdleTimerDisabled = phase.isViewing
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onChange(of: session.displaySelection, initial: true) { _, selection in
+            displayPicker = selection
+        }
+        .sheet(item: $displayPicker) { selection in
+            let owner = session
+            DisplayPicker(host: owner.host.title, selection: selection,
+                          choose: { owner.selectDisplay(selection, index: $0) },
+                          cancel: { owner.cancelDisplay(selection) })
+                .onAppear { displayPickerVisible = true }
+                .onDisappear {
+                    owner.cancelDisplay(selection)
+                    displayPickerVisible = false
+                }
+        }
+        .task(id: session.handle) {
+            // Startup has no frame yet, and a presented picker can pause
+            // Metal's refreshes. Keep reading its original request/expiry.
+            while !Task.isCancelled, !session.phase.isEnded {
+                if !session.phase.isViewing { session.pump() }
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+        }
         .task(id: settings.showStats) {
             guard settings.showStats else { return }
             while !Task.isCancelled {
@@ -101,6 +128,12 @@ struct SessionScreen: View {
     private func close() {
         model.disconnect()
     }
+
+    private func changeDisplay() {
+        model.changeDisplay(session)
+        keyboard = false
+        zoomCommand = nil
+    }
 }
 
 /// Connection progress and end reasons.
@@ -113,43 +146,56 @@ private struct StatusCard: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            switch session.phase {
-            case .ended(let end):
-                Image(systemName: end == .closedByYou ? "checkmark.circle" : "exclamationmark.triangle")
-                    .font(.largeTitle)
-                    .foregroundStyle(end == .closedByYou ? Color.secondary : Color.orange)
-                Text(end.title).font(.headline)
-                if !end.message.isEmpty {
-                    Text(end.message).font(.subheadline).foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                HStack {
-                    if end.canRetry {
-                        Button("Try again", action: retry).buttonStyle(.borderedProminent)
-                    }
-                    if end == .hostRefused, session.controlCapable {
-                        Button("View only") {
-                            model.connect(model.store.host(session.host.id) ?? session.host, control: false)
-                        }
-                        .buttonStyle(.bordered)
-                    }
-                    Button("Close", action: close).buttonStyle(.bordered)
-                }
-                if !session.detail.isEmpty {
-                    DisclosureGroup("Details", isExpanded: $showDetail) {
-                        Text(session.detail).font(.caption.monospaced()).textSelection(.enabled)
-                    }
-                    .font(.caption)
-                    .frame(maxWidth: 320)
-                }
-            default:
+            if model.switchingDisplay {
                 ProgressView().controlSize(.large).tint(.white)
-                Text(progressTitle).font(.headline)
-                Text(session.host.name).font(.caption).foregroundStyle(.secondary)
-                if session.phase == .awaitingApproval {
-                    Text("Approve this connection on the host's screen.")
-                        .font(.subheadline).foregroundStyle(.secondary)
+                Text("Changing display…").font(.headline)
+                Text("Closing the current session before opening the approved display list.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                Button("Cancel", action: close).buttonStyle(.bordered)
+            } else {
+                switch session.phase {
+                case .ended(let end):
+                    Image(systemName: end == .closedByYou ? "checkmark.circle" : "exclamationmark.triangle")
+                        .font(.largeTitle)
+                        .foregroundStyle(end == .closedByYou ? Color.secondary : Color.orange)
+                    Text(end.title).font(.headline)
+                    if !end.message.isEmpty {
+                        Text(end.message).font(.subheadline).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    HStack {
+                        if end.canRetry {
+                            Button("Try again", action: retry).buttonStyle(.borderedProminent)
+                        }
+                        if end == .hostRefused, session.controlCapable {
+                            Button("View only") {
+                                model.connect(model.store.host(session.host.id) ?? session.host, control: false)
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                        Button("Close", action: close).buttonStyle(.bordered)
+                    }
+                    if !session.detail.isEmpty {
+                        DisclosureGroup("Details", isExpanded: $showDetail) {
+                            Text(session.detail).font(.caption.monospaced()).textSelection(.enabled)
+                        }
+                        .font(.caption)
+                        .frame(maxWidth: 320)
+                    }
+                default:
+                    ProgressView().controlSize(.large).tint(.white)
+                    Text(progressTitle).font(.headline)
+                    Text(session.host.name).font(.caption).foregroundStyle(.secondary)
+                    if session.phase == .awaitingApproval {
+                        Text("Approve this connection on the host's screen.")
+                            .font(.subheadline).foregroundStyle(.secondary)
+                    }
                 }
+            }
+            if let error = model.displaySwitchError {
+                Text(error).font(.subheadline).foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
             }
         }
         .padding(24)

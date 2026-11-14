@@ -24,6 +24,13 @@ use std::{
     },
 };
 
+mod display;
+pub use display::{
+    FR_DISPLAY_CHOOSE, FR_DISPLAY_PRIMARY, FR_MAX_DISPLAYS, FrDisplayInfo, FrDisplayRequest,
+    fr_session_cancel_display, fr_session_display_info, fr_session_display_request,
+    fr_session_reopen_status, fr_session_select_display,
+};
+
 pub const FR_OK: i32 = 0;
 pub const FR_PENDING: i32 = 1;
 pub const FR_INVALID: i32 = -1;
@@ -228,6 +235,39 @@ pub unsafe extern "C" fn fr_host_name_valid(name: *const c_char) -> bool {
 /// NULL or NUL-terminated.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrHandle) -> i32 {
+    // SAFETY: forwarded contract; preserve the original ABI's display policy.
+    unsafe { start(config, crate::session::DisplayChoice::Primary, out) }
+}
+
+/// Start with the given display policy, without changing `FrConfig`'s ABI.
+/// `FR_DISPLAY_CHOOSE` opens a sole approved display or waits for an explicit
+/// choice from a larger catalog. No selection bypasses host approval.
+///
+/// # Safety
+/// `config` and `out` are NULL or valid; the strings `config` points to are
+/// NULL or NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_start_with_display(
+    config: *const FrConfig,
+    mode: u32,
+    out: *mut FrHandle,
+) -> i32 {
+    let choice = match mode {
+        FR_DISPLAY_PRIMARY => crate::session::DisplayChoice::Primary,
+        FR_DISPLAY_CHOOSE => crate::session::DisplayChoice::ChooseIfMultiple,
+        _ => return FR_INVALID,
+    };
+    // SAFETY: forwarded contract.
+    unsafe { start(config, choice, out) }
+}
+
+/// # Safety
+/// The configuration, strings and output obey `fr_session_start`'s contract.
+unsafe fn start(
+    config: *const FrConfig,
+    display: crate::session::DisplayChoice,
+    out: *mut FrHandle,
+) -> i32 {
     // SAFETY: NULL or valid per contract.
     let (Some(config), false) = (unsafe { config.as_ref() }, out.is_null()) else {
         return FR_INVALID;
@@ -255,10 +295,9 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         target,
         port: config.port,
         control: config.control,
-        picture,
-        display: crate::session::DisplayChoice::Primary,
-        // No iOS clipboard owner yet: the C ABI never requests one.
         clipboard: false,
+        picture,
+        display,
     }) else {
         return FR_BUSY;
     };

@@ -28,13 +28,17 @@ final class RemoteSurfaceView: UIView, UIKeyInput {
 
     weak var session: RemoteSession? {
         willSet {
-            if session !== newValue { releaseKeys() }
+            if session !== newValue {
+                releaseKeys()
+                modifiers.clear()
+                setSoftwareKeyboard(false)
+                extraKeys.show(modifiers)
+                interpreter.replaceSink(newValue)
+            }
         }
         didSet {
-            interpreter.sink = session
             renderer?.session = session
             renderer?.reset()
-            interpreter.reset()
         }
     }
     var hapticsEnabled = true

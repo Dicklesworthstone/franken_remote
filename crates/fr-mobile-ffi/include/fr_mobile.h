@@ -43,7 +43,12 @@ extern "C" {
                                  input: nothing accepted. Physical keys may
                                  wait; completed text must be discarded,
                                  never queued or retried automatically. */
-#define FR_STALE (-8)         /* the handle names no live session */
+#define FR_STALE (-8)         /* the session or original request is no longer live */
+
+/* Display policy for fr_session_start_with_display (FrConfig is unchanged). */
+#define FR_DISPLAY_PRIMARY 0  /* desktop origin, else first approved display */
+#define FR_DISPLAY_CHOOSE 1   /* one display: open; several: ask the user */
+#define FR_MAX_DISPLAYS 8
 
 /* Event kinds. */
 #define FR_EVENT_STATE 1      /* value: FR_STATE_* */
@@ -141,9 +146,50 @@ typedef struct FrCursor {
     uint32_t reserved;
 } FrCursor;
 
+/* A single approved catalog in one connection attempt. The token is local,
+ * nonzero and never reused, even by a later session with identical rows.
+ * Host-owned display aliases and geometry generations stay inside Rust. */
+typedef struct FrDisplayRequest {
+    uint64_t token;
+    uint32_t count;           /* 1..FR_MAX_DISPLAYS */
+    uint32_t reserved;
+} FrDisplayRequest;
+
+typedef struct FrDisplayInfo {
+    uint32_t pixel_width;    /* post-rotation desktop pixels */
+    uint32_t pixel_height;
+    uint32_t logical_width;
+    uint32_t logical_height;
+    int32_t x;               /* desktop-space origin; may be negative */
+    int32_t y;
+    uint32_t scale_numerator;
+    uint32_t scale_denominator;
+    uint32_t rotation;       /* clockwise quarter turns, 0..3 */
+    uint32_t reserved;
+} FrDisplayInfo;
+
 bool fr_host_name_valid(const char *_Nullable name);
 
 int32_t fr_session_start(const FrConfig *_Nullable config, FrHandle *_Nullable out);
+int32_t fr_session_start_with_display(const FrConfig *_Nullable config,
+                                      uint32_t mode, FrHandle *_Nullable out);
+/* Poll before the first frame, while startup/approval expiry still runs.
+ * false leaves out untouched. Copy every row with this same token; if any
+ * copy fails, discard the entire snapshot. Never replay a choice against
+ * a new token. Selection succeeds once and grants no input authority. */
+bool fr_session_display_request(FrHandle session, FrDisplayRequest *_Nullable out);
+bool fr_session_display_info(FrHandle session, uint64_t token, uint32_t index,
+                             FrDisplayInfo *_Nullable out);
+int32_t fr_session_select_display(FrHandle session, uint64_t token, uint32_t index);
+/* Cancel/dismiss closes only the original still-pending startup. A stale
+ * token cannot close a replacement attempt or an already accepted choice. */
+int32_t fr_session_cancel_display(FrHandle session, uint64_t token);
+/* After asking to close: FR_PENDING while running, FR_OK only when the
+ * original service AND cleanup succeeded, FR_CLOSED otherwise; FR_STALE
+ * for an unknown handle. An end event alone is insufficient. Retain the old
+ * handle until FR_OK before opening a replacement observing session, with
+ * a fresh catalog and no carried-over control request or input. */
+int32_t fr_session_reopen_status(FrHandle session);
 bool fr_session_poll_event(FrHandle session, FrEvent *_Nullable event);
 size_t fr_session_copy_pin(FrHandle session, char *_Nullable buffer, size_t capacity);
 size_t fr_session_copy_detail(FrHandle session, char *_Nullable buffer, size_t capacity);

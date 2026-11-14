@@ -6,6 +6,7 @@ struct SessionToolbar: View {
     @Binding var keyboard: Bool
     @Binding var zoom: SessionSurface.ZoomCommand?
     let close: () -> Void
+    let changeDisplay: () -> Void
     @EnvironmentObject private var settings: AppSettings
     @State private var confirmRelease = false
 
@@ -37,6 +38,10 @@ struct SessionToolbar: View {
                     Button { zoom = .fit } label: { Label("Fit to screen", systemImage: "arrow.down.right.and.arrow.up.left") }
                     Button { zoom = .actualPixels } label: { Label("Actual pixels", systemImage: "1.magnifyingglass") }
                     Toggle("Statistics", isOn: $settings.showStats)
+                    Divider()
+                    Button(action: changeDisplay) {
+                        Label("Change display…", systemImage: "display.2")
+                    }
                 } label: {
                     Image(systemName: settings.touchMode == .trackpad ? "rectangle.and.hand.point.up.left" : "hand.point.up.left")
                 }
