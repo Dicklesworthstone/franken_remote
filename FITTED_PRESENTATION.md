@@ -13,7 +13,10 @@ fr connect NODE_ID --view-only --experimental-native --display choose \
 `--fit WIDTHxHEIGHT` is an explicit maximum window size in **physical pixels**.
 Both dimensions must be even, at least 16, and within the existing media limits.
 Each actual window dimension is capped at the selected remote display dimension
-and rounded down to even pixels. The window still has to fit the local X11 screen.
+and rounded down to even pixels. Without `--fit`, the local screen's usable
+size (the X root, narrowed to `_NET_WORKAREA`) is the default box, so a display
+larger than the screen is fitted the same way instead of refused, and one that
+fits keeps its exact 1:1 window.
 An explicit fit box of at least 64 pixels per axis uses the existing optional
 `scaled-picture` negotiation. A host that can scale capture selects a canonical
 even picture inside that box. Hosts without that capability and sessions whose

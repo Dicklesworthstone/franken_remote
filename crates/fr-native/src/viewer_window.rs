@@ -59,6 +59,7 @@ unsafe extern "C" {
         actual_height: *mut u32,
     ) -> *mut c_void;
     fn fr_viewer_window_close(handle: *mut c_void);
+    fn fr_viewer_screen_area(display: *const c_char, width: *mut u32, height: *mut u32) -> c_int;
     fn fr_viewer_window_next(handle: *mut c_void, kind: *mut u32) -> c_int;
     fn fr_viewer_window_resize_offer(handle: *mut c_void, width: u32, height: u32) -> c_int;
     fn fr_viewer_window_resized(handle: *mut c_void, width: *mut u32, height: *mut u32) -> c_int;
@@ -614,6 +615,23 @@ impl Drop for Native<'_> {
             fr_viewer_window_close(self.handle.as_ptr());
         }
     }
+}
+/// The local X screen's usable size in physical pixels (even axes): the root
+/// window, narrowed to the window manager's work area when it publishes one.
+/// `None` when the display is not local or cannot be read. A viewer window can
+/// never be larger than this; it bounds the default picture box.
+#[must_use]
+pub fn screen_area(display: &str) -> Option<(u32, u32)> {
+    if !local_display(display) {
+        return None;
+    }
+    let native = CString::new(display).ok()?;
+    let (mut width, mut height) = (0_u32, 0_u32);
+    // SAFETY: a NUL-terminated display name and two writable scalars; the
+    // native call opens, reads and closes its own connection.
+    let read = unsafe { fr_viewer_screen_area(native.as_ptr(), &raw mut width, &raw mut height) };
+    let (width, height) = (width & !1, height & !1);
+    (read == 1 && width >= 16 && height >= 16).then_some((width, height))
 }
 pub(crate) fn local_display(display: &str) -> bool {
     let Some(number) = display.strip_prefix(':') else {

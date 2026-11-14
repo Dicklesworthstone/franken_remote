@@ -68,6 +68,7 @@ fn screenshot_report_binds_real_frame_and_viewport_without_fabricating_capture_t
         Some(1234),
         None,
         Some(image(0, 32, 24)),
+        None,
     )
     .unwrap();
     let result: Value = serde_json::from_str(&rendered).unwrap();
@@ -128,7 +129,15 @@ fn absent_wrong_frame_wrong_viewport_and_unpresented_pixels_never_open_output() 
         ),
     ] {
         let (request, path) = request(true);
-        let error = render(&request, Some(observation(stage)), None, None, snapshot).unwrap_err();
+        let error = render(
+            &request,
+            Some(observation(stage)),
+            None,
+            None,
+            snapshot,
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error.code, code);
         assert!(!path.exists());
     }
@@ -144,12 +153,13 @@ fn stronger_requested_evidence_and_missing_observation_refuse_before_file_creati
         None,
         None,
         Some(image(0, 32, 24)),
+        None,
     )
     .unwrap_err();
     assert_eq!(error.code, "observation_evidence_unavailable");
     assert!(!path.exists());
     assert_eq!(
-        render(&request, None, None, None, Some(image(0, 32, 24)))
+        render(&request, None, None, None, Some(image(0, 32, 24)), None)
             .unwrap_err()
             .code,
         "observation_unavailable"
@@ -172,6 +182,7 @@ fn screenshots_match_the_actual_clamped_viewport_for_oversized_and_mixed_fit_bou
             None,
             None,
             Some(image(0, actual.0, actual.1)),
+            None,
         )
         .unwrap();
         let report: Value = serde_json::from_str(&value).unwrap();
@@ -188,11 +199,59 @@ fn odd_display_snapshot_uses_the_actual_even_target_and_keeps_original_geometry(
     let mut original = observation(PresentationStage::SubmittedToCompositor);
     original.display.pixel_width = 33;
     original.display.pixel_height = 25;
-    let value = render(&request, Some(original), None, None, Some(image(0, 32, 24))).unwrap();
+    let value = render(
+        &request,
+        Some(original),
+        None,
+        None,
+        Some(image(0, 32, 24)),
+        None,
+    )
+    .unwrap();
     let report: Value = serde_json::from_str(&value).unwrap();
     assert_eq!(report["data"]["artifact"]["pixel_width"], 32);
     assert_eq!(report["data"]["artifact"]["pixel_height"], 24);
     assert_eq!(report["data"]["display"]["pixel_width"], 33);
     assert_eq!(report["data"]["display"]["pixel_height"], 25);
     assert!(path.is_file());
+}
+
+#[test]
+fn screenshots_without_fit_follow_the_local_screen_box_like_the_window() {
+    // The 1280x720 display does not fit a 640x400 screen: the window, and so
+    // the screenshot, is the box. It fits 1920x1080: exact 1:1 pixels.
+    for (screen, actual) in [((640, 400), (640, 400)), ((1920, 1080), (1280, 720))] {
+        let (request, path) = request(false);
+        assert_eq!(request.connection.fit_window, None);
+        let value = render(
+            &request,
+            Some(observation(PresentationStage::SubmittedToCompositor)),
+            None,
+            None,
+            Some(image(0, actual.0, actual.1)),
+            Some(screen),
+        )
+        .unwrap();
+        let report: Value = serde_json::from_str(&value).unwrap();
+        assert_eq!(report["data"]["artifact"]["pixel_width"], actual.0);
+        assert_eq!(report["data"]["artifact"]["pixel_height"], actual.1);
+        assert_eq!(report["data"]["display"]["pixel_width"], 1280);
+        assert!(path.is_file());
+    }
+    // A screenshot at the display's size when the window was the box, or at
+    // the box when the display fits, is not what was presented.
+    for (screen, wrong) in [((640, 400), (1280, 720)), ((1920, 1080), (1920, 1080))] {
+        let (request, path) = request(false);
+        let error = render(
+            &request,
+            Some(observation(PresentationStage::SubmittedToCompositor)),
+            None,
+            None,
+            Some(image(0, wrong.0, wrong.1)),
+            Some(screen),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "observation_artifact_mismatch");
+        assert!(!path.exists());
+    }
 }

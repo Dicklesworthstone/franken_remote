@@ -948,6 +948,19 @@ microphone, playback, file-transfer or semantic-access capability is requested.
 No UI mapping, visibility witness or input grant is fabricated from a decode or
 map event.
 
+The window shows the remote display's pixels 1:1 when they fit the local
+screen's usable size (the X root, narrowed to the window manager's
+`_NET_WORKAREA` when it publishes one). A larger display, which no local window
+could hold, is aspect-fit into a window of at most that size, the same renderer
+and input mapping as `--fit`. The client states that size to the host as its
+picture box (`scaled-picture`), so a host that can scale sends a picture that
+fits instead of native pixels. A display that fits gets native pixels either
+way, by the same rule on both ends. `--fit` replaces this default, and
+`fr robot observe --native-once` uses it too. Before this default a larger
+display was refused within a second (`native_session_failed`). Evidence: Xvfb
+1920x1080 and 5200x3000 screens against a 5120x2880 macOS host and a 2256x1504
+Windows host (2026-11-13). Not run against a real window manager's panels.
+
 When the host also selects `remote-cursor` (`frd run` offers it), the host's
 pointer, which its X11 capture excludes, arrives as a reliable shape on the
 media-configuration lane plus replaceable position datagrams. The sandboxed

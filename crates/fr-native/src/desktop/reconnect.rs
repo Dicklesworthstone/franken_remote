@@ -307,6 +307,7 @@ impl<U> Session<U> {
         .map(|mut configuration| {
             configuration.display_picker = base.display_picker || self.select_fresh_display;
             configuration.fit_window = base.fit_window;
+            configuration.screen_box = base.screen_box;
             configuration.clipboard_space = base.clipboard_space;
             configuration.capture_system_shortcuts = base.capture_system_shortcuts;
             configuration.initial_snapshot = base.initial_snapshot;
@@ -382,7 +383,7 @@ impl<U: Ui> Application for Session<U> {
         if !(1..=32).contains(&attempt) || attempt <= self.last_attempt || self.desktop.is_some() {
             return None;
         }
-        self.configuration.fit_window.filter(|(width, height)| {
+        self.configuration.picture_box().filter(|(width, height)| {
             (*width).min(*height) >= fr_wire::display::picture::MIN_BOX_PIXELS
         })
     }

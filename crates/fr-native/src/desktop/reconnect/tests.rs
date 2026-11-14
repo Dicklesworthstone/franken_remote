@@ -199,6 +199,92 @@ fn fit_policy_survives_reconnect_without_reusing_native_owners_or_input() {
     }
 }
 
+#[test]
+fn screen_box_fits_only_displays_larger_than_the_screen_as_the_host_does() {
+    let configuration = || Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap();
+    let remote = |width, height| fr_wire::display::Display {
+        handle: 1,
+        geometry: fr_core::ids::DisplayGeometryGeneration::INITIAL,
+        x: 0,
+        y: 0,
+        pixel_width: width,
+        pixel_height: height,
+        logical_width: width,
+        logical_height: height,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    };
+    // No box: every display keeps the exact window, as before.
+    let none = configuration();
+    assert_eq!(none.window_box(5120, 2880), None);
+    assert!(!none.fitted(5120, 2880));
+    assert_eq!(none.picture_box(), None);
+    let screen = configuration().with_screen_box(1920, 1052);
+    assert_eq!(screen.picture_box(), Some((1920, 1052)));
+    for (width, height, larger) in [
+        (1920, 1052, false),
+        (1280, 800, false),
+        (1919, 1051, false),
+        (1920, 1053, true),
+        (1922, 1052, true),
+        (2256, 1504, true),
+        (5120, 2880, true),
+    ] {
+        let window_box = screen.window_box(width, height);
+        assert_eq!(
+            window_box,
+            larger.then_some((1920, 1052)),
+            "{width}x{height}"
+        );
+        assert_eq!(screen.fitted(width, height), larger);
+        // The host sends native pixels exactly when the window stays exact.
+        let picture = remote(width, height).picture(screen.picture_box()).unwrap();
+        assert_eq!(picture == (width, height), !larger, "{width}x{height}");
+        assert!(picture.0 <= 1920 && picture.1 <= 1052);
+    }
+    // An explicit fit replaces the screen box for every display.
+    let fit = configuration()
+        .with_screen_box(1920, 1052)
+        .with_fitted_window(960, 540)
+        .unwrap();
+    assert_eq!(fit.window_box(800, 600), Some((960, 540)));
+    assert_eq!(fit.picture_box(), Some((960, 540)));
+    // The clipboard control keeps its fitted renderer whatever the size.
+    assert!(configuration().with_clipboard_space().fitted(800, 600));
+    // A box no window could have is ignored, not stated.
+    for (width, height) in [
+        (0, 1052),
+        (1919, 1052),
+        (1920, 1051),
+        (8, 8),
+        (u32::MAX, 1052),
+    ] {
+        assert_eq!(
+            configuration().with_screen_box(width, height).screen_box,
+            None,
+            "{width}x{height}"
+        );
+    }
+    // Every later attempt keeps the box and states it to the host.
+    let mut session = Session::new(
+        configuration().with_screen_box(1920, 1052),
+        ObserverPolicy::default(),
+        Mode::Observe,
+        SummaryUi::default(),
+    );
+    for attempt in [1, 2, 32] {
+        assert_eq!(
+            session.configuration(attempt).unwrap().screen_box,
+            Some((1920, 1052))
+        );
+    }
+    assert_eq!(
+        Application::picture(&mut session, 1, None),
+        Some((1920, 1052))
+    );
+}
+
 #[derive(Default)]
 struct SummaryUi(Vec<(u8, CleanupSummary)>);
 impl Ui for SummaryUi {

@@ -40,6 +40,7 @@ pub struct Configuration {
     worker_epoch: u128,
     display_picker: bool,
     fit_window: Option<(u32, u32)>,
+    screen_box: Option<(u32, u32)>,
     clipboard_space: bool,
     capture_system_shortcuts: bool,
     initial_snapshot: bool,
@@ -60,6 +61,7 @@ impl Configuration {
             worker_epoch,
             display_picker: false,
             fit_window: None,
+            screen_box: None,
             clipboard_space: false,
             capture_system_shortcuts: false,
             initial_snapshot: false,
@@ -75,6 +77,49 @@ impl Configuration {
             .map_err(|_| Error::Window(viewer_window::Error::InvalidSize))?;
         self.fit_window = Some((width, height));
         Ok(self)
+    }
+    /// The local screen's usable size in physical pixels, the default when no
+    /// fit is configured. A remote display that fits keeps today's exact 1:1
+    /// window. A larger one, which no local window can show, is aspect-fit
+    /// into a window of at most this size (the fitted renderer), and the box
+    /// is stated to scaling-capable hosts so they send pictures that fit it.
+    /// An explicit fit replaces it. Display coordinates stay unchanged. A box
+    /// no local window could have is ignored, keeping the exact window only.
+    #[must_use]
+    pub fn with_screen_box(mut self, width: u32, height: u32) -> Self {
+        if fr_media::worker::presentation::X11Target::new(1, width, height).is_ok() {
+            self.screen_box = Some((width, height));
+        }
+        self
+    }
+    /// [`Self::with_screen_box`] with this local display's usable size
+    /// ([`viewer_window::screen_area`]); the default without an explicit fit.
+    /// An unreadable screen keeps the exact window only, as before.
+    #[must_use]
+    pub fn with_local_screen_box(self) -> Self {
+        match viewer_window::screen_area(&self.display) {
+            Some((width, height)) => self.with_screen_box(width, height),
+            None => self,
+        }
+    }
+    /// The screen box set by [`Self::with_screen_box`], if any.
+    #[must_use]
+    pub const fn screen_box(&self) -> Option<(u32, u32)> {
+        self.screen_box
+    }
+    /// The largest window for a remote display of `width` x `height` (see
+    /// [`window_size`]). `None` keeps the exact 1:1 window.
+    fn window_box(&self, width: u32, height: u32) -> Option<(u32, u32)> {
+        window_box((width, height), self.fit_window, self.screen_box)
+    }
+    /// Whether a display of `width` x `height` uses the aspect-fit renderer
+    /// and its input mapping instead of the exact 1:1 window.
+    fn fitted(&self, width: u32, height: u32) -> bool {
+        self.window_box(width, height).is_some() || self.clipboard_space
+    }
+    /// The picture box stated to the host: the explicit fit, else the screen.
+    fn picture_box(&self) -> Option<(u32, u32)> {
+        self.fit_window.or(self.screen_box)
     }
     /// Explicitly export the first presented viewport during observation-only
     /// startup. Pixels remain bounded and private until taken by the caller;
@@ -735,12 +780,13 @@ impl Desktop {
                 // evidence, not an inference from a missing worker handle.
                 *renderer_started = true;
                 let result = async {
-                    let (mut width, mut height) = configuration
-                        .fit_window
-                        .map_or((display.pixel_width, display.pixel_height), |(w, h)| {
-                            (w.min(display.pixel_width), h.min(display.pixel_height))
-                        });
-                    if configuration.fit_window.is_some() || configuration.clipboard_space {
+                    let fitted = configuration.fitted(display.pixel_width, display.pixel_height);
+                    let (mut width, mut height) = window_size(
+                        (display.pixel_width, display.pixel_height),
+                        configuration.fit_window,
+                        configuration.screen_box,
+                    );
+                    if fitted {
                         // An odd original display still has an exact input
                         // space; only the local BGRA target needs even axes.
                         width &= !1;
@@ -758,21 +804,20 @@ impl Desktop {
                     });
                     let window = window.as_mut().ok_or(viewer_window::Error::NotReady)?;
                     window.ready().await?;
-                    let launch =
-                        if configuration.fit_window.is_some() || configuration.clipboard_space {
-                            window.mapped_decoder_launch(
-                                &configuration.image,
-                                configuration.xauthority.as_deref(),
-                                configuration.worker_epoch,
-                                display,
-                            )?
-                        } else {
-                            window.decoder_launch(
-                                &configuration.image,
-                                configuration.xauthority.as_deref(),
-                                configuration.worker_epoch,
-                            )?
-                        };
+                    let launch = if fitted {
+                        window.mapped_decoder_launch(
+                            &configuration.image,
+                            configuration.xauthority.as_deref(),
+                            configuration.worker_epoch,
+                            display,
+                        )?
+                    } else {
+                        window.decoder_launch(
+                            &configuration.image,
+                            configuration.xauthority.as_deref(),
+                            configuration.worker_epoch,
+                        )?
+                    };
                     let (launch, owner) = launch
                         .retain_cleanup()
                         .map_err(viewer_window::Error::Launch)?;
@@ -928,10 +973,12 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        let fitted = self.configuration.fit_window.is_some() || self.configuration.clipboard_space;
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let window = self.window().ok_or(Error::NotViewing)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
+        let fitted = self
+            .configuration
+            .fitted(display.pixel_width, display.pixel_height);
         let local = &self.configuration.display;
         let file_controls = self.file_controls.clone();
         let input = &mut self.input;
@@ -1023,13 +1070,15 @@ impl Desktop {
         if self.state() != State::Viewing {
             return Err(Error::NotViewing);
         }
-        let fitted = self.configuration.fit_window.is_some() || self.configuration.clipboard_space;
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let display_switching = self.display_switching;
         let mut switch_mode = viewer_window::DisplaySwitchMode::Viewing;
         let window = self.window().ok_or(Error::NotViewing)?;
         window.enable_orderly_close().map_err(Error::Window)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
+        let fitted = self
+            .configuration
+            .fitted(display.pixel_width, display.pixel_height);
         let local = &self.configuration.display;
         let file_controls = self.file_controls.clone();
         let input = &mut self.input;
@@ -1323,6 +1372,32 @@ fn check_layout(
         return Err(Error::LayoutMismatch);
     }
     Ok(())
+}
+
+/// The explicit fit, else the screen box when the display does not fit in it
+/// (the same test the host applies to a stated picture box).
+fn window_box(
+    display: (u32, u32),
+    fit: Option<(u32, u32)>,
+    screen: Option<(u32, u32)>,
+) -> Option<(u32, u32)> {
+    fit.or_else(|| screen.filter(|&(width, height)| display.0 > width || display.1 > height))
+}
+
+/// The window (presented viewport) for a remote display of `display` pixels:
+/// inside the explicit fit, else inside the screen box when the display does
+/// not fit in it, each axis capped at the display's and made even; otherwise
+/// the display's own size, shown 1:1. One rule for the renderer and for
+/// checking a screenshot of what it presented.
+#[must_use]
+pub fn window_size(
+    display: (u32, u32),
+    fit: Option<(u32, u32)>,
+    screen: Option<(u32, u32)>,
+) -> (u32, u32) {
+    window_box(display, fit, screen).map_or(display, |(width, height)| {
+        (width.min(display.0) & !1, height.min(display.1) & !1)
+    })
 }
 
 fn check_fitted_layout(

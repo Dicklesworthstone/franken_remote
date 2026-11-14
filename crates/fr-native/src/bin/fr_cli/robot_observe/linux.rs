@@ -76,7 +76,13 @@ pub(super) fn run(request: &Request) -> Result<String, Failure> {
                 "Choose bounded even dimensions for --fit.",
             )
         })?;
+    } else {
+        // As `fr connect`: a display larger than the local screen is shown
+        // aspect-fit instead of refused; one that fits stays exact.
+        desktop = desktop.with_local_screen_box();
     }
+    // The screenshot check recomputes the window this configuration opens.
+    let screen_box = desktop.screen_box();
     if request.screenshot.is_some() {
         desktop = desktop.with_initial_snapshot();
     }
@@ -190,6 +196,7 @@ pub(super) fn run(request: &Request) -> Result<String, Failure> {
             receipt_time.get(),
             application.disconnect_outcome(),
             application.take_initial_snapshot(),
+            screen_box,
         )
     });
     crate::closure::preserve(result, application.disconnect_outcome())

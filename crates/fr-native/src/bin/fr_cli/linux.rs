@@ -623,7 +623,11 @@ fn desktop_configuration(
                     "Choose bounded, even physical-pixel dimensions for --fit.",
                 )
             })?,
-        None => configuration,
+        // Without --fit, the local screen bounds the window: a remote display
+        // larger than it is shown aspect-fit instead of refused, and a display
+        // that fits keeps its exact 1:1 window. An unreadable screen keeps the
+        // previous behaviour.
+        None => configuration.with_local_screen_box(),
     };
     let configuration = if connection.control && connection.clipboard {
         configuration.with_clipboard_space()

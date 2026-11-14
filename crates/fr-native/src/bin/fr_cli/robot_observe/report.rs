@@ -70,6 +70,7 @@ pub(super) fn render(
     receipt_time: Option<u64>,
     close: Option<ViewerCloseOutcome>,
     snapshot: Option<Snapshot>,
+    screen_box: Option<(u32, u32)>,
 ) -> Result<String, Failure> {
     let observation = observation.ok_or_else(|| {
         Failure::new(
@@ -87,7 +88,7 @@ pub(super) fn render(
         .map_err(|_| serialization())?;
     // The caller reaches reporting only after the original successful operation
     // and confirmed native cleanup. Validate binding before any output path opens.
-    let image = save_artifact(request, observation, snapshot)?;
+    let image = save_artifact(request, observation, snapshot, screen_box)?;
     if let Some(image) = image {
         data["configuration_generation"] = image["configuration_generation"].clone();
         data["recovery_generation"] = image["recovery_generation"].clone();
@@ -147,6 +148,7 @@ fn save_artifact(
     request: &Request,
     observation: Observation,
     snapshot: Option<Snapshot>,
+    screen_box: Option<(u32, u32)>,
 ) -> Result<Option<Value>, Failure> {
     let Some(path) = &request.screenshot else {
         return Ok(None);
@@ -166,14 +168,11 @@ fn save_artifact(
         observation.display.pixel_width,
         observation.display.pixel_height,
     );
-    // Desktop clamps each requested dimension independently before creating
-    // the actual target. Match that original viewport, including mixed bounds.
-    let viewport = request
-        .connection
-        .fit_window
-        .map_or(source, |(width, height)| {
-            (width.min(source.0) & !1, height.min(source.1) & !1)
-        });
+    // The desktop's own rule for the window it created: each fit dimension
+    // clamped independently (mixed bounds included), or the local screen box
+    // for a display larger than the screen, else the display 1:1.
+    let viewport =
+        fr_native::desktop::window_size(source, request.connection.fit_window, screen_box);
     if stamp.frame != observation.completion.frame
         || observation.completion.stage != PresentationStage::SubmittedToCompositor
         || (snapshot.width(), snapshot.height()) != viewport
@@ -307,7 +306,7 @@ mod tests {
             .collect::<Vec<_>>();
         let request = super::super::parse(&args).unwrap();
         let frame = observation(PresentationStage::SubmittedToCompositor);
-        let text = render(&request, Some(frame), Some(1234), None, None).unwrap();
+        let text = render(&request, Some(frame), Some(1234), None, None, None).unwrap();
         let value: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(value["schema_version"], 1);
         assert_eq!(value["outcome"], "success");
@@ -317,7 +316,9 @@ mod tests {
         assert!(value.get("stage").is_none());
         assert!(value.get("lease").is_none());
         assert_eq!(
-            render(&request, None, None, None, None).unwrap_err().code,
+            render(&request, None, None, None, None, None)
+                .unwrap_err()
+                .code,
             "observation_unavailable"
         );
     }

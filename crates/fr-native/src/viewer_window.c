@@ -53,6 +53,58 @@ static int property(struct fr_viewer_window *h, xcb_atom_t name, xcb_atom_t type
         XCB_PROP_MODE_REPLACE, h->window, name, type, format, count, data));
 }
 #include "viewer_drop.c"
+/* One CARDINAL from the root window, or `fallback` when it is not published. */
+static uint32_t root_cardinal(xcb_connection_t *c, xcb_window_t root, const char *name,
+                              uint32_t index, uint32_t fallback) {
+    xcb_intern_atom_reply_t *a = xcb_intern_atom_reply(c,
+        xcb_intern_atom(c, 1, (uint16_t)strlen(name), name), NULL);
+    xcb_atom_t property = a ? a->atom : XCB_NONE;
+    free(a);
+    if (property == XCB_NONE) return fallback;
+    xcb_get_property_reply_t *r = xcb_get_property_reply(c,
+        xcb_get_property(c, 0, root, property, XCB_ATOM_CARDINAL, index, 1), NULL);
+    uint32_t value = fallback;
+    if (r && r->format == 32 && xcb_get_property_value_length(r) == 4)
+        value = *(const uint32_t *)xcb_get_property_value(r);
+    free(r);
+    return value;
+}
+/* The local screen's usable size: the root window, narrowed to the window
+ * manager's _NET_WORKAREA for the current desktop when one is published (so
+ * panels are left out). Read-only: one short connection, no window. */
+int fr_viewer_screen_area(const char *display, uint32_t *width, uint32_t *height) {
+    if (!display || !width || !height) return 0;
+    *width = *height = 0;
+    int screen = 0;
+    xcb_connection_t *c = xcb_connect(display, &screen);
+    if (!c || xcb_connection_has_error(c)) {
+        if (c) xcb_disconnect(c);
+        return 0;
+    }
+    xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(c));
+    while (screen-- > 0 && it.rem) xcb_screen_next(&it);
+    if (!it.rem) {
+        xcb_disconnect(c);
+        return 0;
+    }
+    uint32_t w = it.data->width_in_pixels, h = it.data->height_in_pixels;
+    xcb_window_t root = it.data->root;
+    uint32_t desktop = root_cardinal(c, root, "_NET_CURRENT_DESKTOP", 0, 0);
+    if (desktop < 64) {
+        /* _NET_WORKAREA holds x, y, width, height per desktop. */
+        uint32_t area_w = root_cardinal(c, root, "_NET_WORKAREA", desktop * 4 + 2, 0);
+        uint32_t area_h = root_cardinal(c, root, "_NET_WORKAREA", desktop * 4 + 3, 0);
+        if (area_w && area_h) {
+            if (area_w < w) w = area_w;
+            if (area_h < h) h = area_h;
+        }
+    }
+    int ok = !xcb_connection_has_error(c);
+    xcb_disconnect(c);
+    if (!ok) return 0;
+    *width = w; *height = h;
+    return 1;
+}
 void fr_viewer_window_close(struct fr_viewer_window *h) {
     if (!h) return;
     /* Destroy only our resources. The Rust owner fences the original session
