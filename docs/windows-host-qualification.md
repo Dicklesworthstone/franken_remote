@@ -87,6 +87,40 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 > clock steps back made by `Set-Date -Adjust` (3 to 45 ms each): with the fix
 > 2 of 2 sessions ran to the end; without it 2 of 2 ended at the first step. No elevated window, lock screen or second display was present.
 
+> **2026-11-14: text clipboard, priority under load, and control deaths that
+> were the viewer's.** All checks were on the machine above.
+>
+> **Text clipboard.** `frd run --control` shares the text clipboard with the
+> controlling viewer by default (d8535ccd). `--no-clipboard` turns it off, and
+> a view-only share never shares it. The clipboard is owned by a second
+> window, "Text clipboard sharing is on." with Turn off, stacked above the
+> Stop sharing window. Turn off stops sharing without ending control.
+>
+> Live with a macOS viewer (mac-mini-old) controlling this host, where the Mac
+> held text P and Windows held Q before the session: the controller's P was
+> kept, copies crossed in both directions, and nothing crossed after Turn off
+> (9 of 9 checks). Two fixes made that hold:
+> - Startup items that crossed no longer end the session (85168d22).
+> - Only the controller offers its pre-session text, so the two selections no
+>   longer swap (ad597f25; the unfixed host gave the Mac Q).
+>
+> **Priority under load.** frd and its media worker run AboveNormal
+> (8e44fd60). Host and load ran at Normal, with spinning threads as the load:
+> - 16 spinners (two per logical CPU): host starts went from 0/6 to 6/6.
+> - 8 spinners: sessions went from 0/2 to 2/2, at about 20 pictures/s
+>   (frame-interval p95 75 ms; about 40/s when idle).
+> - 16 spinners: sessions still fail in both arms (`Worker(Deadline)`).
+>
+> Task Scheduler starts tasks BelowNormal, so earlier task-launched
+> measurements on this machine ran below normal priority.
+>
+> **Control deaths that were the viewer's.** Control sessions from the Linux
+> viewer died within minutes, with whole-picture repairs on a clean link and
+> `RecoveryLimitExceeded`. The cause was the viewer's transport, not this
+> host: after a pass that blocked a route, it drained one datagram per turn
+> (fr-transport, a regression from 624b9dbb). Fixed in 2d56109d. Live A/B:
+> 3 of 3 unfixed sessions died; 3 of 3 fixed sessions completed.
+
 | OS Release | Desktop Duplication | DuplicateOutput1 (HDR) | HW HEVC Encoder | Session 0 Isolation | UIPI Elevation Refusal | Status |
 |---|---|---|---|---|---|---|
 | **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | implemented (`--control`), not run against an elevated window | **view-only and control live; one machine; not qualified** |
