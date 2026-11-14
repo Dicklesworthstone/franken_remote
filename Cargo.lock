@@ -676,6 +676,7 @@ dependencies = [
 name = "fr-windows"
 version = "0.1.0"
 dependencies = [
+ "fr-client",
  "fr-core",
  "fr-media",
  "fr-mobile-ffi",

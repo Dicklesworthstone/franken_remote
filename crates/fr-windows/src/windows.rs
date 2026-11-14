@@ -1,10 +1,11 @@
+mod hosts;
 mod probe;
 mod render;
 mod viewer;
 
 use crate::{
     USAGE,
-    options::{DisplayChoice, Family, Options},
+    options::{ConnectionCommand, DisplayChoice, Family},
 };
 use fr_mobile_ffi::directory::{Request, fetch};
 use fr_mobile_ffi::session::{
@@ -25,15 +26,12 @@ pub fn run(args: &[String]) -> ExitCode {
     {
         return hosts();
     }
-    let [command, selection, rest @ ..] = args else {
-        return usage();
-    };
-    let view = match command.as_str() {
-        "directory" => false,
-        "view" => true,
-        _ => return usage(),
-    };
-    let Some(options) = Options::parse(rest, view, DEFAULT_SERVICE_PORT) else {
+    let Some(ConnectionCommand {
+        view,
+        selection,
+        options,
+    }) = ConnectionCommand::parse(args, DEFAULT_SERVICE_PORT)
+    else {
         return usage();
     };
     let snapshot = match connection::discover() {
@@ -45,7 +43,24 @@ pub fn run(args: &[String]) -> ExitCode {
         Family::Ipv4 => AddressFamily::Ipv4,
         Family::Ipv6 => AddressFamily::Ipv6,
     };
-    let target = match Target::installed(&snapshot, selection, options.addresses, family) {
+    let selected = if let Some(selection) = selection {
+        Target::installed(&snapshot, selection, options.addresses, family)
+    } else {
+        let catalog = match connection::candidates(&snapshot) {
+            Ok(catalog) => catalog,
+            Err(error) => return discovery_failed(error),
+        };
+        let peer = match hosts::choose(catalog) {
+            Ok(Some(peer)) => peer,
+            Ok(None) => return ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("fr-windows: machine choice refused ({error:?}).");
+                return ExitCode::from(1);
+            }
+        };
+        Target::selected(&snapshot, &peer, options.addresses, family)
+    };
+    let target = match selected {
         Ok(target) => target,
         Err(error) => {
             let guidance = if error == Error::AddressMismatch {

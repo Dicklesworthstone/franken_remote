@@ -50,6 +50,38 @@ pub(crate) struct Options {
     pub display: DisplayChoice,
 }
 
+/// A missing viewing destination requests one local native machine choice.
+/// Directory queries retain their explicit destination and never open a UI.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ConnectionCommand<'a> {
+    pub view: bool,
+    pub selection: Option<&'a str>,
+    pub options: Options,
+}
+
+impl<'a> ConnectionCommand<'a> {
+    pub(crate) fn parse(args: &'a [String], default_port: u16) -> Option<Self> {
+        let (view, rest) = match args {
+            [] => (true, args),
+            [command, rest @ ..] if command == "view" => (true, rest),
+            [command, rest @ ..] if command == "directory" => (false, rest),
+            _ => return None,
+        };
+        let (selection, rest) = match rest {
+            [selection, rest @ ..] if !selection.is_empty() && !selection.starts_with('-') => {
+                (Some(selection.as_str()), rest)
+            }
+            _ if view => (None, rest),
+            _ => return None,
+        };
+        Some(Self {
+            view,
+            selection,
+            options: Options::parse(rest, view, default_port)?,
+        })
+    }
+}
+
 impl Options {
     pub(crate) fn parse(mut rest: &[String], view: bool, default_port: u16) -> Option<Self> {
         let mut options = Self {
@@ -133,6 +165,63 @@ mod tests {
             view,
             47819,
         )
+    }
+
+    #[test]
+    fn a_native_machine_choice_preserves_explicit_connection_options() {
+        for args in [vec![], vec!["view"]] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            let command = ConnectionCommand::parse(&args, 8443).unwrap();
+            assert!(command.view);
+            assert_eq!(command.selection, None);
+            assert!(!command.options.control);
+        }
+        let args = [
+            "view",
+            "--control",
+            "--no-clipboard",
+            "--ipv6",
+            "--display",
+            "choose",
+        ]
+        .map(str::to_owned);
+        let command = ConnectionCommand::parse(&args, 8443).unwrap();
+        assert_eq!(command.selection, None);
+        assert!(command.options.control);
+        assert!(!command.options.clipboard);
+        assert_eq!(command.options.family, Family::Ipv6);
+        assert_eq!(command.options.display, DisplayChoice::Choose);
+    }
+
+    #[test]
+    fn explicit_destinations_keep_the_existing_view_and_directory_paths() {
+        for (verb, view) in [("view", true), ("directory", false)] {
+            let args = [verb, "host.tail.ts.net", "--port", "9443", "--ipv4"]
+                .map(str::to_owned);
+            let command = ConnectionCommand::parse(&args, 8443).unwrap();
+            assert_eq!(command.view, view);
+            assert_eq!(command.selection, Some("host.tail.ts.net"));
+            assert_eq!(command.options.port, 9443);
+            assert_eq!(command.options.family, Family::Ipv4);
+        }
+    }
+
+    #[test]
+    fn malformed_commands_do_not_silently_open_the_machine_picker() {
+        for args in [
+            vec!["directory"],
+            vec!["directory", "--ipv6"],
+            vec!["view", ""],
+            vec!["view", "--unknown"],
+            vec!["view", "--port"],
+            vec!["view", "one.tail.ts.net", "two.tail.ts.net"],
+            vec!["hosts", "--control"],
+            vec!["--control"],
+            vec!["unknown"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+            assert!(ConnectionCommand::parse(&args, 8443).is_none(), "{args:?}");
+        }
     }
 
     #[test]

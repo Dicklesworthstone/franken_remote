@@ -12,6 +12,34 @@ use std::{fmt, net::IpAddr, time::Duration};
 
 pub use frd::native_connection::AddressFamily;
 
+/// Build one bounded machine-choice catalog from authenticated local discovery.
+/// Rows contain identity comparison metadata and an informational path hint,
+/// never cached dial authority or a claim that a remote desktop is ready.
+/// Retain this catalog and its snapshot until the native chooser returns.
+pub fn candidates(snapshot: &Discovery) -> Result<Catalog, Error> {
+    if snapshot.peers().len() > MAX_CANDIDATES {
+        return Err(Error::MalformedMetadata);
+    }
+    let candidates = snapshot
+        .peers()
+        .iter()
+        .map(|peer| {
+            let hint = match peer.transport_path() {
+                PeerTransportPath::Direct { .. } => PathHint::Direct,
+                PeerTransportPath::DerpRelayed { .. } => PathHint::Relayed,
+                PeerTransportPath::Unknown => PathHint::Unknown,
+            };
+            Candidate::new(
+                peer.stable_id().to_owned(),
+                peer.certificate_name().to_owned(),
+                hint,
+            )
+            .map_err(|_| Error::MalformedMetadata)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Catalog::new(candidates).map_err(|_| Error::MalformedMetadata)
+}
+
 #[derive(Clone)]
 enum Route {
     Named {
@@ -61,30 +89,7 @@ impl Target {
         addresses: Vec<IpAddr>,
         family: AddressFamily,
     ) -> Result<Self, Error> {
-        if snapshot.peers().len() > MAX_CANDIDATES {
-            return Err(Error::MalformedMetadata);
-        }
-        if addresses.len() > 8 {
-            return Err(Error::InvalidEndpoint);
-        }
-        let candidates = snapshot
-            .peers()
-            .iter()
-            .map(|peer| {
-                let hint = match peer.transport_path() {
-                    PeerTransportPath::Direct { .. } => PathHint::Direct,
-                    PeerTransportPath::DerpRelayed { .. } => PathHint::Relayed,
-                    PeerTransportPath::Unknown => PathHint::Unknown,
-                };
-                Candidate::new(
-                    peer.stable_id().to_owned(),
-                    peer.certificate_name().to_owned(),
-                    hint,
-                )
-                .map_err(|_| Error::MalformedMetadata)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let catalog = Catalog::new(candidates).map_err(|_| Error::MalformedMetadata)?;
+        let catalog = candidates(snapshot)?;
         let name = selection.strip_suffix('.').unwrap_or(selection);
         let mut matches = catalog.candidates().iter().filter(|peer| {
             peer.stable_id() == selection || peer.certificate_name().eq_ignore_ascii_case(name)
@@ -93,11 +98,50 @@ impl Target {
         if matches.next().is_some() {
             return Err(Error::IdentityMismatch);
         }
+        Self::installed_candidate(snapshot, peer, addresses, family)
+    }
+
+    /// Retain the exact machine chosen from a native catalog. Both stable ID
+    /// and canonical certificate name must match the retained discovery
+    /// snapshot; neither a same-name replacement nor a renamed node qualifies.
+    /// A refreshed catalog must never reinterpret the original row ordinal.
+    ///
+    /// Path hints do not establish identity or readiness. Explicit addresses
+    /// and address-family choice follow the same policy as [`Self::installed`].
+    /// Fresh installed-daemon validation still occurs before every connection.
+    pub fn selected(
+        snapshot: &Discovery,
+        candidate: &Candidate,
+        addresses: Vec<IpAddr>,
+        family: AddressFamily,
+    ) -> Result<Self, Error> {
+        let catalog = candidates(snapshot)?;
+        if !catalog.candidates().iter().any(|peer| {
+            peer.stable_id() == candidate.stable_id()
+                && peer.certificate_name() == candidate.certificate_name()
+        }) {
+            return Err(Error::IdentityMismatch);
+        }
+        Self::installed_candidate(snapshot, candidate, addresses, family)
+    }
+
+    fn installed_candidate(
+        snapshot: &Discovery,
+        peer: &Candidate,
+        addresses: Vec<IpAddr>,
+        family: AddressFamily,
+    ) -> Result<Self, Error> {
+        if addresses.len() > 8 {
+            return Err(Error::InvalidEndpoint);
+        }
         if !addresses.is_empty() {
             let original = snapshot
                 .peers()
                 .iter()
-                .find(|original| original.stable_id() == peer.stable_id())
+                .find(|original| {
+                    original.stable_id() == peer.stable_id()
+                        && original.certificate_name() == peer.certificate_name()
+                })
                 .ok_or(Error::IdentityMismatch)?;
             if addresses.len() != original.addresses().len()
                 || addresses.iter().enumerate().any(|(index, address)| {

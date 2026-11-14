@@ -23,6 +23,7 @@ fr-core.workspace = true
 fr-wire.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+fr-client.workspace = true
 fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
 # `capture-probe`: the Windows host media path (Desktop Duplication into a
 # hardware Media Foundation HEVC encoder), checked by this client's decoder.

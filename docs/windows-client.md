@@ -41,6 +41,35 @@ be running FrankenRemote and its own admission policy must allow this viewer.
 
 ## Find and select a host
 
+Run `fr-windows` or `fr-windows view` without a destination to open the native
+machine picker. It lists the eligible machines from one bounded, authenticated
+installed-Tailscale snapshot. Select a row and choose **Connect**, press Enter,
+or double-click it. **Cancel**, Escape, or closing the picker starts no session.
+The local choice expires after two minutes; the connection's startup budget
+begins only after the choice has completed.
+
+```text
+fr-windows
+fr-windows view --control
+fr-windows view --control --no-clipboard --ipv6 --display choose
+```
+
+The picker retains the exact stable device ID and canonical certificate name
+shown in its original catalog. It never interprets an old row number against a
+new discovery result. After selection, the ordinary installed connector
+revalidates that identity through the daemon before dialing and on renewal.
+A removed or renamed device cannot silently turn the choice into another host.
+
+The sampled direct/relayed path labels are informational. They do not claim
+the machine is online, that FrankenRemote is running, or that a desktop is
+available. No remote probe or observation starts while the picker is open.
+An empty snapshot remains empty; it never falls back to a guessed hostname.
+
+All viewing options retain their existing meaning with the picker. In
+particular, choosing a machine alone starts an observing session; `--control`
+still uses the host's separate admission and grant flow. Explicit destination
+commands remain available, and `directory` still requires a destination:
+
 ```text
 fr-windows hosts
 fr-windows view <stable_id-or-full-name>

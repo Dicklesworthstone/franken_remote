@@ -26,6 +26,133 @@ fn snapshot() -> Discovery {
 }
 
 #[test]
+fn chooser_catalog_is_bounded_sorted_and_preserves_original_identity_and_path() {
+    let original = discovery(vec![
+        DiscoveredPeer::from_parts(
+            "n-zulu".into(),
+            "zulu.fixture.ts.net".into(),
+            addresses(),
+            PeerTransportPath::Direct {
+                cur_addr: "192.0.2.1:41641".into(),
+            },
+        ),
+        DiscoveredPeer::from_parts(
+            "n-alpha".into(),
+            "alpha.fixture.ts.net".into(),
+            addresses(),
+            PeerTransportPath::DerpRelayed {
+                relay: "fixture-region".into(),
+            },
+        ),
+        peer("n-middle", "middle.fixture.ts.net"),
+    ]);
+    let catalog = candidates(&original).unwrap();
+    let rows: Vec<_> = catalog
+        .candidates()
+        .iter()
+        .map(|row| (row.stable_id(), row.certificate_name(), row.path_hint()))
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("n-alpha", "alpha.fixture.ts.net", PathHint::Relayed),
+            ("n-middle", "middle.fixture.ts.net", PathHint::Unknown),
+            ("n-zulu", "zulu.fixture.ts.net", PathHint::Direct),
+        ]
+    );
+    assert!(candidates(&discovery(Vec::new())).unwrap().is_empty());
+    let full = discovery(
+        (0..MAX_CANDIDATES)
+            .map(|i| peer(&format!("n-{i}"), &format!("host-{i}.fixture.ts.net")))
+            .collect(),
+    );
+    assert_eq!(candidates(&full).unwrap().len(), MAX_CANDIDATES);
+}
+
+#[test]
+fn chooser_selection_requires_both_original_identity_fields() {
+    let original = snapshot();
+    let catalog = candidates(&original).unwrap();
+    let chosen = catalog.get(0).unwrap();
+    for changed in [
+        discovery(vec![peer("n-replacement", "remote.fixture.ts.net")]),
+        discovery(vec![peer("n-selected", "renamed.fixture.ts.net")]),
+        discovery(Vec::new()),
+    ] {
+        assert_eq!(
+            Target::selected(&changed, chosen, Vec::new(), AddressFamily::Automatic).unwrap_err(),
+            Error::IdentityMismatch
+        );
+    }
+    let retained = Target::selected(&original, chosen, Vec::new(), AddressFamily::Ipv6).unwrap();
+    drop(catalog);
+    drop(original);
+    let Some(PeerSelector::Pinned {
+        stable_id,
+        certificate_name,
+    }) = retained.selector()
+    else {
+        panic!("the selected identity must still require a fresh pinned lookup")
+    };
+    assert_eq!(stable_id, "n-selected");
+    assert_eq!(certificate_name, "remote.fixture.ts.net");
+    assert_eq!(retained.family(), AddressFamily::Ipv6);
+}
+
+#[test]
+fn chooser_selection_never_reinterprets_a_row_number_or_string_alias() {
+    let original = snapshot();
+    let catalog = candidates(&original).unwrap();
+    let chosen = catalog.get(0).unwrap();
+    let reordered = discovery(vec![
+        peer("n-selected", "remote.fixture.ts.net"),
+        peer("n-other", "alpha.fixture.ts.net"),
+        // A name-only or ID-only lookup of this chosen tuple is ambiguous.
+        peer("remote.fixture.ts.net", "different.fixture.ts.net"),
+    ]);
+    let fresh = candidates(&reordered).unwrap();
+    assert_eq!(fresh.get(0).unwrap().stable_id(), "n-other");
+    for family in [
+        AddressFamily::Automatic,
+        AddressFamily::Ipv4,
+        AddressFamily::Ipv6,
+    ] {
+        let target = Target::selected(&reordered, chosen, Vec::new(), family).unwrap();
+        let Some(PeerSelector::Pinned {
+            stable_id,
+            certificate_name,
+        }) = target.selector()
+        else {
+            panic!("a chosen row must preserve its exact tuple")
+        };
+        assert_eq!(stable_id, "n-selected");
+        assert_eq!(certificate_name, "remote.fixture.ts.net");
+        assert_eq!(target.family(), family);
+    }
+}
+
+#[test]
+fn a_path_hint_cannot_change_selected_identity_or_become_dial_authority() {
+    let original = snapshot();
+    let chosen = Candidate::new(
+        "n-selected".into(),
+        "remote.fixture.ts.net".into(),
+        PathHint::Relayed,
+    )
+    .unwrap();
+    let target =
+        Target::selected(&original, &chosen, Vec::new(), AddressFamily::Automatic).unwrap();
+    let Route::Installed { peer, .. } = &target.0 else {
+        panic!("installed metadata must keep its fresh installed route")
+    };
+    assert_eq!(peer, &chosen);
+    assert!(matches!(
+        target.selector(),
+        Some(PeerSelector::Pinned { .. })
+    ));
+}
+
+#[test]
 fn exact_node_id_and_normalized_name_retain_the_same_identity() {
     for selection in [
         "n-selected",
@@ -116,6 +243,9 @@ fn missing_short_invalid_and_ambiguous_choices_never_fall_back_to_dns() {
 
 #[test]
 fn duplicate_and_malformed_discovery_rows_refuse_the_whole_snapshot() {
+    let original = snapshot();
+    let catalog = candidates(&original).unwrap();
+    let chosen = catalog.get(0).unwrap();
     for rows in [
         vec![
             peer("n-same", "first.fixture.ts.net"),
@@ -128,14 +258,23 @@ fn duplicate_and_malformed_discovery_rows_refuse_the_whole_snapshot() {
         vec![peer("invalid node", "remote.fixture.ts.net")],
         vec![peer("n-selected", "REMOTE.fixture.ts.net")],
     ] {
+        let malformed = discovery(rows);
+        assert_eq!(
+            candidates(&malformed).unwrap_err(),
+            Error::MalformedMetadata
+        );
         assert_eq!(
             Target::installed(
-                &discovery(rows),
+                &malformed,
                 "remote.fixture.ts.net",
                 Vec::new(),
                 AddressFamily::Automatic
             )
             .unwrap_err(),
+            Error::MalformedMetadata
+        );
+        assert_eq!(
+            Target::selected(&malformed, chosen, Vec::new(), AddressFamily::Automatic).unwrap_err(),
             Error::MalformedMetadata
         );
     }
@@ -148,35 +287,58 @@ fn duplicate_and_malformed_discovery_rows_refuse_the_whole_snapshot() {
         Target::installed(&oversized, "n-0", Vec::new(), AddressFamily::Automatic).unwrap_err(),
         Error::MalformedMetadata
     );
+    assert_eq!(
+        candidates(&oversized).unwrap_err(),
+        Error::MalformedMetadata
+    );
+    assert_eq!(
+        Target::selected(&oversized, chosen, Vec::new(), AddressFamily::Automatic).unwrap_err(),
+        Error::MalformedMetadata
+    );
 }
 
 #[test]
 fn exact_addresses_remain_constraints_on_the_original_pinned_identity() {
+    let original = snapshot();
+    let catalog = candidates(&original).unwrap();
     let mut explicit = addresses();
     explicit.reverse();
-    let target = Target::installed(
-        &snapshot(),
-        "n-selected",
-        explicit.clone(),
-        AddressFamily::Ipv4,
-    )
-    .unwrap();
-    let Some(PeerSelector::PinnedAddresses {
-        stable_id,
-        certificate_name,
-        addresses: constrained,
-    }) = target.selector()
-    else {
-        panic!("explicit addresses must reach fresh metadata validation")
-    };
-    assert_eq!(stable_id, "n-selected");
-    assert_eq!(certificate_name, "remote.fixture.ts.net");
-    assert_eq!(constrained, explicit);
-    assert_eq!(target.family(), AddressFamily::Ipv4);
+    for target in [
+        Target::installed(
+            &original,
+            "n-selected",
+            explicit.clone(),
+            AddressFamily::Ipv4,
+        )
+        .unwrap(),
+        Target::selected(
+            &original,
+            catalog.get(0).unwrap(),
+            explicit.clone(),
+            AddressFamily::Ipv4,
+        )
+        .unwrap(),
+    ] {
+        let Some(PeerSelector::PinnedAddresses {
+            stable_id,
+            certificate_name,
+            addresses: constrained,
+        }) = target.selector()
+        else {
+            panic!("explicit addresses must reach fresh metadata validation")
+        };
+        assert_eq!(stable_id, "n-selected");
+        assert_eq!(certificate_name, "remote.fixture.ts.net");
+        assert_eq!(constrained, explicit);
+        assert_eq!(target.family(), AddressFamily::Ipv4);
+    }
 }
 
 #[test]
 fn partial_foreign_duplicate_and_oversized_address_constraints_refuse() {
+    let original = snapshot();
+    let catalog = candidates(&original).unwrap();
+    let chosen = catalog.get(0).unwrap();
     let known = addresses();
     for explicit in [
         vec![known[0]],
@@ -189,10 +351,14 @@ fn partial_foreign_duplicate_and_oversized_address_constraints_refuse() {
             Target::installed(
                 &snapshot(),
                 "n-selected",
-                explicit,
+                explicit.clone(),
                 AddressFamily::Automatic
             )
             .unwrap_err(),
+            Error::AddressMismatch
+        );
+        assert_eq!(
+            Target::selected(&original, chosen, explicit, AddressFamily::Automatic).unwrap_err(),
             Error::AddressMismatch
         );
     }
@@ -200,6 +366,16 @@ fn partial_foreign_duplicate_and_oversized_address_constraints_refuse() {
         Target::installed(
             &snapshot(),
             "n-selected",
+            vec![known[0]; 9],
+            AddressFamily::Automatic
+        )
+        .unwrap_err(),
+        Error::InvalidEndpoint
+    );
+    assert_eq!(
+        Target::selected(
+            &original,
+            chosen,
             vec![known[0]; 9],
             AddressFamily::Automatic
         )

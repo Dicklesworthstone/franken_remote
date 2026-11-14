@@ -6,9 +6,11 @@
 //! still decide whether a session may start.
 //!
 //! Commands:
+//!   fr-windows
+//!       choose a machine from the installed Tailscale snapshot, then view it.
 //!   fr-windows hosts
 //!       a local machine-choice snapshot (JSON), without remote probes.
-//!   fr-windows view <stable-id-or-name> [--port N] [--ipv4|--ipv6]
+//!   fr-windows view [stable-id-or-name] [--port N] [--ipv4|--ipv6]
 //!       [--address IP]... [--control] [--no-clipboard] [--seconds N]
 //!       [--display primary|only|choose|HANDLE]
 //!       one session in a native window: Media Foundation (DXVA) decode and
@@ -65,7 +67,7 @@ mod control_request_policy;
 
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: fr-windows hosts\n       fr-windows view <stable-id-or-full-name> \
+const USAGE: &str = "usage: fr-windows\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
      [--display primary|only|choose|HANDLE]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \
