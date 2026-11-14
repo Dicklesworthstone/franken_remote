@@ -1,5 +1,24 @@
 # Implementation status
 
+## Windows selected-file handle custody (2026-11-14 UTC)
+
+Windows native file selection now retains the actual read-only disk handle and
+its volume/file identity. The sender duplicates that same handle rather than
+reopening a pathname or comparing the compatibility layer's placeholder Unix
+inode values. Denying write/delete sharing keeps conflicting writers and
+renames out while the original handle or a duplicate remains open. Leaf
+reparse points, directories, non-disk objects, special device namespaces,
+alternate streams and explicitly mapped network drives are refused. Ancestor
+junction resolution remains an OS path operation; the drive-letter check is
+not proof of physical-local storage.
+
+This is the source-custody prerequisite for an explicit Windows upload, not a
+claim of Windows receive support. All 16 portable `fr-winsys` tests and strict
+all-target Clippy passed on the pinned nightly, including four new production
+path-policy regressions. Native handle-sharing, rename and reparse tests are
+present but still need a Windows runtime. Existing Unix selection is unchanged.
+
+
 ## Native Windows machine choice and in-view display changes (2026-11-14 UTC)
 
 `fr-windows` and `fr-windows view` without a destination now open a native

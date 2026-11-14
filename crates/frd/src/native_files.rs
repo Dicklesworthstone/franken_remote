@@ -237,6 +237,8 @@ struct Selected {
     file: File,
     name: String,
     kind: SelectedKind,
+    #[cfg(windows)]
+    identity: fr_winsys::fs::FileIdentity,
 }
 /// The user's explicit local selection: open regular-file/directory descriptors and
 /// their portable basenames (the host name is the final path component,
@@ -263,7 +265,10 @@ impl Selection {
     /// racing FIFO cannot block us). Require the descriptor to retain its
     /// classified type and identity. No file content or directory is read here;
     /// tree traversal, structural bounds, link rejection and hashing run on the
-    /// sender's bounded disk thread only after control is granted.
+    /// sender's bounded disk thread only after control is granted. Windows
+    /// instead selects one disk handle without write/delete sharing,
+    /// validates its real type/identity, and refuses directories and reparse
+    /// points; its Unix-compatible dev/ino placeholders are never evidence.
     pub fn select(paths: &[PathBuf]) -> Result<Self, SelectRefusal> {
         if paths.is_empty() || paths.len() > MAX_SENDS {
             return Err(SelectRefusal {
@@ -274,6 +279,7 @@ impl Selection {
         let mut files: Vec<Selected> = Vec::with_capacity(paths.len());
         for (index, path) in paths.iter().enumerate() {
             let refuse = |reason| SelectRefusal { index, reason };
+            #[cfg(not(windows))]
             let before = match std::fs::symlink_metadata(path) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -281,10 +287,13 @@ impl Selection {
                 }
                 Err(_) => return Err(refuse(SelectReason::Unreadable)),
             };
+            #[cfg(not(windows))]
             let kind = before.file_type();
+            #[cfg(not(windows))]
             if kind.is_symlink() {
                 return Err(refuse(SelectReason::Symlink));
             }
+            #[cfg(not(windows))]
             if !kind.is_file() && !kind.is_dir() {
                 return Err(refuse(SelectReason::SpecialFile));
             }
@@ -296,17 +305,33 @@ impl Selection {
             if files.iter().any(|selected| selected.name == name) {
                 return Err(refuse(SelectReason::DuplicateName));
             }
-            let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-            if kind.is_dir() {
-                flags |= OFlags::DIRECTORY;
-            }
-            let file = File::from(
-                rustix::fs::open(path, flags, Mode::empty())
-                    .map_err(|_| refuse(SelectReason::Unreadable))?,
-            );
+            #[cfg(not(windows))]
+            let file = {
+                let mut flags =
+                    OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+                if kind.is_dir() {
+                    flags |= OFlags::DIRECTORY;
+                }
+                File::from(
+                    rustix::fs::open(path, flags, Mode::empty())
+                        .map_err(|_| refuse(SelectReason::Unreadable))?,
+                )
+            };
+            #[cfg(windows)]
+            let (file, identity) = fr_winsys::fs::select_file(path).map_err(|error| {
+                use fr_winsys::fs::FileSelectionError;
+                refuse(match error {
+                    FileSelectionError::Path => SelectReason::NotPortable,
+                    FileSelectionError::Directory => SelectReason::Directory,
+                    FileSelectionError::Reparse => SelectReason::Symlink,
+                    FileSelectionError::SpecialFile => SelectReason::SpecialFile,
+                    FileSelectionError::Unavailable => SelectReason::Unreadable,
+                })
+            })?;
             let after = file
                 .metadata()
                 .map_err(|_| refuse(SelectReason::Unreadable))?;
+            #[cfg(not(windows))]
             if after.file_type() != kind
                 || (after.dev(), after.ino()) != (before.dev(), before.ino())
             {
@@ -315,11 +340,13 @@ impl Selection {
             files.push(Selected {
                 file,
                 name: name.to_owned(),
-                kind: if kind.is_dir() {
+                kind: if after.is_dir() {
                     SelectedKind::Directory
                 } else {
                     SelectedKind::File(after.len())
                 },
+                #[cfg(windows)]
+                identity,
             });
         }
         Ok(Self { files })
@@ -351,6 +378,10 @@ impl Selection {
                 .file
                 .try_clone()
                 .map_err(|_| refuse(SelectReason::Unreadable))?;
+            #[cfg(windows)]
+            if fr_winsys::fs::selected_file_identity(&file) != Ok(selected.identity) {
+                return Err(refuse(SelectReason::Changed));
+            }
             let queued = match selected.kind {
                 SelectedKind::File(_) => selection.push(file, &selected.name),
                 SelectedKind::Directory => selection.push_directory(file, &selected.name),
