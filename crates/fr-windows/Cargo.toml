@@ -19,6 +19,8 @@ path = "src/main.rs"
 fr-core.workspace = true
 
 [dev-dependencies]
+# Run the native machine-choice policy against the shared catalog on every host.
+fr-client.workspace = true
 # Run the actual shared approved-catalog selection on portable CI hosts.
 fr-wire.workspace = true
 

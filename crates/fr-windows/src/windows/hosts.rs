@@ -1,6 +1,7 @@
 //! One native choice from an immutable installed-Tailscale snapshot.
 //! No remote probing or session startup happens while this window is open.
-use crate::control::Choice;
+use crate::host_picker::Choice;
+pub(super) use crate::host_picker::Error;
 use fr_client::discovery::picker::{Candidate, Catalog, PathHint};
 use std::{
     cell::{Cell, RefCell},
@@ -20,14 +21,13 @@ use windows::{
             Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE, VK_RETURN},
             WindowsAndMessaging::{
                 BN_CLICKED, BS_DEFPUSHBUTTON, CW_USEDEFAULT, CreateWindowExW, DefWindowProcW,
-                DestroyWindow, DispatchMessageW, GetMessageTime, HMENU, IDC_ARROW,
-                IsDialogMessageW, LBN_DBLCLK, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY,
-                LB_ADDSTRING, LB_GETCURSEL, LB_SETHORIZONTALEXTENT, LoadCursorW, MSG,
-                MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
-                RegisterClassExW, SW_SHOW, SendMessageW, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_QUIT,
-                WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_HSCROLL, WS_SYSMENU,
-                WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
+                DestroyWindow, DispatchMessageW, GetMessageTime, HMENU, IDC_ARROW, IsDialogMessageW,
+                LBN_DBLCLK, LBS_HASSTRINGS, LBS_NOINTEGRALHEIGHT, LBS_NOTIFY, LB_ADDSTRING,
+                LB_GETCURSEL, LB_SETHORIZONTALEXTENT, LoadCursorW, MSG, MsgWaitForMultipleObjects,
+                PM_NOREMOVE, PM_REMOVE, PeekMessageW, QS_ALLINPUT, RegisterClassExW, SW_SHOW,
+                SendMessageW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+                WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_QUIT, WNDCLASSEXW, WS_BORDER, WS_CAPTION,
+                WS_CHILD, WS_HSCROLL, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
             },
         },
     },
@@ -37,17 +37,6 @@ use windows::{
 const CONNECT: usize = 1;
 const CANCEL: usize = 2;
 const MACHINES: usize = 0x4690;
-/// A local choice is valid for at most two minutes. This is
-/// independent of, and precedes, every network/session startup deadline.
-const CHOICE_MILLIS: u64 = 120_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Error {
-    WindowUnavailable,
-    Expired,
-    StaleChoice,
-}
-
 type Outcome = Result<Option<Candidate>, Error>;
 
 struct State {
@@ -55,10 +44,9 @@ struct State {
     list: Cell<Option<HWND>>,
     connect: Cell<Option<HWND>>,
     cancel: Cell<Option<HWND>>,
-    catalog: Catalog,
-    gesture: RefCell<Option<Choice<()>>>,
-    deadline: u64,
-    result: RefCell<Option<Outcome>>,
+    choice: RefCell<Choice>,
+    retiring: Cell<bool>,
+    closed: Cell<bool>,
 }
 
 impl State {
@@ -67,25 +55,18 @@ impl State {
             || [self.list.get(), self.connect.get(), self.cancel.get()].contains(&Some(hwnd))
     }
 
-    fn finish(&self, result: Outcome) {
-        // Reentrant cancellation wins over an in-flight native selection read.
-        if let Ok(mut slot) = self.result.try_borrow_mut()
-            && slot.is_none()
-        {
-            *slot = Some(result);
-        }
+    fn refuse(&self, error: Error) {
+        // No choice borrow spans a native call. Reentrant cancellation can
+        // invalidate a row until successful destruction and final consumption.
+        self.choice.borrow_mut().refuse(error);
     }
 
     fn choose(&self, queued: u32) {
-        if self.result.borrow().is_some() {
-            return;
-        }
-        if ticks() >= self.deadline {
-            self.finish(Err(Error::Expired));
+        if self.choice.borrow_mut().complete(ticks()) {
             return;
         }
         let Some(list) = self.list.get() else {
-            self.finish(Err(Error::WindowUnavailable));
+            self.refuse(Error::NativeUnavailable);
             return;
         };
         // SAFETY: this UI thread owns a live, single-selection list box. The
@@ -95,34 +76,9 @@ impl State {
             // No selection is not a new machine choice. Let the user select.
             return;
         };
-        // Native reads may reenter or stall. Preserve the original gesture's
-        // age rather than validating against the pre-read sample.
-        let now = ticks();
-        if now >= self.deadline {
-            self.finish(Err(Error::Expired));
-            return;
-        }
-        let gesture = self.gesture.borrow_mut().take();
-        if gesture
-            .and_then(|mut choice| choice.take(queued, now))
-            .is_none()
-        {
-            self.finish(Err(Error::StaleChoice));
-            return;
-        }
-        // This ordinal is consumed against the exact catalog displayed in
-        // this window. No fresh discovery can reinterpret it.
-        let result = self
-            .catalog
-            .get(row)
-            .cloned()
-            .map(Some)
-            .map_err(|_| Error::StaleChoice);
-        if ticks() >= self.deadline {
-            self.finish(Err(Error::Expired));
-        } else {
-            self.finish(result);
-        }
+        // Native reads may reenter or stall. Recheck the original event time,
+        // window boundary, snapshot and deadline after the read has completed.
+        self.choice.borrow_mut().choose(row, queued, ticks());
     }
 }
 
@@ -141,34 +97,56 @@ fn active(hwnd: HWND) -> Option<Rc<State>> {
 
 struct Picker(Rc<State>);
 
-impl Drop for Picker {
-    fn drop(&mut self) {
-        self.0.finish(Ok(None));
-        ACTIVE.with(|slot| *slot.borrow_mut() = None);
-        // SAFETY: this thread owns the root window and all of its children.
-        // Callback access is removed before native destruction can reenter.
-        let _ = unsafe { DestroyWindow(self.0.hwnd) };
+impl Picker {
+    fn close(&self) -> Result<(), Error> {
+        if self.0.closed.get() {
+            return Ok(());
+        }
+        self.0.retiring.set(true);
+        // SAFETY: this UI thread owns the root and children. Keep the weak
+        // callback owner available during destruction so a reentrant close
+        // still cancels. WM_DESTROY itself is expected during this retirement.
+        if unsafe { DestroyWindow(self.0.hwnd) }.is_err() {
+            self.0.refuse(Error::CleanupIncomplete);
+            return Err(Error::CleanupIncomplete);
+        }
+        self.0.closed.set(true);
+        ACTIVE.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|state| Rc::ptr_eq(&state, &self.0))
+            {
+                *slot = None;
+            }
+        });
+        Ok(())
     }
 }
 
-fn ticks() -> u64 {
+impl Drop for Picker {
+    fn drop(&mut self) {
+        self.0.refuse(Error::Cancelled);
+        // Partial setup and error paths also own cleanup. A successful choice
+        // is published only by the explicit, checked close below.
+        let _ = self.close();
+    }
+}
+
+pub(super) fn ticks() -> u64 {
     // SAFETY: GetTickCount64 reads the OS uptime clock without pointer arguments.
     unsafe { GetTickCount64() }
 }
 
 /// The result owns the original identity tuple. The caller must still build
 /// an installed Target and revalidate through the daemon before any dial.
-pub(super) fn choose(catalog: Catalog) -> Outcome {
-    let picker = open(catalog).map_err(|_| Error::WindowUnavailable)?;
+pub(super) fn choose(catalog: Catalog, started: u64) -> Outcome {
+    let choice = Choice::new(catalog, started)?;
+    let picker = open(choice).map_err(|_| Error::NativeUnavailable)?;
     loop {
-        if let Some(result) = picker.0.result.borrow_mut().take() {
-            return result;
-        }
-        if ticks() >= picker.0.deadline {
-            return Err(Error::Expired);
-        }
-        // A flood cannot keep the original metadata indefinitely: dispatch a
-        // bounded round, then check completion and the original deadline again.
+        // Finish a bounded batch even after Connect. A cancellation queued
+        // behind that click must still invalidate the provisional selection.
         for _ in 0..64 {
             let mut message = MSG::default();
             // SAFETY: writable MSG, this thread's message queue, no raw payloads.
@@ -176,16 +154,15 @@ pub(super) fn choose(catalog: Catalog) -> Outcome {
                 break;
             }
             if message.message == WM_QUIT {
-                picker.0.finish(Ok(None));
-                break;
+                picker.0.refuse(Error::Cancelled);
+                continue;
             }
-            let own_key =
-                message.message == WM_KEYDOWN && picker.0.owns_input(message.hwnd);
+            let own_key = message.message == WM_KEYDOWN && picker.0.owns_input(message.hwnd);
             if own_key && message.wParam.0 == usize::from(VK_ESCAPE.0) {
-                picker.0.finish(Ok(None));
+                picker.0.refuse(Error::Cancelled);
             } else if own_key && message.wParam.0 == usize::from(VK_RETURN.0) {
                 if picker.0.cancel.get() == Some(message.hwnd) {
-                    picker.0.finish(Ok(None));
+                    picker.0.refuse(Error::Cancelled);
                 } else {
                     picker.0.choose(message.time);
                 }
@@ -198,15 +175,28 @@ pub(super) fn choose(catalog: Catalog) -> Outcome {
                     }
                 }
             }
-            if picker.0.result.borrow().is_some() || ticks() >= picker.0.deadline {
-                break;
+        }
+        if picker.0.choice.borrow_mut().complete(ticks()) {
+            let mut pending = MSG::default();
+            // SAFETY: writable MSG, no removal or borrowed message payload.
+            // Never let Connect overtake a close hidden behind a queue flood.
+            if unsafe { PeekMessageW(&raw mut pending, None, 0, 0, PM_NOREMOVE) }.as_bool() {
+                picker.0.refuse(Error::EventFlood);
             }
+            break;
         }
-        if picker.0.result.borrow().is_none() {
-            // SAFETY: no handles or borrowed buffers; wait only for this UI
-            // thread's input, with a bounded timeout to service expiry.
-            unsafe { MsgWaitForMultipleObjects(None, false, 100, QS_ALLINPUT) };
-        }
+        // SAFETY: no handles or borrowed buffers; wait only for this UI
+        // thread's input, with a bounded timeout to service original expiry.
+        unsafe { MsgWaitForMultipleObjects(None, false, 100, QS_ALLINPUT) };
+    }
+    picker.close()?;
+    // Cleanup consumed part of the same original budget. No candidate can
+    // leave this owner until destruction succeeded and the clock is rechecked.
+    let result = picker.0.choice.borrow_mut().take(ticks());
+    match result {
+        Ok(peer) => Ok(Some(peer)),
+        Err(Error::Cancelled) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -214,7 +204,7 @@ pub(super) fn choose(catalog: Catalog) -> Outcome {
     clippy::too_many_lines,
     reason = "one bounded native window construction"
 )]
-fn open(catalog: Catalog) -> windows::core::Result<Picker> {
+fn open(choice: Choice) -> windows::core::Result<Picker> {
     // SAFETY: every window/control is created, used, and destroyed on this
     // thread. Win32 copies all strings synchronously. Picker owns the root
     // before any fallible child creation, so errors destroy the complete tree.
@@ -248,19 +238,17 @@ fn open(catalog: Catalog) -> windows::core::Result<Picker> {
             Some(instance.into()),
             None,
         )?;
-        let opened = ticks();
         let picker = Picker(Rc::new(State {
             hwnd,
             list: Cell::new(None),
             connect: Cell::new(None),
             cancel: Cell::new(None),
-            catalog,
-            gesture: RefCell::new(Some(Choice::new((), opened))),
-            deadline: opened.saturating_add(CHOICE_MILLIS),
-            result: RefCell::new(None),
+            choice: RefCell::new(choice),
+            retiring: Cell::new(false),
+            closed: Cell::new(false),
         }));
         ACTIVE.with(|slot| *slot.borrow_mut() = Some(Rc::downgrade(&picker.0)));
-        let description = if picker.0.catalog.is_empty() {
+        let description = if picker.0.choice.borrow().candidates().is_empty() {
             w!("No eligible Tailscale machines. Check Tailscale and try again.")
         } else {
             w!("Choose a machine from Tailscale. Desktop availability is checked when you connect.")
@@ -297,13 +285,19 @@ fn open(catalog: Catalog) -> windows::core::Result<Picker> {
             None,
         )?;
         picker.0.list.set(Some(list));
-        for (index, peer) in picker.0.catalog.candidates().iter().enumerate() {
-            let hint = match peer.path_hint() {
-                PathHint::Direct => "direct path sampled",
-                PathHint::Relayed => "relayed path sampled",
-                PathHint::Unknown => "path not sampled",
+        let count = picker.0.choice.borrow().candidates().len();
+        for index in 0..count {
+            let label = {
+                let choice = picker.0.choice.borrow();
+                let peer = &choice.candidates()[index];
+                let hint = match peer.path_hint() {
+                    PathHint::Direct => "direct path sampled",
+                    PathHint::Relayed => "relayed path sampled",
+                    PathHint::Unknown => "path not sampled",
+                };
+                HSTRING::from(format!("{}  —  {hint}", peer.certificate_name()))
             };
-            let label = HSTRING::from(format!("{}  —  {hint}", peer.certificate_name()));
+            // The policy borrow ends before this native call can reenter.
             let added = SendMessageW(
                 list,
                 LB_ADDSTRING,
@@ -323,7 +317,7 @@ fn open(catalog: Catalog) -> windows::core::Result<Picker> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
-            w!("Select a row, then Connect or Enter. No desktop has been opened. Choice expires in two minutes."),
+            w!("Select a row, then Connect or Enter. No desktop has been opened. Choice expires within two minutes."),
             WS_CHILD | WS_VISIBLE,
             scale(20),
             scale(365),
@@ -367,6 +361,7 @@ fn open(catalog: Catalog) -> windows::core::Result<Picker> {
         picker.0.cancel.set(Some(cancel));
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetFocus(Some(list));
+        picker.0.choice.borrow_mut().shown(ticks());
         Ok(picker)
     }
 }
@@ -378,8 +373,14 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if let Some(state) = active(hwnd) {
-        if message == WM_CLOSE || message == WM_DESTROY {
-            state.finish(Ok(None));
+        if message == WM_CLOSE {
+            state.refuse(Error::Cancelled);
+            return LRESULT(0);
+        }
+        if message == WM_DESTROY {
+            if !state.retiring.get() {
+                state.refuse(Error::NativeUnavailable);
+            }
             return LRESULT(0);
         }
         if message == WM_COMMAND {
@@ -388,7 +389,7 @@ unsafe extern "system" fn window_proc(
             let source = HWND(lparam.0 as *mut c_void);
             let clicked = usize::try_from(BN_CLICKED).ok() == Some(notification);
             if id == CANCEL && clicked && state.cancel.get() == Some(source) {
-                state.finish(Ok(None));
+                state.refuse(Error::Cancelled);
                 return LRESULT(0);
             }
             if (id == CONNECT && clicked && state.connect.get() == Some(source))

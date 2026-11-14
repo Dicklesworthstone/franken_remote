@@ -34,6 +34,8 @@ pub fn run(args: &[String]) -> ExitCode {
     else {
         return usage();
     };
+    // Native setup and cleanup must not renew the original discovery budget.
+    let choice_started = hosts::ticks();
     let snapshot = match connection::discover() {
         Ok(snapshot) => snapshot,
         Err(error) => return discovery_failed(error),
@@ -50,13 +52,10 @@ pub fn run(args: &[String]) -> ExitCode {
             Ok(catalog) => catalog,
             Err(error) => return discovery_failed(error),
         };
-        let peer = match hosts::choose(catalog) {
+        let peer = match hosts::choose(catalog, choice_started) {
             Ok(Some(peer)) => peer,
             Ok(None) => return ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("fr-windows: machine choice refused ({error:?}).");
-                return ExitCode::from(1);
-            }
+            Err(error) => return choice_failed(error),
         };
         Target::selected(&snapshot, &peer, options.addresses, family)
     };
@@ -95,6 +94,26 @@ pub fn run(args: &[String]) -> ExitCode {
 fn usage() -> ExitCode {
     eprint!("{USAGE}");
     ExitCode::from(2)
+}
+
+fn choice_failed(error: hosts::Error) -> ExitCode {
+    let guidance = match error {
+        hosts::Error::Expired => {
+            "The original Tailscale snapshot expired. Run the command again to refresh it."
+        }
+        hosts::Error::StaleEvent
+        | hosts::Error::InvalidChoice
+        | hosts::Error::ClockChanged
+        | hosts::Error::EventFlood => "Run the command again and choose a current machine.",
+        hosts::Error::CleanupIncomplete => {
+            "The picker could not confirm that its window closed. Close the application before retrying."
+        }
+        _ => {
+            "Run the command again, or use 'fr-windows hosts' and supply an explicit destination."
+        }
+    };
+    eprintln!("fr-windows: machine choice refused ({error:?}). {guidance}");
+    ExitCode::from(1)
 }
 
 fn discovery_failed(error: Error) -> ExitCode {

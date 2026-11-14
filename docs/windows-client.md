@@ -45,8 +45,17 @@ Run `fr-windows` or `fr-windows view` without a destination to open the native
 machine picker. It lists the eligible machines from one bounded, authenticated
 installed-Tailscale snapshot. Select a row and choose **Connect**, press Enter,
 or double-click it. **Cancel**, Escape, or closing the picker starts no session.
-The local choice expires after two minutes; the connection's startup budget
-begins only after the choice has completed.
+The local choice expires within two minutes of starting discovery. Reading
+the snapshot, constructing the window, choosing a row and closing the picker
+all consume that same budget; the connection's startup budget begins only
+after the choice and confirmed picker cleanup have completed.
+
+The click must come from after this picker was shown and remain fresh when
+the native selection read completes. Cancel, Escape or a queued close can
+still cancel a pending Connect during the same native event batch. A queue
+flood, clock regression, expired snapshot or unconfirmed window cleanup
+refuses the choice. The command reports the reason and asks you to start a
+new choice; it never retries that click against a replacement catalog.
 
 ```text
 fr-windows
@@ -397,6 +406,16 @@ build-time PEM parser, byte bounds and wrong-certificate rejection on every
 build host. With `FR_MOBILE_ISRG_ROOTS_DIR` set to the two public local roots,
 add `-- --ignored` to check both published pins and reject swaps and changed
 certificate bytes. This never uses a live host or changes runtime trust.
+
+Portable machine-picker lifecycle regressions live in
+`crates/fr-windows/src/host_picker.rs`. They cover exact original identity,
+one-use selection, empty and invalid rows, cancellation after Connect, queued
+event freshness and timestamp wrap, clock regression, original-deadline
+expiry through setup and cleanup, and repeated selection/show attempts.
+The lifecycle changes and these new tests have not yet been built or executed
+with the pinned toolchain: the execution environment became unavailable.
+The real window, cancellation ordering and blocked or failed native
+destruction still require Windows desktop qualification.
 
 Portable command-line regressions live in
 `crates/fr-windows/src/options.rs`. Installed target selection and named-route

@@ -39,6 +39,8 @@ mod change_display;
 mod control;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod geometry;
+#[cfg(any(windows, test))]
+mod host_picker;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod keys;
 #[cfg_attr(not(windows), allow(dead_code))]
