@@ -36,6 +36,28 @@ pub use duplication::{WinDisplay, displays};
 pub use encoder::EncoderIdentity;
 pub use parent::bind_parent;
 
+/// Runs this worker above normal-priority work (frd's host does the same,
+/// see `fr_winsys::time::AboveNormal`): a build or render on every core must
+/// not stall the encoder's start or the capture cadence. A worker already
+/// above normal keeps its class.
+pub fn above_normal() {
+    use windows::Win32::System::Threading::{
+        ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess,
+        GetPriorityClass, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, SetPriorityClass,
+    };
+    // SAFETY: the current process's pseudo-handle; no pointers.
+    let class = unsafe { GetPriorityClass(GetCurrentProcess()) };
+    let lower = [
+        IDLE_PRIORITY_CLASS,
+        BELOW_NORMAL_PRIORITY_CLASS,
+        NORMAL_PRIORITY_CLASS,
+    ];
+    if lower.iter().any(|lower| lower.0 == class) {
+        // SAFETY: as above; a failure leaves the priority as it was.
+        let _ = unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) };
+    }
+}
+
 /// Bound for the first desktop image after opening.
 const FIRST_IMAGE_MS: u32 = 1500;
 /// Bound for one encode.

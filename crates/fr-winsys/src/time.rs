@@ -1,14 +1,17 @@
 //! A clock that keeps counting across sleep and hibernation and that no one
 //! can set: the Windows counterpart of Linux's `CLOCK_BOOTTIME`, for evidence
-//! that must expire while the machine sleeps. And a one-millisecond system
-//! timer for a process whose waits must keep a frame cadence.
+//! that must expire while the machine sleeps. And, for a process whose waits
+//! must keep a frame cadence, a one-millisecond system timer and a priority
+//! above normal-priority work.
 use windows::Win32::{
     Media::{TIMERR_NOERROR, timeBeginPeriod, timeEndPeriod},
     System::{
         Threading::{
-            GetCurrentProcess, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess,
+            GetPriorityClass, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_CREATION_FLAGS,
+            PROCESS_POWER_THROTTLING_CURRENT_VERSION,
             PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION, PROCESS_POWER_THROTTLING_STATE,
-            ProcessPowerThrottling, SetProcessInformation,
+            ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
         },
         WindowsProgramming::QueryInterruptTimePrecise,
     },
@@ -71,6 +74,54 @@ impl Drop for FineTimer {
     }
 }
 
+/// This process above normal-priority work for as long as the value lives.
+///
+/// A host's indicator checks, capture, encode and sends must run when they
+/// wake. While a build or a render keeps every core busy at the host's own
+/// priority, the host waits its turn behind each busy thread instead. On a
+/// 4-core, 8-thread Surface Book 2 with one spinning normal-priority thread
+/// per logical processor, a normal-priority host refused both viewer
+/// sessions (its capture worker missed the startup deadline) while a raised
+/// one served both at 20 pictures/s. With two per logical processor, a
+/// normal-priority host failed all 6 starts (its encoder probe never
+/// finished) and a raised one listened in all 6.
+/// A process below this class is raised, including the below-normal class
+/// Task Scheduler gives its tasks by default; a higher class is kept.
+#[derive(Debug)]
+pub struct AboveNormal {
+    previous: Option<PROCESS_CREATION_FLAGS>,
+}
+impl AboveNormal {
+    pub fn begin() -> Self {
+        // SAFETY: the current process's pseudo-handle; no pointers.
+        let class = PROCESS_CREATION_FLAGS(unsafe { GetPriorityClass(GetCurrentProcess()) });
+        let lower = [
+            IDLE_PRIORITY_CLASS,
+            BELOW_NORMAL_PRIORITY_CLASS,
+            NORMAL_PRIORITY_CLASS,
+        ];
+        // SAFETY: as above; a failure leaves the priority as it was.
+        let raised = lower.contains(&class)
+            && unsafe { SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS) }
+                .is_ok();
+        Self {
+            previous: raised.then_some(class),
+        }
+    }
+    /// Whether this value raised the process.
+    pub const fn raised(&self) -> bool {
+        self.previous.is_some()
+    }
+}
+impl Drop for AboveNormal {
+    fn drop(&mut self) {
+        if let Some(class) = self.previous {
+            // SAFETY: returns the process to the class it had before `begin`.
+            let _ = unsafe { SetPriorityClass(GetCurrentProcess(), class) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +138,39 @@ mod tests {
             advanced <= elapsed + Duration::from_millis(5),
             "{advanced:?}"
         );
+    }
+
+    fn class() -> u32 {
+        // SAFETY: the current process's pseudo-handle; no pointers.
+        unsafe { GetPriorityClass(GetCurrentProcess()) }
+    }
+
+    /// From normal or below normal (Task Scheduler's default), the process
+    /// runs above normal while the value lives and returns to its own class
+    /// after. A higher class is kept (checked with high).
+    #[test]
+    fn a_lower_process_runs_above_normal_only_while_the_value_lives() {
+        use windows::Win32::System::Threading::HIGH_PRIORITY_CLASS;
+        let set = |class: PROCESS_CREATION_FLAGS| {
+            // SAFETY: the current process's pseudo-handle; no pointers.
+            unsafe { SetPriorityClass(GetCurrentProcess(), class) }.unwrap();
+        };
+        assert_eq!(class(), NORMAL_PRIORITY_CLASS.0);
+        for own in [NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS] {
+            set(own);
+            let raised = AboveNormal::begin();
+            assert!(raised.raised());
+            assert_eq!(class(), ABOVE_NORMAL_PRIORITY_CLASS.0);
+            drop(raised);
+            assert_eq!(class(), own.0);
+        }
+        set(HIGH_PRIORITY_CLASS);
+        let kept = AboveNormal::begin();
+        assert!(!kept.raised());
+        assert_eq!(class(), HIGH_PRIORITY_CLASS.0);
+        drop(kept);
+        assert_eq!(class(), HIGH_PRIORITY_CLASS.0);
+        set(NORMAL_PRIORITY_CLASS);
     }
 
     /// The median of 40 timed waits of 2 ms each. Win32 `Sleep` waits on the

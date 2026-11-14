@@ -263,6 +263,7 @@ fn parent(args: &mut impl Iterator<Item = String>) -> Result<(), Error> {
 }
 
 pub fn run() -> Result<(), Error> {
+    windows_capture::above_normal();
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
         Some("--probe-encoder") => {

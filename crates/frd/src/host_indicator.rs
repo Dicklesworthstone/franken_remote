@@ -146,6 +146,9 @@ fn run_with_surface(
     #[cfg(windows)]
     {
         let _ = image;
+        // The host keeps its cadence while the machine builds or renders;
+        // its capture worker raises itself the same way.
+        let _priority = fr_winsys::time::AboveNormal::begin();
         let stopped = stop.clone();
         let control = options.input_agent.is_some();
         let mut owner =
