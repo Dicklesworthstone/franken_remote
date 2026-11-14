@@ -124,6 +124,15 @@ final class KeyboardTests: XCTestCase {
         XCTAssertNil(UnicodeCommit.notice(for: .sent))
     }
 
+    func testCRLFPasteUsesOnePhysicalReturn() {
+        let strokes = "a\r\nb".compactMap { KeyboardMap.stroke(for: $0) }
+        XCTAssertEqual(strokes, [KeyStroke(usage: HIDUsage.a, shift: false),
+                                 KeyStroke(usage: HIDUsage.returnKey, shift: false),
+                                 KeyStroke(usage: HIDUsage.a + 1, shift: false)])
+        XCTAssertFalse(UnicodeCommit.needsText(for: "a\r\nb"))
+        XCTAssertTrue(UnicodeCommit.needsText(for: "é\r\n"))
+    }
+
     func testUnicodeCannotOvertakePendingAsciiOrConsumeModifiers() {
         var queue = TypingQueue()
         XCTAssertTrue(queue.append([.stroke(HIDUsage.a, modifiers: [])]))

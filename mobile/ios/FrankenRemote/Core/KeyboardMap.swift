@@ -68,6 +68,12 @@ enum KeyboardMap {
 
     /// The US-layout key for `character`, or nil when there is none.
     static func stroke(for character: Character) -> KeyStroke? {
+        // Swift treats CRLF as one extended grapheme cluster. It is one
+        // line break, even though it contains two ASCII scalars; preserve
+        // the physical Return path rather than misclassifying it as Unicode.
+        if character == "\r\n" {
+            return KeyStroke(usage: HIDUsage.returnKey, shift: false)
+        }
         guard character.isASCII, let scalar = character.unicodeScalars.first,
               character.unicodeScalars.count == 1 else { return nil }
         let value = scalar.value
