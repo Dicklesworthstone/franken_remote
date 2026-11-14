@@ -1367,11 +1367,17 @@ impl QuicRecords {
         remaining: &mut usize,
         handler: &mut DatagramHandler<'_>,
     ) -> Result<usize, Error> {
+        // Promote a parked arrival whose route has drained BEFORE offering
+        // custody, so it is offered in this visit. Promoting it after a failed
+        // offer, then reading the next native record, parked that record behind
+        // it at once: the visit consumed nothing, ended the turn, and a route
+        // that any pass had blocked drained one datagram per turn.
+        let parked = self.pending_datagrams.waiting(current);
         if self.pending_datagrams.receive_one(current, handler)? != 0 {
             return Ok(1);
         }
         // A parked arrival waits for its route: read no further native record.
-        if self.pending_datagrams.waiting(current) {
+        if parked {
             return Ok(0);
         }
         // Budget native records EXAMINED, separately from records consumed by
