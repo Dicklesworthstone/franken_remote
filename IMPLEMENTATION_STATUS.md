@@ -1,5 +1,42 @@
 # Implementation status
 
+## Connected Windows file selection and control-to-view handoff (2026-11-14 UTC)
+
+A controlling Windows viewer now offers **File transfer → Choose file to
+send…** without requiring a preselected `--send` argument. One native dialog
+worker keeps the presentation thread responsive, then pins the selected regular
+file through the existing Windows handle-custody boundary. The original upload
+intake admits at most nine explicit single-file batches and retains each batch's
+progress, host publication receipt and cleanup result. File-only Pause, Resume
+and Cancel refer to the batch displayed by their original popup. Reconnect,
+resize, display change and a new control grant never replay these selections.
+
+Native choices retain their original dialog and accepted-gesture deadlines
+through destruction, source preparation, joining and lock waits. Final admission
+checks the exact original input source/view context and original sender lifetime.
+A failed native cleanup remains failed after later collection. The final JSON
+contains bounded receipt history and chooser cleanup, without file paths or
+contents. No Windows receiving, directory sending, drag-and-drop or reconnect
+resumption is added.
+
+**Input → Stop control and keep viewing** now fences the original native input
+and closes its controlled connection before opening a fresh observing session.
+The underlying source is retained through its terminal exchange; emergency
+source loss still cancels. Replacement requires positive original service and
+cleanup, retains the existing cooldown/replacement/invocation bounds, and starts
+without replaying control, clipboard or files. Closing the window disconnects.
+
+**Passed:** all 93 portable Windows-client tests and strict all-target Clippy;
+seven new chooser-policy regressions; actual picker/menu/policy sources in a
+narrow Windows GNU strict-Clippy check against Windows 0.62.2. That native
+compile fixture substitutes the external Shared/Upload API and does not
+establish full session integration. Thirteen upload-owner tests, two final
+intake-admission tests and two original UDP/TLS close regressions are present
+but unexecuted locally: the unchanged pinned Asupersync compilation was killed
+before reaching project code, including an isolated one-job reduced-memory
+attempt. Complete workspace/runtime and real Windows chooser, transfer and
+control-release qualification remain pending. See [Windows usage](docs/windows-client.md).
+
 ## Windows choices retain their original gesture and connection (2026-11-14 UTC)
 
 The machine chooser retains its accepted native message timestamp through

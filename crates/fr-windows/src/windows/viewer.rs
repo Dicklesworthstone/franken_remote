@@ -108,6 +108,9 @@ struct Viewer {
     input_menu: control::Menu,
     /// Original selected file and its evidence survive every viewing replacement.
     upload_menu: Option<upload::Menu>,
+    /// First parent-close cleanup sample for the original native file chooser.
+    /// Neither repeated close callbacks nor later session completion renew it.
+    file_cleanup_started: Option<u64>,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -234,6 +237,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             display_picker: None,
             input_menu,
             upload_menu,
+            file_cleanup_started: None,
         });
     });
     // SAFETY: showing the window this thread created.
@@ -340,7 +344,12 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
                     continue;
                 }
                 Some(Reopen::Waiting) => {}
-                Some(Reopen::No) | None => return stats,
+                Some(Reopen::No) => {
+                    if !with_viewer(Viewer::pending_file_cleanup).unwrap_or(false) {
+                        return stats;
+                    }
+                }
+                None => return stats,
             }
         }
         if !drew {
@@ -370,7 +379,10 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         input_ticks(),
         lifetime,
         control::visible_now(),
-        finished,
+        finished
+            && v.upload_menu
+                .as_ref()
+                .is_none_or(upload::Menu::cleanup_complete),
         v.session.shared().orderly_closed(),
     ) {
         Action::Open(opening) => opening,
@@ -461,6 +473,24 @@ enum Reopen {
 
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    // Remember the pending worker before polling can collect it. Collection
+    // after the original cleanup bound must remain a failure, including when
+    // the source/transfer checks inside poll waited across that bound.
+    let collecting_file_cleanup = v.file_cleanup_started.is_some() && v.choosing_file();
+    if collecting_file_cleanup {
+        v.file_cleanup_expired();
+    }
+    let file_available = v.can_choose_file();
+    if let Some(menu) = &mut v.upload_menu {
+        menu.poll(
+            &v.session.shared_handle(),
+            control::lifetime(),
+            file_available,
+        );
+    }
+    if collecting_file_cleanup {
+        v.file_cleanup_expired();
+    }
     if let Some(menu) = &mut v.upload_menu {
         menu.refresh();
     }
@@ -634,9 +664,11 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         "cleanup": clipboard.cleanup_name(),
         "reason": clipboard.reason.map(|reason| format!("{reason:?}")),
     });
-    let upload_report = viewer.upload_menu.as_ref().map(upload::Menu::report);
-    let upload_ok = upload_report.is_none_or(|report| report.is_success());
-    let upload = upload::document(upload_report.as_ref());
+    let upload_ok = viewer
+        .upload_menu
+        .as_ref()
+        .is_none_or(upload::Menu::succeeded);
+    let upload = upload::document(viewer.upload_menu.as_ref());
     let mut json = String::new();
     let _ = write!(
         json,
@@ -836,6 +868,80 @@ fn key_result(result: InputResult) -> Result<bool, ()> {
 }
 
 impl Viewer {
+    fn retire_file_choice(&mut self) {
+        upload::retire_choice();
+        if self.choosing_file() {
+            self.file_cleanup_started.get_or_insert_with(input_ticks);
+        }
+    }
+
+    /// The original viewer may finish before the native cancellation timer
+    /// returns. Keep collecting that exact worker without blocking the pump,
+    /// but never grant a later cleanup interval after timeout or clock change.
+    fn pending_file_cleanup(&mut self) -> bool {
+        self.retire_file_choice();
+        if !self.choosing_file() {
+            return false;
+        }
+        !self.file_cleanup_expired()
+    }
+
+    /// Check independently of `choosing_file`: a poll may have just collected
+    /// the original worker after its deadline, which cannot repair cleanup.
+    fn file_cleanup_expired(&mut self) -> bool {
+        let Some(started) = self.file_cleanup_started else {
+            return false;
+        };
+        let now = input_ticks();
+        if now < started || now - started >= 10_000 {
+            if let Some(menu) = &mut self.upload_menu {
+                menu.fail_cleanup();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn choosing_file(&self) -> bool {
+        self.upload_menu
+            .as_ref()
+            .is_some_and(upload::Menu::choosing)
+    }
+
+    fn can_choose_file(&self) -> bool {
+        !self.closing
+            && !self.reopen.pending()
+            && !self.sizing
+            && self.mapping.is_some()
+            && self.text.is_none()
+            && self.display_picker.is_none()
+            && self.keys.is_empty()
+            && !self.buttons.iter().any(|held| *held)
+            && control::visible_now()
+            && control::display_ready(self.session.shared())
+            && self.session.shared().controlled()
+    }
+
+    fn open_file(&mut self, message: u32) {
+        if self.choosing_file() || !self.can_choose_file() {
+            return;
+        }
+        // Native selection runs on its own UI thread; this thread continues
+        // presenting fresh pictures and servicing the original session.
+        self.release_everything();
+        let available = self.can_choose_file();
+        if let Some(menu) = &mut self.upload_menu
+            && !menu.open_choice(
+                &self.session.shared_handle(),
+                control::lifetime(),
+                message,
+                available,
+            )
+        {
+            eprintln!("fr-windows: file_choice_expired_or_unavailable");
+        }
+    }
+
     fn can_change_display(&self) -> bool {
         use fr_mobile_ffi::session::ControlState;
         !self.closing
@@ -844,6 +950,7 @@ impl Viewer {
             && self.mapping.is_some()
             && self.text.is_none()
             && self.display_picker.is_none()
+            && !self.choosing_file()
             && self.keys.is_empty()
             && !self.buttons.iter().any(|held| *held)
             && control::visible_now()
@@ -863,7 +970,10 @@ impl Viewer {
         if self.closing
             || self.sizing
             || (cause == Cause::Display
-                && (self.mapping.is_none() || self.text.is_some() || self.display_picker.is_some()))
+                && (self.mapping.is_none()
+                    || self.text.is_some()
+                    || self.display_picker.is_some()
+                    || self.choosing_file()))
             || !control::visible_now()
             || request.lifetime != control::lifetime()
             || request.attempt != self.session.shared().frames.app_id(0)
@@ -878,6 +988,7 @@ impl Viewer {
             return;
         }
         self.reopen_asked = Some(Instant::now());
+        self.retire_file_choice();
         self.keys.clear();
         self.buttons.fill(false);
         self.mapping = None;
@@ -892,6 +1003,7 @@ impl Viewer {
             || self.reopen.pending()
             || self.text.is_some()
             || self.display_picker.is_some()
+            || self.choosing_file()
             || self.mapping.is_none()
             || !self.keys.is_empty()
             || self.buttons.iter().any(|held| *held)
@@ -926,7 +1038,11 @@ impl Viewer {
         }
     }
     fn open_text(&mut self, hwnd: HWND) {
-        if self.closing || self.reopen.pending() || self.display_picker.is_some() {
+        if self.closing
+            || self.reopen.pending()
+            || self.display_picker.is_some()
+            || self.choosing_file()
+        {
             return;
         }
         // Reopening is a new explicit local choice. No content or context from
@@ -994,7 +1110,7 @@ impl Viewer {
     /// Replaceable old motion may be discarded; losing an ordered transition
     /// instead fences control and delegates held-state cleanup to its owner.
     fn capture_mouse(&mut self, message_time: u32, ordered: bool) -> Option<(CapturedInput, u64)> {
-        if self.closing || self.reopen.pending() || self.text.is_some() {
+        if self.closing || self.reopen.pending() || self.text.is_some() || self.choosing_file() {
             return None;
         }
         let capture = match self.session.shared().capture_input() {
@@ -1080,7 +1196,7 @@ impl Viewer {
     /// source clock is sampled before the native age, conservatively charging
     /// an interrupted sample or a wait for the grant lock to the old event.
     fn key(&mut self, usage: u16, pressed: bool, message_time: u32) {
-        if self.closing || self.reopen.pending() {
+        if self.closing || self.reopen.pending() || self.choosing_file() {
             return;
         }
         let shared = self.session.shared();
@@ -1170,6 +1286,7 @@ impl Viewer {
         // that source wakes frd's independent held-state cleanup; attempting
         // more keys or re-stamping a release is never the recovery path.
         self.closing = true;
+        self.retire_file_choice();
         self.reopen.cancel();
         self.keys.clear();
         self.session.shared().input_failed();
@@ -1182,6 +1299,7 @@ impl Viewer {
     /// Closes for good: no reopen follows.
     fn close(&mut self) {
         self.closing = true;
+        self.retire_file_choice();
         self.reopen.cancel();
         self.keys.clear();
         self.session.shared().close();
@@ -1193,6 +1311,7 @@ impl Viewer {
     fn resized(&mut self, size: (u32, u32)) {
         self.text = None;
         if self.closing
+            || self.choosing_file()
             || !self.reopen.available()
             || self.scales != Some(true)
             || !reopen_for(self.display, self.picture, size)
@@ -1237,8 +1356,16 @@ extern "system" fn window_proc(
     let handled = match message {
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
+                let file_available = v.can_choose_file() && !v.choosing_file();
                 if let Some(menu) = &mut v.upload_menu {
                     menu.refresh();
+                    if menu.is_popup(wparam.0) {
+                        menu.opened(
+                            &v.session.shared_handle(),
+                            control::lifetime(),
+                            file_available,
+                        );
+                    }
                 }
                 if v.input_menu.is_popup(wparam.0) {
                     let available = v.can_change_display();
@@ -1248,10 +1375,23 @@ extern "system" fn window_proc(
             });
             false
         }
+        WM_COMMAND if wparam.0 & 0xffff == upload::OPEN => {
+            let time = current_message_time();
+            with_viewer(|v| v.open_file(time));
+            true
+        }
         WM_COMMAND if wparam.0 & 0xffff == upload::CANCEL => {
             // Stop the original file even during a nested native callback.
             // This cannot request control, close the desktop, or start a retry.
             upload::cancel();
+            true
+        }
+        WM_COMMAND if wparam.0 & 0xffff == upload::PAUSE => {
+            upload::pause();
+            true
+        }
+        WM_COMMAND if wparam.0 & 0xffff == upload::RESUME => {
+            upload::resume();
             true
         }
         WM_COMMAND if wparam.0 & 0xffff == control::REQUEST => {
@@ -1291,6 +1431,7 @@ extern "system" fn window_proc(
             true
         }
         WM_ACTIVATEAPP if wparam.0 == 0 => {
+            upload::retire_choice();
             control::visible(false);
             text::deactivate();
             with_viewer(Viewer::text_deactivated);
@@ -1301,6 +1442,7 @@ extern "system" fn window_proc(
             false
         }
         WM_CLOSE => {
+            upload::retire_choice();
             CLOSE_PENDING.with(|pending| pending.set(true));
             display::close_owner();
             control::close();
@@ -1317,6 +1459,7 @@ extern "system" fn window_proc(
             true
         }
         WM_DESTROY => {
+            upload::retire_choice();
             control::close();
             display::close_owner();
             text::close_owner();
@@ -1325,6 +1468,7 @@ extern "system" fn window_proc(
             true
         }
         WM_SIZE => {
+            upload::retire_choice();
             // Fence an open editor before any nested native work or Viewer
             // borrow; old text cannot outlive hiding or a mapping change.
             text::deactivate();
@@ -1369,6 +1513,7 @@ extern "system" fn window_proc(
             true
         }
         WM_MOVE => {
+            upload::retire_choice();
             control::invalidate_choice();
             // Wheel messages carry screen coordinates: moving the window
             // changes their conversion even when its client size is identical.
@@ -1379,6 +1524,7 @@ extern "system" fn window_proc(
             false
         }
         WM_ENTERSIZEMOVE => {
+            upload::retire_choice();
             control::invalidate_choice();
             text::deactivate();
             with_viewer(|v| v.sizing = true);

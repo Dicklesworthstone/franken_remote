@@ -363,7 +363,32 @@ failure and prevents a replacement session. The original session thread keeps
 the same stopped owner until its native cleanup actually completes; a later
 completion cannot change the earlier failure into success.
 
-## Send one file to the host
+## Send files from the connected desktop
+
+Start a controlling viewer with `--control`, then open **File transfer → Choose
+file to send…** after the host grants control. Choose one regular file in the
+native Windows dialog. The original session negotiates an optional file lane
+even without `--send`; no file is opened or read merely by connecting. A host
+that does not offer files leaves this action unavailable without preventing
+ordinary viewing and control.
+
+The native chooser runs on a separate thread so the viewer keeps presenting
+and servicing the original connection. Physical input stays local during the
+choice. Its result belongs to the original input source, view, connection
+attempt and window lifetime. A real view suspension/recovery, hidden window,
+close or replacement cancels the choice; a temporary compositor candidate gap
+does not invent a new view. The actual Send admission rechecks the original
+context after lock waits. There is no queued choice that becomes valid later.
+
+The dialog has one original two-minute budget. Its accepted native gesture has
+a further two-second bound covering native destruction, selected-handle
+preparation, worker collection and submission. Expiry discards the selection;
+it never reopens the path or retries with a fresh deadline. Native worker
+cleanup is checked separately from file selection. Closing the viewer gives
+that original cancelled worker a bounded collection interval; an unresolved
+or failed cleanup cannot count as successful completion or permit replacement.
+
+### Select the first file on the command line
 
 ```powershell
 fr-windows view remote.example.ts.net --control --send 'C:\Users\me\Documents\draft.txt'
@@ -393,31 +418,43 @@ a conflicting name is a refusal. The transfer does not open the received file.
 If the host does not negotiate files, ordinary viewing and control can still
 continue, and the upload reports that refusal.
 
-The native **File transfer** menu shows the original upload's state, queued
-bytes, host receipt and source-cleanup state. **Cancel this upload** requests
-file-only cancellation and leaves the desktop connection running. Cancellation
+The native **File transfer** menu shows the current upload's state, queued
+bytes, host receipt and source-cleanup state. **Pause** and **Resume** change
+only that original upload's pacing; they do not extend its transfer deadline.
+**Cancel this upload** requests file-only cancellation and leaves the desktop
+connection running. Every command names the exact batch shown when its popup
+opened, so an old command cannot affect a newer selected file. Cancellation
 cannot retract a file the host already published, erase its receipt, or turn an
 uncertain result into success. A transport or authority failure can still end
 the containing session under its existing rules.
 
-A resize, Change display or reconnect never sends this selection again. The
-menu and final report retain the original transfer's evidence across a permitted
-viewing replacement; that replacement has no upload configured. After a refusal,
-cancellation or uncertain publication, another send requires a new explicit
-command and selection. Closing, minimizing, or switching away from an active
+A command admits at most nine explicit single-file selections, including an
+initial `--send`. After a batch finishes, **Choose file to send…** becomes
+available again only if the original lane remains ready. Earlier publication
+receipts and failures remain in bounded history. A cancelled or failed batch
+is never silently repeated.
+
+A resize, Change display, Stop control or reconnect never sends a selection
+again. The menu and final report retain the original transfer evidence across
+a permitted viewing replacement; that replacement has no upload configured.
+Closing, minimizing, or switching away from an active
 controlled viewer also fences its original file work through the existing
 control lifecycle.
 
-The completion JSON adds `upload` (`null` when no file was selected). It contains
-`selected_bytes`, `configured`, `phase`, `cancel_requested`, `queued_bytes`,
-`total_bytes`, `receipt`, `receipt_detail`, `published_bytes`, `cleanup`,
-`reason`, and `succeeded`.
+The completion JSON includes `upload` for a configured original upload owner
+and `null` for an observation-only command. It retains the current batch,
+bounded `batches` history, chooser result and chooser-cleanup outcome.
+Per-file fields include `selected_bytes`, `configured`, `phase`,
+`cancel_requested`, `queued_bytes`, `total_bytes`, `receipt`, `receipt_detail`,
+`published_bytes`, `cleanup`, `reason`, and `succeeded`.
 These fields contain no path, filename or contents. Queued bytes are not proof
 of host publication. Receipts distinguish durable host publication, publication
 with unknown durability, refusal, interruption before publication, and unknown
-publication. With `--send`, exit status zero additionally requires the one file's
-durable host receipt and successful original source cleanup; successful video
-alone cannot make a refused or unfinished upload look successful.
+publication. Every accepted explicit upload must have a durable host receipt
+and successful original source cleanup for the combined upload result to
+succeed. An interactive lane on which no file was selected adds no file-success
+requirement to the command. Successful video alone cannot make a refused or
+unfinished upload look successful.
 
 File cleanup shares the original session cleanup deadline. If that deadline
 expires, the command fails and no replacement session starts. The original

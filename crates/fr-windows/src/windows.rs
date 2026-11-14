@@ -85,7 +85,9 @@ pub fn run(args: &[String]) -> ExitCode {
             }
         }
     } else {
-        None
+        options
+            .control
+            .then(fr_mobile_ffi::session::Upload::interactive)
     };
     let title = format!("FrankenRemote - {}", target.certificate_name());
     let config = Config {

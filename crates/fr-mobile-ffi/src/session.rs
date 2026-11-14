@@ -35,7 +35,7 @@ pub use display::{
     Choice as DisplayChoice, Error as DisplayError, MAX_CHOICES as MAX_DISPLAY_CHOICES,
     Request as DisplayRequest,
 };
-pub use files::{Report as UploadReport, Upload};
+pub use files::{MAX_UPLOADS, PreparedUpload, Report as UploadReport, Upload};
 pub use text::{CapturedText, TextDraft};
 
 use crate::{
@@ -142,6 +142,10 @@ pub struct CapturedKey {
     pressed: bool,
     capture: CapturedInput,
 }
+
+/// One file chooser's original input source and uninterrupted visible view.
+/// Contains no file path, ticket, or authority and is never refreshed in place.
+pub struct FileChoiceContext(frd::session_startup::viewer_events::InputContext);
 impl CapturedKey {
     /// Charge native queue time without changing the original source or stamp.
     pub fn with_queue_age(mut self, age: Duration) -> Option<Self> {
@@ -587,6 +591,52 @@ impl Shared {
     /// Cancel only the selected upload; the original desktop remains alive.
     pub fn cancel_upload(&self) -> bool {
         self.upload.as_ref().is_some_and(|upload| upload.cancel())
+    }
+    /// Bind native file selection before opening the OS chooser. A compositor
+    /// gap is unavailable; it never authorizes carrying a choice into a later
+    /// source, view generation or suspension/recovery cycle.
+    pub fn begin_file_choice(&self) -> Result<FileChoiceContext, InputResult> {
+        let mut captured = None;
+        let result = self.with_granted(|granted| {
+            let Ok(Some(context)) = granted.source.input_context() else {
+                return InputResult::Busy;
+            };
+            if !granted
+                .source
+                .input_context_ready(&context)
+                .unwrap_or(false)
+            {
+                return InputResult::Busy;
+            }
+            captured = Some(FileChoiceContext(context));
+            InputResult::Sent
+        });
+        if result == InputResult::Sent {
+            captured.ok_or(InputResult::Busy)
+        } else {
+            Err(result)
+        }
+    }
+    /// Recheck the exact original choice. A temporary compositor candidate
+    /// gap is `Ok(false)`; source/view discontinuity is an error. Neither a
+    /// refusal nor a later ready check refreshes this original context.
+    pub fn file_choice_ready(&self, context: &FileChoiceContext) -> Result<bool, InputResult> {
+        let mut ready = None;
+        let result =
+            self.with_granted(
+                |granted| match granted.source.input_context_ready(&context.0) {
+                    Ok(current) => {
+                        ready = Some(current);
+                        InputResult::Sent
+                    }
+                    Err(_) => InputResult::Invalid,
+                },
+            );
+        if result == InputResult::Sent {
+            ready.ok_or(InputResult::Invalid)
+        } else {
+            Err(result)
+        }
     }
     /// Fence the granted source now (focus loss, backgrounding, close).
     /// `reason`: this device stopped a live grant (not a close it asked

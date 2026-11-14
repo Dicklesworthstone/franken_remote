@@ -1,13 +1,13 @@
-//! One explicit local upload, owned by one original native session. The
-//! existing observer owns ATP, authority, disk work and publication receipts.
-//! Cloning this handle can inspect/cancel it, never select or send it again.
+//! Explicit local uploads owned by one original native session. The existing
+//! observer owns ATP, authority, disk work and publication receipts. Every new
+//! batch consumes a newly selected descriptor; no earlier selection is replayed.
 #![forbid(unsafe_code)]
 
 use fr_wire::negotiation::Offer;
 use frd::{
     native_files::{
-        Absence, Publication, SelectReason, SelectRefusal, Selection, SendControl, SendPhase,
-        SendRequest, SendSnapshot,
+        Absence, Publication, SelectReason, SelectRefusal, Selection, SendControl, SendIntake,
+        SendPhase, SendRequest, SendSnapshot,
     },
     session_startup::{FileSendError, FileSendOutcome, FileSendReceipt, NativeObserver},
 };
@@ -21,6 +21,8 @@ use std::{
 /// cancellation cannot erase a receipt or resolve an uncertain publication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Report {
+    /// Monotonic original-owner batch; zero means no local file selected.
+    pub batch: u8,
     pub selected_bytes: u64,
     pub configured: bool,
     pub cancel_requested: bool,
@@ -64,6 +66,9 @@ impl Report {
     /// original source completed without a batch/cleanup failure. This is
     /// independent of, and can never repair, the containing session's outcome.
     pub fn is_success(&self) -> bool {
+        if self.batch == 0 {
+            return true; // no local file request; says nothing about capability
+        }
         let completed = self.snapshot.is_some_and(|snapshot| {
             snapshot.status.report.is_some_and(|report| {
                 report.total == 1 && report.started == 1 && report.complete && report.stop.is_none()
@@ -87,6 +92,7 @@ impl Report {
             Some(SendPhase::Ended) => "ended",
             None if self.cancel_requested => "cancelled_before_start",
             None if self.absence.is_some() => "unavailable",
+            None if self.batch == 0 => "no_file_selected",
             None => "selected",
         }
     }
@@ -164,6 +170,16 @@ fn file_capability(name: &str) -> bool {
     )
 }
 
+/// One command retains at most nine explicit files and their original receipts.
+pub const MAX_UPLOADS: usize = 9;
+
+/// A pinned descriptor prepared off the UI/session threads. No public path or
+/// content survives selection; submission consumes this value even on refusal.
+pub struct PreparedUpload {
+    request: SendRequest,
+    bytes: u64,
+}
+
 struct State {
     request: Option<SendRequest>,
     /// Bind at `Session::start`, before any thread/connection can race another
@@ -172,6 +188,9 @@ struct State {
     attempted: bool,
     report: Report,
     source: Option<SendControl>,
+    intake: Option<SendIntake>,
+    retired: bool,
+    history: Vec<Report>,
 }
 
 impl State {
@@ -200,12 +219,13 @@ impl State {
     }
 }
 
-/// An already selected, pinned file. Selection/opening happens before session
-/// startup; no pathname or contents are retained in public diagnostics.
+/// One original upload lane and bounded history. An initial selection is pinned
+/// before startup; later explicit choices prepare descriptors off the UI thread.
+/// No pathname or contents are retained in public diagnostics.
 pub struct Upload(Mutex<State>);
 
 impl Upload {
-    pub fn select(path: &Path) -> Result<Arc<Self>, SelectRefusal> {
+    pub fn prepare(path: &Path) -> Result<PreparedUpload, SelectRefusal> {
         let selected = Selection::select(&[path.to_path_buf()])?;
         let selected_bytes = selected.sizes().next().flatten().ok_or(SelectRefusal {
             index: 0,
@@ -214,12 +234,33 @@ impl Upload {
         // Duplicates the selected descriptor, never reopens its pathname. Only
         // the original observer can start the bounded disk source after grant.
         let request = selected.request()?;
-        Ok(Arc::new(Self(Mutex::new(State {
-            request: Some(request),
+        Ok(PreparedUpload {
+            request,
+            bytes: selected_bytes,
+        })
+    }
+
+    pub fn select(path: &Path) -> Result<Arc<Self>, SelectRefusal> {
+        Ok(Self::new(Some(Self::prepare(path)?)))
+    }
+
+    /// Negotiate one optional original upload lane without opening any source.
+    /// Every actual file still requires a later explicit local selection.
+    pub fn interactive() -> Arc<Self> {
+        Self::new(None)
+    }
+
+    fn new(selected: Option<PreparedUpload>) -> Arc<Self> {
+        let (request, batch, bytes) = selected.map_or((None, 0, 0), |prepared| {
+            (Some(prepared.request), 1, prepared.bytes)
+        });
+        Arc::new(Self(Mutex::new(State {
+            request,
             bound: false,
             attempted: false,
             report: Report {
-                selected_bytes,
+                batch,
+                selected_bytes: bytes,
                 configured: false,
                 cancel_requested: false,
                 absence: None,
@@ -227,13 +268,17 @@ impl Upload {
                 cleanup: None,
             },
             source: None,
-        }))))
+            intake: None,
+            retired: false,
+            history: Vec::with_capacity(MAX_UPLOADS - 1),
+        })))
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(|poison| {
             let mut state = poison.into_inner();
             state.bound = true;
+            state.retired = true;
             state.cancel();
             state.report.absence.get_or_insert(Absence::Unavailable);
             state
@@ -252,29 +297,34 @@ impl Upload {
     /// The first opened observer consumes this choice even if the host declines
     /// files. Reconnect never silently grants another chance to publish it.
     pub(super) fn configure(&self, observer: &mut NativeObserver) {
-        self.configure_with(|request| observer.configure_file_send(request));
+        self.configure_with(|request| match request {
+            Some(request) => observer.configure_file_send_with_intake(request),
+            None => observer.configure_file_drop(),
+        });
     }
 
-    fn configure_with(&self, configure: impl FnOnce(SendRequest) -> Result<SendControl, Absence>) {
+    fn configure_with(
+        &self,
+        configure: impl FnOnce(Option<SendRequest>) -> Result<(SendControl, SendIntake), Absence>,
+    ) {
         let mut state = self.lock();
-        if !state.bound || state.attempted {
+        if !state.bound || state.attempted || state.retired {
             return;
         }
         state.attempted = true;
-        let Some(request) = state.request.take() else {
-            return;
-        };
+        let request = state.request.take();
         // Only synchronous session registration runs under this lock: no
         // source open, hash, read, network wait, or native join. An early Cancel
         // still installs/settles a possibly negotiated attachment, with its
         // stop already set before any service turn can start a source.
         match configure(request) {
-            Ok(source) => {
+            Ok((source, intake)) => {
                 if state.report.cancel_requested {
                     source.cancel();
                 }
                 state.report.configured = true;
                 state.source = Some(source);
+                state.intake = Some(intake);
             }
             Err(absence) => {
                 state.report.absence.get_or_insert(absence);
@@ -285,7 +335,7 @@ impl Upload {
 
     pub(super) fn offer(&self, original: &Offer) -> Result<Offer, ()> {
         let state = self.lock();
-        if state.bound && !state.attempted && !state.report.cancel_requested {
+        if state.bound && !state.attempted && !state.retired && !state.report.cancel_requested {
             return Ok(original.clone());
         }
         if original
@@ -310,7 +360,8 @@ impl Upload {
     /// Once configured, this owner is terminal across every viewing retry.
     pub(super) fn retire(&self) {
         let mut state = self.lock();
-        if state.source.is_some() {
+        if state.attempted {
+            state.retired = true;
             state.cancel();
         }
     }
@@ -320,6 +371,7 @@ impl Upload {
         state.cancel();
         state.request = None;
         state.attempted = true;
+        state.retired = true;
     }
 
     pub(super) fn cleaned(&self, result: Result<(), FileSendError>) {
@@ -328,6 +380,101 @@ impl Upload {
             state.report.cleanup = Some(result);
         }
         state.collect();
+    }
+
+    /// The original lane has capacity for one newly selected file. This is
+    /// never an authority guarantee; the original controller rechecks it.
+    pub fn ready(&self) -> bool {
+        let mut state = self.lock();
+        state.collect();
+        !state.retired
+            && usize::from(state.report.batch) < MAX_UPLOADS
+            && state.intake.as_ref().is_some_and(SendIntake::ready)
+    }
+
+    /// Consume a freshly prepared descriptor on this exact configured intake.
+    /// The caller must first validate its original native choice and current
+    /// session. The intake retains its own original policy/deadline/authority.
+    pub fn submit(&self, prepared: PreparedUpload) -> Result<(), FileSendError> {
+        self.submit_if(prepared, || true)
+    }
+
+    /// Charge the original local choice through both bounded owner locks.
+    /// The predicate may only check local choice state in the reviewed order
+    /// upload -> intake -> granted source -> input queue. No native/file work
+    /// or callbacks into this upload/intake are permitted. The intake resamples
+    /// its original transfer clock after the predicate returns.
+    pub fn submit_if(
+        &self,
+        prepared: PreparedUpload,
+        check: impl FnMut() -> bool,
+    ) -> Result<(), FileSendError> {
+        let mut state = self.lock();
+        state.collect();
+        if state.retired {
+            return Err(FileSendError::Closed);
+        }
+        if usize::from(state.report.batch) >= MAX_UPLOADS {
+            return Err(FileSendError::Limits);
+        }
+        let intake = state.intake.as_ref().ok_or(FileSendError::Closed)?;
+        let source = intake.submit_if(prepared.request, check)?;
+        let batch = state.report.batch + 1;
+        if state.report.batch != 0 {
+            let previous = state.report;
+            state.history.push(previous);
+        }
+        state.report = Report {
+            batch,
+            selected_bytes: prepared.bytes,
+            configured: true,
+            cancel_requested: false,
+            absence: None,
+            snapshot: None,
+            cleanup: None,
+        };
+        state.source = Some(source);
+        state.collect();
+        Ok(())
+    }
+
+    /// Menu commands name the original batch they displayed. An old Cancel or
+    /// pacing command cannot affect a newer explicit file selection.
+    pub fn cancel_batch(&self, batch: u8) -> bool {
+        let mut state = self.lock();
+        state.report.batch == batch && batch != 0 && state.cancel()
+    }
+
+    pub fn pace_batch(&self, batch: u8, paused: bool) -> bool {
+        let mut state = self.lock();
+        if state.report.batch != batch || batch == 0 || state.retired {
+            return false;
+        }
+        let changed = state.source.as_ref().is_some_and(|source| {
+            if paused {
+                source.pause()
+            } else {
+                source.resume()
+            }
+        });
+        state.collect();
+        changed
+    }
+
+    /// Bounded content-free history, including the current actual selection.
+    /// Waiting with no file contributes no fabricated transfer receipt.
+    pub fn reports(&self) -> Vec<Report> {
+        let mut state = self.lock();
+        state.collect();
+        let mut reports = state.history.clone();
+        if state.report.batch != 0 {
+            reports.push(state.report);
+        }
+        reports
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.reports().iter().all(Report::is_success)
     }
 
     pub fn report(&self) -> Report {
@@ -431,7 +578,10 @@ mod tests {
     fn spent_upload_prunes_only_its_optional_markers_and_keeps_clipboard_text() {
         let upload = selected();
         assert!(upload.bind());
-        let original = super::super::control_policy::offer(true, true, true).unwrap();
+        let original = fr_wire::control::with_committed_text(
+            fr_client::native::control_offer_with_auxiliary(true, true, false),
+        )
+        .unwrap();
         assert_eq!(upload.offer(&original).unwrap(), original);
         upload.configure_with(|_| Err(Absence::NotNegotiated));
         let pruned = upload.offer(&original).unwrap();
@@ -482,6 +632,99 @@ mod tests {
         assert!(!report.is_success());
         assert_eq!(report.published_bytes(), None);
         assert_eq!(report.receipt_name(), "none");
+    }
+
+    #[test]
+    fn an_empty_interactive_lane_has_no_selected_file_or_fabricated_receipt() {
+        let upload = Upload::interactive();
+        assert!(upload.bind());
+        assert!(!upload.ready());
+        upload.configure_with(|request| {
+            assert!(request.is_none());
+            Err(Absence::NotNegotiated)
+        });
+        assert_eq!(upload.report().batch, 0);
+        assert_eq!(upload.report().receipt_name(), "none");
+        assert_eq!(upload.report().published_bytes(), None);
+        assert!(upload.reports().is_empty());
+        assert!(upload.is_success(), "no file was requested");
+        upload.configure_with(|_| panic!("refused intake replayed"));
+    }
+
+    #[test]
+    fn prepared_descriptors_cannot_enter_a_retired_or_unconfigured_intake() {
+        let source = selected();
+        let request = source.lock().request.take().unwrap();
+        let upload = Upload::interactive();
+        upload.finish();
+        assert_eq!(
+            upload.submit(PreparedUpload { request, bytes: 13 }),
+            Err(FileSendError::Closed),
+        );
+        assert!(upload.reports().is_empty());
+        assert!(!upload.ready());
+        let source = selected();
+        let request = source.lock().request.take().unwrap();
+        assert_eq!(
+            Upload::interactive().submit(PreparedUpload { request, bytes: 13 }),
+            Err(FileSendError::Closed),
+        );
+    }
+
+    #[test]
+    fn the_ninth_original_batch_refuses_another_descriptor_without_replacing_history() {
+        let upload = selected();
+        {
+            let mut state = upload.lock();
+            for batch in 1..9 {
+                let mut report = state.report;
+                report.batch = batch;
+                state.history.push(report);
+            }
+            state.report.batch = 9;
+        }
+        let source = selected();
+        let request = source.lock().request.take().unwrap();
+        assert_eq!(
+            upload.submit(PreparedUpload { request, bytes: 13 }),
+            Err(FileSendError::Limits),
+        );
+        assert_eq!(
+            upload.reports().iter().map(|r| r.batch).collect::<Vec<_>>(),
+            (1..=9).collect::<Vec<_>>()
+        );
+        assert!(!upload.ready());
+    }
+
+    #[test]
+    fn an_old_batch_cancel_or_pacing_command_cannot_touch_the_next_selection() {
+        let upload = selected();
+        upload.lock().report.batch = 2;
+        assert!(!upload.cancel_batch(1));
+        assert!(!upload.pace_batch(1, true));
+        assert!(!upload.pace_batch(1, false));
+        assert!(!upload.report().cancel_requested);
+        assert!(upload.cancel_batch(2));
+        assert!(upload.report().cancel_requested);
+    }
+
+    #[test]
+    fn later_reports_cannot_erase_an_earlier_failed_request() {
+        let upload = selected();
+        {
+            let mut state = upload.lock();
+            let mut earlier = state.report;
+            earlier.cleanup = Some(Err(FileSendError::Expired));
+            state.history.push(earlier);
+            state.report.batch = 2;
+        }
+        assert!(!upload.is_success());
+        upload.cleaned(Ok(()));
+        assert_eq!(
+            upload.reports()[0].cleanup,
+            Some(Err(FileSendError::Expired))
+        );
+        assert!(!upload.is_success());
     }
 
     #[test]
