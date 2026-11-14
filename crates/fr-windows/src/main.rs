@@ -34,6 +34,8 @@ mod windows;
 
 // Platform-neutral pieces of the viewer, tested on every CI host.
 #[cfg_attr(not(windows), allow(dead_code))]
+mod change_display;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod control;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod geometry;

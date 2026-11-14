@@ -25,7 +25,7 @@ use windows::{
                 LB_ADDSTRING, LB_GETCURSEL, LB_SETHORIZONTALEXTENT, LoadCursorW, MSG,
                 MsgWaitForMultipleObjects, PM_REMOVE, PeekMessageW, QS_ALLINPUT,
                 RegisterClassExW, SW_SHOW, SendMessageW, ShowWindow, TranslateMessage,
-                WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_KEYDOWN, WM_QUIT,
+                WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_KEYDOWN, WM_QUIT,
                 WNDCLASSEXW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_HSCROLL, WS_SYSMENU,
                 WS_TABSTOP, WS_VISIBLE, WS_VSCROLL,
             },
@@ -37,7 +37,7 @@ use windows::{
 const CONNECT: usize = 1;
 const CANCEL: usize = 2;
 const MACHINES: usize = 0x4690;
-/// A local choice retains bounded metadata for at most two minutes. This is
+/// A local choice is valid for at most two minutes. This is
 /// independent of, and precedes, every network/session startup deadline.
 const CHOICE_MILLIS: u64 = 120_000;
 
@@ -378,7 +378,7 @@ unsafe extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     if let Some(state) = active(hwnd) {
-        if message == WM_CLOSE {
+        if message == WM_CLOSE || message == WM_DESTROY {
             state.finish(Ok(None));
             return LRESULT(0);
         }

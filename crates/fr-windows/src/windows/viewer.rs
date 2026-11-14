@@ -26,12 +26,15 @@ mod text;
 
 use super::render::Renderer;
 use crate::{
+    change_display::{self, Action, Cause, Refusal, Replacements},
     geometry::{Mapping, StaleMapping, host_scales, reopen_for},
     keys,
 };
 use fr_mobile_ffi::{
     events::{Event, kind, state},
-    session::{CapturedInput, CapturedKey, ClipboardReport, Config, InputResult, Session, end},
+    session::{
+        CapturedInput, CapturedKey, ClipboardReport, Config, InputResult, Session, Shared, end,
+    },
     video,
 };
 use std::{
@@ -39,6 +42,7 @@ use std::{
     fmt::Write as _,
     io::Write as _,
     process::ExitCode,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -83,7 +87,9 @@ struct Viewer {
     sizing: bool,
     /// A reopen the current session is closing for: the next session
     /// states the client size current when this one finishes.
-    reopen: bool,
+    reopen: Replacements,
+    /// A requested replacement that could not prove safe original cleanup.
+    reopen_refusal: Option<Refusal>,
     /// Closing for good (the user or `--seconds`): no more reopens.
     closing: bool,
     /// The box the current session stated (its client size at start).
@@ -93,9 +99,6 @@ struct Viewer {
     scales: Option<bool>,
     /// When the pending reopen was asked for (its gap is reported).
     reopen_asked: Option<Instant>,
-    /// When the pending reopen dials (`REDIAL_PAUSE` after the old session
-    /// finished).
-    redial_at: Option<Instant>,
     /// One local composition, permanently bound to its opening source/view.
     text: Option<text::Editor>,
     /// One modeless choice from this attempt's host-approved catalog.
@@ -108,6 +111,10 @@ thread_local! {
     // A nested native callback may find VIEWER borrowed. Closure remains due
     // before the pump processes another input event or replaces the session.
     static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// The original owner was already fenced by the independent menu handler.
+    /// UI cleanup may wait until a nested native callback releases Viewer.
+    static CHANGE_PENDING: RefCell<Option<change_display::Request<Shared>>> =
+        const { RefCell::new(None) };
 }
 /// Runs `f` on the viewer unless it is absent or already borrowed (a
 /// message dispatched from inside another viewer call).
@@ -117,11 +124,26 @@ fn with_viewer<R>(f: impl FnOnce(&mut Viewer) -> R) -> Option<R> {
 
 fn drain_close() {
     if CLOSE_PENDING.with(Cell::get) {
+        CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
         with_viewer(|viewer| {
             // Clear before native cleanup, which can itself reenter WM_CLOSE.
             CLOSE_PENDING.with(|pending| pending.set(false));
             viewer.close();
         });
+        return;
+    }
+    let mut requested = CHANGE_PENDING.with(|pending| pending.borrow_mut().take());
+    if requested.is_some() {
+        with_viewer(|viewer| {
+            if let Some(request) = requested.take() {
+                viewer.change_display(request);
+            }
+        });
+        // A native callback can enter while Viewer is borrowed. Preserve the
+        // single original request; the next pump turn consumes it before input.
+        if requested.is_some() {
+            CHANGE_PENDING.with(|pending| *pending.borrow_mut() = requested);
+        }
     }
 }
 
@@ -129,6 +151,7 @@ fn drain_close() {
 struct Stats {
     /// Sessions reopened for a new picture size.
     reopens: u64,
+    display_changes: u64,
     /// Counts of the sessions before the current one.
     earlier_decoded: u64,
     earlier_decode_micros: u64,
@@ -150,6 +173,7 @@ struct Stats {
 
 pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     CLOSE_PENDING.with(|pending| pending.set(false));
+    CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
     // SAFETY: process-wide DPI awareness, set before any window exists, so
     // client-area sizes and mouse points are physical pixels.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -185,12 +209,12 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             keys: keys::Deferred::default(),
             display: (0, 0),
             sizing: false,
-            reopen: false,
+            reopen: Replacements::default(),
+            reopen_refusal: None,
             closing: false,
             stated: size,
             scales: None,
             reopen_asked: None,
-            redial_at: None,
             text: None,
             display_picker: None,
             input_menu,
@@ -198,8 +222,8 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     });
     // SAFETY: showing the window this thread created.
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
+    control::visible(true);
     with_viewer(|v| {
-        v.session.shared().set_visible(true);
         // Only the original invocation uses --control automatically. Native
         // window creation and its initial size events have already settled.
         if control {
@@ -286,7 +310,14 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
         };
         // Drawing may reenter a native close while step owns the viewer.
         drain_close();
-        if finished {
+        // The invocation's own deadline wins before a finished owner can be
+        // replaced. A late timer must not create and then cancel a new dial.
+        if !closing && deadline.is_some_and(|d| Instant::now() >= d) {
+            closing = true;
+            with_viewer(Viewer::close);
+        }
+        let replacing = with_viewer(|v| v.reopen.pending()).unwrap_or(false);
+        if finished || replacing {
             match with_viewer(|v| reopen(v, &mut stats, hwnd, config)) {
                 Some(Reopen::Started) => {
                     last_sequence = 0;
@@ -296,10 +327,6 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
                 Some(Reopen::No) | None => return stats,
             }
         }
-        if !closing && deadline.is_some_and(|d| Instant::now() >= d) {
-            closing = true;
-            with_viewer(Viewer::close);
-        }
         if !drew {
             // SAFETY: waits for input or 2 ms; no handles.
             unsafe { MsgWaitForMultipleObjects(None, false, 2, QS_ALLINPUT) };
@@ -307,22 +334,39 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
     }
 }
 
-/// Replaces a session that finished because a resize closed it with one
-/// stating the current client size, once `REDIAL_PAUSE` has passed. `No`:
-/// no reopen was asked for (or it could not start), so the viewer ends.
+/// Replaces only the original positively retired owner, after the bounded
+/// listener cooldown. A manual switch opens a fresh approved-catalog picker;
+/// resize keeps that policy after the first explicit switch.
 fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reopen {
-    if !v.reopen || v.closing || !v.session.shared().orderly_closed() {
-        return Reopen::No;
+    let finished = v.session.shared().finished();
+    let no_replacement = || if finished { Reopen::No } else { Reopen::Waiting };
+    if v.closing {
+        return no_replacement();
     }
-    let now = Instant::now();
-    if now < *v.redial_at.get_or_insert(now + REDIAL_PAUSE) {
-        return Reopen::Waiting;
-    }
-    v.redial_at = None;
-    v.reopen = false;
+    let lifetime = control::lifetime();
+    let opening = match v.reopen.poll(
+        input_ticks(),
+        lifetime,
+        control::visible_now(),
+        finished,
+        v.session.shared().orderly_closed(),
+    ) {
+        Action::Open(opening) => opening,
+        Action::Waiting => return Reopen::Waiting,
+        Action::None => return no_replacement(),
+        Action::Refused(reason) => {
+            eprintln!("fr-windows: {}", reason.name());
+            v.reopen_refusal.get_or_insert(reason);
+            v.close();
+            return no_replacement();
+        }
+    };
     v.text = None;
     v.display_picker = None;
     let mut next = config.clone();
+    if opening.choose_display {
+        next.display = fr_mobile_ffi::session::DisplayChoice::Choose;
+    }
     let clipboard = v.session.shared().clipboard_report();
     if clipboard.configured || clipboard.reason.is_some() {
         stats.clipboard.get_or_insert(clipboard);
@@ -335,11 +379,25 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // Retain only the offered profile. Session::start grants and requests
     // nothing: a resized view needs a new explicit local menu choice.
     let size = client_size(hwnd);
-    if CLOSE_PENDING.with(Cell::get) {
+    if CLOSE_PENDING.with(Cell::get)
+        || !control::visible_now()
+        || control::lifetime() != lifetime
+    {
+        v.reopen_refusal.get_or_insert(Refusal::Cancelled);
+        v.close();
         return Reopen::No;
     }
     next.picture = Some(size);
+    // Native window queries and the original clipboard report can wait. The
+    // ready opening carries the same absolute bound through both of them.
+    if let Err(reason) = opening.check(input_ticks()) {
+        v.reopen_refusal.get_or_insert(reason);
+        v.close();
+        return Reopen::No;
+    }
     let Ok(session) = Session::start(next) else {
+        v.reopen_refusal.get_or_insert(Refusal::Start);
+        v.close();
         return Reopen::No;
     };
     v.stated = size;
@@ -354,13 +412,16 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         .first_view_micros
         .get_or_insert(shared.first_view_micros());
     stats.reopens += 1;
+    stats.display_changes += u64::from(opening.cause == Cause::Display);
     // The reopen's own wait is not a frame interval.
     stats.last_draw = None;
     v.mapping = None;
     v.picture = (0, 0);
+    v.display = (0, 0);
+    v.scales = None;
     v.buttons = [false; 5];
     v.keys = keys::Deferred::default();
-    v.session.shared().set_visible(true);
+    control::visible(true);
     v.input_menu.refresh(v.session.shared());
     Reopen::Started
 }
@@ -372,14 +433,10 @@ enum Reopen {
     No,
 }
 
-/// frd's serial host binds its next listener only after the last attempt's
-/// retirement wait and a 250 ms cooldown; a dial in that gap loses its
-/// Initials and connects about 5 s later (fr-w4yu). The iOS app waits 400 ms
-/// before a session that follows another; so does a reopen.
-const REDIAL_PAUSE: Duration = Duration::from_millis(400);
-
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
+    let can_change_display = v.can_change_display();
+    v.input_menu.display_available(can_change_display);
     v.input_menu.refresh(v.session.shared());
     v.update_display_picker(hwnd);
     if !v.keys.is_empty() {
@@ -403,6 +460,11 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     }
     if shared.finished() {
         return (true, false);
+    }
+    // Once the original owner is fenced, no old picture can satisfy a new
+    // view or consume the pending replacement's time-to-first-picture metric.
+    if v.reopen.pending() || v.closing {
+        return (false, false);
     }
     // A local resize/move invalidates its coordinate mapping immediately.
     // Redraw the one retained picture even on a static desktop, preserving
@@ -550,7 +612,8 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{},\
-         \"reopens\":{},\"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
+         \"reopens\":{},\"display_changes\":{},\"reopen_refusal\":{},\
+         \"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
          \"seconds\":{:.1},\"clipboard\":{}}}",
         end_name(code),
         shared
@@ -575,13 +638,21 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         viewer.renderer.size().1,
         interval_ms,
         stats.reopens,
+        stats.display_changes,
+        viewer.reopen_refusal.map_or_else(
+            || "null".to_owned(),
+            |reason| format!("{:?}", reason.name()),
+        ),
         micros_to_ms(stats.reopen_gap_micros),
         micros_to_ms(shared.first_view_micros()),
         elapsed.as_secs_f64(),
         clipboard,
     );
     let _ = writeln!(std::io::stdout().lock(), "{json}");
-    if stats.drawn > 0 && matches!(code, end::OK | end::CANCELLED) {
+    if stats.drawn > 0
+        && matches!(code, end::OK | end::CANCELLED)
+        && viewer.reopen_refusal.is_none()
+    {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
@@ -730,9 +801,62 @@ fn key_result(result: InputResult) -> Result<bool, ()> {
 }
 
 impl Viewer {
+    fn can_change_display(&self) -> bool {
+        use fr_mobile_ffi::session::ControlState;
+        !self.closing
+            && self.reopen.available()
+            && !self.sizing
+            && self.mapping.is_some()
+            && self.text.is_none()
+            && self.display_picker.is_none()
+            && self.keys.is_empty()
+            && !self.buttons.iter().any(|held| *held)
+            && control::visible_now()
+            && matches!(
+                self.session.shared().control_state(),
+                ControlState::Unavailable | ControlState::Viewing | ControlState::Controlled
+            )
+    }
+
+    /// The independent native handler has already fenced this exact owner.
+    /// A later lifecycle event may still cancel replacement, never revive it.
+    fn change_display(&mut self, request: change_display::Request<Shared>) {
+        if !Arc::ptr_eq(&request.original, &self.session.shared_handle()) {
+            return;
+        }
+        if self.closing
+            || self.sizing
+            || self.mapping.is_none()
+            || self.text.is_some()
+            || self.display_picker.is_some()
+            || !control::visible_now()
+            || request.lifetime != control::lifetime()
+        {
+            self.reopen_refusal.get_or_insert(Refusal::Cancelled);
+            self.close();
+            return;
+        }
+        if let Err(reason) = self
+            .reopen
+            .request(Cause::Display, request.lifetime, request.at)
+        {
+            self.reopen_refusal.get_or_insert(reason);
+            self.close();
+            return;
+        }
+        self.reopen_asked = Some(Instant::now());
+        self.keys.clear();
+        self.buttons.fill(false);
+        self.mapping = None;
+        self.text = None;
+        // SAFETY: this UI thread's mouse capture only, after the original
+        // session's input and clipboard owners were irrevocably fenced.
+        let _ = unsafe { ReleaseCapture() };
+    }
+
     fn request_control(&mut self, message: u32) {
         if self.closing
-            || self.reopen
+            || self.reopen.pending()
             || self.text.is_some()
             || self.display_picker.is_some()
             || self.mapping.is_none()
@@ -755,7 +879,7 @@ impl Viewer {
         {
             self.display_picker = None;
         }
-        if self.display_picker.is_some() || self.closing || self.reopen {
+        if self.display_picker.is_some() || self.closing || self.reopen.pending() {
             return;
         }
         let Some(request) = self.session.shared().display_request() else {
@@ -769,7 +893,7 @@ impl Viewer {
         }
     }
     fn open_text(&mut self, hwnd: HWND) {
-        if self.closing || self.reopen || self.display_picker.is_some() {
+        if self.closing || self.reopen.pending() || self.display_picker.is_some() {
             return;
         }
         // Reopening is a new explicit local choice. No content or context from
@@ -811,7 +935,7 @@ impl Viewer {
         };
         editor.send(
             message_time,
-            !self.closing && !self.reopen && self.keys.is_empty(),
+            !self.closing && !self.reopen.pending() && self.keys.is_empty(),
         );
     }
 
@@ -837,7 +961,7 @@ impl Viewer {
     /// Replaceable old motion may be discarded; losing an ordered transition
     /// instead fences control and delegates held-state cleanup to its owner.
     fn capture_mouse(&mut self, message_time: u32, ordered: bool) -> Option<(CapturedInput, u64)> {
-        if self.closing || self.reopen || self.text.is_some() {
+        if self.closing || self.reopen.pending() || self.text.is_some() {
             return None;
         }
         let capture = match self.session.shared().capture_input() {
@@ -923,7 +1047,7 @@ impl Viewer {
     /// source clock is sampled before the native age, conservatively charging
     /// an interrupted sample or a wait for the grant lock to the old event.
     fn key(&mut self, usage: u16, pressed: bool, message_time: u32) {
-        if self.closing || self.reopen {
+        if self.closing || self.reopen.pending() {
             return;
         }
         let shared = self.session.shared();
@@ -966,7 +1090,7 @@ impl Viewer {
     /// An ordered button/scroll cannot bypass an unsent key. If the bounded
     /// source still refuses it, fence and clean up instead of reordering input.
     fn after_keys(&mut self, ordered: bool) -> bool {
-        if self.closing || self.reopen {
+        if self.closing || self.reopen.pending() {
             return false;
         }
         self.send_keys();
@@ -1013,7 +1137,7 @@ impl Viewer {
         // that source wakes frd's independent held-state cleanup; attempting
         // more keys or re-stamping a release is never the recovery path.
         self.closing = true;
-        self.reopen = false;
+        self.reopen.cancel();
         self.keys.clear();
         self.session.shared().input_failed();
         self.text = None;
@@ -1025,7 +1149,7 @@ impl Viewer {
     /// Closes for good: no reopen follows.
     fn close(&mut self) {
         self.closing = true;
-        self.reopen = false;
+        self.reopen.cancel();
         self.keys.clear();
         self.session.shared().close();
         self.text = None;
@@ -1036,13 +1160,19 @@ impl Viewer {
     fn resized(&mut self, size: (u32, u32)) {
         self.text = None;
         if self.closing
-            || self.reopen
+            || !self.reopen.available()
             || self.scales != Some(true)
             || !reopen_for(self.display, self.picture, size)
         {
             return;
         }
-        self.reopen = true;
+        if self
+            .reopen
+            .request(Cause::Resize, control::lifetime(), input_ticks())
+            .is_err()
+        {
+            return;
+        }
         self.reopen_asked = Some(Instant::now());
         self.release_everything();
         self.session.shared().close();
@@ -1075,6 +1205,8 @@ extern "system" fn window_proc(
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
                 if v.input_menu.is_popup(wparam.0) {
+                    let available = v.can_change_display();
+                    v.input_menu.display_available(available);
                     v.input_menu.opened(&v.session.shared_handle());
                 }
             });
@@ -1094,7 +1226,18 @@ extern "system" fn window_proc(
             }
             true
         }
+        WM_COMMAND if wparam.0 & 0xffff == control::CHANGE_DISPLAY => {
+            let time = current_message_time();
+            if let Some(request) = control::change_display(time) {
+                CHANGE_PENDING.with(|pending| *pending.borrow_mut() = Some(request));
+                drain_close();
+            } else {
+                eprintln!("fr-windows: display_choice_expired_or_unavailable");
+            }
+            true
+        }
         WM_COMMAND if wparam.0 & 0xffff == text::OPEN => {
+            control::invalidate_display();
             with_viewer(|v| v.open_text(hwnd));
             true
         }
@@ -1151,7 +1294,9 @@ extern "system" fn window_proc(
                     v.session.shared().set_visible(false);
                     v.text = None;
                 } else {
-                    v.session.shared().set_visible(true);
+                    // A restore/resize alone cannot cancel an earlier native
+                    // application-deactivation fence. Activation proves it.
+                    v.session.shared().set_visible(control::visible_now());
                     let size = (
                         u32::try_from(width).unwrap_or(0),
                         u32::try_from(height).unwrap_or(0),

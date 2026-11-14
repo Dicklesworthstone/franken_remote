@@ -1,5 +1,33 @@
 # Implementation status
 
+## Native Windows machine choice and in-view display changes (2026-11-14 UTC)
+
+`fr-windows` and `fr-windows view` without a destination now open a native
+machine picker from one bounded installed-Tailscale catalog. The chosen stable
+ID and canonical certificate name remain paired through fresh installed-daemon
+validation; cancellation starts no remote session. Explicit destinations and
+connection options keep their existing behavior. The shared selected-target
+API rejects removed identities, renamed nodes and same-name replacements.
+
+The viewer now offers **Input → Change display…**. It fences the original input
+and clipboard, requires positive original service/cleanup completion, and then
+opens a fresh approved display catalog to the same machine. Replacement starts
+viewing without replaying control or clipboard. Old picture admission stops
+during retirement; the original replacement deadline remains enforced after
+clipboard locking and native window preparation. Later resize replacements
+retain the fresh-choice policy. Failed cleanup remains terminal and visible.
+
+Three command regressions, four shared identity-selection regressions and nine
+portable display-replacement regressions were added; existing invalid-metadata
+and address tests also cover the new shared entry point. Independent source
+review found and fixed the post-native-read gesture-age and replacement-deadline
+cases. The exact shared connection files passed pinned formatting before the
+execution environment became unavailable. The new Windows/UI/compiler and test
+verdicts are pending in the existing CI lanes; no real Windows multi-monitor,
+IME, clipboard, GPU or tailnet qualification is claimed for these changes.
+See [Windows client usage](docs/windows-client.md). Both scoped feature beads
+remain open for the missing verification.
+
 ## Windows adaptive bitrate through the live capture worker (2026-11-14 UTC)
 
 The original Media Foundation capture worker now implements `CaptureAtRate`

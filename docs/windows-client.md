@@ -197,11 +197,49 @@ cancel it. Existing resize rules still resume viewing only. The selected
 display's own signed origin and geometry feed the existing pointer mapping,
 including displays left of or above the desktop origin.
 
-This selects the display before video starts. To choose a different display
-later, close the viewer and run the command again. Selecting a display does
-not itself request control; `--control` retains the existing separate grant
-and visible-view requirements. The existing mobile C interface retains its
-primary-display default.
+### Change displays while viewing
+
+After a picture is visible, choose **Input → Change display…** to choose a
+different remote monitor in the same window. The action is available while
+viewing or controlling, with no pending control request, text editor, native
+resize, queued key transition or held mouse button. It consumes one fresh
+menu choice from that original session. A queued command from an earlier
+popup, native mapping or connection is refused.
+
+Changing displays immediately fences the original input and clipboard owners.
+The viewer waits for that original session's actual successful service and
+cleanup result, then the serial host listener's 400 ms cooldown. Only then
+does it open a new authenticated viewing session to the original selected
+machine and request a new approved display catalog. The host's current
+admission and local-approval policy still applies. No old display handle,
+coordinate mapping, queued input, text composition or clipboard owner is
+carried into the new session.
+
+The replacement always shows the native picker, including when the command
+started with `--display primary`, `only` or an exact handle. Subsequent resize
+replacements also ask from a fresh catalog; they do not silently return to the
+command's original display. Selecting a row starts viewing only. If the
+original command offered `--control`, **Input → Request control** supplies a
+fresh request for the new ready view. Clipboard sharing stays retired for that
+command and requires a new controlling command to enable again.
+
+Closing the window, stopping, hiding the application or changing the native
+mapping cancels a pending display switch. A host refusal, revoked grant,
+incomplete cleanup or local failure also prevents replacement and retains the
+original completion report. In particular, a controlled session whose
+cancellation cannot prove orderly cleanup ends rather than opening another
+display. Elapsed time alone is never cleanup evidence.
+
+Each replacement has a 10-second absolute retirement/cooldown budget,
+including time the client spends suspended. That same deadline is checked
+again after native preparation immediately before starting the replacement.
+The new connection retains its existing separate startup deadline. One
+command opens at most 32 fresh native session owners, counting the initial
+owner and resize replacements. `--seconds` remains a deadline for the entire
+command and prevents a replacement once it expires. Completion JSON records
+`display_changes` and any content-free `reopen_refusal` separately from the
+original session's ending. Runtime and live Windows multi-monitor
+qualification remain pending.
 
 ## Send Unicode and IME text
 
