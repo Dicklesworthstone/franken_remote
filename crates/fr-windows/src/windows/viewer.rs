@@ -48,16 +48,16 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageTime,
-    IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE,
-    PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED,
-    SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    ShowWindow, SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE,
-    WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN,
-    WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
-    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
+    GetMessageTime, IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG, MsgWaitForMultipleObjects,
+    PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW,
+    SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
+    WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE,
+    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE,
+    WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -687,14 +687,14 @@ impl Viewer {
                     Some(draft),
                     "Compose locally; Send transmits the whole value once.",
                 ),
-                Err(InputResult::Unsupported) => (
-                    None,
-                    "This host has not granted direct Unicode text input.",
-                ),
-                Err(InputResult::NotControlled) => {
-                    (None, "Request control before sending text.")
+                Err(InputResult::Unsupported) => {
+                    (None, "This host has not granted direct Unicode text input.")
                 }
-                Err(_) => (None, "Text is not ready. Release input and reopen Send text."),
+                Err(InputResult::NotControlled) => (None, "Request control before sending text."),
+                Err(_) => (
+                    None,
+                    "Text is not ready. Release input and reopen Send text.",
+                ),
             }
         } else {
             (

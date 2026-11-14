@@ -130,7 +130,12 @@ mod tests {
 
     #[test]
     fn malformed_surrogates_are_refused_without_lossy_replacement() {
-        for units in [vec![0xD800], vec![0xDC00], vec![0xD800, 65], vec![65, 0xDC00]] {
+        for units in [
+            vec![0xD800],
+            vec![0xDC00],
+            vec![0xD800, 65],
+            vec![65, 0xDC00],
+        ] {
             assert_eq!(from_utf16(&units), Err(InvalidText::Encoding));
         }
         assert_eq!(from_utf16(&[0xD83D, 0xDE42]).unwrap(), "🙂");
@@ -185,8 +190,14 @@ mod tests {
         assert_eq!(captured, Some(7));
         assert!(window.try_borrow_mut().is_err());
         nested.dismiss();
-        assert!(!original.valid(), "native read cannot admit the captured Send");
-        assert!(original.dismissed(), "cleanup must finish on the next UI turn");
+        assert!(
+            !original.valid(),
+            "native read cannot admit the captured Send"
+        );
+        assert!(
+            original.dismissed(),
+            "cleanup must finish on the next UI turn"
+        );
         assert!(editor.take().is_none());
     }
 
@@ -195,14 +206,20 @@ mod tests {
         let old = Lifetime::default();
         old.invalidate();
         assert!(!old.valid());
-        assert!(!old.dismissed(), "an overflow may retain only a refusal notice");
+        assert!(
+            !old.dismissed(),
+            "an overflow may retain only a refusal notice"
+        );
         let fresh = Lifetime::default();
         assert!(fresh.valid());
         old.dismiss();
         old.invalidate();
         assert!(old.dismissed());
         assert!(!old.valid());
-        assert!(fresh.valid(), "an old callback cannot replace the new lifetime");
+        assert!(
+            fresh.valid(),
+            "an old callback cannot replace the new lifetime"
+        );
     }
 
     #[test]

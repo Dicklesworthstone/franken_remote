@@ -21,10 +21,10 @@ mod text;
 #[cfg(test)]
 use completion::classify;
 pub use completion::end;
-pub use text::{CapturedText, TextDraft};
 pub(crate) use completion::tailnet_end;
 use completion::{LocalStop, ending, requested_terminal};
 use control_policy::requested_capabilities;
+pub use text::{CapturedText, TextDraft};
 
 use crate::{
     events::{self, Event, Events, kind, state},
@@ -180,7 +180,10 @@ struct Granted {
     scroll: LineScroller,
     /// Last checked send bound for this exact text context. The native Send
     /// gesture freezes it; later renewals cannot extend a queued commit.
-    text_window: Option<(frd::session_startup::viewer_events::TextContext, ClientInstant)>,
+    text_window: Option<(
+        frd::session_startup::viewer_events::TextContext,
+        ClientInstant,
+    )>,
 }
 impl Drop for Granted {
     fn drop(&mut self) {

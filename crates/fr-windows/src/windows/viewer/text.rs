@@ -168,7 +168,10 @@ pub(super) struct Editor {
 }
 
 impl Editor {
-    #[allow(clippy::too_many_lines, reason = "one bounded native editor construction")]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one bounded native editor construction"
+    )]
     pub(super) fn open(
         owner: HWND,
         original: Arc<Shared>,
@@ -265,13 +268,7 @@ impl Editor {
                 Some(WPARAM(MAX_UTF16_UNITS)),
                 None,
             );
-            editor.notice = control(
-                w!("STATIC"),
-                w!(""),
-                WINDOW_STYLE(0),
-                0,
-                (12, 220, 548, 34),
-            )?;
+            editor.notice = control(w!("STATIC"), w!(""), WINDOW_STYLE(0), 0, (12, 220, 548, 34))?;
             editor.send = control(
                 w!("BUTTON"),
                 w!("&Send once"),
