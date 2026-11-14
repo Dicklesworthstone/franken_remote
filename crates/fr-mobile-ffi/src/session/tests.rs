@@ -95,6 +95,10 @@ fn input_is_refused_until_control_is_granted() {
         Err(InputResult::NotControlled)
     ));
     assert_eq!(shared.text("a"), InputResult::NotControlled);
+    assert!(matches!(
+        shared.begin_text(),
+        Err(InputResult::NotControlled)
+    ));
     assert_eq!(shared.text(""), InputResult::Invalid);
     assert_eq!(shared.text("before\0after"), InputResult::Invalid);
     assert_eq!(

@@ -435,9 +435,14 @@ mod tests {
             ))),
             "microphone_failed"
         );
-        assert_eq!(error_code(mic::Error::SendExpired), "microphone_send_expired");
         assert_eq!(
-            error_code(mic::Error::Transport(fr_transport::quic::Error::SendExpired)),
+            error_code(mic::Error::SendExpired),
+            "microphone_send_expired"
+        );
+        assert_eq!(
+            error_code(mic::Error::Transport(
+                fr_transport::quic::Error::SendExpired
+            )),
             "microphone_failed"
         );
         assert_eq!(

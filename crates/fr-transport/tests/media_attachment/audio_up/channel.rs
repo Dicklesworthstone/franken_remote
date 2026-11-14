@@ -434,23 +434,9 @@ fn microphone_prepared_refusal_preserves_original_send_expiry_at_both_admission_
                 };
                 let until = clock(&cx) + 4_000_000;
                 let result = if packet_send {
-                    client.send_packet_prepared(
-                        &mut l.c,
-                        &cx,
-                        &packet(9),
-                        until,
-                        || true,
-                        prepared,
-                    )
+                    client.send_packet_prepared(&mut l.c, &cx, &packet(9), until, || true, prepared)
                 } else {
-                    client.send_control_prepared(
-                        &mut l.c,
-                        &cx,
-                        &stop(9),
-                        until,
-                        || true,
-                        prepared,
-                    )
+                    client.send_control_prepared(&mut l.c, &cx, &stop(9), until, || true, prepared)
                 };
                 assert_eq!(result, Err(Error::SendExpired));
                 assert_eq!(calls, refused_at);

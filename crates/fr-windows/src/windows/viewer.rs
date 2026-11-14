@@ -19,6 +19,8 @@
 //! input source cancels its owner, so controlled resize cannot prove that
 //! orderly close and may terminate instead. Control requires a fresh
 //! explicit invocation, never replay of the earlier --control choice.
+mod text;
+
 use super::render::Renderer;
 use crate::{
     geometry::{Mapping, StaleMapping, host_scales, reopen_for},
@@ -30,7 +32,7 @@ use fr_mobile_ffi::{
     video,
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     fmt::Write as _,
     io::Write as _,
     process::ExitCode,
@@ -46,16 +48,16 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetMessageTime, IDC_ARROW, LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE,
-    PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED,
-    SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow,
-    SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_CLOSE, WM_DESTROY,
-    WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST,
-    WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect, GetMessageTime,
+    IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE,
+    PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED,
+    SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+    ShowWindow, SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE,
+    WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_KEYDOWN,
+    WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP,
+    WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -90,14 +92,29 @@ struct Viewer {
     /// When the pending reopen dials (`REDIAL_PAUSE` after the old session
     /// finished).
     redial_at: Option<Instant>,
+    /// One local composition, permanently bound to its opening source/view.
+    text: Option<text::Editor>,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
+    // A nested native callback may find VIEWER borrowed. Closure remains due
+    // before the pump processes another input event or replaces the session.
+    static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 /// Runs `f` on the viewer unless it is absent or already borrowed (a
 /// message dispatched from inside another viewer call).
 fn with_viewer<R>(f: impl FnOnce(&mut Viewer) -> R) -> Option<R> {
     VIEWER.with(|cell| cell.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+fn drain_close() {
+    if CLOSE_PENDING.with(Cell::get) {
+        with_viewer(|viewer| {
+            // Clear before native cleanup, which can itself reenter WM_CLOSE.
+            CLOSE_PENDING.with(|pending| pending.set(false));
+            viewer.close();
+        });
+    }
 }
 
 #[derive(Default)]
@@ -122,6 +139,7 @@ struct Stats {
 }
 
 pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
+    CLOSE_PENDING.with(|pending| pending.set(false));
     // SAFETY: process-wide DPI awareness, set before any window exists, so
     // client-area sizes and mouse points are physical pixels.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
@@ -131,6 +149,11 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let Ok(hwnd) = create_window(title) else {
         return refuse("window_unavailable");
     };
+    if text::install_menu(hwnd).is_err() {
+        // SAFETY: our UI-thread window, before it owns a session or resources.
+        let _ = unsafe { DestroyWindow(hwnd) };
+        return refuse("input_menu_unavailable");
+    }
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
@@ -160,6 +183,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             scales: None,
             reopen_asked: None,
             redial_at: None,
+            text: None,
         });
     });
     // SAFETY: showing the window this thread created.
@@ -167,7 +191,10 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     with_viewer(|v| v.session.shared().set_visible(true));
     let started = Instant::now();
     let stats = pump(seconds, hwnd, &config);
-    let viewer = VIEWER.with(|cell| cell.borrow_mut().take());
+    let mut viewer = VIEWER.with(|cell| cell.borrow_mut().take());
+    if let Some(viewer) = &mut viewer {
+        viewer.text = None;
+    }
     // SAFETY: destroying the window this thread created; the viewer (and
     // with it the swap chain) is already out of the window procedure's
     // reach.
@@ -195,10 +222,27 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
     let mut closing = false;
     let mut msg = MSG::default();
     loop {
-        // SAFETY: the standard message pump on this thread's queue.
-        while unsafe { PeekMessageW(&raw mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+        loop {
+            drain_close();
+            // SAFETY: the standard message pump on this thread's queue.
+            if !unsafe { PeekMessageW(&raw mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+                break;
+            }
+            // PeekMessage can dispatch sent callbacks before yielding this
+            // queued event. An earlier close must beat any next remote input.
+            drain_close();
             if msg.message == WM_QUIT {
                 return stats;
+            }
+            // Native EDIT owns composition and physical typing. Dialog routing
+            // happens outside the viewer borrow so Send/Cancel can borrow the
+            // original owner synchronously instead of dropping the callback.
+            let editor = with_viewer(|v| v.text.as_ref().map(text::Editor::window)).flatten();
+            if let Some(editor) = editor {
+                // SAFETY: our UI thread's live modeless editor and queued message.
+                if unsafe { IsDialogMessageW(editor, &raw const msg) }.as_bool() {
+                    continue;
+                }
             }
             // SAFETY: a message this thread just removed from its queue.
             unsafe {
@@ -206,10 +250,14 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
                 DispatchMessageW(&raw const msg);
             }
         }
+        // A sent close may also arrive during a queue read that returns empty.
+        drain_close();
         let Some((finished, drew)) = with_viewer(|v| step(v, &mut stats, &mut last_sequence))
         else {
             return stats;
         };
+        // Drawing may reenter a native close while step owns the viewer.
+        drain_close();
         if finished {
             match with_viewer(|v| reopen(v, &mut stats, hwnd, config)) {
                 Some(Reopen::Started) => {
@@ -244,6 +292,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     }
     v.redial_at = None;
     v.reopen = false;
+    v.text = None;
     let mut next = config.clone();
     // The earlier input consent ended with its original grant. A resize
     // may reopen a view but cannot request or restore control automatically.
@@ -291,6 +340,12 @@ const REDIAL_PAUSE: Duration = Duration::from_millis(400);
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64) -> (bool, bool) {
     if !v.keys.is_empty() {
         v.send_keys();
+    }
+    if v.text.as_ref().is_some_and(text::Editor::dismissed) {
+        v.text = None;
+    }
+    if let Some(editor) = &mut v.text {
+        editor.refresh();
     }
     let shared = v.session.shared();
     while let Some(event) = shared.events.poll() {
@@ -619,6 +674,62 @@ fn key_result(result: InputResult) -> Result<bool, ()> {
 }
 
 impl Viewer {
+    fn open_text(&mut self, hwnd: HWND) {
+        if self.closing || self.reopen {
+            return;
+        }
+        // Reopening is a new explicit local choice. No content or context from
+        // an earlier editor is copied, including after a refused Send.
+        self.text = None;
+        let (draft, notice) = if self.keys.is_empty() {
+            match self.session.shared().begin_text() {
+                Ok(draft) => (
+                    Some(draft),
+                    "Compose locally; Send transmits the whole value once.",
+                ),
+                Err(InputResult::Unsupported) => (
+                    None,
+                    "This host has not granted direct Unicode text input.",
+                ),
+                Err(InputResult::NotControlled) => {
+                    (None, "Request control before sending text.")
+                }
+                Err(_) => (None, "Text is not ready. Release input and reopen Send text."),
+            }
+        } else {
+            (
+                None,
+                "Earlier keyboard input is still pending. Reopen Send text after it settles.",
+            )
+        };
+        // Creating an owned editor changes native focus. Reconcile holds now;
+        // the resulting WM_KILLFOCUS may reenter this already-borrowed Viewer.
+        self.release_everything();
+        match text::Editor::open(hwnd, self.session.shared_handle(), draft, notice) {
+            Ok(editor) => self.text = Some(editor),
+            Err(_) => eprintln!("fr-windows: text_editor_unavailable"),
+        }
+    }
+
+    fn send_text(&mut self, message_time: u32) {
+        let Some(editor) = self.text.as_mut() else {
+            return;
+        };
+        editor.send(
+            message_time,
+            !self.closing && !self.reopen && self.keys.is_empty(),
+        );
+    }
+
+    /// The independent native fence has already stopped the exact original
+    /// source before this cleanup, even if an OS call reentered a busy Viewer.
+    fn text_deactivated(&mut self) {
+        if self.text.is_some() {
+            self.text = None;
+            self.release_everything();
+        }
+    }
+
     /// The picture point under `(x, y)`. While a button is held the window
     /// has the mouse captured, and points past the picture's edge clamp to
     /// it, so a drag that leaves the picture still releases.
@@ -632,7 +743,7 @@ impl Viewer {
     /// Replaceable old motion may be discarded; losing an ordered transition
     /// instead fences control and delegates held-state cleanup to its owner.
     fn capture_mouse(&mut self, message_time: u32, ordered: bool) -> Option<(CapturedInput, u64)> {
-        if self.closing || self.reopen {
+        if self.closing || self.reopen || self.text.is_some() {
             return None;
         }
         let capture = match self.session.shared().capture_input() {
@@ -811,6 +922,7 @@ impl Viewer {
         self.reopen = false;
         self.keys.clear();
         self.session.shared().input_failed();
+        self.text = None;
         self.buttons.fill(false);
         // SAFETY: release only this UI thread's mouse capture, after the
         // original remote source has been fenced.
@@ -822,10 +934,12 @@ impl Viewer {
         self.reopen = false;
         self.keys.clear();
         self.session.shared().close();
+        self.text = None;
     }
     /// The client area is now `size` (a drag ended, or a maximize or
     /// restore): reopen when the host would send a different picture.
     fn resized(&mut self, size: (u32, u32)) {
+        self.text = None;
         if self.closing
             || self.reopen
             || self.scales != Some(true)
@@ -863,20 +977,39 @@ extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let handled = match message {
+        WM_COMMAND if wparam.0 & 0xffff == text::OPEN => {
+            with_viewer(|v| v.open_text(hwnd));
+            true
+        }
+        WM_ACTIVATEAPP if wparam.0 == 0 => {
+            text::deactivate();
+            with_viewer(Viewer::text_deactivated);
+            false
+        }
         WM_CLOSE => {
+            CLOSE_PENDING.with(|pending| pending.set(true));
+            text::close_owner();
+            drain_close();
             // An orderly close: the loop ends once the session finishes.
-            if with_viewer(Viewer::close).is_none() {
+            // A borrowed viewer retains the coalesced close for the pump;
+            // only an absent owner permits destroying its HWND here.
+            if VIEWER.with(|cell| cell.try_borrow().is_ok_and(|v| v.is_none())) {
+                CLOSE_PENDING.with(|pending| pending.set(false));
                 // SAFETY: no session: destroy this thread's window now.
                 let _ = unsafe { DestroyWindow(hwnd) };
             }
             true
         }
         WM_DESTROY => {
+            text::close_owner();
             // SAFETY: ends this thread's message loop.
             unsafe { PostQuitMessage(0) };
             true
         }
         WM_SIZE => {
+            // Fence an open editor before any nested native work or Viewer
+            // borrow; old text cannot outlive hiding or a mapping change.
+            text::deactivate();
             let (width, height) = point_of(lparam);
             let minimized = wparam.0 == SIZE_MINIMIZED as usize;
             // Maximize and restore arrive outside any drag; a drag's own
@@ -886,6 +1019,7 @@ extern "system" fn window_proc(
                 if minimized {
                     v.mapping = None;
                     v.session.shared().set_visible(false);
+                    v.text = None;
                 } else {
                     v.session.shared().set_visible(true);
                     let size = (
@@ -896,6 +1030,7 @@ extern "system" fn window_proc(
                     // to an earlier size. Old queued coordinates never acquire
                     // the subsequently redrawn mapping.
                     v.mapping = None;
+                    v.text = None;
                     v.session.shared().scroll_end();
                     if v.renderer.resize(size).is_err() {
                         v.session.shared().presentation_failed();
@@ -919,6 +1054,7 @@ extern "system" fn window_proc(
             false
         }
         WM_ENTERSIZEMOVE => {
+            text::deactivate();
             with_viewer(|v| v.sizing = true);
             false
         }
@@ -1003,7 +1139,7 @@ extern "system" fn window_proc(
             // Only a controlled session takes keys; otherwise Windows keeps
             // its own (Alt+F4 and the system menu).
             with_viewer(|v| {
-                if !v.session.shared().controlled() {
+                if v.text.is_some() || !v.session.shared().controlled() {
                     return false;
                 }
                 if let Some(usage) = fr_core::input::windows_scan::usage(scan, extended)

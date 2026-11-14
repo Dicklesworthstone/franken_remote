@@ -36,6 +36,8 @@ mod geometry;
 mod keys;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod options;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod text;
 
 // The original capture policy is safe and platform-neutral; exercise it here
 // without compiling the platform session and media bindings.

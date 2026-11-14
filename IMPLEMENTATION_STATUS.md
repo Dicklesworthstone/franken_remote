@@ -1,5 +1,33 @@
 # Implementation status
 
+## Native Windows committed Unicode text (2026-11-14 UTC)
+
+The Windows viewer now exposes **Input → Send text…**: a native multiline
+editor for Unicode, paste and local IME composition, followed by one explicit
+Send through the host's negotiated direct-text capability. Physical input
+stays local while the editor is open. The complete value is bounded to 4,096
+UTF-8 bytes; malformed UTF-16, NUL, empty values and native overflow refuse the
+whole draft. Send and cancellation clear the edit, preedit and undo state.
+
+The shared Rust API captures the original source/view context at opening,
+then freezes its checked send bound and the native Send gesture's age before
+reading text. One accepted or refused attempt consumes that draft; a renewed
+ticket, replacement session or changed view cannot revive it. Independent
+native callback fences invalidate local cancellation/overflow and stop the
+original source on window/session lifecycle loss, including reentrant calls.
+This leaves the existing C ABI and physical-key path intact.
+
+Ten portable policy regressions cover exact Unicode conversion, independent
+UTF-16/UTF-8 bounds, consumed or invalidated draft custody, lifecycle loss and
+text changes during a native read. The shared no-grant regression exercises
+the new API; existing source-context and capture
+tests cover continuity and original exclusive deadlines. Source review found
+and repaired reentrant lifecycle gaps before publication. New tests and the
+actual Win32 code await existing hosted compiler/Clippy/test execution after
+the local execution service became unavailable. No real Windows IME,
+host-insertion or live-tailnet qualification is claimed; `fr-nuqa` stays in
+progress. See [Windows client usage](docs/windows-client.md).
+
 ## Established audio send expiry preserves the original desktop (2026-11-14 UTC)
 
 Completed AudioDown and AudioUp pairs now retire independently when their
@@ -15,11 +43,15 @@ microphone output retain their connection fences.
 Regressions exercise queued and native-staged records in both directions,
 original control and sibling traffic, late-admission races, source-demand and
 output cleanup, and preservation of the original microphone owners. These
-new tests are not yet executed: the full local metadata check was SIGKILLed
-in unchanged pinned Asupersync, then the execution service became unavailable.
-The portable four-crate check and formatting pass preceded these changes.
-The recovered source was reviewed against the exact GitHub base; existing
-push checks provide the next compiler/runtime verdict. No native-device,
+full local metadata check was SIGKILLed in unchanged pinned Asupersync, then
+the execution service became unavailable. The portable four-crate check and
+formatting pass preceded these changes. Hosted verification for audio source
+commit [903d02d2](https://github.com/Dicklesworthstone/franken_remote/commit/903d02d2a5d6881a79d85392db47d762c3d07e20)
+is still running at this update. Its continued-step API conclusions do not
+establish compiler/test success; the completed job logs and aggregate verdict
+are required. The completed macOS native-audio job passed. The separate pinned
+formatter's four test-file corrections are included with the Windows feature.
+No native-device,
 live-tailnet or loaded-host qualification is claimed; `fr-jy4e` stays in progress.
 
 ## Complete iOS Unicode callbacks without delayed replay (2026-11-14 UTC)

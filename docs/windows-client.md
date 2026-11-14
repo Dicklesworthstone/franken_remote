@@ -69,6 +69,54 @@ after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
 
+## Send Unicode and IME text
+
+During a controlled session, choose **Input → Send text…** from the viewer's
+local menu. The native multiline editor keeps typing, paste and IME preedit on
+this Windows machine. Finish composition and choose **Send once** to submit one
+complete value through the existing negotiated direct-text input capability.
+Physical keys are not forwarded while the editor is open; close it to resume
+ordinary remote shortcuts and typing.
+
+The host must separately grant direct Unicode text. A host that supports only
+physical keys gets an explanatory local refusal; no guessed keyboard layout or
+clipboard insertion is used. Opening while keys/buttons are held or earlier
+input is pending refuses the draft. Release them and reopen the editor for a
+new local choice.
+
+The editor is tied to the exact input source and remote-view context that
+existed when it opened. A genuine suspension, new input grant or changed view
+invalidates the draft even if the same geometry later returns. A short
+compositor readiness gap temporarily disables Send without moving the draft
+to another context. Resize, minimization, closure and reconnection discard it.
+
+**Switching applications, minimizing, or resizing the viewer while the editor
+is open ends the original control session.** Its independent lifecycle fence
+stops input before native IME cleanup, including during a nested Windows
+callback. This also prevents queued text from being sent after that boundary.
+Cancel clears only local composition; text already admitted to the host path
+is not rolled back.
+
+One Send is limited to **4,096 UTF-8 bytes**. Supplementary characters and
+combining marks retain their complete Unicode representation. Empty values,
+embedded NUL, unpaired UTF-16 surrogates and oversized values refuse as a
+whole. Native editor overflow or a change during the Send read discards the
+draft so a truncated prefix or inconsistent value cannot be transmitted.
+Local text, preedit and the native undo buffer are cleared
+after Send or cancellation; none is included in logs or completion JSON.
+
+Send retains the original gesture's queue age, source timestamp, view and
+exclusive deadline. A queued Send that predates the current editor is refused.
+Waiting for native text reads, transport capacity or a renewed ticket cannot
+give that completed value a new lifetime. Both accepted
+and refused attempts consume the editor's original draft; another Send
+requires reopening and a new explicit local choice.
+
+The status **Queued once for the host** confirms bounded local admission only.
+It does not promise atomic host insertion. Existing host scalar-level
+partial/uncertain outcomes still apply, and neither the original value nor an
+unconfirmed suffix is retried automatically.
+
 ## Explicit address constraints
 
 `--address IP` remains repeatable, up to eight distinct addresses. It now
@@ -126,6 +174,15 @@ Portable command-line regressions live in
 compatibility regressions live in
 `crates/fr-mobile-ffi/src/session/connection/tests.rs`. The exact address
 selector's metadata, fresh-read and renewal regressions live in `fr-tailnet`.
+
+The native editor's portable whole-value and one-use-context regressions live
+in `crates/fr-windows/src/text.rs` and compile on every host, including Linux.
+The shared session's no-grant test also exercises the new original-draft API.
+Existing source-context and original-capture regressions cover view/source
+replacement, suspension continuity and exclusive input deadlines. The Windows
+cross-target Clippy lane compiles the actual editor, its Win32/IME bindings and
+the shared session integration. These are separate from real Windows
+IME/lifecycle and host-delivery qualification.
 
 Those checks cover selection and route policy. They do not establish native
 Windows pipe access, GPU behavior or live tailnet connectivity on a particular

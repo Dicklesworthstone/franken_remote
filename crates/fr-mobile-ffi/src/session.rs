@@ -16,10 +16,12 @@ mod completion;
 pub mod connection;
 mod control_policy;
 mod key_capture;
+mod text;
 
 #[cfg(test)]
 use completion::classify;
 pub use completion::end;
+pub use text::{CapturedText, TextDraft};
 pub(crate) use completion::tailnet_end;
 use completion::{LocalStop, ending, requested_terminal};
 use control_policy::requested_capabilities;
@@ -176,6 +178,9 @@ struct Granted {
     keys: [bool; 256],
     buttons: [bool; 5],
     scroll: LineScroller,
+    /// Last checked send bound for this exact text context. The native Send
+    /// gesture freezes it; later renewals cannot extend a queued commit.
+    text_window: Option<(frd::session_startup::viewer_events::TextContext, ClientInstant)>,
 }
 impl Drop for Granted {
     fn drop(&mut self) {
@@ -765,6 +770,12 @@ impl Session {
     pub fn shared(&self) -> &Shared {
         &self.shared
     }
+    /// The exact original session for a native lifecycle fence. A nested OS
+    /// callback can fence it without borrowing the window's mutable renderer.
+    /// Holding this handle cannot renew authority or survive the source's stop.
+    pub fn shared_handle(&self) -> Arc<Shared> {
+        Arc::clone(&self.shared)
+    }
     /// Whether this session was started control-capable.
     pub const fn control(&self) -> bool {
         self.control
@@ -1122,6 +1133,7 @@ fn attach(
                 keys: [false; 256],
                 buttons: [false; 5],
                 scroll: LineScroller::default(),
+                text_window: None,
             };
             // Re-checked under the lock `set_visible` and `close` fence
             // through: one that ran after the check above found nothing to
@@ -1336,6 +1348,7 @@ impl Application for Mobile {
                             // refused push): control, and so the session, ends.
                             return Ok(ControlFlow::Break(fr_wire::closure::Reason::Requested));
                         }
+                        text::refresh_window(viewer, &shared);
                     }
                 }
                 Ok(ControlFlow::Continue(()))

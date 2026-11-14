@@ -178,7 +178,10 @@ fn peer_send_expiry_stops_the_microphone_without_recording_or_losing_control() {
         assert!(host.send_expired(&link.host));
         let until = network::clock(&cx) + 500_000;
         while uplink.state() != State::Stopped {
-            assert!(network::clock(&cx) < until, "audio retirement did not reach its owner");
+            assert!(
+                network::clock(&cx) < until,
+                "audio retirement did not reach its owner"
+            );
             link.drive_uplink(&cx, &mut uplink).await;
         }
         assert_eq!(uplink.reason(), Some(Error::SendExpired));

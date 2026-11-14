@@ -243,14 +243,15 @@ fn audio_send_expiry_inside_native_io_or_after_authority_loss_remains_terminal()
                     l.h.tick(&cx, || false)
                 } else {
                     let mut checks = 0;
-                    let result = l
-                        .h
-                        .drive(&cx, Duration::ZERO, || {
+                    let result =
+                        l.h.drive(&cx, Duration::ZERO, || {
                             checks += 1;
                             if checks == 3 {
                                 // This native future owns a staged prefix. Expiry
                                 // cannot return it to ordinary traffic or reset it.
-                                std::thread::sleep(Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US));
+                                std::thread::sleep(Duration::from_micros(
+                                    MAX_DELIVERY_ALLOWANCE_US,
+                                ));
                             }
                             true
                         })
