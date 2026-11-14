@@ -296,11 +296,26 @@ impl Shared {
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
+        // Fence new native input immediately, but retain the original source
+        // and its receipts until the existing close exchange and cleanup run.
+        // Source::stop cancels in-flight service; using it here would turn an
+        // explicit orderly close into an unconfirmed emergency cancellation.
+        {
+            let granted = self
+                .granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(granted) = granted.as_ref() {
+                granted.stop.store(true, Ordering::SeqCst);
+                granted.source.fence_for_close();
+            }
+        }
         self.clipboard.stop();
-        self.cancel_upload();
+        if let Some(upload) = &self.upload {
+            upload.retire();
+        }
         self.retire_control_request();
         self.retire_display();
-        self.stop_control(None);
     }
     /// A new native picker request, published only after host approval. The
     /// original startup budget and transport continue while the UI decides.
@@ -553,7 +568,11 @@ impl Shared {
         self.end.load(Ordering::SeqCst)
     }
     pub fn controlled(&self) -> bool {
-        self.granted.lock().is_ok_and(|g| g.is_some())
+        !self.close.load(Ordering::SeqCst)
+            && self
+                .granted
+                .lock()
+                .is_ok_and(|g| !self.close.load(Ordering::SeqCst) && g.is_some())
     }
     /// Original optional clipboard evidence. This contains no clipboard text,
     /// local revision, item identifier or input authority.
@@ -579,7 +598,9 @@ impl Shared {
         };
         if dropped.is_some() {
             self.clipboard.retire();
-            self.cancel_upload();
+            if let Some(upload) = &self.upload {
+                upload.retire();
+            }
             if let Some(reason) = reason {
                 self.note_local_stop(reason);
             }
@@ -594,9 +615,17 @@ impl Shared {
     }
 
     fn with_granted(&self, act: impl FnOnce(&mut Granted) -> InputResult) -> InputResult {
+        if self.close.load(Ordering::SeqCst) {
+            return InputResult::ControlLost;
+        }
         let Ok(mut slot) = self.granted.lock() else {
             return InputResult::ControlLost;
         };
+        // A callback may have waited behind the close fence. It must neither
+        // submit input nor drop the retained source and cancel its close I/O.
+        if self.close.load(Ordering::SeqCst) {
+            return InputResult::ControlLost;
+        }
         let Some(granted) = slot.as_mut() else {
             return InputResult::NotControlled;
         };

@@ -78,6 +78,9 @@ impl From<presentation::Error> for Error {
 pub struct ViewerControl {
     cx: Cx,
     stopped: Arc<AtomicBool>,
+    // Irreversible local input admission fence. Unlike emergency stop, this
+    // leaves the original bounded network turn available for orderly close.
+    input_fenced: Arc<AtomicBool>,
 }
 impl ViewerControl {
     pub fn stop(&self) {
@@ -86,6 +89,9 @@ impl ViewerControl {
     }
     pub fn is_stopped(&self) -> bool {
         self.stopped.load(Ordering::Acquire) || self.cx.is_cancel_requested()
+    }
+    fn input_fenced(&self) -> bool {
+        self.input_fenced.load(Ordering::Acquire)
     }
 }
 struct Pending {
@@ -215,6 +221,7 @@ impl ViewerSession {
         let control = ViewerControl {
             cx: self.cx.clone(),
             stopped: Arc::new(AtomicBool::new(false)),
+            input_fenced: Arc::new(AtomicBool::new(false)),
         };
         let viewport = input.viewport();
         Ok(ControlledViewer {
@@ -503,6 +510,12 @@ impl ControlledViewer {
         let ready = self.input.tick(t)?;
         self.publish_text_context(ready, t)?;
         self.abandon_if_suspended(t)?;
+        if self.control.input_fenced() {
+            // Retire captured payloads and never-admitted bytes, retaining the
+            // original action ledger for terminal receipts/unknown effects.
+            self.events = None;
+            self.pending = None;
+        }
         if let Some(events) = &mut self.events {
             let input = &self.input;
             events
@@ -548,6 +561,9 @@ impl ControlledViewer {
     }
     fn slot(&mut self) -> Result<ClientInstant, Error> {
         let t = self.check()?;
+        if self.control.input_fenced() {
+            return Err(Error::Closed);
+        }
         if self.pending.is_some() {
             return Err(Error::Backpressure);
         }
@@ -670,6 +686,10 @@ impl ControlledViewer {
                 }
             }
         }
+        if self.control.input_fenced() {
+            self.pending = None;
+            return Ok(());
+        }
         if let Some(p) = &self.pending {
             let view = std::cell::Cell::new(None);
             let admission = {
@@ -685,6 +705,12 @@ impl ControlledViewer {
                     p.until,
                     || maintenance_gate(&mut input.borrow_mut(), &self.control, cx, &view),
                     || {
+                        // The native close can race this final, per-record
+                        // admission after its encoding/allocation. Refuse only
+                        // this never-admitted input; keep terminal I/O alive.
+                        if self.control.input_fenced() {
+                            return Err(Error::Closed);
+                        }
                         let t = ClientInstant(now(cx)?);
                         input
                             .borrow_mut()
@@ -696,6 +722,11 @@ impl ControlledViewer {
             };
             match admission {
                 Ok(quic::SendAdmission::Accepted) => self.pending = None,
+                Ok(quic::SendAdmission::Refused(Error::Closed))
+                    if self.control.input_fenced() && !self.control.is_stopped() =>
+                {
+                    self.pending = None;
+                }
                 Ok(quic::SendAdmission::Refused(error)) => {
                     if self.input.suspended_since().is_some() && self.input.stopped().is_none() {
                         self.abandon_if_suspended(t)?;

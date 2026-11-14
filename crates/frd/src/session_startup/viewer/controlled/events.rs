@@ -249,15 +249,29 @@ impl Source {
     }
 
     pub fn clock(&self) -> Result<ClientInstant, Error> {
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         now(&self.control.cx)
             .map(ClientInstant)
             .map_err(|_| Error::Clock)
     }
+    /// Permanently refuse new/queued input while the original owner prepares
+    /// its existing orderly close. This is not suspension or replacement
+    /// authority: the source must remain owned until that close and cleanup.
+    /// Already admitted actions keep their original receipts and effect status.
+    /// Unlike emergency `stop`, this does not cancel a native I/O turn midway.
+    pub fn fence_for_close(&self) {
+        self.control
+            .input_fenced
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.clear_queued();
+    }
     pub fn stop(&self) {
         self.control.stop();
+        self.clear_queued();
+    }
+    fn clear_queued(&self) {
         if let Some(queue) = self.queue.upgrade() {
             match queue.try_lock() {
                 Ok(mut queue) => queue.events.clear(),
@@ -304,7 +318,7 @@ impl Source {
         self.clock()?;
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let queue = shared.lock().map_err(|_| Error::Unavailable)?;
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         Ok((!queue.context.suspended).then(|| TextContext {
@@ -333,7 +347,7 @@ impl Source {
         }
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let queue = shared.lock().map_err(|_| Error::Unavailable)?;
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         queue.context_ready(context.state)
@@ -373,7 +387,7 @@ impl Source {
             )
             .map_err(input_context_error)
         })();
-        if result.is_err() {
+        if result.is_err() && !(result == Err(Error::Closed) && self.control.input_fenced()) {
             self.stop();
         }
         result
@@ -460,6 +474,7 @@ impl Source {
         // These whole-value refusals admitted nothing. Keep physical keys
         // usable, and let a still-valid local draft await a compositor gap.
         if result.is_err()
+            && !(result == Err(Error::Closed) && self.control.input_fenced())
             && !matches!(
                 result,
                 Err(Error::UnsupportedText | Error::StaleTextContext | Error::TextNotReady)
@@ -531,7 +546,7 @@ impl Source {
         }
         let shared = self.queue.upgrade().ok_or(Error::Closed)?;
         let mut queue = shared.lock().map_err(|_| Error::Unavailable)?;
-        if self.control.is_stopped() {
+        if self.control.is_stopped() || self.control.input_fenced() {
             return Err(Error::Closed);
         }
         if let Some(until) = until {
@@ -793,6 +808,9 @@ impl ControlledViewer {
     /// path, grant, ticket, wire sequence or async runtime is created.
     pub fn capture_input(&mut self) -> Result<Source, super::Error> {
         let at = self.check()?;
+        if self.control.input_fenced() {
+            return Err(super::Error::Closed);
+        }
         if self.events.is_some() {
             return Err(super::Error::Capture(Error::AlreadyAttached));
         }
@@ -836,6 +854,11 @@ impl ControlledViewer {
         Ok(())
     }
     pub(super) fn dispatch_captured(&mut self) -> Result<(), super::Error> {
+        if self.control.input_fenced() {
+            self.events = None;
+            self.pending = None;
+            return Ok(());
+        }
         let Some(mut receiver) = self.events.take() else {
             return Ok(());
         };
@@ -942,6 +965,14 @@ impl ControlledViewer {
                     &mut receiver.refused_keys,
                     &mut receiver.refused_buttons,
                 );
+                receiver.pending = None;
+                Ok(())
+            }
+            Err(super::Error::Closed)
+                if self.control.input_fenced() && !self.control.is_stopped() =>
+            {
+                // The source was fenced after this event left the queue, but
+                // before input admission. No replay and no cancelled close I/O.
                 receiver.pending = None;
                 Ok(())
             }
