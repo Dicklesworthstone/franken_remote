@@ -1,5 +1,24 @@
 # Implementation status
 
+## Windows capture refuses obsolete desktop pixels (2026-11-14 UTC)
+
+After Desktop Duplication access loss, a recreated interface no longer makes
+retained pixels from the previous interface current. The capture owner requires
+a complete image from the current interface and successful frame release before
+encoding or reporting an unchanged desktop. Startup timeouts, pointer-only
+updates, failed copies and failed releases cannot manufacture that evidence;
+forced IDRs and cursor updates cannot bypass it. Access loss gets one immediate,
+nonblocking retry on the same selected output, then an unavailable result ends
+the original media owner through its existing cleanup path.
+
+Six deterministic tests compile the exact production freshness policy and cover
+startup, healthy static capture, recreation, release/copy failure and repeated
+loss. All six passed, as did strict standalone Clippy and pinned formatting,
+before the execution environment became unavailable. The baseline portable
+fr-core/fr-wire/fr-media/fr-client suites also passed 1,755 tests. Native Windows
+compilation and lock/UAC/display transition qualification remain pending; this
+is source-policy evidence, not new hardware qualification (`fr-4f9m`).
+
 ## Serial reconnects and cleanup-confirmed host recovery (2026-11-13 UTC)
 
 The capacity-one listener now rebinds its exact protected address set after

@@ -3,9 +3,9 @@
 //! texture and the frame released at once, so the compositor never waits on
 //! this process. Desktop Duplication leaves the pointer out of the image; it
 //! is drawn into a second, GDI-compatible copy before conversion.
+use super::freshness::{Frame, Observation, Source};
 use crate::NativeError;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE, POINT};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -149,35 +149,26 @@ pub struct Pointer {
     visible: bool,
 }
 
-/// How long the last image may stand while the input desktop refuses
-/// duplication. A UAC prompt or the Ctrl+Alt+Del screen is answered at the
-/// machine; a lock, user switch or logoff ends the share through frd's
-/// session monitor long before this.
-const REFUSED_DESKTOP_LIMIT: Duration = Duration::from_secs(60);
-/// Spacing of duplication attempts while the desktop refuses them.
-const REFUSED_DESKTOP_RETRY: Duration = Duration::from_millis(100);
-
 pub struct Duplicator {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     output: IDXGIOutput1,
-    /// None while the input desktop refuses duplication.
+    /// None after access loss, until the selected output is duplicated again.
     duplication: Option<IDXGIOutputDuplication>,
-    /// When the input desktop began refusing duplication, and the last try.
-    refused: Option<(Instant, Instant)>,
     /// The last duplicated desktop image, without the pointer.
     desktop: ID3D11Texture2D,
     /// `desktop` plus the pointer; the converter's input.
     composed: ID3D11Texture2D,
     display: WinDisplay,
-    has_picture: bool,
+    /// Evidence belongs to `duplication`, never to the cached GPU texture.
+    source: Source,
     hotspots: HashMap<isize, POINT>,
     /// Desktop images acquired (new presents, not pointer-only updates).
     pub acquired: u64,
     /// Duplications recreated after `DXGI_ERROR_ACCESS_LOST`.
     pub recreated: u64,
-    /// Times the input desktop refused a new duplication (the secure
-    /// desktop of a UAC prompt or Ctrl+Alt+Del) and the last image stood.
+    /// Times the input desktop refused a new duplication. Retained pixels
+    /// cannot establish source progress while that desktop is unavailable.
     pub refused_desktops: u64,
 }
 
@@ -262,9 +253,8 @@ impl Duplicator {
             context,
             output,
             duplication: Some(duplication),
-            refused: None,
             display: *display,
-            has_picture: false,
+            source: Source::default(),
             hotspots: HashMap::new(),
             acquired: 0,
             recreated: 0,
@@ -279,95 +269,104 @@ impl Duplicator {
         &self.composed
     }
     pub const fn has_picture(&self) -> bool {
-        self.has_picture
+        self.source.has_image()
     }
 
     /// Takes the newest desktop image, waiting up to `wait_ms` for one.
-    /// `true` when the image changed since the previous call. A pointer-only
-    /// update is not an image change; `pointer` reports it.
-    pub fn poll(&mut self, wait_ms: u32) -> Result<bool, NativeError> {
-        // A counted reference: the arms below may replace the field.
-        let Some(duplication) = self.duplication.clone() else {
-            self.reduplicate()?;
-            return Ok(false);
-        };
-        let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
-        let mut resource: Option<IDXGIResource> = None;
-        // SAFETY: valid out pointers on the live duplication; an acquired
-        // frame is released below before any other duplication call.
-        let acquired =
-            unsafe { duplication.AcquireNextFrame(wait_ms, &raw mut info, &raw mut resource) };
-        match acquired {
-            Ok(()) => {}
-            Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
-            Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
-                // A desktop switch (secure desktop, lock), a mode change or a
-                // full-screen exclusive application. A new duplication starts
-                // with a full image; a changed mode ends the capture; a
-                // desktop that refuses duplication is waited out.
-                self.duplication = None;
-                self.reduplicate()?;
-                return Ok(false);
+    /// A timeout or pointer-only update can verify the existing image only
+    /// while its original duplication remains valid. After access loss, one
+    /// immediate replacement acquisition may supply a new image; a denied or
+    /// still-empty replacement is unknown, never an unchanged observation.
+    pub(super) fn poll(&mut self, wait_ms: u32) -> Result<Observation, NativeError> {
+        for attempt in 0..2 {
+            if self.duplication.is_none() && !self.reduplicate()? {
+                return Ok(Observation::Unknown);
             }
-            Err(_) => return Err(NativeError::Unavailable),
-        }
-        let copied = (|| {
-            if info.LastPresentTime == 0 {
-                return Ok(false);
+            // A counted reference: the arms below may replace the field.
+            let duplication = self.duplication.clone().ok_or(NativeError::Unavailable)?;
+            let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource: Option<IDXGIResource> = None;
+            // Only the initial acquisition may wait. Interface recreation
+            // does not restart or lengthen this request's wait budget.
+            let wait = if attempt == 0 { wait_ms } else { 0 };
+            // SAFETY: valid out pointers on the live duplication; an acquired
+            // frame is released below before any other duplication call.
+            let acquired =
+                unsafe { duplication.AcquireNextFrame(wait, &raw mut info, &raw mut resource) };
+            match acquired {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    return Ok(self.source.unchanged());
+                }
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                    self.source.invalidate();
+                    self.duplication = None;
+                    continue;
+                }
+                Err(_) => {
+                    self.source.invalidate();
+                    return Err(NativeError::Unavailable);
+                }
             }
-            let image: ID3D11Texture2D = resource
-                .as_ref()
-                .ok_or(NativeError::Unavailable)?
-                .cast()
-                .map_err(|_| NativeError::Unavailable)?;
-            // SAFETY: both textures are BGRA of the display's size on the
-            // same device; the copy is queued before the frame is released.
-            unsafe { self.context.CopyResource(&self.desktop, &image) };
-            Ok(true)
-        })();
-        drop(resource);
-        // SAFETY: the frame acquired above, released exactly once.
-        let released = unsafe { duplication.ReleaseFrame() };
-        let copied = copied?;
-        if released.is_err() {
-            return Err(NativeError::Unavailable);
+            let copied = (|| {
+                if info.LastPresentTime == 0 {
+                    return Ok(false);
+                }
+                let image: ID3D11Texture2D = resource
+                    .as_ref()
+                    .ok_or(NativeError::Unavailable)?
+                    .cast()
+                    .map_err(|_| NativeError::Unavailable)?;
+                // SAFETY: both textures are BGRA of the display's size on the
+                // same device; the copy is queued before the frame is released.
+                unsafe { self.context.CopyResource(&self.desktop, &image) };
+                Ok(true)
+            })();
+            drop(resource);
+            // SAFETY: the frame acquired above, released exactly once, also
+            // when copying failed or the callback contained only a pointer.
+            let released = unsafe { duplication.ReleaseFrame() };
+            let frame = match &copied {
+                Ok(true) => Frame::Image,
+                Ok(false) => Frame::PointerOnly,
+                Err(_) => Frame::Failed,
+            };
+            let observation = self.source.released(frame, released.is_ok());
+            let copied = copied?;
+            match released {
+                Ok(()) => {}
+                Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
+                    // Even a completed CopyResource belongs to the lost
+                    // duplication; its pixels were invalidated above.
+                    self.duplication = None;
+                    continue;
+                }
+                Err(_) => return Err(NativeError::Unavailable),
+            }
+            if copied {
+                self.acquired += 1;
+            }
+            return Ok(observation);
         }
-        if copied {
-            self.has_picture = true;
-            self.acquired += 1;
-        }
-        Ok(copied)
+        Ok(Observation::Unknown)
     }
 
-    /// Replaces a lost duplication. While the input desktop refuses one,
-    /// the last image stands (no change is reported) and a new one is tried
-    /// every `REFUSED_DESKTOP_RETRY`, for at most `REFUSED_DESKTOP_LIMIT`.
-    /// Only this display's own desktop is ever duplicated: the refusing
-    /// desktop is waited out, never followed.
-    fn reduplicate(&mut self) -> Result<(), NativeError> {
-        let now = Instant::now();
-        if let Some((since, tried)) = &mut self.refused {
-            if now.duration_since(*since) > REFUSED_DESKTOP_LIMIT {
-                return Err(NativeError::Unavailable);
-            }
-            if now.duration_since(*tried) < REFUSED_DESKTOP_RETRY {
-                return Ok(());
-            }
-            *tried = now;
-        }
+    /// Replaces a lost duplication of this output. Successful recreation
+    /// alone is not source evidence: its first desktop image is still owed.
+    /// A refusing desktop is never followed or represented by cached pixels.
+    fn reduplicate(&mut self) -> Result<bool, NativeError> {
+        self.source.invalidate();
         match duplicate(&self.output, &self.device, &self.display)? {
             Some(duplication) => {
                 self.duplication = Some(duplication);
-                self.refused = None;
                 self.recreated += 1;
+                Ok(true)
             }
-            None if self.refused.is_none() => {
-                self.refused = Some((now, now));
+            None => {
                 self.refused_desktops += 1;
+                Ok(false)
             }
-            None => {}
         }
-        Ok(())
     }
 
     /// Where the pointer is now, relative to this display.

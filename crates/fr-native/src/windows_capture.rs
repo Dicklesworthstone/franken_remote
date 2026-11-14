@@ -9,11 +9,14 @@
 //!
 //! The pointer is drawn into the picture, as on macOS. `Unchanged` is
 //! returned only on Desktop Duplication's own evidence: no new desktop image
-//! since the last encoded one, and the pointer where it was drawn. Rotated
-//! displays are refused for now.
+//! since the last encoded one, and the pointer where it was drawn. Access
+//! loss invalidates retained pixels until a replacement duplication supplies
+//! a new image; denied or unserviced capture never becomes a fresh timestamp.
+//! Rotated displays are refused for now.
 mod convert;
 mod duplication;
 mod encoder;
+mod freshness;
 mod parent;
 
 use crate::NativeError;
@@ -53,7 +56,7 @@ pub struct CaptureStatistics {
     /// Duplications recreated after the desktop switched or the mode reset.
     pub recreated: u64,
     /// Times the input desktop refused a new duplication (a UAC prompt or
-    /// Ctrl+Alt+Del) and the last image stood until it came back.
+    /// Ctrl+Alt+Del). Capture refuses rather than refreshing cached pixels.
     pub refused_desktops: u64,
     /// Encoded units, and how many of them were IDR pictures.
     pub encoded: u64,
@@ -291,14 +294,15 @@ impl WinCapture {
             FIRST_IMAGE_MS
         };
         let began = Instant::now();
-        let changed = self.source.poll(wait)?;
+        let observation = self.source.poll(wait)?;
         let polled = Instant::now();
-        if !self.source.has_picture() {
+        let capture = observation.capture(force_idr || !only_if_changed);
+        if capture == freshness::Capture::Refuse {
             return Err(NativeError::Unavailable);
         }
         let pointer = self.source.pointer();
         let pointer_moved = self.drawn != Some(pointer);
-        if only_if_changed && !force_idr && !changed && !pointer_moved {
+        if capture == freshness::Capture::Unchanged && !pointer_moved {
             let reference = self.last_output.ok_or(NativeError::Codec)?;
             self.statistics.unchanged += 1;
             return Ok(Captured::Unchanged(UnchangedCapture {
@@ -371,7 +375,7 @@ impl WinCapture {
                 self.statistics.unrequested_idr += 1;
             }
         }
-        if !changed {
+        if observation == freshness::Observation::Unchanged {
             self.statistics.pointer_only += 1;
         }
         self.last_output = Some(frame);

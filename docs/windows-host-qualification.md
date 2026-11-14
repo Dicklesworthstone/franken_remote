@@ -12,7 +12,7 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 
 1. **Desktop Duplication capture:** Direct3D 11 / DXGI Desktop Duplication API (`IDXGIOutputDuplication`) for low-latency full-display capture with dirty-region and hardware cursor metadata.
 2. **Prompt frame release invariant:** When `AcquireNextFrame` succeeds, retaining the borrowed DXGI resource blocks subsequent display frame presentation in the OS. The capture pipeline copies the frame to an `OwnedGpuSurface` and calls `ReleaseFrame` immediately.
-3. **Display transitions & GPU fault recovery:** Desktop switches (`DXGI_ERROR_ACCESS_LOST` on lock screen, UAC elevation prompt, or fast user switching) and GPU driver crashes/resets (`DXGI_ERROR_DEVICE_REMOVED` on TDR) are handled explicitly via a recovery state machine with exponential backoff and typed event logging, never conflated with transport network failures.
+3. **Display transitions & GPU fault recovery:** Desktop Duplication access loss invalidates evidence from the old interface before a bounded recreation attempt; an unavailable current image ends the original capture owner. Section 3 describes this implemented path. Automatic lock/UAC recovery and GPU reset recovery remain unqualified.
 4. **Hybrid GPU qualification:** For dual-GPU systems (e.g. laptops with Intel/AMD integrated GPU driving physical outputs and NVIDIA discrete GPU offering NVENC), the capture adapter is matched to the physical display output, and texture transfer to the encoder GPU uses Direct3D 11 shared NT handles (`D3D11_RESOURCE_MISC_SHARED_NTHANDLE`) with measured transfer overhead.
 5. **HDR to SDR tone-mapping:** Displays operating in HDR / wide color gamut (WCG) mode with `DXGI_FORMAT_R10G10B10A2_UNORM` or `DXGI_FORMAT_R16G16B16A16_FLOAT` use `DuplicateOutput1` to select SDR or apply qualified ITU-R BT.2446 Method A / Reinhard tone-mapping to 8-bit NV12 / BGRA without altering user OS display settings.
 6. **Session 0 isolation & service split:** The host service (`frd`) runs as a Windows Service in non-interactive Session 0. **The service never captures Session 0 as the user desktop.** It delegates capture and input to an interactive user agent running in the active console session (`WTSGetActiveConsoleSessionId()`).
@@ -96,23 +96,29 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 
 ## 3. Transition and Recovery State Machine
 
-When a display or desktop transition occurs:
+The current interactive host treats capture evidence as belonging to one
+Desktop Duplication instance. A successful complete image copy followed by a
+successful `ReleaseFrame` establishes that evidence. A timeout or pointer-only
+update from that same valid instance can then report the desktop unchanged.
 
-```
-[Normal Capture]
-       |
-       | DXGI_ERROR_ACCESS_LOST (Lock / UAC / Switch)
-       v
-[Awaiting Retry (Exponential Backoff)]
-       |
-       | Desktop Available (Unlock / Return from UAC)
-       v
-[Re-enumerating Outputs & Recreating Duplication]
-       |
-       +--> Success: [Normal Capture] (Logged as TransitionLogEntry)
-       |
-       +--> Exhausted Max Retries: [FatalFault] (Clean teardown)
-```
+`DXGI_ERROR_ACCESS_LOST` from acquisition or release invalidates the evidence
+before duplication is recreated on the same selected output. Recreation alone
+does not refresh the retained texture. At most one immediate nonblocking
+acquisition is attempted after recreation; a full image and successful release
+are required before encoding resumes. Without them, capture returns unavailable
+and the existing media owner closes. There is no sixty-second loop presenting
+old pixels as newly observed desktop state. A forced IDR, cursor change or
+request to encode a static frame cannot bypass this refusal.
+
+Copy and release failures also invalidate the current evidence. Healthy static
+capture retains its existing unchanged-frame behavior. The session monitor
+independently ends sharing on lock, console-session loss, switch or logoff.
+Automatic recovery across a real lock, UAC transition, display replacement or
+GPU reset remains a native qualification item, not a measured result here.
+
+Six portable tests include the exact production freshness policy and passed
+with strict standalone Clippy on 2026-11-14. They verify the evidence decisions;
+they do not execute DXGI or qualify a physical Windows transition.
 
 ---
 
