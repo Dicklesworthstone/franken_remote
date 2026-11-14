@@ -6,10 +6,10 @@ license-file.workspace = true
 repository.workspace = true
 publish = false
 
-# The Windows client: the shared session core (fr-mobile-ffi, which already
-# dials one exact MagicDNS name under strict WebPKI for the iOS app), driven
-# from a native Win32 window with Media Foundation decode and a D3D11 swap
-# chain. Other platforms build a stub that says so.
+# The Windows client: installed Tailscale discovery and authenticated native
+# connections through the shared session core (fr-mobile-ffi), driven from a
+# Win32 window with Media Foundation decode and a D3D11 swap chain. Other
+# platforms build a stub that says so.
 [[bin]]
 name = "fr-windows"
 path = "src/main.rs"

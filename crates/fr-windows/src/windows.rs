@@ -2,11 +2,17 @@ mod probe;
 mod render;
 mod viewer;
 
-use crate::USAGE;
+use crate::{
+    USAGE,
+    options::{Family, Options},
+};
 use fr_mobile_ffi::directory::{Request, fetch};
-use fr_mobile_ffi::session::Config;
-use fr_tailnet::{DEFAULT_SERVICE_PORT, HostName, HostPin};
-use std::{io::Write, net::IpAddr, process::ExitCode};
+use fr_mobile_ffi::session::{
+    Config,
+    connection::{self, AddressFamily, Target},
+};
+use fr_tailnet::{DEFAULT_SERVICE_PORT, Error, PeerTransportPath};
+use std::{io::Write, process::ExitCode};
 
 pub fn run(args: &[String]) -> ExitCode {
     if let [command, rest @ ..] = args
@@ -14,7 +20,12 @@ pub fn run(args: &[String]) -> ExitCode {
     {
         return probe::run(rest);
     }
-    let [command, host, rest @ ..] = args else {
+    if let [command] = args
+        && command == "hosts"
+    {
+        return hosts();
+    }
+    let [command, selection, rest @ ..] = args else {
         return usage();
     };
     let view = match command.as_str() {
@@ -22,34 +33,41 @@ pub fn run(args: &[String]) -> ExitCode {
         "view" => true,
         _ => return usage(),
     };
-    let Some(options) = Options::parse(rest, view) else {
+    let Some(options) = Options::parse(rest, view, DEFAULT_SERVICE_PORT) else {
         return usage();
     };
-    let Ok(name) = HostName::parse(host) else {
-        eprintln!("fr-windows: the host must be an exact <machine>.<tailnet>.ts.net name");
-        return ExitCode::from(2);
+    let snapshot = match connection::discover() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return discovery_failed(error),
     };
-    let pin = if options.addresses.is_empty() {
-        None
-    } else if let Ok(pin) = HostPin::from_addresses(name.clone(), options.addresses) {
-        Some(pin)
-    } else {
-        eprintln!("fr-windows: --address must be the host's own tailnet address");
-        return ExitCode::from(2);
+    let family = match options.family {
+        Family::Automatic => AddressFamily::Automatic,
+        Family::Ipv4 => AddressFamily::Ipv4,
+        Family::Ipv6 => AddressFamily::Ipv6,
+    };
+    let target = match Target::installed(&snapshot, selection, options.addresses, family) {
+        Ok(target) => target,
+        Err(error) => {
+            let guidance = if error == Error::AddressMismatch {
+                "Use the complete address set from 'fr-windows hosts', or omit --address and use --ipv4 or --ipv6."
+            } else {
+                "Run 'fr-windows hosts' and choose one stable_id or full name from that listing."
+            };
+            eprintln!("fr-windows: host selection refused ({error:?}). {guidance}");
+            return ExitCode::from(2);
+        }
     };
     if !view {
-        return directory(name, options.port, pin);
+        return directory(target, options.port);
     }
-    let direct = pin.is_some();
+    let title = format!("FrankenRemote - {}", target.certificate_name());
     let config = Config {
-        host: name,
+        target,
         port: options.port,
-        pin,
         control: options.control,
-        direct,
         picture: None,
     };
-    viewer::run(config, &format!("FrankenRemote - {host}"), options.seconds)
+    viewer::run(config, &title, options.seconds)
 }
 
 fn usage() -> ExitCode {
@@ -57,60 +75,66 @@ fn usage() -> ExitCode {
     ExitCode::from(2)
 }
 
-struct Options {
-    port: u16,
-    /// `--address IP` (repeatable): dial these tailnet addresses instead of
-    /// resolving the name. Windows' `MagicDNS` answers only the A record, so
-    /// a host that serves IPv6 alone is reachable only this way until the
-    /// client reads the installed `LocalAPI`.
-    addresses: Vec<IpAddr>,
-    /// `view --control`: ask the host for control at once.
-    control: bool,
-    /// `view --seconds N`: close in order after N seconds.
-    seconds: Option<u64>,
-}
-impl Options {
-    fn parse(mut rest: &[String], view: bool) -> Option<Self> {
-        let mut options = Self {
-            port: DEFAULT_SERVICE_PORT,
-            addresses: Vec::new(),
-            control: false,
-            seconds: None,
-        };
-        loop {
-            match rest {
-                [] => return Some(options),
-                [flag, tail @ ..] if view && flag == "--control" => {
-                    options.control = true;
-                    rest = tail;
-                }
-                [flag, value, tail @ ..] => {
-                    match flag.as_str() {
-                        "--port" => options.port = value.parse().ok().filter(|port| *port != 0)?,
-                        "--address" => options.addresses.push(value.parse().ok()?),
-                        "--seconds" if view => {
-                            options.seconds = Some(value.parse().ok().filter(|s| *s != 0)?);
-                        }
-                        _ => return None,
-                    }
-                    rest = tail;
-                }
-                [_] => return None,
-            }
+fn discovery_failed(error: Error) -> ExitCode {
+    let guidance = match error {
+        Error::BackendNotRunning => "Connect this machine to Tailscale and retry.",
+        Error::LocalApiUnavailable => "Start the installed Tailscale service and retry.",
+        Error::LocalApiDenied | Error::UntrustedLocalApi => {
+            "Check access to the installed Tailscale service's authenticated LocalAPI."
         }
+        Error::Timeout => "The installed Tailscale service did not answer in time; retry.",
+        _ => "Check the installed Tailscale service and retry 'fr-windows hosts'.",
+    };
+    eprintln!("fr-windows: local discovery failed ({error:?}). {guidance}");
+    ExitCode::from(1)
+}
+
+/// One local informational snapshot. Selecting a listed node later repeats
+/// discovery; the connector then resolves the retained ID/name before dialing.
+fn hosts() -> ExitCode {
+    let snapshot = match connection::discover() {
+        Ok(snapshot) => snapshot,
+        Err(error) => return discovery_failed(error),
+    };
+    let machines: Vec<_> = snapshot
+        .peers()
+        .iter()
+        .map(|peer| {
+            let path = match peer.transport_path() {
+                PeerTransportPath::Direct { .. } => "direct",
+                PeerTransportPath::DerpRelayed { .. } => "relayed",
+                PeerTransportPath::Unknown => "unknown",
+            };
+            serde_json::json!({
+                "stable_id": peer.stable_id(),
+                "name": peer.certificate_name(),
+                "addresses": peer.addresses().iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "path": path,
+            })
+        })
+        .collect();
+    let excluded = snapshot.excluded();
+    let document = serde_json::json!({
+        "status": "ok",
+        "source": "installed_tailscale",
+        "readiness": "not_probed",
+        "machines": machines,
+        "excluded": {
+            "shared": excluded.shared,
+            "expired": excluded.expired,
+            "unusable": excluded.unusable,
+        },
+    });
+    if writeln!(std::io::stdout().lock(), "{document}").is_err() {
+        return ExitCode::from(74);
     }
+    ExitCode::SUCCESS
 }
 
 /// One fetch, printed as the session core's JSON document. Exit 0 only when
 /// the host listed its directory.
-fn directory(host: HostName, port: u16, pin: Option<HostPin>) -> ExitCode {
-    let direct = pin.is_some();
-    let json = fetch(Request {
-        host,
-        port,
-        pin,
-        direct,
-    });
+fn directory(target: Target, port: u16) -> ExitCode {
+    let json = fetch(Request { target, port });
     let listed =
         serde_json::from_str::<serde_json::Value>(&json).is_ok_and(|value| value["status"] == "ok");
     if writeln!(std::io::stdout().lock(), "{json}").is_err() {

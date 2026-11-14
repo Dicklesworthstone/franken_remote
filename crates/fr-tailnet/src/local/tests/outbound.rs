@@ -517,3 +517,105 @@ fn pinned_selection_checks_both_reads_and_uses_current_node_addresses() {
         );
     });
 }
+
+#[test]
+fn explicit_address_selection_checks_both_original_metadata_reads() {
+    let original = status();
+    let mut changed = original.clone();
+    peer_mut(&mut changed)["TailscaleIPs"] = json!(["100.64.0.3"]);
+    let server = Server::new(
+        vec![response(&original, false), response(&changed, false)],
+        Duration::ZERO,
+    );
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let addresses = ["100.64.0.2".parse().unwrap()];
+        assert!(matches!(
+            server
+                .client
+                .peer_target(
+                    &cx,
+                    PeerSelector::PinnedAddresses {
+                        stable_id: "n-peer",
+                        certificate_name: "remote.fixture.ts.net",
+                        addresses: &addresses,
+                    },
+                )
+                .await,
+            Err(Error::AddressMismatch)
+        ));
+    });
+    assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn explicit_address_target_renews_only_the_original_identity_and_lifetime() {
+    for address_changes in [false, true] {
+        let original = status();
+        let mut later = original.clone();
+        if address_changes {
+            peer_mut(&mut later)["TailscaleIPs"] = json!(["100.64.0.3"]);
+        }
+        let server = Server::new(
+            vec![
+                response(&original, false),
+                response(&original, false),
+                response(&later, false),
+            ],
+            Duration::ZERO,
+        );
+        runtime().block_on(async {
+            let cx = Cx::current().unwrap();
+            let addresses = ["100.64.0.2".parse().unwrap()];
+            let target = server
+                .client
+                .peer_target(
+                    &cx,
+                    PeerSelector::PinnedAddresses {
+                        stable_id: "n-peer",
+                        certificate_name: "remote.fixture.ts.net",
+                        addresses: &addresses,
+                    },
+                )
+                .await
+                .unwrap();
+            let mut owner = crate::TargetOwner::new(server.client.clone(), cx, target).unwrap();
+            let lease = owner.lease();
+            if address_changes {
+                assert_eq!(owner.refresh().await, Err(Error::IdentityChanged));
+                assert_eq!(lease.check(), Err(Error::IdentityChanged));
+            } else {
+                assert!(owner.refresh().await.is_ok());
+                assert!(lease.check().is_ok());
+                drop(owner);
+                assert_eq!(lease.check(), Err(Error::Revoked));
+            }
+        });
+    }
+}
+
+#[test]
+fn invalid_explicit_address_constraints_are_refused_before_local_io() {
+    let server = Server::new(vec![response(&status(), false)], Duration::ZERO);
+    runtime().block_on(async {
+        let cx = Cx::current().unwrap();
+        let address = "100.64.0.2".parse().unwrap();
+        for addresses in [vec![], vec![address, address], vec![address; 9]] {
+            assert!(matches!(
+                server
+                    .client
+                    .peer_target(
+                        &cx,
+                        PeerSelector::PinnedAddresses {
+                            stable_id: "n-peer",
+                            certificate_name: "remote.fixture.ts.net",
+                            addresses: &addresses,
+                        },
+                    )
+                    .await,
+                Err(Error::InvalidEndpoint)
+            ));
+        }
+    });
+    assert_eq!(server.calls.load(Ordering::SeqCst), 0);
+}

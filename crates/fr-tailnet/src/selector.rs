@@ -12,6 +12,16 @@ pub enum PeerSelector<'a> {
         stable_id: &'a str,
         certificate_name: &'a str,
     },
+    /// Compare the ID, canonical name and COMPLETE node-owned address set
+    /// against the same fresh daemon record. Addresses constrain selection;
+    /// they never replace installed metadata or the server's TLS identity.
+    /// A partial set refuses rather than permitting a dial to an unlisted
+    /// alternate-family address. Order is immaterial; duplicates are invalid.
+    PinnedAddresses {
+        stable_id: &'a str,
+        certificate_name: &'a str,
+        addresses: &'a [IpAddr],
+    },
     Name(&'a str),
     Address(IpAddr),
 }
@@ -29,6 +39,27 @@ impl PeerSelector<'_> {
             } => {
                 Self::StableId(stable_id).validate()?;
                 Self::Name(certificate_name).validate()
+            }
+            Self::PinnedAddresses {
+                stable_id,
+                certificate_name,
+                addresses,
+            } => {
+                Self::Pinned {
+                    stable_id,
+                    certificate_name,
+                }
+                .validate()?;
+                if addresses.is_empty() || addresses.len() > 8 {
+                    return Err(Error::InvalidEndpoint);
+                }
+                for (index, address) in addresses.iter().enumerate() {
+                    Self::Address(*address).validate()?;
+                    if addresses[..index].contains(address) {
+                        return Err(Error::InvalidEndpoint);
+                    }
+                }
+                Ok(())
             }
             Self::StableId(s)
                 if !s.is_empty() && s.len() <= 128 && !s.chars().any(char::is_control) =>

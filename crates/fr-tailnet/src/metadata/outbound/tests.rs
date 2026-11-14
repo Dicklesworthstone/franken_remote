@@ -40,6 +40,103 @@ fn verify(status: &Value, who: &Value, ip: &str) -> Result<Option<String>, Error
     )
 }
 
+fn pinned_addresses(status: &Value, addresses: &[IpAddr]) -> Result<Target, Error> {
+    resolve(
+        &Status::parse(&serde_json::to_vec(status).unwrap()).unwrap(),
+        PeerSelector::PinnedAddresses {
+            stable_id: "n-2",
+            certificate_name: "remote.fixture.ts.net",
+            addresses,
+        },
+    )
+}
+
+#[test]
+fn explicit_addresses_constrain_the_full_fresh_set_without_replacing_metadata() {
+    let (status, _) = fixtures();
+    let addresses = [
+        "fd7a:115c:a1e0::2".parse().unwrap(),
+        "100.64.0.2".parse().unwrap(),
+    ];
+    let selected = pinned_addresses(&status, &addresses).unwrap();
+    let ordinary = target(&status);
+    assert!(selected == ordinary);
+    assert_eq!(selected.certificate_name, "remote.fixture.ts.net");
+    assert_eq!(selected.peer.ips.0, ordinary.peer.ips.0);
+    assert_eq!(
+        format!(
+            "{:?}",
+            PeerSelector::PinnedAddresses {
+                stable_id: "n-2",
+                certificate_name: "remote.fixture.ts.net",
+                addresses: &addresses,
+            }
+        ),
+        "PeerSelector([redacted])"
+    );
+}
+
+#[test]
+fn partial_foreign_and_extra_explicit_addresses_never_select_a_peer() {
+    let (status, _) = fixtures();
+    for addresses in [
+        vec!["100.64.0.2"],
+        vec!["fd7a:115c:a1e0::2"],
+        vec!["100.64.0.3", "fd7a:115c:a1e0::2"],
+        vec!["100.64.0.2", "fd7a:115c:a1e0::3"],
+        vec!["100.64.0.2", "fd7a:115c:a1e0::2", "100.64.0.3"],
+    ] {
+        let addresses: Vec<IpAddr> = addresses.iter().map(|ip| ip.parse().unwrap()).collect();
+        assert_eq!(
+            pinned_addresses(&status, &addresses).err(),
+            Some(Error::AddressMismatch)
+        );
+    }
+}
+
+#[test]
+fn explicit_address_selection_rejects_empty_duplicate_and_oversized_sets() {
+    let (status, _) = fixtures();
+    let v4: IpAddr = "100.64.0.2".parse().unwrap();
+    let v6: IpAddr = "fd7a:115c:a1e0::2".parse().unwrap();
+    for addresses in [
+        vec![],
+        vec![v4, v4],
+        vec![v4, v6, v6],
+        (2..=10)
+            .map(|last| IpAddr::from([100, 64, 0, last]))
+            .collect(),
+        vec!["::ffff:100.64.0.2".parse().unwrap(), v6],
+        vec!["127.0.0.1".parse().unwrap(), v6],
+    ] {
+        assert_eq!(
+            pinned_addresses(&status, &addresses).err(),
+            Some(Error::InvalidEndpoint)
+        );
+    }
+}
+
+#[test]
+fn explicit_addresses_do_not_authorize_a_renamed_or_replaced_node() {
+    let (status, _) = fixtures();
+    let addresses = [
+        "100.64.0.2".parse().unwrap(),
+        "fd7a:115c:a1e0::2".parse().unwrap(),
+    ];
+    let mut renamed = status.clone();
+    peer(&mut renamed)["DNSName"] = json!("renamed.fixture.ts.net.");
+    assert_eq!(
+        pinned_addresses(&renamed, &addresses).err(),
+        Some(Error::IdentityChanged)
+    );
+    let mut replaced = status;
+    peer(&mut replaced)["ID"] = json!("n-replacement");
+    assert_eq!(
+        pinned_addresses(&replaced, &addresses).err(),
+        Some(Error::IdentityMismatch)
+    );
+}
+
 #[test]
 fn exact_whois_identity_keeps_both_families_and_its_key_expiry() {
     let (status, who) = fixtures();

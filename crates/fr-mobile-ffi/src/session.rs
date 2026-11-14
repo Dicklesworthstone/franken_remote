@@ -1,7 +1,7 @@
 //! One viewer session on its own thread: frd's reconnecting supervisor over
-//! the named (`MagicDNS` + strict `WebPKI`) client, the in-process
-//! `VideoToolbox` presenter, and the granted event source the app's input
-//! calls push into.
+//! an installed-daemon or named (`MagicDNS` + strict `WebPKI`) client, the
+//! platform's in-process presenter, and the granted event source the app's
+//! input calls push into.
 //!
 //! The app's main thread never blocks on the session. It polls events,
 //! copies the newest picture, reports what it actually drew, and pushes input;
@@ -13,6 +13,7 @@
 //! invisible view. Ending control ends the session (`CONTROL_STOPPED` when
 //! this device stopped it); viewing again is a new session.
 mod completion;
+pub mod connection;
 mod key_capture;
 
 #[cfg(test)]
@@ -47,7 +48,7 @@ use fr_wire::display::{Catalog, Display};
 use frd::{
     media::PresentationStage,
     native_connection::{
-        Client, Configuration, HostName, HostPin, PinWatch,
+        Configuration, PinWatch,
         reconnect::{self, Application, CallbackError, Failure, Status},
     },
     session_startup::{
@@ -145,14 +146,9 @@ fn requested_capabilities() -> Capabilities {
 
 #[derive(Clone)]
 pub struct Config {
-    pub host: HostName,
+    pub target: connection::Target,
     pub port: u16,
-    pub pin: Option<HostPin>,
     pub control: bool,
-    /// Dial `pin`'s own addresses instead of resolving `host`: a machine
-    /// listed by a host's tailnet directory (`fr_directory_fetch`). The pin
-    /// is required and names `host`; TLS still verifies exactly that name.
-    pub direct: bool,
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
     pub picture: Option<(u32, u32)>,
@@ -775,6 +771,7 @@ fn finish(shared: &Shared, code: u32, detail: Option<String>) {
     shared.finished.store(true, Ordering::SeqCst);
 }
 
+#[allow(clippy::too_many_lines)] // one runtime, destination dispatch and terminal cleanup
 fn run(shared: &Arc<Shared>, config: Config) {
     let Ok(runtime) = RuntimeBuilder::current_thread()
         .enable_platform_reactor(true)
@@ -791,29 +788,20 @@ fn run(shared: &Arc<Shared>, config: Config) {
     else {
         return finish(shared, end::INTERNAL, Some("MissingRuntime".into()));
     };
-    let Ok(roots) = crate::roots::bundled() else {
-        return finish(shared, end::INTERNAL, Some("InvalidTrustStore".into()));
-    };
     let control = config.control;
-    let client = match (config.direct, config.pin) {
-        (true, Some(pin)) if pin.name() == &config.host => {
-            Client::named_at(pin, roots, Duration::from_secs(5))
-        }
-        (true, _) => return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into())),
-        (false, pin) => Client::named(config.host, pin, roots, Duration::from_secs(5)),
+    let target = config.target;
+    let mut client = match target.client() {
+        Ok(client) => client,
+        Err(error) => return finish(shared, end::INTERNAL, Some(format!("{error:?}"))),
     };
-    let Ok(mut client) = client else {
-        return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
-    };
-    let Some(watch) = client.pin_watch() else {
-        return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
-    };
+    let watch = client.pin_watch();
     let mut epoch = [0_u8; 16];
     cx.random_bytes(&mut epoch);
     let epoch = u128::from_be_bytes(epoch).max(1);
     let mut app = Mobile::new(shared.clone(), control, local, epoch, watch);
     let cfg = Configuration {
         port: config.port,
+        family: target.family(),
         picture: config.picture,
         ..Configuration::default()
     };
@@ -821,27 +809,66 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let result = if control {
-        let operation = client.run_named_control_capable(
-            cx.clone(),
-            runtime.handle(),
-            cfg,
-            fr_client::native::control_offer(),
-            policy,
-            &mut app,
-        );
-        runtime.block_on(supervise(&cx, shared, operation))
+    let offer = if control {
+        fr_client::native::control_offer()
     } else {
-        let operation = client.run_named_observing(
-            cx.clone(),
-            runtime.handle(),
-            cfg,
-            fr_client::native::observation_offer(),
-            policy,
-            &mut app,
-        );
-        runtime.block_on(supervise(&cx, shared, operation))
+        fr_client::native::observation_offer()
     };
+    let operation = async {
+        match (control, target.selector()) {
+            (true, Some(selector)) => {
+                client
+                    .run_control_capable(
+                        cx.clone(),
+                        runtime.handle(),
+                        selector,
+                        cfg,
+                        offer,
+                        policy,
+                        &mut app,
+                    )
+                    .await
+            }
+            (false, Some(selector)) => {
+                client
+                    .run_observing(
+                        cx.clone(),
+                        runtime.handle(),
+                        selector,
+                        cfg,
+                        offer,
+                        policy,
+                        &mut app,
+                    )
+                    .await
+            }
+            (true, None) => {
+                client
+                    .run_named_control_capable(
+                        cx.clone(),
+                        runtime.handle(),
+                        cfg,
+                        offer,
+                        policy,
+                        &mut app,
+                    )
+                    .await
+            }
+            (false, None) => {
+                client
+                    .run_named_observing(
+                        cx.clone(),
+                        runtime.handle(),
+                        cfg,
+                        offer,
+                        policy,
+                        &mut app,
+                    )
+                    .await
+            }
+        }
+    };
+    let result = runtime.block_on(supervise(&cx, shared, operation));
     publish_pin(shared, client.pin_watch().as_ref());
     let closed = shared.close.load(Ordering::SeqCst);
     let stopped = LocalStop::from_code(shared.local_stop.load(Ordering::SeqCst));
@@ -1110,7 +1137,7 @@ struct Mobile {
     control: bool,
     close_cx: Cx,
     epoch: u128,
-    watch: PinWatch,
+    watch: Option<PinWatch>,
     observer: Option<NativeObserver>,
     started: bool,
     native_started: Rc<Cell<bool>>,
@@ -1118,7 +1145,13 @@ struct Mobile {
     terminal: Option<ObserverError>,
 }
 impl Mobile {
-    fn new(shared: Arc<Shared>, control: bool, close_cx: Cx, epoch: u128, watch: PinWatch) -> Self {
+    fn new(
+        shared: Arc<Shared>,
+        control: bool,
+        close_cx: Cx,
+        epoch: u128,
+        watch: Option<PinWatch>,
+    ) -> Self {
         Self {
             shared,
             control,
@@ -1144,7 +1177,7 @@ impl Application for Mobile {
         self.started = true;
         self.service_succeeded = false;
         self.shared.frames.begin_attempt();
-        publish_pin(&self.shared, Some(&self.watch));
+        publish_pin(&self.shared, self.watch.as_ref());
         let attempt_number = u32::from(attempt);
         let epoch = self
             .epoch
@@ -1375,7 +1408,7 @@ impl Application for Mobile {
                     .state(state::CONNECTING, u32::from(attempt));
             }
             Status::Authenticated { attempt } => {
-                publish_pin(&self.shared, Some(&self.watch));
+                publish_pin(&self.shared, self.watch.as_ref());
                 self.shared
                     .events
                     .state(state::AUTHENTICATED, u32::from(attempt));

@@ -130,6 +130,7 @@ pub(super) async fn get(
 enum Selector {
     StableId(String),
     Pinned(String, String),
+    PinnedAddresses(String, String, Vec<IpAddr>),
     Name(String),
     Address(IpAddr),
 }
@@ -142,6 +143,15 @@ impl Selector {
                 stable_id,
                 certificate_name,
             } => Self::Pinned(stable_id.into(), certificate_name.into()),
+            PeerSelector::PinnedAddresses {
+                stable_id,
+                certificate_name,
+                addresses,
+            } => Self::PinnedAddresses(
+                stable_id.into(),
+                certificate_name.into(),
+                addresses.to_vec(),
+            ),
             PeerSelector::Name(name) => Self::Name(name.into()),
             PeerSelector::Address(ip) => Self::Address(ip),
         })
@@ -153,6 +163,13 @@ impl Selector {
                 stable_id,
                 certificate_name,
             },
+            Self::PinnedAddresses(stable_id, certificate_name, addresses) => {
+                PeerSelector::PinnedAddresses {
+                    stable_id,
+                    certificate_name,
+                    addresses,
+                }
+            }
             Self::Name(name) => PeerSelector::Name(name),
             Self::Address(ip) => PeerSelector::Address(*ip),
         }

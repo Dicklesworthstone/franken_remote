@@ -1,7 +1,8 @@
 //! One tailnet directory fetch (`fr_directory_fetch`, `PROTOCOL_DIRECTORY.md`):
-//! connect to a host the app already knows exactly as a session would (strict
-//! `WebPKI` for the name, tailnet-only addresses, the saved pin), ask once
-//! for its directory, and close. The host lists itself and the viewer's own
+//! connect to a host the app already knows exactly as a session would, ask
+//! once for its directory, and close. Installed clients revalidate the selected
+//! node through the local daemon; named clients retain their saved address pin.
+//! Both paths require strict `WebPKI` for the exact certificate name. The host lists itself and the viewer's own
 //! untagged machines; nothing here grants, selects a session, or touches
 //! capture. The result crosses to Swift as one JSON document.
 //!
@@ -14,7 +15,7 @@
 //! host's own row is marked serving; and an incomplete listing says so.
 //! (frd lists only its own tailnet and marks only itself; these checks keep
 //! the app from relying on that.)
-use crate::session::{end, tailnet_end};
+use crate::session::{connection::Target, end, tailnet_end};
 use asupersync::{runtime::RuntimeBuilder, time::timeout, types::Budget};
 use fr_wire::{
     directory::{Entry, Listing},
@@ -22,7 +23,7 @@ use fr_wire::{
     refusal::Reason,
 };
 use frd::{
-    native_connection::{Client, Configuration, Error as ConnectionError, HostName, HostPin},
+    native_connection::{Configuration, Error as ConnectionError, HostName, HostPin},
     session_startup::{Error as StartupError, Viewer},
 };
 use serde_json::{Value, json};
@@ -33,12 +34,8 @@ const LIMIT: Duration = Duration::from_secs(30);
 
 /// Where to fetch from: a saved host, as the app would open a session to it.
 pub struct Request {
-    pub host: HostName,
+    pub target: Target,
     pub port: u16,
-    pub pin: Option<HostPin>,
-    /// Dial `pin`'s own addresses (a machine this app learned from a
-    /// directory) instead of resolving the name.
-    pub direct: bool,
 }
 
 /// What one fetch ended with, before it becomes JSON.
@@ -54,7 +51,7 @@ pub enum Outcome {
 
 /// Fetch on the calling thread (the FFI gives it its own); returns the JSON.
 pub fn fetch(request: Request) -> String {
-    let via = request.host.as_str().to_owned();
+    let via = request.target.certificate_name().to_owned();
     to_json(&via, &run(request))
 }
 
@@ -66,25 +63,32 @@ fn run(request: Request) -> Outcome {
         return Outcome::Failed(end::INTERNAL, "MissingRuntime".into());
     };
     let cx = runtime.request_cx_with_budget(Budget::INFINITE);
-    let Ok(roots) = crate::roots::bundled() else {
-        return Outcome::Failed(end::INTERNAL, "InvalidTrustStore".into());
-    };
-    let client = match (request.direct, request.pin) {
-        (true, Some(pin)) => Client::named_at(pin, roots, Duration::from_secs(5)),
-        (true, None) => return Outcome::Failed(end::INTERNAL, "InvalidConfiguration".into()),
-        (false, pin) => Client::named(request.host, pin, roots, Duration::from_secs(5)),
-    };
-    let Ok(mut client) = client else {
-        return Outcome::Failed(end::INTERNAL, "InvalidConfiguration".into());
+    let mut client = match request.target.client() {
+        Ok(client) => client,
+        Err(error) => return outcome(Err(error)),
     };
     let Ok(offer) = fr_client::native::directory_offer() else {
         return Outcome::Failed(end::INTERNAL, "InvalidConfiguration".into());
     };
     let cfg = Configuration {
         port: request.port,
+        family: request.target.family(),
         ..Configuration::default()
     };
-    let operation = client.run_named(cx.clone(), cfg, offer, Viewer::fetch_directory);
+    let operation = async {
+        match request.target.selector() {
+            Some(selector) => {
+                client
+                    .run(cx.clone(), selector, cfg, offer, Viewer::fetch_directory)
+                    .await
+            }
+            None => {
+                client
+                    .run_named(cx.clone(), cfg, offer, Viewer::fetch_directory)
+                    .await
+            }
+        }
+    };
     match runtime.block_on(timeout(cx.now(), LIMIT, operation)) {
         Err(_) => Outcome::Failed(end::UNREACHABLE, "Timeout".into()),
         Ok(result) => outcome(result),

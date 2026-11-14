@@ -1,5 +1,28 @@
 # Implementation status
 
+## Windows installed-Tailscale machine discovery and connections (2026-11-14 UTC)
+
+The native Windows client now lists a bounded local machine snapshot with
+`fr-windows hosts` and accepts a stable ID or full certificate name for `view`
+and `directory`. It selects through the authenticated installed Tailscale
+service, retains the original ID/name tuple, and revalidates fresh metadata
+before dialing and during renewal. Strict TLS and host admission remain the
+remote acceptance boundary; discovery explicitly reports readiness as unprobed.
+
+Automatic IPv6/IPv4 selection is available, with explicit `--ipv4` and `--ipv6`
+choices. Optional `--address` arguments constrain the complete current address
+set; partial, extra, duplicate and changed sets refuse instead of overriding
+metadata. The same constraint is retained across fresh resolution and renewal.
+iOS keeps its named route and unchanged C ABI. Usage and limits are documented
+in [the Windows client guide](docs/windows-client.md).
+
+Twenty regressions were added: nine Target cases, four portable CLI cases,
+and seven selector/fresh-read/renewal cases. Independent source review checked
+the real APIs, platform gates and FFI migration. Pinned formatting passed for
+the five selector files. Integrated compilation, tests and strict Clippy remain
+pending after executor timeouts; no native Windows or live-tailnet qualification
+is claimed. The broader desktop-shell bead remains open.
+
 ## Windows mouse events retain their original capture and mapping (2026-11-14 UTC)
 
 Windows mouse motion, buttons and wheel events now retain the same original

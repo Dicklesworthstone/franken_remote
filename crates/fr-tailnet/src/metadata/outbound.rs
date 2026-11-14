@@ -11,7 +11,9 @@ pub(crate) struct Target {
 pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Target, Error> {
     let host = status.host_identity()?;
     let mut candidates = status.peers.iter().filter(|(_, peer)| match selector {
-        PeerSelector::StableId(id) | PeerSelector::Pinned { stable_id: id, .. } => peer.id.0 == id,
+        PeerSelector::StableId(id)
+        | PeerSelector::Pinned { stable_id: id, .. }
+        | PeerSelector::PinnedAddresses { stable_id: id, .. } => peer.id.0 == id,
         PeerSelector::Name(name) => peer.dns_name.as_ref().is_some_and(|dns| {
             dns.0
                 .trim_end_matches('.')
@@ -77,10 +79,21 @@ pub(crate) fn resolve(status: &Status, selector: PeerSelector<'_>) -> Result<Tar
     }
     if let PeerSelector::Pinned {
         certificate_name, ..
+    }
+    | PeerSelector::PinnedAddresses {
+        certificate_name, ..
     } = selector
         && certificate_name != name
     {
         return Err(Error::IdentityChanged);
+    }
+    if let PeerSelector::PinnedAddresses { addresses, .. } = selector {
+        selector.validate()?;
+        if addresses.len() != peer.ips.0.len()
+            || !addresses.iter().all(|address| peer.ips.0.contains(address))
+        {
+            return Err(Error::AddressMismatch);
+        }
     }
     Ok(Target {
         host,

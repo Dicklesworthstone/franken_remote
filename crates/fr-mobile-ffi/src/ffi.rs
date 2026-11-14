@@ -10,7 +10,7 @@
 //! memory. Any thread may call any function, concurrently.
 use crate::{
     directory,
-    session::{Config, InputResult, Session},
+    session::{Config, InputResult, Session, connection::Target},
     video::FrameInfo,
 };
 use core::ffi::{c_char, c_void};
@@ -236,6 +236,9 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
     let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
     };
+    let Ok(target) = Target::named(host, pin, config.direct) else {
+        return FR_INVALID;
+    };
     let picture = match (config.picture_width, config.picture_height) {
         (0, 0) => None,
         (width, height) if width.min(height) >= fr_wire::display::picture::MIN_BOX_PIXELS => {
@@ -249,11 +252,9 @@ pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrH
         return FR_BUSY;
     }
     let Ok(started) = Session::start(Config {
-        host,
+        target,
         port: config.port,
-        pin,
         control: config.control,
-        direct: config.direct,
         picture,
     }) else {
         return FR_BUSY;
@@ -336,11 +337,12 @@ pub unsafe extern "C" fn fr_directory_fetch(
     let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
     };
+    let Ok(target) = Target::named(host, pin, config.direct) else {
+        return FR_INVALID;
+    };
     let request = directory::Request {
-        host,
+        target,
         port: config.port,
-        pin,
-        direct: config.direct,
     };
     if FETCHES
         .try_update(Ordering::AcqRel, Ordering::Acquire, |n| {
