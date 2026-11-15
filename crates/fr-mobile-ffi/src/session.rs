@@ -279,6 +279,15 @@ pub struct Shared {
     first_view_micros: AtomicU64,
 }
 impl Shared {
+    fn clear_presentation(&self) {
+        self.frames.clear();
+        if let Ok(mut cursor) = self.cursor.lock() {
+            let _ = cursor.reset(0, self.frames.sequence());
+            cursor.visible = false;
+            cursor.rgba.clear();
+        }
+    }
+
     #[cfg(test)]
     fn new() -> Self {
         Self::with_control(true)
@@ -1282,7 +1291,7 @@ impl Session {
                     run(&worker, config);
                 }));
                 if ran.is_err() && !worker.finished() {
-                    worker.frames.clear();
+                    worker.clear_presentation();
                     finish(&worker, end::INTERNAL, Some("Panic".into()));
                 }
             })?;
@@ -1444,7 +1453,7 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let focus_closed = shared.focus_close_requested.load(Ordering::SeqCst)
         && completion::focus_closed(result, app.service_succeeded, closed, stopped, terminal);
     let (code, detail) = ending(result, closed, stopped, terminal);
-    shared.frames.clear();
+    shared.clear_presentation();
     shared.orderly_closed.store(orderly, Ordering::SeqCst);
     shared.focus_closed.store(focus_closed, Ordering::SeqCst);
     finish(shared, code, detail);
@@ -1516,6 +1525,11 @@ async fn supervise<T>(
 /// The in-process presenter frd's worker drives on its blocking pool.
 struct Presenter {
     shared: Arc<Shared>,
+    /// Immutable connection generation; a delayed callback cannot target a
+    /// newer attempt that happens to reuse this Shared object.
+    attempt: u64,
+    /// Original selected display pixels, before any host encoding resize.
+    display: (u32, u32),
     decoder: Option<Decoder>,
 }
 fn worker_error(error: crate::video::Error) -> WorkerError {
@@ -1534,8 +1548,28 @@ impl LocalPresenter for Presenter {
         configuration: &WorkerConfiguration,
         record: &DecoderRecord,
     ) -> Result<(), WorkerError> {
-        if record.generation() != configuration.generation {
+        if record.generation() != configuration.generation
+            || self.attempt != self.shared.frames.app_id(0)
+        {
             return Err(WorkerError::WrongEpoch);
+        }
+        {
+            let mut cursor = self
+                .shared
+                .cursor
+                .lock()
+                .map_err(|_| WorkerError::NativeFailure)?;
+            if cursor.attempt != self.attempt || self.attempt != self.shared.frames.app_id(0) {
+                return Err(WorkerError::WrongEpoch);
+            }
+            // Configure and overlay run serially on the same local worker.
+            // A fresh binding makes the core re-send its shape; the new
+            // cursor can appear only on a later picture of this decoder.
+            cursor
+                .reset(self.attempt, self.shared.frames.sequence())
+                .map_err(worker_error)?;
+            cursor.source_width = self.display.0;
+            cursor.source_height = self.display.1;
         }
         let decoder = Decoder::new(
             configuration.codec()?,
@@ -1577,17 +1611,26 @@ impl LocalPresenter for Presenter {
         let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
         self.shared.frames.record_decode(micros);
         if let Some(image) = image {
-            self.shared.frames.publish(image, unit.frame().as_raw());
+            self.shared
+                .frames
+                .publish_for(self.attempt, image, unit.frame().as_raw())
+                .map_err(worker_error)?;
         }
         Ok(())
     }
     fn overlay(&mut self, update: &CursorUpdate<'_>) -> Result<(), WorkerError> {
-        self.shared
+        if self.attempt != self.shared.frames.app_id(0) {
+            return Err(WorkerError::WrongEpoch);
+        }
+        let mut cursor = self
+            .shared
             .cursor
             .lock()
-            .map_err(|_| WorkerError::NativeFailure)?
-            .apply(update)
-            .map_err(worker_error)
+            .map_err(|_| WorkerError::NativeFailure)?;
+        if self.attempt != self.shared.frames.app_id(0) {
+            return Err(WorkerError::WrongEpoch);
+        }
+        cursor.apply_for(self.attempt, update).map_err(worker_error)
     }
 }
 
@@ -1814,7 +1857,17 @@ impl Application for Mobile {
         self.started = true;
         self.service_succeeded = false;
         self.shared.begin_display()?;
-        self.shared.frames.begin_attempt();
+        self.shared
+            .frames
+            .begin_attempt()
+            .map_err(|_| ObserverError::InvalidConfiguration)?;
+        let presentation_attempt = self.shared.frames.app_id(0);
+        self.shared
+            .cursor
+            .lock()
+            .map_err(|_| ObserverError::InvalidConfiguration)?
+            .reset(presentation_attempt, self.shared.frames.sequence())
+            .map_err(|_| ObserverError::InvalidConfiguration)?;
         publish_pin(&self.shared, self.watch.as_ref());
         let attempt_number = u32::from(attempt);
         let epoch = self
@@ -1839,6 +1892,8 @@ impl Application for Mobile {
                 Launch::in_process(
                     Box::new(Presenter {
                         shared,
+                        attempt: presentation_attempt,
+                        display: (display.pixel_width, display.pixel_height),
                         decoder: None,
                     }),
                     epoch,

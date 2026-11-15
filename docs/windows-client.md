@@ -132,6 +132,33 @@ after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
 
+## See the remote cursor
+
+When the host sends a separate cursor, the viewer draws its confirmed shape
+and position over the decoded picture. Cursor motion, shape changes and hiding
+repaint even when the desktop has no new video frame. The overlay follows the
+picture's scale, hotspot and clipping; it cannot draw into the letterbox.
+Hosts that already include their cursor in video keep that existing picture
+without a second overlay.
+
+During control, the ordinary Windows pointer remains the local cursor while
+the host's confirmed position follows submitted input. If the host moves or
+confines its pointer elsewhere, its confirmed overlay appears and the local
+pointer is hidden only over the actual picture. The local pointer is restored
+after the overlay has been erased, or when leaving the picture, opening a
+local dialog, ending control or closing the view. This client does not yet
+install the host's shape as a zero-latency native Windows cursor; that path
+still uses the default local pointer.
+
+One bounded 256-by-256 cursor bitmap is composited on the existing GPU device;
+decoded video stays on the GPU. A replacement briefly retains the old and new
+cursor bitmaps. Reconnect and decoder reconfiguration retire the former
+shape; an old cursor cannot be shown over a replacement decoder's picture.
+Cursor-only draws retain the original video frame ID and count separately
+as `repaints` in completion JSON. They provide no new video freshness or input
+authority. Live Direct2D rendering and cursor handoff qualification on Windows
+remain pending.
+
 ## Request or stop control in the viewer
 
 The native **Input** menu now contains **Request control**, **Stop control and

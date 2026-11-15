@@ -39,6 +39,8 @@ mod change_display;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod control;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod cursor;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod file_choice;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod geometry;

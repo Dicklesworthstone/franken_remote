@@ -26,6 +26,7 @@
 //! a new foreground event, then open fresh viewing without input or auxiliary
 //! authority. Hidden/failure reports remain distinct from cleanup proof.
 mod control;
+mod cursor;
 mod display;
 mod text;
 mod upload;
@@ -33,7 +34,7 @@ mod upload;
 use super::render::Renderer;
 use crate::{
     change_display::{self, Action, Activation, Cause, Refusal, Replacements},
-    geometry::{Mapping, StaleMapping, host_scales, reopen_for},
+    geometry::{Mapping, Rect as PictureRect, StaleMapping, fit, host_scales, reopen_for},
     keys,
 };
 use fr_mobile_ffi::{
@@ -62,16 +63,16 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetMessageTime, IDC_ARROW, IsDialogMessageW, IsIconic, LoadCursorW, MSG,
-    MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT,
-    RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW,
-    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
-    WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_ENTERSIZEMOVE,
-    WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_INITMENUPOPUP, WM_KEYDOWN, WM_KEYFIRST, WM_KEYLAST,
-    WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-    WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW,
-    WS_OVERLAPPEDWINDOW,
+    GetForegroundWindow, GetMessageTime, HTCLIENT, IDC_ARROW, IsDialogMessageW, IsIconic,
+    LoadCursorW, MSG, MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE, PeekMessageW,
+    PostQuitMessage, QS_ALLINPUT, RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED,
+    SPI_GETWORKAREA, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow,
+    SystemParametersInfoW, TranslateMessage, WINDOW_EX_STYLE, WM_ACTIVATEAPP, WM_CLOSE, WM_COMMAND,
+    WM_DESTROY, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_INITMENUPOPUP, WM_KEYDOWN,
+    WM_KEYFIRST, WM_KEYLAST, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+    WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_MOVE, WM_PAINT, WM_QUIT,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_SIZE, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
 };
 use windows::core::{HSTRING, Interface, w};
 
@@ -116,6 +117,10 @@ struct Viewer {
     /// First parent-close cleanup sample for the original native file chooser.
     /// Neither repeated close callbacks nor later session completion renew it.
     file_cleanup_started: Option<u64>,
+    /// What the last successful presentation actually composited, scoped to
+    /// its original connection. Used only for local cursor ownership.
+    cursor_drawn: Option<(u64, PictureRect)>,
+    local_cursor_hidden: bool,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -182,6 +187,8 @@ struct Stats {
     /// Longest wait from a reopen's request to its first drawn picture.
     reopen_gap_micros: u64,
     drawn: u64,
+    /// Cursor/placement redraws of the same original frame, never new video.
+    repaints: u64,
     draw_failures: u64,
     last_draw: Option<Instant>,
     /// Fixed-memory timing summary; no per-frame history survives a draw.
@@ -250,6 +257,8 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             input_menu,
             upload_menu,
             file_cleanup_started: None,
+            cursor_drawn: None,
+            local_cursor_hidden: false,
         });
     });
     // SAFETY: showing the window this thread created.
@@ -267,6 +276,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let stats = pump(seconds, hwnd, &config);
     let mut viewer = VIEWER.with(|cell| cell.borrow_mut().take());
     if let Some(viewer) = &mut viewer {
+        cursor::retire(viewer, hwnd);
         viewer.text = None;
         viewer.display_picker = None;
     }
@@ -425,6 +435,10 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     };
     v.text = None;
     v.display_picker = None;
+    cursor::retire(v, hwnd);
+    if v.closing {
+        return Reopen::No;
+    }
     let mut next = config.clone();
     // A replacement view cannot resend the original explicit file. Its menu
     // retains only the original transfer's cancellation and receipt evidence.
@@ -617,17 +631,44 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
         }
     }
     if shared.finished() {
+        cursor::retire(v, hwnd);
         return (true, false);
     }
     // Once the original owner is fenced, no old picture can satisfy a new
     // view or consume the pending replacement's time-to-first-picture metric.
     if v.reopen.pending() || v.closing {
+        cursor::retire(v, hwnd);
         return (false, false);
     }
+    let cursor_changed = match cursor::synchronize(v) {
+        Ok(changed) => changed,
+        Err(()) => {
+            eprintln!("fr-windows: cursor_presentation_failed");
+            v.session.shared().presentation_failed();
+            v.close();
+            cursor::retire(v, hwnd);
+            stats.draw_failures += 1;
+            return (false, false);
+        }
+    };
+    cursor::refresh(v, hwnd, false);
+    draw_latest(v, stats, last_sequence, hwnd, cursor_changed)
+}
+
+/// Redraw the newest retained picture when either video or cursor changed.
+/// Cursor-only redraws keep the original picture's identity and evidence.
+fn draw_latest(
+    v: &mut Viewer,
+    stats: &mut Stats,
+    last_sequence: &mut u64,
+    hwnd: HWND,
+    cursor_changed: bool,
+) -> (bool, bool) {
+    let shared = v.session.shared();
     // A local resize/move invalidates its coordinate mapping immediately.
     // Redraw the one retained picture even on a static desktop, preserving
     // that picture's ORIGINAL frame id; this creates no new source evidence.
-    let after = if v.mapping.is_some() {
+    let after = if v.mapping.is_some() && !cursor_changed {
         *last_sequence
     } else {
         0
@@ -635,20 +676,63 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     let Some((raw, info)) = shared.frames.take_newer(after, shared.full_range()) else {
         return (false, false);
     };
-    *last_sequence = info.sequence;
-    // SAFETY: the slot handed out a +1 `IMFSample` reference for this
-    // caller; `from_raw` takes it over.
+    // SAFETY: take ownership of the slot's +1 reference BEFORE every early
+    // return, including a connection change that overtook this snapshot.
     let sample = unsafe { IMFSample::from_raw(raw) };
+    // Select the picture before the final cursor snapshot. A decoder reset
+    // clears its cursor before publishing new pictures; the reverse order
+    // could put the preceding decoder's cursor on this newer picture.
+    if cursor::synchronize(v).is_err() {
+        eprintln!("fr-windows: cursor_presentation_failed");
+        v.session.shared().presentation_failed();
+        v.close();
+        cursor::retire(v, hwnd);
+        stats.draw_failures += 1;
+        return (false, false);
+    }
+    let shared = v.session.shared();
+    let attempt = shared.frames.app_id(0);
+    if attempt == 0 || shared.frames.app_id(info.frame) != info.frame {
+        cursor::retire(v, hwnd);
+        return (false, false);
+    }
+    let picture = (info.width, info.height);
+    let overlay = v
+        .renderer
+        .cursor_visible(picture, attempt, info.sequence)
+        .then(|| fit(picture, v.renderer.size()))
+        .flatten()
+        .map(|dest| (attempt, dest));
+    cursor::before_draw(v, hwnd, overlay);
     let drawn = video::texture_of(&sample).and_then(|(texture, slice)| {
         v.renderer
-            .draw(&texture, slice, (info.width, info.height), info.full_range)
+            .draw(
+                &texture,
+                slice,
+                picture,
+                info.full_range,
+                attempt,
+                info.sequence,
+            )
             .ok()
             .flatten()
     });
     let Some(dest) = drawn else {
         stats.draw_failures += 1;
+        v.session.shared().presentation_failed();
+        v.close();
+        cursor::retire(v, hwnd);
         return (false, false);
     };
+    let shared = v.session.shared();
+    if shared.finished() || shared.frames.app_id(0) != attempt {
+        v.mapping = None;
+        cursor::retire(v, hwnd);
+        return (false, false);
+    }
+    v.cursor_drawn = overlay;
+    cursor::refresh(v, hwnd, false);
+    let shared = v.session.shared();
     v.picture = (info.width, info.height);
     if v.mapping
         .as_ref()
@@ -661,6 +745,12 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
         v.scales = host_scales(v.display, v.stated, v.picture);
     }
     shared.frames.mark_drawn(info.frame);
+    let new_picture = info.sequence > *last_sequence;
+    *last_sequence = info.sequence;
+    if !new_picture {
+        stats.repaints += 1;
+        return (false, true);
+    }
     let now = Instant::now();
     if let Some(asked) = v.reopen_asked.take() {
         let gap = u64::try_from(now.duration_since(asked).as_micros()).unwrap_or(u64::MAX);
@@ -778,7 +868,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
     let mut json = String::new();
     let _ = write!(
         json,
-        "{{\"status\":\"ended\",\"end\":\"{}\",\"detail\":{},\"drawn\":{},\"draw_failures\":{},\
+        "{{\"status\":\"ended\",\"end\":\"{}\",\"detail\":{},\"drawn\":{},\"repaints\":{},\"draw_failures\":{},\
          \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{},\
@@ -791,6 +881,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
             .detail()
             .map_or_else(|| "null".to_owned(), |d| format!("{d:?}")),
         stats.drawn,
+        stats.repaints,
         stats.draw_failures,
         shared.frames.presented() + stats.earlier_presented,
         decoded,
@@ -1503,6 +1594,13 @@ extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let handled = match message {
+        WM_SETCURSOR if (lparam.0 & 0xffff) == HTCLIENT as isize && wparam.0 == hwnd.0 as usize => {
+            // A nested native draw can temporarily borrow Viewer. Preserve
+            // the current pointer then, rather than reinstalling an arrow
+            // over an overlay whose owner blanked it before presentation.
+            with_viewer(|v| cursor::refresh(v, hwnd, true));
+            return LRESULT(1);
+        }
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
                 let file_available = v.can_choose_file() && !v.choosing_file();

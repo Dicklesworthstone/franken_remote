@@ -3,6 +3,7 @@
 //! into the BGRA back buffer. 1:1 whenever the picture fits the window
 //! (`geometry::fit`); the picture never leaves the GPU.
 use crate::geometry::{Rect, fit};
+mod cursor;
 use core::mem::ManuallyDrop;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Direct3D11::{
@@ -35,11 +36,13 @@ struct Conversion {
 }
 
 pub struct Renderer {
+    device: ID3D11Device,
     video: ID3D11VideoDevice,
     context: ID3D11VideoContext1,
     swap_chain: IDXGISwapChain1,
     size: (u32, u32),
     conversion: Option<Conversion>,
+    cursor: cursor::Overlay,
 }
 
 impl Renderer {
@@ -72,11 +75,13 @@ impl Renderer {
                 .GetImmediateContext()?
                 .cast::<ID3D11VideoContext1>()?;
             Ok(Self {
+                device: device.clone(),
                 video: device.cast()?,
                 context,
                 swap_chain,
                 size,
                 conversion: None,
+                cursor: cursor::Overlay::default(),
             })
         }
     }
@@ -106,11 +111,32 @@ impl Renderer {
         self.size
     }
 
+    pub fn cursor_state(&self) -> crate::cursor::State {
+        self.cursor.state()
+    }
+
+    pub fn update_cursor(
+        &mut self,
+        state: crate::cursor::State,
+        pixels: Option<&[u8]>,
+    ) -> Result<()> {
+        self.cursor.update(&self.device, state, pixels)
+    }
+
+    pub fn clear_cursor(&mut self) {
+        self.cursor.clear();
+    }
+
+    pub fn cursor_visible(&self, picture: (u32, u32), attempt: u64, sequence: u64) -> bool {
+        fit(picture, self.size).is_some_and(|dest| self.cursor.visible(dest, attempt, sequence))
+    }
+
     /// Replace the retired session's visible image with black. Input is fenced
     /// before the caller enters this native work. No frame or presentation
     /// freshness is reported for the clear.
     pub fn clear(&mut self) -> Result<()> {
         self.conversion = None;
+        self.cursor.clear();
         // SAFETY: all COM interfaces belong to the same live D3D device. The
         // temporary back-buffer/view references end before any later resize.
         unsafe {
@@ -174,6 +200,8 @@ impl Renderer {
         slice: u32,
         picture: (u32, u32),
         full_range: bool,
+        attempt: u64,
+        sequence: u64,
     ) -> Result<Option<Rect>> {
         let Some(dest) = fit(picture, self.size) else {
             return Ok(None);
@@ -277,6 +305,7 @@ impl Renderer {
             ManuallyDrop::drop(&mut entry.pInputSurface);
             blt?;
             drop(output);
+            self.cursor.draw(&back_buffer, dest, attempt, sequence)?;
             drop(back_buffer);
             swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
         }

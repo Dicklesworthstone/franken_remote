@@ -106,6 +106,7 @@ fn videotoolbox_decodes_into_io_surface_nv12_pictures_of_the_stream_size() {
     assert_eq!(decoder.picture(), (128, 96));
     assert!(!decoder.full_range(), "the fixture is BT.709 limited range");
     let slot = FrameSlot::default();
+    slot.begin_attempt().unwrap();
     for unit in &units {
         let image = decoder
             .submit(unit, true)
@@ -123,7 +124,8 @@ fn videotoolbox_decodes_into_io_surface_nv12_pictures_of_the_stream_size() {
         // white picture. Limited-range luma stays inside 16..=235.
         let mean = image.mean_luma().unwrap();
         assert!((40.0..200.0).contains(&mean), "{mean}");
-        slot.publish(image, unit.frame().as_raw());
+        slot.publish_for(slot.app_id(0), image, unit.frame().as_raw())
+            .unwrap();
     }
     assert_eq!(slot.presented(), 3);
     eprintln!("platform hardware decoder: {:?}", decoder.hardware());
@@ -171,9 +173,10 @@ fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
     let units = units();
     let mut decoder = decoder();
     let slot = FrameSlot::default();
+    slot.begin_attempt().unwrap();
     assert!(slot.take_newer(0, false).is_none());
     let image = decoder.submit(&units[0], true).unwrap().unwrap();
-    slot.publish(image, 7);
+    slot.publish_for(slot.app_id(0), image, 7).unwrap();
     let (raw, info) = slot.take_newer(0, false).unwrap();
     assert!(!raw.is_null());
     release(raw);
@@ -181,22 +184,74 @@ fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
         info,
         FrameInfo {
             sequence: 1,
-            frame: 7,
+            frame: slot.app_id(7),
             width: 128,
             height: 96,
             full_range: false
         }
     );
     assert!(slot.take_newer(info.sequence, false).is_none());
-    slot.mark_drawn(7);
-    slot.mark_drawn(3);
+    slot.mark_drawn(slot.app_id(7));
+    slot.mark_drawn(slot.app_id(3));
     assert_eq!(
         slot.drawn(),
-        7,
+        slot.app_id(7),
         "a late report never lowers the drawn frame"
     );
     slot.clear();
     assert!(slot.take_newer(0, false).is_none());
+}
+
+#[test]
+fn a_delayed_native_picture_cannot_be_relabelled_into_a_new_attempt() {
+    let units = units();
+    let mut decoder = decoder();
+    let slot = FrameSlot::default();
+    slot.begin_attempt().unwrap();
+    let original = slot.app_id(0);
+    let delayed = decoder.submit(&units[0], true).unwrap().unwrap();
+    slot.begin_attempt().unwrap();
+    let current = slot.app_id(0);
+    assert_ne!(original, current);
+    let fresh = decoder.submit(&units[1], true).unwrap().unwrap();
+    slot.publish_for(current, fresh, 3).unwrap();
+    assert_eq!(slot.sequence(), 1);
+    assert!(matches!(
+        slot.publish_for(original, delayed, 500),
+        Err(Error::StaleGeneration)
+    ));
+    assert_eq!(
+        slot.sequence(),
+        1,
+        "late native output is not publication evidence"
+    );
+    assert_eq!(slot.presented(), 1);
+    let (raw, info) = slot.take_newer(0, false).unwrap();
+    release(raw);
+    assert_eq!(info.frame, current | 3);
+    slot.mark_drawn(original | 500);
+    assert_eq!(slot.drawn(), 0);
+    slot.mark_drawn(info.frame);
+    assert_eq!(slot.drawn(), info.frame);
+    slot.clear();
+    let draining = decoder.submit(&units[2], true).unwrap().unwrap();
+    assert!(matches!(
+        slot.publish_for(current, draining, 4),
+        Err(Error::Closed)
+    ));
+    assert!(matches!(slot.begin_attempt(), Err(Error::Closed)));
+    assert!(slot.take_newer(0, false).is_none());
+    assert_eq!(slot.presented(), 1);
+}
+
+#[test]
+fn attempt_exhaustion_refuses_instead_of_reusing_an_old_identity() {
+    let slot = FrameSlot::default();
+    slot.generation
+        .store(u64::MAX >> RAW_BITS, Ordering::Release);
+    let before = slot.app_id(0);
+    assert!(matches!(slot.begin_attempt(), Err(Error::Closed)));
+    assert_eq!(slot.app_id(0), before);
 }
 
 /// A canonical-layout record carrying `sps` between the fixture's own VPS
@@ -298,4 +353,58 @@ fn cursor_updates_need_a_checked_shape_first() {
     assert_eq!((cursor.x, cursor.y, cursor.visible), (20, 21, false));
     assert_eq!(cursor.generation, 3);
     assert_eq!(cursor.rgba.len(), 64);
+}
+
+#[test]
+fn a_cursor_reset_fences_old_attempts_and_requires_a_new_shape() {
+    let mut cursor = Cursor::default();
+    cursor.reset(11, 5).unwrap();
+    let update = CursorUpdate::Shape {
+        x: 4,
+        y: 5,
+        width: 2,
+        height: 2,
+        hotspot_x: 1,
+        hotspot_y: 1,
+        rgba: &[255; 16],
+    };
+    cursor.apply_for(11, &update).unwrap();
+    let original_shape = cursor.shape_generation;
+    cursor
+        .apply_for(11, &CursorUpdate::Move { x: 20, y: 21 })
+        .unwrap();
+    assert_eq!(cursor.shape_generation, original_shape);
+    let before_reset = cursor.generation;
+    cursor.reset(12, 8).unwrap();
+    assert!(cursor.generation > before_reset);
+    assert!(cursor.shape_generation > original_shape);
+    assert_eq!((cursor.attempt, cursor.frame_after), (12, 8));
+    assert!(!cursor.visible);
+    assert!(cursor.rgba.is_empty());
+    assert_eq!(cursor.apply_for(11, &update), Err(Error::StaleGeneration));
+    assert_eq!(
+        cursor.apply_for(12, &CursorUpdate::Move { x: 4, y: 5 }),
+        Err(Error::InvalidConfiguration)
+    );
+    cursor.apply_for(12, &update).unwrap();
+    // A decoder change within the SAME connection also retires its shape.
+    cursor.reset(12, 10).unwrap();
+    assert!(!cursor.visible);
+    assert!(cursor.rgba.is_empty());
+    assert_eq!(cursor.frame_after, 10);
+    cursor.reset(0, 10).unwrap();
+    assert_eq!(cursor.apply_for(0, &update), Err(Error::StaleGeneration));
+}
+
+#[test]
+fn exhausted_cursor_revisions_refuse_without_partially_changing_state() {
+    let mut cursor = Cursor {
+        generation: u64::MAX,
+        visible: true,
+        ..Cursor::default()
+    };
+    assert_eq!(cursor.apply(&CursorUpdate::Hidden), Err(Error::Closed));
+    assert!(cursor.visible);
+    assert_eq!(cursor.reset(1, 0), Err(Error::Closed));
+    assert_eq!(cursor.attempt, 0);
 }

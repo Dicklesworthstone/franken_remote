@@ -15,7 +15,7 @@ use fr_media::hevc::HevcGuard;
 use fr_media::worker::overlay::Update as CursorUpdate;
 use std::sync::{
     Mutex,
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +189,7 @@ impl Decoder {
 #[derive(Default)]
 pub struct FrameSlot {
     latest: Mutex<Option<Latest>>,
+    retired: AtomicBool,
     sequence: AtomicU64,
     generation: AtomicU64,
     drawn: AtomicU64,
@@ -217,32 +218,58 @@ const RAW_MASK: u64 = (1 << RAW_BITS) - 1;
 
 impl FrameSlot {
     /// A new connection attempt: later ids are all above every earlier one.
-    pub fn begin_attempt(&self) {
-        self.generation.fetch_add(1, Ordering::AcqRel);
+    pub fn begin_attempt(&self) -> Result<(), Error> {
+        // Serialize the new generation with publication. An old decode may
+        // return late, but cannot be relabelled as a picture of this attempt.
+        let mut latest = self.latest.lock().map_err(|_| Error::Closed)?;
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        let generation = self
+            .generation
+            .load(Ordering::Acquire)
+            .checked_add(1)
+            .filter(|generation| *generation <= u64::MAX >> RAW_BITS)
+            .ok_or(Error::Closed)?;
+        self.generation.store(generation, Ordering::Release);
+        *latest = None;
+        Ok(())
+    }
+    /// Monotonic publication sequence; a decoder reset retains this floor so
+    /// its cursor cannot be rendered on the preceding decoder's picture.
+    pub fn sequence(&self) -> u64 {
+        self.sequence.load(Ordering::Acquire)
     }
     /// The app-visible id of frd frame `raw` in the current attempt.
     pub fn app_id(&self, raw: u64) -> u64 {
         (self.generation.load(Ordering::Acquire) << RAW_BITS) | (raw & RAW_MASK)
     }
-    /// Publish a presented picture (frd frame id `frame`).
-    pub fn publish(&self, image: Image, frame: u64) {
-        let sequence = self.sequence.fetch_add(1, Ordering::AcqRel) + 1;
-        let frame = self.app_id(frame);
-        if let Ok(mut latest) = self.latest.lock() {
-            *latest = Some(Latest {
-                image,
-                sequence,
-                frame,
-            });
+    /// Publish only into the decoder's ORIGINAL attempt. A delayed decode
+    /// returns its image to the native owner without replacing newer pixels.
+    pub fn publish_for(&self, attempt: u64, image: Image, frame: u64) -> Result<(), Error> {
+        let mut latest = self.latest.lock().map_err(|_| Error::Closed)?;
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Error::Closed);
         }
+        if attempt == 0 || attempt != self.app_id(0) || frame > RAW_MASK {
+            return Err(Error::StaleGeneration);
+        }
+        let sequence = self.sequence().checked_add(1).ok_or(Error::Closed)?;
+        *latest = Some(Latest {
+            image,
+            sequence,
+            frame: attempt | frame,
+        });
+        self.sequence.store(sequence, Ordering::Release);
         self.presented.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
     /// A new +1 reference to the newest picture when it is newer than
     /// `after`, with its info. The caller releases the reference.
     pub fn take_newer(&self, after: u64, full_range: bool) -> Option<(*mut c_void, FrameInfo)> {
         let latest = self.latest.lock().ok()?;
         let latest = latest.as_ref()?;
-        if latest.sequence <= after {
+        if latest.sequence <= after || latest.frame != self.app_id(latest.frame) {
             return None;
         }
         let (width, height, format, _) = latest.image.describe();
@@ -261,7 +288,9 @@ impl FrameSlot {
     /// [`FrameInfo::frame`]) into a presented drawable. Monotonic: an older
     /// report never lowers it.
     pub fn mark_drawn(&self, frame: u64) {
-        self.drawn.fetch_max(frame, Ordering::AcqRel);
+        if !self.retired.load(Ordering::Acquire) && frame == self.app_id(frame) {
+            self.drawn.fetch_max(frame, Ordering::AcqRel);
+        }
     }
     /// The newest app-visible id reported drawn.
     pub fn drawn(&self) -> u64 {
@@ -286,19 +315,31 @@ impl FrameSlot {
             self.decode_micros.load(Ordering::Relaxed),
         )
     }
-    /// Drop the retained picture (session end).
+    /// Retire this owner and drop its retained picture (session end). Native
+    /// decode may still be draining; no later completion can repopulate it.
     pub fn clear(&self) {
         if let Ok(mut latest) = self.latest.lock() {
+            self.retired.store(true, Ordering::Release);
             *latest = None;
         }
     }
 }
 
 /// The client-rendered remote cursor (hosts that send it separately from the
-/// picture), in decoded picture pixels. Shape bytes are RGBA, row-major.
+/// picture), in ORIGINAL selected display pixels. Shape bytes are RGBA,
+/// row-major; a host may encode a smaller picture of this same source.
 #[derive(Default, Clone)]
 pub struct Cursor {
+    /// Exact app-visible connection attempt, assigned by the original owner.
+    pub attempt: u64,
     pub generation: u64,
+    /// Moves and hides do not allocate or upload a new native shape.
+    pub shape_generation: u64,
+    /// Only a picture published after the original decoder reset can carry
+    /// this cursor. Repainting an older picture may erase its former cursor.
+    pub frame_after: u64,
+    pub source_width: u32,
+    pub source_height: u32,
     pub visible: bool,
     pub x: i32,
     pub y: i32,
@@ -309,9 +350,33 @@ pub struct Cursor {
     pub rgba: Vec<u8>,
 }
 impl Cursor {
+    /// Retire the old shape and coordinates before a new attempt/configuration.
+    /// The revision remains monotonic even when native IDs are reused.
+    pub fn reset(&mut self, attempt: u64, frame_after: u64) -> Result<(), Error> {
+        let generation = self.generation.checked_add(1).ok_or(Error::Closed)?;
+        let shape_generation = self.shape_generation.checked_add(1).ok_or(Error::Closed)?;
+        *self = Self {
+            attempt,
+            generation,
+            shape_generation,
+            frame_after,
+            ..Self::default()
+        };
+        Ok(())
+    }
+
+    /// A delayed original presenter cannot publish into a replacement owner.
+    pub fn apply_for(&mut self, attempt: u64, update: &CursorUpdate<'_>) -> Result<(), Error> {
+        if attempt == 0 || attempt != self.attempt {
+            return Err(Error::StaleGeneration);
+        }
+        self.apply(update)
+    }
+
     /// Apply one checked overlay update. A move before any shape, or an
     /// invalid shape, changes nothing and is refused.
     pub fn apply(&mut self, update: &CursorUpdate<'_>) -> Result<(), Error> {
+        let generation = self.generation.checked_add(1).ok_or(Error::Closed)?;
         match *update {
             CursorUpdate::Hidden => self.visible = false,
             CursorUpdate::Move { x, y } => {
@@ -333,18 +398,24 @@ impl Cursor {
             } => {
                 fr_media::cursor::check_geometry(width, height, hotspot_x, hotspot_y, rgba.len())
                     .map_err(|_| Error::InvalidConfiguration)?;
+                let shape_generation = self.shape_generation.checked_add(1).ok_or(Error::Closed)?;
+                let mut image = Vec::new();
+                image
+                    .try_reserve_exact(rgba.len())
+                    .map_err(|_| Error::Allocation)?;
+                image.extend_from_slice(rgba);
                 self.x = x;
                 self.y = y;
                 self.width = width;
                 self.height = height;
                 self.hotspot_x = hotspot_x;
                 self.hotspot_y = hotspot_y;
-                self.rgba.clear();
-                self.rgba.extend_from_slice(rgba);
+                self.rgba = image;
+                self.shape_generation = shape_generation;
                 self.visible = true;
             }
         }
-        self.generation += 1;
+        self.generation = generation;
         Ok(())
     }
 }

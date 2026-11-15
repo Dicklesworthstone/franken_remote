@@ -398,10 +398,10 @@ fn a_picture_drawn_in_an_earlier_attempt_never_counts_in_a_later_one() {
     };
     let shared = Shared::new();
     shared.set_visible(true);
-    shared.frames.begin_attempt();
+    shared.frames.begin_attempt().unwrap();
     shared.frames.mark_drawn(shared.frames.app_id(500));
     // A reconnect: frd's frame ids start again from low numbers.
-    shared.frames.begin_attempt();
+    shared.frames.begin_attempt().unwrap();
     let mut pending = None;
     // Planted negative: compared without the generation, the earlier
     // attempt's 500 would make picture 3 count before it was drawn.
