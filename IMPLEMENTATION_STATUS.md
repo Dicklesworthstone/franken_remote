@@ -1,5 +1,38 @@
 # Implementation status
 
+## Late sender turns reconcile queued QUIC acknowledgements (2026-11-15 UTC)
+
+A host or viewer whose own task wakes after a retained reliable record's
+delivery deadline now has one bounded ACK-only receive turn before judging
+that custody. Actual acknowledged stream offsets release retained records;
+the unchanged expiry check judges everything left. The helper sends no
+application data, retransmissions or probes and dispatches no input. It reads
+at most one native receive batch, with a 1 ms receive wait inside a 10 ms
+absolute turn bound. This is an observation-order correction, not evidence
+that an ACK reached the kernel before its original deadline.
+
+The normal host, admission-refresh and viewer loops call that turn before
+synchronous service can judge retained-send expiry. Original cancellation,
+connection/operation lifetimes, authorization, input and presentation gates,
+receive deadlines and explicit attachment retirement still win. Expired
+unsent or partially staged records and unsettled native output cannot use the
+exception. Synchronous `tick` retains its original fail-closed contract; there
+is no general delivery allowance extension or fresh input ticket.
+
+Eleven real UDP/TLS transport regressions and five host/viewer integration
+regressions cover successful reconciliation, missing ACKs, unsent tails,
+queued payload, optional clipboard retirement, cancellation, authorization
+and original lifetime precedence. **Passed:** pinned workspace formatting and
+diff checks; independent source review of the native ACK-only path and its
+host/viewer integration. **Blocked:** these runtime regressions and complete
+workspace compilation. The unchanged pinned Asupersync compiler was killed
+with SIGKILL before first-party code in normal, single-job reduced-memory,
+Cranelift and metadata-only attempts. No test assertion has been claimed as
+passing from those runs. The original scheduling-stall reproducer is retained
+as a real network regression, but no live load-induced end has been attributed
+to this cause. `fr-load-ends-cuqi` remains in progress, including its five full
+suites at load above 100. See [QUIC records](QUIC_RECORDS.md).
+
 ## Connected Windows file selection and control-to-view handoff (2026-11-14 UTC)
 
 A controlling Windows viewer now offers **File transfer → Pick and send one

@@ -355,6 +355,35 @@ impl ObservationRenewal {
     ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
         self.drive_checked(connection, wait, || true)
     }
+    /// Consume already-arrived acknowledgement evidence before synchronous
+    /// application maintenance judges retained sends after a scheduling pause.
+    /// This does not flush application bytes, dispatch records, or renew an
+    /// authority. When no send is overdue the transport leaves the application
+    /// permission callback untouched, preserving maintenance-before-I/O ordering.
+    pub(crate) fn reconcile_checked<'a>(
+        &'a self,
+        connection: &'a mut QuicRecords,
+        mut permitted: impl FnMut() -> bool + 'a,
+    ) -> impl std::future::Future<Output = Result<(), Error>> + 'a {
+        let bound = self.bound(connection);
+        let guard = bound
+            .is_ok()
+            .then(|| IoGuard::new(connection, self.control.clone()));
+        async move {
+            bound?;
+            let mut io = guard.expect("matching connection installs guard");
+            self.live(io.connection)?;
+            io.connection
+                .reconcile_acknowledgements(&self.control.cx, || {
+                    permitted() && self.control.check().is_ok()
+                })
+                .await
+                .map_err(Error::Transport)?;
+            self.live(io.connection)?;
+            io.complete = true;
+            Ok(())
+        }
+    }
     /// A controlled session shares this connection with input feedback. Its
     /// native authority must remain valid at UDP submission, not merely when
     /// records were queued before an admission refresh or an I/O wait.

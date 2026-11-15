@@ -20,6 +20,7 @@ use std::{
     time::Duration,
 };
 
+mod acknowledgements;
 mod admission;
 mod datagrams;
 pub use datagrams::DatagramReceipt;
@@ -709,6 +710,17 @@ impl QuicRecords {
     // authority closure through several generic layers, and a generic body here
     // was compiled once per distinct closure type (21,980 copies of check alone).
     fn check(&mut self, cx: &Cx, authorize: &mut dyn FnMut() -> bool) -> Result<u64, Error> {
+        self.check_with_send_deadlines(cx, authorize, true)
+    }
+    // The only caller passing false owns one bounded ACK-only reconciliation.
+    // It cannot admit, dispatch or transmit application payload before the
+    // ordinary deadline check runs again. Every authority gate stays active.
+    fn check_with_send_deadlines(
+        &mut self,
+        cx: &Cx,
+        authorize: &mut dyn FnMut() -> bool,
+        send_deadlines: bool,
+    ) -> Result<u64, Error> {
         if self.is_closed() {
             return Err(Error::Closed);
         }
@@ -729,15 +741,16 @@ impl QuicRecords {
                 return Err(Error::Clock);
             }
             self.last_now = Some(now);
-            self.service_optional_retirements(cx, now)?;
+            self.service_optional_retirements(cx, now, send_deadlines)?;
             self.pending_datagrams.expire(now);
             if self.attachments.iter().any(|r| r.expired(now)) {
                 return Err(Error::Expired);
             }
-            if self
-                .senders
-                .iter()
-                .any(|s| s.until.is_some_and(|until| now >= until))
+            if send_deadlines
+                && self
+                    .senders
+                    .iter()
+                    .any(|s| s.until.is_some_and(|until| now >= until))
             {
                 return Err(Error::Expired);
             }
@@ -765,8 +778,11 @@ impl QuicRecords {
     ///
     /// `send_by_micros` is the record's usefulness deadline and is enforced at
     /// admission: a record already past it is refused. An admitted reliable
-    /// record must then be staged and acknowledged by max(send-by, admission +
-    /// [`delivery_allowance_us`] for this path). Between settled native I/O
+    /// record's fixed delivery bound is max(send-by, admission +
+    /// [`delivery_allowance_us`] for this path). A late drive may reconcile one
+    /// bounded batch of authenticated ACKs for fully staged bytes before judging
+    /// retained custody; it cannot send expired bytes or extend their deadlines.
+    /// Between settled native I/O
     /// operations, expiry retires an ACTIVE clipboard, file or audio pair;
     /// other retained expiry closes the connection. Microphone datagram custody
     /// still requires its original native-output fence. Expiry during native
@@ -961,7 +977,9 @@ impl QuicRecords {
         }
         Ok(SendAdmission::Accepted)
     }
-    /// Flush at most eight small bulk prefixes, or one critical prefix followed
+    /// Reconcile overdue, fully staged sends with one ACK-only receive before
+    /// ordinary application I/O. Then flush at most eight small bulk prefixes,
+    /// or one critical prefix followed
     /// by at most one bulk prefix, then wait at most `wait` for incoming I/O.
     /// Critical work gets the first native slot on every turn; the bounded bulk
     /// opportunity keeps a continuous critical backlog from starving recovery.
@@ -978,13 +996,17 @@ impl QuicRecords {
         wait: Duration,
         mut authorize: impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        self.check(cx, &mut authorize)?;
         if wait > Duration::from_millis(100) {
+            self.check(cx, &mut authorize)?;
             return Err(Error::InvalidPolicy);
         }
         let result = {
             // Dropped at this block's end: a failed turn never outlives it.
-            let turn = pin!(self.drive_turn(cx, wait, &mut authorize));
+            let turn = pin!(async {
+                self.reconcile_acknowledgements(cx, &mut authorize).await?;
+                self.check(cx, &mut authorize)?;
+                self.drive_turn(cx, wait, &mut authorize).await
+            });
             let bound = pin!(sleep(cx.now(), Duration::from_millis(250)));
             lifetime::within_turn_bound(turn, bound).await
         };
@@ -1069,7 +1091,10 @@ impl QuicRecords {
         // delivery deadlines and synchronous tick/send/receive gates still apply.
         self.retire_acknowledged()?;
         self.check(cx, authorize)?;
-        let native = self.native.as_mut().ok_or(Error::Closed)?;
+        self.check_native_state()
+    }
+    fn check_native_state(&mut self) -> Result<(), Error> {
+        let native = self.native.as_ref().ok_or(Error::Closed)?;
         if native.connection().state() != QuicConnectionState::Established
             || native.connection().inner().streams().len() > self.streams.len()
         {

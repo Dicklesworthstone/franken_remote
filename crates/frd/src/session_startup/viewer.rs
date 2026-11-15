@@ -748,6 +748,7 @@ impl ViewerSession {
             if wait > Duration::from_millis(100) {
                 return Err(Error::InvalidConfiguration);
             }
+            guard.viewer.reconcile_acknowledgements(|| true).await?;
             guard.viewer.step(&mut other)?;
             let until = guard
                 .viewer
@@ -768,6 +769,42 @@ impl ViewerSession {
                 .await
                 .map_err(|e| expired.get().unwrap_or(Error::Transport(e)))?;
             guard.viewer.step(&mut other)?;
+            guard.complete = true;
+            Ok(())
+        }
+    }
+    /// ACK-only evidence on this original session, before a caller's ordinary
+    /// synchronous send/receive services. No application record is dispatched or
+    /// retransmitted, and original silence/response/local permission still fence
+    /// any actual socket read. The transport's no-due path samples no additional
+    /// application permission before its normal maintenance turn.
+    pub(super) fn reconcile_acknowledgements<'a>(
+        &'a mut self,
+        mut permitted: impl FnMut() -> bool + 'a,
+    ) -> impl Future<Output = Result<(), Error>> + 'a {
+        let guard = SessionDrive {
+            viewer: self,
+            complete: false,
+        };
+        async move {
+            let mut guard = guard;
+            guard.viewer.check()?;
+            let until = guard
+                .viewer
+                .responder
+                .response_deadline()
+                .map_or(guard.viewer.heard_until, |d| {
+                    d.0.min(guard.viewer.heard_until)
+                });
+            let cx = &guard.viewer.cx;
+            let expired = Cell::new(None);
+            guard
+                .viewer
+                .transport
+                .reconcile_acknowledgements(cx, || permitted() && live_until(cx, until, &expired))
+                .await
+                .map_err(|e| expired.get().unwrap_or(Error::Transport(e)))?;
+            guard.viewer.check()?;
             guard.complete = true;
             Ok(())
         }

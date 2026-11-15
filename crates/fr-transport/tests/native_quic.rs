@@ -50,6 +50,9 @@ macro_rules! run_test {
     }};
 }
 
+#[path = "native_quic/reconciliation.rs"]
+mod reconciliation;
+
 #[test]
 fn authenticated_stream_reassembles_large_record_and_coalesced_records() {
     run_test!(cx, {
@@ -1772,4 +1775,58 @@ fn authenticated_ack_is_retired_before_a_delayed_post_io_deadline_check() {
 #[test]
 fn completed_io_without_an_ack_still_expires_at_the_original_delivery_bound() {
     runtime().block_on(Box::pin(pause_after_native_read(false)));
+}
+
+/// The peer acknowledged while the sender's task was not scheduled. Its next
+/// turn must learn that authenticated fact before treating local scheduling
+/// delay as an unacknowledged record. No clock, ACK, or stream state is forged.
+#[test]
+fn a_sender_that_wakes_late_reconciles_its_peers_queued_acknowledgement() {
+    run_test!(cx, {
+        let mut p = pair(&cx, Policy::default()).await;
+        let route = Route::Stream(p.host_routes[1]);
+        measure_path(&cx, &mut p, route).await;
+        let packet = recovery_packet(2, 100);
+        let admitted = clock(&cx);
+        p.server
+            .send(&cx, route, &packet, admitted + 50_000, || true)
+            .unwrap();
+        p.server.drive(&cx, Duration::ZERO, || true).await.unwrap();
+        let mut received = 0;
+        while clock(&cx) < admitted + 60_000 {
+            p.client
+                .drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
+            p.client
+                .receive(
+                    &cx,
+                    || true,
+                    |_, bytes| {
+                        assert_eq!(bytes, packet);
+                        received += 1;
+                        Ok(Disposition::Consumed)
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(received, 1);
+        assert_eq!(p.server.usage().retained_send_records, 1);
+        asupersync::time::sleep(
+            cx.now(),
+            Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US + 50_000),
+        )
+        .await;
+        assert!(clock(&cx) > admitted + MAX_DELIVERY_ALLOWANCE_US);
+        assert_eq!(
+            p.server.drive(&cx, Duration::ZERO, || true).await,
+            Ok(()),
+            "the sender's local scheduling delay was judged as peer silence"
+        );
+        assert!(!p.server.is_closed());
+        assert_eq!(p.server.usage().retained_send_records, 0);
+        // The SAME original connection remains useful after reconciliation.
+        measure_path(&cx, &mut p, route).await;
+        assert!(!p.server.is_closed());
+    });
 }

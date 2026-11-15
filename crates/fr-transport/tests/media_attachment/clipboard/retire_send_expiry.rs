@@ -336,3 +336,69 @@ fn clipboard_admission_expiry_does_not_retire_a_live_pair() {
         l.h.tick(&cx, || true).unwrap();
     });
 }
+
+#[test]
+fn queued_clipboard_ack_prevents_false_retirement_after_a_local_pause() {
+    run_test!(cx, {
+        let mut l = Link::new(&cx).await;
+        enable(&mut l);
+        let _input = attach(&mut l, &cx, 8, MediaRole::Input).await;
+        let (hp, cp, ha, ca) = attach(&mut l, &cx, 9, MediaRole::Clipboard).await;
+        let h = ClipboardChannel::new(&l.h, hp, scope()).unwrap();
+        let c = ClipboardChannel::new(&l.c, cp, scope()).unwrap();
+        quiet(&mut l, &cx).await;
+        // Exact transport envelope only; no native clipboard publication or
+        // application acceptance is inferred from this transport ACK.
+        let bytes = record(0x50, 9, 128);
+        let admitted = clock(&cx);
+        l.h.send(
+            &cx,
+            Route::Stream(ha.outbound),
+            &bytes,
+            admitted + 50_000,
+            || true,
+        )
+        .unwrap();
+        l.h.drive(&cx, Duration::ZERO, || true).await.unwrap();
+        let mut received = 0;
+        while clock(&cx) < admitted + 60_000 {
+            l.c.drive(&cx, Duration::from_millis(1), || true)
+                .await
+                .unwrap();
+            l.c.receive_ready(
+                &cx,
+                || true,
+                |route| route == Route::Stream(ca.inbound),
+                |_, incoming| {
+                    assert_eq!(incoming, bytes);
+                    received += 1;
+                    Ok(Disposition::Consumed)
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(received, 1);
+        assert_eq!(l.h.usage().retained_send_records, 1);
+        asupersync::time::sleep(
+            cx.now(),
+            Duration::from_micros(MAX_DELIVERY_ALLOWANCE_US + 50_000),
+        )
+        .await;
+        l.h.reconcile_acknowledgements(&cx, || true).await.unwrap();
+        assert_eq!(l.h.usage().retained_send_records, 0);
+        assert!(!h.send_expired(&l.h));
+        h.check(&l.h).unwrap();
+        c.check(&l.c).unwrap();
+        input::transfer(
+            &mut l,
+            &cx,
+            true,
+            Route::Stream(ha.outbound),
+            Route::Stream(ca.inbound),
+            &bytes,
+        )
+        .await;
+        assert!(!l.h.is_closed());
+        assert!(!l.c.is_closed());
+    });
+}

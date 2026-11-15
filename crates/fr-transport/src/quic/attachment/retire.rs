@@ -194,7 +194,12 @@ impl QuicRecords {
     /// cancels this media/optional pair; it is not EOF on the critical input stream.
     /// So does the local owner's `request_retirement`.
     /// Retired reservations remain forever to prevent replay-ledger recreation.
-    pub(crate) fn service_optional_retirements(&mut self, cx: &Cx, now: u64) -> Result<(), Error> {
+    pub(crate) fn service_optional_retirements(
+        &mut self,
+        cx: &Cx,
+        now: u64,
+        send_deadlines: bool,
+    ) -> Result<(), Error> {
         for index in 0..self.attachments.len() {
             let r = &self.attachments[index];
             if retirement_code(r.role).is_none() {
@@ -239,10 +244,11 @@ impl QuicRecords {
                     Some(Expiry::Receive)
                 } else if send_expiry.is_some()
                     && (peer_send_expired
-                        || self.senders.iter().any(|sender| {
-                            sender.route.stream == r.outbound
-                                && sender.until.is_some_and(|until| now >= until)
-                        }))
+                        || (send_deadlines
+                            && self.senders.iter().any(|sender| {
+                                sender.route.stream == r.outbound
+                                    && sender.until.is_some_and(|until| now >= until)
+                            })))
                 {
                     Some(Expiry::Send)
                 } else {

@@ -717,4 +717,5 @@ fn display_choice_uses_running_sessions_while_observation_renews_past_initial_gr
     });
 }
 
+mod acknowledgements;
 mod session_clock;

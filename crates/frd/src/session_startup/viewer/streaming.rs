@@ -158,6 +158,22 @@ enum Peer {
     Closed,
 }
 impl Peer {
+    async fn reconcile_acknowledgements(&mut self) -> Result<(), Error> {
+        match self {
+            Self::Control(viewer) => viewer
+                .reconcile_acknowledgements()
+                .await
+                .map_err(Error::Control),
+            Self::Acquiring {
+                session, request, ..
+            } => request.reconcile_acknowledgements(session).await,
+            Self::Observe { session, .. } | Self::Viewing { session, .. } => session
+                .reconcile_acknowledgements(|| true)
+                .await
+                .map_err(Error::Session),
+            Self::Closed => Err(Error::Closed),
+        }
+    }
     fn prepare_decode(&mut self, receiver: &ReceivePipeline) -> Result<bool, Error> {
         match self {
             Self::Acquiring {
@@ -901,8 +917,12 @@ impl StreamingViewer {
             );
         }
         let cx = &self.control.cx.clone();
+        // Initial view preparation also queries the clock owner, whose
+        // synchronous maintenance must see any ACK already in this socket.
+        self.peer.reconcile_acknowledgements().await?;
         acquisition::notify(&mut self.peer, &self.receiver, &mut self.control, None, ui)?;
         loop {
+            self.peer.reconcile_acknowledgements().await?;
             // Tick before selecting native work. A lost reference may expire
             // during silence, with no packet or decoder completion to wake it.
             let recovering = recovery::service(
@@ -1141,6 +1161,7 @@ async fn network(
     result: &mut impl FnMut(ResultEvent),
     other: &mut impl FnMut(Route, &[u8]) -> Result<Disposition, ()>,
 ) -> Result<(), Error> {
+    peer.reconcile_acknowledgements().await?;
     if let Some(app) = clipboard
         && let Some(viewer) = peer.controlled()
     {

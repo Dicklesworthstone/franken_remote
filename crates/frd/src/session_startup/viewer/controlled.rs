@@ -973,6 +973,7 @@ impl ControlledViewer {
             if wait > Duration::from_millis(100) {
                 return Err(Error::Session(super::Error::InvalidConfiguration));
             }
+            operation.viewer.reconcile_acknowledgements().await?;
             // Check the file setup horizon without sampling the input clock.
             // Clipboard permission/service advances that same input clock, so
             // tick's timestamp must be obtained AFTER clipboard servicing.
@@ -1051,6 +1052,34 @@ impl ControlledViewer {
             viewer.step(&mut result, &mut other)?;
             operation.complete = true;
             Ok(())
+        }
+    }
+
+    /// Read only already-queued ACK evidence before synchronous optional-owner
+    /// and input maintenance. The original control/view gate is mandatory and
+    /// no input, clipboard, file, or microphone payload is sent by this turn.
+    pub(super) async fn reconcile_acknowledgements(&mut self) -> Result<(), Error> {
+        if self.is_closed() {
+            return Err(Error::Closed);
+        }
+        let view = std::cell::Cell::new(None);
+        let cx = self.session.cx.clone();
+        let result = self
+            .session
+            .reconcile_acknowledgements(|| {
+                self.microphone.permits_io()
+                    && self.files.permits_io()
+                    && self
+                        .clipboard
+                        .as_ref()
+                        .is_none_or(crate::clipboard_quic::Bridge::permits_io)
+                    && self.clipboard_setup.permits_io()
+                    && maintenance_gate(&mut self.input, &self.control, &cx, &view)
+            })
+            .await;
+        match result {
+            Err(super::Error::Transport(error)) => Err(gated(error, view.take())),
+            result => result.map_err(Error::Session),
         }
     }
 }
