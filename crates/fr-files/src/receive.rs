@@ -1,4 +1,4 @@
-//! Handle-relative, no-overwrite publication of bounded ATP objects on Linux.
+//! Handle-relative, no-overwrite publication of bounded ATP objects.
 //!
 //! Directory descriptors, not re-resolved path strings, anchor every operation.
 //! The selected desktop user and the OS remain trusted (SECURITY.md); other
@@ -12,9 +12,15 @@ use staging::StagingFile;
 
 use crate::rx::{
     fd::{AsFd, OwnedFd},
-    fs::{self, Mode, OFlags},
+    fs,
+};
+#[cfg(unix)]
+use crate::rx::{
+    fs::{Mode, OFlags},
     process::geteuid,
 };
+#[cfg(unix)]
+use std::path::Component;
 use asupersync::atp::{
     object::{ContentId, ObjectId},
     safety::validate_portable_path_component,
@@ -25,7 +31,7 @@ use asupersync::net::atp::transport_common::{
 use std::{
     fmt,
     io::{self, Write},
-    path::{Component, Path},
+    path::Path,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -102,6 +108,44 @@ struct Root {
     reserved: Mutex<Reserved>,
 }
 
+
+#[cfg(unix)]
+fn open_root(path: &Path) -> Result<OwnedFd, Error> {
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut fd = fs::open("/", flags, Mode::empty())?;
+    let mut normal = false;
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                fd = fs::openat(&fd, name, flags, Mode::empty())?;
+                normal = true;
+            }
+            _ => return Err(Error::InvalidRoot),
+        }
+    }
+    if !normal {
+        return Err(Error::InvalidRoot);
+    }
+    let stat = fs::fstat(&fd)?;
+    if stat.st_uid != geteuid().as_raw() || stat.st_mode & 0o022 != 0 {
+        return Err(Error::UnsafeRoot);
+    }
+    Ok(fd)
+}
+
+#[cfg(windows)]
+fn open_root(path: &Path) -> Result<OwnedFd, Error> {
+    use fr_winsys::fs::ReceiveRootError;
+    fr_winsys::fs::open_receive_root(path)
+        .map(Into::into)
+        .map_err(|error| match error {
+            ReceiveRootError::Path => Error::InvalidRoot,
+            ReceiveRootError::Unsafe => Error::UnsafeRoot,
+            ReceiveRootError::Io(error) => error.into(),
+        })
+}
+
 /// A locally selected directory identity, never constructible from a wire path.
 /// Renaming/replacing the original path does not redirect writes to another
 /// directory. Clones share both its descriptor and its aggregate reservations.
@@ -127,7 +171,9 @@ impl DropDirectory {
     /// Open an existing absolute directory without following any symlink.
     /// Its final component must be owned by this user and not writable by
     /// another user/group. Parent directories need not be private: they are
-    /// traversed once with NOFOLLOW and all later operations use the pinned fd.
+    /// traversed once without following links and all later operations use the
+    /// retained handle. Windows admits ordinary local drive paths and checks
+    /// the final owner and DACL; received regular files have private ACLs.
     pub fn open(path: &Path, limits: Limits) -> Result<Self, Error> {
         if limits.max_file_bytes == 0
             || limits.max_reserved_bytes < limits.max_file_bytes
@@ -138,26 +184,7 @@ impl DropDirectory {
         if !path.is_absolute() {
             return Err(Error::InvalidRoot);
         }
-        let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-        let mut fd = fs::open("/", flags, Mode::empty())?;
-        let mut normal = false;
-        for component in path.components() {
-            match component {
-                Component::RootDir => {}
-                Component::Normal(name) => {
-                    fd = fs::openat(&fd, name, flags, Mode::empty())?;
-                    normal = true;
-                }
-                _ => return Err(Error::InvalidRoot),
-            }
-        }
-        if !normal {
-            return Err(Error::InvalidRoot);
-        }
-        let stat = fs::fstat(&fd)?;
-        if stat.st_uid != geteuid().as_raw() || stat.st_mode & 0o022 != 0 {
-            return Err(Error::UnsafeRoot);
-        }
+        let fd = open_root(path)?;
         Ok(Self(
             Arc::new(Root {
                 fd,
@@ -449,11 +476,15 @@ impl PendingFile {
         let original = self.destination.clone();
         let mut attempt = 0;
         loop {
-            check()?;
-            match self
+            // Native rename records are prepared before the original authority
+            // check. The final operation uses only retained handles; it never
+            // reopens the staging name after that check.
+            let prepared = self
                 .staging
-                .publish(self.reservation.root.fd.as_fd(), self.destination.as_str())
-            {
+                .prepare(self.reservation.root.fd.as_fd(), self.destination.as_str())
+                .map_err(Error::from)?;
+            check()?;
+            match prepared.commit() {
                 Ok(()) => break,
                 Err(crate::rx::io::Errno::EXIST)
                     if self.conflict_policy == ConflictPolicy::KeepBoth

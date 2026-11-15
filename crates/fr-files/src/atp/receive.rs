@@ -496,6 +496,11 @@ fn lower_hex(value: &str, length: usize) -> bool {
             .all(|v| v.is_ascii_digit() || (b'a'..=b'f').contains(&v))
 }
 fn portable_manifest(frame: &Frame, profile: u16) -> Result<TransferManifest, Error> {
+    // A Windows regular-file destination never accepts a tree profile and then
+    // discovers unsupported custody after reserving the worker's quota.
+    if cfg!(windows) && profile != fr_wire::files::ATP_PORTABLE_FULL {
+        return Err(Error::UnsupportedProfile);
+    }
     if frame.payload.len() > MAX_MANIFEST_BYTES {
         return Err(Error::ResourceLimit);
     }

@@ -244,6 +244,11 @@ impl std::fmt::Debug for PendingDirectory {
 }
 impl super::DropDirectory {
     pub fn begin_directory(&self, manifest: DirectoryManifest) -> Result<PendingDirectory, Error> {
+        // Windows currently has retained-handle custody for regular files.
+        // Refuse a tree before quota reservation or any staging filesystem call.
+        if cfg!(windows) {
+            return Err(Error::Io(std::io::ErrorKind::Unsupported));
+        }
         let mut reservation = Reservation::new(self.0.clone(), manifest.size, self.2.clone())?;
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|_| Error::Io(std::io::ErrorKind::Other))?;

@@ -2,6 +2,11 @@
 //! a final reparse point, who owns an object and what its DACL grants to
 //! anyone else (the Windows form of the owner and mode bits frd's Unix stores
 //! read with `fstat`), and a rename over a file readers may hold open.
+mod receive;
+pub use receive::{
+    PreparedReceiveRename, ReceiveRootError, create_receive_file, open_receive_root,
+    prepare_receive_rename, remove_receive_file,
+};
 use crate::pipe::os;
 use core::ffi::c_void;
 use std::fs::{File, OpenOptions};
@@ -591,5 +596,83 @@ mod tests {
         drop(reader);
         assert_eq!(std::fs::read(&to).unwrap(), b"new");
         assert!(!from.exists());
+    }
+
+    #[test]
+    fn receive_preparation_has_no_effect_and_publication_keeps_the_original_file() {
+        use std::io::Write;
+        use std::os::windows::io::AsHandle;
+
+        let dir = scratch("receive-publish");
+        let root = open_receive_root(&dir).unwrap();
+        let mut file = create_receive_file(root.as_handle(), ".fr-part-native").unwrap();
+        let private = inspect(&file).unwrap();
+        assert_eq!(private.owner, Owner::Us);
+        assert!(!private.directory && !private.reparse && !private.others_may_access());
+        assert_eq!(private.links, 1);
+        file.write_all(b"original received bytes").unwrap();
+        file.sync_all().unwrap();
+        let prepared =
+            prepare_receive_rename(file.as_handle(), root.as_handle(), "received.txt").unwrap();
+        assert!(!dir.join("received.txt").exists());
+        assert!(dir.join(".fr-part-native").exists());
+        drop(prepared);
+        assert!(!dir.join("received.txt").exists());
+        prepare_receive_rename(file.as_handle(), root.as_handle(), "received.txt")
+            .unwrap()
+            .commit()
+            .unwrap();
+        drop(file);
+        assert_eq!(
+            std::fs::read(dir.join("received.txt")).unwrap(),
+            b"original received bytes"
+        );
+        assert!(!dir.join(".fr-part-native").exists());
+    }
+
+    #[test]
+    fn receive_conflict_preserves_the_destination_and_deletes_only_owned_staging() {
+        use std::io::Write;
+        use std::os::windows::io::AsHandle;
+
+        let dir = scratch("receive-conflict");
+        let root = open_receive_root(&dir).unwrap();
+        std::fs::write(dir.join("taken.txt"), b"local contents").unwrap();
+        let mut file = create_receive_file(root.as_handle(), ".fr-part-owned").unwrap();
+        file.write_all(b"incoming").unwrap();
+        file.sync_all().unwrap();
+        assert_eq!(
+            prepare_receive_rename(file.as_handle(), root.as_handle(), "taken.txt")
+                .unwrap()
+                .commit()
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(std::fs::read(dir.join("taken.txt")).unwrap(), b"local contents");
+        assert!(std::fs::write(dir.join(".fr-part-owned"), b"replacement").is_err());
+        assert!(std::fs::rename(dir.join(".fr-part-owned"), dir.join("moved")).is_err());
+        remove_receive_file(file.as_handle()).unwrap();
+        drop(file);
+        assert!(!dir.join(".fr-part-owned").exists());
+        assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 1);
+        assert_eq!(std::fs::read(dir.join("taken.txt")).unwrap(), b"local contents");
+    }
+
+    #[test]
+    fn receive_root_cannot_be_redirected_and_native_names_cannot_escape() {
+        use std::os::windows::io::AsHandle;
+
+        let dir = scratch("receive-root");
+        let root = open_receive_root(&dir).unwrap();
+        assert!(std::fs::rename(&*dir, dir.with_extension("replacement")).is_err());
+        let file = create_receive_file(root.as_handle(), ".fr-part-original").unwrap();
+        for name in ["../escape", r"..\escape", "other/name", "file:stream", "NUL", "bad."] {
+            assert!(create_receive_file(root.as_handle(), name).is_err());
+            assert!(prepare_receive_rename(file.as_handle(), root.as_handle(), name).is_err());
+        }
+        remove_receive_file(file.as_handle()).unwrap();
+        drop(file);
+        assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 0);
     }
 }

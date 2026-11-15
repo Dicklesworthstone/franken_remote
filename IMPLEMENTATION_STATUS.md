@@ -1,5 +1,34 @@
 # Implementation status
 
+## Windows regular-file receive custody (2026-11-15 UTC)
+
+The existing ATP disk worker can now receive regular files into a Windows
+destination selected by its actual directory handle. Selection walks ordinary
+local-drive path components individually and refuses reparse points and unsafe
+owner/DACLs. The retained root denies delete sharing. Exclusive staging creates
+a protected private DACL immediately; cancellation deletes through the original
+file handle and closes it before releasing the transfer's reservation.
+
+Before each final original-authority check, publication prepares its bounded
+native rename record. The next operation renames the retained staging handle
+into the retained root without replacement. Keep-both conflict retries perform
+a fresh check. Existing integrity, file sync, separate file permission, transfer
+deadlines and cleanup accounting remain in force. Windows tree profiles refuse
+before worker admission or reservation.
+
+A successful rename is committed with `DurabilityUnknown`: directory crash
+durability is not established, and the destination is never rolled back or
+automatically replayed on that account. This increment supplies storage and ATP
+custody; the host CLI opt-in follows separately.
+
+Sixteen new portable-component, native-boundary, filesystem and ATP regressions
+are present. Independent source and pinned Windows API reviews found no remaining
+blocker. The changed feature has **not compiled or executed** after executor
+loss. The earlier 16 passing portable fr-winsys tests and successful pinned
+Windows all-target check cover baseline `0ed1fb` only. Native filesystem and
+original-connection transfer qualification remain outstanding. Tracks
+`fr-p2-file-transfer-m7o`, which remains open.
+
 ## Late decoder configuration cannot revive retired presentation (2026-11-15 UTC)
 
 Native decoder construction and its hardware query now finish before metadata

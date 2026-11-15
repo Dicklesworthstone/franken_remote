@@ -64,16 +64,24 @@ pub(super) fn ordinary_absolute(path: &[u16]) -> bool {
     {
         return false;
     }
-    path[3..].split(|unit| separator(*unit)).all(|component| {
-        !component.is_empty()
-            && !component
-                .last()
-                .is_some_and(|unit| matches!(*unit, 0x20 | 0x2e))
-            && !component.iter().any(|unit| {
-                *unit < 0x20 || matches!(*unit, 0x22 | 0x2a | 0x3a | 0x3c | 0x3e | 0x3f | 0x7c)
-            })
-            && !reserved(component)
-    })
+    path[3..]
+        .split(|unit| separator(*unit))
+        .all(ordinary_component)
+}
+
+/// One literal component for a handle-relative native call. Namespace and
+/// separator handling cannot turn this name into a second path or an ADS.
+pub(super) fn ordinary_component(component: &[u16]) -> bool {
+    !component.is_empty()
+        && !component
+            .last()
+            .is_some_and(|unit| matches!(*unit, 0x20 | 0x2e))
+        && !component.iter().any(|unit| {
+            *unit < 0x20
+                || separator(*unit)
+                || matches!(*unit, 0x22 | 0x2a | 0x3a | 0x3c | 0x3e | 0x3f | 0x7c)
+        })
+        && !reserved(component)
 }
 
 #[cfg(test)]
@@ -153,5 +161,30 @@ mod tests {
         assert!(ordinary_absolute(&path));
         path.push(u16::from(b'a'));
         assert!(!ordinary_absolute(&path));
+    }
+
+    #[test]
+    fn relative_native_components_never_expand_to_a_path_or_stream() {
+        for name in [
+            "",
+            ".",
+            "..",
+            r"a\b",
+            "a/b",
+            "a:stream",
+            "NUL.txt",
+            "COM¹",
+            "bad.",
+            "bad ",
+            "bad\0suffix",
+        ] {
+            assert!(
+                !ordinary_component(&name.encode_utf16().collect::<Vec<_>>()),
+                "{name:?}"
+            );
+        }
+        for name in [".fr-part-owned", "普通の名前.txt", "space within.txt"] {
+            assert!(ordinary_component(&name.encode_utf16().collect::<Vec<_>>()));
+        }
     }
 }

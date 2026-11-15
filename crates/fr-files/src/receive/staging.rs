@@ -1,20 +1,22 @@
-//! Unpublished file custody. Prefer an unnamed inode on the selected filesystem,
+//! Unpublished file custody. Prefer an unnamed inode on Linux filesystems,
 //! so even SIGKILL cannot leave a new partial file in the drop directory.
 //!
-//! Publication links the owned inode through a pinned procfs fd directory. This
-//! is Linux's unprivileged alternative to `linkat(AT_EMPTY_PATH)`, not permission
-//! to follow a peer-supplied symlink. Both basenames come from the local owner;
-//! the destination is still relative to its original, approved directory fd.
-//! Other platforms have no procfs: they always stage under an exclusively
-//! created private name in the destination directory.
+//! Linux publication links the owned inode through a pinned procfs fd directory.
+//! Windows creates a private regular file under the selected directory handle
+//! and publishes or removes that exact file handle. Its bounded rename record
+//! is prepared before the final authority check. Other Unix platforms retain
+//! the exclusive private named-staging path.
 #[cfg(target_os = "linux")]
 use crate::rx::fd::{AsRawFd, OwnedFd};
+#[cfg(not(windows))]
+use crate::rx::fs::{self, AtFlags, Mode, OFlags, RenameFlags};
 use crate::rx::{
     fd::BorrowedFd,
-    fs::{self, AtFlags, Mode, OFlags, RenameFlags},
     io::{Errno, Result},
 };
 use std::fs::File;
+#[cfg(windows)]
+use std::os::windows::io::AsHandle;
 
 // The procfs handle is acquired before receiving bytes, not after the final
 // publication authority check. Its fd table belongs to this process, so an
@@ -42,6 +44,7 @@ impl ProcFd {
     }
 }
 
+#[cfg(not(windows))]
 enum Location {
     #[cfg(target_os = "linux")]
     Anonymous(ProcFd),
@@ -51,13 +54,42 @@ enum Location {
 pub(super) struct StagingFile {
     // Close the inode before releasing its directory/procfs handles or quota.
     file: Option<File>,
+    #[cfg(not(windows))]
     location: Location,
 }
+
+/// All native preparation is complete before the caller checks its original
+/// authority. Committing this value performs only the final publication call.
+pub(super) struct PreparedPublication<'a> {
+    #[cfg(windows)]
+    native: fr_winsys::fs::PreparedReceiveRename<'a>,
+    #[cfg(not(windows))]
+    staging: &'a StagingFile,
+    #[cfg(not(windows))]
+    directory: BorrowedFd<'a>,
+    #[cfg(not(windows))]
+    name: &'a str,
+}
+impl PreparedPublication<'_> {
+    pub(super) fn commit(self) -> Result<()> {
+        #[cfg(windows)]
+        return self.native.commit().map_err(Errno::from);
+        #[cfg(not(windows))]
+        self.staging.publish(self.directory, self.name)
+    }
+}
+
 impl StagingFile {
     pub(super) fn create(directory: BorrowedFd<'_>, name: &str) -> Result<Self> {
         #[cfg(target_os = "linux")]
         return Self::create_with_proc(directory, name, ProcFd::open().ok());
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(windows)]
+        {
+            let file =
+                fr_winsys::fs::create_receive_file(directory, name).map_err(Errno::from)?;
+            Ok(Self { file: Some(file) })
+        }
+        #[cfg(all(not(target_os = "linux"), not(windows)))]
         Self::create_named(directory, name)
     }
 
@@ -89,6 +121,7 @@ impl StagingFile {
         Self::create_named(directory, name)
     }
 
+    #[cfg(not(windows))]
     fn create_named(directory: BorrowedFd<'_>, name: &str) -> Result<Self> {
         let fd = fs::openat(
             directory,
@@ -106,8 +139,35 @@ impl StagingFile {
         self.file.as_mut().expect("owned until cleanup")
     }
 
+    pub(super) fn prepare<'a>(
+        &'a self,
+        directory: BorrowedFd<'a>,
+        name: &'a str,
+    ) -> Result<PreparedPublication<'a>> {
+        #[cfg(windows)]
+        {
+            let file = self.file.as_ref().ok_or(Errno::BADF)?;
+            let native =
+                fr_winsys::fs::prepare_receive_rename(file.as_handle(), directory, name)
+                    .map_err(Errno::from)?;
+            Ok(PreparedPublication { native })
+        }
+        #[cfg(not(windows))]
+        {
+            if self.file.is_none() {
+                return Err(Errno::BADF);
+            }
+            Ok(PreparedPublication {
+                staging: self,
+                directory,
+                name,
+            })
+        }
+    }
+
     /// Called only after integrity, file sync and the original authority gate.
     /// No filesystem open or extra staging copy occurs at this final effect.
+    #[cfg(not(windows))]
     pub(super) fn publish(&self, directory: BorrowedFd<'_>, name: &str) -> Result<()> {
         if self.file.is_none() {
             return Err(Errno::BADF);
@@ -137,12 +197,24 @@ impl StagingFile {
         }
     }
 
-    /// Remove only this transfer's private name, when there is one. Close the
-    /// file before the caller can release its byte/transfer reservation.
+    /// Remove only this transfer's original private object. Close the file
+    /// before the caller can release its byte/transfer reservation.
     pub(super) fn cleanup(&mut self, directory: BorrowedFd<'_>) -> Result<()> {
         if self.file.is_none() {
             return Ok(());
         }
+        #[cfg(windows)]
+        {
+            // The original file handle carries deletion authority. Neither a
+            // renamed root nor a replacement staging name can redirect cleanup.
+            let _ = directory;
+            let file = self.file.as_ref().ok_or(Errno::BADF)?;
+            match fr_winsys::fs::remove_receive_file(file.as_handle()).map_err(Errno::from) {
+                Ok(()) | Err(Errno::NOENT) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        #[cfg(not(windows))]
         match &self.location {
             Location::Named(name) => match fs::unlinkat(directory, name.as_str(), AtFlags::empty())
             {
@@ -152,6 +224,8 @@ impl StagingFile {
             #[cfg(target_os = "linux")]
             Location::Anonymous(_) => {}
         }
+        // Native delete disposition is completed by closing this sole owned
+        // handle, still before PendingFile releases its shared reservation.
         self.file = None;
         Ok(())
     }
