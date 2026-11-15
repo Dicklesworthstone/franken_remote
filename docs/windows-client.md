@@ -543,6 +543,24 @@ It performs one bounded fetch, prints the shared directory JSON document, and
 exits successfully only when the host returned a listing. The host must enable
 directory service; its refusal remains visible in the result.
 
+## HEVC decoder requirements
+
+The viewer requires the system HEVC decoder to return each admitted frame's
+own NV12 picture synchronously. A missing picture, delayed picture belonging
+to an earlier frame, incomplete output or unexpected native event fails the
+current decoder through the existing typed error path. It cannot advance the
+reference chain or report an older picture as a newly decoded frame. Native
+samples carry the original frame ID for ownership checking, independently of
+capture timestamps; capture times and freshness deadlines remain unchanged.
+
+Output types must retain the admitted coded dimensions or visible crop.
+Buffer requests are checked before allocation, including their required
+alignment. The per-picture NV12 budget allows rows padded to 512-byte
+boundaries and heights padded to 64-line boundaries; returned texture arrays
+are limited to 16 surfaces with a valid slice. Larger requests, changed
+geometry and oversized returned memory are refused. These checks also apply
+when the decoder renegotiates its output type.
+
 ## Local capture probe
 
 ```text
@@ -554,6 +572,14 @@ the local Desktop Duplication, hardware HEVC encode and decode path in the
 interactive session and prints counts and timings.
 
 ## Validation scope
+
+`cargo test --locked -p fr-mobile-ffi --lib` passes ten portable decoder-policy
+regressions with the pinned toolchain, covering original frame ownership,
+missing/incomplete output, geometry, allocation bounds, alignment and readable
+luma rows. A Windows-only real HEVC regression additionally checks distinct
+frame ownership when capture timestamps are identical and exceed signed
+native timestamp range. That new native regression has not run on a Windows
+desktop; portable checks do not qualify decoder or GPU behavior.
 
 `cargo test -p fr-mobile-ffi --test build_roots --locked` exercises the actual
 build-time PEM parser, byte bounds and wrong-certificate rejection on every

@@ -138,6 +138,34 @@ fn a_decode_only_unit_returns_no_picture_but_advances_the_chain() {
     assert!(decoder.submit(&units[1], true).unwrap().is_some());
 }
 
+#[cfg(windows)]
+#[test]
+fn windows_output_owns_its_frame_even_when_capture_timestamps_repeat_or_overflow() {
+    use windows::Win32::Media::MediaFoundation::IMFSample;
+    use windows::core::Interface;
+
+    let mut decoder = decoder();
+    for original in units() {
+        let unit = EncodedAccessUnit::new(
+            &ProtocolLimits::ABSOLUTE,
+            original.frame(),
+            original.kind(),
+            original.config_generation(),
+            u64::MAX,
+            original.bytes().to_vec(),
+        )
+        .unwrap();
+        let image = decoder.submit(&unit, true).unwrap().unwrap();
+        // SAFETY: retained_raw returns a +1 sample reference for this caller;
+        // the wrapper owns and releases it after the read-only timestamp query.
+        let sample = unsafe { IMFSample::from_raw(image.retained_raw()) };
+        // SAFETY: the sample is live and owned until this scope ends.
+        let time = unsafe { sample.GetSampleTime() }.unwrap();
+        assert_eq!(time, i64::try_from(unit.frame().as_raw()).unwrap());
+        assert_eq!(unit.capture_micros(), u64::MAX);
+    }
+}
+
 #[test]
 fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
     let units = units();

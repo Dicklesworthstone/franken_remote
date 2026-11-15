@@ -27,6 +27,10 @@ pub mod roots;
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod video;
 
+#[cfg(any(windows, test))]
+#[path = "video/windows_contract.rs"]
+mod windows_video_contract;
+
 #[cfg(all(
     feature = "session",
     any(

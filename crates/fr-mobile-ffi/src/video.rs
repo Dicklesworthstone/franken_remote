@@ -89,8 +89,16 @@ impl Decoder {
         let [vps, sps, pps] = parameter_sets(record).ok_or(Error::InvalidConfiguration)?;
         let g = config.geometry();
         let full_range = matches!(config.color().range, ColorRange::Full);
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
         let raw =
             backend::RawDecoder::new([vps, sps, pps], g.crop_width(), g.crop_height(), full_range)?;
+        #[cfg(windows)]
+        let raw = backend::RawDecoder::new(
+            [vps, sps, pps],
+            (g.coded_width(), g.coded_height()),
+            (g.crop_width(), g.crop_height()),
+            full_range,
+        )?;
         Ok(Self {
             raw,
             config,
@@ -149,7 +157,14 @@ impl Decoder {
         let sample = admission
             .prepare_hvc1(unit.bytes(), idr)
             .map_err(|_| Error::UnsupportedBitstream)?;
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
         let pts = i64::try_from(unit.capture_micros()).unwrap_or(i64::MAX);
+        // MF timestamps correlate output with the original frame, independently
+        // of capture clocks (which can repeat). This is not a freshness clock;
+        // the access unit keeps its original capture time and deadline.
+        #[cfg(windows)]
+        let pts = crate::windows_video_contract::sample_time(unit.frame().as_raw())
+            .ok_or(Error::StaleGeneration)?;
         let image = match self.raw.decode(sample.bytes(), idr, pts, present) {
             Ok(image) => image,
             Err(error) => {

@@ -6,10 +6,13 @@
 //!
 //! Input is Annex B: each admitted sample's 4-byte length prefixes become
 //! start codes, and an IDR carries the record's VPS, SPS and PPS in front.
-//! The transform runs in low-latency mode, so one admitted unit yields its
-//! own picture; a transform that holds a picture back answers no picture
-//! for that unit (counted, never invented).
+//! One admitted unit must synchronously yield its own timestamp-matched
+//! picture. Missing or delayed output fails the decoder transaction: it
+//! cannot advance the reference chain or become a later input's picture.
 use super::{Error, NV12_FULL_RANGE, NV12_VIDEO_RANGE};
+use crate::windows_video_contract::{
+    Allocation, MAX_OUTPUT_TYPES, MAX_TRANSFORMS, OutputBounds, owns_picture, readable_luma,
+};
 use core::ffi::c_void;
 use core::mem::ManuallyDrop;
 use std::sync::OnceLock;
@@ -22,17 +25,20 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11Multithread, ID3D11Texture2D,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
 use windows::Win32::Media::MediaFoundation::{
     IMF2DBuffer, IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample,
-    IMFTransform, MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE,
-    MF_VERSION, MFCreateDXGIDeviceManager, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-    MFMediaType_Video, MFSTARTUP_NOSOCKET, MFSampleExtension_CleanPoint, MFStartup,
-    MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_HEVC,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive,
+    IMFTransform, MF_E_ATTRIBUTENOTFOUND, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
+    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_VERSION,
+    MFCreateAlignedMemoryBuffer, MFCreateDXGIDeviceManager, MFCreateMediaType,
+    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET,
+    MFSampleExtension_CleanPoint, MFStartup, MFT_CATEGORY_VIDEO_DECODER,
+    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
+    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
+    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::core::Interface;
@@ -184,14 +190,16 @@ fn read_texture_luma(
         context
             .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&raw mut mapped))
             .ok()?;
-        let sum = sum_rows(
-            mapped.pData.cast::<u8>(),
-            mapped.RowPitch as usize,
-            width,
-            height,
-        );
+        let sum = (!mapped.pData.is_null() && mapped.RowPitch >= width).then(|| {
+            sum_rows(
+                mapped.pData.cast::<u8>(),
+                mapped.RowPitch as usize,
+                width,
+                height,
+            )
+        });
         context.Unmap(&staging, 0);
-        Some(sum)
+        sum
     }
 }
 
@@ -202,13 +210,14 @@ fn read_memory_luma(sample: &IMFSample, width: u32, height: u32) -> Option<u64> 
     unsafe {
         let buffer = sample.GetBufferByIndex(0).ok()?;
         let planar = buffer.cast::<IMF2DBuffer>().ok()?;
+        let capacity = buffer.GetMaxLength().ok()?;
         let mut base = core::ptr::null_mut();
         let mut pitch = 0_i32;
         planar.Lock2D(&raw mut base, &raw mut pitch).ok()?;
-        let sum = usize::try_from(pitch)
+        let sum = u32::try_from(pitch)
             .ok()
-            .filter(|pitch| *pitch >= width as usize)
-            .map(|pitch| sum_rows(base, pitch, width, height));
+            .filter(|pitch| !base.is_null() && readable_luma(width, height, *pitch, capacity))
+            .map(|pitch| sum_rows(base, pitch as usize, width, height));
         let _ = planar.Unlock2D();
         sum
     }
@@ -233,10 +242,11 @@ pub(super) struct RawDecoder {
     sets: Vec<u8>,
     width: u32,
     height: u32,
+    coded: (u32, u32),
+    bounds: OutputBounds,
+    minimum_output_bytes: u32,
     full_range: bool,
     dxva: bool,
-    provides_samples: bool,
-    output_size: u32,
     annex_b: Vec<u8>,
 }
 // SAFETY: the transform is used by one thread at a time (`&mut self`); a
@@ -248,10 +258,11 @@ const START: [u8; 4] = [0, 0, 0, 1];
 impl RawDecoder {
     pub(super) fn new(
         sets: [&[u8]; 3],
-        width: u32,
-        height: u32,
+        coded: (u32, u32),
+        visible: (u32, u32),
         full_range: bool,
     ) -> Result<Self, Error> {
+        let bounds = OutputBounds::new(coded, visible).ok_or(Error::Geometry)?;
         // This thread joins the process's multithreaded apartment (an
         // already-initialized thread keeps its own; both work for a
         // synchronous transform).
@@ -259,7 +270,16 @@ impl RawDecoder {
         let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
         let gpu = gpu().ok_or(Error::Unavailable)?;
         let transform = hevc_transform()?;
+        let sets_length = sets
+            .iter()
+            .try_fold(0_usize, |length, set| {
+                length.checked_add(START.len())?.checked_add(set.len())
+            })
+            .ok_or(Error::Allocation)?;
         let mut parameter_sets = Vec::new();
+        parameter_sets
+            .try_reserve_exact(sets_length)
+            .map_err(|_| Error::Allocation)?;
         for set in sets {
             parameter_sets.extend_from_slice(&START);
             parameter_sets.extend_from_slice(set);
@@ -267,12 +287,13 @@ impl RawDecoder {
         let mut decoder = Self {
             transform,
             sets: parameter_sets,
-            width,
-            height,
+            width: visible.0,
+            height: visible.1,
+            coded,
+            bounds,
+            minimum_output_bytes: 0,
             full_range,
             dxva: false,
-            provides_samples: false,
-            output_size: 0,
             annex_b: Vec::new(),
         };
         decoder.configure(gpu)?;
@@ -304,7 +325,7 @@ impl RawDecoder {
             input
                 .SetUINT64(
                     &MF_MT_FRAME_SIZE,
-                    (u64::from(self.width) << 32) | u64::from(self.height),
+                    (u64::from(self.coded.0) << 32) | u64::from(self.coded.1),
                 )
                 .map_err(|_| Error::Allocation)?;
             input
@@ -329,29 +350,82 @@ impl RawDecoder {
         // SAFETY: COM calls on a live transform; each enumerated type is
         // owned by its wrapper.
         unsafe {
-            let mut index = 0;
-            let chosen: IMFMediaType = loop {
+            for index in 0..MAX_OUTPUT_TYPES {
                 let Ok(candidate) = self.transform.GetOutputAvailableType(0, index) else {
                     return Err(Error::Unavailable);
                 };
-                if candidate.GetGUID(&MF_MT_SUBTYPE).ok() == Some(MFVideoFormat_NV12) {
-                    break candidate;
+                if candidate.GetGUID(&MF_MT_SUBTYPE).ok() != Some(MFVideoFormat_NV12) {
+                    continue;
                 }
-                index += 1;
-            };
-            self.transform
-                .SetOutputType(0, &chosen, 0)
-                .map_err(|_| Error::Unavailable)?;
-            let info = self
-                .transform
-                .GetOutputStreamInfo(0)
-                .map_err(|_| Error::Codec)?;
-            let provides = (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0
-                | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
-            self.provides_samples = info.dwFlags & provides != 0;
-            self.output_size = info.cbSize;
+                // MF can offer a partial type before the first input. Fill
+                // only the absent geometry with our already admitted size;
+                // an explicitly different size is still refused.
+                if let Err(error) = candidate.GetUINT64(&MF_MT_FRAME_SIZE) {
+                    if error.code() != MF_E_ATTRIBUTENOTFOUND {
+                        return Err(Error::Geometry);
+                    }
+                    candidate
+                        .SetUINT64(
+                            &MF_MT_FRAME_SIZE,
+                            (u64::from(self.coded.0) << 32) | u64::from(self.coded.1),
+                        )
+                        .map_err(|_| Error::Geometry)?;
+                }
+                self.output_layout(&candidate)?;
+                self.transform
+                    .SetOutputType(0, &candidate, 0)
+                    .map_err(|_| Error::Unavailable)?;
+                let selected = self
+                    .transform
+                    .GetOutputCurrentType(0)
+                    .map_err(|_| Error::Codec)?;
+                self.minimum_output_bytes = self.output_layout(&selected)?;
+                self.output_allocation()?;
+                return Ok(());
+            }
         }
-        Ok(())
+        Err(Error::Unavailable)
+    }
+
+    fn output_layout(&self, media_type: &IMFMediaType) -> Result<u32, Error> {
+        // SAFETY: read-only queries on a live media type. Missing stride is
+        // allowed; malformed attributes and geometry are not.
+        unsafe {
+            if media_type.GetGUID(&MF_MT_SUBTYPE).ok() != Some(MFVideoFormat_NV12) {
+                return Err(Error::Geometry);
+            }
+            let dimensions = media_type
+                .GetUINT64(&MF_MT_FRAME_SIZE)
+                .map_err(|_| Error::Geometry)?;
+            let width = u32::try_from(dimensions >> 32).map_err(|_| Error::Geometry)?;
+            let height =
+                u32::try_from(dimensions & u64::from(u32::MAX)).map_err(|_| Error::Geometry)?;
+            let stride = match media_type.GetUINT32(&MF_MT_DEFAULT_STRIDE) {
+                Ok(stride) => Some(stride),
+                Err(error) if error.code() == MF_E_ATTRIBUTENOTFOUND => None,
+                Err(_) => return Err(Error::Geometry),
+            };
+            self.bounds
+                .layout(width, height, stride)
+                .ok_or(Error::Geometry)
+        }
+    }
+
+    /// Stream info can change after `ProcessOutput`, even without a new type.
+    /// Recheck it before every native allocation instead of caching `cbSize`.
+    fn output_allocation(&self) -> Result<Allocation, Error> {
+        // SAFETY: a live transform with its input and output types set.
+        let info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|_| Error::Codec)?;
+        let provides =
+            (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0) as u32;
+        self.bounds
+            .allocation(
+                self.minimum_output_bytes,
+                info.cbSize,
+                info.cbAlignment,
+                info.dwFlags & provides != 0,
+            )
+            .ok_or(Error::Geometry)
     }
 
     /// Whether DXVA decodes (the transform took the D3D11 device).
@@ -369,10 +443,17 @@ impl RawDecoder {
         &mut self,
         sample: &[u8],
         idr: bool,
-        pts: i64,
+        frame_time: i64,
         present: bool,
     ) -> Result<Option<Image>, Error> {
         self.annex_b.clear();
+        let size = sample
+            .len()
+            .checked_add(if idr { self.sets.len() } else { 0 })
+            .ok_or(Error::Allocation)?;
+        self.annex_b
+            .try_reserve_exact(size)
+            .map_err(|_| Error::Allocation)?;
         if idr {
             self.annex_b.extend_from_slice(&self.sets);
         }
@@ -385,12 +466,10 @@ impl RawDecoder {
             self.annex_b.extend_from_slice(nal);
             rest = &tail[length..];
         }
-        let input = self.input_sample(idr, pts)?;
+        let input = self.input_sample(idr, frame_time)?;
         // SAFETY: a live transform and a sample this function owns.
         unsafe { self.transform.ProcessInput(0, &input, 0) }.map_err(|_| Error::Codec)?;
-        let Some(output) = self.drain()? else {
-            return Ok(None);
-        };
+        let output = self.drain(frame_time)?;
         Ok(present.then_some(Image {
             sample: output,
             width: self.width,
@@ -399,16 +478,21 @@ impl RawDecoder {
         }))
     }
 
-    fn input_sample(&self, idr: bool, pts: i64) -> Result<IMFSample, Error> {
+    fn input_sample(&self, idr: bool, frame_time: i64) -> Result<IMFSample, Error> {
         let length = u32::try_from(self.annex_b.len()).map_err(|_| Error::Codec)?;
         // SAFETY: the buffer is locked for exactly the copy of `length` bytes
         // into its `length`-byte allocation.
         unsafe {
             let buffer = MFCreateMemoryBuffer(length).map_err(|_| Error::Allocation)?;
             let mut base = core::ptr::null_mut();
+            let mut capacity = 0;
             buffer
-                .Lock(&raw mut base, None, None)
+                .Lock(&raw mut base, Some(&raw mut capacity), None)
                 .map_err(|_| Error::Allocation)?;
+            if base.is_null() || capacity < length {
+                let _ = buffer.Unlock();
+                return Err(Error::Allocation);
+            }
             core::ptr::copy_nonoverlapping(self.annex_b.as_ptr(), base, self.annex_b.len());
             buffer.Unlock().map_err(|_| Error::Allocation)?;
             buffer
@@ -416,31 +500,38 @@ impl RawDecoder {
                 .map_err(|_| Error::Allocation)?;
             let sample = MFCreateSample().map_err(|_| Error::Allocation)?;
             sample.AddBuffer(&buffer).map_err(|_| Error::Allocation)?;
-            // Capture microseconds to Media Foundation's 100 ns units.
-            let _ = sample.SetSampleTime(pts.saturating_mul(10));
+            // This token identifies the original access unit, not wall time.
+            sample.SetSampleTime(frame_time).map_err(|_| Error::Codec)?;
             if idr {
-                let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
+                sample
+                    .SetUINT32(&MFSampleExtension_CleanPoint, 1)
+                    .map_err(|_| Error::Codec)?;
             }
             Ok(sample)
         }
     }
 
-    /// The transform's next picture, if it has one now.
-    fn drain(&mut self) -> Result<Option<IMFSample>, Error> {
+    /// The current input's one picture; missing output is a failed decode,
+    /// never permission to carry a hidden picture into the next transaction.
+    fn drain(&mut self, frame_time: i64) -> Result<IMFSample, Error> {
         // A stream change renegotiates NV12 once and asks again; a second
         // change in one call is a codec failure.
         for _ in 0..2 {
-            let provided = if self.provides_samples {
-                None
-            } else {
-                // SAFETY: a fresh sample with one buffer of the size the
-                // transform asked for.
-                unsafe {
-                    let sample = MFCreateSample().map_err(|_| Error::Allocation)?;
-                    let buffer =
-                        MFCreateMemoryBuffer(self.output_size).map_err(|_| Error::Allocation)?;
-                    sample.AddBuffer(&buffer).map_err(|_| Error::Allocation)?;
-                    Some(sample)
+            let provided = match self.output_allocation()? {
+                Allocation::Decoder => None,
+                Allocation::Caller {
+                    bytes,
+                    alignment_mask,
+                } => {
+                    // SAFETY: a fresh sample with one buffer whose size and
+                    // alignment were checked against this admitted geometry.
+                    unsafe {
+                        let sample = MFCreateSample().map_err(|_| Error::Allocation)?;
+                        let buffer = MFCreateAlignedMemoryBuffer(bytes, alignment_mask)
+                            .map_err(|_| Error::Allocation)?;
+                        sample.AddBuffer(&buffer).map_err(|_| Error::Allocation)?;
+                        Some(sample)
+                    }
                 }
             };
             let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
@@ -458,15 +549,66 @@ impl RawDecoder {
             };
             let [buffer] = buffers;
             let sample = ManuallyDrop::into_inner(buffer.pSample);
-            drop(ManuallyDrop::into_inner(buffer.pEvents));
+            let events = ManuallyDrop::into_inner(buffer.pEvents);
+            // SAFETY: the returned collection is owned until it is dropped.
+            let has_events = events
+                .as_ref()
+                .is_some_and(|events| unsafe { events.GetElementCount() != Ok(0) });
+            drop(events);
             match result {
-                Ok(()) => return Ok(sample),
-                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+                Ok(()) => {
+                    let sample = sample.ok_or(Error::Codec)?;
+                    // SAFETY: this function owns the returned sample.
+                    let time = unsafe { sample.GetSampleTime() }.ok();
+                    if !owns_picture(frame_time, time, buffer.dwStatus, status, has_events) {
+                        return Err(Error::Codec);
+                    }
+                    self.validate_output(&sample)?;
+                    return Ok(sample);
+                }
+                Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                    return Err(Error::Codec);
+                }
                 Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => self.select_nv12()?,
                 Err(_) => return Err(Error::Codec),
             }
         }
         Err(Error::Codec)
+    }
+
+    fn validate_output(&self, sample: &IMFSample) -> Result<(), Error> {
+        // SAFETY: read-only COM queries on the live sample and its one buffer.
+        // No returned pixels are mapped or handed to a renderer before these
+        // geometry, allocation, and subresource checks succeed.
+        unsafe {
+            if sample.GetBufferCount().map_err(|_| Error::Codec)? != 1 {
+                return Err(Error::Codec);
+            }
+            if let Some((texture, slice)) = texture_of(sample) {
+                let mut desc = D3D11_TEXTURE2D_DESC::default();
+                texture.GetDesc(&raw mut desc);
+                if desc.Format != DXGI_FORMAT_NV12
+                    || desc.MipLevels != 1
+                    || desc.SampleDesc.Count != 1
+                    || !self
+                        .bounds
+                        .texture(desc.Width, desc.Height, desc.ArraySize, slice)
+                {
+                    return Err(Error::Geometry);
+                }
+            } else {
+                let buffer = sample.GetBufferByIndex(0).map_err(|_| Error::Codec)?;
+                let capacity = buffer.GetMaxLength().map_err(|_| Error::Geometry)?;
+                let length = buffer.GetCurrentLength().map_err(|_| Error::Geometry)?;
+                if !self
+                    .bounds
+                    .memory(self.minimum_output_bytes, length, capacity)
+                {
+                    return Err(Error::Geometry);
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -500,12 +642,18 @@ fn hevc_transform() -> Result<IMFTransform, Error> {
         if activates.is_null() {
             return Err(Error::Unavailable);
         }
-        let all: Vec<IMFActivate> = (0..count as usize)
-            .filter_map(|n| (*activates.add(n)).take())
-            .collect();
+        // Do not build an unbounded Rust vector or activate an unbounded
+        // number of codecs. All COM references still need releasing when an
+        // oversized native enumeration is refused.
+        let mut chosen = None;
+        for index in 0..count as usize {
+            let activation = (*activates.add(index)).take();
+            if count <= MAX_TRANSFORMS && chosen.is_none() {
+                chosen =
+                    activation.and_then(|activate| activate.ActivateObject::<IMFTransform>().ok());
+            }
+        }
         CoTaskMemFree(Some(activates.cast_const().cast()));
-        all.iter()
-            .find_map(|activate| activate.ActivateObject::<IMFTransform>().ok())
-            .ok_or(Error::Unavailable)
+        chosen.ok_or(Error::Unavailable)
     }
 }
