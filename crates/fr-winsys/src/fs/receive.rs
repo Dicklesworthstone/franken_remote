@@ -12,8 +12,9 @@ use std::path::Path;
 use windows::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT, NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS,
-    NtCreateFile,
+    FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT, FileRenameInformation,
+    NTCREATEFILE_CREATE_DISPOSITION, NTCREATEFILE_CREATE_OPTIONS, NtCreateFile,
+    NtSetInformationFile,
 };
 use windows::Win32::Foundation::{
     HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
@@ -25,9 +26,9 @@ use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_DESCRIPTOR, TokenU
 use windows::Win32::Storage::FileSystem::{
     BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ACCESS_RIGHTS, FILE_ATTRIBUTE_DIRECTORY,
     FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_GENERIC_READ,
-    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO, FILE_SHARE_MODE, FILE_SHARE_READ,
-    FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK, FileDispositionInfo, FileRenameInfo,
-    GetDriveTypeW, GetFileInformationByHandle, GetFileType, SetFileInformationByHandle,
+    FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_TRAVERSE, FILE_TYPE_DISK, FileDispositionInfo, GetDriveTypeW, GetFileInformationByHandle,
+    GetFileType, SetFileInformationByHandle,
 };
 use windows::Win32::System::IO::IO_STATUS_BLOCK;
 use windows::core::{HSTRING, PCWSTR, PWSTR};
@@ -259,18 +260,18 @@ pub fn prepare_receive_rename<'a>(
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or(io::ErrorKind::InvalidInput)?;
-    let bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName)
+    let bytes = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName)
         .checked_add(name_bytes)
         .and_then(|bytes| bytes.checked_add(size_of::<u16>()))
         .ok_or(io::ErrorKind::InvalidInput)?
-        .max(size_of::<FILE_RENAME_INFO>());
+        .max(size_of::<FILE_RENAME_INFORMATION>());
     let mut buffer = Vec::<u64>::new();
     buffer
         .try_reserve_exact(bytes.div_ceil(size_of::<u64>()))
         .map_err(|_| io::ErrorKind::OutOfMemory)?;
     buffer.resize(bytes.div_ceil(size_of::<u64>()), 0);
-    let record = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // SAFETY: the zeroed buffer is aligned for FILE_RENAME_INFO on Windows and
+    let record = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    // SAFETY: the zeroed buffer is aligned for FILE_RENAME_INFORMATION and
     // contains its header, the checked name and one NUL. The stored handles stay
     // borrowed in PreparedReceiveRename. No untrusted pointer enters the record.
     unsafe {
@@ -296,17 +297,30 @@ impl PreparedReceiveRename<'_> {
     /// original authority check; no name lookup, reopen, probe or allocation
     /// precedes it here. Success means published, not proven crash-durable.
     pub fn commit(self) -> io::Result<()> {
-        // SAFETY: the prepared aligned record and both borrowed original handles
-        // remain live for this synchronous call. ReplaceIfExists is false.
-        unsafe {
-            SetFileInformationByHandle(
+        // The NT call keeps the name relative to the retained root handle.
+        // SetFileInformationByHandle(FileRenameInfo) expands it to a full DOS
+        // path from the process's current directory, which is invalid beside
+        // RootDirectory: every publication failed ERROR_INVALID_PARAMETER.
+        let mut status_block = IO_STATUS_BLOCK::default();
+        // SAFETY: the prepared aligned record, the status block and both
+        // borrowed original handles remain live for this synchronous call (the
+        // staging handle was opened FILE_SYNCHRONOUS_IO_NONALERT).
+        // ReplaceIfExists is false.
+        let status = unsafe {
+            NtSetInformationFile(
                 HANDLE(self.source.as_raw_handle()),
-                FileRenameInfo,
+                &raw mut status_block,
                 self.buffer.as_ptr().cast(),
                 self.bytes,
+                FileRenameInformation,
             )
+        };
+        if status.is_err() {
+            // SAFETY: translates a returned status value; it retains no pointers.
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(io::Error::from_raw_os_error(code.cast_signed()));
         }
-        .map_err(|e| os(&e))
+        Ok(())
     }
 }
 
