@@ -124,6 +124,10 @@ pub struct Controller {
     source: Option<Observation>,
     unchanged_since: Option<u64>,
     mode: Mode,
+    // Losing current source evidence ends the Idle classification, but does
+    // not erase why cadence was reduced. Only a fresh change may consume this
+    // conservative wake opportunity; missing evidence cannot accelerate work.
+    idle_pending_wake: bool,
     closed: bool,
     report: Option<Report>,
     decisions: [Option<Report>; 16],
@@ -147,6 +151,7 @@ impl Controller {
             source: None,
             unchanged_since: None,
             mode: Mode::Active,
+            idle_pending_wake: false,
             closed: false,
             report: None,
             decisions: [None; 16],
@@ -222,8 +227,12 @@ impl Controller {
         if gap {
             self.reset_evidence();
             self.mode = Mode::Active;
-            self.interval = self.interval.max(self.policy.conservative());
-            self.adjusted = Some(s.now_us);
+            // A delayed service turn invalidates accumulated measurements; it
+            // does not prove persistent overload or a changed network path.
+            // Keep the last operating point and its actual adjustment clock.
+            // Fresh pressure still has to meet its dwell, and a probe needs
+            // entirely new headroom. Cold start and wake from verified idle
+            // retain their separate conservative policies below.
             reason = Reason::EvidenceGap;
         }
         if self
@@ -251,8 +260,9 @@ impl Controller {
                         .unchanged_since
                         .is_some_and(|t| o.at_us - t >= IDLE_DWELL_US)
             });
-        if changed && self.mode == Mode::Idle {
+        if changed && fresh && self.idle_pending_wake {
             self.mode = Mode::Active;
+            self.idle_pending_wake = false;
             // Wake is conservative, never an optimistic probe through pressure.
             if !pressure.contains(&true) && !remote.contains(&true) {
                 self.interval = self.policy.conservative();
@@ -262,6 +272,7 @@ impl Controller {
             reason = Reason::ChangedAfterIdle;
         } else if idle && self.mode != Mode::Idle {
             self.mode = Mode::Idle;
+            self.idle_pending_wake = true;
             self.interval = self.policy.maximum_interval_us;
             self.adjusted = Some(s.now_us);
             self.reset_headroom();

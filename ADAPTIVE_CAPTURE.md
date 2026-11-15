@@ -236,6 +236,12 @@ platform damage-event notification remains outside this controller. The separate
 source check during verified idle without altering these pacing decisions.
 
 A sampling gap longer than 100 ms resets accumulated dwell and idle evidence.
+It keeps the last capture interval and the time of the last actual adjustment:
+missing measurements do not establish persistent overload. Fresh pressure must
+meet its full dwell again, and a faster probe needs two new seconds of measured
+headroom. A fresh changed source observation after verified idle still takes the
+conservative wake path, even when its delivery also crosses a sampling gap;
+missing, duplicate or stale observations cannot request that wake.
 Missing source evidence removes the idle classification without manufacturing a
 changed frame. Clock regression, future source timestamps, and contradictory or
 regressing source metadata are terminal typed controller errors.
