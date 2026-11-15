@@ -20,6 +20,11 @@
 //! exchange. A failed cleanup still terminates instead. A reopened control-capable view
 //! exposes a fresh Input → Request control choice, never replay of the earlier
 //! --control choice.
+//!
+//! Leaving the active controlling window fences that original grant and closes
+//! it in order. After positive bounded cleanup the window can wait dormant for
+//! a new foreground event, then open fresh viewing without input or auxiliary
+//! authority. Hidden/failure reports remain distinct from cleanup proof.
 mod control;
 mod display;
 mod text;
@@ -27,7 +32,7 @@ mod upload;
 
 use super::render::Renderer;
 use crate::{
-    change_display::{self, Action, Cause, Refusal, Replacements},
+    change_display::{self, Action, Activation, Cause, Refusal, Replacements},
     geometry::{Mapping, StaleMapping, host_scales, reopen_for},
     keys,
 };
@@ -57,7 +62,7 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
-    GetForegroundWindow, GetMessageTime, IDC_ARROW, IsDialogMessageW, LoadCursorW, MSG,
+    GetForegroundWindow, GetMessageTime, IDC_ARROW, IsDialogMessageW, IsIconic, LoadCursorW, MSG,
     MsgWaitForMultipleObjects, PM_NOREMOVE, PM_REMOVE, PeekMessageW, PostQuitMessage, QS_ALLINPUT,
     RegisterClassExW, SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED, SPI_GETWORKAREA, SW_SHOW,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, ShowWindow, SystemParametersInfoW, TranslateMessage,
@@ -119,7 +124,7 @@ thread_local! {
     static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
     // Activation messages describe a transition. Restore visible observation
     // only after the pump sees this original viewer actually in foreground.
-    static ACTIVATION_PENDING: Cell<Option<(u64, u64)>> = const { Cell::new(None) };
+    static ACTIVATION_PENDING: Cell<Option<Activation>> = const { Cell::new(None) };
     /// The original owner was already fenced by the independent menu handler.
     /// UI cleanup may wait until a nested native callback releases Viewer.
     static CHANGE_PENDING: RefCell<Option<(Cause, change_display::Request<Shared>)>> =
@@ -162,6 +167,10 @@ struct Stats {
     reopens: u64,
     display_changes: u64,
     control_releases: u64,
+    focus_releases: u64,
+    /// Actual last retired focus owner's public result, separate from the
+    /// current viewing owner's end. Bounded to one content-free result.
+    focus_end: Option<(u32, Option<String>)>,
     /// Counts of the sessions before the current one.
     earlier_decoded: u64,
     earlier_decode_micros: u64,
@@ -356,8 +365,14 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
             }
         }
         if !drew {
-            // SAFETY: waits for input or 2 ms; no handles.
-            unsafe { MsgWaitForMultipleObjects(None, false, 2, QS_ALLINPUT) };
+            let wait = if with_viewer(|v| v.reopen.dormant()).unwrap_or(false) {
+                50
+            } else {
+                2
+            };
+            // SAFETY: waits for input or a bounded timeout; no handles. A
+            // disconnected dormant window does not need the presentation tick.
+            unsafe { MsgWaitForMultipleObjects(None, false, wait, QS_ALLINPUT) };
         }
     }
 }
@@ -378,6 +393,12 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         return no_replacement();
     }
     let lifetime = control::lifetime();
+    let focus = v.reopen.focus_pending();
+    let cleaned = if focus {
+        v.session.shared().focus_closed()
+    } else {
+        v.session.shared().orderly_closed()
+    };
     let opening = match v.reopen.poll(
         input_ticks(),
         lifetime,
@@ -386,10 +407,14 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
             && v.upload_menu
                 .as_ref()
                 .is_none_or(upload::Menu::cleanup_complete),
-        v.session.shared().orderly_closed(),
+        cleaned,
     ) {
         Action::Open(opening) => opening,
         Action::Waiting => return Reopen::Waiting,
+        Action::Dormant => {
+            v.input_menu.waiting_for_foreground();
+            return Reopen::Waiting;
+        }
         Action::None => return no_replacement(),
         Action::Refused(reason) => {
             eprintln!("fr-windows: {}", reason.name());
@@ -404,7 +429,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // A replacement view cannot resend the original explicit file. Its menu
     // retains only the original transfer's cancellation and receipt evidence.
     next.upload = None;
-    if opening.cause == Cause::StopControl {
+    if matches!(opening.cause, Cause::StopControl | Cause::FocusLost) {
         next.clipboard = false;
     }
     if opening.choose_display {
@@ -422,7 +447,14 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // Retain only the offered profile. Session::start grants and requests
     // nothing: a resized view needs a new explicit local menu choice.
     let size = client_size(hwnd);
-    if CLOSE_PENDING.with(Cell::get) || !control::visible_now() || control::lifetime() != lifetime {
+    // SAFETY: scalar queries of this UI thread's original live viewer. A
+    // foreground callback never authorizes opening while it is hidden again.
+    let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
+    if CLOSE_PENDING.with(Cell::get)
+        || !control::visible_now()
+        || control::lifetime() != lifetime
+        || (opening.cause == Cause::FocusLost && !foreground)
+    {
         v.reopen_refusal.get_or_insert(Refusal::Cancelled);
         v.close();
         return Reopen::No;
@@ -454,6 +486,10 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     stats.reopens += 1;
     stats.display_changes += u64::from(opening.cause == Cause::Display);
     stats.control_releases += u64::from(opening.cause == Cause::StopControl);
+    if opening.cause == Cause::FocusLost {
+        stats.focus_releases += 1;
+        stats.focus_end = Some((shared.end_code(), shared.detail()));
+    }
     // The reopen's own wait is not a frame interval.
     stats.last_draw = None;
     v.mapping = None;
@@ -502,18 +538,60 @@ fn poll_file_choice(v: &mut Viewer, hwnd: HWND) {
     }
 }
 
+/// Consume one current foreground observation. A foreground clear can reenter
+/// Win32, so another hide/resize/close during that work still cancels the choice.
+fn apply_activation(v: &mut Viewer, hwnd: HWND) {
+    let Some(activation) = ACTIVATION_PENDING.with(Cell::get) else {
+        return;
+    };
+    if v.closing
+        || (v.reopen.pending() && !v.reopen.focus_pending())
+        || !activation.current(control::activation_scope(), input_ticks())
+    {
+        ACTIVATION_PENDING.with(|pending| pending.set(None));
+        return;
+    }
+    // SAFETY: scalar queries against this UI thread's live viewer.
+    if unsafe { GetForegroundWindow() != hwnd || IsIconic(hwnd).as_bool() } {
+        return;
+    }
+    ACTIVATION_PENDING.with(|pending| pending.set(None));
+    let focus = v.reopen.focus_pending();
+    if focus && let Err(reason) = v.reopen.resume_focus(activation, input_ticks()) {
+        v.reopen_refusal.get_or_insert(reason);
+        v.close();
+        return;
+    }
+    // The retired owner remains permanently closed. Reflect this admitted
+    // foreground event before native work so a nested hide changes its scope.
+    control::visible(true);
+    if !focus {
+        return;
+    }
+    // The earlier background Present may have been occluded. Clear again now
+    // the window is foreground, without marking any remote frame as presented.
+    if v.renderer.clear().is_err() {
+        v.session.shared().presentation_failed();
+        v.reopen_refusal.get_or_insert(Refusal::Presentation);
+        v.close();
+        return;
+    }
+    // SAFETY: native rendering above may have dispatched lifecycle callbacks;
+    // recheck the same live viewer after it and retain the opening's old bound.
+    let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
+    if CLOSE_PENDING.with(Cell::get)
+        || control::activation_scope() != Some((activation.lifetime, activation.attempt))
+        || !foreground
+    {
+        v.reopen_refusal.get_or_insert(Refusal::Cancelled);
+        v.close();
+    }
+}
+
 /// Events, then the newest picture if there is one. (finished, drew)
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
     sync_file_focus(v, hwnd);
-    if let Some(scope) = ACTIVATION_PENDING.with(Cell::get) {
-        if v.closing || v.reopen.pending() || control::activation_scope() != Some(scope) {
-            ACTIVATION_PENDING.with(|pending| pending.set(None));
-        // SAFETY: compare the current foreground HWND to this live viewer.
-        } else if unsafe { GetForegroundWindow() } == hwnd {
-            ACTIVATION_PENDING.with(|pending| pending.set(None));
-            control::visible(true);
-        }
-    }
+    apply_activation(v, hwnd);
     poll_file_choice(v, hwnd);
     let can_change_display = v.can_change_display();
     v.input_menu.display_available(can_change_display);
@@ -690,6 +768,13 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         .as_ref()
         .is_none_or(upload::Menu::succeeded);
     let upload = upload::document(viewer.upload_menu.as_ref());
+    let focus_end = stats.focus_end.as_ref().map(|(code, detail)| {
+        serde_json::json!({
+            "end": end_name(*code),
+            "detail": detail,
+            "cleanup": "finished",
+        })
+    });
     let mut json = String::new();
     let _ = write!(
         json,
@@ -697,7 +782,8 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"presented\":{},\"decoded\":{},\"decode_ms_mean\":{:.2},\"first_view_ms\":{:.1},\
          \"dxva\":{},\"display\":[{},{}],\"picture\":[{},{}],\"window\":[{},{}],\
          \"frame_interval_ms\":{},\
-         \"reopens\":{},\"display_changes\":{},\"control_releases\":{},\"reopen_refusal\":{},\
+         \"reopens\":{},\"display_changes\":{},\"control_releases\":{},\"focus_releases\":{},\
+         \"last_focus_end\":{},\"reopen_refusal\":{},\
          \"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
          \"seconds\":{:.1},\"clipboard\":{},\"upload\":{}}}",
         end_name(code),
@@ -725,6 +811,8 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         stats.reopens,
         stats.display_changes,
         stats.control_releases,
+        stats.focus_releases,
+        serde_json::to_string(&focus_end).unwrap_or_else(|_| "null".into()),
         viewer.reopen_refusal.map_or_else(
             || "null".to_owned(),
             |reason| format!("{:?}", reason.name()),
@@ -880,6 +968,21 @@ fn current_message_time() -> u32 {
     unsafe { GetMessageTime() }.cast_unsigned()
 }
 
+fn remember_activation() {
+    let at = input_ticks();
+    let activation = control::activation_scope().map(|(lifetime, attempt)| Activation {
+        lifetime,
+        attempt,
+        at,
+    });
+    ACTIVATION_PENDING.with(|pending| {
+        // Repeated notifications cannot give an unconsumed return a new age.
+        if pending.get().is_none() {
+            pending.set(activation);
+        }
+    });
+}
+
 fn key_result(result: InputResult) -> Result<bool, ()> {
     match result {
         InputResult::Sent | InputResult::Pending => Ok(true),
@@ -900,7 +1003,7 @@ fn sync_file_focus(viewer: &mut Viewer, hwnd: HWND) {
         // never restored, and no old activation message is reused.
         // SAFETY: scalar comparison against this still-live original viewer.
         if unsafe { GetForegroundWindow() } == hwnd {
-            ACTIVATION_PENDING.with(|pending| pending.set(control::activation_scope()));
+            remember_activation();
         }
     }
 }
@@ -1012,9 +1115,12 @@ impl Viewer {
                     || self.text.is_some()
                     || self.display_picker.is_some()
                     || self.choosing_file()))
-            || !control::visible_now()
-            || request.lifetime != control::lifetime()
-            || request.attempt != self.session.shared().frames.app_id(0)
+            || (cause != Cause::FocusLost && !control::visible_now())
+            || !request.current(
+                &self.session.shared_handle(),
+                control::lifetime(),
+                self.session.shared().frames.app_id(0),
+            )
         {
             self.reopen_refusal.get_or_insert(Refusal::Cancelled);
             self.close();
@@ -1034,6 +1140,11 @@ impl Viewer {
         // SAFETY: this UI thread's mouse capture only, after the original
         // session's input and clipboard owners were irrevocably fenced.
         let _ = unsafe { ReleaseCapture() };
+        if cause == Cause::FocusLost && self.renderer.clear().is_err() {
+            self.session.shared().presentation_failed();
+            self.reopen_refusal.get_or_insert(Refusal::Presentation);
+            self.close();
+        }
     }
 
     fn request_control(&mut self, message: u32) {
@@ -1474,14 +1585,21 @@ extern "system" fn window_proc(
                 .is_ok_and(|thread| upload::picker_deactivated(thread, control::lifetime()));
             if !picker {
                 upload::retire_choice();
-                control::visible(false);
+                if let Some(request) = control::focus_lost() {
+                    CHANGE_PENDING.with(|pending| {
+                        *pending.borrow_mut() = Some((Cause::FocusLost, request));
+                    });
+                    drain_close();
+                } else {
+                    control::visible(false);
+                }
                 text::deactivate();
                 with_viewer(Viewer::text_deactivated);
             }
             false
         }
         WM_ACTIVATEAPP => {
-            ACTIVATION_PENDING.with(|pending| pending.set(control::activation_scope()));
+            remember_activation();
             false
         }
         WM_CLOSE => {

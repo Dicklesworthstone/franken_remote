@@ -83,6 +83,12 @@ pub struct ViewerControl {
     input_fenced: Arc<AtomicBool>,
 }
 impl ViewerControl {
+    /// Permanently refuse new and queued input while the original owner
+    /// completes its existing orderly close. This lock-free fence neither
+    /// cancels that close's I/O nor grants a replacement any input authority.
+    pub fn fence_for_close(&self) {
+        self.input_fenced.store(true, Ordering::Release);
+    }
     pub fn stop(&self) {
         self.stopped.store(true, Ordering::Release);
         self.cx.cancel_fast(CancelKind::User);

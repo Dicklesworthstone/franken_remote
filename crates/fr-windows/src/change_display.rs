@@ -20,6 +20,31 @@ pub struct Request<T> {
     pub at: u64,
 }
 
+impl<T> Request<T> {
+    pub fn current(&self, original: &Arc<T>, lifetime: u64, attempt: u64) -> bool {
+        Arc::ptr_eq(&self.original, original)
+            && self.lifetime == lifetime
+            && self.attempt == attempt
+    }
+}
+
+/// A native foreground notification, scoped before any deferred UI work.
+/// Current foreground ownership must also be checked by the native caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Activation {
+    pub lifetime: u64,
+    pub attempt: u64,
+    pub at: u64,
+}
+
+impl Activation {
+    pub fn current(self, scope: Option<(u64, u64)>, now: u64) -> bool {
+        scope == Some((self.lifetime, self.attempt))
+            && now >= self.at
+            && now - self.at < ACTIVATION_MS
+    }
+}
+
 impl<T> MenuChoice<T> {
     pub fn new(original: Arc<T>, lifetime: u64, attempt: u64, opened: u64) -> Self {
         Self {
@@ -63,6 +88,10 @@ impl<T> MenuChoice<T> {
 pub const MAX_OWNERS: u8 = 32;
 pub const REPLACEMENT_MS: u64 = 10_000;
 pub const REDIAL_MS: u64 = 400;
+/// A foreground callback cannot wait behind native work and then become a new
+/// viewing request. This is admission age; accepted requests keep their own
+/// original ten-second opening bound.
+pub const ACTIVATION_MS: u64 = 250;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cause {
@@ -70,6 +99,9 @@ pub enum Cause {
     Display,
     /// End the original input owner and open fresh viewing after actual cleanup.
     StopControl,
+    /// Retire control on focus loss, then wait without a connection for a new
+    /// foreground event before opening fresh viewing.
+    FocusLost,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +112,7 @@ pub enum Refusal {
     Clock,
     Expired,
     Cleanup,
+    Presentation,
     Start,
 }
 
@@ -92,6 +125,7 @@ impl Refusal {
             Self::Clock => "replacement_clock_invalid",
             Self::Expired => "replacement_expired",
             Self::Cleanup => "original_cleanup_unconfirmed",
+            Self::Presentation => "retired_picture_clear_failed",
             Self::Start => "replacement_start_failed",
         }
     }
@@ -123,6 +157,8 @@ impl Opening {
 pub enum Action {
     None,
     Waiting,
+    /// Original service and cleanup succeeded; no foreground request exists.
+    Dormant,
     Open(Opening),
     Refused(Refusal),
 }
@@ -133,6 +169,9 @@ struct Pending {
     until: u64,
     last: u64,
     ready_at: Option<u64>,
+    /// A fresh foreground event is a new viewing choice, never an extension of
+    /// the original cleanup. Once accepted, repeats cannot refresh its bound.
+    foreground: Option<u64>,
 }
 
 pub struct Replacements {
@@ -175,12 +214,58 @@ impl Replacements {
             until: at.checked_add(REPLACEMENT_MS).ok_or(Refusal::Clock)?,
             last: at,
             ready_at: None,
+            foreground: None,
         });
         Ok(())
     }
 
     pub fn cancel(&mut self) {
         self.pending = None;
+    }
+
+    pub fn focus_pending(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.cause == Cause::FocusLost)
+    }
+
+    pub fn dormant(&self) -> bool {
+        self.pending.as_ref().is_some_and(|pending| {
+            pending.cause == Cause::FocusLost
+                && pending.ready_at.is_some()
+                && pending.foreground.is_none()
+        })
+    }
+
+    /// Admit one fresh, already scoped native foreground event. Cleanup still
+    /// has its original bound; only positively completed cleanup may wait in a
+    /// dormant window. The invocation's close/deadline must cancel this owner
+    /// before calling this method or polling it again.
+    pub fn resume_focus(&mut self, activation: Activation, now: u64) -> Result<(), Refusal> {
+        let Some(pending) = &mut self.pending else {
+            return Err(Refusal::Cancelled);
+        };
+        if pending.cause != Cause::FocusLost || activation.lifetime != pending.lifetime {
+            return Err(Refusal::Cancelled);
+        }
+        if now < pending.last || now < activation.at {
+            return Err(Refusal::Clock);
+        }
+        if now - activation.at >= ACTIVATION_MS
+            || (pending.ready_at.is_none() && now >= pending.until)
+        {
+            return Err(Refusal::Expired);
+        }
+        if pending.foreground.is_none() {
+            pending.foreground = Some(
+                activation
+                    .at
+                    .checked_add(REPLACEMENT_MS)
+                    .ok_or(Refusal::Clock)?,
+            );
+        }
+        pending.last = now;
+        Ok(())
     }
 
     /// Poll the original owner's actual cleanup evidence. The clock includes
@@ -197,18 +282,26 @@ impl Replacements {
         let Some(pending) = &mut self.pending else {
             return Action::None;
         };
-        let refusal =
-            if !visible || (pending.cause != Cause::Resize && lifetime != pending.lifetime) {
-                Some(Refusal::Cancelled)
-            } else if now < pending.last {
-                Some(Refusal::Clock)
-            } else if now >= pending.until {
-                Some(Refusal::Expired)
-            } else if finished && !orderly {
-                Some(Refusal::Cleanup)
-            } else {
-                None
-            };
+        let focused = pending.cause == Cause::FocusLost;
+        let waiting_for_foreground = focused && pending.foreground.is_none();
+        let deadline = if focused && pending.ready_at.is_some() {
+            pending.foreground
+        } else {
+            Some(pending.until)
+        };
+        let refusal = if (!visible && !waiting_for_foreground)
+            || (pending.cause != Cause::Resize && lifetime != pending.lifetime)
+        {
+            Some(Refusal::Cancelled)
+        } else if now < pending.last {
+            Some(Refusal::Clock)
+        } else if deadline.is_some_and(|until| now >= until) {
+            Some(Refusal::Expired)
+        } else if finished && !orderly {
+            Some(Refusal::Cleanup)
+        } else {
+            None
+        };
         if let Some(refusal) = refusal {
             self.pending = None;
             return Action::Refused(refusal);
@@ -220,11 +313,14 @@ impl Replacements {
         let ready = pending
             .ready_at
             .get_or_insert(now.saturating_add(REDIAL_MS));
+        if waiting_for_foreground {
+            return Action::Dormant;
+        }
         if now < *ready {
             return Action::Waiting;
         }
         let cause = pending.cause;
-        let until = pending.until;
+        let until = pending.foreground.unwrap_or(pending.until);
         self.pending = None;
         self.opened += 1; // request refuses at MAX_OWNERS, well before overflow
         self.choose_display |= cause == Cause::Display;
@@ -469,6 +565,200 @@ mod tests {
         assert!(!replacements.available());
         assert_eq!(
             replacements.request(Cause::Display, 3, 50_000),
+            Err(Refusal::Limit)
+        );
+    }
+
+    fn foreground(at: u64) -> Activation {
+        Activation {
+            lifetime: 3,
+            attempt: 9,
+            at,
+        }
+    }
+
+    #[test]
+    fn a_focus_stop_waits_for_actual_cleanup_then_a_fresh_foreground_event() {
+        let mut replacements = Replacements::default();
+        replacements.request(Cause::FocusLost, 3, 1_000).unwrap();
+        assert_eq!(
+            replacements.poll(1_100, 3, false, false, false),
+            Action::Waiting
+        );
+        assert_eq!(
+            replacements.poll(1_200, 3, false, true, true),
+            Action::Dormant
+        );
+        // Time in another app is not a renewed cleanup or an implicit dial.
+        assert_eq!(
+            replacements.poll(90_000, 3, false, true, true),
+            Action::Dormant
+        );
+        assert_eq!(
+            replacements.poll(91_000, 3, true, true, true),
+            Action::Dormant
+        );
+        replacements
+            .resume_focus(foreground(92_000), 92_010)
+            .unwrap();
+        let Action::Open(opening) = replacements.poll(92_010, 3, true, true, true) else {
+            panic!("a new foreground choice follows positive original cleanup");
+        };
+        assert_eq!(opening.cause, Cause::FocusLost);
+        assert_eq!(opening.check(101_999), Ok(()));
+        assert_eq!(opening.check(102_000), Err(Refusal::Expired));
+        assert_eq!(
+            replacements.poll(102_010, 3, true, true, true),
+            Action::None
+        );
+    }
+
+    #[test]
+    fn returning_while_original_cleanup_runs_keeps_both_original_deadlines() {
+        let mut replacements = Replacements::default();
+        replacements.request(Cause::FocusLost, 3, 1_000).unwrap();
+        replacements.resume_focus(foreground(1_100), 1_110).unwrap();
+        assert_eq!(
+            replacements.poll(1_110, 3, true, false, false),
+            Action::Waiting
+        );
+        assert_eq!(
+            replacements.poll(1_200, 3, true, true, true),
+            Action::Waiting
+        );
+        assert_eq!(
+            replacements.poll(1_599, 3, true, true, true),
+            Action::Waiting
+        );
+        let Action::Open(opening) = replacements.poll(1_600, 3, true, true, true) else {
+            panic!("original cleanup and listener cooldown completed");
+        };
+        assert_eq!(opening.check(11_099), Ok(()));
+        assert_eq!(opening.check(11_100), Err(Refusal::Expired));
+    }
+
+    #[test]
+    fn failed_or_late_focus_cleanup_never_becomes_dormant_eligible() {
+        for (now, orderly, expected) in [
+            (1_100, false, Refusal::Cleanup),
+            (11_000, true, Refusal::Expired),
+            (99_000, true, Refusal::Expired),
+        ] {
+            let mut replacements = Replacements::default();
+            replacements.request(Cause::FocusLost, 3, 1_000).unwrap();
+            assert_eq!(
+                replacements.poll(now, 3, false, true, orderly),
+                Action::Refused(expected)
+            );
+            assert_eq!(
+                replacements.resume_focus(foreground(now + 1), now + 2),
+                Err(Refusal::Cancelled)
+            );
+            assert_eq!(
+                replacements.poll(now + 3, 3, true, true, true),
+                Action::None
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_scope_and_age_reject_old_owner_attempts_and_late_callbacks() {
+        let activation = foreground(1_000);
+        assert!(activation.current(Some((3, 9)), 1_000));
+        assert!(activation.current(Some((3, 9)), 1_249));
+        for (scope, now) in [
+            (Some((4, 9)), 1_010),
+            (Some((3, 10)), 1_010),
+            (None, 1_010),
+            (Some((3, 9)), 999),
+            (Some((3, 9)), 1_250),
+        ] {
+            assert!(!activation.current(scope, now));
+        }
+        let original = Arc::new(());
+        let request = Request {
+            original: Arc::clone(&original),
+            lifetime: 3,
+            attempt: 9,
+            at: 1_000,
+        };
+        assert!(request.current(&original, 3, 9));
+        assert!(!request.current(&Arc::new(()), 3, 9));
+        assert!(!request.current(&original, 4, 9));
+        assert!(!request.current(&original, 3, 10));
+    }
+
+    #[test]
+    fn a_repeated_foreground_notification_never_rearms_the_viewing_deadline() {
+        let mut replacements = Replacements::default();
+        replacements.request(Cause::FocusLost, 3, 1_000).unwrap();
+        assert_eq!(
+            replacements.poll(1_100, 3, false, true, true),
+            Action::Dormant
+        );
+        replacements
+            .resume_focus(foreground(20_000), 20_010)
+            .unwrap();
+        replacements
+            .resume_focus(foreground(29_999), 29_999)
+            .unwrap();
+        assert_eq!(
+            replacements.poll(30_000, 3, true, true, true),
+            Action::Refused(Refusal::Expired)
+        );
+        assert_eq!(replacements.poll(30_001, 3, true, true, true), Action::None);
+    }
+
+    #[test]
+    fn close_invocation_expiry_and_new_focus_loss_cancel_dormant_recovery() {
+        for local_close in [true, false] {
+            let mut replacements = Replacements::default();
+            replacements.request(Cause::FocusLost, 3, 1_000).unwrap();
+            assert_eq!(
+                replacements.poll(1_100, 3, false, true, true),
+                Action::Dormant
+            );
+            // The pump cancels for both a native close and --seconds expiry.
+            if local_close {
+                replacements.cancel();
+                assert_eq!(
+                    replacements.resume_focus(foreground(2_000), 2_001),
+                    Err(Refusal::Cancelled)
+                );
+            } else {
+                replacements.resume_focus(foreground(2_000), 2_001).unwrap();
+                assert_eq!(
+                    replacements.poll(2_002, 4, false, true, true),
+                    Action::Refused(Refusal::Cancelled)
+                );
+            }
+            assert_eq!(replacements.poll(3_000, 3, true, true, true), Action::None);
+        }
+    }
+
+    #[test]
+    fn repeated_focus_cycles_share_the_existing_native_owner_limit() {
+        let mut replacements = Replacements::default();
+        for index in 1..MAX_OWNERS {
+            let at = u64::from(index) * 100_000;
+            replacements.request(Cause::FocusLost, 3, at).unwrap();
+            assert_eq!(
+                replacements.poll(at + 1, 3, false, true, true),
+                Action::Dormant
+            );
+            replacements
+                .resume_focus(foreground(at + 50_000), at + 50_001)
+                .unwrap();
+            assert!(matches!(
+                replacements.poll(at + 50_001, 3, true, true, true),
+                Action::Open(Opening {
+                    cause: Cause::FocusLost,
+                    ..
+                })
+            ));
+        }
+        assert_eq!(
+            replacements.request(Cause::FocusLost, 3, 4_000_000),
             Err(Refusal::Limit)
         );
     }

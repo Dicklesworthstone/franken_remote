@@ -72,6 +72,10 @@ mod display_selection_policy;
 #[path = "../../fr-mobile-ffi/src/session/control_request.rs"]
 mod control_request_policy;
 
+#[cfg(test)]
+#[path = "../../fr-mobile-ffi/src/session/focus_close.rs"]
+mod focus_close_policy;
+
 use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \

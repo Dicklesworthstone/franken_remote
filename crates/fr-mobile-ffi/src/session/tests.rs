@@ -459,6 +459,30 @@ fn a_retired_file_chooser_cannot_hide_a_new_view_or_spend_its_control_choice() {
 }
 
 #[test]
+fn focus_continuity_requires_an_actual_published_grant_not_a_view_or_request() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.serving.store(true, Ordering::SeqCst);
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    let clipboard = shared.clipboard_report();
+    assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.close.load(Ordering::SeqCst));
+    assert!(!shared.focus_close_requested.load(Ordering::SeqCst));
+    assert!(!shared.focus_closed());
+    assert!(shared.visible.load(Ordering::SeqCst));
+    assert_eq!(shared.local_stop.load(Ordering::SeqCst), 0);
+    assert_eq!(shared.clipboard_report(), clipboard);
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    // A queued control gesture remains a request, never an attached grant.
+    assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(shared.take_control_request().unwrap());
+    shared.close();
+    assert!(!shared.close_for_focus_loss(shared.frames.app_id(0)));
+    assert!(!shared.focus_close_requested.load(Ordering::SeqCst));
+}
+
+#[test]
 fn the_end_code_says_who_ended_the_session() {
     let hidden = Some(LocalStop::Hidden);
     let observed = Failure::Observation(ObserverError::Application);

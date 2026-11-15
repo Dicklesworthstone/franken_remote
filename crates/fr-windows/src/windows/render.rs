@@ -12,8 +12,8 @@ use windows::Win32::Graphics::Direct3D11::{
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
     D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
     D3D11_VIDEO_USAGE_PLAYBACK_NORMAL, D3D11_VPIV_DIMENSION_TEXTURE2D,
-    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11Texture2D, ID3D11VideoContext1,
-    ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
+    D3D11_VPOV_DIMENSION_TEXTURE2D, ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D,
+    ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_ALPHA_MODE_IGNORE, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
@@ -104,6 +104,27 @@ impl Renderer {
 
     pub const fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Replace the retired session's visible image with black. Input is fenced
+    /// before the caller enters this native work. No frame or presentation
+    /// freshness is reported for the clear.
+    pub fn clear(&mut self) -> Result<()> {
+        self.conversion = None;
+        // SAFETY: all COM interfaces belong to the same live D3D device. The
+        // temporary back-buffer/view references end before any later resize.
+        unsafe {
+            let context = self.context.cast::<ID3D11DeviceContext>()?;
+            let device = context.GetDevice()?;
+            let back_buffer: ID3D11Texture2D = self.swap_chain.GetBuffer(0)?;
+            let mut target = None;
+            device.CreateRenderTargetView(&back_buffer, None, Some(&raw mut target))?;
+            context.ClearRenderTargetView(target.as_ref(), &[0.0, 0.0, 0.0, 1.0]);
+            drop(target);
+            drop(back_buffer);
+            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+        }
+        Ok(())
     }
 
     fn conversion(&mut self, input: (u32, u32)) -> Result<&Conversion> {

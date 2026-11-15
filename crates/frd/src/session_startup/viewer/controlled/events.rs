@@ -262,9 +262,7 @@ impl Source {
     /// Already admitted actions keep their original receipts and effect status.
     /// Unlike emergency `stop`, this does not cancel a native I/O turn midway.
     pub fn fence_for_close(&self) {
-        self.control
-            .input_fenced
-            .store(true, std::sync::atomic::Ordering::Release);
+        self.control.fence_for_close();
         self.clear_queued();
     }
     pub fn stop(&self) {

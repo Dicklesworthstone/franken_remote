@@ -76,8 +76,8 @@ pub(super) fn invalidate_display() {
 
 /// Window lifecycle checks need no mutable access to Viewer or any codec.
 pub(super) fn visible(visible: bool) {
-    VISIBLE.with(|current| current.set(visible));
-    if !visible {
+    let was = VISIBLE.with(|current| current.replace(visible));
+    if !visible && was {
         invalidate_display();
     }
     ORIGINAL.with(|slot| {
@@ -90,8 +90,31 @@ pub(super) fn visible(visible: bool) {
 /// Reflect a worker's already-scoped negative fence in this UI only. Repeating
 /// `Shared::set_visible` here could apply an old notification to a later attempt.
 pub(super) fn reflect_hidden() {
-    VISIBLE.with(|current| current.set(false));
-    invalidate_display();
+    if VISIBLE.with(|current| current.replace(false)) {
+        invalidate_display();
+    }
+}
+
+/// Fence the exact active grant before any native cleanup or Viewer borrow.
+/// An already-closing/failed owner cannot turn another notification into a
+/// replacement request. The request names the NEW hidden native lifetime.
+pub(super) fn focus_lost() -> Option<change_display::Request<Shared>> {
+    if !visible_now() {
+        return None;
+    }
+    let original = ORIGINAL.with(|slot| slot.borrow().as_ref().and_then(Weak::upgrade))?;
+    let attempt = ready_attempt(&original)?;
+    let at = input_ticks();
+    if !original.close_for_focus_loss(attempt) {
+        return None;
+    }
+    reflect_hidden();
+    Some(change_display::Request {
+        original,
+        lifetime: lifetime(),
+        attempt,
+        at,
+    })
 }
 
 /// Identity for a deferred native activation. A replacement or internal
@@ -171,6 +194,7 @@ pub(super) struct Menu {
     displayed: Option<ControlState>,
     choice: Option<Choice<ControlRequest>>,
     display_available: bool,
+    dormant: bool,
 }
 
 impl Menu {
@@ -222,6 +246,7 @@ impl Menu {
             displayed: None,
             choice: None,
             display_available: false,
+            dormant: false,
         })
     }
 
@@ -309,6 +334,7 @@ impl Menu {
             return;
         }
         self.displayed = Some(state);
+        self.dormant = false;
         let enabled = |available| if available { MF_ENABLED } else { MF_GRAYED };
         let description = match state {
             ControlState::Unavailable => "View only (start with --control to request input)",
@@ -343,6 +369,24 @@ impl Menu {
                 &HSTRING::from(format!("{} — {description}", self.title)),
             );
             let _ = DrawMenuBar(self.hwnd);
+        }
+    }
+
+    pub(super) fn waiting_for_foreground(&mut self) {
+        if self.dormant {
+            return;
+        }
+        self.dormant = true;
+        // SAFETY: this UI thread's live window. The original session has
+        // already completed cleanup; this text grants no new observation.
+        unsafe {
+            let _ = SetWindowTextW(
+                self.hwnd,
+                &HSTRING::from(format!(
+                    "{} — Control stopped; return to this window to keep viewing",
+                    self.title
+                )),
+            );
         }
     }
 }

@@ -19,6 +19,7 @@ mod control_policy;
 mod control_request;
 mod display;
 mod files;
+mod focus_close;
 mod key_capture;
 mod text;
 mod typing;
@@ -69,7 +70,7 @@ use frd::{
     },
     session_startup::{
         ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
-        Presentation, Viewer,
+        Presentation, Viewer, ViewerControl,
         viewer_events::{
             ClientInstant, Event as InputEvent, Layout, LocalPoint, Located, NativeCapture,
             PositionedAction, Source,
@@ -222,9 +223,18 @@ struct Granted {
 }
 impl Drop for Granted {
     fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
         self.source.stop();
         self.released.store(true, Ordering::SeqCst);
     }
+}
+
+/// Published together with one granted producer. Its short publication lock
+/// never performs native work and never waits for the granted/source lock.
+/// The independent control fence stops queued dispatch while that lock is busy.
+struct FocusOwner {
+    original: focus_close::Original,
+    control: ViewerControl,
 }
 
 /// Everything the app's threads and the session thread share.
@@ -233,6 +243,7 @@ pub struct Shared {
     pub frames: FrameSlot,
     pub cursor: Mutex<Cursor>,
     granted: Mutex<Option<Granted>>,
+    focus_owner: Mutex<Option<FocusOwner>>,
     clipboard: clipboard::Clipboard,
     upload: Option<Arc<Upload>>,
     close: AtomicBool,
@@ -252,6 +263,11 @@ pub struct Shared {
     /// The original service and bounded cleanup succeeded for a local close.
     /// Published before `finished`; never inferred from the UI's end code.
     orderly_closed: AtomicBool,
+    /// An active native controller requested an orderly close specifically
+    /// because its original window lost focus. Hidden remains its end reason.
+    focus_close_requested: AtomicBool,
+    /// Positive original service/cleanup proof for that focus-close request.
+    focus_closed: AtomicBool,
     picture: Mutex<(u32, u32)>,
     full_range: AtomicBool,
     hardware: AtomicI32,
@@ -277,6 +293,7 @@ impl Shared {
             frames: FrameSlot::default(),
             cursor: Mutex::default(),
             granted: Mutex::default(),
+            focus_owner: Mutex::default(),
             clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
             upload,
             close: AtomicBool::new(false),
@@ -291,6 +308,8 @@ impl Shared {
             serving: AtomicBool::new(false),
             finished: AtomicBool::new(false),
             orderly_closed: AtomicBool::new(false),
+            focus_close_requested: AtomicBool::new(false),
+            focus_closed: AtomicBool::new(false),
             picture: Mutex::new((0, 0)),
             full_range: AtomicBool::new(false),
             hardware: AtomicI32::new(-1),
@@ -326,6 +345,61 @@ impl Shared {
         }
         self.retire_control_request();
         self.retire_display();
+    }
+    /// Fence this exact active controller on native focus loss while retaining
+    /// its source through the original orderly close and held-input cleanup.
+    /// This never resumes control. A native shell may wait for `focus_closed`
+    /// and a new local foreground choice before opening a fresh viewing owner.
+    /// A stale callback, a failed input source or an earlier close cannot create
+    /// that proof. `attempt` is the drawn frame's original `app_id(0)` scope.
+    pub fn close_for_focus_loss(&self, attempt: u64) -> bool {
+        {
+            let Ok(owner) = self.focus_owner.lock() else {
+                return false;
+            };
+            let Some(owner) = owner.as_ref() else {
+                return false;
+            };
+            if self.finished()
+                || !self.serving.load(Ordering::SeqCst)
+                || !self.visible.load(Ordering::SeqCst)
+                || !owner
+                    .original
+                    .claim(attempt, self.frames.app_id(0), &self.close)
+            {
+                return false;
+            }
+            // Close is claimed for this published original without waiting on
+            // native/file admission. A competing callback cannot drop the
+            // retained source when it notices this permanent input fence.
+            owner.control.fence_for_close();
+            if self
+                .local_stop
+                .compare_exchange(
+                    0,
+                    LocalStop::Hidden as u32,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            // Cleanup retires this witness under the same short lock before
+            // any later attempt may begin. Publish the request here, so fast
+            // original cleanup cannot race the callback out of its real proof.
+            self.focus_close_requested.store(true, Ordering::SeqCst);
+            self.events.state(state::CONTROL_ENDED, 0);
+        }
+        // The close fence precedes every auxiliary/native cleanup. Hiding a
+        // closing owner retains its already-fenced input source, never revives it.
+        self.set_visible(false);
+        self.clipboard.stop();
+        if let Some(upload) = &self.upload {
+            upload.retire();
+        }
+        self.retire_display();
+        true
     }
     /// A new native picker request, published only after host approval. The
     /// original startup budget and transport continue while the UI decides.
@@ -405,6 +479,14 @@ impl Shared {
     pub fn orderly_closed(&self) -> bool {
         self.finished() && self.end_code() == end::OK && self.orderly_closed.load(Ordering::SeqCst)
     }
+    /// A focus-close whose original service AND cleanup succeeded. The public
+    /// result stays `CONTROL_STOPPED` / `Hidden`; merely seeing that result or
+    /// waiting longer cannot establish this separate proof.
+    pub fn focus_closed(&self) -> bool {
+        self.finished()
+            && self.end_code() == end::CONTROL_STOPPED
+            && self.focus_closed.load(Ordering::SeqCst)
+    }
     /// The view is on screen in an active app (not backgrounded, covered or
     /// detached). Frames count as seen only while this holds; losing it
     /// ends control at once, and a pending control request with it.
@@ -417,7 +499,12 @@ impl Shared {
                 self.hides.fetch_add(1, Ordering::SeqCst);
             }
             self.retire_control_request();
-            self.stop_control(Some(LocalStop::Hidden));
+            // Close already fences native input and retains the source until
+            // its original service settles. A repeated native hide must not
+            // turn that orderly drain into an emergency source cancellation.
+            if !self.close.load(Ordering::SeqCst) {
+                self.stop_control(Some(LocalStop::Hidden));
+            }
         }
     }
     /// The legacy native/FFI choice can wait for this attempt's first view.
@@ -698,9 +785,19 @@ impl Shared {
     /// `reason`: this device stopped a live grant (not a close it asked
     /// for, and not the attempt's own cleanup).
     fn stop_control(&self, reason: Option<LocalStop>) {
-        let dropped = match self.granted.lock() {
-            Ok(mut granted) => granted.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
+        let dropped = {
+            let mut granted = self
+                .granted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Retire the published witness before cleanup can finish and a new
+            // attempt can begin. Attach uses the same granted -> focus order;
+            // focus callbacks never acquire the granted lock.
+            self.focus_owner
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            granted.take()
         };
         if dropped.is_some() {
             self.clipboard.retire();
@@ -1344,9 +1441,12 @@ fn run(shared: &Arc<Shared>, config: Config) {
     let terminal = app.terminal_failure();
     let orderly =
         completion::orderly_closed(result, app.service_succeeded, closed, stopped, terminal);
+    let focus_closed = shared.focus_close_requested.load(Ordering::SeqCst)
+        && completion::focus_closed(result, app.service_succeeded, closed, stopped, terminal);
     let (code, detail) = ending(result, closed, stopped, terminal);
     shared.frames.clear();
     shared.orderly_closed.store(orderly, Ordering::SeqCst);
+    shared.focus_closed.store(focus_closed, Ordering::SeqCst);
     finish(shared, code, detail);
     // A failed bounded cleanup has already ended this command unsuccessfully.
     // Keep the original observer on its original session thread until its
@@ -1563,6 +1663,13 @@ fn attach(
                 return Err(());
             };
             let opened = source.clock().map_err(|_| ())?;
+            let focus_owner = FocusOwner {
+                original: focus_close::Original {
+                    attempt: shared.frames.app_id(0),
+                    stop: Arc::clone(&stop),
+                },
+                control: source.control(),
+            };
             let granted = Granted {
                 source,
                 opened,
@@ -1577,6 +1684,9 @@ fn attach(
                 key_window: None,
                 typing: input::typing::Batches::default(),
             };
+            let Ok(mut focus) = shared.focus_owner.lock() else {
+                return Err(());
+            };
             // Re-checked under the lock `set_visible` and `close` fence
             // through: one that ran after the check above found nothing to
             // fence, so this grant must not outlive it. Dropping it stops
@@ -1586,6 +1696,7 @@ fn attach(
                 && shared.hides.load(Ordering::SeqCst) == hides
             {
                 *slot = Some(granted);
+                *focus = Some(focus_owner);
                 outcome = Attach::Installed;
             } else {
                 drop(granted);

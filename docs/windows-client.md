@@ -171,11 +171,46 @@ budget, finite replacement count and invocation-wide `--seconds` still apply.
 Close the window to disconnect completely, including while a control request
 is pending. The final JSON counts completed handoffs in `control_releases`.
 
-Switching to another application or minimizing the viewer invalidates pending
-control choices and ends any granted control. Returning to the application
-cannot restore it. A view-only session can remain connected. Existing resize
-rules still require successful original cleanup before reopening; a controlled
-resize that cannot establish orderly closure ends the session instead.
+Switching to another application invalidates pending control choices and ends
+any granted control. For an active controller, the viewer now keeps its window
+open while the original connection closes and its held input, clipboard and
+file owners finish cleanup. The old picture is cleared. If that original service
+and cleanup both succeed within the existing ten-second bound, the disconnected
+window waits for you to return; it opens no connection while waiting. Its title
+shows **Control stopped; return to this window to keep viewing**.
+
+A fresh foreground event opens a new viewing connection to the same selected
+machine, subject to normal host admission and approval. That event has its own
+bounded opening request; repeated activation callbacks do not renew it. The
+new connection starts viewing. Choose **Input → Request control** again to
+request a new grant. Clipboard synchronization and previous file selections
+are retired permanently for this invocation's replacement connections. They
+are never resumed or replayed by returning to the window.
+
+Closing the dormant window or reaching `--seconds` ends the invocation. Stale
+foreground callbacks are discarded and leave the window disconnected. Failed
+or late original cleanup, another hide during an accepted return, a failed
+picture clear, or an exhausted replacement count ends the connection instead
+of reopening. Dormant time does not renew the original
+cleanup budget; returning to a disconnected window creates a fresh viewing
+choice only while the invocation remains live. The existing cap of 32 native
+session owners includes focus replacements, display changes and resizes.
+
+The JSON completion document counts fresh viewing owners started after
+confirmed original focus cleanup in `focus_releases`. `last_focus_end` retains
+the original `CONTROL_STOPPED` / `Hidden` ending and its positive cleanup
+result; the replacement's admission and final ending are reported separately.
+These fields contain no input, clipboard text or file paths. Starting a
+replacement never changes the original hidden ending into an ordinary
+successful close or proves that the new host admission will succeed.
+
+This continuity path covers switching from an active controlling viewer to
+another application and returning to its still-open window (`fr-o26d`).
+Minimizing, native resize/mapping changes, and external focus loss from a file
+picker retain their existing terminal behavior. A view-only session can remain
+connected. Existing resize rules still require successful original cleanup
+before reopening; a controlled resize that cannot establish orderly closure
+ends the session instead.
 
 ## Choose a remote display
 
@@ -535,6 +570,25 @@ The actual package's 85 portable tests and strict all-target Clippy passed with
 the pinned toolchain after integration with the explicit Windows uploader.
 The real window, cancellation ordering and blocked or failed native
 destruction still require Windows desktop qualification.
+
+For focus continuity (`fr-o26d`), the package's 106 portable tests and strict
+all-target Clippy passed with the pinned toolchain. The new regressions cover
+positive original cleanup, failed/late cleanup, long disconnected dormancy,
+exclusive foreground/opening deadlines, stale callback/attempt identity,
+repeated activation without deadline renewal, close/expiry cancellation and
+the shared replacement limit. The exact original-grant claim policy is also
+tested for a stopped source and a prior explicit close. An additional actual
+controlled-session regression fences through an independent lifecycle handle
+while the original producer mutex is held, then checks queued input and the
+original orderly-close ledger.
+
+The repository's actual render and geometry modules also passed a narrow
+Windows GNU target compile and strict Clippy check against their existing
+Windows bindings. This checked the D3D11 clear API boundary; it did not run the
+native viewer or GPU. Real application switching, covered-window presentation,
+held-key cleanup, host reapproval and explicit control reacquisition still need
+Windows desktop qualification. Portable policy and boundary compile checks do
+not establish those native observations.
 
 Portable command-line regressions live in
 `crates/fr-windows/src/options.rs`. Installed target selection and named-route

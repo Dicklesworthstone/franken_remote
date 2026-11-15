@@ -62,6 +62,24 @@ pub(super) fn orderly_closed(
     result.is_ok() && service_succeeded && closed && stopped.is_none() && terminal.is_none()
 }
 
+/// Separate proof for an explicitly requested focus-close. Hidden remains a
+/// control stop in `ending`; only actual original service and cleanup success
+/// allows the native shell to consider a NEW viewing session. Callers must also
+/// retain the original focus-close request and require a new foreground choice.
+pub(super) fn focus_closed(
+    result: Result<(), Failure>,
+    service_succeeded: bool,
+    closed: bool,
+    stopped: Option<LocalStop>,
+    terminal: Option<ObserverError>,
+) -> bool {
+    result.is_ok()
+        && service_succeeded
+        && closed
+        && stopped == Some(LocalStop::Hidden)
+        && terminal.is_none()
+}
+
 /// The end code and detail for a finished run. A local close or stop cannot
 /// erase an authenticated terminal report, including its external effects.
 pub(super) fn ending(

@@ -346,7 +346,16 @@ fn native_input_fence_preserves_the_original_orderly_close_and_action_ledger() {
         // its original pending-effect identity instead of inventing a receipt.
         let _ = f.viewer.action(key(true)).unwrap();
         assert!(f.viewer.pending_send());
-        source.fence_for_close();
+        // A native callback must fence queued input even while another native
+        // operation holds the original producer lock. The independent handle
+        // must not borrow the source or cancel its orderly close I/O.
+        let lifecycle = source.control();
+        let producer = std::sync::Mutex::new(source);
+        let held = producer.lock().unwrap();
+        lifecycle.fence_for_close();
+        assert!(!lifecycle.is_stopped());
+        drop(held);
+        let mut source = producer.into_inner().unwrap();
         assert!(!source.control().is_stopped());
         assert!(!c.is_cancel_requested());
         assert_eq!(

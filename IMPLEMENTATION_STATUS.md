@@ -1,5 +1,42 @@
 # Implementation status
 
+## Windows focus loss keeps a path back to fresh viewing (2026-11-15 UTC)
+
+Switching away from an active controlling Windows viewer now fences its
+original input immediately and keeps the native window. The original control,
+clipboard and upload owners end through their existing terminal exchange.
+Only successful original service and cleanup permit a disconnected dormant
+window to await a fresh foreground event. Returning starts a new observing
+connection through normal admission; **Input → Request control** is required
+for a new grant. Pending input, clipboard content and file selections never
+replay into the replacement.
+
+The focus callback uses an exact-attempt witness and a lock-free input fence,
+so a busy producer mutex cannot delay the fence and a stale callback cannot
+close a newer attempt. Stop intent is recorded before cleanup can publish its
+result. The public ending remains `CONTROL_STOPPED / Hidden`; separate positive
+evidence, not that label alone, authorizes replacement. The retained GPU image
+is cleared on focus loss and again after foreground return, with original
+lifetime/foreground checks after native work and no invented presentation
+evidence.
+
+The original ten-second cleanup bound, invocation deadline, replacement cap
+and cooldown remain. A fresh foreground request has its own bounded opening
+phase; repeated callbacks cannot extend it or repair late/failed cleanup.
+Minimize/restore, resize/mapping changes and external focus loss from a file
+picker retain their existing terminal behavior.
+
+**Passed:** all 106 portable Windows-client tests, strict all-target package
+Clippy, pinned workspace formatting and an actual-source Windows GNU compile
+and strict Clippy check of the renderer and geometry boundary. Independent
+review checked the original-owner locking, input submission fences and native
+reentry checks. **Blocked:** full shared session/frd/native-viewer compilation
+and the new shared completion, no-grant and lock-contention integration
+regressions, because unchanged pinned Asupersync compilation was SIGKILLed
+before project code. No live Windows, GPU or tailnet result is claimed.
+`fr-o26d` remains in progress pending those gates. See
+[Windows usage](docs/windows-client.md).
+
 ## Late sender turns reconcile queued QUIC acknowledgements (2026-11-15 UTC)
 
 A host or viewer whose own task wakes after a retained reliable record's
