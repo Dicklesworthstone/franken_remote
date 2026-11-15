@@ -390,6 +390,7 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
 /// Replaces only the original positively retired owner, after the bounded
 /// listener cooldown. A manual switch opens a fresh approved-catalog picker;
 /// resize keeps that policy after the first explicit switch.
+#[allow(clippy::too_many_lines, reason = "one ordered replacement sequence")]
 fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reopen {
     let finished = v.session.shared().finished();
     let no_replacement = || {
@@ -640,16 +641,13 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
         cursor::retire(v, hwnd);
         return (false, false);
     }
-    let cursor_changed = match cursor::synchronize(v) {
-        Ok(changed) => changed,
-        Err(()) => {
-            eprintln!("fr-windows: cursor_presentation_failed");
-            v.session.shared().presentation_failed();
-            v.close();
-            cursor::retire(v, hwnd);
-            stats.draw_failures += 1;
-            return (false, false);
-        }
+    let Ok(cursor_changed) = cursor::synchronize(v) else {
+        eprintln!("fr-windows: cursor_presentation_failed");
+        v.session.shared().presentation_failed();
+        v.close();
+        cursor::retire(v, hwnd);
+        stats.draw_failures += 1;
+        return (false, false);
     };
     cursor::refresh(v, hwnd, false);
     draw_latest(v, stats, last_sequence, hwnd, cursor_changed)
@@ -1594,7 +1592,9 @@ extern "system" fn window_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let handled = match message {
-        WM_SETCURSOR if (lparam.0 & 0xffff) == HTCLIENT as isize && wparam.0 == hwnd.0 as usize => {
+        WM_SETCURSOR
+            if u32::try_from(lparam.0 & 0xffff) == Ok(HTCLIENT) && wparam.0 == hwnd.0 as usize =>
+        {
             // A nested native draw can temporarily borrow Viewer. Preserve
             // the current pointer then, rather than reinstalling an arrow
             // over an overlay whose owner blanked it before presentation.

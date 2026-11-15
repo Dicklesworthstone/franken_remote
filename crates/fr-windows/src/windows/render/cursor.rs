@@ -12,14 +12,14 @@ use windows::{
         Graphics::{
             Direct2D::{
                 Common::{
-                    D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
-                    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_U,
+                    D2D_RECT_F, D2D_SIZE_U, D2D1_ALPHA_MODE_IGNORE, D2D1_ALPHA_MODE_PREMULTIPLIED,
+                    D2D1_PIXEL_FORMAT,
                 },
                 D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                 D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
                 D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1CreateFactory,
-                ID2D1Bitmap1, ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
+                D2D1_INTERPOLATION_MODE_NEAREST_NEIGHBOR, D2D1CreateFactory, ID2D1Bitmap1,
+                ID2D1DeviceContext, ID2D1Factory1, ID2D1Image,
             },
             Direct3D11::{ID3D11Device, ID3D11Texture2D},
             Dxgi::{Common::DXGI_FORMAT_B8G8R8A8_UNORM, IDXGIDevice, IDXGISurface},
@@ -98,7 +98,8 @@ impl Overlay {
             // SAFETY: all Direct2D objects belong to this UI thread and use
             // the decoder's BGRA-capable D3D11 device. COM wrappers own them.
             let context = unsafe {
-                let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+                let factory: ID2D1Factory1 =
+                    D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
                 let device = factory.CreateDevice(&dxgi)?;
                 let context = device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
                 // The Win32 viewer already operates in physical pixels.
@@ -112,12 +113,7 @@ impl Overlay {
             .ok_or_else(|| Error::from_hresult(E_INVALIDARG))
     }
 
-    pub(super) fn visible(
-        &self,
-        dest: Rect,
-        attempt: u64,
-        sequence: u64,
-    ) -> bool {
+    pub(super) fn visible(&self, dest: Rect, attempt: u64, sequence: u64) -> bool {
         self.bitmap.is_some()
             && self.state.visible_on(attempt, sequence)
             && cursor::placement(self.state, dest).is_some()

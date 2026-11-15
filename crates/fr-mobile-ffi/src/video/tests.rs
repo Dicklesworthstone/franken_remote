@@ -229,7 +229,7 @@ fn a_delayed_native_picture_cannot_be_relabelled_into_a_new_attempt() {
     let (raw, info) = slot.take_newer(0, false).unwrap();
     release(raw);
     assert_eq!(info.frame, current | 3);
-    slot.mark_drawn(original | 500);
+    slot.mark_drawn(original | 0x1f4);
     assert_eq!(slot.drawn(), 0);
     slot.mark_drawn(info.frame);
     assert_eq!(slot.drawn(), info.frame);
@@ -380,7 +380,7 @@ fn a_cursor_reset_fences_old_attempts_and_requires_a_new_shape() {
     assert!(cursor.shape_generation > original_shape);
     assert_eq!((cursor.attempt, cursor.frame_after), (12, 8));
     assert!(!cursor.visible);
-    assert!(cursor.rgba.is_empty());
+    assert_eq!(cursor.rgba, [] as [u8; 0]);
     assert_eq!(cursor.apply_for(11, &update), Err(Error::StaleGeneration));
     assert_eq!(
         cursor.apply_for(12, &CursorUpdate::Move { x: 4, y: 5 }),
@@ -390,7 +390,7 @@ fn a_cursor_reset_fences_old_attempts_and_requires_a_new_shape() {
     // A decoder change within the SAME connection also retires its shape.
     cursor.reset(12, 10).unwrap();
     assert!(!cursor.visible);
-    assert!(cursor.rgba.is_empty());
+    assert_eq!(cursor.rgba, [] as [u8; 0]);
     assert_eq!(cursor.frame_after, 10);
     cursor.reset(0, 10).unwrap();
     assert_eq!(cursor.apply_for(0, &update), Err(Error::StaleGeneration));

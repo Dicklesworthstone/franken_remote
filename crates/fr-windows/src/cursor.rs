@@ -87,7 +87,8 @@ pub fn premultiplied(shape: Shape, rgba: &[u8]) -> Result<Vec<u8>, Error> {
         return Err(Error::Geometry);
     }
     let mut bgra = Vec::new();
-    bgra.try_reserve_exact(bytes).map_err(|_| Error::Allocation)?;
+    bgra.try_reserve_exact(bytes)
+        .map_err(|_| Error::Allocation)?;
     for pixel in rgba.as_chunks::<4>().0 {
         let alpha = u16::from(pixel[3]);
         let multiply = |channel: u8| {
@@ -198,7 +199,9 @@ mod tests {
             height: 1,
             ..Shape::default()
         };
-        let pixels = [255, 16, 8, 0, 200, 100, 50, 128, 1, 2, 3, 255, 255, 255, 255, 1];
+        let pixels = [
+            255, 16, 8, 0, 200, 100, 50, 128, 1, 2, 3, 255, 255, 255, 255, 1,
+        ];
         assert_eq!(
             premultiplied(shape, &pixels).unwrap(),
             [0, 0, 0, 0, 25, 50, 100, 128, 3, 2, 1, 255, 1, 1, 1, 1]
@@ -309,12 +312,20 @@ mod tests {
         assert!(state.visible_on(17, 9));
         assert!(!state.visible_on(17, 8));
         assert!(!state.visible_on(18, 9));
-        assert!(!State { attempt: 0, ..state }.visible_on(0, 9));
-        assert!(!State {
-            visible: false,
-            ..state
-        }
-        .visible_on(17, 9));
+        assert!(
+            !State {
+                attempt: 0,
+                ..state
+            }
+            .visible_on(0, 9)
+        );
+        assert!(
+            !State {
+                visible: false,
+                ..state
+            }
+            .visible_on(17, 9)
+        );
         let moved = State {
             generation: 4,
             x: 30,
