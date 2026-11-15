@@ -1,5 +1,26 @@
 # Implementation status
 
+## Late decoder configuration cannot revive retired presentation (2026-11-15 UTC)
+
+Native decoder construction and its hardware query now finish before metadata
+is committed under the original frame owner's publication gate. Replacement,
+retirement and close refuse a delayed result: it cannot change a successor's
+picture metadata or append VIDEO after terminal ENDED. Native image replacement
+and clearing detach old images under the gate, then release native resources
+after unlocking. No foreign constructor, hardware query or final image release
+is added to the publication critical section.
+
+Four further regressions exercise the retained-image configuration gap in both
+range directions, publication serialization, stale attempts, close and late
+terminal results. These tests use the actual FrameSlot and Shared paths; native
+picture cases use real HEVC. Source review and pinned formatting passed before
+executor loss. Runtime regression execution, complete workspace tests and
+Windows/Apple integration remain blocked. Recovered files have not had a
+post-recovery formatter/build run. The Linux workspace check was
+interrupted during shared memory pressure; the Windows preflight lacked
+MinGW, and the execution environment subsequently disconnected. No timeout,
+dependency pin or qualification gate was relaxed. `fr-4cqh` remains open.
+
 ## Retained native pictures keep their own color range (2026-11-15 UTC)
 
 Repainting a retained picture now reads the color range from that native image.

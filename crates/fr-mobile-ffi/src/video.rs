@@ -232,8 +232,40 @@ impl FrameSlot {
             .filter(|generation| *generation <= u64::MAX >> RAW_BITS)
             .ok_or(Error::Closed)?;
         self.generation.store(generation, Ordering::Release);
-        *latest = None;
+        let previous = latest.take();
+        drop(latest);
+        // A native image's final release may enter its decoder/driver. It
+        // never holds the publication gate or delays another owner's fence.
+        drop(previous);
         Ok(())
+    }
+    /// Publish bounded, native-free metadata only for the original attempt.
+    /// The same mutex serializes retirement and new-attempt admission, so a
+    /// native configuration returning after its timeout cannot append VIDEO
+    /// after ENDED or change a replacement attempt's picture metadata.
+    #[cfg(all(
+        feature = "session",
+        any(
+            target_os = "ios",
+            all(target_os = "macos", feature = "macos-session"),
+            all(windows, feature = "windows-session")
+        )
+    ))]
+    pub(crate) fn with_current<T>(
+        &self,
+        attempt: u64,
+        publish: impl FnOnce() -> T,
+    ) -> Result<T, Error> {
+        let latest = self.latest.lock().map_err(|_| Error::Closed)?;
+        if self.retired.load(Ordering::Acquire) {
+            return Err(Error::Closed);
+        }
+        if attempt == 0 || attempt != self.app_id(0) {
+            return Err(Error::StaleGeneration);
+        }
+        let result = publish();
+        drop(latest);
+        Ok(result)
     }
     /// Monotonic publication sequence; a decoder reset retains this floor so
     /// its cursor cannot be rendered on the preceding decoder's picture.
@@ -255,13 +287,15 @@ impl FrameSlot {
             return Err(Error::StaleGeneration);
         }
         let sequence = self.sequence().checked_add(1).ok_or(Error::Closed)?;
-        *latest = Some(Latest {
+        let previous = latest.replace(Latest {
             image,
             sequence,
             frame: attempt | frame,
         });
         self.sequence.store(sequence, Ordering::Release);
         self.presented.fetch_add(1, Ordering::Relaxed);
+        drop(latest);
+        drop(previous);
         Ok(())
     }
     /// A new +1 reference to the newest picture when it is newer than
@@ -322,7 +356,9 @@ impl FrameSlot {
     pub fn clear(&self) {
         if let Ok(mut latest) = self.latest.lock() {
             self.retired.store(true, Ordering::Release);
-            *latest = None;
+            let previous = latest.take();
+            drop(latest);
+            drop(previous);
         }
     }
 }
@@ -423,4 +459,4 @@ impl Cursor {
 }
 
 #[cfg(all(test, any(target_os = "ios", target_os = "macos", windows)))]
-mod tests;
+pub(crate) mod tests;

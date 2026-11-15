@@ -600,3 +600,95 @@ fn legacy_control_installation_cannot_finish_after_its_attempt_retired() {
     shared.request_control();
     assert!(!shared.want_control.load(Ordering::SeqCst));
 }
+
+#[test]
+fn retained_picture_range_does_not_follow_a_new_decoder_configuration() {
+    use crate::video::tests::{picture, release};
+
+    for retained_range in [false, true] {
+        let shared = Shared::new();
+        shared.frames.begin_attempt().unwrap();
+        let attempt = shared.frames.app_id(0);
+        shared
+            .publish_configuration(attempt, (128, 96), retained_range, None)
+            .unwrap();
+        shared
+            .frames
+            .publish_for(attempt, picture(retained_range), 1)
+            .unwrap();
+        // Configuration is acknowledged before its first picture. A resize
+        // or cursor update can repaint the preceding decoder's retained image
+        // during this gap, using that image's original range in BOTH directions.
+        shared
+            .publish_configuration(attempt, (128, 96), !retained_range, None)
+            .unwrap();
+        assert_eq!(shared.full_range(), !retained_range);
+        let (raw, retained) = shared.frames.take_newer(0).unwrap();
+        release(raw);
+        assert_eq!(retained.full_range, retained_range);
+        assert_eq!(retained.frame, attempt | 1);
+        shared
+            .frames
+            .publish_for(attempt, picture(!retained_range), 2)
+            .unwrap();
+        let (raw, current) = shared.frames.take_newer(retained.sequence).unwrap();
+        release(raw);
+        assert_eq!(current.full_range, !retained_range);
+        assert_eq!(current.frame, attempt | 2);
+    }
+}
+
+#[test]
+fn native_configuration_returning_after_retirement_publishes_no_video_or_metadata() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let original = shared.frames.app_id(0);
+    shared
+        .publish_configuration(original, (128, 96), false, Some(false))
+        .unwrap();
+    assert_eq!(shared.events.poll().unwrap().kind, kind::VIDEO);
+
+    // The native configure call is still running when its bounded cleanup
+    // fails. This is the real terminal path: retire presentation, then ENDED.
+    shared.clear_presentation();
+    finish(&shared, end::INTERNAL, Some("Cleanup".into()));
+    assert!(shared.finished());
+    assert!(
+        shared
+            .publish_configuration(original, (640, 480), true, Some(true))
+            .is_err()
+    );
+    assert_eq!(*shared.picture.lock().unwrap(), (128, 96));
+    assert!(!shared.full_range());
+    assert_eq!(shared.hardware(), 0);
+    assert_eq!(shared.events.poll().unwrap().kind, kind::ENDED);
+    assert!(shared.events.poll().is_none(), "ENDED remains last");
+}
+
+#[test]
+fn configuration_metadata_cannot_migrate_to_another_attempt_or_publish_during_close() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let original = shared.frames.app_id(0);
+    shared.frames.begin_attempt().unwrap();
+    let current = shared.frames.app_id(0);
+    shared
+        .publish_configuration(current, (128, 96), false, None)
+        .unwrap();
+    assert_eq!(shared.events.poll().unwrap().kind, kind::VIDEO);
+    assert!(
+        shared
+            .publish_configuration(original, (640, 480), true, Some(true))
+            .is_err()
+    );
+    shared.close();
+    assert!(
+        shared
+            .publish_configuration(current, (640, 480), true, Some(true))
+            .is_err()
+    );
+    assert_eq!(*shared.picture.lock().unwrap(), (128, 96));
+    assert!(!shared.full_range());
+    assert_eq!(shared.hardware(), -1);
+    assert!(shared.events.poll().is_none());
+}

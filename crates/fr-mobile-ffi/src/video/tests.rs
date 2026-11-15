@@ -316,6 +316,52 @@ fn attempt_exhaustion_refuses_instead_of_reusing_an_old_identity() {
     assert_eq!(slot.app_id(0), before);
 }
 
+#[cfg(all(
+    feature = "session",
+    any(
+        target_os = "ios",
+        all(target_os = "macos", feature = "macos-session"),
+        all(windows, feature = "windows-session")
+    )
+))]
+#[test]
+fn metadata_publication_holds_the_original_gate_until_the_commit_finishes() {
+    use std::sync::{Arc, TryLockError, mpsc};
+
+    let slot = Arc::new(FrameSlot::default());
+    slot.begin_attempt().unwrap();
+    let original = slot.app_id(0);
+    let (entered, waiting) = mpsc::sync_channel(0);
+    let (release, released) = mpsc::sync_channel(0);
+    let publishing = Arc::clone(&slot);
+    let worker = std::thread::spawn(move || {
+        publishing.with_current(original, || {
+            entered.send(()).unwrap();
+            released.recv().unwrap();
+            7
+        })
+    });
+    waiting.recv().unwrap();
+    assert!(matches!(
+        slot.latest.try_lock(),
+        Err(TryLockError::WouldBlock)
+    ));
+    release.send(()).unwrap();
+    assert_eq!(worker.join().unwrap(), Ok(7));
+    slot.begin_attempt().unwrap();
+    assert_eq!(
+        slot.with_current::<()>(original, || panic!("old metadata cannot commit")),
+        Err(Error::StaleGeneration)
+    );
+    let current = slot.app_id(0);
+    assert_eq!(slot.with_current(current, || 8), Ok(8));
+    slot.clear();
+    assert_eq!(
+        slot.with_current::<()>(current, || panic!("retired metadata cannot commit")),
+        Err(Error::Closed)
+    );
+}
+
 /// A canonical-layout record carrying `sps` between the fixture's own VPS
 /// and PPS.
 fn record_with_sps(sps: &[u8]) -> Vec<u8> {

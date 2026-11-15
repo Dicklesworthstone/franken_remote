@@ -297,6 +297,47 @@ impl Shared {
         }
     }
 
+    /// Commit a native decoder's bounded metadata after it returns, while its
+    /// original frame owner is still live. Native creation, probing and drops
+    /// stay outside the frame gate. Retirement acquires that gate before
+    /// publishing ENDED, so no delayed completion can append another VIDEO.
+    fn publish_configuration(
+        &self,
+        attempt: u64,
+        picture: (u32, u32),
+        full_range: bool,
+        hardware: Option<bool>,
+    ) -> Result<(), WorkerError> {
+        self.frames
+            .with_current(attempt, || {
+                if self.close.load(Ordering::SeqCst) || self.finished() {
+                    return Err(WorkerError::WrongEpoch);
+                }
+                let previous = self
+                    .picture
+                    .lock()
+                    .map(|mut p| std::mem::replace(&mut *p, picture))
+                    .map_err(|_| WorkerError::NativeFailure)?;
+                // A changed picture invalidates the original control layout.
+                // No native call runs here; the independent authority owner
+                // performs release/cleanup after the granted source is stopped.
+                if previous != (0, 0) && previous != picture {
+                    self.stop_control(Some(LocalStop::PictureChanged));
+                }
+                self.hardware
+                    .store(hardware.map_or(-1, i32::from), Ordering::Relaxed);
+                self.full_range.store(full_range, Ordering::Relaxed);
+                self.events.push(Event {
+                    kind: kind::VIDEO,
+                    picture_width: picture.0,
+                    picture_height: picture.1,
+                    ..Event::default()
+                });
+                Ok(())
+            })
+            .map_err(worker_error)?
+    }
+
     #[cfg(test)]
     fn new() -> Self {
         Self::with_control(true)
@@ -1688,30 +1729,18 @@ impl LocalPresenter for Presenter {
             record.bytes(),
         )
         .map_err(worker_error)?;
-        let picture = decoder.picture();
-        self.shared
-            .hardware
-            .store(decoder.hardware().map_or(-1, i32::from), Ordering::Relaxed);
-        self.shared
-            .full_range
-            .store(decoder.full_range(), Ordering::Relaxed);
-        // A changed picture size invalidates any attached layout: control
-        // ends (frd also refuses the old layout).
-        let previous = self
-            .shared
-            .picture
-            .lock()
-            .map(|mut p| std::mem::replace(&mut *p, picture))
-            .unwrap_or_default();
-        if previous != (0, 0) && previous != picture {
-            self.shared.stop_control(Some(LocalStop::PictureChanged));
-        }
-        self.shared.events.push(Event {
-            kind: kind::VIDEO,
-            picture_width: picture.0,
-            picture_height: picture.1,
-            ..Event::default()
-        });
+        // The native constructor and hardware query may return after the
+        // asynchronous owner has timed out. Recheck under the publication
+        // gate only AFTER both foreign calls, before exposing their result.
+        let hardware = decoder.hardware();
+        self.shared.publish_configuration(
+            self.attempt,
+            decoder.picture(),
+            decoder.full_range(),
+            hardware,
+        )?;
+        // Replacing the decoder may enter native destruction. Its publication
+        // guard has already ended, including on the error path above.
         self.decoder = Some(decoder);
         Ok(())
     }
