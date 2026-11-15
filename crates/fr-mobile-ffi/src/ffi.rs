@@ -507,10 +507,7 @@ pub unsafe extern "C" fn fr_session_copy_frame(
         return core::ptr::null_mut();
     };
     let shared = s.shared();
-    let Some((image, frame)) = shared
-        .frames
-        .take_newer(after_sequence, shared.full_range())
-    else {
+    let Some((image, frame)) = shared.frames.take_newer(after_sequence) else {
         return core::ptr::null_mut();
     };
     if !info.is_null() {

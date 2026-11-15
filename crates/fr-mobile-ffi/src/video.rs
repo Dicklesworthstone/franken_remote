@@ -265,8 +265,10 @@ impl FrameSlot {
         Ok(())
     }
     /// A new +1 reference to the newest picture when it is newer than
-    /// `after`, with its info. The caller releases the reference.
-    pub fn take_newer(&self, after: u64, full_range: bool) -> Option<(*mut c_void, FrameInfo)> {
+    /// `after`, with its original image metadata. A later configuration never
+    /// changes the retained picture's colour range. The caller releases the
+    /// reference.
+    pub fn take_newer(&self, after: u64) -> Option<(*mut c_void, FrameInfo)> {
         let latest = self.latest.lock().ok()?;
         let latest = latest.as_ref()?;
         if latest.sequence <= after || latest.frame != self.app_id(latest.frame) {
@@ -280,7 +282,7 @@ impl FrameSlot {
                 frame: latest.frame,
                 width,
                 height,
-                full_range: full_range || format == NV12_FULL_RANGE,
+                full_range: format == NV12_FULL_RANGE,
             },
         ))
     }

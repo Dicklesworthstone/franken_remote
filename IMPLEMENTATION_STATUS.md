@@ -1,5 +1,22 @@
 # Implementation status
 
+## Retained native pictures keep their own color range (2026-11-15 UTC)
+
+Repainting a retained picture now reads the color range from that native image.
+Acknowledging a newer decoder configuration cannot recolor the preceding
+picture while the renderer awaits the new decoder's first frame. Windows and
+the Apple C ABI use the same rule; callers no longer supply mutable current
+configuration as metadata for old pixels.
+
+A native regression decodes real limited/full/limited-range HEVC pictures and
+checks the metadata returned with each retained image. The fixture's full-range
+SPS was produced from the existing stream with FFmpeg's metadata filter.
+Pinned source formatting, whitespace checks and independent source review
+passed before executor loss. The native regression and complete Windows/Apple
+integration remain unexecuted here. Portable baseline results (113 Windows
+policy, 10 decoder-contract and six root-bundle tests, one ignored) are
+separate evidence and do not qualify this change. Tracks `fr-4cqh`.
+
 ## Windows app switch pauses control instead of ending it (2026-11-15 UTC)
 
 Switching from a controlling Windows viewer to another application now

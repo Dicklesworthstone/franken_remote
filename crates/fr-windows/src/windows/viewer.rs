@@ -680,7 +680,7 @@ fn draw_latest(
     } else {
         0
     };
-    let Some((raw, info)) = shared.frames.take_newer(after, shared.full_range()) else {
+    let Some((raw, info)) = shared.frames.take_newer(after) else {
         return (false, false);
     };
     // SAFETY: take ownership of the slot's +1 reference BEFORE every early

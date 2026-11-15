@@ -13,6 +13,10 @@ const STREAM_HEX: &str = include_str!("../../../fr-native/src/macos/tiny128.hex"
 // The same encoder's SPS without a colour description (refused by the guard).
 const UNSPECIFIED_SPS: &str =
     "42010101600000030090000003000003001ea010206165ba4a4c2f016808000003000800000300f040";
+// The fixture's SPS after FFmpeg's hevc_metadata=video_full_range_flag=1.
+// Only the range flag changes; the VPS, PPS and encoded picture are retained.
+const FULL_RANGE_SPS: &str =
+    "42010101600000030090000003000003001ea010206165ba4a4c2f016e02020208000003000800000300f040";
 
 fn hex(text: &str) -> Vec<u8> {
     let text: String = text.split_whitespace().collect();
@@ -79,7 +83,7 @@ fn record(first: &EncodedAccessUnit) -> Vec<u8> {
     guard.decoder_record().unwrap().bytes().to_vec()
 }
 /// Releases a +1 reference the slot handed out.
-fn release(raw: *mut c_void) {
+pub(crate) fn release(raw: *mut c_void) {
     #[cfg(any(target_os = "ios", target_os = "macos"))]
     // SAFETY: the slot returned a +1 reference for this caller to release.
     unsafe {
@@ -96,6 +100,64 @@ fn release(raw: *mut c_void) {
 }
 fn decoder() -> Decoder {
     Decoder::new(config(), ProtocolLimits::ABSOLUTE, &record(&units()[0])).unwrap()
+}
+
+/// One real native picture with its own admitted colour range. This is used
+/// by the shared-session regression too; no fake native image enters the slot.
+pub(crate) fn picture(full_range: bool) -> Image {
+    let first = units().remove(0);
+    let mut config = config();
+    let mut record = record(&first);
+    let mut bytes = first.bytes().to_vec();
+    if full_range {
+        let [_, original_sps, _] = parameter_sets(&record).unwrap();
+        let full_sps = hex(FULL_RANGE_SPS);
+        assert_eq!(original_sps.len(), full_sps.len());
+        let offset = bytes
+            .windows(original_sps.len())
+            .position(|candidate| candidate == original_sps)
+            .unwrap();
+        bytes[offset..offset + full_sps.len()].copy_from_slice(&full_sps);
+        record = record_with_sps(&full_sps);
+        config = CodecConfiguration::new_baseline(
+            config.generation(),
+            config.geometry(),
+            ColorInfo {
+                range: ColorRange::Full,
+                ..config.color()
+            },
+            config.gop(),
+        )
+        .unwrap();
+    }
+    let unit = EncodedAccessUnit::new(
+        &ProtocolLimits::ABSOLUTE,
+        first.frame(),
+        first.kind(),
+        first.config_generation(),
+        first.capture_micros(),
+        bytes,
+    )
+    .unwrap();
+    let mut decoder = Decoder::new(config, ProtocolLimits::ABSOLUTE, &record).unwrap();
+    assert_eq!(decoder.full_range(), full_range);
+    let image = decoder.submit(&unit, true).unwrap().unwrap();
+    assert_eq!(image.describe().2 == NV12_FULL_RANGE, full_range);
+    image
+}
+
+#[test]
+fn a_retained_picture_carries_its_own_limited_or_full_range() {
+    let slot = FrameSlot::default();
+    slot.begin_attempt().unwrap();
+    for (frame, range) in [(1, false), (2, true), (3, false)] {
+        slot.publish_for(slot.app_id(0), picture(range), frame)
+            .unwrap();
+        let (raw, info) = slot.take_newer(0).unwrap();
+        release(raw);
+        assert_eq!(info.full_range, range);
+        assert_eq!(info.frame, slot.app_id(frame));
+    }
 }
 
 #[test]
@@ -174,10 +236,10 @@ fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
     let mut decoder = decoder();
     let slot = FrameSlot::default();
     slot.begin_attempt().unwrap();
-    assert!(slot.take_newer(0, false).is_none());
+    assert!(slot.take_newer(0).is_none());
     let image = decoder.submit(&units[0], true).unwrap().unwrap();
     slot.publish_for(slot.app_id(0), image, 7).unwrap();
-    let (raw, info) = slot.take_newer(0, false).unwrap();
+    let (raw, info) = slot.take_newer(0).unwrap();
     assert!(!raw.is_null());
     release(raw);
     assert_eq!(
@@ -190,7 +252,7 @@ fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
             full_range: false
         }
     );
-    assert!(slot.take_newer(info.sequence, false).is_none());
+    assert!(slot.take_newer(info.sequence).is_none());
     slot.mark_drawn(slot.app_id(7));
     slot.mark_drawn(slot.app_id(3));
     assert_eq!(
@@ -199,7 +261,7 @@ fn the_slot_hands_out_only_newer_pictures_and_tracks_drawn_frames() {
         "a late report never lowers the drawn frame"
     );
     slot.clear();
-    assert!(slot.take_newer(0, false).is_none());
+    assert!(slot.take_newer(0).is_none());
 }
 
 #[test]
@@ -226,7 +288,7 @@ fn a_delayed_native_picture_cannot_be_relabelled_into_a_new_attempt() {
         "late native output is not publication evidence"
     );
     assert_eq!(slot.presented(), 1);
-    let (raw, info) = slot.take_newer(0, false).unwrap();
+    let (raw, info) = slot.take_newer(0).unwrap();
     release(raw);
     assert_eq!(info.frame, current | 3);
     slot.mark_drawn(original | 0x1f4);
@@ -240,7 +302,7 @@ fn a_delayed_native_picture_cannot_be_relabelled_into_a_new_attempt() {
         Err(Error::Closed)
     ));
     assert!(matches!(slot.begin_attempt(), Err(Error::Closed)));
-    assert!(slot.take_newer(0, false).is_none());
+    assert!(slot.take_newer(0).is_none());
     assert_eq!(slot.presented(), 1);
 }
 
