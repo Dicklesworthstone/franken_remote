@@ -1,12 +1,15 @@
 //! Desktop Duplication of one output, on a D3D11 device created for the
-//! adapter that drives it. The duplicated image is copied into an owned
-//! texture and the frame released at once, so the compositor never waits on
-//! this process. A separate DXGI pointer is composed only in its bounded
+//! adapter that drives it. The duplicated image is copied or rotated on the
+//! GPU into one owned upright texture and the frame released at once. A
+//! separate DXGI pointer is composed only in its bounded
 //! rectangle on that owned texture. Already-composited pointers are left
 //! alone; no second full-display copy or full-surface GDI mapping is needed.
 use super::cursor::Cursor;
 use super::freshness::{Frame, Observation, Source};
+use super::rotation::{Layout, Mismatch, Rotation, Texture};
+use super::upright::Upright;
 use crate::NativeError;
+use fr_core::limits::ProtocolLimits;
 use windows::Win32::Foundation::{E_ACCESSDENIED, HMODULE};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
@@ -18,9 +21,9 @@ use windows::Win32::Graphics::Direct3D11::{
     ID3D11Texture2D,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION_IDENTITY, DXGI_MODE_ROTATION_ROTATE90,
-    DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_UNSPECIFIED,
-    DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_MODE_ROTATION, DXGI_MODE_ROTATION_IDENTITY,
+    DXGI_MODE_ROTATION_ROTATE90, DXGI_MODE_ROTATION_ROTATE180, DXGI_MODE_ROTATION_ROTATE270,
+    DXGI_MODE_ROTATION_UNSPECIFIED, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_ACCESS_LOST, DXGI_ERROR_NOT_FOUND, DXGI_ERROR_WAIT_TIMEOUT,
@@ -58,6 +61,11 @@ impl WinDisplay {
         (u128::from(self.adapter.1.cast_unsigned()) << 64)
             | (u128::from(self.adapter.0) << 32)
             | u128::from(self.output)
+    }
+    /// The wire catalog describes rotation in quarter turns while keeping
+    /// dimensions and origins in upright physical desktop coordinates.
+    pub fn rotation_quarter_turns(&self) -> Option<u8> {
+        Rotation::from_degrees(self.rotation).map(Rotation::quarter_turns)
     }
     /// `GeometryChanged` unless the same output still has this placement,
     /// size, scale and rotation.
@@ -102,16 +110,13 @@ pub fn displays() -> Result<Vec<WinDisplay>, NativeError> {
                 }
                 let r = desc.DesktopCoordinates;
                 let (Ok(width), Ok(height)) = (
-                    u32::try_from(r.right - r.left),
-                    u32::try_from(r.bottom - r.top),
+                    u32::try_from(i64::from(r.right) - i64::from(r.left)),
+                    u32::try_from(i64::from(r.bottom) - i64::from(r.top)),
                 ) else {
                     continue;
                 };
-                let rotation = match desc.Rotation {
-                    DXGI_MODE_ROTATION_ROTATE90 => 90,
-                    DXGI_MODE_ROTATION_ROTATE180 => 180,
-                    DXGI_MODE_ROTATION_ROTATE270 => 270,
-                    _ => 0,
+                let Some(rotation) = rotation(desc.Rotation) else {
+                    continue;
                 };
                 let (mut x, mut y) = (0, 0);
                 let dpi =
@@ -131,7 +136,7 @@ pub fn displays() -> Result<Vec<WinDisplay>, NativeError> {
                     width,
                     height,
                     dpi,
-                    rotation,
+                    rotation: u32::from(rotation.quarter_turns()) * 90,
                 });
             }
         }
@@ -148,6 +153,9 @@ pub struct Duplicator {
     /// The last duplicated desktop image, with a separate pointer composed
     /// only after capture succeeds. The cursor owns its small clean underlay.
     desktop: ID3D11Texture2D,
+    /// No extra desktop texture: rotated inputs write directly to `desktop`.
+    upright: Option<Upright>,
+    layout: Layout,
     display: WinDisplay,
     /// Evidence belongs to `duplication`, never to the cached GPU texture.
     source: Source,
@@ -188,12 +196,20 @@ fn texture(
 }
 
 impl Duplicator {
-    /// Duplicates `display` on its own adapter. Rotated displays are refused
-    /// (`Unavailable`) until the picture is rotated back on the GPU.
-    pub fn open(display: &WinDisplay) -> Result<Self, NativeError> {
-        if display.rotation != 0 {
-            return Err(NativeError::Unavailable);
-        }
+    /// Duplicates `display` on its own adapter. A rotated output additionally
+    /// requires hardware BGRA rotation; there is no CPU fallback.
+    pub fn open(
+        display: &WinDisplay,
+        fps: u32,
+        limits: &ProtocolLimits,
+    ) -> Result<Self, NativeError> {
+        let layout = Layout::new(
+            (display.width, display.height),
+            display.rotation,
+            limits.max_dimension_pixels(),
+            limits.max_coded_pixels(),
+        )
+        .ok_or(NativeError::InvalidConfiguration)?;
         // SAFETY: DXGI/D3D11 creation with valid out pointers; every
         // interface is owned by its wrapper.
         let (device, context, output) = unsafe {
@@ -228,10 +244,18 @@ impl Duplicator {
             (device, context.ok_or(NativeError::Unavailable)?, output)
         };
         // A share cannot begin on a desktop it may not see.
-        let duplication = duplicate(&output, &device, display)?.ok_or(NativeError::Unavailable)?;
-        let size = (display.width, display.height);
+        let duplication =
+            duplicate(&output, &device, display, layout)?.ok_or(NativeError::Unavailable)?;
+        let desktop = texture(&device, layout.upright())?;
+        let upright = if layout.rotation() == Rotation::Identity {
+            None
+        } else {
+            Some(Upright::open(&device, &desktop, layout, fps)?)
+        };
         Ok(Self {
-            desktop: texture(&device, size)?,
+            desktop,
+            upright,
+            layout,
             device,
             context,
             output,
@@ -303,14 +327,12 @@ impl Duplicator {
                     .ok_or(NativeError::Unavailable)?
                     .cast()
                     .map_err(|_| NativeError::Unavailable)?;
-                // SAFETY: both textures are BGRA of the display's size on the
-                // same device; the copy is queued before the frame is released.
-                unsafe { self.context.CopyResource(&self.desktop, &image) };
+                self.write_image(&image)?;
                 Ok((true, pointer))
             })();
             drop(resource);
             // SAFETY: the frame acquired above, released exactly once, also
-            // when copying failed or the callback contained only a pointer.
+            // when copying/rotation failed or this was a pointer-only update.
             let released = unsafe { duplication.ReleaseFrame() };
             let frame = match &copied {
                 Ok((true, _)) => Frame::Image,
@@ -325,7 +347,7 @@ impl Duplicator {
             match released {
                 Ok(()) => {}
                 Err(e) if e.code() == DXGI_ERROR_ACCESS_LOST => {
-                    // Even a completed CopyResource belongs to the lost
+                    // Even a completed copy/rotation belongs to the lost
                     // duplication; its pixels were invalidated above.
                     self.duplication = None;
                     continue;
@@ -345,13 +367,45 @@ impl Duplicator {
         Ok(Observation::Unknown)
     }
 
+    /// Validate and queue the upright image while its duplication frame is
+    /// still acquired. A submission alone is not published source evidence.
+    fn write_image(&self, image: &ID3D11Texture2D) -> Result<(), NativeError> {
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        // SAFETY: the acquired resource and a valid out pointer.
+        unsafe { image.GetDesc(&raw mut desc) };
+        self.layout
+            .check_texture(Texture {
+                size: (desc.Width, desc.Height),
+                bgra: desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
+                mip_levels: desc.MipLevels,
+                array_size: desc.ArraySize,
+                sample_count: desc.SampleDesc.Count,
+                sample_quality: desc.SampleDesc.Quality,
+            })
+            .map_err(|mismatch| match mismatch {
+                Mismatch::Geometry => NativeError::GeometryChanged,
+                Mismatch::Resource => NativeError::Unavailable,
+            })?;
+        if let Some(upright) = &self.upright {
+            // The source view is dropped before ReleaseFrame. The pointer
+            // is already upright and is composed only after release.
+            upright.write(image)
+        } else {
+            // SAFETY: the source descriptor was validated against the one
+            // owned BGRA desktop; both share this device.
+            unsafe { self.context.CopyResource(&self.desktop, image) };
+            Ok(())
+        }
+    }
+
     /// Replaces a lost duplication of this output. Successful recreation
     /// alone is not source evidence: its first desktop image is still owed.
     /// A refusing desktop is never followed or represented by cached pixels.
     fn reduplicate(&mut self) -> Result<bool, NativeError> {
         self.source.invalidate();
         self.cursor.invalidate();
-        let Some(duplication) = duplicate(&self.output, &self.device, &self.display)? else {
+        let Some(duplication) = duplicate(&self.output, &self.device, &self.display, self.layout)?
+        else {
             self.refused_desktops += 1;
             return Ok(false);
         };
@@ -405,7 +459,11 @@ fn duplicate(
     output: &IDXGIOutput1,
     device: &ID3D11Device,
     display: &WinDisplay,
+    layout: Layout,
 ) -> Result<Option<IDXGIOutputDuplication>, NativeError> {
+    // Recreating an output must not carry the old input geometry into a
+    // replacement mode, even when the upright dimensions happen to match.
+    display.check()?;
     // SAFETY: a live output and device. Too many duplications and a
     // non-interactive session refuse here too.
     let duplication = match unsafe { output.DuplicateOutput(device) } {
@@ -415,12 +473,28 @@ fn duplicate(
     };
     // SAFETY: a live duplication.
     let desc = unsafe { duplication.GetDesc() };
-    let rotated = !matches!(
-        desc.Rotation,
-        DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED
-    );
-    if rotated || desc.ModeDesc.Width != display.width || desc.ModeDesc.Height != display.height {
+    let current_rotation = rotation(desc.Rotation).ok_or(NativeError::GeometryChanged)?;
+    if !layout.matches_mode(
+        (desc.ModeDesc.Width, desc.ModeDesc.Height),
+        current_rotation,
+    ) {
         return Err(NativeError::GeometryChanged);
     }
+    if desc.ModeDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM {
+        return Err(NativeError::Unavailable);
+    }
+    // DuplicateOutput may block while the desktop reconfigures. Complete
+    // the ownership check after that call as well as before it.
+    display.check()?;
     Ok(Some(duplication))
+}
+
+fn rotation(value: DXGI_MODE_ROTATION) -> Option<Rotation> {
+    match value {
+        DXGI_MODE_ROTATION_IDENTITY | DXGI_MODE_ROTATION_UNSPECIFIED => Some(Rotation::Identity),
+        DXGI_MODE_ROTATION_ROTATE90 => Some(Rotation::Clockwise90),
+        DXGI_MODE_ROTATION_ROTATE180 => Some(Rotation::Clockwise180),
+        DXGI_MODE_ROTATION_ROTATE270 => Some(Rotation::Clockwise270),
+        _ => None,
+    }
 }

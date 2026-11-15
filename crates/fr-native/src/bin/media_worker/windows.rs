@@ -31,10 +31,10 @@ const fn gcd(a: u32, b: u32) -> u32 {
 /// The catalog entry for one display: pixels are the desktop's own (Desktop
 /// Duplication captures them 1:1), logical size the pixels at 96 DPI.
 fn entry(d: &WinDisplay, limits: &ProtocolLimits) -> Option<Display> {
-    // Rotated outputs are refused by the capture for now.
-    if d.rotation != 0 || d.dpi == 0 {
+    if d.dpi == 0 {
         return None;
     }
+    let rotation = d.rotation_quarter_turns()?;
     let logical = |pixels: u32| {
         u32::try_from((u64::from(pixels) * 96 + u64::from(d.dpi) / 2) / u64::from(d.dpi)).ok()
     };
@@ -50,7 +50,7 @@ fn entry(d: &WinDisplay, limits: &ProtocolLimits) -> Option<Display> {
         logical_height: logical(d.height)?,
         scale_numerator: d.dpi / divisor,
         scale_denominator: 96 / divisor,
-        rotation: 0,
+        rotation,
     };
     display.validate(limits).ok()?;
     Some(display)

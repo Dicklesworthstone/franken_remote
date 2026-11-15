@@ -178,6 +178,66 @@ replacement images. They pass with the pinned nightly and strict standalone
 Clippy. This establishes copy elimination and policy correctness in source;
 native D3D execution and any frame-rate improvement still require measurement.
 
+### Portrait and rotated displays
+
+The Windows host catalog now includes 90°, 180° and 270° displays. Pixel and
+logical sizes, origins and input coordinates remain upright; the catalog's
+rotation is metadata in clockwise quarter turns. A source image from Desktop
+Duplication is still unrotated: a 768×1024 portrait output supplies a 1024×768
+texture. The capture adapter validates that actual texture's dimensions,
+BGRA format, single mip, single array slice and single-sample layout before
+using it. Unknown rotations and geometry changes refuse the original owner.
+
+For a rotated output, one D3D11 video processor rotates the borrowed image
+directly into the existing owned BGRA desktop texture before `ReleaseFrame`.
+Source rectangles use acquired-image coordinates; destination rectangles use
+upright coordinates. The processor must advertise rotation and BGRA input and
+output in the same RGB color space, and a rate-conversion mode requiring no
+past or future frames. Automatic image enhancement is disabled. There is no
+additional full-display texture, temporal history or CPU rotation fallback.
+Unrotated capture keeps its existing direct copy path. The source desktop's
+axes and total pixels are bounded before allocation, including when the
+encoded picture is smaller than the display.
+
+The existing cursor compositor runs after the desktop is upright. Separate
+DXGI pointer positions already use the output's upright coordinates and are
+not rotated again. A pointer already embedded in the captured image travels
+with the image and receives no additional overlay. Native clients display the
+upright codec picture and map input through its physical bounds; they do not
+apply catalog rotation to it a second time.
+
+A rotation failure or failed `ReleaseFrame` invalidates retained source
+evidence. Recreating a duplication first invalidates the old image and cursor,
+then checks the complete selected display and exact original mode/rotation.
+A same-sized 180° flip, or a 90° to 270° change, cannot keep the old capture
+owner or refresh cached pixels. The existing geometry-change path closes that
+owner before a newly selected geometry can be used.
+
+**Evidence (2026-11-15, `fr-biky`):** nine portable tests of the production
+layout/resource and freshness policy passed with the pinned nightly, including
+strict standalone Clippy. The actual capture library passed Windows GNU
+`cargo check`; the library and media-worker binary passed strict Windows GNU
+Clippy with `windows-host-media`. An ignored native test uses the actual
+production D3D operation and reads back distinctly colored corners for 90°,
+180° and 270°; it passed strict typechecking against the real Windows and
+capture-library metadata, but has not been run. Physical portrait capture,
+cursor placement, negative-origin mixed-DPI input, rotation during sharing and
+any performance change remain **not tested** on Windows hardware.
+
+Native GPU check, on a Windows machine with a suitable video processor:
+
+```powershell
+cargo test -p fr-native --no-default-features --features windows-media --lib windows_capture::upright::tests::rotates_labeled_corners_on_hardware -- --ignored --nocapture
+```
+
+The geometry and direction follow Microsoft's
+[Desktop Duplication rotation and pointer contract](https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/desktop-dup-api),
+[video processor rotation contract](https://learn.microsoft.com/en-us/windows/win32/api/d3d11/nf-d3d11-id3d11videocontext-videoprocessorsetstreamrotation),
+and [Desktop Duplication sample](https://github.com/microsoft/Windows-classic-samples/blob/main/Samples/DXGIDesktopDuplication/cpp/DisplayManager.cpp).
+The distinction between upright duplication-mode dimensions and swapped
+acquired-image dimensions is also explicit in the
+[WebRTC DXGI implementation](https://webrtc.googlesource.com/src/+/7e0bd7aaaf52a6a4bd6c3f84c107071cd2827299/modules/desktop_capture/win/dxgi_output_duplicator.cc).
+
 ### Encoder event and output bounds
 
 The Media Foundation event pump forwards at most 32 payload-free events through
