@@ -165,11 +165,13 @@ OPTIONS:
     --fps FPS       Maximum capture/codec frame rate, integer 1..240 (default 30).
                     Native backpressure skips opportunities; this is not measured
                     throughput. No queued catch-up frames
-    --adaptive-capture  Adapt raw capture cadence to measured source pressure and
-                    verified idle, for controlled and shared viewing sessions.
-                    Normally bounded at 200 ms; a slower --fps remains fixed.
-                    Codec settings stay fixed. Per-viewer feedback applies to control.
-                    Off by default; see ADAPTIVE_CAPTURE.md
+    --adaptive-capture  Adapt raw capture cadence to measured source pressure,
+                    viewer decoder load (shared: only when every viewer is
+                    behind) and verified idle, for controlled and shared viewing
+                    sessions. Normally bounded at 200 ms; a slower --fps remains
+                    fixed. An explicit software encoder, VideoToolbox or Media
+                    Foundation may also lower its bitrate target, never above
+                    --bitrate. Off by default; see ADAPTIVE_CAPTURE.md
     --directory     Answer an admitted viewer's request for this host's tailnet
                     directory: this machine and that viewer's own untagged
                     machines (name, node ID, OS, online, tailnet addresses),
