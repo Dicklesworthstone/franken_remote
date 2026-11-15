@@ -57,7 +57,7 @@ use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, ScrollUnit};
 use fr_core::input_submission::Capability;
 use fr_media::{
     access_unit::EncodedAccessUnit,
-    freshness::ClockPolicy,
+    freshness::{ClockPolicy, Error as FreshnessError},
     hevc::DecoderRecord,
     worker::{
         Configuration as WorkerConfiguration, Error as WorkerError, overlay::Update as CursorUpdate,
@@ -71,8 +71,8 @@ use frd::{
         reconnect::{self, Application, CallbackError, Failure, Status},
     },
     session_startup::{
-        ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
-        Presentation, Viewer, ViewerControl,
+        ControlledViewer, ControlledViewerError, InteractiveViewerState, NativeObserver,
+        ObserverError, ObserverPolicy, Presentation, StreamingViewerError, Viewer, ViewerControl,
         viewer_events::{
             ClientInstant, Event as InputEvent, Layout, LocalPoint, Located, NativeCapture,
             PositionedAction, Source,
@@ -1817,8 +1817,7 @@ impl LocalPresenter for Presenter {
 /// ([`FrameSlot::app_id`]), so an earlier attempt's drawing never counts.
 fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>) -> Option<u64> {
     if let Some(frame) = frame {
-        *pending =
-            (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw());
+        *pending = submitted(frame);
     }
     let id = (*pending)?;
     if !shared.visible.load(Ordering::SeqCst) || shared.frames.drawn() < shared.frames.app_id(id) {
@@ -1826,6 +1825,41 @@ fn shown(shared: &Shared, pending: &mut Option<u64>, frame: Option<Presentation>
     }
     *pending = None;
     Some(id)
+}
+
+/// frd's id for a picture it submitted for display. A decode-only picture is
+/// never shown.
+fn submitted(frame: Presentation) -> Option<u64> {
+    (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw())
+}
+
+/// Record the answer to a visibility report for `frame`, which [`shown`] has
+/// just taken out of `pending`.
+///
+/// - The view exists only once the session clock is correlated. A picture
+///   drawn while the session opened therefore meets `ClockNotReady` on the
+///   first turns, so that refusal puts it back to report on a later turn.
+/// - `QueueExpired` means the picture arrived on screen after its display
+///   budget. frd still holds it as the visible picture, unqualified, until the
+///   host verifies the source again, and its evidence gates input until then.
+///   It counts as shown, so the view keeps checking that evidence; otherwise
+///   a late opening picture on a static host would never offer control.
+/// - Any other refusal waits for a newer picture, as in the Linux viewer.
+fn witness<T>(
+    result: &Result<T, StreamingViewerError>,
+    frame: u64,
+    pending: &mut Option<u64>,
+    last_shown: &mut Option<u64>,
+) {
+    match result {
+        Ok(_) | Err(StreamingViewerError::Freshness(FreshnessError::QueueExpired)) => {
+            *last_shown = Some(frame);
+        }
+        Err(StreamingViewerError::Control(ControlledViewerError::ClockNotReady)) => {
+            *pending = Some(frame);
+        }
+        Err(_) => {}
+    }
 }
 
 /// What attaching the granted source did.
@@ -2116,6 +2150,7 @@ impl Application for Mobile {
         );
         let opened = opening.await?;
         let display = opened.display();
+        let initial = opened.initial_presentation();
         let observer = self.observer.insert(opened);
         self.shared
             .clipboard
@@ -2141,7 +2176,11 @@ impl Application for Mobile {
                 shared.events.state(state::VIEWING, attempt_number);
             }
         };
-        let mut pending = None;
+        // frd decodes and submits the opening picture before serving, and its
+        // callbacks carry only later pictures. On a static host the opening
+        // picture is the only one, so it starts pending: without it the view
+        // would never be announced or offer control.
+        let mut pending = submitted(initial);
         let outcome = if self.control {
             let mut mapped = false;
             let mut last_shown = None;
@@ -2171,8 +2210,8 @@ impl Application for Mobile {
                                 .map_err(|_| ())?;
                             mapped = true;
                         }
-                        if fresh.is_some() && view.visible(frame).is_ok() {
-                            last_shown = Some(frame);
+                        if fresh.is_some() {
+                            witness(&view.visible(frame), frame, &mut pending, &mut last_shown);
                         }
                         announce_view(&shared);
                         let ready = !requested

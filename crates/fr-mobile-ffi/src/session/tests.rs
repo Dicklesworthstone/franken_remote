@@ -428,6 +428,68 @@ fn a_submitted_picture_counts_as_shown_once_the_app_has_drawn_it() {
 }
 
 #[test]
+fn the_opening_picture_counts_as_shown_even_late_and_a_clock_refusal_reports_it_again() {
+    use fr_media::access_unit::FrameId;
+    let opening = |stage| Presentation {
+        frame: FrameId::from_raw(3),
+        stage,
+    };
+    let shared = Shared::new();
+    shared.set_visible(true);
+    shared.frames.mark_drawn(3);
+    // Planted negative: frd's callbacks never carry the opening picture, so
+    // starting with nothing pending (the old rule) never reports it. On a
+    // static host no later picture comes, and control is never offered.
+    let mut old = None;
+    assert_eq!(shown(&shared, &mut old, None), None);
+    let mut pending = submitted(opening(PresentationStage::SubmittedToCompositor));
+    assert_eq!(shown(&shared, &mut pending, None), Some(3));
+    // Before the clock is correlated the view does not exist: the refusal
+    // puts the picture back, and it is reported again on a later turn.
+    let mut last_shown = None;
+    let not_ready: Result<(), _> = Err(StreamingViewerError::Control(
+        ControlledViewerError::ClockNotReady,
+    ));
+    witness(&not_ready, 3, &mut pending, &mut last_shown);
+    assert_eq!(last_shown, None);
+    assert_eq!(shown(&shared, &mut pending, None), Some(3));
+    // Any other refusal waits for a newer picture.
+    witness(
+        &Err::<(), _>(StreamingViewerError::Closed),
+        3,
+        &mut pending,
+        &mut last_shown,
+    );
+    assert_eq!(last_shown, None);
+    assert_eq!(shown(&shared, &mut pending, None), None);
+    witness(
+        &Ok::<(), StreamingViewerError>(()),
+        3,
+        &mut pending,
+        &mut last_shown,
+    );
+    assert_eq!(last_shown, Some(3));
+    assert_eq!(pending, None);
+    // Planted negative (the old rule set `last_shown` only on Ok): a late
+    // picture is on screen, held unqualified by frd until the host verifies
+    // it. It counts as shown, so the view keeps checking its gated evidence,
+    // and it is not reported again.
+    let (mut late_pending, mut late_shown) = (None, None);
+    witness(
+        &Err::<(), _>(StreamingViewerError::Freshness(
+            FreshnessError::QueueExpired,
+        )),
+        4,
+        &mut late_pending,
+        &mut late_shown,
+    );
+    assert_eq!(late_shown, Some(4));
+    assert_eq!(late_pending, None);
+    // A decode-only opening picture never counts.
+    assert_eq!(submitted(opening(PresentationStage::DecodedOnly)), None);
+}
+
+#[test]
 fn a_picture_drawn_in_an_earlier_attempt_never_counts_in_a_later_one() {
     use fr_media::access_unit::FrameId;
     let submitted = |raw| {

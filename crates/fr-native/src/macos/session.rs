@@ -39,7 +39,7 @@ use fr_core::input::{DesktopPoint, InputBounds, KeyTransition, PhysicalKey, Poin
 use fr_core::input_submission::{Capabilities, Capability};
 use fr_media::{
     access_unit::EncodedAccessUnit,
-    freshness::ClockPolicy,
+    freshness::{ClockPolicy, Error as FreshnessError},
     hevc::DecoderRecord,
     worker::{
         Configuration as WorkerConfiguration, Error as WorkerError, overlay::Update as CursorUpdate,
@@ -55,8 +55,9 @@ use frd::{
         self, Application, CallbackError, CompletionAction, LocalLayoutChange, Status,
     },
     session_startup::{
-        ControlledViewer, InteractiveViewerState, NativeObserver, ObserverError, ObserverPolicy,
-        Presentation, StreamingViewerControl, Viewer,
+        ControlledViewer, ControlledViewerError, InteractiveViewerState, NativeObserver,
+        ObserverError, ObserverPolicy, Presentation, StreamingViewerControl, StreamingViewerError,
+        Viewer,
         viewer_events::{
             Error as CaptureError, Event, Layout, LocalPoint, MAX_EVENT_AGE_US, NativeCapture,
             PositionedAction, Source, TextContext,
@@ -1481,17 +1482,72 @@ fn service(
 
 /// The frame's on-screen evidence: drawn through Metal while some of the
 /// window is visible. Decode-only frames are never visible.
-fn shown(window: &RefCell<Option<Window>>, frame: Option<Presentation>) -> Option<u64> {
-    let frame = frame?;
-    if frame.stage != PresentationStage::SubmittedToCompositor {
-        return None;
-    }
+fn shown(
+    window: &RefCell<Option<Window>>,
+    pending: &mut Option<u64>,
+    frame: Option<Presentation>,
+) -> Option<u64> {
     let visible = window
         .borrow()
         .as_ref()
         .and_then(|w| w.state().ok())
         .is_some_and(|s| s.visible && s.geometry_current);
-    visible.then_some(frame.frame.as_raw())
+    take_shown(pending, frame, visible)
+}
+
+/// frd hands each later picture to the callback once, then calls again with
+/// `None` after every network turn; the opening picture never comes through
+/// the callback. Keep the newest submitted picture pending until the window is
+/// visible, and report it once. A newer callback picture replaces it. An idle
+/// host may send nothing newer, so without this the opening picture of a
+/// static desktop would never count and control would never be requested.
+fn take_shown(
+    pending: &mut Option<u64>,
+    frame: Option<Presentation>,
+    visible: bool,
+) -> Option<u64> {
+    if let Some(frame) = frame {
+        *pending = submitted(frame);
+    }
+    if !visible {
+        return None;
+    }
+    pending.take()
+}
+
+/// frd's id for a picture it submitted for display. A decode-only picture is
+/// never shown.
+fn submitted(frame: Presentation) -> Option<u64> {
+    (frame.stage == PresentationStage::SubmittedToCompositor).then(|| frame.frame.as_raw())
+}
+
+/// Record the answer to a visibility report for `frame`, which [`shown`] has
+/// just taken out of `pending`.
+///
+/// - The view exists only once the session clock is correlated. A picture
+///   drawn while the session opened therefore meets `ClockNotReady` on the
+///   first turns, so that refusal puts it back to report on a later turn.
+/// - `QueueExpired` means the picture arrived on screen after its display
+///   budget. frd still holds it as the visible picture, unqualified, until the
+///   host verifies the source again, and its evidence gates input until then.
+///   It counts as shown, so the view keeps checking that evidence; otherwise
+///   a late opening picture on a static host would never offer control.
+/// - Any other refusal waits for a newer picture, as in the Linux viewer.
+fn witness<T>(
+    result: &Result<T, StreamingViewerError>,
+    frame: u64,
+    pending: &mut Option<u64>,
+    last_shown: &mut Option<u64>,
+) {
+    match result {
+        Ok(_) | Err(StreamingViewerError::Freshness(FreshnessError::QueueExpired)) => {
+            *last_shown = Some(frame);
+        }
+        Err(StreamingViewerError::Control(ControlledViewerError::ClockNotReady)) => {
+            *pending = Some(frame);
+        }
+        Err(_) => {}
+    }
 }
 
 /// Attach this window's input to the granted session with a layout that
@@ -1806,6 +1862,9 @@ impl Application for Session {
             }
         }
         let display = opened.display();
+        // frd decodes and submits the opening picture before serving; its
+        // callbacks carry only later pictures (see `take_shown`).
+        let opening_picture = submitted(opened.initial_presentation());
         let observer = self.observer.insert(opened);
         if let Some(install) = &mut self.audio_install {
             *self.audio_owner.borrow_mut() = Some(Rc::from(install(observer)));
@@ -1871,6 +1930,7 @@ impl Application for Session {
             Some(policy) => {
                 let mut mapped = false;
                 let mut last_shown = None;
+                let mut pending = opening_picture;
                 let mut attached = false;
                 let ui_window = window.clone();
                 let ui_input = input.clone();
@@ -1908,7 +1968,8 @@ impl Application for Session {
                         }
                         return Err(());
                     }
-                    let fresh = shown(&ui_window, frame).filter(|f| last_shown != Some(*f));
+                    let fresh =
+                        shown(&ui_window, &mut pending, frame).filter(|f| last_shown != Some(*f));
                     match state {
                         InteractiveViewerState::Viewing(view) => {
                             let Some(frame) = fresh.or(last_shown) else {
@@ -1921,8 +1982,8 @@ impl Application for Session {
                                     .map_err(|_| ())?;
                                 mapped = true;
                             }
-                            if fresh.is_some() && view.visible(frame).is_ok() {
-                                last_shown = Some(frame);
+                            if fresh.is_some() {
+                                witness(&view.visible(frame), frame, &mut pending, &mut last_shown);
                             }
                             let local_ready = ui_window
                                 .borrow()
@@ -2291,6 +2352,70 @@ fn reported_terminal(observer: &NativeObserver) -> Option<ObserverError> {
 mod tests {
     use super::*;
     use asupersync::{runtime::RuntimeBuilder, types::Budget};
+
+    #[test]
+    fn the_opening_picture_counts_once_visible_even_late_and_a_clock_refusal_reports_it_again() {
+        use fr_media::access_unit::FrameId;
+        let picture = |raw, stage| Presentation {
+            frame: FrameId::from_raw(raw),
+            stage,
+        };
+        let submitted_at = |raw| Some(picture(raw, PresentationStage::SubmittedToCompositor));
+        // Planted negative: frd's callbacks never carry the opening picture,
+        // so the old rule (only a callback picture counts) never reported it.
+        assert_eq!(take_shown(&mut None, None, true), None);
+        let mut pending = submitted(picture(3, PresentationStage::SubmittedToCompositor));
+        // The window is not visible yet: it stays pending.
+        assert_eq!(take_shown(&mut pending, None, false), None);
+        assert_eq!(take_shown(&mut pending, None, true), Some(3));
+        assert_eq!(take_shown(&mut pending, None, true), None, "reported once");
+        // Before the clock is correlated the view does not exist: the refusal
+        // puts the picture back for a later turn.
+        let mut last_shown = None;
+        let not_ready: Result<(), _> = Err(StreamingViewerError::Control(
+            ControlledViewerError::ClockNotReady,
+        ));
+        witness(&not_ready, 3, &mut pending, &mut last_shown);
+        assert_eq!(last_shown, None);
+        assert_eq!(take_shown(&mut pending, None, true), Some(3));
+        // Any other refusal waits for a newer picture.
+        witness(
+            &Err::<(), _>(StreamingViewerError::Closed),
+            3,
+            &mut pending,
+            &mut last_shown,
+        );
+        assert_eq!(take_shown(&mut pending, None, true), None);
+        witness(
+            &Ok::<(), StreamingViewerError>(()),
+            3,
+            &mut pending,
+            &mut last_shown,
+        );
+        assert_eq!(last_shown, Some(3));
+        // Planted negative (the old rule set `last_shown` only on Ok): a late
+        // picture is on screen, held unqualified by frd until the host
+        // verifies it. It counts as shown, so the view keeps checking its
+        // gated evidence, and it is not reported again.
+        let (mut late_pending, mut late_shown) = (None, None);
+        witness(
+            &Err::<(), _>(StreamingViewerError::Freshness(
+                FreshnessError::QueueExpired,
+            )),
+            4,
+            &mut late_pending,
+            &mut late_shown,
+        );
+        assert_eq!(late_shown, Some(4));
+        assert_eq!(late_pending, None);
+        // A newer callback picture replaces a pending one; decode-only never counts.
+        let mut pending = submitted(picture(4, PresentationStage::SubmittedToCompositor));
+        assert_eq!(take_shown(&mut pending, submitted_at(5), true), Some(5));
+        let mut pending = submitted(picture(6, PresentationStage::SubmittedToCompositor));
+        let decoded = Some(picture(7, PresentationStage::DecodedOnly));
+        assert_eq!(take_shown(&mut pending, decoded, true), None);
+        assert_eq!(submitted(picture(8, PresentationStage::DecodedOnly)), None);
+    }
 
     #[derive(Default)]
     struct AudioCleanup {
