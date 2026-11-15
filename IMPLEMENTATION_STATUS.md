@@ -1,5 +1,24 @@
 # Implementation status
 
+## Windows hosts can opt in to regular-file receiving (2026-11-15 UTC)
+
+`frd run --encoder mediafoundation --control --files C:\Users\me\FrankenRemoteDrop` now reaches the
+existing controlled Files lane on Windows. The selected directory must already
+exist and pass the native actual-handle owner/DACL and no-reparse checks.
+Windows option validation no longer rejects this supported combination; file
+receiving still requires the original control attachment and a separate local
+file permission. Missing or unsafe roots refuse before host startup with
+Windows-appropriate diagnostics.
+
+Three additional Windows regressions cover real root admission and limits,
+unsafe DACLs, junctions and path namespaces, and CLI refusal ordering. Existing
+Windows option tests now expect the supported configuration. These regressions
+and real Windows transfers remain **unexecuted** after executor loss; source/API
+review is not native qualification. NATIVE_FILE_RECEIVE.md records the opt-in,
+regular-file-only scope, conflict policy and committed-but-unconfirmed directory
+durability. Tree transfer, synchronization and reconnect replay remain
+unavailable. Tracks `fr-p2-file-transfer-m7o`.
+
 ## Windows regular-file receive custody (2026-11-15 UTC)
 
 The existing ATP disk worker can now receive regular files into a Windows

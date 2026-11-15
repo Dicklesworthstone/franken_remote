@@ -280,7 +280,6 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
             &["--observation-indicator", r"C:\fr\indicator.exe"],
             "observation_indicator_unavailable",
         ),
-        (&["--control", "--files", r"C:\drop"], "files_unavailable"),
         (
             &["--control", "--microphone"],
             "microphone_endpoint_unavailable",
@@ -385,7 +384,7 @@ fn initial_send_keeps_control_scope_bounds_and_other_windows_refusals() {
             ],
             Approval::Local,
         ),
-        Some("files_unavailable"),
+        None,
     );
     assert_eq!(
         refusal(
@@ -424,4 +423,120 @@ fn initial_send_refuses_directories_and_nonordinary_windows_sources() {
         assert_eq!(refused.index, 0);
         assert_eq!(refused.reason, SelectReason::NotPortable, "{source}");
     }
+}
+
+#[test]
+fn receive_selects_a_real_private_root_without_starting_transfers_or_granting_control() {
+    use frd::native_files::{DirectoryRefusal, Limits};
+
+    let root = Root::new();
+    let inbox = root.0.join("inbox");
+    fs::create_dir(&inbox).unwrap();
+    let options = run_options(&[
+        "--control",
+        "--files",
+        inbox.to_str().unwrap(),
+        "--files-conflict",
+        "keep-both",
+        "--files-max-file-bytes",
+        "3",
+        "--files-max-session-bytes",
+        "6",
+    ])
+    .unwrap();
+    assert!(options.control && options.input_agent.is_none());
+    assert_eq!(options.windows_refusal(Approval::Local), None);
+    let directory = options.open_files().unwrap().unwrap();
+    assert_eq!(
+        directory.limits(),
+        Limits {
+            max_file_bytes: 3,
+            max_session_bytes: 6,
+        }
+    );
+    assert!(!format!("{directory:?}").contains(inbox.to_str().unwrap()));
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    drop(directory);
+
+    // Native validation checks the actual final directory DACL. The chosen
+    // collision policy and positive control option cannot waive that check.
+    grant(&inbox, "(AD,WD)");
+    assert_eq!(options.open_files().unwrap_err(), DirectoryRefusal::Unsafe);
+    assert_eq!(fs::read_dir(&inbox).unwrap().count(), 0);
+    assert_eq!(DirectoryRefusal::Unsafe.code(), "files_directory_unsafe");
+}
+
+#[test]
+fn receive_refuses_reparse_roots_and_nonordinary_windows_names() {
+    use frd::native_files::DirectoryRefusal;
+
+    let root = Root::new();
+    let real = root.0.join("real");
+    fs::create_dir(&real).unwrap();
+    let junction = root.0.join("junction");
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&real)
+        .output()
+        .unwrap()
+        .status;
+    assert!(status.success());
+    let selected = run_options(&["--control", "--files", junction.to_str().unwrap()]).unwrap();
+    assert_eq!(selected.open_files().unwrap_err(), DirectoryRefusal::Unsafe);
+    assert_eq!(fs::read_dir(&real).unwrap().count(), 0);
+    for path in [
+        r"\\server\share\inbox",
+        r"\\?\C:\inbox",
+        r"\\.\pipe\never-open",
+        r"C:relative",
+        r"\rooted",
+        r"C:\selected\..\inbox",
+    ] {
+        let selected = run_options(&["--control", "--files", path]).unwrap();
+        assert_eq!(
+            selected.open_files().unwrap_err(),
+            DirectoryRefusal::Relative,
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn receive_cli_requires_explicit_control_then_uses_the_checked_native_root() {
+    let root = Root::new();
+    let policy = root.0.join("host.json");
+    root.store("host.json")
+        .update(Change::Approval(Approval::None))
+        .unwrap();
+    let missing = root.0.join("receive-destination-must-stay-missing");
+    for (control, code) in [
+        (false, "files_requires_input_agent"),
+        (true, "files_directory_missing"),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_frd"));
+        command.args([
+            "run",
+            "--config",
+            policy.to_str().unwrap(),
+            "--encoder",
+            "mediafoundation",
+            "--no-clipboard",
+            "--files",
+            missing.to_str().unwrap(),
+            "--json",
+        ]);
+        if control {
+            command.arg("--control");
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(2), "{code}");
+        let response = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            response.contains(&format!("\"code\":\"{code}\"")),
+            "{response}"
+        );
+        assert!(!response.contains("receive-destination-must-stay-missing"));
+    }
+    assert!(!missing.exists());
 }

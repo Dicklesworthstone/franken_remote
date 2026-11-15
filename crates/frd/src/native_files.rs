@@ -13,8 +13,11 @@
 //! browsing, synchronization or picker UI. Native copy drops can submit fresh
 //! selections on the original upload intake. Status retains actual publication
 //! separately from progress, refusal and cleanup, without names or contents.
+#[cfg(not(windows))]
 use crate::sys::rustix;
+#[cfg(not(windows))]
 use crate::sys::rustix::fs::{Mode, OFlags};
+#[cfg(not(windows))]
 use crate::sys::unix::fs::{MetadataExt, PermissionsExt};
 use fr_files::{
     receive::{DropDirectory, Limits as DirectoryLimits},
@@ -74,6 +77,9 @@ pub enum DirectoryRefusal {
     Symlink,
     NotOwned,
     WritableByOthers,
+    /// The Windows path contains a reparse point, or the actual directory
+    /// has an untrusted owner or writable DACL.
+    Unsafe,
     Limits,
     Unavailable,
 }
@@ -86,6 +92,7 @@ impl DirectoryRefusal {
             Self::Symlink => "files_directory_symlink",
             Self::NotOwned => "files_directory_not_owned",
             Self::WritableByOthers => "files_directory_writable_by_others",
+            Self::Unsafe => "files_directory_unsafe",
             Self::Limits => "files_limits_invalid",
             Self::Unavailable => "files_directory_unavailable",
         }
@@ -109,11 +116,11 @@ impl fmt::Debug for Directory {
     }
 }
 impl Directory {
-    /// Accept only an existing absolute directory, owned by this effective
-    /// user, not group/other-writable, reached without any symbolic link.
-    /// The typed classification uses `lstat`; `DropDirectory::open` then
-    /// re-checks ownership and mode on the pinned no-follow descriptor, so a
-    /// swap between the two is refused rather than trusted.
+    /// Accept an existing absolute directory owned by this user, inaccessible
+    /// to other writers, reached without links or reparse points. Windows
+    /// validates the actual pinned handle and its DACL in `DropDirectory`;
+    /// no Unix metadata approximation or second pathname walk grants access.
+    /// Unix first classifies the path, then rechecks the pinned descriptor.
     pub fn open(path: &Path, limits: Limits) -> Result<Self, DirectoryRefusal> {
         if limits.max_file_bytes == 0 || limits.max_session_bytes < limits.max_file_bytes {
             return Err(DirectoryRefusal::Limits);
@@ -121,28 +128,32 @@ impl Directory {
         if !path.is_absolute() {
             return Err(DirectoryRefusal::Relative);
         }
-        let metadata = match std::fs::symlink_metadata(path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(DirectoryRefusal::Missing);
-            }
-            Err(_) => return Err(DirectoryRefusal::Unavailable),
-        };
-        if metadata.file_type().is_symlink()
-            || path.ancestors().skip(1).any(|parent| {
-                std::fs::symlink_metadata(parent).is_ok_and(|m| m.file_type().is_symlink())
-            })
+        #[cfg(not(windows))]
         {
-            return Err(DirectoryRefusal::Symlink);
-        }
-        if !metadata.is_dir() {
-            return Err(DirectoryRefusal::NotDirectory);
-        }
-        if metadata.uid() != rustix::process::geteuid().as_raw() {
-            return Err(DirectoryRefusal::NotOwned);
-        }
-        if metadata.permissions().mode() & 0o022 != 0 {
-            return Err(DirectoryRefusal::WritableByOthers);
+            let metadata = match std::fs::symlink_metadata(path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(DirectoryRefusal::Missing);
+                }
+                Err(_) => return Err(DirectoryRefusal::Unavailable),
+            };
+            if metadata.file_type().is_symlink()
+                || path.ancestors().skip(1).any(|parent| {
+                    std::fs::symlink_metadata(parent)
+                        .is_ok_and(|m| m.file_type().is_symlink())
+                })
+            {
+                return Err(DirectoryRefusal::Symlink);
+            }
+            if !metadata.is_dir() {
+                return Err(DirectoryRefusal::NotDirectory);
+            }
+            if metadata.uid() != rustix::process::geteuid().as_raw() {
+                return Err(DirectoryRefusal::NotOwned);
+            }
+            if metadata.permissions().mode() & 0o022 != 0 {
+                return Err(DirectoryRefusal::WritableByOthers);
+            }
         }
         let directory = DropDirectory::open(
             path,
@@ -154,9 +165,19 @@ impl Directory {
             },
         )
         .map_err(|error| match error {
-            fr_files::receive::Error::UnsafeRoot => DirectoryRefusal::NotOwned,
+            fr_files::receive::Error::UnsafeRoot => {
+                if cfg!(windows) {
+                    DirectoryRefusal::Unsafe
+                } else {
+                    DirectoryRefusal::NotOwned
+                }
+            }
             fr_files::receive::Error::InvalidLimits => DirectoryRefusal::Limits,
             fr_files::receive::Error::InvalidRoot => DirectoryRefusal::Relative,
+            fr_files::receive::Error::Io(io::ErrorKind::NotFound) => DirectoryRefusal::Missing,
+            fr_files::receive::Error::Io(io::ErrorKind::NotADirectory) => {
+                DirectoryRefusal::NotDirectory
+            }
             _ => DirectoryRefusal::Unavailable,
         })?;
         Ok(Self { directory, limits })
