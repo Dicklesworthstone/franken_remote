@@ -32,8 +32,11 @@ impl RunOptions {
         if self.send.is_empty() {
             return Ok(());
         }
+        // Unix hosts name their input executor; Windows opts into the same
+        // controlled share with --control and uses frd's own executable. The
+        // selection itself cannot enable either form of control.
         if !self.once
-            || self.input_agent.is_none()
+            || (self.input_agent.is_none() && !self.control)
             || self.send.len() > crate::native_files::MAX_SENDS
             || self.send.iter().any(|path| {
                 !path.is_absolute()

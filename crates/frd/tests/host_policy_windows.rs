@@ -303,3 +303,125 @@ fn run_accepts_a_view_only_share_and_refuses_what_windows_lacks() {
         .is_err()
     );
 }
+
+#[test]
+fn initial_send_reaches_the_pinned_selection_without_an_external_input_agent() {
+    use frd::native_files::HostSelection;
+    let root = Root::new();
+    let source = root.0.join("selected.txt");
+    fs::write(&source, b"selected locally").unwrap();
+    let options = run_options(&[
+        "--encoder",
+        "mediafoundation",
+        "--once",
+        "--control",
+        "--approval",
+        "local",
+        "--send",
+        source.to_str().unwrap(),
+    ])
+    .unwrap();
+    assert!(options.once && options.control && options.input_agent.is_none());
+    assert_eq!(options.send, [source.clone()]);
+    assert_eq!(options.approval, Some(Approval::Local));
+    assert!(options.files.is_none() && options.send_control.is_none());
+    assert_eq!(options.windows_refusal(Approval::Local), None);
+    // This is the public selector called by frd run before desktop/network
+    // startup. It opens a native file handle; no transport or control grant is
+    // manufactured by accepting the command line or selecting a source.
+    let selection = HostSelection::select(&options.send).unwrap();
+    assert!(selection.is_available());
+    assert!(fs::write(&source, b"replacement").is_err());
+    assert!(fs::remove_file(&source).is_err());
+    assert!(fs::rename(&source, root.0.join("renamed.txt")).is_err());
+    let retained = selection.clone();
+    drop(selection);
+    assert!(fs::write(&source, b"replacement").is_err());
+    assert!(!format!("{retained:?}").contains(source.to_str().unwrap()));
+    drop(retained);
+    fs::write(&source, b"released after the original owner").unwrap();
+}
+
+#[test]
+fn initial_send_keeps_control_scope_bounds_and_other_windows_refusals() {
+    let source = r"C:\selected\report.pdf";
+    for args in [
+        vec!["--send", source],
+        vec!["--once", "--send", source],
+        vec!["--control", "--send", source],
+        vec!["--once", "--control", "--send", "relative.txt"],
+        vec!["--once", "--control", "--send", r"C:relative.txt"],
+        vec!["--once", "--control", "--send", r"\rooted.txt"],
+        vec!["--once", "--control", "--send", r"C:\selected\..\file.txt"],
+        vec!["--once", "--control", "--send"],
+        vec!["--once", "--control", "--send-control", "desk"],
+        vec![
+            "--once",
+            "--control",
+            "--send",
+            source,
+            "--send-control",
+            "desk",
+        ],
+    ] {
+        assert!(run_options(&args).is_err(), "{args:?}");
+    }
+    let mut args = vec!["--once", "--control"];
+    for _ in 0..frd::native_files::MAX_SENDS {
+        args.extend(["--send", source]);
+    }
+    assert_eq!(run_options(&args).unwrap().send.len(), 8);
+    args.extend(["--send", source]);
+    assert!(run_options(&args).is_err());
+    assert_eq!(
+        refusal(
+            &[
+                "--once",
+                "--control",
+                "--send",
+                source,
+                "--files",
+                r"C:\drop"
+            ],
+            Approval::Local,
+        ),
+        Some("files_unavailable"),
+    );
+    assert_eq!(
+        refusal(
+            &[
+                "--once",
+                "--input-agent",
+                r"C:\fr\agent.exe",
+                "--send",
+                source,
+            ],
+            Approval::Local,
+        ),
+        Some("input_agent_unavailable"),
+    );
+}
+
+#[test]
+fn initial_send_refuses_directories_and_nonordinary_windows_sources() {
+    use frd::native_files::{HostSelection, SelectReason};
+    let root = Root::new();
+    assert_eq!(
+        HostSelection::select(std::slice::from_ref(&root.0))
+            .unwrap_err()
+            .reason,
+        SelectReason::Directory,
+    );
+    for source in [
+        r"\\server\share\file.txt",
+        r"\\?\C:\selected\file.txt",
+        r"\\.\pipe\never-open",
+        r"C:\selected\file.txt:stream",
+        r"C:\selected\NUL",
+    ] {
+        let options = run_options(&["--once", "--control", "--send", source]).unwrap();
+        let refused = HostSelection::select(&options.send).unwrap_err();
+        assert_eq!(refused.index, 0);
+        assert_eq!(refused.reason, SelectReason::NotPortable, "{source}");
+    }
+}

@@ -126,6 +126,30 @@ The Windows host adapter implements hardware-accelerated workstation hosting on 
 | **Windows 11** (one Surface Laptop 3, Intel Iris Plus) | live, one display (hardware measurement) | not implemented | Intel Media Foundation HEVC, live (hardware measurement) | not implemented: frd runs in the interactive session | implemented (`--control`), not run against an elevated window | **view-only and control live; one machine; not qualified** |
 | **Windows 10 / Server 2022** | not tested | not implemented | not tested | not implemented | not tested | **not tested** |
 
+### Explicit host file sends
+
+A Windows host can send an initial batch of up to eight explicitly selected
+regular files to a controlling Linux or macOS viewer with a local `--receive`
+directory. `--once` and `--control` are both required:
+
+```powershell
+.\frd.exe run --encoder auto --once --control --send 'C:\Users\Alice\Documents\report.pdf' --json
+```
+
+Startup pins the source handles before desktop/network setup. The ordinary
+approval policy, live control grant and separately authenticated file attachment
+still govern transfer. Cloned host configurations share one consumable selection;
+reconnect cannot resend it. Windows source handles deny write/delete sharing,
+and directories, final reparse points and nonordinary device/network namespaces
+refuse. `--send-control` and Windows receive directories remain unavailable.
+See [native file downloads](../NATIVE_FILE_DOWNLOAD.md) for destination selection,
+source limitations, publication receipts and cleanup semantics.
+
+The `frd` integration target `host_policy_windows` covers Windows command parsing
+and actual source-handle selection, including the unsupported cases. Portable
+policy and host-selection tests cover the original one-use request. A live
+Windows-to-viewer file transfer has **not been run** for this change.
+
 ---
 
 ## 3. Transition and Recovery State Machine

@@ -36,7 +36,7 @@ fn published(id: u64) -> ResultReceipt {
 }
 
 #[test]
-fn selection_clones_cannot_send_twice_or_reopen_a_replaced_path() {
+fn selection_clones_cannot_send_twice_and_retain_the_original_source() {
     let rt = asupersync::runtime::RuntimeBuilder::current_thread()
         .build()
         .unwrap();
@@ -44,18 +44,38 @@ fn selection_clones_cannot_send_twice_or_reopen_a_replaced_path() {
     let selected = Selected::new();
     let host = HostSelection::select(std::slice::from_ref(&selected.0)).unwrap();
     let clone = host.clone();
-    // The original descriptors are already selected. A later claim cannot
-    // reopen a disappeared name or give another session a second request.
+    // Unix permits removing the selected name; Windows retains an actual
+    // handle that denies write/delete sharing. Neither case can redirect a
+    // later claim or give another session a second request.
+    #[cfg(not(windows))]
     fs::remove_file(&selected.0).unwrap();
+    #[cfg(windows)]
+    {
+        assert!(fs::remove_file(&selected.0).is_err());
+        assert!(fs::write(&selected.0, b"replacement").is_err());
+    }
     assert!(host.is_available() && clone.is_available());
     let other = cx.clone();
-    let first = std::thread::spawn(move || clone.take(other).is_ok());
-    let second = host.take(cx.clone()).is_ok();
-    assert_ne!(first.join().unwrap(), second);
+    let first = std::thread::spawn(move || clone.take(other).ok());
+    let second = host.take(cx.clone()).ok();
+    let first = first.join().unwrap();
+    assert_ne!(first.is_some(), second.is_some());
+    let original = first.or(second).unwrap();
+    assert!(matches!(&original, HostDownload::Initial(request) if request.selection.len() == 1));
     assert!(!host.is_available());
     assert!(matches!(host.take(cx), Err(Absence::Unavailable)));
     let debug = format!("{host:?}");
     assert!(!debug.contains(selected.0.to_str().unwrap()));
+    #[cfg(windows)]
+    {
+        // Consuming the configuration transfers the pinned source into the
+        // original request; it must not unlock it while that request lives.
+        assert!(fs::remove_file(&selected.0).is_err());
+        assert!(fs::write(&selected.0, b"replacement").is_err());
+    }
+    drop(original);
+    #[cfg(windows)]
+    fs::write(&selected.0, b"after the original owner ended").unwrap();
 }
 
 #[test]

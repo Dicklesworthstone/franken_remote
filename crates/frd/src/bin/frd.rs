@@ -97,12 +97,15 @@ OPTIONS:
                     Unsupported clipboard keeps control usable.
                     --clipboard explicitly selects the default. View-only
                     sessions never expose either clipboard
-    --send PATH     With --once and --input-agent: send this explicit absolute
-                    file or portable directory root to a controller using --receive.
-                    Repeat up to 8 times. May combine with --files for independent
-                    transfers in both directions when both peers support them.
-                    No browsing or automatic replay.
-    --send-control NAME  With --once and --input-agent: enable same-user local
+    --send PATH     With --once and native control (--control on Windows,
+                    --input-agent elsewhere): send this explicit absolute file
+                    to a controller using --receive. Repeat up to 8 times.
+                    Windows selects ordinary local drive files; directories,
+                    reparse points and device/network paths refuse. Linux/macOS
+                    also select portable directories and may combine with --files
+                    for independent transfers in both directions. No browsing
+                    or automatic replay.
+    --send-control NAME  Linux/macOS, with --once and --input-agent: enable same-user local
                     `frd send` commands for later file/directory selections on
                     this original controlled session. The client must opt in
                     with --receive DIR. Cannot combine with --send. NAME is
@@ -1045,8 +1048,13 @@ fn send(
                 json,
                 refusal.reason.code(),
                 &format!(
-                    "host file selection {} was refused; select an existing absolute regular file or portable directory root",
-                    refusal.index + 1
+                    "host file selection {} was refused; select {}",
+                    refusal.index + 1,
+                    if cfg!(windows) {
+                        "an existing absolute regular file on an ordinary local drive"
+                    } else {
+                        "an existing absolute regular file or portable directory root"
+                    }
                 ),
                 2,
             )
