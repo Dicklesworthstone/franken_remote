@@ -440,13 +440,44 @@ input mapping and control consent are never carried into the replacement.
 The new viewer starts without control; release and press F8 to request it.
 Previously selected files are not offered again.
 
+The controlling viewer also has **Stop control**. It releases the current
+control session through the same orderly close, then reopens viewing only after
+the original local owners have finished cleanup. The new attempt repeats
+identity, admission, any host approval, and display selection from a fresh
+catalog. An invocation using the native display picker asks again; other
+configured display choices are evaluated against the new catalog. No old
+display alias or input mapping is reused. Press and release **F8** in the fresh,
+focused viewer to request another grant.
+
+Stop control ends the original clipboard sharing, file selections and pending
+text composition. Completed file publications and input effects retain their
+original reports; cleanup does not undo them. A replacement cannot replay those
+choices. The button is available only for a currently controlled viewer, with
+the same independent cleanup owner used by Change Display. Viewing and a
+pending control request cannot consume an old Stop control click. If the local
+click expires before it can begin the orderly close, the original control is
+still stopped, but no replacement view is authorized.
+
 Explicit changes share the connector's existing attempt/owner bounds. Closing
 the window, the emergency escape, an input/native failure or failed cleanup
 takes precedence over a pending change. Completion retains each original
-display-change close and lease report even if a later choice is cancelled or
-a reconnect fails; unknown host cleanup remains unknown. The Change Display
-button is unavailable while a control request is pending. Its reserved toolbar
-area cannot produce remote pointer coordinates.
+display-change or control-release close and lease report even if a later choice
+is cancelled or a reconnect fails; unknown host cleanup remains unknown. Both
+buttons are unavailable while a control request is pending. Their reserved
+toolbar areas cannot produce remote pointer coordinates. Stop control has its
+own 136-point slot in the existing sharing row, reserved before the window's
+input viewport is established.
+
+**Stop control verification (2026-11-15, fr-ivyh):** the exact portable
+action policy passes all 10 tests and the exact native-window sizing policy
+passes all 13 tests on the repository-pinned nightly. Both pass standalone
+Clippy with all/pedantic warnings denied. These checks cover current-grant and
+event-time gates, later state/terminal vetoes, single consumption, the original
+close-start deadline, and every combination of reserved sharing controls.
+The actual session completion regressions also cover cleanup/refusal gates,
+preserved original close evidence, and consumed control consent; they require
+the macOS integration build. AppKit execution and a live host control-release
+round trip have not been tested in this Linux environment.
 
 **Verification (2026-11-09):** six display-switch, nine control-consent and five
 sizing tests pass with the pinned compiler and strict standalone Clippy. Four
