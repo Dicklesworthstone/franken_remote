@@ -198,46 +198,46 @@ budget, finite replacement count and invocation-wide `--seconds` still apply.
 Close the window to disconnect completely, including while a control request
 is pending. The final JSON counts completed handoffs in `control_releases`.
 
-Switching to another application invalidates pending control choices and ends
-any granted control. For an active controller, the viewer now keeps its window
-open while the original connection closes and its held input, clipboard and
-file owners finish cleanup. The old picture is cleared. If that original service
-and cleanup both succeed within the existing ten-second bound, the disconnected
-window waits for you to return; it opens no connection while waiting. Its title
-shows **Control stopped; return to this window to keep viewing**.
+Switching to another application pauses granted control instead of ending
+it. At the switch the viewer releases every key and mouse button it pressed on
+the host, and discards an open **Send text** draft and any unsent menu choice.
+While another application is in front nothing is forwarded, including pointer
+motion over the still-visible viewer window. Viewing, the control grant and
+its renewal, and the text clipboard lane continue: text copied in the other
+application reaches the host, ready to paste after you return. Use **Turn
+off** in the clipboard window when that is not wanted. Input resumes once the
+viewer window is in front again. Only new input is sent: a key or button
+pressed in the other application and released over the viewer sends nothing,
+and nothing from before the switch is replayed.
 
-A fresh foreground event opens a new viewing connection to the same selected
-machine, subject to normal host admission and approval. That event has its own
-bounded opening request; repeated activation callbacks do not renew it. The
-new connection starts viewing. Choose **Input → Request control** again to
-request a new grant. Clipboard synchronization and previous file selections
-are retired permanently for this invocation's replacement connections. They
-are never resumed or replayed by returning to the window.
+If a release cannot be sent at the switch (the input queue refuses it), the
+viewer does not pause with input held. It ends control instead. The window
+stays open while the original connection closes and its held input,
+clipboard and file owners finish cleanup, and the old picture is cleared. If
+that original service and cleanup both succeed within the existing ten-second
+bound, the disconnected window waits for you to return; it opens no
+connection while waiting. Its title shows **Control stopped; return to this
+window to keep viewing**. A fresh foreground event opens a new viewing
+connection to the same selected machine, subject to normal host admission and
+approval. That event has its own bounded opening request; repeated activation
+callbacks do not renew it. Choose **Input → Request control** again to request
+a new grant. Clipboard synchronization and previous file selections are
+retired permanently for that invocation's replacement connections. Closing
+the dormant window or reaching `--seconds` ends the invocation. Failed or late
+original cleanup, another hide during an accepted return, a failed picture
+clear, or an exhausted replacement count ends the connection instead of
+reopening. The existing cap of 32 native session owners includes these
+replacements, display changes and resizes. The JSON completion document
+counts them in `focus_releases`. `last_focus_end` keeps the original
+`CONTROL_STOPPED` / `Hidden` ending and its cleanup result. These fields
+contain no input, clipboard text or file paths.
 
-Closing the dormant window or reaching `--seconds` ends the invocation. Stale
-foreground callbacks are discarded and leave the window disconnected. Failed
-or late original cleanup, another hide during an accepted return, a failed
-picture clear, or an exhausted replacement count ends the connection instead
-of reopening. Dormant time does not renew the original
-cleanup budget; returning to a disconnected window creates a fresh viewing
-choice only while the invocation remains live. The existing cap of 32 native
-session owners includes focus replacements, display changes and resizes.
-
-The JSON completion document counts fresh viewing owners started after
-confirmed original focus cleanup in `focus_releases`. `last_focus_end` retains
-the original `CONTROL_STOPPED` / `Hidden` ending and its positive cleanup
-result; the replacement's admission and final ending are reported separately.
-These fields contain no input, clipboard text or file paths. Starting a
-replacement never changes the original hidden ending into an ordinary
-successful close or proves that the new host admission will succeed.
-
-This continuity path covers switching from an active controlling viewer to
-another application and returning to its still-open window (`fr-o26d`).
-Minimizing, native resize/mapping changes, and external focus loss from a file
-picker retain their existing terminal behavior. A view-only session can remain
-connected. Existing resize rules still require successful original cleanup
-before reopening; a controlled resize that cannot establish orderly closure
-ends the session instead.
+Minimizing the viewer, native resize/mapping changes, and external focus loss
+from a file picker still end any granted control; restoring the window cannot
+bring control back. A view-only session can remain connected. Existing resize
+rules still require successful original cleanup before reopening; a
+controlled resize that cannot establish orderly closure ends the session
+instead.
 
 ## Choose a remote display
 
@@ -347,8 +347,9 @@ invalidates the draft even if the same geometry later returns. A short
 compositor readiness gap temporarily disables Send without moving the draft
 to another context. Resize, minimization, closure and reconnection discard it.
 
-**Switching applications, minimizing, or resizing the viewer while the editor
-is open ends the original control session.** Its independent lifecycle fence
+**Minimizing or resizing the viewer while the editor is open ends the original
+control session; switching applications discards the draft and pauses
+control as described above.** Its independent lifecycle fence
 stops input before native IME cleanup, including during a nested Windows
 callback. This also prevents queued text from being sent after that boundary.
 Cancel clears only local composition; text already admitted to the host path
@@ -394,8 +395,11 @@ provides **Turn off** on this Windows machine. The host has its own local Off
 control. The window does not activate over the viewer; its independent
 supervisor fences clipboard publication if the window closes or stops
 responding. Turn off retires only this clipboard lane. Ordinary control can
-continue. Closing, minimizing or switching away from the viewer fences the
-original clipboard immediately along with the existing input lifecycle.
+continue. Closing or minimizing the viewer fences the original clipboard
+immediately along with the existing input lifecycle. Switching to another
+application does not: the lane keeps running while control is paused, so a
+copy made there is offered to the host. Use **Turn off** when that is not
+wanted.
 
 The existing native adapter copies validated Unicode text in both directions,
 up to **1 MiB of UTF-8 per item**. It checks the local clipboard revision
@@ -443,7 +447,8 @@ does not invent a new view. The actual Send admission rechecks the original
 context after lock waits. There is no queued choice that becomes valid later.
 
 Focus can move between the viewer and its open file dialog. Switching to
-another application cancels the choice and ends the original control grant.
+another application while the dialog is open cancels the choice and ends the
+original control grant (unlike a switch from the viewer itself).
 Returning does not restore that grant. A delayed dialog callback cannot hide
 or end control on a replacement connection, and sending also requires the
 original viewer to be back in the foreground after the dialog has closed.
@@ -505,9 +510,10 @@ is never silently repeated.
 A resize, Change display, Stop control or reconnect never sends a selection
 again. The menu and final report retain the original transfer evidence across
 a permitted viewing replacement; that replacement has no upload configured.
-Closing, minimizing, or switching away from an active
-controlled viewer also fences its original file work through the existing
-control lifecycle.
+Closing or minimizing an active controlled viewer also fences its original
+file work through the existing control lifecycle. Switching to another
+application retires an unsent file choice but leaves a started transfer
+running with the paused control grant.
 
 The completion JSON includes `upload` for a configured original upload owner
 and `null` for an observation-only command. It retains the current batch,

@@ -607,6 +607,15 @@ fn apply_activation(v: &mut Viewer, hwnd: HWND) {
 fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) -> (bool, bool) {
     sync_file_focus(v, hwnd);
     apply_activation(v, hwnd);
+    // Level-triggered, so no lost or rescoped activation message can leave a
+    // paused owner gated: input resumes once this window is actually in front.
+    if !v.closing && !v.session.shared().active() {
+        // SAFETY: scalar queries against this UI thread's live viewer.
+        let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
+        if foreground {
+            let _ = control::active(true);
+        }
+    }
     poll_file_choice(v, hwnd);
     let can_change_display = v.can_change_display();
     v.input_menu.display_available(can_change_display);
@@ -1074,7 +1083,9 @@ fn remember_activation() {
 
 fn key_result(result: InputResult) -> Result<bool, ()> {
     match result {
-        InputResult::Sent | InputResult::Pending => Ok(true),
+        // A key deferred across an app switch is dropped: the switch already
+        // released every press the host saw, and nothing is replayed later.
+        InputResult::Sent | InputResult::Pending | InputResult::Inactive => Ok(true),
         InputResult::Busy => Ok(false),
         _ => Err(()),
     }
@@ -1353,7 +1364,7 @@ impl Viewer {
         }
         let capture = match self.session.shared().capture_input() {
             Ok(capture) => capture,
-            Err(InputResult::NotControlled) => return None,
+            Err(InputResult::NotControlled | InputResult::Inactive) => return None,
             Err(_) => {
                 self.input_failed();
                 return None;
@@ -1412,7 +1423,10 @@ impl Viewer {
             .captured_button(captured, wire, pressed, px, py)
         {
             InputResult::Sent | InputResult::Pending => {}
-            InputResult::NotControlled | InputResult::Unsupported | InputResult::Outside => return,
+            InputResult::NotControlled
+            | InputResult::Inactive
+            | InputResult::Unsupported
+            | InputResult::Outside => return,
             _ => {
                 self.input_failed();
                 return;
@@ -1438,9 +1452,14 @@ impl Viewer {
             return;
         }
         let shared = self.session.shared();
-        let Ok(captured) = shared.capture_key(usage, pressed) else {
-            self.input_failed();
-            return;
+        let captured = match shared.capture_key(usage, pressed) {
+            Ok(captured) => captured,
+            // Queued before an app switch: dropped, never failed or replayed.
+            Err(InputResult::Inactive) => return,
+            Err(_) => {
+                self.input_failed();
+                return;
+            }
         };
         let Ok((at, age)) = message_age(message_time) else {
             self.input_failed();
@@ -1683,15 +1702,28 @@ extern "system" fn window_proc(
                 .is_ok_and(|thread| upload::picker_deactivated(thread, control::lifetime()));
             if !picker {
                 upload::retire_choice();
-                if let Some(request) = control::focus_lost() {
-                    CHANGE_PENDING.with(|pending| {
-                        *pending.borrow_mut() = Some((Cause::FocusLost, request));
-                    });
-                    drain_close();
+                // An app switch pauses control instead of ending it. Release
+                // what this window holds while it can still send; the shared
+                // owner then releases anything a borrowed Viewer could not,
+                // and admits nothing until the pump sees this window in front.
+                with_viewer(Viewer::release_everything);
+                if control::active(false) {
+                    text::deactivate_app();
                 } else {
-                    control::visible(false);
+                    // A refused release must not leave input paused with
+                    // state held on the host: end this owner instead, in
+                    // order when it can be (its cleanup releases held input;
+                    // the window stays for a fresh viewing session).
+                    if let Some(request) = control::focus_lost() {
+                        CHANGE_PENDING.with(|pending| {
+                            *pending.borrow_mut() = Some((Cause::FocusLost, request));
+                        });
+                        drain_close();
+                    } else {
+                        control::visible(false);
+                    }
+                    text::deactivate();
                 }
-                text::deactivate();
                 with_viewer(Viewer::text_deactivated);
             }
             false

@@ -221,6 +221,46 @@ fn hiding_and_retirement_discard_queued_and_unused_control_choices() {
 }
 
 #[test]
+fn an_app_switch_retires_unsent_choices_but_neither_hides_nor_stops() {
+    let shared = Shared::new();
+    shared.set_visible(true);
+    assert!(
+        shared.active(),
+        "shells that never call set_active stay active"
+    );
+    shared.refresh_control_request(true).unwrap();
+    let request = shared.control_request().unwrap();
+    assert!(shared.request_control_for(&request, Duration::ZERO));
+    assert!(shared.set_active(false), "nothing held, nothing refused");
+    assert!(!shared.active());
+    // The choice made before the switch is gone, and none is offered or
+    // taken while the app is in the background.
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    shared.refresh_control_request(true).unwrap();
+    assert!(shared.control_request().is_none());
+    shared.request_control();
+    assert!(!shared.take_control_request().unwrap());
+    // Unlike hiding: no hide is counted, no local stop recorded, nothing
+    // reported, and the session is not closing (only no choice is offered).
+    assert_eq!(shared.hides.load(Ordering::SeqCst), 0);
+    assert_eq!(shared.local_stop.load(Ordering::SeqCst), 0);
+    assert!(shared.events.is_empty());
+    assert_eq!(shared.control_state(), ControlState::WaitingForView);
+    // Without a grant the grant check still answers first.
+    assert_eq!(shared.key(0x04, true), InputResult::NotControlled);
+    // Returning offers a fresh choice; the old one stays spent.
+    assert!(shared.set_active(true));
+    shared.refresh_control_request(true).unwrap();
+    let fresh = shared.control_request().unwrap();
+    assert!(!shared.request_control_for(&request, Duration::ZERO));
+    assert!(shared.request_control_for(&fresh, Duration::ZERO));
+    assert!(shared.take_control_request().unwrap());
+    // Planted negative: hiding the same view still counts and retires.
+    shared.set_visible(false);
+    assert_eq!(shared.hides.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn expired_native_gesture_or_original_input_failure_cannot_queue_control() {
     let shared = Shared::new();
     shared.set_visible(true);

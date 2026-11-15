@@ -87,6 +87,23 @@ pub(super) fn visible(visible: bool) {
     });
 }
 
+/// The app switched away (`false`) or back (`true`) while the window stays
+/// on screen. Old menu choices die with the switch; a granted owner releases
+/// its held input and pauses instead of ending (`Shared::set_active`).
+/// `false`: a release was refused, so the caller must end control instead.
+#[must_use]
+pub(super) fn active(active: bool) -> bool {
+    if !active {
+        invalidate_display();
+    }
+    ORIGINAL.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_none_or(|original| original.set_active(active))
+    })
+}
+
 /// Reflect a worker's already-scoped negative fence in this UI only. Repeating
 /// `Shared::set_visible` here could apply an old notification to a later attempt.
 pub(super) fn reflect_hidden() {

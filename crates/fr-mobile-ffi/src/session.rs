@@ -107,6 +107,9 @@ pub enum InputResult {
     /// Nothing was accepted because input is busy or the text context is not
     /// ready. Physical keys may be paced; completed text must be discarded.
     Busy,
+    /// The app is in the background ([`Shared::set_active`]): nothing was
+    /// sent or queued, and control continues. Drop the event; never retry it.
+    Inactive,
 }
 
 /// A native event's original input source, picture mapping and exclusive send
@@ -208,6 +211,9 @@ struct Granted {
     released: Arc<AtomicBool>,
     keys: [bool; 256],
     buttons: [bool; 5],
+    /// Where the host last saw the pointer: an app switch releases held
+    /// buttons here, as no later native point exists.
+    last: Option<Located>,
     scroll: LineScroller,
     /// Last checked send bound for this exact text context. The native Send
     /// gesture freezes it; later renewals cannot extend a queued commit.
@@ -253,6 +259,9 @@ pub struct Shared {
     control_retirement: control_request::Retirement,
     requesting_control: AtomicBool,
     visible: AtomicBool,
+    /// The app is in the foreground. Only [`Shared::set_active`] clears it;
+    /// shells that never call it (iOS) stay active.
+    active: AtomicBool,
     /// How many times the view went from visible to hidden: a control
     /// request made before a hide never completes after it.
     hides: AtomicU64,
@@ -312,6 +321,7 @@ impl Shared {
             control_retirement: control_request::Retirement::default(),
             requesting_control: AtomicBool::new(false),
             visible: AtomicBool::new(false),
+            active: AtomicBool::new(true),
             hides: AtomicU64::new(0),
             local_stop: AtomicU32::new(0),
             serving: AtomicBool::new(false),
@@ -496,9 +506,10 @@ impl Shared {
             && self.end_code() == end::CONTROL_STOPPED
             && self.focus_closed.load(Ordering::SeqCst)
     }
-    /// The view is on screen in an active app (not backgrounded, covered or
-    /// detached). Frames count as seen only while this holds; losing it
-    /// ends control at once, and a pending control request with it.
+    /// The view is on screen (not backgrounded, covered or detached; a
+    /// desktop app switch alone is [`Shared::set_active`]). Frames count as
+    /// seen only while this holds; losing it ends control at once, and a
+    /// pending control request with it.
     pub fn set_visible(&self, visible: bool) {
         let was = self.visible.swap(visible, Ordering::SeqCst);
         if !visible {
@@ -515,6 +526,54 @@ impl Shared {
                 self.stop_control(Some(LocalStop::Hidden));
             }
         }
+    }
+    /// The app left (`false`) or regained (`true`) the foreground while its
+    /// view stays on screen: a desktop app switch, not a minimize or hide.
+    /// Leaving first releases every key and button this grant sent a press
+    /// for, then admits nothing (motion over the inactive window included)
+    /// until the app is active again. The grant, its lease renewal, the
+    /// clipboard lane and viewing all continue, so an app switch does not end
+    /// the session (plan Phase 1 exit gate). Unsent control choices retire.
+    /// Returning admits only new native events: a release of a key or button
+    /// pressed in another app sends nothing, and nothing is replayed.
+    ///
+    /// `false` only when leaving and a release was refused: control is not
+    /// paused with input held, and the shell must end it (an orderly
+    /// [`Shared::close_for_focus_loss`], else a hide). A failed source has
+    /// already dropped its grant, exactly as any push that loses control.
+    #[must_use]
+    pub fn set_active(&self, active: bool) -> bool {
+        if active {
+            self.active.store(true, Ordering::SeqCst);
+            return true;
+        }
+        self.retire_control_request();
+        let mut slot = self
+            .granted
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Closed under the grant lock: no event admitted after this point
+        // can precede the releases below.
+        self.active.store(false, Ordering::SeqCst);
+        // A closing owner keeps its fenced source for that close's own
+        // cleanup and submits nothing more (see `with_granted`).
+        if self.close.load(Ordering::SeqCst) {
+            return true;
+        }
+        let released = match slot.as_mut() {
+            Some(granted) if !granted.stop.load(Ordering::SeqCst) => release_held(granted),
+            _ => InputResult::Sent,
+        };
+        if released == InputResult::ControlLost {
+            drop(slot.take());
+            self.note_local_stop(LocalStop::InputRefused);
+            self.events.state(state::CONTROL_ENDED, 0);
+        }
+        released == InputResult::Sent
+    }
+    /// The app is in the foreground (see [`Shared::set_active`]).
+    pub fn active(&self) -> bool {
+        self.active.load(Ordering::SeqCst)
     }
     /// The legacy native/FFI choice can wait for this attempt's first view.
     /// Hiding, attempt retirement and reconnect discard it; they never carry
@@ -624,6 +683,7 @@ impl Shared {
             ready
                 && self.control_capable
                 && self.visible.load(Ordering::SeqCst)
+                && self.active.load(Ordering::SeqCst)
                 && !self.close.load(Ordering::SeqCst)
                 && self.local_stop.load(Ordering::SeqCst) == 0
                 && !self.finished(),
@@ -633,6 +693,7 @@ impl Shared {
     fn take_control_request(&self) -> Result<bool, ()> {
         let mut requests = self.control_requests.lock().map_err(|_| ())?;
         if !self.visible.load(Ordering::SeqCst)
+            || !self.active.load(Ordering::SeqCst)
             || self.close.load(Ordering::SeqCst)
             || self.local_stop.load(Ordering::SeqCst) != 0
         {
@@ -846,6 +907,10 @@ impl Shared {
             self.events.state(state::CONTROL_ENDED, 0);
             return InputResult::ControlLost;
         }
+        // Read under the grant lock that `set_active` closes the gate under.
+        if !self.active.load(Ordering::SeqCst) {
+            return InputResult::Inactive;
+        }
         let result = act(granted);
         if result == InputResult::ControlLost {
             drop(slot.take());
@@ -876,7 +941,11 @@ impl Shared {
                 return InputResult::Outside;
             };
             g.scroll.reset();
-            push_captured(g, InputEvent::Pointer(location), captured.as_ref())
+            let result = push_captured(g, InputEvent::Pointer(location.clone()), captured.as_ref());
+            if result == InputResult::Sent {
+                g.last = Some(location);
+            }
+            result
         })
     }
     /// A button transition at encoded picture pixel `(x, y)`. A press of a
@@ -922,12 +991,13 @@ impl Shared {
                 return InputResult::Pending;
             }
             let event = InputEvent::Positioned {
-                location,
+                location: location.clone(),
                 action: PositionedAction::Button { button, pressed },
             };
             let result = push_captured(g, event, captured.as_ref());
             if result == InputResult::Sent {
                 g.buttons[slot] = pressed;
+                g.last = Some(location);
             }
             result
         })
@@ -1162,30 +1232,71 @@ impl Shared {
     pub fn release_all(&self) -> InputResult {
         self.with_granted(|g| {
             g.scroll.reset();
-            for slot in 0..256_usize {
-                if g.keys[slot] {
-                    let Ok(usage) = u16::try_from(slot) else {
-                        continue;
-                    };
-                    let Some((_, key)) = input::key(usage) else {
-                        continue;
-                    };
-                    let result = push(
-                        g,
-                        InputEvent::Key {
-                            key,
-                            transition: KeyTransition::Release,
-                        },
-                    );
-                    if result != InputResult::Sent {
-                        return result;
-                    }
-                    g.keys[slot] = false;
-                }
-            }
-            InputResult::Sent
+            release_keys(g)
         })
     }
+}
+
+fn release_keys(g: &mut Granted) -> InputResult {
+    for slot in 0..256_usize {
+        if g.keys[slot] {
+            let Ok(usage) = u16::try_from(slot) else {
+                continue;
+            };
+            let Some((_, key)) = input::key(usage) else {
+                continue;
+            };
+            let result = push(
+                g,
+                InputEvent::Key {
+                    key,
+                    transition: KeyTransition::Release,
+                },
+            );
+            if result != InputResult::Sent {
+                return result;
+            }
+            g.keys[slot] = false;
+        }
+    }
+    InputResult::Sent
+}
+
+/// Every key, then every button (at the host's last pointer point) this
+/// grant sent a press for. Returns the first refusal; a held button without
+/// a known point cannot be released here, so it refuses too.
+fn release_held(g: &mut Granted) -> InputResult {
+    g.scroll.reset();
+    let keys = release_keys(g);
+    if keys != InputResult::Sent {
+        return keys;
+    }
+    for index in 0..5_u32 {
+        let Some((slot, button)) = input::button(index) else {
+            continue;
+        };
+        if !g.buttons[slot] {
+            continue;
+        }
+        let Some(location) = g.last.clone() else {
+            return InputResult::ControlLost;
+        };
+        let result = push(
+            g,
+            InputEvent::Positioned {
+                location,
+                action: PositionedAction::Button {
+                    button,
+                    pressed: false,
+                },
+            },
+        );
+        if result != InputResult::Sent {
+            return result;
+        }
+        g.buttons[slot] = false;
+    }
+    InputResult::Sent
 }
 
 fn capture_input(g: &Granted) -> Option<CapturedInput> {
@@ -1722,6 +1833,7 @@ fn attach(
                 released,
                 keys: [false; 256],
                 buttons: [false; 5],
+                last: None,
                 scroll: LineScroller::default(),
                 text_window: None,
                 key_window: None,

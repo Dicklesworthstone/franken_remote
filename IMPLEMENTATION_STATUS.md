@@ -1,5 +1,47 @@
 # Implementation status
 
+## Windows app switch pauses control instead of ending it (2026-11-15 UTC)
+
+Switching from a controlling Windows viewer to another application now
+pauses control. At the switch the viewer releases every key and mouse button
+it pressed on the host. While another application is in front nothing is
+forwarded, including pointer motion over the still-visible window. Viewing,
+the grant and its renewal, and the text clipboard lane continue. Input
+resumes once the pump sees the viewer in the foreground again, and only new
+native events are sent: a release of something pressed elsewhere sends
+nothing, and nothing is replayed. `Shared::set_active` closes the input gate
+under the grant lock, releases held keys and then buttons at the host's last
+pointer point, and retires unsent control choices. It returns `false` only
+when a release is refused. The shell then ends control through the existing
+focus-close path described below (or a hide), so a paused grant never keeps
+input held on the host. Minimize, resize/mapping changes and external
+file-picker focus loss still end control.
+
+**Live** (oldsurface viewer `--control --seconds 75` against an X11 host on
+ts2; xev on the host records the injected input; a console window takes the
+foreground for 10 s). The pause build passed every check in 2 of 2 runs:
+
+- The held key and button were released at the switch.
+- Nothing reached the host while the viewer was in the background.
+- After return, later key presses arrived, and the stale releases sent nothing.
+- Text copied on Windows in the background application reached ts2, and text
+  copied on ts2 after return reached Windows.
+- Each session ran to `--seconds` with 0 reopens, at 27-28 drawn pictures/s.
+
+The same script ran once on main without this change (3a6dd777 plus its
+build fix). Held input was released at the switch. The original session then
+ended `ok` / `Cancelled` instead of `CONTROL_STOPPED` / `Hidden`. The
+focus-close proof was therefore absent, and the viewer exited 2 s after the
+switch with `original_cleanup_unconfirmed`. Nothing after the switch reached
+the host, and no clipboard text crossed. That is one run: it shows the failure
+exists but gives no rate.
+
+**Passed:** formatting, CI's Windows cross Clippy command, the fr-mobile-ffi
+`macos-session` library tests (151) and Clippy, and macOS workspace Clippy.
+**Not verified:** the refused-release fallback, live (it needs a busy input
+queue at the switch). The macOS viewer still ends control on focus loss
+(`fr-native` `halt`).
+
 ## Windows focus loss keeps a path back to fresh viewing (2026-11-15 UTC)
 
 Switching away from an active controlling Windows viewer now fences its

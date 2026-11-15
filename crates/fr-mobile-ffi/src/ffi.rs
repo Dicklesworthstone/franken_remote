@@ -178,7 +178,9 @@ const fn code(result: InputResult) -> i32 {
     match result {
         InputResult::Sent => FR_OK,
         InputResult::Pending => FR_PENDING,
-        InputResult::NotControlled => FR_NOT_CONTROLLED,
+        // Only `Shared::set_active`, which the C ABI does not expose, closes
+        // the Inactive gate; sharing this code keeps the published set fixed.
+        InputResult::NotControlled | InputResult::Inactive => FR_NOT_CONTROLLED,
         InputResult::Outside => FR_OUTSIDE,
         InputResult::Unsupported => FR_UNSUPPORTED,
         InputResult::Invalid => FR_INVALID,

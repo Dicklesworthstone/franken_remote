@@ -199,10 +199,12 @@ impl Queue {
         Ok(())
     }
 }
-/// A single native event producer. Drop, focus loss, hiding, resize, suspend and
-/// native failure must stop it. The authority fence is lock-free and wakes
-/// cancellation of an in-flight network operation. Best-effort queue cleanup
-/// never waits for a lock; no subsequent focus gain can resume control.
+/// A single native event producer. Drop, hiding, resize, suspend and native
+/// failure must stop it. Focus loss must either stop it or release every press
+/// it sent and push nothing until focus returns (a paused app switch, as in
+/// fr-mobile-ffi's `Shared::set_active`). The authority fence is lock-free and
+/// wakes cancellation of an in-flight network operation. Best-effort queue
+/// cleanup never waits for a lock; no focus gain can resume a stopped source.
 /// Capture timestamps must use `clock`, not wall time or the host's clock.
 /// A retained stopped producer cannot keep the closed viewer's payloads alive.
 pub struct Source {
@@ -460,7 +462,8 @@ impl Source {
     /// bits never synthesize presses. Snapshots are not coalesced across actions.
     /// Sample periodically: the existing sender permits at most four snapshots
     /// per second and discards early samples without postponing or retiming them.
-    /// Focus loss, hiding and suspension still require immediate `stop` instead.
+    /// Hiding and suspension still require immediate `stop` instead, and a paused
+    /// focus loss needs explicit releases: a snapshot may be discarded as early.
     pub fn reconcile_held(
         &mut self,
         observed: HeldState,
