@@ -687,6 +687,10 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
 
 /// Redraw the newest retained picture when either video or cursor changed.
 /// Cursor-only redraws keep the original picture's identity and evidence.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one ordered draw and recheck sequence"
+)]
 fn draw_latest(
     v: &mut Viewer,
     stats: &mut Stats,

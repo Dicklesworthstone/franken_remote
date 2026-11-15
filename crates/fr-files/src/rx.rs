@@ -10,7 +10,7 @@ pub(crate) use rustix::{fd, fs, io, process};
 pub(crate) use std::os::unix::fs::MetadataExt;
 
 #[cfg(windows)]
-pub(crate) use windows::{MetadataExt, fd, fs, io, process};
+pub(crate) use windows::{MetadataExt, fd, fs, io};
 
 // Items mirror rustix; some are named only by Linux-only paths.
 #[cfg(windows)]

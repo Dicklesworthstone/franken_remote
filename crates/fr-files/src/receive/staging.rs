@@ -85,8 +85,7 @@ impl StagingFile {
         return Self::create_with_proc(directory, name, ProcFd::open().ok());
         #[cfg(windows)]
         {
-            let file =
-                fr_winsys::fs::create_receive_file(directory, name).map_err(Errno::from)?;
+            let file = fr_winsys::fs::create_receive_file(directory, name).map_err(Errno::from)?;
             Ok(Self { file: Some(file) })
         }
         #[cfg(all(not(target_os = "linux"), not(windows)))]
@@ -147,9 +146,8 @@ impl StagingFile {
         #[cfg(windows)]
         {
             let file = self.file.as_ref().ok_or(Errno::BADF)?;
-            let native =
-                fr_winsys::fs::prepare_receive_rename(file.as_handle(), directory, name)
-                    .map_err(Errno::from)?;
+            let native = fr_winsys::fs::prepare_receive_rename(file.as_handle(), directory, name)
+                .map_err(Errno::from)?;
             Ok(PreparedPublication { native })
         }
         #[cfg(not(windows))]

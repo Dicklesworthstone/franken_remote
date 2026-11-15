@@ -19,8 +19,6 @@ use crate::rx::{
     fs::{Mode, OFlags},
     process::geteuid,
 };
-#[cfg(unix)]
-use std::path::Component;
 use asupersync::atp::{
     object::{ContentId, ObjectId},
     safety::validate_portable_path_component,
@@ -28,6 +26,8 @@ use asupersync::atp::{
 use asupersync::net::atp::transport_common::{
     StagedEntryReceive, flat_merkle_root_from_digests, hex_encode,
 };
+#[cfg(unix)]
+use std::path::Component;
 use std::{
     fmt,
     io::{self, Write},
@@ -107,7 +107,6 @@ struct Root {
     limits: Limits,
     reserved: Mutex<Reserved>,
 }
-
 
 #[cfg(unix)]
 fn open_root(path: &Path) -> Result<OwnedFd, Error> {

@@ -90,7 +90,11 @@ fn multichunk_publication_is_private_complete_and_truthful_about_durability() {
     let root = scratch.open();
     let bytes = vec![0x5a; MAX_CHUNK_BYTES * 3 + 11];
     let mut pending = root
-        .begin("complete.bin", bytes.len() as u64, ContentId::from_bytes(&bytes))
+        .begin(
+            "complete.bin",
+            bytes.len() as u64,
+            ContentId::from_bytes(&bytes),
+        )
         .unwrap();
     for chunk in bytes.chunks(MAX_CHUNK_BYTES) {
         pending
@@ -103,11 +107,9 @@ fn multichunk_publication_is_private_complete_and_truthful_about_durability() {
     assert_eq!(pending.publish(), Ok(Publication::DurabilityUnknown));
     // The return occurs after closing the original no-sharing staging handle.
     assert_eq!(fs::read(scratch.0.join("complete.bin")).unwrap(), bytes);
-    let published = fr_winsys::fs::open_no_follow(
-        &scratch.0.join("complete.bin"),
-        fr_winsys::fs::Open::Read,
-    )
-    .unwrap();
+    let published =
+        fr_winsys::fs::open_no_follow(&scratch.0.join("complete.bin"), fr_winsys::fs::Open::Read)
+            .unwrap();
     let inspection = fr_winsys::fs::inspect(&published).unwrap();
     assert_eq!(inspection.owner, fr_winsys::fs::Owner::Us);
     assert!(!inspection.others_may_access());
@@ -136,8 +138,21 @@ fn traversal_devices_alternate_streams_and_staging_names_refuse_before_creation(
     let root = scratch.open();
     let too_long = "a".repeat(256);
     for name in [
-        "", ".", "..", "../escape", "/absolute", "a/b", "a\\b", "NUL.txt", "COM1",
-        "a:stream", "a.", "a ", "a\0b", ".fr-part-claimed", &too_long,
+        "",
+        ".",
+        "..",
+        "../escape",
+        "/absolute",
+        "a/b",
+        "a\\b",
+        "NUL.txt",
+        "COM1",
+        "a:stream",
+        "a.",
+        "a ",
+        "a\0b",
+        ".fr-part-claimed",
+        &too_long,
     ] {
         assert!(matches!(
             root.begin(name, 0, ContentId::from_bytes(b"")),
@@ -190,11 +205,9 @@ fn existing_files_directories_hardlinks_and_junctions_are_never_replaced() {
         fs::read(scratch.0.join("junction/original")).unwrap(),
         b"preserve outside"
     );
-    let link = fr_winsys::fs::open_no_follow(
-        &scratch.0.join("junction"),
-        fr_winsys::fs::Open::Read,
-    )
-    .unwrap();
+    let link =
+        fr_winsys::fs::open_no_follow(&scratch.0.join("junction"), fr_winsys::fs::Open::Read)
+            .unwrap();
     assert!(fr_winsys::fs::inspect(&link).unwrap().reparse);
 }
 
@@ -204,10 +217,7 @@ fn foreign_writable_roots_and_final_or_ancestor_junctions_refuse() {
     let outside = Scratch::new();
     fs::create_dir(outside.0.join("child")).unwrap();
     junction(&scratch.0.join("redirect"), &outside.0);
-    for path in [
-        scratch.0.join("redirect"),
-        scratch.0.join("redirect/child"),
-    ] {
+    for path in [scratch.0.join("redirect"), scratch.0.join("redirect/child")] {
         assert!(DropDirectory::open(&path, limits()).is_err());
     }
     grant_everyone(&outside.0, "(AD)");
@@ -240,12 +250,18 @@ fn selected_root_cannot_be_renamed_or_redirect_publication() {
 fn keep_both_rechecks_authority_per_attempt_and_never_rejects_after_publication() {
     let scratch = Scratch::new();
     fs::write(scratch.0.join("report.txt"), b"existing").unwrap();
-    let root = scratch.open().with_conflict_policy(ConflictPolicy::KeepBoth);
+    let root = scratch
+        .open()
+        .with_conflict_policy(ConflictPolicy::KeepBoth);
     let mut checks = 0;
     let published = verified(&root, "report.txt", b"incoming")
         .publish_named_checked(|| {
             checks += 1;
-            if checks <= 2 { Ok(()) } else { Err(Error::Retired) }
+            if checks <= 2 {
+                Ok(())
+            } else {
+                Err(Error::Retired)
+            }
         })
         .unwrap();
     assert_eq!(checks, 2);
@@ -253,14 +269,20 @@ fn keep_both_rechecks_authority_per_attempt_and_never_rejects_after_publication(
     assert_eq!(published.publication(), Publication::DurabilityUnknown);
     assert_ne!(published.name(), "report.txt");
     assert_eq!(fs::read(scratch.0.join("report.txt")).unwrap(), b"existing");
-    assert_eq!(fs::read(scratch.0.join(published.name())).unwrap(), b"incoming");
+    assert_eq!(
+        fs::read(scratch.0.join(published.name())).unwrap(),
+        b"incoming"
+    );
 
     let mut checks = 0;
-    let refused = verified(&root, "report.txt", b"must not appear")
-        .publish_named_checked(|| {
-            checks += 1;
-            if checks == 1 { Ok(()) } else { Err(Error::Retired) }
-        });
+    let refused = verified(&root, "report.txt", b"must not appear").publish_named_checked(|| {
+        checks += 1;
+        if checks == 1 {
+            Ok(())
+        } else {
+            Err(Error::Retired)
+        }
+    });
     assert!(matches!(refused, Err(Error::Retired)));
     assert_eq!(checks, 2);
     assert_eq!(scratch.entries(), 2);
@@ -277,7 +299,9 @@ fn integrity_failure_drop_cancel_and_first_gate_refusal_reclaim_original_custody
     drop(corrupt);
     assert_eq!(scratch.entries(), 0);
 
-    let mut partial = root.begin("partial", 3, ContentId::from_bytes(b"abc")).unwrap();
+    let mut partial = root
+        .begin("partial", 3, ContentId::from_bytes(b"abc"))
+        .unwrap();
     partial.write_chunk(0, b"a").unwrap();
     partial.cancel().unwrap();
     assert_eq!(scratch.entries(), 0);

@@ -217,14 +217,19 @@ fn stop(task: &mut Task) {
 fn real_atp_worker_commits_complete_file_and_reports_uncertain_directory_durability() {
     let fixture = Fixture::new();
     let (mut receiver, mut task) = fixture.spawn();
-    let bytes: Vec<_> = (0..65_539).map(|i| u8::try_from(i % 251).unwrap()).collect();
+    let bytes: Vec<_> = (0..65_539)
+        .map(|i| u8::try_from(i % 251).unwrap())
+        .collect();
     let manifest = manifest("received.bin", &bytes);
     push(&mut receiver, &offer(&manifest));
     let accepted = event(&mut receiver);
     assert!(matches!(accepted.outcome(), Ok(Completion::Begun(_))));
     let mut reply = [0; MAX_REPLY_BYTES];
     let length = accepted.encode_reply(&mut reply).unwrap().unwrap();
-    assert_eq!(parse(&reply[..length]).frame_type(), FrameType::ObjectRequest);
+    assert_eq!(
+        parse(&reply[..length]).frame_type(),
+        FrameType::ObjectRequest
+    );
 
     let mut offset = 0;
     for chunk in bytes.chunks(7000) {
@@ -244,7 +249,10 @@ fn real_atp_worker_commits_complete_file_and_reports_uncertain_directory_durabil
         panic!("native publication did not complete");
     };
     assert_eq!(receipt.publication, Publication::DurabilityUnknown);
-    assert_eq!(fs::read(fixture.scratch.0.join("received.bin")).unwrap(), bytes);
+    assert_eq!(
+        fs::read(fixture.scratch.0.join("received.bin")).unwrap(),
+        bytes
+    );
     let length = result.encode_reply(&mut reply).unwrap().unwrap();
     let frame = parse(&reply[..length]);
     assert_eq!(frame.frame_type(), FrameType::Proof);
@@ -274,22 +282,26 @@ fn valid_directory_profiles_refuse_before_worker_admission_or_disk_reservation()
             let commitment = metadata_commitment(&[("leaf", &metadata)]).unwrap();
             manifest.entries[0].metadata = Some(metadata);
             manifest.metadata_root_hex = Some(commitment.clone());
-            assert!(DirectoryManifest::with_metadata(
-                manifest.root_name.clone(),
-                0,
-                manifest.entries.clone(),
-                manifest.merkle_root_hex.clone(),
-                commitment,
-            )
-            .is_ok());
+            assert!(
+                DirectoryManifest::with_metadata(
+                    manifest.root_name.clone(),
+                    0,
+                    manifest.entries.clone(),
+                    manifest.merkle_root_hex.clone(),
+                    commitment,
+                )
+                .is_ok()
+            );
         } else {
-            assert!(DirectoryManifest::new(
-                manifest.root_name.clone(),
-                0,
-                manifest.entries.clone(),
-                manifest.merkle_root_hex.clone(),
-            )
-            .is_ok());
+            assert!(
+                DirectoryManifest::new(
+                    manifest.root_name.clone(),
+                    0,
+                    manifest.entries.clone(),
+                    manifest.merkle_root_hex.clone(),
+                )
+                .is_ok()
+            );
         }
         assert_eq!(
             receiver.push_profile(receiver.binding(), 1, &offer(&manifest), profile),
@@ -310,9 +322,15 @@ fn original_authority_loss_expiry_and_permission_revoke_clean_native_staging() {
         let mut fixture = Fixture::new();
         let (mut receiver, mut task) = fixture.spawn();
         push(&mut receiver, &offer(&manifest("unfinished", b"abc")));
-        assert!(matches!(event(&mut receiver).outcome(), Ok(Completion::Begun(_))));
+        assert!(matches!(
+            event(&mut receiver).outcome(),
+            Ok(Completion::Begun(_))
+        ));
         push(&mut receiver, &data(0, b"a"));
-        assert!(matches!(event(&mut receiver).outcome(), Ok(Completion::Written(_))));
+        assert!(matches!(
+            event(&mut receiver).outcome(),
+            Ok(Completion::Written(_))
+        ));
         assert!(!fixture.scratch.0.join("unfinished").exists());
         match reason {
             0 => drop(fixture.input.take()),

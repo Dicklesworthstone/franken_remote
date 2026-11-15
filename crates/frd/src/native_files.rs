@@ -139,8 +139,7 @@ impl Directory {
             };
             if metadata.file_type().is_symlink()
                 || path.ancestors().skip(1).any(|parent| {
-                    std::fs::symlink_metadata(parent)
-                        .is_ok_and(|m| m.file_type().is_symlink())
+                    std::fs::symlink_metadata(parent).is_ok_and(|m| m.file_type().is_symlink())
                 })
             {
                 return Err(DirectoryRefusal::Symlink);

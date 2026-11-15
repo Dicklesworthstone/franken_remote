@@ -3,12 +3,12 @@
 //! anyone else (the Windows form of the owner and mode bits frd's Unix stores
 //! read with `fstat`), and a rename over a file readers may hold open.
 mod receive;
+use crate::pipe::os;
+use core::ffi::c_void;
 pub use receive::{
     PreparedReceiveRename, ReceiveRootError, create_receive_file, open_receive_root,
     prepare_receive_rename, remove_receive_file,
 };
-use crate::pipe::os;
-use core::ffi::c_void;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -649,14 +649,20 @@ mod tests {
                 .kind(),
             io::ErrorKind::AlreadyExists
         );
-        assert_eq!(std::fs::read(dir.join("taken.txt")).unwrap(), b"local contents");
+        assert_eq!(
+            std::fs::read(dir.join("taken.txt")).unwrap(),
+            b"local contents"
+        );
         assert!(std::fs::write(dir.join(".fr-part-owned"), b"replacement").is_err());
         assert!(std::fs::rename(dir.join(".fr-part-owned"), dir.join("moved")).is_err());
         remove_receive_file(file.as_handle()).unwrap();
         drop(file);
         assert!(!dir.join(".fr-part-owned").exists());
         assert_eq!(std::fs::read_dir(&*dir).unwrap().count(), 1);
-        assert_eq!(std::fs::read(dir.join("taken.txt")).unwrap(), b"local contents");
+        assert_eq!(
+            std::fs::read(dir.join("taken.txt")).unwrap(),
+            b"local contents"
+        );
     }
 
     #[test]
@@ -667,7 +673,14 @@ mod tests {
         let root = open_receive_root(&dir).unwrap();
         assert!(std::fs::rename(&*dir, dir.with_extension("replacement")).is_err());
         let file = create_receive_file(root.as_handle(), ".fr-part-original").unwrap();
-        for name in ["../escape", r"..\escape", "other/name", "file:stream", "NUL", "bad."] {
+        for name in [
+            "../escape",
+            r"..\escape",
+            "other/name",
+            "file:stream",
+            "NUL",
+            "bad.",
+        ] {
             assert!(create_receive_file(root.as_handle(), name).is_err());
             assert!(prepare_receive_rename(file.as_handle(), root.as_handle(), name).is_err());
         }
