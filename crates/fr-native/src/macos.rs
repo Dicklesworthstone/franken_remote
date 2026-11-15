@@ -332,8 +332,13 @@ pub enum WindowEvent {
     },
     /// The user asked to close the window. It stays open until dropped.
     CloseRequested,
-    /// Keyboard focus left the window: held remote keys must be released.
+    /// The window was minimized or hidden, or its session became unavailable:
+    /// held remote keys must be released, and control ends.
     FocusLost,
+    /// Another window or app took keyboard focus, or the window was covered or
+    /// moved to another Space. Held remote keys must be released; a grant
+    /// pauses until the window is key and visible again.
+    FocusPaused,
     FocusGained,
     /// Events arrived faster than they were polled and some were lost.
     Overflow,
@@ -867,6 +872,10 @@ impl Window {
                 events.push(WindowEvent::FocusLost);
             }
             10 => events.push(WindowEvent::FocusGained),
+            11 => {
+                self.modifiers = Modifiers::default();
+                events.push(WindowEvent::FocusPaused);
+            }
             _ => {}
         }
     }

@@ -140,6 +140,14 @@ fn history(report: &Report) -> crate::ControlHistory {
     let mut text = String::new();
     display_change_history(report, &mut json, &mut text);
     control_release_history(report, &mut json, &mut text);
+    if report.control_pauses != 0 {
+        let _ = write!(json, ",\"control_pauses\":{}", report.control_pauses);
+        let _ = write!(
+            text,
+            " Control paused while the window was in the background: {} (each pause released every held key and button on the host).",
+            report.control_pauses,
+        );
+    }
     window_resize_history(report, &mut json, &mut text);
     if refused_scroll(report) {
         let _ = write!(
@@ -219,6 +227,7 @@ pub(super) fn finish(
     if report.display_change_closes.is_empty()
         && report.control_release_closes.is_empty()
         && report.window_resize_closes.is_empty()
+        && report.control_pauses == 0
         && !refused_scroll(report)
         && !text_activity(report)
         && !report.input_receipts.observed()
@@ -300,6 +309,30 @@ mod tests {
             }],
             ..Report::default()
         }
+    }
+
+    #[test]
+    fn control_pauses_are_reported_and_no_pause_adds_nothing() {
+        let paused = Report {
+            control_pauses: 2,
+            ..Report::default()
+        };
+        let rendered = finish(&paused, Ok("{\"outcome\":\"success\"}\n".to_owned()), true).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(value["control_pauses"], 2);
+        let rendered = finish(&paused, Ok("Session ended.\n".to_owned()), false).unwrap();
+        assert!(rendered.contains("Control paused while the window was in the background: 2"));
+        let rendered = finish(
+            &Report::default(),
+            Ok("{\"outcome\":\"success\"}\n".to_owned()),
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert!(value["control_pauses"].is_null());
+        let rendered =
+            finish(&Report::default(), Ok("Session ended.\n".to_owned()), false).unwrap();
+        assert!(!rendered.contains("Control paused"));
     }
 
     #[test]

@@ -45,6 +45,7 @@ enum {
     FR_MAC_CLOSE = 8,
     FR_MAC_FOCUS_LOST = 9,
     FR_MAC_FOCUS_GAINED = 10,
+    FR_MAC_FOCUS_PAUSED = 11,
 };
 
 // Must match `RawEvent` in macos.rs.
@@ -1775,7 +1776,30 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     // Space changes while AppKit animates it are not a user's focus change.
     // The settled sample still requires the key, visible, active-Space window.
     if (fullScreenFenced) return;
-    [self loseFocus];
+    [self pauseFocus];
+}
+// An app switch, another key window, a covering window or another Space: the
+// window is still on screen somewhere. Rust releases everything it holds on
+// the host and pauses the grant until this window is key and visible again.
+// As on every focus loss, local text and its held keys are discarded (scalar
+// only) and the clipboard stops. Viewing, audio and focus-gated file
+// selection continue.
+- (void)pauseFocus {
+    if (nativeStopPending) return;
+    textContext = 0;
+    textUntil = 0;
+    textEligible = NO;
+    [self retireText:@"Text cancelled: the window lost focus."];
+    [self stopClipboard:NO];
+    buttons = 0;  // the session releases everything it holds remotely
+    memset(physicalKeys, 0, sizeof(physicalKeys));
+    memset(localTextKeys, 0, sizeof(localTextKeys));
+    physicalModifiers = 0;
+    localTextModifiers = 0;
+    textQuarantine = NO;
+    FrMacEvent e = {0};
+    e.kind = FR_MAC_FOCUS_PAUSED;
+    [self push:e];
 }
 // The terminal focus-loss path: AppKit's resign-key notification and an
 // unavailable session both end held input here.
@@ -1803,7 +1827,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     [self layout];
 }
 - (void)windowWillMiniaturize:(NSNotification *)note {
-    [self windowDidResignKey:note];
+    (void)note;
+    if (fullScreenFenced) return;
+    [self loseFocus];
 }
 - (void)windowDidChangeOcclusionState:(NSNotification *)note {
     (void)note;
@@ -1811,9 +1837,13 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
         [self fullScreenSettle];
         return;
     }
-    if (!window.isVisible || window.isMiniaturized || !window.isOnActiveSpace ||
-        !(window.occlusionState & NSWindowOcclusionStateVisible)) {
-        [self windowDidResignKey:note];
+    // A minimized or hidden window ends control. A covered window, or one on
+    // another Space, pauses it.
+    if (!window.isVisible || window.isMiniaturized) {
+        [self loseFocus];
+    } else if (!window.isOnActiveSpace ||
+               !(window.occlusionState & NSWindowOcclusionStateVisible)) {
+        [self pauseFocus];
     }
 }
 // Full screen moves the window to its own Space and resizes it over an

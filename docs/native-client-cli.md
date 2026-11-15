@@ -119,9 +119,15 @@ The `macos-desktop` feature builds a native viewer from system frameworks only.
 VideoToolbox decodes the host's HEVC stream into IOSurface-backed buffers, and
 Metal draws them, with the client-rendered remote cursor, into a
 `CAMetalLayer` in an AppKit window. AppKit keyboard, pointer and wheel events
-enter the same `frd` input path as the Linux viewer. As on Linux, losing focus,
-hiding the window or a change of picture size stops local input and ends
-control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
+enter the same `frd` input path as the Linux viewer. Switching to another app,
+another window taking focus, covering the viewer or moving it to another Space
+pauses control. The viewer releases every key and button it holds on the
+host, and sends nothing while away. Viewing continues, and input resumes once
+the window is key and visible again. Nothing held is restored. The pause
+discards an unsent text draft and stops the clipboard (`control_pauses` in
+the completion counts pauses). Minimizing or hiding the window, a locked or
+switched-away user session, or a change of picture size stops local input and
+ends control; closing the window ends the session. **Ctrl+Alt+Shift+Escape** also
 stops the original session locally before any other input from that native
 batch can be forwarded.
 
@@ -236,8 +242,9 @@ The initial `--control` request is consumed once for the whole invocation.
 Automatic reconnects obtain fresh viewing only; after the recovered window is
 visible, focused and fresh, press and release **F8** to request new control.
 Held, repeated, modified or stale keys cannot request a grant. No queued
-gesture, input action or grant crosses an attempt. Focus/visibility loss and
-known host revocation remain terminal. Completion distinguishes request counts
+gesture, input action or grant crosses an attempt. Minimizing or hiding the
+window and known host revocation remain terminal; an app switch or a covered
+window pauses control within the attempt (see above). Completion distinguishes request counts
 and viewing reconnects, confirmed local cleanup, and the host's independently
 reported cleanup/effect stages. A close click cannot hide a native cleanup
 failure or an adverse host report.

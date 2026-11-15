@@ -59,8 +59,8 @@ use frd::{
         ObserverError, ObserverPolicy, Presentation, StreamingViewerControl, StreamingViewerError,
         Viewer,
         viewer_events::{
-            Error as CaptureError, Event, Layout, LocalPoint, MAX_EVENT_AGE_US, NativeCapture,
-            PositionedAction, Source, TextContext,
+            Error as CaptureError, Event, Layout, LocalPoint, Located, MAX_EVENT_AGE_US,
+            NativeCapture, PositionedAction, Source, TextContext,
         },
     },
     worker::{Deadline, Launch, LocalPresenter},
@@ -142,6 +142,9 @@ pub struct Report {
     pub display_changes: u32,
     pub display_change_closes: Vec<DisplayChangeReport>,
     pub control_releases: u32,
+    /// Times a grant paused because the window lost focus or was covered.
+    /// Each pause released every held key and button on the host.
+    pub control_pauses: u32,
     /// Original close evidence from explicit Stop control actions, retained
     /// separately from the subsequent viewing attempts and their results.
     pub control_release_closes: Vec<DisplayChangeReport>,
@@ -218,6 +221,12 @@ struct Input {
     text_context: Option<TextContext>,
     text_serial: Option<u64>,
     text_until: u64,
+    /// The window lost focus or was covered: everything held was released and
+    /// nothing is delivered until it is key and visible again.
+    paused: bool,
+    /// The host location of the latest positioned event, where a pause
+    /// releases held buttons.
+    last: Option<Located>,
 }
 impl Drop for Input {
     fn drop(&mut self) {
@@ -254,6 +263,11 @@ impl Input {
     /// Keep native composition attached to its original source and uninterrupted
     /// view. A compositor gap disables Send without cancelling a valid draft.
     fn text_status(&mut self) -> (Option<u64>, u64, bool) {
+        if self.paused {
+            // The native draft was discarded at the pause. The same context
+            // returns on resume, so a new draft needs no new context.
+            return (None, 0, false);
+        }
         if self.stopped() || !self.source.supports_text() {
             self.text_context = None;
             self.text_until = 0;
@@ -286,7 +300,8 @@ impl Input {
             if self.stopped() {
                 return Err(());
             }
-            if self.text_serial != Some(commit.context)
+            if self.paused
+                || self.text_serial != Some(commit.context)
                 || self.keys.iter().any(|held| *held)
                 || self.buttons.iter().any(|held| *held)
             {
@@ -350,6 +365,9 @@ impl Input {
     }
     /// One window event to the granted session. Err means stop control.
     fn deliver(&mut self, event: &WindowEvent, report: &mut Report) -> Result<(), ()> {
+        if self.paused {
+            return Ok(());
+        }
         let caps = self.source.capabilities();
         let now = self.source.clock().map_err(|_| ())?;
         let captured = match *event {
@@ -394,7 +412,9 @@ impl Input {
                     return Ok(());
                 }
                 report.pointer += 1;
-                Event::Pointer(self.layout.at(self.local(at)))
+                let location = self.layout.at(self.local(at));
+                self.last = Some(location.clone());
+                Event::Pointer(location)
             }
             WindowEvent::Button {
                 button,
@@ -414,8 +434,10 @@ impl Input {
                 }
                 self.buttons[index] = pressed;
                 report.buttons += 1;
+                let location = self.layout.at(self.local(at));
+                self.last = Some(location.clone());
                 Event::Positioned {
-                    location: self.layout.at(self.local(at)),
+                    location,
                     action: PositionedAction::Button { button, pressed },
                 }
             }
@@ -473,8 +495,10 @@ impl Input {
             }
         };
         report.scrolls += 1;
+        let location = self.layout.at(self.local(at));
+        self.last = Some(location.clone());
         let event = Event::Positioned {
-            location: self.layout.at(self.local(at)),
+            location,
             action: PositionedAction::Scroll {
                 x: delta.x,
                 y: delta.y,
@@ -482,6 +506,84 @@ impl Input {
             },
         };
         Some((event, ClientInstant(delta.sampled)))
+    }
+
+    /// Release every key, then every button, this owner holds on the host, and
+    /// deliver nothing more until [`Input::resume`]. Nothing is restored on
+    /// resume. Err: a release was refused, so control must end.
+    fn pause(&mut self, report: &mut Report) -> Result<(), ()> {
+        if self.paused {
+            return Ok(());
+        }
+        self.paused = true;
+        report.control_pauses = report.control_pauses.saturating_add(1);
+        self.scroll.reset();
+        let sampled = self.source.clock().map_err(|_| ())?;
+        for usage in 0..=u8::MAX {
+            if !std::mem::take(&mut self.keys[usize::from(usage)]) {
+                continue;
+            }
+            // `deliver` holds only keys `PhysicalKey` accepts.
+            let key = PhysicalKey::new(u16::from(usage)).ok_or(())?;
+            let release = Event::Key {
+                key,
+                transition: KeyTransition::Release,
+            };
+            self.source.push(release, sampled).map_err(|_| ())?;
+        }
+        for (index, button) in HELD_BUTTONS.into_iter().enumerate() {
+            if !std::mem::take(&mut self.buttons[index]) {
+                continue;
+            }
+            // Every press carried a location, so a held button has one.
+            let location = self.last.clone().ok_or(())?;
+            let release = Event::Positioned {
+                location,
+                action: PositionedAction::Button {
+                    button,
+                    pressed: false,
+                },
+            };
+            self.source.push(release, sampled).map_err(|_| ())?;
+        }
+        Ok(())
+    }
+
+    /// The window is key and visible again: input flows from the next turn.
+    const fn resume(&mut self) {
+        self.paused = false;
+    }
+}
+
+/// `Input::buttons` slots, in `deliver`'s order.
+const HELD_BUTTONS: [PointerButton; 5] = [
+    PointerButton::Primary,
+    PointerButton::Secondary,
+    PointerButton::Middle,
+    PointerButton::Back,
+    PointerButton::Forward,
+];
+
+/// What a granted owner does about focus this turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusStep {
+    Continue,
+    Pause,
+    Resume,
+}
+
+/// `away`: the window is not key or not visible now. `pause_event`: this
+/// batch reported a pausing focus loss. An app switch and back within one poll
+/// still pauses, because native forgot the keys it held and will not report
+/// their releases. Pause and resume each discard their turn's batch: those
+/// events may predate the change.
+const fn focus_step(paused: bool, away: bool, pause_event: bool) -> FocusStep {
+    if away || (pause_event && !paused) {
+        FocusStep::Pause
+    } else if paused {
+        FocusStep::Resume
+    } else {
+        FocusStep::Continue
     }
 }
 
@@ -1203,7 +1305,7 @@ fn service(
             input
                 .borrow()
                 .as_ref()
-                .is_some_and(|input| !input.stopped()),
+                .is_some_and(|input| !input.stopped() && !input.paused),
         );
         if !text_updated
             || opened.file_selection_update().is_err()
@@ -1298,6 +1400,40 @@ fn service(
             Some(_) => None,
         }
     };
+    // An app switch or a covered window pauses a grant instead of ending it.
+    // Minimizing, hiding, an unavailable session and closing stay terminal
+    // (`terminal_event`), as does a pending explicit close.
+    let away = matches!(reason, Some(LocalStop::FocusLost | LocalStop::WindowHidden));
+    let focus = match input.as_ref() {
+        Some(granted) if (reason.is_none() || away) && !reopen_intent.borrow().pending() => {
+            focus_step(
+                granted.paused,
+                away,
+                events.contains(&WindowEvent::FocusPaused),
+            )
+        }
+        _ => FocusStep::Continue,
+    };
+    match focus {
+        FocusStep::Pause => {
+            intent.suspend();
+            let paused = input
+                .as_mut()
+                .is_some_and(|granted| granted.pause(&mut report).is_ok());
+            if !paused {
+                intent.invalidate();
+                halt(LocalStop::NativeFailure, &mut input, &mut report);
+            }
+            return;
+        }
+        FocusStep::Resume => {
+            if let Some(granted) = input.as_mut() {
+                granted.resume();
+            }
+            return;
+        }
+        FocusStep::Continue => {}
+    }
     if let Some(reason) = reason {
         intent.suspend();
         if input.is_some()
@@ -1606,6 +1742,8 @@ fn attach(
                 text_context: None,
                 text_serial: Some(0),
                 text_until: 0,
+                paused: false,
+                last: None,
             });
             Ok::<_, ()>(capture)
         })
@@ -2952,6 +3090,27 @@ mod tests {
             .unwrap()
             .required = true;
         assert_eq!(session.offer(3, &required), Err(CallbackError));
+    }
+
+    #[test]
+    fn an_app_switch_pauses_a_grant_and_return_resumes_it_without_ending_control() {
+        // The pause event is not terminal: only close, escape, a minimize or
+        // hide (FocusLost) and overflow end the batch.
+        assert_eq!(terminal_event(&[WindowEvent::FocusPaused]), None);
+        assert_eq!(
+            terminal_event(&[WindowEvent::FocusPaused, WindowEvent::FocusLost]),
+            Some(LocalStop::FocusLost)
+        );
+        // Away: pause (again, harmlessly, while still away).
+        assert_eq!(focus_step(false, true, true), FocusStep::Pause);
+        assert_eq!(focus_step(true, true, false), FocusStep::Pause);
+        // Back: resume once, then deliver normally.
+        assert_eq!(focus_step(true, false, false), FocusStep::Resume);
+        assert_eq!(focus_step(false, false, false), FocusStep::Continue);
+        // Away and back within one poll: native forgot its held keys, so the
+        // host's must still be released before input continues.
+        assert_eq!(focus_step(false, false, true), FocusStep::Pause);
+        assert_eq!(focus_step(true, false, true), FocusStep::Resume);
     }
 
     #[test]
