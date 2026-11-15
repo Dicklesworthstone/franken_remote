@@ -1,12 +1,24 @@
 //! Thread-local pointer access, without changing the global `ShowCursor` count
 //! or replacing any shared system cursor image.
+mod shape;
+pub(super) use shape::Cursor;
 use windows::Win32::{
     Foundation::{HWND, POINT},
     Graphics::Gdi::ScreenToClient,
     UI::WindowsAndMessaging::{
-        GetCursorPos, IDC_ARROW, LoadCursorW, SW_HIDE, SetCursor, ShowWindow, WindowFromPoint,
+        GetCursor, GetCursorPos, GetForegroundWindow, IDC_ARROW, IsIconic, IsWindowVisible,
+        LoadCursorW, SW_HIDE, SetCursor, ShowWindow, WindowFromPoint,
     },
 };
+
+pub(super) fn foreground(hwnd: HWND) -> bool {
+    // SAFETY: scalar ownership/visibility queries of this UI thread's HWND.
+    unsafe {
+        GetForegroundWindow() == hwnd
+            && !IsIconic(hwnd).as_bool()
+            && IsWindowVisible(hwnd).as_bool()
+    }
+}
 
 pub(super) fn point(hwnd: HWND) -> Option<(i32, i32)> {
     let mut point = POINT::default();
@@ -29,19 +41,23 @@ pub(super) fn assign(hidden: bool) -> bool {
     unsafe {
         if hidden {
             SetCursor(None);
+            GetCursor().is_invalid()
         } else {
             let Ok(arrow) = LoadCursorW(None, IDC_ARROW) else {
                 return false;
             };
             SetCursor(Some(arrow));
+            GetCursor() == arrow
         }
     }
-    true
 }
 
 /// A failed renderer cannot leave a stale overlay visible during cleanup.
-pub(super) fn hide_failed_view(hwnd: HWND) {
+pub(super) fn hide_failed_view(hwnd: HWND) -> bool {
     // SAFETY: this UI thread owns the live viewer window. The caller has
     // already fenced input and permanently closed its session before hiding.
-    let _ = unsafe { ShowWindow(hwnd, SW_HIDE) };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        !IsWindowVisible(hwnd).as_bool()
+    }
 }

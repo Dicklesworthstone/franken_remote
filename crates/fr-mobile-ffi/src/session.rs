@@ -21,6 +21,7 @@ mod display;
 mod files;
 mod focus_close;
 mod key_capture;
+mod local_cursor_adapter;
 mod text;
 mod typing;
 
@@ -42,6 +43,7 @@ pub use text::{CapturedText, TextDraft};
 use crate::{
     events::{self, Event, Events, kind, state},
     input::{self, LineScroller},
+    local_cursor,
     video::{Cursor, Decoder, FrameSlot},
 };
 use asupersync::{
@@ -186,18 +188,23 @@ pub struct Config {
 struct Capture {
     stop: Arc<AtomicBool>,
     released: Arc<AtomicBool>,
+    cursor: Option<Arc<local_cursor::Owner>>,
 }
 impl NativeCapture for Capture {
     fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        if let Some(cursor) = &self.cursor {
+            cursor.stop();
+        }
     }
     fn try_reap(&mut self) -> bool {
         self.released.load(Ordering::SeqCst)
+            && self.cursor.as_ref().is_none_or(|cursor| cursor.completed())
     }
 }
 impl Drop for Capture {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.stop();
     }
 }
 
@@ -248,6 +255,7 @@ pub struct Shared {
     pub events: Events,
     pub frames: FrameSlot,
     pub cursor: Mutex<Cursor>,
+    local_cursor: Option<local_cursor::Hub>,
     granted: Mutex<Option<Granted>>,
     focus_owner: Mutex<Option<FocusOwner>>,
     clipboard: clipboard::Clipboard,
@@ -288,6 +296,12 @@ pub struct Shared {
     first_view_micros: AtomicU64,
 }
 impl Shared {
+    /// The optional native UI exchange. Its owner belongs to one exact grant,
+    /// and reports only cursor effects, never input or visible-frame evidence.
+    pub fn local_cursor(&self) -> Option<&local_cursor::Hub> {
+        self.local_cursor.as_ref()
+    }
+
     fn clear_presentation(&self) {
         self.frames.clear();
         if let Ok(mut cursor) = self.cursor.lock() {
@@ -351,6 +365,7 @@ impl Shared {
             events: Events::default(),
             frames: FrameSlot::default(),
             cursor: Mutex::default(),
+            local_cursor: None,
             granted: Mutex::default(),
             focus_owner: Mutex::default(),
             clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
@@ -1410,6 +1425,15 @@ pub struct Session {
 }
 impl Session {
     pub fn start(config: Config) -> std::io::Result<Self> {
+        Self::start_inner(config, false)
+    }
+    /// Start with a native UI owner for frd's admitted local cursor requests.
+    /// The caller must service this session's exchange and complete its native
+    /// cleanup before destroying the UI. The C ABI keeps its existing path.
+    pub fn start_with_local_cursor(config: Config) -> std::io::Result<Self> {
+        Self::start_inner(config, true)
+    }
+    fn start_inner(config: Config, native_cursor: bool) -> std::io::Result<Self> {
         if let Some(upload) = &config.upload {
             if !config.control {
                 return Err(std::io::Error::new(
@@ -1424,11 +1448,12 @@ impl Session {
                 ));
             }
         }
-        let shared = Arc::new(Shared::with_auxiliary(
-            config.control,
-            config.clipboard,
-            config.upload.clone(),
-        ));
+        let mut shared =
+            Shared::with_auxiliary(config.control, config.clipboard, config.upload.clone());
+        if native_cursor && config.control {
+            shared.local_cursor = Some(local_cursor::Hub::default());
+        }
+        let shared = Arc::new(shared);
         let worker = shared.clone();
         let control = config.control;
         // Detached: the thread owns its share of the state and ends on its
@@ -1717,11 +1742,17 @@ impl LocalPresenter for Presenter {
             // Configure and overlay run serially on the same local worker.
             // A fresh binding makes the core re-send its shape; the new
             // cursor can appear only on a later picture of this decoder.
+            let frame_after = self.shared.frames.sequence();
             cursor
-                .reset(self.attempt, self.shared.frames.sequence())
+                .reset(self.attempt, frame_after)
                 .map_err(worker_error)?;
             cursor.source_width = self.display.0;
             cursor.source_height = self.display.1;
+            if let Some(local) = &self.shared.local_cursor {
+                local
+                    .configure(self.attempt, frame_after)
+                    .map_err(|_| WorkerError::NativeFailure)?;
+            }
         }
         let decoder = Decoder::new(
             configuration.codec()?,
@@ -1835,10 +1866,12 @@ fn attach(
     viewer.confirm_viewport(&layout).map_err(|_| ())?;
     let stop = Arc::new(AtomicBool::new(false));
     let released = Arc::new(AtomicBool::new(false));
-    let capture = Capture {
+    let mut capture = Capture {
         stop: stop.clone(),
         released: released.clone(),
+        cursor: None,
     };
+    let mut local_cursor = None;
     let mut outcome = Attach::Fenced;
     viewer
         .capture_input_owned(&layout.clone(), |source| {
@@ -1846,6 +1879,26 @@ fn attach(
                 return Err(());
             };
             let opened = source.clock().map_err(|_| ())?;
+            if let Some(hub) = &shared.local_cursor {
+                match hub.bind(
+                    shared.frames.app_id(0),
+                    (display.pixel_width, display.pixel_height),
+                    Arc::clone(&stop),
+                ) {
+                    Ok(owner) => {
+                        capture.cursor = Some(Arc::clone(&owner));
+                        local_cursor = Some(local_cursor_adapter::Handle {
+                            owner,
+                            control: source.control(),
+                        });
+                    }
+                    // No owner was published. A contended optional cursor
+                    // exchange keeps the existing native-default path; it
+                    // cannot abort the original input capture or grant.
+                    Err(local_cursor::Error::Busy) => {}
+                    Err(_) => return Err(()),
+                }
+            }
             let focus_owner = FocusOwner {
                 original: focus_close::Original {
                     attempt: shared.frames.app_id(0),
@@ -1888,6 +1941,11 @@ fn attach(
             Ok(capture)
         })
         .map_err(|_| ())?;
+    if let Some(cursor) = local_cursor {
+        // An attachment refusal stops this original optional owner; input
+        // still follows the one capture attachment and its cleanup deadline.
+        let _ = viewer.attach_local_cursor(Box::new(cursor));
+    }
     Ok(outcome)
 }
 
@@ -2009,6 +2067,11 @@ impl Application for Mobile {
             .map_err(|_| ObserverError::InvalidConfiguration)?
             .reset(presentation_attempt, self.shared.frames.sequence())
             .map_err(|_| ObserverError::InvalidConfiguration)?;
+        if let Some(local) = &self.shared.local_cursor {
+            local
+                .begin_attempt(presentation_attempt)
+                .map_err(|_| ObserverError::InvalidConfiguration)?;
+        }
         publish_pin(&self.shared, self.watch.as_ref());
         let attempt_number = u32::from(attempt);
         let epoch = self

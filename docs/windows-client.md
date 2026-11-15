@@ -141,23 +141,52 @@ picture's scale, hotspot and clipping; it cannot draw into the letterbox.
 Hosts that already include their cursor in video keep that existing picture
 without a second overlay.
 
-During control, the ordinary Windows pointer remains the local cursor while
-the host's confirmed position follows submitted input. If the host moves or
-confines its pointer elsewhere, its confirmed overlay appears and the local
-pointer is hidden only over the actual picture. The local pointer is restored
-after the overlay has been erased, or when leaving the picture, opening a
-local dialog, ending control or closing the view. This client does not yet
-install the host's shape as a zero-latency native Windows cursor; that path
-still uses the default local pointer.
+During control, the viewer installs the admitted host shape as its native
+Windows pointer while the host's confirmed position follows submitted input.
+The native pointer moves locally; it does not wait for a video frame or a
+network round trip. The existing shared cursor policy decides whether that
+local pointer explains the confirmed host position. If the host moves or
+confines its pointer elsewhere, the native pointer is blanked before the
+confirmed overlay appears. The host-shaped native pointer returns only after
+the old overlay has been erased. The viewer uses the ordinary Windows arrow
+outside the picture, over local dialogs, and while another application is
+active. It never changes system/class cursor images or the global cursor
+visibility count.
 
-One bounded 256-by-256 cursor bitmap is composited on the existing GPU device;
+Native shape geometry and its hotspot follow the actually presented picture,
+including downscaling and a later window resize. The original bounded RGBA
+image is retained for that resize, so ordinary pointer motion creates no new
+native bitmap. Changing applications retains the original granted source as
+described below, pauses this native shape, and requires a foreground repaint
+before using its picture geometry again. Returning from an owned text/display
+dialog also repaints a static desktop without inventing a new video frame.
+Ending control, a reconnect, or decoder reconfiguration invalidates the old
+native image and its pending acknowledgement, even if the host reuses a shape
+ID. When the host reports its cursor already composited into video, the
+existing shared policy suppresses the managed local cursor and separate
+overlay instead of installing a second host shape. An unknown cursor or an
+unnegotiated cursor lane remains a distinct policy state.
+
+The overlay uses one bounded 256-by-256 bitmap on the existing GPU device;
 decoded video stays on the GPU. A replacement briefly retains the old and new
-cursor bitmaps. Reconnect and decoder reconfiguration retire the former
-shape; an old cursor cannot be shown over a replacement decoder's picture.
-Cursor-only draws retain the original video frame ID and count separately
-as `repaints` in completion JSON. They provide no new video freshness or input
-authority. Live Direct2D rendering and cursor handoff qualification on Windows
-remain pending.
+GPU bitmaps. Native cursor creation likewise retains at most the old image
+and one replacement, using checked top-down premultiplied BGRA and a bounded
+monochrome transparency mask. A single pending request replaces obsolete
+work at the shared/UI boundary. Each native acknowledgement names the exact
+original capture, attempt, decoder configuration and request generation;
+preparing a cursor is not acknowledgement of its installation. The original
+capture cannot report native cleanup complete until its pointer is restored
+and its resources are released. Unproven native destruction remains a failed
+cleanup and cannot admit a replacement owner.
+
+Cursor-only draws retain the original video frame ID and color range and count
+separately as `repaints` in completion JSON. They provide no new video freshness
+or input authority. Only an exact `S_OK` presentation result admits draw
+accounting and native shape handoff; another successful DXGI status retains
+the pending repaint and old overlay knowledge without marking a frame drawn.
+This is evidence of accepted API submission, not measurement of physical
+scanout. Live Direct2D rendering, native cursor handoff, focus changes and
+failed-cleanup qualification on a Windows desktop remain pending.
 
 ## Request or stop control in the viewer
 
@@ -605,6 +634,26 @@ the local Desktop Duplication, hardware HEVC encode and decode path in the
 interactive session and prints counts and timings.
 
 ## Validation scope
+
+For the native host-shaped cursor slice (`fr-s6qi`), the actual
+`cargo test --locked -p fr-windows --bin fr-windows` run passed all 117 portable
+tests, including alpha premultiplication, mask padding, original-display
+scaling, hotspot bounds, tiny downscales and rejected geometry. Strict
+bin/tests Clippy also passed. The actual mobile library passed ten bounded
+cursor-exchange tests, including request replacement, configuration changes
+during preparation, nonblocking contention, generation exhaustion, original
+stop/cleanup fencing and numerically identical requests belonging to distinct
+owners. These are portable policy tests, not native Windows observations.
+
+The actual native cursor, image preparation, renderer and overlay source
+passed a narrow Windows GNU target check and strict Clippy against pinned
+`windows` 0.62.2 bindings. A separate compile-only check of the UI cursor
+manager used the real exchange/native modules with fixture declarations for
+the surrounding session/frame/lifetime APIs; it checks those local types and
+borrows, not complete viewer integration or behavior. The full native
+viewer/session dependency build remains blocked by compiler memory limits in
+this environment. Native cursor creation/assignment/destruction, live GPU
+handoff and focus/resize behavior still require a Windows desktop run.
 
 `cargo test --locked -p fr-mobile-ffi --lib` passes ten portable decoder-policy
 regressions with the pinned toolchain, covering original frame ownership,

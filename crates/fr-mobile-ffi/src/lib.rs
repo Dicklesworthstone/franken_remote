@@ -31,6 +31,22 @@ pub mod video;
 #[path = "video/windows_contract.rs"]
 mod windows_video_contract;
 
+// The native cursor exchange is safe, platform-neutral state. Its exact
+// bounds/ownership tests run on every test host; the session opts into it.
+#[cfg(any(
+    test,
+    all(
+        feature = "session",
+        any(
+            target_os = "ios",
+            all(target_os = "macos", feature = "macos-session"),
+            all(windows, feature = "windows-session")
+        )
+    )
+))]
+#[path = "session/local_cursor.rs"]
+pub mod local_cursor;
+
 #[cfg(all(
     feature = "session",
     any(

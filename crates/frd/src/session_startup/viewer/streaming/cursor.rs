@@ -290,6 +290,11 @@ impl StreamingViewer {
             let Some(cursor) = &mut self.cursor else {
                 return Ok(());
             };
+            // Recovery can replace the decoder/media before another ordinary
+            // network turn. Retire its old cursor cache BEFORE requesting a
+            // native pointer image or publishing an overlay in the new scope.
+            let (session, media) = self.peer.parts()?;
+            cursor.refresh(media, &session.transport)?;
             let now = super::now(cx).map_err(Error::Session)?;
             // Do not promote/change rendering owners during this request. The
             // installed input owner still services its capture and stop handles.

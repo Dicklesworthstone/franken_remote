@@ -41,6 +41,8 @@ mod control;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod cursor;
 #[cfg_attr(not(windows), allow(dead_code))]
+mod cursor_image;
+#[cfg_attr(not(windows), allow(dead_code))]
 mod file_choice;
 #[cfg_attr(not(windows), allow(dead_code))]
 mod geometry;

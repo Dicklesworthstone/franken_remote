@@ -5,7 +5,7 @@
 use crate::geometry::{Rect, fit};
 mod cursor;
 use core::mem::ManuallyDrop;
-use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Foundation::{HWND, RECT, S_OK};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_VIDEO_COLOR, D3D11_VIDEO_COLOR_0,
     D3D11_VIDEO_COLOR_RGBA, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
@@ -43,6 +43,9 @@ pub struct Renderer {
     size: (u32, u32),
     conversion: Option<Conversion>,
     cursor: cursor::Overlay,
+    /// Only exact `S_OK` admits picture/cursor handoff accounting. Other
+    /// successful DXGI statuses do not prove this presentation was accepted.
+    present_accepted: bool,
 }
 
 impl Renderer {
@@ -82,6 +85,7 @@ impl Renderer {
                 size,
                 conversion: None,
                 cursor: cursor::Overlay::default(),
+                present_accepted: false,
             })
         }
     }
@@ -92,6 +96,7 @@ impl Renderer {
             return Ok(());
         }
         self.conversion = None;
+        self.present_accepted = false;
         // SAFETY: no back-buffer reference outlives `draw`, as ResizeBuffers
         // requires.
         unsafe {
@@ -109,6 +114,10 @@ impl Renderer {
 
     pub const fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    pub const fn present_accepted(&self) -> bool {
+        self.present_accepted
     }
 
     pub fn cursor_state(&self) -> crate::cursor::State {
@@ -135,6 +144,7 @@ impl Renderer {
     /// before the caller enters this native work. No frame or presentation
     /// freshness is reported for the clear.
     pub fn clear(&mut self) -> Result<()> {
+        self.present_accepted = false;
         self.conversion = None;
         self.cursor.clear();
         // SAFETY: all COM interfaces belong to the same live D3D device. The
@@ -148,7 +158,9 @@ impl Renderer {
             context.ClearRenderTargetView(target.as_ref(), &[0.0, 0.0, 0.0, 1.0]);
             drop(target);
             drop(back_buffer);
-            self.swap_chain.Present(0, DXGI_PRESENT(0)).ok()?;
+            let status = self.swap_chain.Present(0, DXGI_PRESENT(0));
+            self.present_accepted = status == S_OK;
+            status.ok()?;
         }
         Ok(())
     }
@@ -203,6 +215,7 @@ impl Renderer {
         attempt: u64,
         sequence: u64,
     ) -> Result<Option<Rect>> {
+        self.present_accepted = false;
         let Some(dest) = fit(picture, self.size) else {
             return Ok(None);
         };
@@ -307,7 +320,9 @@ impl Renderer {
             drop(output);
             self.cursor.draw(&back_buffer, dest, attempt, sequence)?;
             drop(back_buffer);
-            swap_chain.Present(1, DXGI_PRESENT(0)).ok()?;
+            let status = swap_chain.Present(1, DXGI_PRESENT(0));
+            self.present_accepted = status == S_OK;
+            status.ok()?;
         }
         Ok(Some(dest))
     }

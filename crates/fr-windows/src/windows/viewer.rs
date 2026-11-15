@@ -117,10 +117,15 @@ struct Viewer {
     /// First parent-close cleanup sample for the original native file chooser.
     /// Neither repeated close callbacks nor later session completion renew it.
     file_cleanup_started: Option<u64>,
-    /// What the last successful presentation actually composited, scoped to
-    /// its original connection. Used only for local cursor ownership.
+    /// Cursor pixels an accepted or uncertain submission may have left in
+    /// the swap chain, scoped to their original connection.
     cursor_drawn: Option<(u64, PictureRect)>,
-    local_cursor_hidden: bool,
+    /// Accepted picture geometry for the native cursor, never a pending frame.
+    picture_drawn: Option<(u64, u64, PictureRect)>,
+    /// A static picture must be retried after a skipped Present or foreground
+    /// transition, retaining its original frame and color-range identity.
+    repaint_pending: bool,
+    local_cursor: cursor::Local,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -228,7 +233,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
-    let Ok(session) = Session::start(config.clone()) else {
+    let Ok(session) = Session::start_with_local_cursor(config.clone()) else {
         return refuse("session_thread_unavailable");
     };
     let Ok(renderer) = Renderer::new(&gpu.device, hwnd, size) else {
@@ -258,7 +263,9 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             upload_menu,
             file_cleanup_started: None,
             cursor_drawn: None,
-            local_cursor_hidden: false,
+            picture_drawn: None,
+            repaint_pending: false,
+            local_cursor: cursor::Local::default(),
         });
     });
     // SAFETY: showing the window this thread created.
@@ -482,7 +489,7 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         v.close();
         return Reopen::No;
     }
-    let Ok(session) = Session::start(next) else {
+    let Ok(session) = Session::start_with_local_cursor(next) else {
         v.reopen_refusal.get_or_insert(Refusal::Start);
         v.close();
         return Reopen::No;
@@ -509,6 +516,8 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     stats.last_draw = None;
     v.mapping = None;
     v.picture = (0, 0);
+    v.picture_drawn = None;
+    v.repaint_pending = false;
     v.display = (0, 0);
     v.scales = None;
     v.buttons = [false; 5];
@@ -580,6 +589,8 @@ fn apply_activation(v: &mut Viewer, hwnd: HWND) {
     // The retired owner remains permanently closed. Reflect this admitted
     // foreground event before native work so a nested hide changes its scope.
     control::visible(true);
+    v.picture_drawn = None;
+    v.repaint_pending = true;
     if !focus {
         return;
     }
@@ -590,6 +601,9 @@ fn apply_activation(v: &mut Viewer, hwnd: HWND) {
         v.reopen_refusal.get_or_insert(Refusal::Presentation);
         v.close();
         return;
+    }
+    if v.renderer.present_accepted() {
+        v.cursor_drawn = None;
     }
     // SAFETY: native rendering above may have dispatched lifecycle callbacks;
     // recheck the same live viewer after it and retain the opening's old bound.
@@ -609,11 +623,20 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     apply_activation(v, hwnd);
     // Level-triggered, so no lost or rescoped activation message can leave a
     // paused owner gated: input resumes once this window is actually in front.
-    if !v.closing && !v.session.shared().active() {
+    if !v.closing && (!v.session.shared().active() || v.picture_drawn.is_none()) {
         // SAFETY: scalar queries against this UI thread's live viewer.
         let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
         if foreground {
-            let _ = control::active(true);
+            if !v.session.shared().active() {
+                let _ = control::active(true);
+                v.picture_drawn = None;
+            }
+            // An owned text/display window can take foreground without an
+            // app switch. Its return still needs a retained-picture repaint,
+            // even when no video or cursor update arrived while it was open.
+            if v.session.shared().active() && v.picture_drawn.is_none() {
+                v.repaint_pending = true;
+            }
         }
     }
     poll_file_choice(v, hwnd);
@@ -650,7 +673,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
         cursor::retire(v, hwnd);
         return (false, false);
     }
-    let Ok(cursor_changed) = cursor::synchronize(v) else {
+    let Ok(cursor_changed) = cursor::synchronize(v, hwnd) else {
         eprintln!("fr-windows: cursor_presentation_failed");
         v.session.shared().presentation_failed();
         v.close();
@@ -658,7 +681,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
         stats.draw_failures += 1;
         return (false, false);
     };
-    cursor::refresh(v, hwnd, false);
+    cursor::refresh(v, hwnd);
     draw_latest(v, stats, last_sequence, hwnd, cursor_changed)
 }
 
@@ -675,7 +698,7 @@ fn draw_latest(
     // A local resize/move invalidates its coordinate mapping immediately.
     // Redraw the one retained picture even on a static desktop, preserving
     // that picture's ORIGINAL frame id; this creates no new source evidence.
-    let after = if v.mapping.is_some() && !cursor_changed {
+    let after = if v.mapping.is_some() && !cursor_changed && !v.repaint_pending {
         *last_sequence
     } else {
         0
@@ -689,7 +712,7 @@ fn draw_latest(
     // Select the picture before the final cursor snapshot. A decoder reset
     // clears its cursor before publishing new pictures; the reverse order
     // could put the preceding decoder's cursor on this newer picture.
-    if cursor::synchronize(v).is_err() {
+    if cursor::synchronize(v, hwnd).is_err() {
         eprintln!("fr-windows: cursor_presentation_failed");
         v.session.shared().presentation_failed();
         v.close();
@@ -710,7 +733,14 @@ fn draw_latest(
         .then(|| fit(picture, v.renderer.size()))
         .flatten()
         .map(|dest| (attempt, dest));
-    cursor::before_draw(v, hwnd, overlay);
+    if cursor::before_draw(v, hwnd, overlay).is_err() {
+        stats.draw_failures += 1;
+        v.session.shared().presentation_failed();
+        v.close();
+        cursor::retire(v, hwnd);
+        return (false, false);
+    }
+    let lifetime = control::lifetime();
     let drawn = video::texture_of(&sample).and_then(|(texture, slice)| {
         v.renderer
             .draw(
@@ -725,20 +755,44 @@ fn draw_latest(
             .flatten()
     });
     let Some(dest) = drawn else {
+        // A failed Present has an unknown display outcome. Preserve evidence
+        // of either old or newly submitted cursor pixels until cleanup.
+        v.cursor_drawn = overlay.or(v.cursor_drawn);
+        v.picture_drawn = None;
         stats.draw_failures += 1;
         v.session.shared().presentation_failed();
         v.close();
         cursor::retire(v, hwnd);
         return (false, false);
     };
+    if !v.renderer.present_accepted() {
+        v.cursor_drawn = overlay.or(v.cursor_drawn);
+        v.picture_drawn = None;
+        v.repaint_pending = true;
+        return (false, false);
+    }
+    // Record the just-submitted image BEFORE checking callbacks which could
+    // have retired its owner during native work. Cleanup must erase it too.
+    v.cursor_drawn = overlay;
+    v.picture_drawn = Some((attempt, info.sequence, dest));
     let shared = v.session.shared();
-    if shared.finished() || shared.frames.app_id(0) != attempt {
+    if v.closing
+        || v.reopen.pending()
+        || shared.finished()
+        || shared.frames.app_id(0) != attempt
+        || control::lifetime() != lifetime
+    {
         v.mapping = None;
         cursor::retire(v, hwnd);
         return (false, false);
     }
-    v.cursor_drawn = overlay;
-    cursor::refresh(v, hwnd, false);
+    // SetCursor's ownership is local to this thread/window. A background
+    // submission cannot supply native shape geometry on a later activation.
+    // SAFETY: scalar queries of this UI thread's original live viewer.
+    if !shared.active() || unsafe { GetForegroundWindow() != hwnd || IsIconic(hwnd).as_bool() } {
+        v.picture_drawn = None;
+    }
+    v.repaint_pending = false;
     let shared = v.session.shared();
     v.picture = (info.width, info.height);
     if v.mapping
@@ -756,6 +810,7 @@ fn draw_latest(
     *last_sequence = info.sequence;
     if !new_picture {
         stats.repaints += 1;
+        cursor::refresh(v, hwnd);
         return (false, true);
     }
     let now = Instant::now();
@@ -771,6 +826,7 @@ fn draw_latest(
     stats.last_draw = Some(now);
     stats.drawn += 1;
     stats.picture = v.picture;
+    cursor::refresh(v, hwnd);
     (false, true)
 }
 
@@ -1240,10 +1296,16 @@ impl Viewer {
         // SAFETY: this UI thread's mouse capture only, after the original
         // session's input and clipboard owners were irrevocably fenced.
         let _ = unsafe { ReleaseCapture() };
-        if cause == Cause::FocusLost && self.renderer.clear().is_err() {
-            self.session.shared().presentation_failed();
-            self.reopen_refusal.get_or_insert(Refusal::Presentation);
-            self.close();
+        if cause == Cause::FocusLost {
+            self.picture_drawn = None;
+            self.repaint_pending = true;
+            if self.renderer.clear().is_err() {
+                self.session.shared().presentation_failed();
+                self.reopen_refusal.get_or_insert(Refusal::Presentation);
+                self.close();
+            } else if self.renderer.present_accepted() {
+                self.cursor_drawn = None;
+            }
         }
     }
 
@@ -1617,7 +1679,7 @@ extern "system" fn window_proc(
             // A nested native draw can temporarily borrow Viewer. Preserve
             // the current pointer then, rather than reinstalling an arrow
             // over an overlay whose owner blanked it before presentation.
-            with_viewer(|v| cursor::refresh(v, hwnd, true));
+            with_viewer(|v| cursor::refresh(v, hwnd));
             return LRESULT(1);
         }
         WM_INITMENUPOPUP => {
@@ -1725,6 +1787,11 @@ extern "system" fn window_proc(
                     text::deactivate();
                 }
                 with_viewer(Viewer::text_deactivated);
+                with_viewer(|v| {
+                    v.picture_drawn = None;
+                    v.repaint_pending = true;
+                    cursor::refresh(v, hwnd);
+                });
             }
             false
         }
@@ -1789,6 +1856,8 @@ extern "system" fn window_proc(
                     // to an earlier size. Old queued coordinates never acquire
                     // the subsequently redrawn mapping.
                     v.mapping = None;
+                    v.picture_drawn = None;
+                    v.repaint_pending = true;
                     v.text = None;
                     v.session.shared().scroll_end();
                     if v.renderer.resize(size).is_err() {
