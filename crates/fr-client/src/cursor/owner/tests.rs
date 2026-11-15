@@ -307,6 +307,101 @@ fn a_blank_local_pointer_is_acknowledged_before_the_overlay_appears() {
 }
 
 #[test]
+fn replacing_an_in_flight_shape_with_blank_requires_the_replacement_ack() {
+    let mut rendered = Rendered::new();
+    rendered.window_attached();
+    rendered.window_requested(WindowCursor::Blank, 1);
+    rendered.window_applied(1);
+    let followed = controlling(LocalPointer::Inside, visible(7, 10, 20), true);
+    assert_eq!(
+        rendered.next(&followed),
+        Step::Window(WindowCursor::Shape(7))
+    );
+    rendered.window_requested(WindowCursor::Shape(7), 2);
+    let diverged = controlling(LocalPointer::Inside, visible(7, 300, 200), false);
+    assert_eq!(rendered.next(&diverged), Step::Window(WindowCursor::Blank));
+    rendered.window_requested(WindowCursor::Blank, 3);
+    // The native thread may have applied Shape(7) without publishing its ack
+    // yet. The old Blank acknowledgement is not evidence for request 3.
+    assert_eq!(rendered.window(), Some(WindowCursor::Blank));
+    assert_eq!(rendered.next(&diverged), Step::Idle);
+    rendered.window_applied(2);
+    assert_eq!(rendered.next(&diverged), Step::Idle);
+    rendered.window_applied(3);
+    assert_eq!(rendered.next(&diverged), Step::Overlay(diverged.overlay));
+}
+
+#[test]
+fn a_new_view_reissues_the_same_shape_without_inventing_native_default() {
+    for shape in [FALLBACK, 7] {
+        let mut rendered = Rendered::new();
+        rendered.window_attached();
+        let followed = controlling(LocalPointer::Inside, visible(shape, 10, 20), true);
+        rendered.window_requested(WindowCursor::Shape(shape), 1);
+        rendered.window_applied(1);
+        rendered.window_unknown();
+        rendered.window_attached();
+        assert_eq!(rendered.window(), Some(WindowCursor::Shape(shape)));
+        assert_eq!(
+            rendered.next(&followed),
+            Step::Window(WindowCursor::Shape(shape)),
+        );
+        rendered.window_requested(WindowCursor::Shape(shape), 2);
+        rendered.window_applied(1);
+        assert_eq!(rendered.next(&followed), Step::Idle);
+        rendered.window_applied(2);
+        assert_eq!(rendered.next(&followed), Step::Idle);
+        assert!(rendered.exclusive());
+    }
+}
+
+#[test]
+fn an_old_ack_cannot_satisfy_a_new_views_image_invalidation() {
+    let mut rendered = Rendered::new();
+    rendered.window_attached();
+    rendered.window_requested(WindowCursor::Shape(7), 1);
+    rendered.window_unknown();
+    // A late native completion is real evidence of the old image, but cannot
+    // establish the image of a new binding that reused the same shape number.
+    rendered.window_applied(1);
+    let followed = controlling(LocalPointer::Inside, visible(7, 10, 20), true);
+    assert_eq!(
+        rendered.next(&followed),
+        Step::Window(WindowCursor::Shape(7))
+    );
+    let unknown = controlling(LocalPointer::Inside, Confirmed::Unknown, false);
+    assert_eq!(rendered.next(&unknown), Step::Window(WindowCursor::Default));
+    assert_eq!(rendered.window(), Some(WindowCursor::Shape(7)));
+    rendered.window_requested(WindowCursor::Default, 2);
+    assert_eq!(rendered.next(&unknown), Step::Idle);
+    rendered.window_applied(2);
+    assert_eq!(rendered.window(), Some(WindowCursor::Default));
+    assert_eq!(rendered.next(&unknown), Step::Idle);
+}
+
+#[test]
+fn a_view_reset_hides_its_old_overlay_before_requesting_the_local_image() {
+    let mut rendered = Rendered::new();
+    rendered.window_attached();
+    rendered.window_requested(WindowCursor::Blank, 1);
+    rendered.window_applied(1);
+    rendered.overlay_applied(Some(At {
+        shape: 7,
+        x: 30,
+        y: 40,
+    }));
+    rendered.overlay_unknown();
+    rendered.window_unknown();
+    let unknown = controlling(LocalPointer::Inside, Confirmed::Unknown, false);
+    assert_eq!(rendered.next(&unknown), Step::Overlay(None));
+    rendered.overlay_applied(None);
+    assert_eq!(rendered.next(&unknown), Step::Window(WindowCursor::Default));
+    rendered.window_requested(WindowCursor::Default, 2);
+    assert_eq!(rendered.next(&unknown), Step::Idle);
+    assert!(rendered.exclusive());
+}
+
+#[test]
 fn a_detached_platform_owner_is_no_longer_managed() {
     let mut rendered = Rendered::new();
     rendered.window_attached();
