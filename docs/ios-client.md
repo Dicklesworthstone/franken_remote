@@ -235,6 +235,89 @@ original pinned destinations and gesture owner replacement. Apple SDK
 builds, XCTest execution and live iPhone/iPad display switching still need
 native qualification; source policy is not hardware evidence.
 
+## Send a selected file to the host
+
+A control-capable session now offers **View options → Choose a file to send…**
+while it is viewing, before control is requested. The system document picker
+selects one regular file from an installed file provider. The picker can cover
+the desktop, so the app marks the remote view hidden throughout its actual
+presentation and dismissal. It never keeps an obscured controlling session
+alive or claims that frames behind the picker were seen.
+
+Selection prepares a pinned native descriptor on a background task; it sends
+no file bytes. After the picker closes and a fresh picture is visible, choose
+**Control**, wait for the host grant and file channel, then press **Send once**
+in the small transfer panel. The host must separately enable receiving files
+through its existing `frd run --files DIR` configuration. A host that declines
+the optional file capability still permits ordinary viewing and control.
+
+Choosing is disabled while control is pending or granted. If already controlling,
+use **In control → Give back control and keep viewing**. This fences the original
+input, waits for successful service and cleanup plus the existing host-listener
+cooldown, then opens a fresh observing session to the same original pinned host.
+It clears automatic control intent even when **Ask for control on connect** is
+enabled. A multi-display host may ask for a fresh approved display choice.
+Backgrounding, disconnect, expiry or failed original cleanup prevents that
+replacement. Selected files, earlier Send actions and input never carry into it.
+
+The local choice has the native owner's original two-minute budget and exact
+connection-attempt token. Provider preparation, picker time and waiting for a
+grant all consume that same budget. A changed connection, close, background
+transition or discarded choice cannot adopt a later token. A provider callback
+that returns after cancellation is collected only for its original selection;
+it cannot replace a newer choice or send automatically. Only one preparation
+task exists per session, including a cancelled task still waiting on its file
+provider.
+
+**Send once** is a separate explicit action after selection. It samples the
+current granted input view and original native deadline, consumes the prepared
+descriptor even if refused, and never queues a retry with a renewed ticket.
+The current session cannot replay a chosen file after reconnect or display
+switch. Files are uploaded through the existing bounded ATP lane and original
+disk worker; Swift never reads or buffers their contents. Source validation,
+host quotas, safe staging and atomic publication remain in the existing Rust
+file implementation. A published file is not opened automatically.
+
+The transfer panel distinguishes bytes **queued** from the host's actual
+publication receipt. It also preserves host refusal, interrupted or uncertain
+publication, unconfirmed durability and failed local cleanup. **Pause** and
+**Resume** affect only that original batch's pacing and do not extend its
+deadline. **Cancel** stops the current upload without deliberately ending the
+desktop; it cannot retract a file the host already published. Every command
+retains the batch whose state the user saw. Earlier receipts remain in the
+native owner's bounded history, and the panel summarizes received and other
+outcomes independently of the current transfer.
+
+### Document-provider access and cleanup
+
+The picker uses open-in-place access rather than copying entire files into
+Swift or creating persistent bookmarks. Preparation coordinates a read and
+pins the selected descriptor away from the UI and session threads. The
+original security-scoped URL remains retained for every accepted upload until
+the native session reports that all of its original file sources have actually
+been released. A terminal event or a cleanup deadline is insufficient proof.
+
+Closing the UI hands the original session handle and its bounded access owners
+to a cleanup task. That task frees the handle and balances document access only
+after the source-release witness. A stuck cleanup retains its original slot
+under the existing four-session bound; it does not recycle permissions or
+create unlimited replacement workers. Discarded, refused and expired choices
+release their own access after preparation returns and their unsent descriptor
+is discarded. Nothing from a selected URL, local filename or file contents is
+written into diagnostic JSON.
+
+Source regression coverage includes original selection tokens, bounded status
+decoding, one-use picker callbacks, publication versus queue progress, and
+independent cleanup outcomes. The executor became unavailable during this
+implementation; Apple SDK compilation, XCTest execution and live
+iPhone/iPad transfers with local, iCloud and third-party providers remain
+unverified. In particular, real picker dismissal, provider cancellation,
+background cleanup and host publication require native qualification.
+
+Apple API contracts:
+[document-picker access](https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller)
+and [balanced security-scoped access](https://developer.apple.com/documentation/foundation/url/startaccessingsecurityscopedresource()).
+
 ## Input
 
 The app requests keys, absolute pointer, buttons, line scroll and optional

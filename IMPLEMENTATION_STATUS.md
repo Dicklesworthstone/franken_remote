@@ -1,9 +1,10 @@
 # Implementation status
 
-## iOS explicit file upload bridge (2026-11-16 UTC)
+## iOS explicit file uploads (2026-11-16 UTC)
 
-The native mobile core now exposes explicit local file selection over its
-existing ATP upload owner. One non-reused token identifies a local choice on
+The shipping iOS app now connects its native document picker and explicit
+Send controls to the existing ATP upload owner. One non-reused token identifies
+a local choice on
 the original connection attempt for at most 120 seconds. A bounded worker pins
 the selected regular file without reading or sending its contents. A separate
 Send consumes that choice once and rechecks the original input source, current
@@ -21,16 +22,27 @@ A positive source-release witness follows actual original worker collection
 and owner destruction, including collection after a failed bounded cleanup.
 Session termination alone does not release an external security-scoped URL.
 Pending preparation is independently bounded and also fences release evidence.
-The shipping Swift picker and transfer controls are the next integration slice.
+The Swift owner retains security-scoped file-provider access through native
+source collection, including after the screen disappears. The system picker
+opens only while observing; its actual dismissal restores view visibility.
+
+The interface shows local preparation, explicit Send, queued-byte progress,
+actual host receipts, durability uncertainty and cleanup failure. Pause,
+Resume and Cancel address the displayed original batch. An unused lane or a
+host that declines files reports that no file was sent. Give back control
+reuses the original host pin and cleanup-confirmed reconnect path to open a
+fresh observing session without carrying file choices or automatic control.
 
 Validation: the original 11 standalone selection-owner tests compiled with the
 repository-pinned Rust toolchain and -D warnings and passed before the local
-executor disconnected. The twelfth metadata-accessor test and integrated
-session, FFI and status regressions remain unexecuted. Independent source review
+executor disconnected. The twelfth metadata-accessor test, integrated
+session/FFI/status regressions and eleven Swift regressions remain unexecuted.
+Independent source review
 caught and corrected final-Send visibility and late-picker ownership races.
-A focused Apple workflow now exercises the actual macos-session/C ABI and the
-shipping Xcode Simulator target; its results remain required. No Apple device,
-native file-provider or live host-publication qualification is claimed.
+A focused Apple workflow now targets the actual macos-session/C ABI and the
+shipping Xcode Simulator target; both jobs were queued on the bridge commit,
+and their results remain required. No Apple device, native file-provider or
+live host-publication qualification is claimed.
 Tracks `fr-ios-file-upload`, which remains in progress.
 
 ## Original-display mapping for scaled native pictures (2026-11-16 UTC)

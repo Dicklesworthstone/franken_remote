@@ -16,6 +16,10 @@ struct SessionScreen: View {
     @State private var stats = SessionStats()
     @State private var displayPicker: DisplaySelection?
     @State private var displayPickerVisible = false
+    @State private var uploadPicker: FileUploadChoice?
+    @State private var uploadPickerVisible = false
+    @State private var uploadPickerToken: UInt64?
+    @State private var uploadPickerSession: RemoteSession?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -23,7 +27,8 @@ struct SessionScreen: View {
                            keyboard: $keyboard, zoom: $zoomCommand,
                            visible: scenePhase == .active && !session.phase.isEnded
                                && session.phase != .closing && !model.switchingDisplay
-                               && displayPicker == nil && !displayPickerVisible)
+                               && displayPicker == nil && !displayPickerVisible
+                               && uploadPicker == nil && !uploadPickerVisible)
                 .ignoresSafeArea()
             if !session.phase.isViewing {
                 StatusCard(session: session, retry: retry, close: close)
@@ -31,7 +36,8 @@ struct SessionScreen: View {
             }
             if toolbarVisible || !session.phase.isViewing {
                 SessionToolbar(session: session, keyboard: $keyboard, zoom: $zoomCommand,
-                               close: close, changeDisplay: changeDisplay)
+                               close: close, changeDisplay: changeDisplay,
+                               chooseFile: chooseFile, releaseControl: releaseControl)
                     .transition(.move(edge: .top).combined(with: .opacity))
             } else {
                 Button {
@@ -62,6 +68,10 @@ struct SessionScreen: View {
                     .allowsHitTesting(false)
             }
         }
+        .overlay(alignment: .bottom) {
+            FileUploadBar(session: session)
+                .padding(.horizontal, 12).padding(.bottom, 12)
+        }
         .background(Color.black)
         .statusBarHidden(session.phase.isViewing && !toolbarVisible)
         .persistentSystemOverlays(session.phase.isViewing ? .hidden : .automatic)
@@ -90,11 +100,48 @@ struct SessionScreen: View {
                     displayPickerVisible = false
                 }
         }
+        .sheet(item: $uploadPicker, onDismiss: {
+            // Selection callbacks run before the system sheet actually leaves.
+            // Keep the original picture hidden until this dismissal witness.
+            if let owner = uploadPickerSession, let token = uploadPickerToken,
+               owner.uploadChoice?.token == token,
+               owner.uploadChoice?.phase == .choosing {
+                owner.discardUploadSelection(token: token)
+            }
+            uploadPickerToken = nil
+            uploadPickerSession = nil
+            uploadPickerVisible = false
+        }) { choice in
+            if let owner = uploadPickerSession {
+                FileUploadPicker { url in
+                    if let url {
+                        owner.prepareUpload(url, choice: choice)
+                    } else {
+                        owner.discardUploadSelection(token: choice.token)
+                    }
+                    uploadPicker = nil
+                }
+                .onAppear { uploadPickerVisible = true }
+            }
+        }
+        .onChange(of: session.uploadChoice?.token) { _, token in
+            if token == nil { uploadPicker = nil }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active {
+                session.discardUploadSelection()
+                uploadPicker = nil
+            }
+        }
         .task(id: session.handle) {
             // Startup has no frame yet, and a presented picker can pause
             // Metal's refreshes. Keep reading its original request/expiry.
-            while !Task.isCancelled, !session.phase.isEnded {
-                if !session.phase.isViewing { session.pump() }
+            while !Task.isCancelled {
+                // Native pickers can pause Metal callbacks. Continue bounded
+                // status polling through actual file cleanup after an end.
+                if !session.phase.isViewing || uploadPickerVisible || uploadPicker != nil {
+                    session.pump()
+                }
                 try? await Task.sleep(for: .milliseconds(50))
             }
         }
@@ -116,7 +163,8 @@ struct SessionScreen: View {
         hideTask?.cancel()
         hideTask = Task { @MainActor in
             try? await Task.sleep(for: .seconds(3))
-            if !Task.isCancelled, session.phase.isViewing, !keyboard { toolbarVisible = false }
+            if !Task.isCancelled, session.phase.isViewing, !keyboard,
+               session.uploadChoice == nil, !uploadPickerVisible { toolbarVisible = false }
         }
     }
 
@@ -127,6 +175,24 @@ struct SessionScreen: View {
 
     private func close() {
         model.disconnect()
+    }
+
+    private func chooseFile() {
+        guard uploadPickerSession == nil, !uploadPickerVisible,
+              let choice = session.beginUploadSelection() else { return }
+        keyboard = false
+        session.setVisible(false)
+        uploadPickerToken = choice.token
+        uploadPickerSession = session
+        uploadPickerVisible = true
+        uploadPicker = choice
+        showToolbar()
+    }
+
+    private func releaseControl() {
+        model.releaseControl(session)
+        keyboard = false
+        zoomCommand = nil
     }
 
     private func changeDisplay() {
@@ -148,8 +214,10 @@ private struct StatusCard: View {
         VStack(spacing: 14) {
             if model.switchingDisplay {
                 ProgressView().controlSize(.large).tint(.white)
-                Text("Changing display…").font(.headline)
-                Text("Closing the current session before opening the approved display list.")
+                Text(model.releasingControl ? "Releasing control…" : "Changing display…").font(.headline)
+                Text(model.releasingControl
+                     ? "Closing the controlled session before opening fresh viewing."
+                     : "Closing the current session before opening the approved display list.")
                     .font(.subheadline).foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button("Cancel", action: close).buttonStyle(.bordered)

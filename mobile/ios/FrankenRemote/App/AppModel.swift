@@ -29,6 +29,7 @@ final class AppModel: ObservableObject {
     private var connectTask: Task<Void, Never>?
     private var displaySwitchTask: Task<Void, Never>?
     @Published private(set) var switchingDisplay = false
+    @Published private(set) var releasingControl = false
     @Published private(set) var displaySwitchError: String?
 
     @Published private(set) var session: RemoteSession?
@@ -158,13 +159,22 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Releasing control uses the same original-session cleanup proof as a
+    /// display change. The replacement observes and requires a new Control
+    /// action; it never carries selected files or the auto-control preference.
+    func releaseControl(_ original: RemoteSession) {
+        guard session === original, original.phase == .controlled, !switchingDisplay else { return }
+        changeDisplay(original)
+        if switchingDisplay { releasingControl = true }
+    }
+
     /// A display switch is a new observing session to the original pinned
     /// host, after the old service has actually cleaned up. No saved catalog
     /// or input intent survives; control remains available as a fresh action.
     func changeDisplay(_ original: RemoteSession) {
         guard session === original, original.phase.isViewing, !switchingDisplay else { return }
         guard let host = original.displaySwitchHost() else {
-            original.notice = "The current machine's identity is unavailable. Disconnect before choosing another display."
+            original.notice = "The current machine's identity is unavailable. Disconnect before opening another viewing session."
             return
         }
         cancelStart()
@@ -188,6 +198,7 @@ final class AppModel: ObservableObject {
                 case .ready:
                     self.displaySwitchTask = nil
                     self.switchingDisplay = false
+                    self.releasingControl = false
                     self.subscriptions.removeAll()
                     self.session = nil
                     self.start(host, control: original.controlCapable, requestControl: false)
@@ -195,7 +206,8 @@ final class AppModel: ObservableObject {
                 case .refused:
                     self.displaySwitchTask = nil
                     self.switchingDisplay = false
-                    self.displaySwitchError = "The previous session did not confirm a clean close. No new display session was opened."
+                    self.releasingControl = false
+                    self.displaySwitchError = "The previous session did not confirm a clean close. No new viewing session was opened."
                     return
                 }
             }
@@ -206,6 +218,7 @@ final class AppModel: ObservableObject {
         displaySwitchTask?.cancel()
         displaySwitchTask = nil
         switchingDisplay = false
+        releasingControl = false
         displaySwitchError = nil
     }
 

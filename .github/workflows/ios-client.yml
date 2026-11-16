@@ -21,7 +21,9 @@ permissions:
 
 concurrency:
   group: ios-client-${{ github.ref }}
-  cancel-in-progress: false
+  # The latest main contains the complete core and app; superseded snapshots
+  # must not hold an Apple runner ahead of current integration validation.
+  cancel-in-progress: true
 
 env:
   CARGO_BUILD_JOBS: '1'

@@ -19,6 +19,7 @@ struct FrankenRemoteApp: App {
                     set: { if $0 == nil { model.disconnect() } })
                 ) { active in
                     SessionScreen(session: active.session)
+                        .id(active.session.handle)
                         .environmentObject(model)
                         .environmentObject(model.settings)
                 }
