@@ -41,6 +41,26 @@ be running FrankenRemote and its own admission policy must allow this viewer.
 
 ## Install and use the desktop app
 
+The quickest install is the PowerShell one-liner. It downloads the release
+zip (or builds from source while no release exists) and runs the app's own
+`--install`, described below:
+
+```powershell
+irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1 | iex
+```
+
+It checks the zip against the release's `SHA256SUMS`. It also checks the zip's
+Sigstore bundle when cosign 2.6.2 or later is installed. It refuses an archive
+with absolute or `..` paths, links, or more than one top-level folder.
+
+Before installing, it checks for Tailscale and offers to install it with
+winget. It also checks for the HEVC Video Extensions and opens their Store page
+if they are missing. It writes the agent skill for Claude Code and Codex.
+
+`-Uninstall` runs `FrankenRemote.exe --uninstall` and removes the skill.
+`-Help` lists the options. The zip-based install and uninstall ran on
+Windows 11 (oldsurface). A complete source build has not run on Windows yet.
+
 The release build produces two programs from one library:
 
 - `FrankenRemote.exe`: the desktop app, a window with no console.

@@ -11,6 +11,49 @@ The two binaries are:
 
 Helper processes they launch (all built from `fr-native`): `fr-media-worker` (capture/encode, the sandboxed decoder/presenter, host audio capture), `fr-input-agent` (the per-lease XTest or Quartz executor with its indicator, and the separate `--clipboard` X11 or macOS pasteboard owner), `fr-opus-worker` (the client's restricted Opus decoder) and `fr-session-monitor` (read-only logind evidence for `frd run --logind-session`, and required [console/sleep evidence on macOS](docs/macos-host.md#console-session-lifecycle); graphical screen-lock qualification on macOS remains open). The separate `fr-observation-indicator` provides the [required macOS host Stop sharing surface](docs/observation-indicator.md), including view-only hosting; native visibility/input qualification remains pending.
 
+## Install
+
+**macOS and Linux.** This installs the client (`fr`) and the host programs (`frd` and its helpers) for the current user:
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.sh?$(date +%s)" | bash
+```
+
+Append `-s -- --host` to that command to also share this machine's desktop, which registers a per-user LaunchAgent on macOS or a systemd user service on Linux. Append `-s -- --client-only` to install only the viewer.
+
+**Windows.** This installs the FrankenRemote desktop app, which lists your tailnet's machines, and the `fr-windows` command. Run it in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1 | iex
+```
+
+Both installers check for Tailscale and offer to install it.
+
+They download the release archive for the machine and check it against the release's `SHA256SUMS`. When cosign 2.6.2 or later is installed, they also verify the archive's Sigstore bundle. A checksum or signature mismatch stops the install and leaves the existing install untouched. If no release archive fits the machine, they build from source with the pinned toolchain.
+
+Beyond the programs themselves:
+
+- `install.sh` installs bash, zsh and fish completions.
+- Both install a `franken-remote` agent skill for Claude Code and Codex.
+
+Running the installer again upgrades in place. `--uninstall` (or `-Uninstall` on Windows) removes everything it added. All options are listed by `install.sh --help` and `install.ps1 -Help`. To pass options on Windows, use `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1))) -NoLaunch` or set the `FR_INSTALL_*` environment variables.
+
+**No release has been published yet, so both installers currently build from source.** Building needs about 12 GB free (10 GB on Windows), and the installers ask before installing anything system-wide:
+
+- **Linux:** the distribution's build packages (apt, dnf, pacman or zypper).
+- **macOS:** the Xcode command line tools.
+- **Windows:** rustup and a MinGW-w64 GCC (WinLibs, through winget).
+
+The first build took about 8 minutes for the Mac client and about 15 minutes for the Linux client and host.
+
+What has been run:
+
+- **Linux:** source installs in clean Ubuntu 24.04 and 26.04 containers.
+- **macOS:** a client-only source install, plus installs from local release archives. Wrong checksums, path traversal and symlinks were all refused.
+- **Windows 11:** installs from a local release zip, covering the app, its Apps & features entry, Start menu shortcut, PATH, `fr-windows hosts` and uninstall. The source-build helpers were also checked on Windows 11.
+
+Not run yet: `--host` on a live Linux or macOS desktop, a complete native Windows source build, and the release workflow (`.github/workflows/release.yml`, which runs on `v*` tags).
+
 ## What runs today
 
 Evidence levels: *live* = run against this repository's binaries on a real tailnet host; *namespace e2e* = real processes, UDP/TLS/QUIC, admission and media in an isolated network namespace with fixture Tailscale LocalAPI, test CA and synthetic firewall; *Xvfb* = real X server in CI; *unit* = tests only.
