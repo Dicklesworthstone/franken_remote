@@ -1267,7 +1267,12 @@ impl HevcDecoder {
         let sample = admission
             .prepare_hvc1(unit.bytes(), idr)
             .map_err(|_| NativeError::UnsupportedBitstream)?;
-        let pts = i64::try_from(unit.capture_micros()).unwrap_or(i64::MAX);
+        // Positive original-frame identity, never a saturating/repeated capture
+        // clock. The native output gate matches this token before publication.
+        let pts = i64::try_from(unit.frame().as_raw())
+            .ok()
+            .and_then(|frame| frame.checked_add(1))
+            .ok_or(NativeError::StaleGeneration)?;
         let bytes = sample.bytes();
         // SAFETY: the admitted sample lives for this synchronous call and the
         // glue copies it into a CoreMedia block buffer before decoding.

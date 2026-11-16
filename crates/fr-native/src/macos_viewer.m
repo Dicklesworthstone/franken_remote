@@ -12,6 +12,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <CoreVideo/CoreVideo.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <VideoToolbox/VideoToolbox.h>
@@ -22,6 +23,7 @@
 #include <unistd.h>
 #include <stdbool.h>
 #include <stdatomic.h>
+#include "apple_decode_output.h"
 
 enum {
     FR_MAC_OK = 0,
@@ -3150,33 +3152,24 @@ void fr_mac_window_free(void *handle) {
     FrRenderer *renderer;
     CMVideoFormatDescriptionRef format;
     VTDecompressionSessionRef session;
-    OSStatus status;
-    CVImageBufferRef image;
+    FrAppleDecodeOutput output;
 }
 @end
 
 @implementation FrDecoder
 - (void)dealloc {
+    fr_apple_output_close(&output);
     if (session) {
+        // Fence first; keep callback storage alive until native work drains
+        // and its session is invalidated. No output gate is held while waiting.
+        VTDecompressionSessionWaitForAsynchronousFrames(session);
         VTDecompressionSessionInvalidate(session);
         CFRelease(session);
     }
     if (format) CFRelease(format);
-    if (image) CVPixelBufferRelease(image);
+    fr_apple_output_destroy(&output);
 }
 @end
-
-static void fr_decoded(void *refcon, void *frame, OSStatus status, VTDecodeInfoFlags flags,
-                       CVImageBufferRef image, CMTime pts, CMTime duration) {
-    (void)frame;
-    (void)flags;
-    (void)pts;
-    (void)duration;
-    FrDecoder *d = (__bridge FrDecoder *)refcon;
-    d->status = status;
-    if (d->image) CVPixelBufferRelease(d->image);
-    d->image = status == noErr && image ? CVPixelBufferRetain(image) : NULL;
-}
 
 // Parameter sets arrive already admitted by Rust's HEVC guard.
 int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len,
@@ -3188,6 +3181,8 @@ int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len
     @autoreleasepool {
         FrDecoder *d = [FrDecoder new];
         d->renderer = (__bridge FrRenderer *)renderer_handle;
+        if (!fr_apple_output_init(&d->output, width, height, full_range != 0))
+            return FR_MAC_ALLOCATION;
         const uint8_t *sets[3] = {vps, sps, pps};
         const size_t sizes[3] = {vps_len, sps_len, pps_len};
         if (CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault, 3, sets, sizes, 4,
@@ -3205,7 +3200,7 @@ int fr_mac_decoder_new(void *renderer_handle, const uint8_t *vps, size_t vps_len
         NSDictionary *spec = @{
             (id)kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder : @YES,
         };
-        VTDecompressionOutputCallbackRecord callback = {fr_decoded, (__bridge void *)d};
+        VTDecompressionOutputCallbackRecord callback = {fr_apple_output_callback, &d->output};
         if (VTDecompressionSessionCreate(kCFAllocatorDefault, d->format, (__bridge CFDictionaryRef)spec,
                                          (__bridge CFDictionaryRef)attributes, &callback,
                                          &d->session) != noErr)
@@ -3255,10 +3250,11 @@ int fr_mac_decoder_hardware(void *handle) {
 
 // Decodes one length-prefixed access unit synchronously and, when `present`
 // is set, draws it. A decode-only unit still advances the reference chain.
-int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t pts,
+int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t token,
                           int present) {
     if (!handle || !bytes || !len) return FR_MAC_INVALID;
     FrDecoder *d = (__bridge FrDecoder *)handle;
+    if (!fr_apple_output_begin(&d->output, token)) return FR_MAC_CODEC;
     int result = FR_MAC_OK;
     @autoreleasepool {
         CMBlockBufferRef block = NULL;
@@ -3270,29 +3266,26 @@ int fr_mac_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_
             if (block) CFRelease(block);
             return FR_MAC_ALLOCATION;
         }
-        CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(pts, 1000000), kCMTimeInvalid};
+        // Original frame identity; capture time remains separate Rust metadata.
+        CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(token, 1), kCMTimeInvalid};
         const size_t sizes[1] = {len};
         if (CMSampleBufferCreateReady(kCFAllocatorDefault, block, d->format, 1, 1, &timing, 1, sizes,
                                       &sample) != noErr) {
             CFRelease(block);
             return FR_MAC_ALLOCATION;
         }
-        d->status = noErr;
-        if (d->image) {
-            CVPixelBufferRelease(d->image);
-            d->image = NULL;
-        }
         VTDecodeInfoFlags info = 0;
-        OSStatus status = VTDecompressionSessionDecodeFrame(d->session, sample, 0, NULL, &info);
+        OSStatus status = VTDecompressionSessionDecodeFrame(d->session, sample, 0, &d->output, &info);
         CFRelease(sample);
         CFRelease(block);
+        CVPixelBufferRef decoded = NULL;
+        enum FrAppleOutputError output_result =
+            fr_apple_output_take(&d->output, status, info, &decoded);
         if (status == kVTInvalidSessionErr) return FR_MAC_SESSION_LOST;
-        if (status != noErr || d->status != noErr || !d->image ||
-            (info & kVTDecodeInfo_FrameDropped))
-            return FR_MAC_CODEC;
-        if (present) result = [d->renderer present:d->image];
-        CVPixelBufferRelease(d->image);
-        d->image = NULL;
+        if (output_result == FR_APPLE_OUTPUT_GEOMETRY) return FR_MAC_GEOMETRY;
+        if (output_result != FR_APPLE_OUTPUT_OK) return FR_MAC_CODEC;
+        if (present) result = [d->renderer present:decoded];
+        CVPixelBufferRelease(decoded);
     }
     return result;
 }

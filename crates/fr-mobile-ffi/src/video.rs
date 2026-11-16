@@ -158,7 +158,12 @@ impl Decoder {
             .prepare_hvc1(unit.bytes(), idr)
             .map_err(|_| Error::UnsupportedBitstream)?;
         #[cfg(any(target_os = "ios", target_os = "macos"))]
-        let pts = i64::try_from(unit.capture_micros()).unwrap_or(i64::MAX);
+        // Native callback identity must remain unique even when capture clocks
+        // repeat. Zero is reserved by the output gate; frame zero uses token one.
+        let pts = i64::try_from(unit.frame().as_raw())
+            .ok()
+            .and_then(|frame| frame.checked_add(1))
+            .ok_or(Error::StaleGeneration)?;
         // MF timestamps correlate output with the original frame, independently
         // of capture clocks (which can repeat). This is not a freshness clock;
         // the access unit keeps its original capture time and deadline.

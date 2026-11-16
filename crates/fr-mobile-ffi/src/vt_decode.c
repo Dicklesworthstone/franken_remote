@@ -9,9 +9,11 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
+#include <IOSurface/IOSurface.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "../../fr-native/src/apple_decode_output.h"
 
 enum {
     FR_VT_OK = 0,
@@ -26,21 +28,8 @@ enum {
 typedef struct {
     CMVideoFormatDescriptionRef format;
     VTDecompressionSessionRef session;
-    OSStatus status;
-    CVImageBufferRef image;
+    FrAppleDecodeOutput output;
 } FrVtDecoder;
-
-static void fr_vt_decoded(void *refcon, void *frame, OSStatus status, VTDecodeInfoFlags flags,
-                          CVImageBufferRef image, CMTime pts, CMTime duration) {
-    (void)frame;
-    (void)flags;
-    (void)pts;
-    (void)duration;
-    FrVtDecoder *d = (FrVtDecoder *)refcon;
-    d->status = status;
-    if (d->image) CVPixelBufferRelease(d->image);
-    d->image = status == noErr && image ? CVPixelBufferRetain(image) : NULL;
-}
 
 static CFDictionaryRef fr_vt_dictionary(const void **keys, const void **values, CFIndex count) {
     return CFDictionaryCreate(kCFAllocatorDefault, keys, values, count,
@@ -50,12 +39,16 @@ static CFDictionaryRef fr_vt_dictionary(const void **keys, const void **values, 
 void fr_vt_decoder_free(void *handle) {
     FrVtDecoder *d = (FrVtDecoder *)handle;
     if (!d) return;
+    fr_apple_output_close(&d->output);
     if (d->session) {
+        // No asynchronous work is requested. Drain any unexpected native
+        // output after fencing it; the callback owner stays alive throughout.
+        VTDecompressionSessionWaitForAsynchronousFrames(d->session);
         VTDecompressionSessionInvalidate(d->session);
         CFRelease(d->session);
     }
     if (d->format) CFRelease(d->format);
-    if (d->image) CVPixelBufferRelease(d->image);
+    fr_apple_output_destroy(&d->output);
     free(d);
 }
 
@@ -66,6 +59,10 @@ int fr_vt_decoder_new(const uint8_t *vps, size_t vps_len, const uint8_t *sps, si
     *out = NULL;
     FrVtDecoder *d = calloc(1, sizeof(FrVtDecoder));
     if (!d) return FR_VT_ALLOCATION;
+    if (!fr_apple_output_init(&d->output, width, height, full_range != 0)) {
+        fr_vt_decoder_free(d);
+        return FR_VT_ALLOCATION;
+    }
     const uint8_t *sets[3] = {vps, sps, pps};
     const size_t sizes[3] = {vps_len, sps_len, pps_len};
     if (CMVideoFormatDescriptionCreateFromHEVCParameterSets(kCFAllocatorDefault, 3, sets, sizes, 4,
@@ -96,7 +93,7 @@ int fr_vt_decoder_new(const uint8_t *vps, size_t vps_len, const uint8_t *sps, si
 #else
     CFDictionaryRef spec = NULL;
 #endif
-    VTDecompressionOutputCallbackRecord callback = {fr_vt_decoded, d};
+    VTDecompressionOutputCallbackRecord callback = {fr_apple_output_callback, &d->output};
     OSStatus created = VTDecompressionSessionCreate(kCFAllocatorDefault, d->format, spec, attributes,
                                                     &callback, &d->session);
     if (spec) CFRelease(spec);
@@ -131,11 +128,12 @@ int fr_vt_decoder_hardware(void *handle) {
 // Decodes one length-prefixed access unit synchronously. With `image` set,
 // the decoded picture is returned retained (+1) for presentation; without,
 // it is released (a decode-only unit still advances the reference chain).
-int fr_vt_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t pts,
+int fr_vt_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t token,
                          void **image) {
     FrVtDecoder *d = (FrVtDecoder *)handle;
     if (!d || !bytes || !len) return FR_VT_INVALID;
     if (image) *image = NULL;
+    if (!fr_apple_output_begin(&d->output, token)) return FR_VT_CODEC;
     CMBlockBufferRef block = NULL;
     CMSampleBufferRef sample = NULL;
     if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, NULL, len, kCFAllocatorDefault, NULL, 0,
@@ -145,36 +143,29 @@ int fr_vt_decoder_decode(void *handle, const uint8_t *bytes, size_t len, int64_t
         if (block) CFRelease(block);
         return FR_VT_ALLOCATION;
     }
-    CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(pts, 1000000), kCMTimeInvalid};
+    // A correlation token, not a capture/freshness clock. Capture timestamps
+    // can repeat; every original frame has its own positive token.
+    CMSampleTimingInfo timing = {kCMTimeInvalid, CMTimeMake(token, 1), kCMTimeInvalid};
     const size_t sizes[1] = {len};
     if (CMSampleBufferCreateReady(kCFAllocatorDefault, block, d->format, 1, 1, &timing, 1, sizes,
                                   &sample) != noErr) {
         CFRelease(block);
         return FR_VT_ALLOCATION;
     }
-    d->status = noErr;
-    if (d->image) {
-        CVPixelBufferRelease(d->image);
-        d->image = NULL;
-    }
     VTDecodeInfoFlags info = 0;
-    OSStatus status = VTDecompressionSessionDecodeFrame(d->session, sample, 0, NULL, &info);
+    OSStatus status = VTDecompressionSessionDecodeFrame(d->session, sample, 0, &d->output, &info);
     CFRelease(sample);
     CFRelease(block);
+    CVPixelBufferRef decoded = NULL;
+    enum FrAppleOutputError result = fr_apple_output_take(&d->output, status, info, &decoded);
     if (status == kVTInvalidSessionErr) return FR_VT_SESSION_LOST;
-    if (status != noErr || d->status != noErr || !d->image || (info & kVTDecodeInfo_FrameDropped)) {
-        if (d->image) {
-            CVPixelBufferRelease(d->image);
-            d->image = NULL;
-        }
-        return FR_VT_CODEC;
-    }
+    if (result == FR_APPLE_OUTPUT_GEOMETRY) return FR_VT_GEOMETRY;
+    if (result != FR_APPLE_OUTPUT_OK) return FR_VT_CODEC;
     if (image) {
-        *image = (void *)d->image;  // ownership moves to the caller
+        *image = (void *)decoded;  // ownership moves to the caller
     } else {
-        CVPixelBufferRelease(d->image);
+        CVPixelBufferRelease(decoded);
     }
-    d->image = NULL;
     return FR_VT_OK;
 }
 
