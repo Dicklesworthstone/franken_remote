@@ -174,6 +174,32 @@ fn a_late_real_publication_replaces_uncertainty_but_never_loses_to_cleanup() {
 }
 
 #[test]
+fn first_cleanup_failure_survives_later_collection_and_late_publication() {
+    let control = ReceiveControl::new();
+    let collector = control.clone();
+    control.set_phase(ReceivePhase::Receiving);
+    control.observe(ResultReceipt {
+        id: 9,
+        outcome: Err(worker::Error::UnknownEffect),
+    });
+    control.cleaned(Ok(()));
+    control.cleaned(Err(worker::Error::Cleanup));
+    control.end(Absence::Unavailable);
+
+    // A late original disk receipt proves the committed effect, even though
+    // cleanup failed. A later successful join must not rewrite that failure.
+    let receipt = published(9);
+    collector.observe(receipt);
+    collector.cleaned(Ok(()));
+    collector.cleaned(Err(worker::Error::Panicked));
+    let status = control.status();
+    assert_eq!(status.results, [receipt]);
+    assert_eq!(status.cleanup, Some(Err(worker::Error::Cleanup)));
+    assert_eq!(status.phase, ReceivePhase::Ended);
+    assert!(status.may_have_started());
+}
+
+#[test]
 fn cleanup_evidence_distinguishes_pre_start_absence_from_an_unjoined_owner() {
     for absence in [
         Absence::NotNegotiated,

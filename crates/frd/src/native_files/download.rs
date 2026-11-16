@@ -219,7 +219,13 @@ impl ReceiveControl {
         state.progress = None;
     }
     pub(crate) fn cleaned(&self, cleanup: Result<(), worker::Error>) {
-        self.lock().cleanup = Some(cleanup);
+        let mut state = self.lock();
+        // A later poll may establish a real publication or join the original
+        // worker, but cannot repair an already observed cleanup failure.
+        // Retain the first failure independently of those stronger receipts.
+        if state.cleanup.is_none_or(|previous| previous.is_ok()) {
+            state.cleanup = Some(cleanup);
+        }
     }
 }
 
