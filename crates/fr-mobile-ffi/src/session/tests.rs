@@ -824,3 +824,29 @@ fn configuration_cannot_redefine_display_coordinates_or_accept_a_noncanonical_cr
             .is_err()
     );
 }
+
+#[test]
+fn retained_frame_display_never_uses_a_replacement_attempt_even_at_the_same_size() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let first = shared.frames.app_id(0);
+    shared
+        .publish_configuration(first, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    let retained = shared.frames.app_id(17);
+    assert_eq!(shared.display_for_frame(retained), Some((5120, 2880)));
+    assert_eq!(shared.display_for_frame(0), None);
+    assert_eq!(shared.display_for_frame(17), None);
+
+    shared.frames.begin_attempt().unwrap();
+    let replacement = shared.frames.app_id(0);
+    assert_eq!(shared.display_for_frame(retained), None);
+    assert_eq!(shared.display_for_frame(replacement | 17), None);
+    shared
+        .publish_configuration(replacement, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    assert_eq!(shared.display_for_frame(retained), None);
+    assert_eq!(shared.display_for_frame(replacement | 17), Some((5120, 2880)));
+    shared.clear_presentation();
+    assert_eq!(shared.display_for_frame(replacement | 17), None);
+}

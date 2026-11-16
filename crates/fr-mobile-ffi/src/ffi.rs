@@ -518,6 +518,39 @@ pub unsafe extern "C" fn fr_session_copy_frame(
     image
 }
 
+/// Original approved display dimensions for this retained frame's live
+/// attempt. Unlike VIDEO notifications, this lookup survives event overflow
+/// and cannot pair an old picture with a replacement connection's geometry.
+/// Returns false without writing either output for unknown, retired, closed
+/// or mismatched owners. This supplies geometry, not input authority.
+///
+/// # Safety
+/// Each output is NULL or writable for one `u32`; both must be non-null for
+/// success. Call again before repainting a retained frame after a reconnect.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_frame_display(
+    handle: FrHandle,
+    frame: u64,
+    width: *mut u32,
+    height: *mut u32,
+) -> bool {
+    if width.is_null() || height.is_null() {
+        return false;
+    }
+    let Some(session) = lookup(handle) else {
+        return false;
+    };
+    let Some((display_width, display_height)) = session.shared().display_for_frame(frame) else {
+        return false;
+    };
+    // SAFETY: both outputs are non-null and writable per the caller's contract.
+    unsafe {
+        width.write(display_width);
+        height.write(display_height);
+    }
+    true
+}
+
 /// Report that the picture with frame id `frame` was drawn into a drawable
 /// that was presented. This is the session's evidence that the user can see
 /// the host; control is requested and kept only on it.

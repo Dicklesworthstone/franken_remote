@@ -159,6 +159,36 @@ fn display_bridge_rejects_bad_handles_and_modes_without_changing_outputs() {
 }
 
 #[test]
+fn frame_display_refuses_unknown_owners_and_null_outputs_without_writing() {
+    let mut width = 91;
+    let mut height = 37;
+    // SAFETY: outputs are writable or NULL; all handles are deliberately invalid.
+    unsafe {
+        for handle in [0, 1, u64::MAX] {
+            assert!(!fr_session_frame_display(
+                handle,
+                1,
+                &raw mut width,
+                &raw mut height
+            ));
+        }
+        assert!(!fr_session_frame_display(
+            0,
+            1,
+            core::ptr::null_mut(),
+            &raw mut height
+        ));
+        assert!(!fr_session_frame_display(
+            0,
+            1,
+            &raw mut width,
+            core::ptr::null_mut()
+        ));
+    }
+    assert_eq!((width, height), (91, 37));
+}
+
+#[test]
 fn captured_typing_rejects_stale_handles_without_writing_or_allocating_a_token() {
     let mut token = 91;
     // SAFETY: the first output is valid; the null output is explicitly refused.

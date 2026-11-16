@@ -342,6 +342,18 @@ impl Shared {
             .flatten()
     }
 
+    /// Original display dimensions for a retained app-visible frame id.
+    /// Attempt generations never repeat. A reconnect between either snapshot
+    /// below and the guarded lookup therefore refuses instead of supplying
+    /// the replacement display's coordinates for an older picture.
+    pub fn display_for_frame(&self, frame: u64) -> Option<(u32, u32)> {
+        let attempt = self.frames.app_id(0);
+        if frame == 0 || frame != self.frames.app_id(frame) {
+            return None;
+        }
+        self.display_for(attempt)
+    }
+
     fn clear_presentation(&self) {
         self.frames.clear();
         if let Ok(mut cursor) = self.cursor.lock() {

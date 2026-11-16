@@ -10,10 +10,14 @@
  * Threading: any thread may call any function, concurrently. No function
  * blocks on the network. A freed or invented handle is refused, never used.
  *
- * Coordinates: input positions are ENCODED PICTURE pixels (the size in
- * FR_EVENT_VIDEO / FrFrameInfo), after the app undid its own zoom, pan,
- * letterbox, rotation and safe-area placement. A point outside the picture
- * is refused (FR_OUTSIDE), never moved onto an edge.
+ * Coordinates: input positions use an ENCODED PICTURE-sized area
+ * (FrFrameInfo), after the app undid its own zoom, pan, rotation and safe-area
+ * placement. Fit the ORIGINAL DISPLAY aspect into that area with integer
+ * dimensions and centered offsets; draw and target its image rectangle.
+ * Its letterbox bars are refused (FR_OUTSIDE), never moved onto an edge.
+ * fr_session_frame_display supplies the original dimensions for a live
+ * frame owner. Cursor positions, shape sizes and hotspots use ORIGINAL
+ * DISPLAY pixels and must be scaled through the same image rectangle.
  *
  * Privacy: nothing here logs pixels, keys, text, names or addresses.
  */
@@ -199,6 +203,13 @@ CVPixelBufferRef _Nullable fr_session_copy_frame(FrHandle session,
                                                  uint64_t after_sequence,
                                                  FrFrameInfo *_Nullable info)
     CF_RETURNS_RETAINED;
+/* Original approved display for the live owner of FrFrameInfo.frame.
+ * Recheck before repainting a retained frame. False for stale, retired or
+ * closed owners, unknown handles or NULL outputs; refusal writes neither.
+ * VIDEO events are lossy notifications, not presentation geometry authority.
+ * This does not grant visibility or input authority; FrFrameInfo ABI is unchanged. */
+bool fr_session_frame_display(FrHandle session, uint64_t frame,
+                                uint32_t *_Nullable width, uint32_t *_Nullable height);
 void fr_session_frame_drawn(FrHandle session, uint64_t frame);
 void fr_session_set_visible(FrHandle session, bool visible);
 
