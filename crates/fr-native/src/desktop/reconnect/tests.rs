@@ -200,7 +200,7 @@ fn fit_policy_survives_reconnect_without_reusing_native_owners_or_input() {
 }
 
 #[test]
-fn screen_box_fits_only_displays_larger_than_the_screen_as_the_host_does() {
+fn screen_box_preserves_native_window_size_but_always_maps_shared_pictures() {
     let configuration = || Configuration::new(Path::new("/usr/bin/false"), ":0", None, 71).unwrap();
     let remote = |width, height| fr_wire::display::Display {
         handle: 1,
@@ -215,10 +215,10 @@ fn screen_box_fits_only_displays_larger_than_the_screen_as_the_host_does() {
         scale_denominator: 1,
         rotation: 0,
     };
-    // No box: every display keeps the exact window, as before.
+    // No box: even native displays keep the exact legacy window and renderer.
     let none = configuration();
     assert_eq!(none.window_box(5120, 2880), None);
-    assert!(!none.fitted(5120, 2880));
+    assert!(!none.mapped_presentation(5120, 2880));
     assert_eq!(none.picture_box(), None);
     let screen = configuration().with_screen_box(1920, 1052);
     assert_eq!(screen.picture_box(), Some((1920, 1052)));
@@ -237,8 +237,9 @@ fn screen_box_fits_only_displays_larger_than_the_screen_as_the_host_does() {
             larger.then_some((1920, 1052)),
             "{width}x{height}"
         );
-        assert_eq!(screen.fitted(width, height), larger);
-        // The host sends native pixels exactly when the window stays exact.
+        assert!(screen.mapped_presentation(width, height));
+        // A fresh host source keeps native pixels when they fit. An existing
+        // shared source may still supply a smaller canonical picture.
         let picture = remote(width, height).picture(screen.picture_box()).unwrap();
         assert_eq!(picture == (width, height), !larger, "{width}x{height}");
         assert!(picture.0 <= 1920 && picture.1 <= 1052);
@@ -251,7 +252,11 @@ fn screen_box_fits_only_displays_larger_than_the_screen_as_the_host_does() {
     assert_eq!(fit.window_box(800, 600), Some((960, 540)));
     assert_eq!(fit.picture_box(), Some((960, 540)));
     // The clipboard control keeps its fitted renderer whatever the size.
-    assert!(configuration().with_clipboard_space().fitted(800, 600));
+    assert!(
+        configuration()
+            .with_clipboard_space()
+            .mapped_presentation(800, 600)
+    );
     // A box no window could have is ignored, not stated.
     for (width, height) in [
         (0, 1052),

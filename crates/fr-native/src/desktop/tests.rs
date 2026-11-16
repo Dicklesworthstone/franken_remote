@@ -301,3 +301,167 @@ fn fitted_client(bounds: InputBounds) -> InputClient {
     )
     .unwrap()
 }
+
+#[test]
+fn a_native_size_window_accepts_smaller_shared_pictures_in_original_display_space() {
+    use fr_client::input::viewport::LocalPoint;
+    use fr_media::worker::presentation::{Fit, MappedX11Target, X11Target};
+
+    let configuration = Configuration::new(Path::new("/usr/bin/false"), ":0", None, 81)
+        .unwrap()
+        .with_screen_box(640, 480);
+    let display = Display {
+        handle: 9,
+        geometry: DisplayGeometryGeneration::INITIAL,
+        x: -320,
+        y: -80,
+        pixel_width: 320,
+        pixel_height: 240,
+        logical_width: 320,
+        logical_height: 240,
+        scale_numerator: 1,
+        scale_denominator: 1,
+        rotation: 0,
+    };
+    assert_eq!(configuration.window_box(320, 240), None);
+    assert!(configuration.mapped_presentation(320, 240));
+    let size = window_size(
+        (display.pixel_width, display.pixel_height),
+        configuration.fit_window,
+        configuration.screen_box,
+    );
+    assert_eq!(size, (320, 240));
+    let target = X11Target::new(19, size.0, size.1).unwrap();
+    let mapping = MappedX11Target::new(target, 320, 240).unwrap();
+    // The existing publisher may keep a smaller canonical picture. It is
+    // neither an exact native picture nor the old downscale-only fit mode.
+    assert!(display.accepts_picture(true, 160, 120));
+    assert!(!display.accepts_picture(false, 160, 120));
+    assert!(Fit::new(160, 120, target).is_err());
+    assert_eq!(
+        mapping.validate_picture(160, 120, &ProtocolLimits::ABSOLUTE),
+        Ok(())
+    );
+    assert!(
+        mapping
+            .validate_picture(160, 122, &ProtocolLimits::ABSOLUTE)
+            .is_err()
+    );
+
+    let bounds = InputBounds::new(DesktopPoint { x: -320, y: -80 }, 320, 240).unwrap();
+    let client = fitted_client(bounds);
+    let mut viewport = client.viewport();
+    let layout = viewport
+        .configure(bounds, SurfaceRect::new(0, 0, size.0, size.1).unwrap())
+        .unwrap();
+    assert_eq!(
+        check_fitted_layout(
+            display,
+            crate::viewer_input::Window {
+                id: 19,
+                width: size.0,
+                height: size.1,
+            },
+            &layout,
+        ),
+        Ok(())
+    );
+    viewport.confirm_layout(&layout).unwrap();
+    assert_eq!(
+        viewport.map(&layout.at(LocalPoint::pixels(160, 120))),
+        Ok(DesktopPoint { x: -160, y: 40 })
+    );
+
+    #[cfg(feature = "linux-media")]
+    {
+        let mut pixels = vec![0_u8; 160 * 120 * 4];
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel.copy_from_slice(&[11, 22, 33, 255]);
+        }
+        pixels[0..4].copy_from_slice(&[71, 72, 73, 255]);
+        let source = crate::BgraFrame::new(160, 120, pixels, &ProtocolLimits::ABSOLUTE).unwrap();
+        let mut fitted =
+            crate::FittedFrame::for_mapped_viewport(160, 120, mapping, ProtocolLimits::ABSOLUTE)
+                .unwrap()
+                .unwrap();
+        let output = fitted.render(&source).unwrap();
+        assert_eq!((output.width(), output.height()), size);
+        for at in [0, 4, 320 * 4, 321 * 4] {
+            assert_eq!(&output.pixels()[at..at + 4], &[71, 72, 73, 255]);
+        }
+        assert_eq!(&output.pixels()[8..12], &[11, 22, 33, 255]);
+        // Mapping a true native picture retains the allocation-free path.
+        assert!(
+            crate::FittedFrame::for_mapped_viewport(
+                320,
+                240,
+                mapping,
+                ProtocolLimits::ABSOLUTE,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
+
+#[test]
+fn odd_display_axes_use_one_even_viewport_for_presentation_snapshot_and_input() {
+    use fr_media::worker::presentation::{MappedX11Target, X11Target};
+
+    for screen in [None, Some((1920, 1080))] {
+        let mut configuration =
+            Configuration::new(Path::new("/usr/bin/false"), ":0", None, 82).unwrap();
+        if let Some((width, height)) = screen {
+            configuration = configuration.with_screen_box(width, height);
+        }
+        assert!(configuration.mapped_presentation(1365, 767));
+        let size = window_size((1365, 767), None, configuration.screen_box);
+        assert_eq!(size, (1364, 766));
+        let target = X11Target::new(19, size.0, size.1).unwrap();
+        let mapping = MappedX11Target::new(target, 1365, 767).unwrap();
+        assert_eq!(
+            mapping.validate_picture(640, 358, &ProtocolLimits::ABSOLUTE),
+            Ok(())
+        );
+        let display = Display {
+            handle: 9,
+            geometry: DisplayGeometryGeneration::INITIAL,
+            x: -100,
+            y: 30,
+            pixel_width: 1365,
+            pixel_height: 767,
+            logical_width: 1365,
+            logical_height: 767,
+            scale_numerator: 1,
+            scale_denominator: 1,
+            rotation: 0,
+        };
+        let bounds = InputBounds::new(DesktopPoint { x: -100, y: 30 }, 1365, 767).unwrap();
+        let client = fitted_client(bounds);
+        let layout = client
+            .viewport()
+            .configure(bounds, SurfaceRect::new(0, 0, size.0, size.1).unwrap())
+            .unwrap();
+        assert_eq!(layout.source(), bounds);
+        assert_eq!(
+            check_fitted_layout(
+                display,
+                crate::viewer_input::Window {
+                    id: 19,
+                    width: size.0,
+                    height: size.1,
+                },
+                &layout,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            window_size((1365, 767), Some((1000, 750)), configuration.screen_box),
+            (1000, 750)
+        );
+    }
+
+    let legacy = Configuration::new(Path::new("/usr/bin/false"), ":0", None, 83).unwrap();
+    assert!(!legacy.mapped_presentation(320, 240));
+    assert_eq!(window_size((320, 240), None, None), (320, 240));
+}

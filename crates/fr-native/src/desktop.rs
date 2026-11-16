@@ -138,10 +138,16 @@ impl Configuration {
     fn window_box(&self, width: u32, height: u32) -> Option<(u32, u32)> {
         window_box((width, height), self.fit_window, self.screen_box)
     }
-    /// Whether a display of `width` x `height` uses the aspect-fit renderer
-    /// and its input mapping instead of the exact 1:1 window.
-    fn fitted(&self, width: u32, height: u32) -> bool {
-        self.window_box(width, height).is_some() || self.clipboard_space
+    /// Whether presentation must retain the original display coordinate space.
+    /// A stated picture box permits a smaller shared-source picture even when
+    /// this display fits in the local screen. Odd display axes also need an
+    /// even local target; neither case changes the input coordinate space.
+    fn mapped_presentation(&self, width: u32, height: u32) -> bool {
+        self.window_box(width, height).is_some()
+            || self.picture_box().is_some()
+            || self.clipboard_space
+            || !width.is_multiple_of(2)
+            || !height.is_multiple_of(2)
     }
     /// The picture box stated to the host: the explicit fit, else the screen,
     /// capped beside the clipboard panel when the viewer reserves it (the
@@ -816,18 +822,13 @@ impl Desktop {
                 // evidence, not an inference from a missing worker handle.
                 *renderer_started = true;
                 let result = async {
-                    let fitted = configuration.fitted(display.pixel_width, display.pixel_height);
-                    let (mut width, mut height) = window_size(
+                    let mapped = configuration
+                        .mapped_presentation(display.pixel_width, display.pixel_height);
+                    let (width, height) = window_size(
                         (display.pixel_width, display.pixel_height),
                         configuration.fit_window,
                         configuration.screen_box,
                     );
-                    if fitted {
-                        // An odd original display still has an exact input
-                        // space; only the local BGRA target needs even axes.
-                        width &= !1;
-                        height &= !1;
-                    }
                     *window = Some(if configuration.clipboard_space {
                         ViewerWindow::start_with_clipboard_space(
                             &configuration.display,
@@ -840,7 +841,7 @@ impl Desktop {
                     });
                     let window = window.as_mut().ok_or(viewer_window::Error::NotReady)?;
                     window.ready().await?;
-                    let launch = if fitted {
+                    let launch = if mapped {
                         window.mapped_decoder_launch(
                             &configuration.image,
                             configuration.xauthority.as_deref(),
@@ -1012,9 +1013,9 @@ impl Desktop {
         let capture_system_shortcuts = self.configuration.capture_system_shortcuts;
         let window = self.window().ok_or(Error::NotViewing)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
-        let fitted = self
+        let mapped = self
             .configuration
-            .fitted(display.pixel_width, display.pixel_height);
+            .mapped_presentation(display.pixel_width, display.pixel_height);
         let local = &self.configuration.display;
         let file_controls = self.file_controls.clone();
         let input = &mut self.input;
@@ -1037,7 +1038,7 @@ impl Desktop {
                                     return Err(Error::CaptureAlreadyStarted);
                                 }
                                 let target = window.input_window().map_err(Error::Window)?;
-                                if fitted {
+                                if mapped {
                                     check_fitted_layout(display, target, &layout)?;
                                 } else {
                                     check_layout(display, target, &layout)?;
@@ -1112,9 +1113,9 @@ impl Desktop {
         let window = self.window().ok_or(Error::NotViewing)?;
         window.enable_orderly_close().map_err(Error::Window)?;
         let display = self.observer.as_ref().ok_or(Error::NotViewing)?.display();
-        let fitted = self
+        let mapped = self
             .configuration
-            .fitted(display.pixel_width, display.pixel_height);
+            .mapped_presentation(display.pixel_width, display.pixel_height);
         let local = &self.configuration.display;
         let file_controls = self.file_controls.clone();
         let input = &mut self.input;
@@ -1154,7 +1155,7 @@ impl Desktop {
                                     return Err(Error::CaptureAlreadyStarted);
                                 }
                                 let target = window.input_window().map_err(Error::Window)?;
-                                if fitted {
+                                if mapped {
                                     check_fitted_layout(display, target, &layout)?;
                                 } else {
                                     check_layout(display, target, &layout)?;
@@ -1422,18 +1423,20 @@ fn window_box(
 
 /// The window (presented viewport) for a remote display of `display` pixels:
 /// inside the explicit fit, else inside the screen box when the display does
-/// not fit in it, each axis capped at the display's and made even; otherwise
-/// the display's own size, shown 1:1. One rule for the renderer and for
-/// checking a screenshot of what it presented.
+/// not fit in it, each axis capped at the display's and rounded down to even.
+/// A display that fits keeps its own even dimensions. Odd native dimensions
+/// retain their original display-space mapping in the even target. One rule
+/// for the renderer and for checking a screenshot of what it presented.
 #[must_use]
 pub fn window_size(
     display: (u32, u32),
     fit: Option<(u32, u32)>,
     screen: Option<(u32, u32)>,
 ) -> (u32, u32) {
-    window_box(display, fit, screen).map_or(display, |(width, height)| {
-        (width.min(display.0) & !1, height.min(display.1) & !1)
-    })
+    let (width, height) = window_box(display, fit, screen).map_or(display, |(width, height)| {
+        (width.min(display.0), height.min(display.1))
+    });
+    (width & !1, height & !1)
 }
 
 fn check_fitted_layout(
