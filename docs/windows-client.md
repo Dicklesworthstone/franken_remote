@@ -132,6 +132,30 @@ after a positive number of seconds. Closing the window also closes the session.
 The viewer prints its existing JSON completion document with counts, timings
 and the typed ending.
 
+### Scaled pictures keep the original display coordinates
+
+A scaling-capable host can send a smaller HEVC picture for the viewer's physical
+client area. The Windows viewer preserves the original selected display's
+aspect ratio when placing that picture. The encoded crop supplies texture
+samples; it does not redefine the desktop's input or cursor coordinates.
+
+For example, a 5120-by-2880 display can produce a canonical 1582-by-888 crop.
+Its exact display-space rectangle is 1578-by-888, with two columns on each
+side in that picture-sized window. Video, the cursor overlay and the native
+pointer use that same rectangle. Mouse positions are translated into the
+shared input owner's matching rectangle inside the encoded picture, so edge
+clicks and drag releases remain in the granted display.
+
+The existing policy still avoids enlarging small pictures in a larger window.
+Letterbox clicks remain outside the remote desktop. A reconnect, including one
+with identical dimensions, requires a fresh presentation mapping; old queued
+native coordinates cannot inherit it. Original display dimensions come from
+the current frame owner and remain available even if a VIDEO notification was
+dropped from the bounded event queue.
+
+Portable geometry and original-owner regression sources cover these cases.
+Native Windows rendering and pointer-injection qualification remain pending.
+
 ## See the remote cursor
 
 When the host sends a separate cursor, the viewer draws its confirmed shape

@@ -1,5 +1,45 @@
 # Implementation status
 
+## Original-display mapping for scaled native pictures (2026-11-16 UTC)
+
+The Linux desktop now chooses its original-display mapped renderer whenever a
+local picture box is stated, including native-size windows. A smaller canonical
+picture retained by a shared publisher can therefore be sampled into the
+original target without a native-size decoder mismatch. Odd display axes use
+one even target for rendering and snapshot checks while retaining the complete
+original input bounds. The even no-box legacy path remains exact-size.
+
+The Windows viewer now derives video placement, cursor placement and pointer
+translation from the approved original display. HEVC crop dimensions determine
+texture sampling only. Its pointer mapping accounts for the shared input
+owner's integer rectangle inside the encoded picture, including canonical
+rounding such as a 1582-by-888 crop for a 5120-by-2880 display. Edge clicks and
+drag releases remain inside that original input rectangle.
+
+Approved display dimensions are retained under the original frame owner's
+publication gate. A bounded event queue losing a VIDEO notification cannot
+remove or replace that geometry. Configuration cannot redefine it within an
+attempt. Identical dimensions on a replacement attempt still require a fresh
+native mapping timestamp, and the viewer rechecks ownership after presentation.
+
+Two Linux regression tests, eight portable Windows geometry tests and two
+shared-session metadata tests were added; the existing selection and
+configuration tests were updated. They cover shared smaller pictures, original
+negative origins, sampling, odd dimensions, edge/letterbox input, late metadata,
+notification overflow and stale reconnect/resize events. Independent source and
+arithmetic reviews passed. These new tests have not yet executed locally: the
+executor disconnected during unchanged baseline dependency compilation.
+Hosted verification on the new revisions remains required; no native Windows,
+real X11 scaled-host, live tailnet or performance result is claimed.
+
+Baseline hosted compiler failures also revealed incorrect inclusion of the
+native session tests by the portable download owner and a file-offer test passing
+an Offer where a Selection was required. Those source defects and unchanged-test
+lint failures were corrected without suppressing tests or relaxing gates.
+See [fitted Linux presentation](FITTED_PRESENTATION.md) and
+[Windows client geometry](docs/windows-client.md#scaled-pictures-keep-the-original-display-coordinates).
+Tracks `fr-foub` and `fr-foub.1`, which remain open for broader qualification.
+
 ## Windows download cleanup and completion (2026-11-16 UTC)
 
 `fr-windows view --control --receive DIR` now connects an explicitly selected

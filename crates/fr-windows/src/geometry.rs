@@ -10,13 +10,103 @@ pub struct Rect {
     pub bottom: i32,
 }
 
+/// One picture's placement and its corresponding shared-core input area.
+///
+/// The original display supplies the aspect ratio. The encoded picture only
+/// supplies samples and the upper bound for the existing no-upscale policy.
+/// The shared input owner separately fits that display into encoded-picture
+/// coordinates, so its rounding/letterbox offsets must also be retained here.
+/// This value is geometry, not a session, visibility or input-authority token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Presentation {
+    pub destination: Rect,
+    input: Rect,
+    display: (u32, u32),
+    picture: (u32, u32),
+    window: (u32, u32),
+}
+
+impl Presentation {
+    /// Construct only from the current attempt's selected display and the
+    /// retained picture's own dimensions. Negotiation validates the canonical
+    /// picture rule separately; invalid/oversized local geometry refuses here.
+    pub fn new(
+        display: (u32, u32),
+        picture: (u32, u32),
+        window: (u32, u32),
+    ) -> Option<Self> {
+        let limits = fr_core::limits::ProtocolLimits::ABSOLUTE;
+        for (width, height) in [display, picture, window] {
+            limits.validate_coded_dimensions(width, height).ok()?;
+        }
+        if picture.0 > display.0 || picture.1 > display.1 {
+            return None;
+        }
+        let input = display_area(display, picture)?;
+        let bounded = (picture.0.min(window.0), picture.1.min(window.1));
+        let fitted = display_area(display, bounded)?;
+        let width = fitted.right.abs_diff(fitted.left);
+        let height = fitted.bottom.abs_diff(fitted.top);
+        let left = (window.0 - width) / 2;
+        let top = (window.1 - height) / 2;
+        let destination = Rect {
+            left: i32::try_from(left).ok()?,
+            top: i32::try_from(top).ok()?,
+            right: i32::try_from(left.checked_add(width)?).ok()?,
+            bottom: i32::try_from(top.checked_add(height)?).ok()?,
+        };
+        Some(Self {
+            destination,
+            input,
+            display,
+            picture,
+            window,
+        })
+    }
+
+    pub const fn picture(self) -> (u32, u32) {
+        self.picture
+    }
+
+    pub const fn window(self) -> (u32, u32) {
+        self.window
+    }
+}
+
+/// The same integer aspect fit used by the shared input `Viewport`. A vanishing
+/// axis refuses instead of inventing a one-pixel input area. All operands were
+/// bounded before these products.
+fn display_area(display: (u32, u32), area: (u32, u32)) -> Option<Rect> {
+    let (sw, sh) = (u64::from(display.0), u64::from(display.1));
+    let (aw, ah) = (u64::from(area.0), u64::from(area.1));
+    if sw == 0 || sh == 0 || aw == 0 || ah == 0 {
+        return None;
+    }
+    let (width, height) = if aw * sh <= ah * sw {
+        (aw, aw * sh / sw)
+    } else {
+        (ah * sw / sh, ah)
+    };
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let left = (aw - width) / 2;
+    let top = (ah - height) / 2;
+    Some(Rect {
+        left: i32::try_from(left).ok()?,
+        top: i32::try_from(top).ok()?,
+        right: i32::try_from(left + width).ok()?,
+        bottom: i32::try_from(top + height).ok()?,
+    })
+}
+
 /// One actually presented window-to-picture mapping. A resize invalidates it
 /// before native work; presenting the retained picture establishes a new one.
 /// Native messages queued under the earlier placement never use the new one.
 /// No Debug: positions are private input state.
 pub struct Mapping {
-    dest: Rect,
-    picture: (u32, u32),
+    presentation: Presentation,
+    attempt: u64,
     /// Suspend-inclusive native tick, sampled after presentation succeeded.
     presented_at: u64,
 }
@@ -25,18 +115,56 @@ pub struct Mapping {
 pub struct StaleMapping;
 
 impl Mapping {
-    pub const fn new(dest: Rect, picture: (u32, u32), presented_at: u64) -> Self {
+    #[cfg(test)]
+    pub fn new(dest: Rect, picture: (u32, u32), presented_at: u64) -> Self {
+        Self::for_presentation(
+            Presentation {
+                destination: dest,
+                input: Rect {
+                    left: 0,
+                    top: 0,
+                    right: i32::try_from(picture.0).expect("bounded test picture"),
+                    bottom: i32::try_from(picture.1).expect("bounded test picture"),
+                },
+                display: picture,
+                picture,
+                window: (
+                    u32::try_from(dest.right).expect("bounded test window"),
+                    u32::try_from(dest.bottom).expect("bounded test window"),
+                ),
+            },
+            1,
+            presented_at,
+        )
+    }
+
+    /// Retain the exact rendered rectangle and the original display's input
+    /// rectangle inside the encoded picture. Encoded rounding cannot retarget
+    /// a pointer to a letterbox column in the shared input owner.
+    pub const fn for_presentation(
+        presentation: Presentation,
+        attempt: u64,
+        presented_at: u64,
+    ) -> Self {
         Self {
-            dest,
-            picture,
+            presentation,
+            attempt,
             presented_at,
         }
     }
 
+    /// A repaint with unchanged geometry keeps its original input timestamp.
+    /// Equal dimensions on a new connection attempt still need a fresh native
+    /// timestamp, so queued coordinates cannot cross into that successor.
+    pub fn same_presentation(&self, presentation: Presentation, attempt: u64) -> bool {
+        attempt != 0 && self.attempt == attempt && self.presentation == presentation
+    }
+
     /// Ordinary pictures with the same placement do not restart input's local
     /// mapping lifetime. Returning to the same size after invalidation does.
+    #[cfg(test)]
     pub fn same_layout(&self, dest: Rect, picture: (u32, u32)) -> bool {
-        self.dest == dest && self.picture == picture
+        self.presentation.destination == dest && self.presentation.picture == picture
     }
 
     /// `Err` is a stale mapping, `Ok(None)` an ordinary letterbox/outside point.
@@ -49,18 +177,29 @@ impl Mapping {
         y: i32,
         dragging: bool,
     ) -> Result<Option<(f64, f64)>, StaleMapping> {
-        if message_at <= self.presented_at {
+        if self.attempt == 0 || message_at <= self.presented_at {
             return Err(StaleMapping);
         }
+        let dest = self.presentation.destination;
         let (x, y) = if dragging {
             (
-                x.clamp(self.dest.left, self.dest.right - 1),
-                y.clamp(self.dest.top, self.dest.bottom - 1),
+                x.clamp(dest.left, dest.right - 1),
+                y.clamp(dest.top, dest.bottom - 1),
             )
         } else {
             (x, y)
         };
-        Ok(picture_point(self.dest, self.picture, x, y))
+        let input = self.presentation.input;
+        Ok(picture_point(
+            dest,
+            (
+                input.right.abs_diff(input.left),
+                input.bottom.abs_diff(input.top),
+            ),
+            x,
+            y,
+        )
+        .map(|(px, py)| (f64::from(input.left) + px, f64::from(input.top) + py)))
     }
 }
 
@@ -289,3 +428,7 @@ mod tests {
         assert!((x - 4.0 / 3.0).abs() < 1e-9 && (y - 4.0 / 3.0).abs() < 1e-9);
     }
 }
+
+#[cfg(test)]
+#[path = "geometry/scaled_tests.rs"]
+mod scaled_tests;

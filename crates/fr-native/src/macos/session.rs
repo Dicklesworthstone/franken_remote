@@ -1422,14 +1422,14 @@ fn service(
             let paused = input
                 .as_mut()
                 .is_some_and(|granted| granted.pause(&mut report).is_ok());
-            if !paused {
-                intent.invalidate();
-                halt(LocalStop::NativeFailure, &mut input, &mut report);
-            } else {
+            if paused {
                 // Release held input before querying AppKit. Clipboard owns
                 // a separate visible Off panel; an app switch cannot starve
                 // its original watchdog merely by pausing keyboard input.
                 clipboard.borrow_mut().turn(window.borrow().as_ref());
+            } else {
+                intent.invalidate();
+                halt(LocalStop::NativeFailure, &mut input, &mut report);
             }
             return;
         }

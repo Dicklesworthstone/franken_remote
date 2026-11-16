@@ -260,6 +260,15 @@ struct FocusOwner {
     control: ViewerControl,
 }
 
+/// Original approved display coordinates, retained with their frame owner.
+/// Encoded pictures may be smaller; decoder configuration cannot change this
+/// scope within an attempt.
+#[derive(Clone, Copy)]
+struct PresentationDisplay {
+    attempt: u64,
+    size: (u32, u32),
+}
+
 /// Everything the app's threads and the session thread share.
 pub struct Shared {
     pub events: Events,
@@ -297,6 +306,7 @@ pub struct Shared {
     /// Positive original service/cleanup proof for that focus-close request.
     focus_closed: AtomicBool,
     picture: Mutex<(u32, u32)>,
+    display: Mutex<Option<PresentationDisplay>>,
     full_range: AtomicBool,
     hardware: AtomicI32,
     pin: Mutex<Option<String>>,
@@ -311,6 +321,25 @@ impl Shared {
     /// and reports only cursor effects, never input or visible-frame evidence.
     pub fn local_cursor(&self) -> Option<&local_cursor::Hub> {
         self.local_cursor.as_ref()
+    }
+
+    /// Original approved display dimensions for this live frame owner.
+    /// A lossy VIDEO notification is not a geometry authority. The frame gate
+    /// prevents an earlier attempt's dimensions from describing a new picture.
+    pub fn display_for(&self, attempt: u64) -> Option<(u32, u32)> {
+        self.frames
+            .with_current(attempt, || {
+                if self.close.load(Ordering::SeqCst) || self.finished() {
+                    return None;
+                }
+                self.display
+                    .lock()
+                    .ok()?
+                    .filter(|display| display.attempt == attempt)
+                    .map(|display| display.size)
+            })
+            .ok()
+            .flatten()
     }
 
     fn clear_presentation(&self) {
@@ -329,6 +358,7 @@ impl Shared {
     fn publish_configuration(
         &self,
         attempt: u64,
+        display: (u32, u32),
         picture: (u32, u32),
         full_range: bool,
         hardware: Option<bool>,
@@ -338,11 +368,25 @@ impl Shared {
                 if self.close.load(Ordering::SeqCst) || self.finished() {
                     return Err(WorkerError::WrongEpoch);
                 }
+                let mut original = self
+                    .display
+                    .lock()
+                    .map_err(|_| WorkerError::NativeFailure)?;
+                if !fr_wire::display::picture::is_picture(display, picture)
+                    || original.is_some_and(|value| value.attempt == attempt && value.size != display)
+                {
+                    return Err(WorkerError::GeometryChanged);
+                }
                 let previous = self
                     .picture
                     .lock()
                     .map(|mut p| std::mem::replace(&mut *p, picture))
                     .map_err(|_| WorkerError::NativeFailure)?;
+                *original = Some(PresentationDisplay {
+                    attempt,
+                    size: display,
+                });
+                drop(original);
                 // A changed picture invalidates the original control layout.
                 // No native call runs here; the independent authority owner
                 // performs release/cleanup after the granted source is stopped.
@@ -403,6 +447,7 @@ impl Shared {
             focus_close_requested: AtomicBool::new(false),
             focus_closed: AtomicBool::new(false),
             picture: Mutex::new((0, 0)),
+            display: Mutex::default(),
             full_range: AtomicBool::new(false),
             hardware: AtomicI32::new(-1),
             pin: Mutex::default(),
@@ -1849,6 +1894,7 @@ impl LocalPresenter for Presenter {
         let hardware = decoder.hardware();
         self.shared.publish_configuration(
             self.attempt,
+            self.display,
             decoder.picture(),
             decoder.full_range(),
             hardware,

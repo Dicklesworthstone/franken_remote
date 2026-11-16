@@ -35,7 +35,9 @@ mod upload;
 use super::render::Renderer;
 use crate::{
     change_display::{self, Action, Activation, Cause, Refusal, Replacements},
-    geometry::{Mapping, Rect as PictureRect, StaleMapping, fit, host_scales, reopen_for},
+    geometry::{
+        Mapping, Presentation, Rect as PictureRect, StaleMapping, host_scales, reopen_for,
+    },
     keys,
 };
 use fr_mobile_ffi::{
@@ -89,7 +91,7 @@ struct Viewer {
     last_point: (f64, f64),
     /// Key transitions waiting behind a press the session answered `Busy`.
     keys: keys::Deferred<CapturedKey>,
-    /// The host's display size (its first VIDEO event).
+    /// The approved display size of the last accepted original frame owner.
     display: (u32, u32),
     /// Inside a drag's size/move loop: reopen only once it ends.
     sizing: bool,
@@ -684,12 +686,8 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     let shared = v.session.shared();
     while let Some(event) = shared.events.poll() {
         log_event(&event);
-        // One VIDEO event names the host display, a later one the encoded
-        // picture; each leaves the other zero.
-        if event.kind == kind::VIDEO && event.display_width != 0 {
-            stats.display = (event.display_width, event.display_height);
-            v.display = stats.display;
-        }
+        // Notifications may be dropped on overflow. Rendering reads geometry
+        // from the original frame owner below, never from this event queue.
     }
     if shared.finished() {
         cursor::retire(v, hwnd);
@@ -759,12 +757,22 @@ fn draw_latest(
         return (false, false);
     }
     let picture = (info.width, info.height);
+    let Some(display) = shared.display_for(attempt) else {
+        v.mapping = None;
+        cursor::retire(v, hwnd);
+        return (false, false);
+    };
+    let Some(presentation) = Presentation::new(display, picture, v.renderer.size()) else {
+        stats.draw_failures += 1;
+        v.session.shared().presentation_failed();
+        v.close();
+        cursor::retire(v, hwnd);
+        return (false, false);
+    };
     let overlay = v
         .renderer
-        .cursor_visible(picture, attempt, info.sequence)
-        .then(|| fit(picture, v.renderer.size()))
-        .flatten()
-        .map(|dest| (attempt, dest));
+        .cursor_visible(presentation.destination, attempt, info.sequence)
+        .then_some((attempt, presentation.destination));
     if cursor::before_draw(v, hwnd, overlay).is_err() {
         stats.draw_failures += 1;
         v.session.shared().presentation_failed();
@@ -778,7 +786,7 @@ fn draw_latest(
             .draw(
                 &texture,
                 slice,
-                picture,
+                presentation,
                 info.full_range,
                 attempt,
                 info.sequence,
@@ -812,6 +820,7 @@ fn draw_latest(
         || v.reopen.pending()
         || shared.finished()
         || shared.frames.app_id(0) != attempt
+        || shared.display_for(attempt) != Some(display)
         || control::lifetime() != lifetime
     {
         v.mapping = None;
@@ -826,12 +835,14 @@ fn draw_latest(
     }
     v.repaint_pending = false;
     let shared = v.session.shared();
-    v.picture = (info.width, info.height);
+    v.picture = picture;
+    v.display = display;
+    stats.display = display;
     if v.mapping
         .as_ref()
-        .is_none_or(|mapping| !mapping.same_layout(dest, v.picture))
+        .is_none_or(|mapping| !mapping.same_presentation(presentation, attempt))
     {
-        v.mapping = Some(Mapping::new(dest, v.picture, input_ticks()));
+        v.mapping = Some(Mapping::for_presentation(presentation, attempt, input_ticks()));
         shared.scroll_end();
     }
     if v.scales.is_none() {
@@ -916,6 +927,19 @@ const fn end_name(code: u32) -> &'static str {
 
 /// The completion document (content-free counts and timings) on stdout.
 /// Exit 0 only when pictures were drawn and the session ended in order.
+fn clipboard_document(clipboard: ClipboardReport) -> serde_json::Value {
+    serde_json::json!({
+        "requested": clipboard.requested,
+        "configured": clipboard.configured,
+        "native_started": clipboard.native_started,
+        "received_submitted": clipboard.received_submitted,
+        "received_unknown": clipboard.received_unknown,
+        "received_refused": clipboard.received_refused,
+        "cleanup": clipboard.cleanup_name(),
+        "reason": clipboard.reason.map(|reason| format!("{reason:?}")),
+    })
+}
+
 fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
     let shared = viewer.session.shared();
     let code = shared.end_code();
@@ -937,17 +961,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         "samples": stats.intervals.gaps(),
     });
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
-    let clipboard = stats.clipboard.unwrap_or_else(|| shared.clipboard_report());
-    let clipboard = serde_json::json!({
-        "requested": clipboard.requested,
-        "configured": clipboard.configured,
-        "native_started": clipboard.native_started,
-        "received_submitted": clipboard.received_submitted,
-        "received_unknown": clipboard.received_unknown,
-        "received_refused": clipboard.received_refused,
-        "cleanup": clipboard.cleanup_name(),
-        "reason": clipboard.reason.map(|reason| format!("{reason:?}")),
-    });
+    let clipboard = clipboard_document(stats.clipboard.unwrap_or_else(|| shared.clipboard_report()));
     let upload_ok = viewer
         .upload_menu
         .as_ref()

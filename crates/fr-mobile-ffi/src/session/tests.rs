@@ -672,7 +672,7 @@ fn retained_picture_range_does_not_follow_a_new_decoder_configuration() {
         shared.frames.begin_attempt().unwrap();
         let attempt = shared.frames.app_id(0);
         shared
-            .publish_configuration(attempt, (128, 96), retained_range, None)
+            .publish_configuration(attempt, (1920, 1440), (128, 96), retained_range, None)
             .unwrap();
         shared
             .frames
@@ -682,7 +682,7 @@ fn retained_picture_range_does_not_follow_a_new_decoder_configuration() {
         // or cursor update can repaint the preceding decoder's retained image
         // during this gap, using that image's original range in BOTH directions.
         shared
-            .publish_configuration(attempt, (128, 96), !retained_range, None)
+            .publish_configuration(attempt, (1920, 1440), (128, 96), !retained_range, None)
             .unwrap();
         assert_eq!(shared.full_range(), !retained_range);
         let (raw, retained) = shared.frames.take_newer(0).unwrap();
@@ -706,7 +706,7 @@ fn native_configuration_returning_after_retirement_publishes_no_video_or_metadat
     shared.frames.begin_attempt().unwrap();
     let original = shared.frames.app_id(0);
     shared
-        .publish_configuration(original, (128, 96), false, Some(false))
+        .publish_configuration(original, (1920, 1440), (128, 96), false, Some(false))
         .unwrap();
     assert_eq!(shared.events.poll().unwrap().kind, kind::VIDEO);
 
@@ -717,7 +717,7 @@ fn native_configuration_returning_after_retirement_publishes_no_video_or_metadat
     assert!(shared.finished());
     assert!(
         shared
-            .publish_configuration(original, (640, 480), true, Some(true))
+            .publish_configuration(original, (1920, 1440), (640, 480), true, Some(true))
             .is_err()
     );
     assert_eq!(*shared.picture.lock().unwrap(), (128, 96));
@@ -735,22 +735,92 @@ fn configuration_metadata_cannot_migrate_to_another_attempt_or_publish_during_cl
     shared.frames.begin_attempt().unwrap();
     let current = shared.frames.app_id(0);
     shared
-        .publish_configuration(current, (128, 96), false, None)
+        .publish_configuration(current, (1920, 1440), (128, 96), false, None)
         .unwrap();
     assert_eq!(shared.events.poll().unwrap().kind, kind::VIDEO);
     assert!(
         shared
-            .publish_configuration(original, (640, 480), true, Some(true))
+            .publish_configuration(original, (1920, 1440), (640, 480), true, Some(true))
             .is_err()
     );
     shared.close();
     assert!(
         shared
-            .publish_configuration(current, (640, 480), true, Some(true))
+            .publish_configuration(current, (1920, 1440), (640, 480), true, Some(true))
             .is_err()
     );
     assert_eq!(*shared.picture.lock().unwrap(), (128, 96));
     assert!(!shared.full_range());
     assert_eq!(shared.hardware(), -1);
     assert!(shared.events.poll().is_none());
+}
+
+#[test]
+fn presentation_display_is_original_and_survives_notification_overflow() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let original = shared.frames.app_id(0);
+    assert_eq!(shared.display_for(0), None);
+    assert_eq!(shared.display_for(original), None);
+    shared
+        .publish_configuration(original, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    for _ in 0..events::CAPACITY * 2 {
+        shared.events.state(state::VIEWING, 1);
+    }
+    assert_eq!(shared.events.poll().unwrap().kind, kind::OVERFLOW);
+    assert_eq!(shared.display_for(original), Some((5120, 2880)));
+
+    shared.frames.begin_attempt().unwrap();
+    let current = shared.frames.app_id(0);
+    assert_eq!(shared.display_for(original), None);
+    assert_eq!(shared.display_for(current), None);
+    assert!(
+        shared
+            .publish_configuration(original, (5120, 2880), (1000, 562), false, None)
+            .is_err()
+    );
+    shared
+        .publish_configuration(current, (1920, 1080), (1280, 720), false, None)
+        .unwrap();
+    assert_eq!(shared.display_for(current), Some((1920, 1080)));
+    assert_eq!(shared.display_for(original), None);
+    shared.clear_presentation();
+    assert_eq!(shared.display_for(current), None);
+}
+
+#[test]
+fn configuration_cannot_redefine_display_coordinates_or_accept_a_noncanonical_crop() {
+    let shared = Shared::new();
+    shared.frames.begin_attempt().unwrap();
+    let attempt = shared.frames.app_id(0);
+    shared
+        .publish_configuration(attempt, (5120, 2880), (1582, 888), false, None)
+        .unwrap();
+    shared
+        .publish_configuration(attempt, (5120, 2880), (1000, 562), false, None)
+        .unwrap();
+    let notifications = shared.events.len();
+    for (display, picture) in [
+        ((2560, 1440), (1280, 720)),
+        ((5120, 2880), (1000, 564)),
+        ((0, 2880), (1000, 562)),
+    ] {
+        assert_eq!(
+            shared.publish_configuration(attempt, display, picture, true, Some(true)),
+            Err(WorkerError::GeometryChanged)
+        );
+        assert_eq!(shared.display_for(attempt), Some((5120, 2880)));
+        assert_eq!(*shared.picture.lock().unwrap(), (1000, 562));
+        assert_eq!(shared.events.len(), notifications);
+        assert!(!shared.full_range());
+        assert_eq!(shared.hardware(), -1);
+    }
+    shared.close();
+    assert_eq!(shared.display_for(attempt), None);
+    assert!(
+        shared
+            .publish_configuration(attempt, (5120, 2880), (1280, 720), false, None)
+            .is_err()
+    );
 }

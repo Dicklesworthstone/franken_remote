@@ -1,8 +1,9 @@
 //! The window's picture: a flip-model swap chain on the decoder's own D3D11
 //! device, and the D3D11 video processor turning each decoded NV12 picture
-//! into the BGRA back buffer. 1:1 whenever the picture fits the window
-//! (`geometry::fit`); the picture never leaves the GPU.
-use crate::geometry::{Rect, fit};
+//! into the BGRA back buffer. The original display aspect determines the
+//! destination; encoded dimensions determine sampling. The picture never
+//! leaves the GPU.
+use crate::geometry::{Presentation, Rect};
 mod cursor;
 use core::mem::ManuallyDrop;
 use windows::Win32::Foundation::{HWND, RECT, S_OK};
@@ -136,8 +137,8 @@ impl Renderer {
         self.cursor.clear();
     }
 
-    pub fn cursor_visible(&self, picture: (u32, u32), attempt: u64, sequence: u64) -> bool {
-        fit(picture, self.size).is_some_and(|dest| self.cursor.visible(dest, attempt, sequence))
+    pub fn cursor_visible(&self, dest: Rect, attempt: u64, sequence: u64) -> bool {
+        self.cursor.visible(dest, attempt, sequence)
     }
 
     /// Replace the retired session's visible image with black. Input is fenced
@@ -202,23 +203,25 @@ impl Renderer {
         Ok(self.conversion.as_ref().expect("set above"))
     }
 
-    /// Converts slice `slice` of `texture` (the `picture`-sized visible part
-    /// of a decoded NV12 surface) into the back buffer and presents it on
-    /// the next vertical blank. Returns where the picture landed.
+    /// Converts the complete admitted crop of `texture` into its original
+    /// display-space placement and presents it on the next vertical blank.
+    /// Cursor rendering and input use the same checked placement.
     #[allow(clippy::too_many_lines, reason = "one ordered sequence of COM calls")]
     pub fn draw(
         &mut self,
         texture: &ID3D11Texture2D,
         slice: u32,
-        picture: (u32, u32),
+        presentation: Presentation,
         full_range: bool,
         attempt: u64,
         sequence: u64,
     ) -> Result<Option<Rect>> {
         self.present_accepted = false;
-        let Some(dest) = fit(picture, self.size) else {
+        if presentation.window() != self.size {
             return Ok(None);
-        };
+        }
+        let picture = presentation.picture();
+        let dest = presentation.destination;
         let size = self.size;
         let video = self.video.clone();
         let context = self.context.clone();
