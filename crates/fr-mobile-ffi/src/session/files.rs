@@ -161,13 +161,39 @@ fn receipt_detail(receipt: Option<FileSendReceipt>) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn file_capability(name: &str) -> bool {
     matches!(
         name,
         fr_wire::attachment::FILES_CAPABILITY
             | fr_wire::files::CAPABILITY
             | fr_wire::files::CHANNEL_SCOPE_CAPABILITY
+            | fr_wire::files::DOWNLOAD_CAPABILITY
+            | fr_wire::files::DUPLEX_CAPABILITY
     )
+}
+
+/// Retain only the original command's still-unspent file directions. Common
+/// attachment/ATP capabilities belong to both directions; retiring an upload
+/// cannot remove those while an explicit download still needs them.
+pub(super) fn offer(original: &Offer, upload: bool, download: bool) -> Result<Offer, ()> {
+    let keep = |name: &str| match name {
+        fr_wire::attachment::FILES_CAPABILITY | fr_wire::files::CAPABILITY => upload || download,
+        fr_wire::files::CHANNEL_SCOPE_CAPABILITY => upload,
+        fr_wire::files::DOWNLOAD_CAPABILITY => download,
+        fr_wire::files::DUPLEX_CAPABILITY => upload && download,
+        _ => true,
+    };
+    if original
+        .capabilities
+        .iter()
+        .any(|cap| cap.required && !keep(&cap.name))
+    {
+        return Err(());
+    }
+    let mut offered = original.clone();
+    offered.capabilities.retain(|cap| keep(&cap.name));
+    Ok(offered)
 }
 
 /// One command retains at most nine explicit files and their original receipts.
@@ -333,21 +359,9 @@ impl Upload {
         state.collect();
     }
 
-    pub(super) fn offer(&self, original: &Offer) -> Result<Offer, ()> {
+    pub(super) fn available(&self) -> bool {
         let state = self.lock();
-        if state.bound && !state.attempted && !state.retired && !state.report.cancel_requested {
-            return Ok(original.clone());
-        }
-        if original
-            .capabilities
-            .iter()
-            .any(|cap| cap.required && file_capability(&cap.name))
-        {
-            return Err(());
-        }
-        let mut offer = original.clone();
-        offer.capabilities.retain(|cap| !file_capability(&cap.name));
-        Ok(offer)
+        state.bound && !state.attempted && !state.retired && !state.report.cancel_requested
     }
 
     /// File-only cancellation. A negotiated but unstarted attachment still
@@ -583,9 +597,9 @@ mod tests {
             fr_client::native::control_offer_with_auxiliary(true, true, false),
         )
         .unwrap();
-        assert_eq!(upload.offer(&original).unwrap(), original);
+        assert_eq!(offer(&original, upload.available(), false).unwrap(), original);
         upload.configure_with(|_| Err(Absence::NotNegotiated));
-        let pruned = upload.offer(&original).unwrap();
+        let pruned = offer(&original, upload.available(), false).unwrap();
         assert!(
             !pruned
                 .capabilities
@@ -604,7 +618,44 @@ mod tests {
             .find(|cap| file_capability(&cap.name))
             .unwrap()
             .required = true;
-        assert!(upload.offer(&required).is_err());
+        assert!(offer(&required, upload.available(), false).is_err());
+    }
+
+    #[test]
+    fn each_unspent_direction_keeps_its_common_boundaries_without_reapproving_the_other() {
+        let original = fr_wire::control::with_committed_text(
+            fr_client::native::control_offer_with_duplex(true, false),
+        )
+        .unwrap();
+        for (upload, download) in [(true, true), (true, false), (false, true), (false, false)] {
+            let retained = offer(&original, upload, download).unwrap();
+            retained.validate().unwrap();
+            let selected = |name| retained.capabilities.iter().any(|cap| cap.name == name);
+            assert_eq!(
+                selected(fr_wire::attachment::FILES_CAPABILITY),
+                upload || download
+            );
+            assert_eq!(selected(fr_wire::files::CAPABILITY), upload || download);
+            assert_eq!(selected(fr_wire::files::CHANNEL_SCOPE_CAPABILITY), upload);
+            assert_eq!(selected(fr_wire::files::DOWNLOAD_CAPABILITY), download);
+            assert_eq!(selected(fr_wire::files::DUPLEX_CAPABILITY), upload && download);
+            assert!(selected(fr_wire::clipboard::CAPABILITY));
+            assert!(selected(fr_wire::control::TEXT_CAPABILITY));
+            assert!(
+                retained
+                    .capabilities
+                    .iter()
+                    .all(|cap| original.capabilities.contains(cap))
+            );
+        }
+        let mut required = original;
+        required
+            .capabilities
+            .iter_mut()
+            .find(|cap| cap.name == fr_wire::files::DOWNLOAD_CAPABILITY)
+            .unwrap()
+            .required = true;
+        assert!(offer(&required, true, false).is_err());
     }
 
     #[test]

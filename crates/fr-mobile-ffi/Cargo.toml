@@ -27,6 +27,7 @@ crate-type = ["staticlib", "rlib"]
 asupersync = { workspace = true, features = ["tls"] }
 fr-client.workspace = true
 fr-core.workspace = true
+fr-files.workspace = true
 fr-media.workspace = true
 fr-tailnet.workspace = true
 fr-wire.workspace = true

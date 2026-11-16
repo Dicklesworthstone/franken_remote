@@ -622,6 +622,7 @@ dependencies = [
  "base64",
  "fr-client",
  "fr-core",
+ "fr-files",
  "fr-media",
  "fr-tailnet",
  "fr-transport",

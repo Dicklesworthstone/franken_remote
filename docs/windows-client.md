@@ -501,8 +501,10 @@ fr-windows view --control --send 'C:\Users\me\Documents\Résumé final.txt'
 requires `--control`, may appear once, and also works with the native machine
 chooser. The host must separately enable its existing file receiver with
 `frd run ... --files DIR`, alongside the host's normal control configuration.
-Use a Linux or macOS receiver for this workflow; this does not add a Windows
-receive directory, downloads, directory uploads or drag-and-drop.
+Linux, macOS and Windows hosts can enable regular-file receiving through that
+existing option. Directory uploads and drag-and-drop remain separate workflows.
+For files selected by the host operator, explicitly choose a local destination
+with `--receive DIR` as described below.
 
 The sender retains the selected read-only Windows handle and its actual file
 identity. It never reopens the source pathname during transfer. Conflicting
@@ -564,6 +566,85 @@ expires, the command fails and no replacement session starts. The original
 session thread retains the stopped file owner and nonblockingly collects it
 when its actual worker returns. Later collection cannot repair the earlier
 failure or supply a new transfer deadline.
+
+## Receive files selected by the host
+
+Select an existing private directory on this Windows machine when starting a
+controlling viewer:
+
+```powershell
+fr-windows view remote.example.ts.net --control --receive 'C:\Users\me\FrankenRemoteDrop'
+fr-windows view --control --receive 'C:\Users\me\FrankenRemoteDrop' --receive-conflict keep-both
+```
+
+The host operator separately selects the files. On a configured Linux or macOS
+host, add `--once --send /absolute/path/to/report.pdf` to the normal
+`frd run ... --input-agent PATH` command. A Windows host uses its own
+`--once --control --send FILE` options. Linux and macOS hosts can also use
+their existing local `--send-control` endpoint for later explicit selections.
+See [native downloads](../NATIVE_FILE_DOWNLOAD.md) for those host commands.
+
+`--receive DIR` requires `--control` and may appear once. The selected directory
+is opened before the remote session begins and retained by its original native
+handle. It must already exist on an ordinary local drive, belong to the current
+user, and have a DACL that prevents other users from writing to it. Reparse
+points, traversal and UNC/device paths are refused with a typed, content-free
+error. Renaming the path after selection cannot redirect the transfer. No
+directory is created automatically and the viewer never opens a received file.
+
+The first receive slice accepts regular files, including empty files. Directory
+trees are refused before staging by the existing Windows receiver. Files stage
+privately and are published atomically without replacing an existing destination.
+The default conflict policy is `reject`; `--receive-conflict keep-both` uses the
+receiver's bounded alternate-name policy while retaining the original file.
+
+The default limits are 268,435,456 bytes per file (256 MiB) and 1,073,741,824
+declared bytes per session (1 GiB). Override them with
+`--receive-max-file-bytes N` and `--receive-max-session-bytes N`. Both values
+must be positive decimal integers; the session limit must be at least the file
+limit after applying defaults. These options require `--receive`. Admission
+also retains the existing 64-transfer session limit. Failed or cancelled
+transfers consume their original declared-byte allowance.
+
+The destination supplies independent file consent. Receiving starts only with
+the original live control authority and a positively negotiated download
+attachment. A host without that optional capability leaves viewing and control
+available and reports its receive refusal. Clipboard has its own consent and
+cancellation. Upload and download can run together when the host offers the
+existing duplex profile; retiring either direction cannot remove the framing
+capabilities still needed by the other.
+
+The native **Receive files** menu shows the original lane's state, staged bytes,
+published-file count, unconfirmed durability count and receiver-cleanup state.
+**Cancel receiving** stops that original receive permission without closing the
+desktop. It cannot undo an already published file, erase a receipt, request new
+control or approve a new destination. An old menu command still names the owner
+shown when that popup opened.
+
+A resize, Change display, Stop control, suspension or reconnect cannot approve
+this directory again. The original receive owner, cancellation and receipts
+remain available in the menu after a permitted viewing replacement; that new
+session has no receive destination. Starting another receive session requires
+a fresh explicit invocation. Native focus and control retirement retain their
+existing authority checks; returning to the window never replays a transfer.
+
+The completion JSON adds a `download` object for this explicit destination, or
+`null` when receiving was not requested. It contains `configured`, `phase`,
+`cancel_requested`, `cleanup`, a typed `reason`, current `progress`, bounded
+`receipts` and `results_truncated`. Each receipt has an index and outcome, plus
+published bytes and durability when actual publication was observed; no paths,
+filenames or file contents enter this report.
+
+Fully staged bytes are not a publication receipt. A successful Windows rename
+is reported as `locally_published` with `durable: false` because crash durability
+is unconfirmed. That file was committed and must not be retried as though no
+file was saved. Refusals, cancellation and unknown publication remain distinct.
+The command's video exit status does not claim that a host chose or completed
+any particular file; inspect the retained download receipts for those outcomes.
+
+Receive cleanup shares the session's original deadline. Pending or failed
+cleanup prevents replacement; late native collection cannot repair an earlier
+failure. Actual receipt evidence survives cancellation and cleanup failure.
 
 ## Explicit address constraints
 
@@ -634,6 +715,17 @@ the local Desktop Duplication, hardware HEVC encode and decode path in the
 interactive session and prints counts and timings.
 
 ## Validation scope
+
+The Windows receive integration adds actual-source portable regressions in
+`crates/frd/tests/windows_client_download.rs` for one-session destination
+ownership, registration refusal, pre-start cancellation, original cleanup failure
+and publication evidence. The existing Windows clipboard/offer and upload
+targets exercise optional download/duplex composition and independent capability
+retirement; `fr-windows` parser tests cover destination consent and byte/conflict
+policy. These additions were authored while the execution environment was
+unavailable and have not been run locally. Hosted CI and a Windows desktop
+transfer are still required; they do not establish Windows DACL, menu, focus or
+filesystem behavior merely by existing.
 
 For the native host-shaped cursor slice (`fr-s6qi`), the actual
 `cargo test --locked -p fr-windows --bin fr-windows` run passed all 117 portable

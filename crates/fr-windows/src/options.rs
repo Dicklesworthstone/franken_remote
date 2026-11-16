@@ -37,6 +37,14 @@ impl DisplayChoice {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ReceiveOptions {
+    pub directory: PathBuf,
+    pub max_file_bytes: Option<u64>,
+    pub max_session_bytes: Option<u64>,
+    pub keep_both: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Options {
     pub port: u16,
     /// Optional complete authenticated address-set constraint, not a DNS override.
@@ -50,6 +58,8 @@ pub(crate) struct Options {
     pub display: DisplayChoice,
     /// One explicit regular file; consumed once by the original control grant.
     pub send: Option<PathBuf>,
+    /// An explicit private destination; requires a controlling connection.
+    pub receive: Option<ReceiveOptions>,
 }
 
 /// A missing viewing destination requests one local native machine choice.
@@ -85,6 +95,7 @@ impl<'a> ConnectionCommand<'a> {
 }
 
 impl Options {
+    #[allow(clippy::too_many_lines)] // one bounded parser with no partial configuration
     pub(crate) fn parse(mut rest: &[String], view: bool, default_port: u16) -> Option<Self> {
         let mut options = Self {
             port: default_port,
@@ -95,12 +106,43 @@ impl Options {
             seconds: None,
             display: DisplayChoice::Primary,
             send: None,
+            receive: None,
         };
         let mut port_set = false;
         let mut display_set = false;
+        let mut receive_directory = None;
+        let mut receive_file_bytes = None;
+        let mut receive_session_bytes = None;
+        let mut receive_conflict = None;
         loop {
             match rest {
-                [] => return (options.send.is_none() || options.control).then_some(options),
+                [] => {
+                    if (options.send.is_some() || receive_directory.is_some()) && !options.control {
+                        return None;
+                    }
+                    if matches!(
+                        (receive_file_bytes, receive_session_bytes),
+                        (Some(file), Some(session)) if session < file
+                    ) {
+                        return None;
+                    }
+                    options.receive = match receive_directory {
+                        Some(directory) => Some(ReceiveOptions {
+                            directory,
+                            max_file_bytes: receive_file_bytes,
+                            max_session_bytes: receive_session_bytes,
+                            keep_both: receive_conflict.unwrap_or(false),
+                        }),
+                        None if receive_file_bytes.is_some()
+                            || receive_session_bytes.is_some()
+                            || receive_conflict.is_some() =>
+                        {
+                            return None;
+                        }
+                        None => None,
+                    };
+                    return Some(options);
+                }
                 [flag, tail @ ..] if view && flag == "--control" && !options.control => {
                     options.control = true;
                     rest = tail;
@@ -148,6 +190,24 @@ impl Options {
                         "--send" if view && options.send.is_none() && !value.is_empty() => {
                             options.send = Some(PathBuf::from(value));
                         }
+                        "--receive" if view && receive_directory.is_none() && !value.is_empty() => {
+                            receive_directory = Some(PathBuf::from(value));
+                        }
+                        "--receive-max-file-bytes" if view && receive_file_bytes.is_none() => {
+                            receive_file_bytes = Some(byte_limit(value)?);
+                        }
+                        "--receive-max-session-bytes"
+                            if view && receive_session_bytes.is_none() =>
+                        {
+                            receive_session_bytes = Some(byte_limit(value)?);
+                        }
+                        "--receive-conflict" if view && receive_conflict.is_none() => {
+                            receive_conflict = Some(match value.as_str() {
+                                "reject" => false,
+                                "keep-both" => true,
+                                _ => return None,
+                            });
+                        }
                         _ => return None,
                     }
                     rest = tail;
@@ -156,6 +216,13 @@ impl Options {
             }
         }
     }
+}
+
+fn byte_limit(value: &str) -> Option<u64> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value.parse().ok().filter(|bytes| *bytes != 0)
 }
 
 #[cfg(test)]
@@ -171,6 +238,94 @@ mod tests {
             view,
             47819,
         )
+    }
+
+    #[test]
+    fn explicit_downloads_require_control_and_keep_local_policy_independent() {
+        let selected = parse(&["--control", "--receive", r"C:\Received"], true).unwrap();
+        assert_eq!(
+            selected.receive,
+            Some(ReceiveOptions {
+                directory: PathBuf::from(r"C:\Received"),
+                max_file_bytes: None,
+                max_session_bytes: None,
+                keep_both: false,
+            })
+        );
+        let duplex = parse(
+            &[
+                "--receive-max-file-bytes",
+                "20",
+                "--receive-conflict",
+                "keep-both",
+                "--send",
+                r"C:\outbound.txt",
+                "--control",
+                "--receive",
+                r"C:\Received",
+                "--receive-max-session-bytes",
+                "80",
+            ],
+            true,
+        )
+        .unwrap();
+        let receive = duplex.receive.unwrap();
+        assert_eq!(receive.max_file_bytes, Some(20));
+        assert_eq!(receive.max_session_bytes, Some(80));
+        assert!(receive.keep_both);
+        assert!(duplex.send.is_some());
+        assert!(duplex.clipboard);
+    }
+
+    #[test]
+    fn invalid_download_policies_do_not_open_an_unapproved_destination() {
+        for args in [
+            vec!["--receive", r"C:\Received"],
+            vec!["--control", "--receive", ""],
+            vec!["--control", "--receive-max-file-bytes", "20"],
+            vec!["--control", "--receive-max-session-bytes", "20"],
+            vec!["--control", "--receive-conflict", "reject"],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        for tail in [
+            vec!["--receive", r"C:\other"],
+            vec!["--receive-conflict", "replace"],
+            vec!["--receive-max-file-bytes", "0"],
+            vec!["--receive-max-file-bytes", "+1"],
+            vec!["--receive-max-session-bytes", "-1"],
+            vec!["--receive-max-file-bytes", "18446744073709551616"],
+            vec![
+                "--receive-max-file-bytes",
+                "20",
+                "--receive-max-session-bytes",
+                "10",
+            ],
+            vec![
+                "--receive-conflict",
+                "reject",
+                "--receive-conflict",
+                "keep-both",
+            ],
+            vec![
+                "--receive-max-file-bytes",
+                "1",
+                "--receive-max-file-bytes",
+                "2",
+            ],
+            vec![
+                "--receive-max-session-bytes",
+                "20",
+                "--receive-max-session-bytes",
+                "40",
+            ],
+        ] {
+            let mut args = vec!["--control", "--receive", r"C:\Received"];
+            args.extend(tail);
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        assert!(parse(&["--receive", r"C:\Received"], false).is_none());
+        assert!(parse(&["--receive-conflict", "keep-both"], false).is_none());
     }
 
     #[test]
@@ -242,6 +397,7 @@ mod tests {
                 seconds: None,
                 display: DisplayChoice::Primary,
                 send: None,
+                receive: None,
             })
         );
         assert_eq!(parse(&[], false), parse(&[], true));

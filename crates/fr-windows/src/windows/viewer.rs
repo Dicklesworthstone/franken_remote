@@ -28,6 +28,7 @@
 mod control;
 mod cursor;
 mod display;
+mod download;
 mod text;
 mod upload;
 
@@ -114,6 +115,8 @@ struct Viewer {
     input_menu: control::Menu,
     /// Original selected file and its evidence survive every viewing replacement.
     upload_menu: Option<upload::Menu>,
+    /// Original receive consent and disk receipts survive viewing replacements.
+    download_menu: Option<download::Menu>,
     /// First parent-close cleanup sample for the original native file chooser.
     /// Neither repeated close callbacks nor later session completion renew it.
     file_cleanup_started: Option<u64>,
@@ -202,6 +205,7 @@ struct Stats {
     display: (u32, u32),
 }
 
+#[allow(clippy::too_many_lines)] // one original window and its explicitly selected owners
 pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     CLOSE_PENDING.with(|pending| pending.set(false));
     CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
@@ -226,6 +230,17 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             // SAFETY: our window, before any remote session starts.
             let _ = unsafe { DestroyWindow(hwnd) };
             return refuse("file_menu_unavailable");
+        }
+    } else {
+        None
+    };
+    let download_menu = if let Some(original) = &config.download {
+        if let Ok(menu) = download::Menu::install(hwnd, Arc::clone(original)) {
+            Some(menu)
+        } else {
+            // SAFETY: our window, before any remote session starts.
+            let _ = unsafe { DestroyWindow(hwnd) };
+            return refuse("receive_menu_unavailable");
         }
     } else {
         None
@@ -261,6 +276,7 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
             display_picker: None,
             input_menu,
             upload_menu,
+            download_menu,
             file_cleanup_started: None,
             cursor_drawn: None,
             picture_drawn: None,
@@ -448,9 +464,10 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         return Reopen::No;
     }
     let mut next = config.clone();
-    // A replacement view cannot resend the original explicit file. Its menu
-    // retains only the original transfer's cancellation and receipt evidence.
+    // A replacement view cannot resend a file or approve the selected receive
+    // directory again. Menus retain only original cancellation and evidence.
     next.upload = None;
+    next.download = None;
     if matches!(opening.cause, Cause::StopControl | Cause::FocusLost) {
         next.clipboard = false;
     }
@@ -558,6 +575,9 @@ fn poll_file_choice(v: &mut Viewer, hwnd: HWND) {
         v.file_cleanup_expired();
     }
     if let Some(menu) = &mut v.upload_menu {
+        menu.refresh();
+    }
+    if let Some(menu) = &mut v.download_menu {
         menu.refresh();
     }
 }
@@ -925,6 +945,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         .as_ref()
         .is_none_or(upload::Menu::succeeded);
     let upload = upload::document(viewer.upload_menu.as_ref());
+    let download = download::document(viewer.download_menu.as_ref());
     let focus_end = stats.focus_end.as_ref().map(|(code, detail)| {
         serde_json::json!({
             "end": end_name(*code),
@@ -942,7 +963,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
          \"reopens\":{},\"display_changes\":{},\"control_releases\":{},\"focus_releases\":{},\
          \"last_focus_end\":{},\"reopen_refusal\":{},\
          \"reopen_gap_ms\":{:.1},\"last_first_view_ms\":{:.1},\
-         \"seconds\":{:.1},\"clipboard\":{},\"upload\":{}}}",
+         \"seconds\":{:.1},\"clipboard\":{},\"upload\":{},\"download\":{}}}",
         end_name(code),
         shared
             .detail()
@@ -980,6 +1001,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         elapsed.as_secs_f64(),
         clipboard,
         upload,
+        download,
     );
     let _ = writeln!(std::io::stdout().lock(), "{json}");
     if stats.drawn > 0
@@ -1699,6 +1721,12 @@ extern "system" fn window_proc(
                         );
                     }
                 }
+                if let Some(menu) = &mut v.download_menu {
+                    menu.refresh();
+                    if menu.is_popup(wparam.0) {
+                        menu.opened();
+                    }
+                }
                 if v.input_menu.is_popup(wparam.0) {
                     let available = v.can_change_display();
                     v.input_menu.display_available(available);
@@ -1716,6 +1744,12 @@ extern "system" fn window_proc(
             // Stop the original file even during a nested native callback.
             // This cannot request control, close the desktop, or start a retry.
             upload::cancel();
+            true
+        }
+        WM_COMMAND if wparam.0 & 0xffff == download::CANCEL => {
+            // This original receive owner remains addressable even when the
+            // viewer is borrowed by a nested Win32 callback.
+            download::cancel();
             true
         }
         WM_COMMAND if wparam.0 & 0xffff == upload::PAUSE => {

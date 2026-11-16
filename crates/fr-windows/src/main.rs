@@ -14,6 +14,8 @@
 //!       [--address IP]... [--control] [--no-clipboard] [--seconds N]
 //!       [--display primary|only|choose|HANDLE]
 //!       [--send FILE] (requires --control; one regular file, sent once)
+//!       [--receive DIR] [--receive-max-file-bytes N] [--receive-max-session-bytes N]
+//!       [--receive-conflict reject|keep-both] (requires --control)
 //!       one session in a native window: Media Foundation (DXVA) decode and
 //!       a D3D11 swap chain, 1:1 when the picture fits. Prints a JSON
 //!       completion document (counts and timings, no content) at the end.
@@ -84,7 +86,9 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
-     [--display primary|only|choose|HANDLE] [--send FILE]\n       \
+     [--display primary|only|choose|HANDLE] [--send FILE] [--receive DIR] \
+     [--receive-max-file-bytes N] [--receive-max-session-bytes N] \
+     [--receive-conflict reject|keep-both]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \
      [--address IP]...\n       fr-windows capture-probe [--seconds N] [--fps N] [--bitrate N] \
      [--display N] [--picture-width N] [--all]\n";

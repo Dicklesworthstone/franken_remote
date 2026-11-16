@@ -21,6 +21,25 @@ pub(super) fn offer(control: bool, clipboard: bool, files: bool) -> Result<Offer
     }
 }
 
+// Control and three independently selected optional capabilities.
+#[allow(clippy::fn_params_excessive_bools)]
+pub(super) fn offer_with_download(
+    control: bool,
+    clipboard: bool,
+    upload: bool,
+    download: bool,
+) -> Result<Offer, Error> {
+    if !control || !download {
+        return offer(control, clipboard, upload);
+    }
+    let original = if upload {
+        fr_client::native::control_offer_with_duplex(clipboard, false)
+    } else {
+        fr_client::native::control_offer_with_download(clipboard, false)
+    };
+    fr_wire::control::with_committed_text(original)
+}
+
 /// The app produces whole committed text but never synthesizes physical repeat.
 /// `NativeObserver` meets this intent with the negotiated host profile before
 /// sending a control request, so legacy hosts retain physical-key control.
@@ -230,6 +249,48 @@ mod tests {
             assert!(requested.contains(Capability::Keys));
             assert!(requested.contains(Capability::Text));
         }
+    }
+
+    #[test]
+    fn explicit_downloads_are_optional_and_compose_with_existing_control_and_uploads() {
+        for upload in [false, true] {
+            for clipboard in [false, true] {
+                assert_eq!(
+                    offer_with_download(true, clipboard, upload, false).unwrap(),
+                    offer(true, clipboard, upload).unwrap()
+                );
+                let offered = offer_with_download(true, clipboard, upload, true).unwrap();
+                offered.validate().unwrap();
+                let has = |name| offered.capabilities.iter().any(|cap| cap.name == name);
+                assert!(has(fr_wire::files::DOWNLOAD_CAPABILITY));
+                assert_eq!(has(fr_wire::files::DUPLEX_CAPABILITY), upload);
+                assert_eq!(has(fr_wire::files::CHANNEL_SCOPE_CAPABILITY), upload);
+                assert!(has(fr_wire::control::TEXT_CAPABILITY));
+                assert!(
+                    offered
+                        .capabilities
+                        .iter()
+                        .filter(|cap| {
+                            cap.name == fr_wire::files::DOWNLOAD_CAPABILITY
+                                || cap.name == fr_wire::files::DUPLEX_CAPABILITY
+                        })
+                        .all(|cap| !cap.required)
+                );
+                let legacy = with_line_scroll(host_offer(true));
+                let selected = legacy.intersect(&offered).unwrap();
+                assert!(
+                    !selected
+                        .capabilities
+                        .iter()
+                        .any(|cap| cap.name == fr_wire::files::DOWNLOAD_CAPABILITY)
+                );
+                assert!(requestable(&selected.capabilities).contains(Capability::Keys));
+            }
+        }
+        assert_eq!(
+            offer_with_download(false, true, true, true).unwrap(),
+            fr_client::native::observation_offer()
+        );
     }
 
     #[test]

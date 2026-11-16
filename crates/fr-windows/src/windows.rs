@@ -89,6 +89,24 @@ pub fn run(args: &[String]) -> ExitCode {
             .control
             .then(fr_mobile_ffi::session::Upload::interactive)
     };
+    let download = match &options.receive {
+        Some(receive) => match fr_mobile_ffi::session::Download::select(
+            &receive.directory,
+            receive.max_file_bytes,
+            receive.max_session_bytes,
+            receive.keep_both,
+        ) {
+            Ok(download) => Some(download),
+            Err(reason) => {
+                eprintln!(
+                    "fr-windows: {}. Choose an existing absolute private directory on a local drive, without reparse points or an unsafe DACL. No remote session was opened.",
+                    reason.code(),
+                );
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
     let title = format!("FrankenRemote - {}", target.certificate_name());
     let config = Config {
         target,
@@ -96,6 +114,7 @@ pub fn run(args: &[String]) -> ExitCode {
         control: options.control,
         clipboard: options.control && options.clipboard,
         upload,
+        download,
         picture: None,
         display: match options.display {
             DisplayChoice::Primary => fr_mobile_ffi::session::DisplayChoice::Primary,

@@ -18,6 +18,7 @@ pub mod connection;
 mod control_policy;
 mod control_request;
 mod display;
+mod download;
 mod files;
 mod focus_close;
 mod key_capture;
@@ -37,6 +38,7 @@ pub use display::{
     Choice as DisplayChoice, Error as DisplayError, MAX_CHOICES as MAX_DISPLAY_CHOICES,
     Request as DisplayRequest,
 };
+pub use download::{Download, Receipt as DownloadReceipt, Report as DownloadReport};
 pub use files::{MAX_UPLOADS, PreparedUpload, Report as UploadReport, Upload};
 pub use text::{CapturedText, TextDraft};
 
@@ -177,6 +179,9 @@ pub struct Config {
     /// One explicit, already selected local file. Clones retain its original
     /// one-use owner; replacement sessions must omit it rather than replay it.
     pub upload: Option<Arc<Upload>>,
+    /// One explicit private destination. Registration consumes this original
+    /// consent; a replacement connection must not approve it again.
+    pub download: Option<Arc<Download>>,
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
     pub picture: Option<(u32, u32)>,
@@ -260,6 +265,7 @@ pub struct Shared {
     focus_owner: Mutex<Option<FocusOwner>>,
     clipboard: clipboard::Clipboard,
     upload: Option<Arc<Upload>>,
+    download: Option<Arc<Download>>,
     close: AtomicBool,
     want_control: AtomicBool,
     control_capable: bool,
@@ -358,9 +364,14 @@ impl Shared {
     }
     #[cfg(test)]
     fn with_control(control_capable: bool) -> Self {
-        Self::with_auxiliary(control_capable, false, None)
+        Self::with_auxiliary(control_capable, false, None, None)
     }
-    fn with_auxiliary(control_capable: bool, clipboard: bool, upload: Option<Arc<Upload>>) -> Self {
+    fn with_auxiliary(
+        control_capable: bool,
+        clipboard: bool,
+        upload: Option<Arc<Upload>>,
+        download: Option<Arc<Download>>,
+    ) -> Self {
         Self {
             events: Events::default(),
             frames: FrameSlot::default(),
@@ -370,6 +381,7 @@ impl Shared {
             focus_owner: Mutex::default(),
             clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
             upload,
+            download,
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
             control_capable,
@@ -417,6 +429,9 @@ impl Shared {
         self.clipboard.stop();
         if let Some(upload) = &self.upload {
             upload.retire();
+        }
+        if let Some(download) = &self.download {
+            download.retire();
         }
         self.retire_control_request();
         self.retire_display();
@@ -473,6 +488,9 @@ impl Shared {
         if let Some(upload) = &self.upload {
             upload.retire();
         }
+        if let Some(download) = &self.download {
+            download.retire();
+        }
         self.retire_display();
         true
     }
@@ -518,6 +536,7 @@ impl Shared {
         drop(selection);
         self.clipboard.stop();
         self.cancel_upload();
+        self.cancel_download();
         self.stop_control(None);
         Ok(())
     }
@@ -572,6 +591,7 @@ impl Shared {
             self.clipboard.hide(was);
             if was {
                 self.cancel_upload();
+                self.cancel_download();
                 self.hides.fetch_add(1, Ordering::SeqCst);
             }
             self.retire_control_request();
@@ -811,6 +831,14 @@ impl Shared {
     pub fn cancel_upload(&self) -> bool {
         self.upload.as_ref().is_some_and(|upload| upload.cancel())
     }
+    /// Cancel only this original receive permission. Published files and
+    /// their receipts remain; no destination is granted to a replacement.
+    pub fn cancel_download(&self) -> bool {
+        self.download.as_ref().is_some_and(|download| download.cancel())
+    }
+    pub fn download_report(&self) -> Option<DownloadReport> {
+        self.download.as_ref().map(|download| download.report())
+    }
     /// Bind native file selection before opening the OS chooser. A compositor
     /// gap is unavailable; it never authorizes carrying a choice into a later
     /// source, view generation or suspension/recovery cycle.
@@ -902,6 +930,9 @@ impl Shared {
         if let Some(upload) = &self.upload {
             upload.retire();
         }
+        if let Some(download) = &self.download {
+            download.retire();
+        }
         self.retire_control_request();
         self.events.state(state::CONTROL_ENDED, 0);
         drop(dropped);
@@ -929,6 +960,9 @@ impl Shared {
             self.clipboard.retire();
             if let Some(upload) = &self.upload {
                 upload.retire();
+            }
+            if let Some(download) = &self.download {
+                download.retire();
             }
             if let Some(reason) = reason {
                 self.note_local_stop(reason);
@@ -1448,8 +1482,26 @@ impl Session {
                 ));
             }
         }
-        let mut shared =
-            Shared::with_auxiliary(config.control, config.clipboard, config.upload.clone());
+        if let Some(download) = &config.download {
+            if !config.control {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "file receiving requires control",
+                ));
+            }
+            if !download.bind() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "receive destination already belongs to its original session",
+                ));
+            }
+        }
+        let mut shared = Shared::with_auxiliary(
+            config.control,
+            config.clipboard,
+            config.upload.clone(),
+            config.download.clone(),
+        );
         if native_cursor && config.control {
             shared.local_cursor = Some(local_cursor::Hub::default());
         }
@@ -1500,6 +1552,9 @@ fn finish(shared: &Shared, code: u32, detail: Option<String>) {
     shared.clipboard.stop();
     if let Some(upload) = &shared.upload {
         upload.finish();
+    }
+    if let Some(download) = &shared.download {
+        download.finish();
     }
     shared.retire_control_request();
     shared.retire_display();
@@ -1566,10 +1621,11 @@ fn run(shared: &Arc<Shared>, config: Config) {
         max_attempts: 3,
         ..reconnect::Policy::default()
     };
-    let Ok(offer) = control_policy::offer(
+    let Ok(offer) = control_policy::offer_with_download(
         control,
         shared.clipboard.report().requested,
         shared.upload.is_some(),
+        shared.download.is_some(),
     ) else {
         return finish(shared, end::INTERNAL, Some("InvalidConfiguration".into()));
     };
@@ -2047,6 +2103,9 @@ impl Mobile {
                 if let Some(upload) = &self.shared.upload {
                     upload.cleaned(result);
                 }
+                if let Some(download) = &self.shared.download {
+                    download.cleaned(result);
+                }
             }
             for _ in 0..2 {
                 let _ = observer.collect_clipboard();
@@ -2077,10 +2136,18 @@ impl Application for Mobile {
             .clipboard
             .offer(original)
             .map_err(|()| CallbackError)?;
-        match &self.shared.upload {
-            Some(upload) => upload.offer(&offered).map_err(|()| CallbackError),
-            None => Ok(offered),
-        }
+        files::offer(
+            &offered,
+            self.shared
+                .upload
+                .as_ref()
+                .is_some_and(|upload| upload.available()),
+            self.shared
+                .download
+                .as_ref()
+                .is_some_and(|download| download.available()),
+        )
+        .map_err(|()| CallbackError)
     }
     #[allow(clippy::too_many_lines)] // one attempt: open, serve, control
     async fn run(&mut self, attempt: u8, viewer: Viewer) -> Result<(), ObserverError> {
@@ -2159,6 +2226,9 @@ impl Application for Mobile {
             });
         if let Some(upload) = &self.shared.upload {
             upload.configure(observer);
+        }
+        if let Some(download) = &self.shared.download {
+            download.configure(observer);
         }
         self.shared.serving.store(true, Ordering::SeqCst);
         let shared = self.shared.clone();
@@ -2327,6 +2397,9 @@ impl Application for Mobile {
         if let Some(upload) = &self.shared.upload {
             upload.retire();
         }
+        if let Some(download) = &self.shared.download {
+            download.retire();
+        }
         self.clipboard_cleanup = Some(deadline);
         self.shared.serving.store(false, Ordering::SeqCst);
         async move {
@@ -2343,6 +2416,9 @@ impl Application for Mobile {
                         // join is collection, not a repaired transfer result.
                         upload.cleaned(Err(error));
                     }
+                    if let (Some(download), Err(error)) = (&self.shared.download, files) {
+                        download.cleaned(Err(error));
+                    }
                     // Reap may time out before polling a just-finished source.
                     // Collect without a renewed wait budget, retaining the
                     // original timeout as failure even if joining now succeeds.
@@ -2350,6 +2426,9 @@ impl Application for Mobile {
                     self.files_pending = collected_files.is_none();
                     if let (Some(upload), Some(result)) = (&self.shared.upload, collected_files) {
                         upload.cleaned(result);
+                    }
+                    if let (Some(download), Some(result)) = (&self.shared.download, collected_files) {
+                        download.cleaned(result);
                     }
                     let clipboard = observer.reap_clipboard(cx, deadline).await;
                     for _ in 0..2 {

@@ -299,6 +299,7 @@ unsafe fn start(
         control: config.control,
         clipboard: false,
         upload: None,
+        download: None,
         picture,
         display,
     }) else {
