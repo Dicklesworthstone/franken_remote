@@ -6,9 +6,11 @@
 //! With control, the session confirms the window's mapping, reports frames as
 //! visible only while the window is actually on screen, requests control once
 //! the session reports current evidence, and after the grant hands `AppKit`
-//! input to the granted session's one event `Source`. Focus loss, hiding, a
-//! changed picture size, event overflow or a closed window stop that source
-//! (frd's contract for a native producer): control then ends with the session.
+//! input to the granted session's one event `Source`. An app switch releases
+//! held keys/buttons and pauses input while the original clipboard's separate
+//! Off surface stays live. Hiding, a changed picture size, event overflow or a
+//! closed window stop that source (frd's contract for a native producer):
+//! control then ends with the session.
 //! Checked native geometry changes can reopen a fresh viewing window after
 //! original cleanup, retaining only local point size/position. They never reuse
 //! the old mapping, control, clipboard, file selection or text composition.
@@ -1423,6 +1425,11 @@ fn service(
             if !paused {
                 intent.invalidate();
                 halt(LocalStop::NativeFailure, &mut input, &mut report);
+            } else {
+                // Release held input before querying AppKit. Clipboard owns
+                // a separate visible Off panel; an app switch cannot starve
+                // its original watchdog merely by pausing keyboard input.
+                clipboard.borrow_mut().turn(window.borrow().as_ref());
             }
             return;
         }
@@ -1430,6 +1437,7 @@ fn service(
             if let Some(granted) = input.as_mut() {
                 granted.resume();
             }
+            clipboard.borrow_mut().turn(window.borrow().as_ref());
             return;
         }
         FocusStep::Continue => {}
@@ -1927,7 +1935,7 @@ impl Application for Session {
                         opened.enter_full_screen().map_err(|_| ())?;
                     }
                 }
-                clipboard_ui.borrow_mut().install(&opened).map_err(|_| ())?;
+                clipboard_ui.borrow_mut().install(&opened);
                 if let Some(ingress) = file_ui.borrow().file_drop_ingress() {
                     opened.file_selection_bind(ingress).map_err(|_| ())?;
                 }

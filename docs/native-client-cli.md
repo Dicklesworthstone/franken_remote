@@ -758,16 +758,34 @@ fr connect NODE_ID --control --experimental-native --display only --json
 fr connect NODE_ID --control --experimental-native --display only --no-clipboard
 ```
 
-The viewer reserves a visible **Clipboard / Turn Off** control. Turn Off fences
-the original clipboard immediately. Once its attachment is established, that
-lane can retire while input, viewing and independent file transfers continue.
-Cancellation during incomplete attachment can still require closing the original
-connection. Hiding or closing the viewer, losing focus, changing
-displays or ending the original control also stops clipboard admission. The
-native worker requires both the original grant and a responsive local privacy
-control. A viewing reconnect or later F8 control request does not re-enable
-the initial clipboard choice. Start a new explicitly controlled connection to
-select sharing again.
+The viewer reserves a **Clipboard / Turn Off** toolbar control and an independent,
+nonactivating **Text clipboard / Turn Off** panel. The panel remains visible when
+you switch to another application or Space; it does not take keyboard focus.
+Switching applications releases held remote keys and buttons and pauses input.
+The original clipboard lane can keep sharing copies made in the other app
+while its separate privacy panel and the original grant remain valid.
+
+Covering the remote picture can still suspend clipboard payloads under the
+existing view-freshness policy. Fresh presentation and authenticated proof of
+the same lease are required to resume; the panel grants no input, observation
+or publication authority by itself. The pause never renews an existing item's
+deadline, and an expired or revoked owner cannot be revived.
+
+Either **Turn Off** fences the original clipboard immediately. Once its
+attachment is established, that lane can retire while input, viewing and
+independent file transfers continue. Cancellation during incomplete attachment
+can still require closing the original connection. Hiding or minimizing the
+viewer, closing it, changing displays or ending the original control also stops
+clipboard admission. A missing, hidden or unresponsive Off panel fails closed;
+the original 250 ms watchdog is serviced on paused-input turns as well as
+ordinary turns. If the separate panel cannot be created, the optional clipboard
+reports a native setup refusal and the desktop remains usable. Failed native
+panel cleanup retains that original surface and refuses another clipboard
+panel; an exception is not treated as successful cleanup.
+
+A viewing reconnect or later F8 control request does not re-enable the initial
+clipboard choice. Start a new explicitly controlled connection to select sharing
+again.
 
 No text is read before the original grant, bilateral readiness and local privacy
 checks. The adapter observes pasteboard revision metadata and reads only a new
@@ -801,9 +819,12 @@ later viewing attempt fails:
 | `clipboard_absence`, `clipboard_ended` | Typed setup absence or the reason an active lane retired. |
 | `clipboard_cleanup` | `not_started`, `unknown`, `pending`, `finished` or `failed`, from the original worker. |
 
-The new native backend and toolbar require macOS SDK/runtime qualification.
-Portable policy checks, source review and authored native tests are separate
-evidence; they do not establish a live Mac clipboard or tailnet result.
+The native backend, toolbar and independent panel require macOS SDK/runtime
+qualification. The app-switch change adds deterministic regressions for
+continued original-surface heartbeats and terminal loss of privacy visibility.
+Those new tests and the new AppKit path were not compiled or executed in the
+implementation session after its executor became unavailable. Source review
+does not establish a live Mac clipboard or tailnet result.
 
 ## Check local capture, encoding and input readiness
 

@@ -559,6 +559,19 @@ static BOOL fr_any_key(const BOOL *keys) {
 @interface FrSharingButton : NSButton
 @end
 
+// The clipboard's Off surface is independent of keyboard focus and remains
+// visible when another app covers the remote picture. It never becomes a
+// remote input window or changes the application's activation policy.
+@interface FrClipboardPanel : NSPanel
+@end
+
+@interface FrClipboardView : FrSharingView
+@property(nonatomic) BOOL drawn;
+@end
+
+@interface FrClipboardOffButton : FrSharingButton
+@end
+
 // AppKit owns real text editing, input methods and candidate placement here.
 // This view is local chrome, not a guessed remote document or caret.
 @interface FrTextComposer : NSTextView {
@@ -587,6 +600,10 @@ static BOOL fr_any_key(const BOOL *keys) {
     NSTextField *clipboardLabel;
     FrSharingButton *uploadCancel, *uploadPacing, *downloadCancel, *changeDisplay, *stopControl;
     FrSharingButton *clipboardOff;
+    FrClipboardPanel *clipboardPanel;
+    FrClipboardView *clipboardPanelView;
+    NSTextField *clipboardPanelLabel;
+    FrClipboardOffButton *clipboardPanelOff;
     NSTextField *audioLabel, *audioVolumeLabel;
     FrSharingButton *audioDown, *audioUp, *audioMute;
     uint32_t audioState, audioVolume;
@@ -668,6 +685,8 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)chooseReopen:(uint32_t)action;
 - (void)stopClipboard:(BOOL)userOff;
 - (void)stopClipboardWithoutUI:(BOOL)userOff;
+- (BOOL)openClipboardSurface;
+- (BOOL)closeClipboardSurface;
 - (void)finishStoppedUI;
 - (void)disableClipboard:(id)sender;
 - (BOOL)fileSelectionAvailable;
@@ -691,6 +710,11 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)cancelText:(id)sender;
 - (BOOL)allowsTextReplacement:(NSRange)range string:(id)string;
 @end
+
+// One independent privacy surface per native viewer process. Retain its exact
+// owner until AppKit confirms close, even if final window cleanup encounters
+// an exception. An unconfirmed surface can never be replaced by another one.
+static FrWindowOwner *fr_clipboard_surface_owner;
 
 @implementation FrTextComposer
 - (BOOL)acceptsTextCallbacks {
@@ -950,6 +974,22 @@ static BOOL fr_any_key(const BOOL *keys) {
 - (void)mouseUp:(NSEvent *)event { (void)event; }
 @end
 
+@implementation FrClipboardPanel
+- (BOOL)canBecomeKeyWindow { return NO; }
+- (BOOL)canBecomeMainWindow { return NO; }
+@end
+
+@implementation FrClipboardView
+- (void)drawRect:(NSRect)dirty {
+    [super drawRect:dirty];
+    self.drawn = YES;
+}
+@end
+
+@implementation FrClipboardOffButton
+- (BOOL)acceptsFirstMouse:(NSEvent *)event { (void)event; return YES; }
+@end
+
 static NSTextField *fr_sharing_label(FrSharingView *parent, NSString *text) {
     NSTextField *label = [NSTextField labelWithString:text];
     label.font = [NSFont systemFontOfSize:11];
@@ -970,6 +1010,23 @@ static FrSharingButton *fr_sharing_button(FrSharingView *parent, NSString *title
     button.font = [NSFont systemFontOfSize:11];
     [parent addSubview:button];
     return button;
+}
+
+// Query exactly the retained panel, not a process-wide or guessed window.
+// A stalled WindowServer query cannot renew the Rust privacy watchdog.
+static BOOL fr_clipboard_surface_onscreen(NSWindow *panel) {
+    NSInteger number = panel.windowNumber;
+    if (number <= 0 || number > UINT32_MAX) return NO;
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow,
+                                                   (CGWindowID)number);
+    if (!windows) return NO;
+    BOOL shown = NO;
+    if (CFArrayGetCount(windows) == 1) {
+        NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows, 0);
+        shown = [info[(__bridge NSString *)kCGWindowIsOnscreen] boolValue];
+    }
+    CFRelease(windows);
+    return shown;
 }
 
 static BOOL fr_file_selection_bytes(NSPasteboard *pasteboard, uint8_t *bytes, size_t *length) {
@@ -1041,6 +1098,94 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 - (void)dealloc {
     for (id observer in lifetimeObservers) [lifetimeCenter removeObserver:observer];
 }
+- (BOOL)openClipboardSurface {
+    if (fr_clipboard_surface_owner || clipboardPanel || clipboardStopped || nativeStopPending ||
+        atomic_load_explicit(&lifetime->unavailable, memory_order_acquire)) return NO;
+    NSScreen *screen = window.screen ?: NSScreen.mainScreen;
+    if (!screen) return NO;
+    NSRect visible = screen.visibleFrame;
+    NSSize size = NSMakeSize(360, 44);
+    if (NSWidth(visible) < size.width || NSHeight(visible) < size.height) return NO;
+    NSRect frame = NSMakeRect(floor(NSMidX(visible) - size.width / 2),
+                              floor(NSMaxY(visible) - size.height - 8),
+                              size.width, size.height);
+    FrClipboardPanel *panel = [[FrClipboardPanel alloc]
+        initWithContentRect:frame
+                  styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                    backing:NSBackingStoreBuffered defer:NO];
+    if (!panel) return NO;
+    // Retain partial construction for this owner's cleanup, including a
+    // native exception or a session-loss notification during the open.
+    clipboardPanel = panel;
+    fr_clipboard_surface_owner = self;
+    panel.title = @"FrankenRemote text clipboard";
+    panel.level = NSStatusWindowLevel;
+    panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorIgnoresCycle;
+    panel.hidesOnDeactivate = NO;
+    panel.floatingPanel = YES;
+    panel.becomesKeyOnlyIfNeeded = YES;
+    panel.releasedWhenClosed = NO;
+    panel.hasShadow = YES;
+    FrClipboardView *surface = [[FrClipboardView alloc]
+        initWithFrame:NSMakeRect(0, 0, size.width, size.height)];
+    if (!surface) return NO;
+    clipboardPanelView = surface;
+    panel.contentView = surface;
+    clipboardPanelLabel = fr_sharing_label(surface, @"Text clipboard: Waiting");
+    clipboardPanelLabel.frame = NSMakeRect(12, 14, 242, 18);
+    FrClipboardOffButton *off = [[FrClipboardOffButton alloc]
+        initWithFrame:NSMakeRect(266, 8, 82, 28)];
+    if (!clipboardPanelLabel || !off) return NO;
+    clipboardPanelOff = off;
+    off.title = @"Turn Off";
+    off.bezelStyle = NSBezelStyleRounded;
+    off.controlSize = NSControlSizeSmall;
+    off.target = self;
+    off.action = @selector(disableClipboard:);
+    off.font = [NSFont systemFontOfSize:11];
+    off.accessibilityLabel = @"Turn off FrankenRemote text clipboard sharing";
+    off.toolTip = @"Stops this connection's text clipboard. Viewing and control continue.";
+    [surface addSubview:off];
+    [panel orderFrontRegardless];
+    [panel displayIfNeeded];
+    // No nested event pump. The viewer's bounded pump remains the sole native
+    // event translator. Rust checks actual visibility before native access.
+    return !clipboardStopped && !nativeStopPending &&
+           !atomic_load_explicit(&lifetime->unavailable, memory_order_acquire);
+}
+
+- (BOOL)closeClipboardSurface {
+    // Call only after the original privacy callback was fenced, or before its
+    // first adoption on a failed open. Keep all custody on a native exception;
+    // the occupied owner slot also survives final Window destruction.
+    if (![NSThread isMainThread]) return NO;
+    FrClipboardPanel *panel = clipboardPanel;
+    if (!panel) {
+        if (fr_clipboard_surface_owner == self) fr_clipboard_surface_owner = nil;
+        return YES;
+    }
+    @try {
+        clipboardPanelOff.target = nil;
+        clipboardPanelOff.action = NULL;
+        clipboardPanelOff.enabled = NO;
+        clipboardPanelLabel.stringValue = @"Text clipboard: Off";
+        [panel orderOut:nil];
+        [panel close];
+        if (panel.isVisible) return NO;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return NO;
+    }
+    clipboardPanel = nil;
+    clipboardPanelView = nil;
+    clipboardPanelLabel = nil;
+    clipboardPanelOff = nil;
+    if (fr_clipboard_surface_owner == self) fr_clipboard_surface_owner = nil;
+    return YES;
+}
+
 - (void)checkSessionUnavailable {
     if (atomic_load_explicit(&lifetime->unavailable, memory_order_acquire) &&
         !sessionUnavailableReported) {
@@ -1640,9 +1785,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 - (void)finishStoppedUI {
     if (nativeStopPending) return;
     if (clipboardUIStopped) {
-        clipboardUIStopped = NO;
         clipboardOff.enabled = NO;
         clipboardLabel.stringValue = @"Clipboard: Off";
+        if ([self closeClipboardSurface]) clipboardUIStopped = NO;
     }
     if (reopenUsed) {
         changeDisplay.enabled = NO;
@@ -1656,8 +1801,9 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
     [self finishStoppedUI];
 }
 - (void)disableClipboard:(id)sender {
-    (void)sender;
-    if (!clipboardOff.enabled) return;
+    if (clipboardStopped ||
+        !((sender == clipboardOff && clipboardOff.enabled) ||
+          (sender == clipboardPanelOff && clipboardPanelOff.enabled))) return;
     [self stopClipboard:YES];
 }
 
@@ -1781,16 +1927,15 @@ static FrMacResizeSample fr_resize_sample(FrWindowOwner *owner) {
 // An app switch, another key window, a covering window or another Space: the
 // window is still on screen somewhere. Rust releases everything it holds on
 // the host and pauses the grant until this window is key and visible again.
-// As on every focus loss, local text and its held keys are discarded (scalar
-// only) and the clipboard stops. Viewing, audio and focus-gated file
-// selection continue.
+// Local text and its held keys are discarded (scalar only). The independent
+// clipboard Off panel and its original watchdog remain live; actual clipboard
+// payload still needs the original grant, view and bilateral readiness.
 - (void)pauseFocus {
     if (nativeStopPending) return;
     textContext = 0;
     textUntil = 0;
     textEligible = NO;
     [self retireText:@"Text cancelled: the window lost focus."];
-    [self stopClipboard:NO];
     buttons = 0;  // the session releases everything it holds remotely
     memset(physicalKeys, 0, sizeof(physicalKeys));
     memset(localTextKeys, 0, sizeof(localTextKeys));
@@ -2517,6 +2662,19 @@ int fr_mac_window_clipboard_bind(void *handle, void *context, FrClipboardStop st
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
     if (!owner->clipboardOff || owner->clipboardContext) return FR_MAC_INVALID;
+    @try {
+        if (!owner->clipboardStopped && ![owner openClipboardSurface]) {
+            [owner closeClipboardSurface];
+            return FR_MAC_UNAVAILABLE;
+        }
+    } @catch (NSException *exception) {
+        (void)exception;
+        // The Rust callback is not adopted on failure. Its caller keeps the
+        // desktop and records an optional clipboard setup refusal.
+        @try { [owner closeClipboardSurface]; }
+        @catch (NSException *cleanup) { (void)cleanup; }
+        return FR_MAC_UNAVAILABLE;
+    }
     owner->clipboardContext = context;
     owner->clipboardStop = stop;
     owner->clipboardRelease = release;
@@ -2557,8 +2715,17 @@ int fr_mac_window_clipboard_update(void *handle, uint32_t state) {
     if (!owner->clipboardOff) return FR_MAC_INVALID;
     static NSString *const labels[] = {@"Clipboard: Waiting", @"Clipboard: On",
         @"Clipboard: Off", @"Clipboard: N/A", @"Clipboard: Ended"};
+    // A stopped native worker cannot leave a live-looking independent panel.
+    // Fence its original callback before any AppKit cleanup can block.
+    if (state >= 2) [owner stopClipboardWithoutUI:NO];
+    if (owner->nativeStopPending) return FR_MAC_UNAVAILABLE;
+    [owner finishStoppedUI];
+    if (owner->clipboardUIStopped) return FR_MAC_UNAVAILABLE;
     owner->clipboardLabel.stringValue = owner->clipboardStopped ? labels[2] : labels[state];
     owner->clipboardOff.enabled = !owner->clipboardStopped && state < 2;
+    owner->clipboardPanelLabel.stringValue = state == 1
+        ? @"Text clipboard sharing is on" : @"Text clipboard: Waiting";
+    owner->clipboardPanelOff.enabled = !owner->clipboardStopped && state < 2;
     return FR_MAC_OK;
 }
 
@@ -2566,13 +2733,31 @@ int fr_mac_window_clipboard_visible(void *handle, int *visible) {
     if (!handle || !visible) return FR_MAC_INVALID;
     if (![NSThread isMainThread]) return FR_MAC_THREAD;
     FrWindowOwner *owner = (__bridge FrWindowOwner *)handle;
-    NSWindow *w = owner->window;
-    *visible = owner->clipboardOff && !owner->clipboardStopped &&
-               !owner->sharing.hidden && !owner->clipboardOff.hidden &&
-               w.isKeyWindow && w.isVisible && !w.isMiniaturized && w.isOnActiveSpace &&
-               (w.occlusionState & NSWindowOcclusionStateVisible) &&
-               NSContainsRect(owner->sharing.visibleRect, owner->clipboardOff.frame) ? 1 : 0;
-    return FR_MAC_OK;
+    *visible = 0;
+    @try {
+        FrClipboardPanel *panel = owner->clipboardPanel;
+        FrClipboardView *surface = owner->clipboardPanelView;
+        FrClipboardOffButton *off = owner->clipboardPanelOff;
+        BOOL shown = panel && surface && off && surface.drawn &&
+            panel.isVisible && !panel.isMiniaturized && panel.isOnActiveSpace &&
+            (panel.occlusionState & NSWindowOcclusionStateVisible) &&
+            !surface.hidden && !off.hidden && off.enabled &&
+            surface.window == panel && off.window == panel &&
+            NSContainsRect(surface.visibleRect, surface.bounds) &&
+            NSContainsRect(surface.visibleRect, off.frame) &&
+            fr_clipboard_surface_onscreen(panel);
+        // Keyboard focus and picture occlusion belong to input/presentation,
+        // not this separate privacy surface. Hide/minimize, original stop and
+        // session loss remain terminal, including after a native query stalls.
+        *visible = shown && owner->clipboardContext && !owner->clipboardStopped &&
+            !owner->nativeStopPending && !NSApp.isHidden &&
+            owner->window.isVisible && !owner->window.isMiniaturized &&
+            !atomic_load_explicit(&owner->lifetime->unavailable, memory_order_acquire) ? 1 : 0;
+        return FR_MAC_OK;
+    } @catch (NSException *exception) {
+        (void)exception;
+        return FR_MAC_UNAVAILABLE;
+    }
 }
 
 // Waits up to `timeout` seconds for the first event, then drains one bounded
@@ -2952,6 +3137,9 @@ void fr_mac_window_free(void *handle) {
         owner->audioUp = nil;
         owner->audioMute = nil;
         owner->sendCopiedFiles = nil;
+        // A failed independent panel close retains only its original privacy
+        // custody. Do not retain decoded screen pixels on that account.
+        owner->renderer = nil;
     }
 }
 

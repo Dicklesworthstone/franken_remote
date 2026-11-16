@@ -1,4 +1,6 @@
 //! A bounded heartbeat from the original native clipboard's visible Off UI.
+//! Viewer keyboard focus is separate: only this original privacy surface can
+//! renew the heartbeat, including while remote input is paused.
 //! Expiry, clock regression and stop are terminal; a later paint cannot renew
 //! privacy permission. This carries no clipboard data or input authority.
 #![forbid(unsafe_code)]
@@ -66,6 +68,23 @@ impl Heartbeat {
 
     pub(crate) fn progress(&self) -> bool {
         self.progress_with_clock(Sample::now)
+    }
+
+    /// Judge the original independent Off surface on every viewer pump,
+    /// including paused-input turns. Lost visibility is terminal even when
+    /// the watchdog has not expired; a later visible panel cannot revive it.
+    #[cfg(any(test, feature = "macos-desktop"))]
+    pub(crate) fn observe(&self, visible: bool) -> bool {
+        self.observe_with_clock(visible, Sample::now)
+    }
+
+    #[cfg(any(test, feature = "macos-desktop"))]
+    fn observe_with_clock(&self, visible: bool, clock: impl FnOnce() -> Sample) -> bool {
+        if !visible {
+            self.stop(false);
+            return false;
+        }
+        self.progress_with_clock(clock)
     }
 
     fn progress_with_clock(&self, clock: impl FnOnce() -> Sample) -> bool {
@@ -144,6 +163,46 @@ mod tests {
         assert!(heartbeat.stopped());
         assert!(!heartbeat.progress_with_clock(|| sample(start + MAX_SILENCE, SILENCE_NS)));
         assert!(!heartbeat.live_with_clock(|| sample(start + MAX_SILENCE, SILENCE_NS)));
+    }
+
+    #[test]
+    fn an_independent_surface_keeps_the_original_watchdog_live_across_many_turns() {
+        let heartbeat = Heartbeat::default();
+        let original = heartbeat.clone();
+        let start = Instant::now();
+        // This is the same method called from both the ordinary viewer turn
+        // and its input Pause/Resume branches. No new owner or grant is made.
+        for turn in 0..=20 {
+            let elapsed = Duration::from_millis(turn * 100);
+            let now = || sample(start + elapsed, turn * 100_000_000);
+            assert!(heartbeat.observe_with_clock(true, now));
+            assert!(original.live_with_clock(now));
+        }
+        let late = || sample(start + Duration::from_millis(2250), 2_250_000_000);
+        assert!(!heartbeat.observe_with_clock(true, late));
+        assert!(original.stopped());
+        assert!(!original.observe_with_clock(true, late));
+    }
+
+    #[test]
+    fn lost_surface_visibility_fences_before_clock_work_and_never_reopens() {
+        let heartbeat = Heartbeat::default();
+        let original = heartbeat.clone();
+        let start = Instant::now();
+        assert!(heartbeat.observe_with_clock(true, || sample(start, 1)));
+        assert!(!heartbeat.observe_with_clock(false, || {
+            panic!("negative native visibility must fence without waiting on a clock")
+        }));
+        assert!(original.stopped());
+        assert!(!original.user_off());
+        assert!(!original.observe_with_clock(true, || sample(start, 1)));
+        original.stop(true);
+        assert!(heartbeat.user_off());
+        assert!(!heartbeat.observe(true));
+
+        let never_shown = Heartbeat::default();
+        assert!(!never_shown.observe(false));
+        assert!(!never_shown.observe(true));
     }
 
     #[test]
