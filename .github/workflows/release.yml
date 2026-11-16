@@ -2,8 +2,10 @@ name: release
 
 # Builds the artifacts install.sh and install.ps1 download, then publishes a
 # GitHub release with SHA256SUMS and a Sigstore bundle per file. A pushed
-# v* tag publishes that release; a manual run builds an existing tag into a
-# draft release.
+# v* tag publishes that release. A manual run builds the selected branch's
+# commit into a draft release: drafts are invisible to /releases/latest (so
+# the installers ignore them), and the tag is created at that commit only
+# when someone publishes the draft.
 #
 # Artifact layout (what the installers validate):
 #   franken_remote-<tag>-<target>-ubuntu<version>.tar.gz   (Linux)
@@ -24,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing tag to build (vX.Y.Z); the release is created as a draft
+        description: Tag for the draft release (vX.Y.Z), created at this run's commit when the draft is published
         required: true
 
 permissions:
@@ -39,7 +41,20 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  tag:
+    name: check the tag
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Release tags are vX.Y.Z
+        run: |
+          if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release tag '$RELEASE_TAG' is not vX.Y.Z"
+            exit 1
+          fi
+
   linux:
+    needs: tag
     name: linux (${{ matrix.target }}, ${{ matrix.distro }})
     strategy:
       fail-fast: true
@@ -57,10 +72,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
-      - name: Check out the tag
+      - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-        with:
-          ref: ${{ env.RELEASE_TAG }}
       - name: Add build swap
         uses: ./.github/actions/build-swap
       - name: Install repository-pinned toolchain
@@ -97,14 +110,13 @@ jobs:
           if-no-files-found: error
 
   macos:
+    needs: tag
     name: macos (aarch64-apple-darwin)
     runs-on: macos-15
     timeout-minutes: 120
     steps:
-      - name: Check out the tag
+      - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-        with:
-          ref: ${{ env.RELEASE_TAG }}
       - name: Install repository-pinned toolchain
         run: rustup show active-toolchain
       - name: Install the static Opus library (host and client audio)
@@ -141,14 +153,13 @@ jobs:
           if-no-files-found: error
 
   windows:
+    needs: tag
     name: windows (x86_64-pc-windows-gnu, cross-built)
     runs-on: macos-15
     timeout-minutes: 120
     steps:
-      - name: Check out the tag
+      - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-        with:
-          ref: ${{ env.RELEASE_TAG }}
       - name: Install repository-pinned toolchain and the Windows target
         run: |
           rustup show active-toolchain
@@ -184,10 +195,8 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - name: Check out the tag
+      - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
-        with:
-          ref: ${{ env.RELEASE_TAG }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*
@@ -219,6 +228,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          draft=()
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then draft=(--draft); fi
-          gh release create "$RELEASE_TAG" dist/* --verify-tag --title "FrankenRemote $RELEASE_TAG" --generate-notes "${draft[@]}"
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            gh release create "$RELEASE_TAG" dist/* --draft --target "$GITHUB_SHA" \
+              --title "FrankenRemote $RELEASE_TAG" --generate-notes
+          else
+            gh release create "$RELEASE_TAG" dist/* --verify-tag \
+              --title "FrankenRemote $RELEASE_TAG" --generate-notes
+          fi
