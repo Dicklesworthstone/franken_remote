@@ -124,7 +124,7 @@ fn fully_staged_bytes_never_become_a_publication_receipt() {
     });
     owner.lock().report.status = Some(original);
     let report = owner.report();
-    assert!(report.receipts().is_empty());
+    assert_eq!(report.receipts().len(), 0);
     assert_eq!(report.cleanup_name(), "pending");
 }
 

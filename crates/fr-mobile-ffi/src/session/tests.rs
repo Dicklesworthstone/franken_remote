@@ -841,17 +841,17 @@ fn retained_frame_display_never_uses_a_replacement_attempt_even_at_the_same_size
     shared.frames.begin_attempt().unwrap();
     let replacement = shared.frames.app_id(0);
     assert_eq!(shared.display_for_frame(retained), None);
-    assert_eq!(shared.display_for_frame(replacement | 17), None);
+    assert_eq!(shared.display_for_frame(replacement | 0x11), None);
     shared
         .publish_configuration(replacement, (5120, 2880), (1582, 888), false, None)
         .unwrap();
     assert_eq!(shared.display_for_frame(retained), None);
     assert_eq!(
-        shared.display_for_frame(replacement | 17),
+        shared.display_for_frame(replacement | 0x11),
         Some((5120, 2880))
     );
     shared.clear_presentation();
-    assert_eq!(shared.display_for_frame(replacement | 17), None);
+    assert_eq!(shared.display_for_frame(replacement | 0x11), None);
 }
 
 fn reset_frame_cursor(shared: &Shared, attempt: u64) {

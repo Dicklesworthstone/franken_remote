@@ -102,12 +102,9 @@ impl Shared {
                     .map_err(Error::Choice)
             })
             .map_err(|_| Error::Choice(ChoiceError::Stale))??;
-        let prepared = match Upload::prepare(path) {
-            Ok(prepared) => prepared,
-            Err(_) => {
-                self.discard_upload_selection(token);
-                return Err(Error::Source);
-            }
+        let Ok(prepared) = Upload::prepare(path) else {
+            self.discard_upload_selection(token);
+            return Err(Error::Source);
         };
         self.frames
             .with_current(attempt, || {
