@@ -354,6 +354,9 @@ impl Menu {
         self.dormant = false;
         let enabled = |available| if available { MF_ENABLED } else { MF_GRAYED };
         let description = match state {
+            ControlState::Unavailable if super::super::application_session() => {
+                "View only (choose View and control in FrankenRemote to request input)"
+            }
             ControlState::Unavailable => "View only (start with --control to request input)",
             ControlState::WaitingForView => "Waiting for a ready view",
             ControlState::Viewing => "Viewing — Input → Request control",

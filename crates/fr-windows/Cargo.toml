@@ -5,18 +5,32 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 publish = false
+# Windows targets embed the application manifest (visual styles, per-monitor
+# DPI, asInvoker), icon and version resource; other targets do nothing.
+build = "build.rs"
 
 # The Windows client: installed Tailscale discovery and authenticated native
 # connections through the shared session core (fr-mobile-ffi), driven from a
 # Win32 window with Media Foundation decode and a D3D11 swap chain. Other
-# platforms build a stub that says so.
+# platforms build a stub that says so. One library serves the command line
+# and the windowed desktop application.
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "fr-windows"
 path = "src/main.rs"
 
+# The desktop application installed for the user (Start menu, Apps & features).
+[[bin]]
+name = "FrankenRemote"
+path = "src/app_main.rs"
+
 [dependencies]
 # Portable native text validation uses the protocol's one committed-text bound.
 fr-core.workspace = true
+# Settings and completion summaries are parsed portably (already in the graph).
+serde_json.workspace = true
 
 [dev-dependencies]
 # Run the native machine-choice policy against the shared catalog on every host.
@@ -32,7 +46,6 @@ fr-mobile-ffi = { workspace = true, features = ["windows-session"] }
 fr-native = { workspace = true, default-features = false, features = ["windows-media"] }
 fr-media.workspace = true
 fr-tailnet.workspace = true
-serde_json.workspace = true
 # The window, swap chain and video processor (the version Cargo.lock
 # already carries; only the bindings named below compile).
 windows = { version = "=0.62.2", features = [
@@ -45,7 +58,9 @@ windows = { version = "=0.62.2", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Controls",

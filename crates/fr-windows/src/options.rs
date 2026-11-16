@@ -36,6 +36,30 @@ impl DisplayChoice {
     }
 }
 
+/// Which local HEVC decode path a viewing command may use.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Decoder {
+    /// GPU (DXVA) decode when the system decoder accepts this PC's device,
+    /// otherwise the decoder's CPU path with GPU presentation.
+    #[default]
+    Automatic,
+    /// Refuse the session unless the GPU decodes.
+    Hardware,
+    /// CPU decode, GPU presentation (for comparison or a faulty driver).
+    Software,
+}
+
+impl Decoder {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Automatic),
+            "hardware" => Some(Self::Hardware),
+            "software" => Some(Self::Software),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReceiveConflict {
     #[default]
@@ -69,6 +93,8 @@ pub(crate) struct Options {
     pub send: Option<PathBuf>,
     /// Receive host-selected files only under this command's original grant.
     pub receive: Option<ReceiveOptions>,
+    /// Local decode path (`--decoder auto|hardware|software`).
+    pub decoder: Decoder,
 }
 
 /// A missing viewing destination requests one local native machine choice.
@@ -116,8 +142,10 @@ impl Options {
             display: DisplayChoice::Primary,
             send: None,
             receive: None,
+            decoder: Decoder::Automatic,
         };
         let mut port_set = false;
+        let mut decoder_set = false;
         let mut display_set = false;
         let mut receive_directory = None;
         let mut receive_max_file_bytes = None;
@@ -192,6 +220,10 @@ impl Options {
                         "--display" if view && !display_set => {
                             options.display = DisplayChoice::parse(value)?;
                             display_set = true;
+                        }
+                        "--decoder" if view && !decoder_set => {
+                            options.decoder = Decoder::parse(value)?;
+                            decoder_set = true;
                         }
                         "--send" if view && options.send.is_none() && !value.is_empty() => {
                             options.send = Some(PathBuf::from(value));
@@ -273,6 +305,27 @@ mod tests {
     }
 
     #[test]
+    fn the_decoder_preference_is_explicit_unique_and_viewing_only() {
+        assert_eq!(parse(&[], true).unwrap().decoder, Decoder::Automatic);
+        for (value, decoder) in [
+            ("auto", Decoder::Automatic),
+            ("hardware", Decoder::Hardware),
+            ("software", Decoder::Software),
+        ] {
+            assert_eq!(parse(&["--decoder", value], true).unwrap().decoder, decoder);
+        }
+        for args in [
+            vec!["--decoder", "gpu"],
+            vec!["--decoder", ""],
+            vec!["--decoder"],
+            vec!["--decoder", "auto", "--decoder", "software"],
+        ] {
+            assert_eq!(parse(&args, true), None, "{args:?}");
+        }
+        assert_eq!(parse(&["--decoder", "software"], false), None);
+    }
+
+    #[test]
     fn explicit_destinations_keep_the_existing_view_and_directory_paths() {
         for (verb, view) in [("view", true), ("directory", false)] {
             let args = [verb, "host.tail.ts.net", "--port", "9443", "--ipv4"].map(str::to_owned);
@@ -314,6 +367,7 @@ mod tests {
                 clipboard: true,
                 seconds: None,
                 display: DisplayChoice::Primary,
+                decoder: Decoder::Automatic,
                 send: None,
                 receive: None,
             })

@@ -205,11 +205,35 @@ struct Stats {
     display: (u32, u32),
 }
 
+/// One viewer's content-free completion document and whether it counts as
+/// success (pictures drawn and an orderly end).
+pub struct Completion {
+    pub json: String,
+    pub success: bool,
+}
+
+impl Completion {
+    /// The command line's contract: the document on stdout, exit 0 on success.
+    pub fn print(&self) -> ExitCode {
+        let _ = writeln!(std::io::stdout().lock(), "{}", self.json);
+        if self.success {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        }
+    }
+}
+
+pub fn run(config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
+    session(config, title, seconds).print()
+}
+
+/// One viewer window and session, returning its completion document.
 #[allow(
     clippy::too_many_lines,
     reason = "one original window and its selected owners"
 )]
-pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
+pub fn session(mut config: Config, title: &str, seconds: Option<u64>) -> Completion {
     CLOSE_PENDING.with(|pending| pending.set(false));
     CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
     // SAFETY: process-wide DPI awareness, set before any window exists, so
@@ -316,12 +340,11 @@ pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     report(&viewer, &stats, started.elapsed())
 }
 
-fn refuse(reason: &str) -> ExitCode {
-    let _ = writeln!(
-        std::io::stdout().lock(),
-        "{{\"status\":\"refused\",\"reason\":\"{reason}\"}}"
-    );
-    ExitCode::from(1)
+fn refuse(reason: &str) -> Completion {
+    Completion {
+        json: format!("{{\"status\":\"refused\",\"reason\":\"{reason}\"}}"),
+        success: false,
+    }
 }
 
 /// The message pump and draw loop, until the session ends (a session
@@ -942,7 +965,7 @@ fn clipboard_document(clipboard: ClipboardReport) -> serde_json::Value {
     })
 }
 
-fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
+fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> Completion {
     let shared = viewer.session.shared();
     let code = shared.end_code();
     let (decoded, decode_micros) = shared.frames.decode_stats();
@@ -1032,17 +1055,12 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         upload,
         download,
     );
-    let _ = writeln!(std::io::stdout().lock(), "{json}");
-    if stats.drawn > 0
+    let success = stats.drawn > 0
         && matches!(code, end::OK | end::CANCELLED)
         && viewer.reopen_refusal.is_none()
         && upload_ok
-        && download_ok
-    {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::from(1)
-    }
+        && download_ok;
+    Completion { json, success }
 }
 
 #[allow(clippy::cast_precision_loss, reason = "timings far below 2^52 µs")]
@@ -1062,6 +1080,8 @@ fn create_window(title: &str) -> windows::core::Result<HWND> {
             lpfnWndProc: Some(window_proc),
             hInstance: instance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            hIcon: super::app_icon(false),
+            hIconSm: super::app_icon(true),
             lpszClassName: class,
             ..Default::default()
         };

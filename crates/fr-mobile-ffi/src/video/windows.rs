@@ -4,6 +4,12 @@
 //! D3D11 texture that the client's swap chain presents from the same device.
 //! A picture never leaves GPU memory on that path.
 //!
+//! When the decoder has no usable DXVA path (no GPU HEVC profile, a
+//! transform that refuses the device, or an explicit software preference),
+//! it decodes on the CPU into system memory. Each such picture is copied once
+//! into a bounded ring of NV12 textures on the same device, so presentation
+//! stays one GPU video-processor step on either path.
+//!
 //! Input is Annex B: each admitted sample's 4-byte length prefixes become
 //! start codes, and an IDR carries the record's VPS, SPS and PPS in front.
 //! One admitted unit must synchronously yield its own timestamp-matched
@@ -16,32 +22,125 @@ use crate::windows_video_contract::{
 use core::ffi::c_void;
 use core::mem::ManuallyDrop;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 use windows::Win32::Foundation::{E_FAIL, HMODULE};
 use windows::Win32::Graphics::Direct3D::{
     D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1,
 };
 use windows::Win32::Graphics::Direct3D11::{
-    D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-    D3D11_MAP_READ, D3D11_MAPPED_SUBRESOURCE, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-    D3D11_USAGE_STAGING, D3D11CreateDevice, ID3D11Device, ID3D11Multithread, ID3D11Texture2D,
+    D3D11_BIND_DECODER, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_READ, D3D11_CPU_ACCESS_WRITE,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_DECODER_PROFILE_HEVC_VLD_MAIN, D3D11_MAP_READ, D3D11_MAP_WRITE, D3D11_MAPPED_SUBRESOURCE,
+    D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
+    D3D11CreateDevice, ID3D11Device, ID3D11Multithread, ID3D11Texture2D, ID3D11VideoDevice,
 };
-use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_NV12;
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_NV12, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::IDXGIDevice;
 use windows::Win32::Media::MediaFoundation::{
-    IMF2DBuffer, IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample,
-    IMFTransform, MF_E_ATTRIBUTENOTFOUND, MF_E_TRANSFORM_NEED_MORE_INPUT,
+    IMF2DBuffer, IMF2DBuffer2, IMFActivate, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType,
+    IMFSample, IMFTransform, MF_E_ATTRIBUTENOTFOUND, MF_E_TRANSFORM_NEED_MORE_INPUT,
     MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
     MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_SA_D3D11_AWARE, MF_VERSION,
-    MFCreateAlignedMemoryBuffer, MFCreateDXGIDeviceManager, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSTARTUP_NOSOCKET,
-    MFSampleExtension_CleanPoint, MFStartup, MFT_CATEGORY_VIDEO_DECODER,
-    MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive,
+    MF2DBuffer_LockFlags_Read, MFCreateAlignedMemoryBuffer, MFCreateDXGIDeviceManager,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFMediaType_Video, MFSTARTUP_NOSOCKET, MFSampleExtension_CleanPoint, MFStartup,
+    MFT_CATEGORY_VIDEO_DECODER, MFT_ENUM_FLAG_SORTANDFILTER, MFT_ENUM_FLAG_SYNCMFT,
+    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_HEVC,
+    MFVideoFormat_NV12, MFVideoInterlace_Progressive,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
 use windows::core::Interface;
+
+/// Which Media Foundation decode path this process's viewers may use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoderPreference {
+    /// DXVA when the system decoder accepts the shared D3D11 device;
+    /// otherwise its CPU path, uploaded once per picture to the same GPU.
+    Automatic,
+    /// Refuse a decoder (`Unavailable`) that does not accept the device.
+    Hardware,
+    /// Never hand the decoder the device: CPU decode, GPU presentation.
+    Software,
+}
+
+static PREFERENCE: AtomicU8 = AtomicU8::new(0);
+
+/// Set once at startup, before any session creates a decoder.
+pub fn set_decoder_preference(preference: DecoderPreference) {
+    let value = match preference {
+        DecoderPreference::Automatic => 0,
+        DecoderPreference::Hardware => 1,
+        DecoderPreference::Software => 2,
+    };
+    PREFERENCE.store(value, Ordering::Relaxed);
+}
+
+pub fn decoder_preference() -> DecoderPreference {
+    match PREFERENCE.load(Ordering::Relaxed) {
+        1 => DecoderPreference::Hardware,
+        2 => DecoderPreference::Software,
+        _ => DecoderPreference::Automatic,
+    }
+}
+
+/// Local decode readiness for setup guidance, without opening a session.
+/// `gpu_hevc_profile` is the adapter's advertised HEVC Main decode profile,
+/// not proof of a working decode: a session's `dxva` result is that proof.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DecoderSupport {
+    /// A Media Foundation HEVC-to-NV12 decoder is registered (on most PCs
+    /// Microsoft's HEVC Video Extension). Without one nothing can be viewed.
+    pub decoder_installed: bool,
+    /// The shared D3D11 device could be created.
+    pub gpu_device: bool,
+    /// The adapter advertises the D3D11 HEVC Main (VLD) decode profile.
+    pub gpu_hevc_profile: bool,
+    /// The adapter's description (for example "Intel(R) Iris(R) Plus
+    /// Graphics"); bounded to 128 UTF-16 units by DXGI.
+    pub adapter: Option<String>,
+}
+
+/// One bounded local probe: decoder registration plus the shared device's
+/// adapter and decode profiles. No decode is run.
+pub fn decoder_support() -> DecoderSupport {
+    // SAFETY: plain COM initialization for the calling thread.
+    let _ = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
+    let mut support = DecoderSupport::default();
+    let Some(gpu) = gpu() else {
+        return support;
+    };
+    support.gpu_device = true;
+    support.decoder_installed = hevc_transform().is_ok();
+    // SAFETY: read-only COM queries on the live shared device; the adapter
+    // description is a fixed-size UTF-16 array owned by the returned struct.
+    unsafe {
+        if let Ok(adapter) = gpu
+            .device
+            .cast::<IDXGIDevice>()
+            .and_then(|dxgi| dxgi.GetAdapter())
+            && let Ok(desc) = adapter.GetDesc()
+        {
+            let end = desc
+                .Description
+                .iter()
+                .position(|&unit| unit == 0)
+                .unwrap_or(desc.Description.len());
+            let name = String::from_utf16_lossy(&desc.Description[..end]);
+            support.adapter = (!name.trim().is_empty()).then(|| name.trim().to_owned());
+        }
+        if let Ok(video) = gpu.device.cast::<ID3D11VideoDevice>() {
+            let count = video.GetVideoDecoderProfileCount().min(256);
+            support.gpu_hevc_profile = (0..count).any(|index| {
+                video
+                    .GetVideoDecoderProfile(index)
+                    .is_ok_and(|profile| profile == D3D11_DECODER_PROFILE_HEVC_VLD_MAIN)
+            });
+        }
+    }
+    support
+}
 
 /// The process's one D3D11 device, with the Media Foundation device manager
 /// that hands it to decoders. Multithread-protected: the decode thread (via
@@ -248,12 +347,90 @@ pub(super) struct RawDecoder {
     full_range: bool,
     dxva: bool,
     annex_b: Vec<u8>,
+    /// Luma rows in a system-memory output buffer (the selected NV12 type's
+    /// frame height); the chroma plane starts this many pitches in.
+    output_rows: u32,
+    /// Bytes per row of a contiguous (non-2D) system-memory output buffer.
+    output_pitch: u32,
+    /// The CPU path's upload ring, created on its first picture.
+    upload: Option<Upload>,
+}
+
+/// Textures in the CPU path's upload ring. A picture's slice is rewritten
+/// only after this many newer pictures, long after the viewer has replaced
+/// it; the frame slot itself retains just the newest picture.
+const UPLOAD_SLICES: u32 = 4;
+
+/// One CPU-writable NV12 staging texture and the GPU texture array the
+/// video processor reads, both at the even-rounded visible size.
+struct Upload {
+    staging: ID3D11Texture2D,
+    ring: ID3D11Texture2D,
+    size: (u32, u32),
+    next: u32,
+}
+
+impl Upload {
+    fn new(device: &ID3D11Device, size: (u32, u32)) -> Result<Self, Error> {
+        let desc = |array: u32, staging: bool, bind: u32| D3D11_TEXTURE2D_DESC {
+            Width: size.0,
+            Height: size.1,
+            MipLevels: 1,
+            ArraySize: array,
+            Format: DXGI_FORMAT_NV12,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: if staging {
+                D3D11_USAGE_STAGING
+            } else {
+                D3D11_USAGE_DEFAULT
+            },
+            BindFlags: bind,
+            CPUAccessFlags: if staging {
+                D3D11_CPU_ACCESS_WRITE.0 as u32
+            } else {
+                0
+            },
+            MiscFlags: 0,
+        };
+        let staging_desc = desc(1, true, 0);
+        let (mut staging, mut ring) = (None, None);
+        // SAFETY: texture creation on the live shared device with fully
+        // initialized descriptions and owned out pointers.
+        unsafe {
+            device
+                .CreateTexture2D(&raw const staging_desc, None, Some(&raw mut staging))
+                .map_err(|_| Error::Allocation)?;
+            // Drivers refuse an NV12 array without a bind flag. The decoder
+            // flag matches DXVA's own output (the renderer's proven input);
+            // a shader resource is the fallback.
+            for bind in [D3D11_BIND_DECODER.0, D3D11_BIND_SHADER_RESOURCE.0] {
+                let ring_desc = desc(UPLOAD_SLICES, false, bind.cast_unsigned());
+                if device
+                    .CreateTexture2D(&raw const ring_desc, None, Some(&raw mut ring))
+                    .is_ok()
+                {
+                    break;
+                }
+            }
+        }
+        Ok(Self {
+            staging: staging.ok_or(Error::Allocation)?,
+            ring: ring.ok_or(Error::Allocation)?,
+            size,
+            next: 0,
+        })
+    }
 }
 // SAFETY: the transform is used by one thread at a time (`&mut self`); a
 // synchronous Media Foundation transform has no thread affinity.
 unsafe impl Send for RawDecoder {}
 
 const START: [u8; 4] = [0, 0, 0, 1];
+/// An HEVC access unit delimiter (NAL type 35, any picture type).
+const NEXT_ACCESS_UNIT: [u8; 7] = [0, 0, 0, 1, 0x46, 0x01, 0x50];
 
 impl RawDecoder {
     pub(super) fn new(
@@ -295,6 +472,9 @@ impl RawDecoder {
             full_range,
             dxva: false,
             annex_b: Vec::new(),
+            output_rows: 0,
+            output_pitch: 0,
+            upload: None,
         };
         decoder.configure(gpu)?;
         Ok(decoder)
@@ -309,11 +489,17 @@ impl RawDecoder {
                 .GetAttributes()
                 .map_err(|_| Error::Unavailable)?;
             let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
-            if attributes.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0 {
+            let preference = decoder_preference();
+            if preference != DecoderPreference::Software
+                && attributes.GetUINT32(&MF_SA_D3D11_AWARE).unwrap_or(0) != 0
+            {
                 self.dxva = self
                     .transform
                     .ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER, gpu.manager.as_raw() as usize)
                     .is_ok();
+            }
+            if preference == DecoderPreference::Hardware && !self.dxva {
+                return Err(Error::Unavailable);
             }
             let input = MFCreateMediaType().map_err(|_| Error::Allocation)?;
             input
@@ -380,6 +566,13 @@ impl RawDecoder {
                     .GetOutputCurrentType(0)
                     .map_err(|_| Error::Codec)?;
                 self.minimum_output_bytes = self.output_layout(&selected)?;
+                let size = selected
+                    .GetUINT64(&MF_MT_FRAME_SIZE)
+                    .map_err(|_| Error::Geometry)?;
+                self.output_rows =
+                    u32::try_from(size & u64::from(u32::MAX)).map_err(|_| Error::Geometry)?;
+                let width = u32::try_from(size >> 32).map_err(|_| Error::Geometry)?;
+                self.output_pitch = selected.GetUINT32(&MF_MT_DEFAULT_STRIDE).unwrap_or(width);
                 self.output_allocation()?;
                 return Ok(());
             }
@@ -450,6 +643,7 @@ impl RawDecoder {
         let size = sample
             .len()
             .checked_add(if idr { self.sets.len() } else { 0 })
+            .and_then(|size| size.checked_add(NEXT_ACCESS_UNIT.len()))
             .ok_or(Error::Allocation)?;
         self.annex_b
             .try_reserve_exact(size)
@@ -466,16 +660,120 @@ impl RawDecoder {
             self.annex_b.extend_from_slice(nal);
             rest = &tail[length..];
         }
+        if !self.dxva {
+            // The software parser completes a picture only when the next
+            // access unit starts; a delimiter starts it now.
+            self.annex_b.extend_from_slice(&NEXT_ACCESS_UNIT);
+        }
         let input = self.input_sample(idr, frame_time)?;
         // SAFETY: a live transform and a sample this function owns.
         unsafe { self.transform.ProcessInput(0, &input, 0) }.map_err(|_| Error::Codec)?;
-        let output = self.drain(frame_time)?;
+        let mut output = self.drain(frame_time)?;
+        if present && texture_of(&output).is_none() {
+            output = self.upload(&output, frame_time)?;
+        }
         Ok(present.then_some(Image {
             sample: output,
             width: self.width,
             height: self.height,
             full_range: self.full_range,
         }))
+    }
+
+    /// The CPU path: copy one validated system-memory NV12 picture into the
+    /// next ring slice and return a texture sample carrying the original
+    /// frame time, so presentation is the same GPU step as DXVA output.
+    fn upload(&mut self, sample: &IMFSample, frame_time: i64) -> Result<IMFSample, Error> {
+        let gpu = gpu().ok_or(Error::Unavailable)?;
+        let even = |value: u32| value.checked_add(1).map(|value| value & !1);
+        let size = (
+            even(self.width).ok_or(Error::Geometry)?,
+            even(self.height).ok_or(Error::Geometry)?,
+        );
+        if size.0 == 0 || size.1 == 0 || size.1 > self.output_rows {
+            return Err(Error::Geometry);
+        }
+        if self
+            .upload
+            .as_ref()
+            .is_none_or(|upload| upload.size != size)
+        {
+            self.upload = Some(Upload::new(&gpu.device, size)?);
+        }
+        let upload = self.upload.as_mut().ok_or(Error::Allocation)?;
+        let slice = upload.next;
+        upload.next = (upload.next + 1) % UPLOAD_SLICES;
+        let rows = self.output_rows;
+        // SAFETY: the source buffer is locked for reading for the whole copy
+        // and unlocked on every path; every row read is bounds-checked
+        // against the locked length below. The staging map is written only
+        // inside its mapped `RowPitch` x (height * 3 / 2) area and unmapped
+        // before the GPU copy. All objects belong to the shared device.
+        unsafe {
+            let buffer = sample.GetBufferByIndex(0).map_err(|_| Error::Codec)?;
+            if let Ok(planar) = buffer.cast::<IMF2DBuffer2>() {
+                // The decoder's own samples: its pitch and locked range.
+                let mut scanline = core::ptr::null_mut();
+                let mut pitch = 0_i32;
+                let mut start = core::ptr::null_mut();
+                let mut length = 0_u32;
+                planar
+                    .Lock2DSize(
+                        MF2DBuffer_LockFlags_Read,
+                        &raw mut scanline,
+                        &raw mut pitch,
+                        &raw mut start,
+                        &raw mut length,
+                    )
+                    .map_err(|_| Error::Codec)?;
+                let copied = copy_to_staging(
+                    &gpu.device,
+                    &upload.staging,
+                    Source {
+                        scanline: scanline.cast_const(),
+                        start: start.cast_const(),
+                        length,
+                        pitch,
+                        rows,
+                    },
+                    size,
+                );
+                let _ = planar.Unlock2D();
+                copied?;
+            } else {
+                // A caller-allocated contiguous buffer laid out with the
+                // negotiated output type's stride.
+                let pitch = i32::try_from(self.output_pitch).map_err(|_| Error::Geometry)?;
+                let mut base = core::ptr::null_mut();
+                let mut length = 0_u32;
+                buffer
+                    .Lock(&raw mut base, None, Some(&raw mut length))
+                    .map_err(|_| Error::Codec)?;
+                let copied = copy_to_staging(
+                    &gpu.device,
+                    &upload.staging,
+                    Source {
+                        scanline: base.cast_const(),
+                        start: base.cast_const(),
+                        length,
+                        pitch,
+                        rows,
+                    },
+                    size,
+                );
+                let _ = buffer.Unlock();
+                copied?;
+            }
+            let context = gpu.device.GetImmediateContext().map_err(|_| Error::Codec)?;
+            context.CopySubresourceRegion(&upload.ring, slice, 0, 0, 0, &upload.staging, 0, None);
+            let media =
+                MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &upload.ring, slice, false)
+                    .map_err(|_| Error::Allocation)?;
+            let output = MFCreateSample().map_err(|_| Error::Allocation)?;
+            output.AddBuffer(&media).map_err(|_| Error::Allocation)?;
+            output.SetSampleTime(frame_time).map_err(|_| Error::Codec)?;
+            Ok(output)
+        }
     }
 
     fn input_sample(&self, idr: bool, frame_time: i64) -> Result<IMFSample, Error> {
@@ -517,50 +815,19 @@ impl RawDecoder {
         // A stream change renegotiates NV12 once and asks again; a second
         // change in one call is a codec failure.
         for _ in 0..2 {
-            let provided = match self.output_allocation()? {
-                Allocation::Decoder => None,
-                Allocation::Caller {
-                    bytes,
-                    alignment_mask,
-                } => {
-                    // SAFETY: a fresh sample with one buffer whose size and
-                    // alignment were checked against this admitted geometry.
-                    unsafe {
-                        let sample = MFCreateSample().map_err(|_| Error::Allocation)?;
-                        let buffer = MFCreateAlignedMemoryBuffer(bytes, alignment_mask)
-                            .map_err(|_| Error::Allocation)?;
-                        sample.AddBuffer(&buffer).map_err(|_| Error::Allocation)?;
-                        Some(sample)
-                    }
-                }
-            };
-            let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
-                dwStreamID: 0,
-                pSample: ManuallyDrop::new(provided),
-                dwStatus: 0,
-                pEvents: ManuallyDrop::new(None),
-            }];
-            let mut status = 0_u32;
-            // SAFETY: one output buffer descriptor for stream 0; ownership of
-            // its sample and events returns to this function below.
-            let result = unsafe {
-                self.transform
-                    .ProcessOutput(0, &mut buffers, &raw mut status)
-            };
-            let [buffer] = buffers;
-            let sample = ManuallyDrop::into_inner(buffer.pSample);
-            let events = ManuallyDrop::into_inner(buffer.pEvents);
-            // SAFETY: the returned collection is owned until it is dropped.
-            let has_events = events
-                .as_ref()
-                .is_some_and(|events| unsafe { events.GetElementCount() != Ok(0) });
-            drop(events);
-            match result {
+            let output = self.output_once()?;
+            match output.result {
                 Ok(()) => {
-                    let sample = sample.ok_or(Error::Codec)?;
+                    let sample = output.sample.ok_or(Error::Codec)?;
                     // SAFETY: this function owns the returned sample.
                     let time = unsafe { sample.GetSampleTime() }.ok();
-                    if !owns_picture(frame_time, time, buffer.dwStatus, status, has_events) {
+                    if !owns_picture(
+                        frame_time,
+                        time,
+                        output.stream_status,
+                        output.status,
+                        output.has_events,
+                    ) {
                         return Err(Error::Codec);
                     }
                     self.validate_output(&sample)?;
@@ -574,6 +841,56 @@ impl RawDecoder {
             }
         }
         Err(Error::Codec)
+    }
+
+    /// One `ProcessOutput` call with a sample of the admitted size when the
+    /// transform asks the caller to allocate.
+    fn output_once(&mut self) -> Result<Output, Error> {
+        let provided = match self.output_allocation()? {
+            Allocation::Decoder => None,
+            Allocation::Caller {
+                bytes,
+                alignment_mask,
+            } => {
+                // SAFETY: a fresh sample with one buffer whose size and
+                // alignment were checked against this admitted geometry.
+                unsafe {
+                    let sample = MFCreateSample().map_err(|_| Error::Allocation)?;
+                    let buffer = MFCreateAlignedMemoryBuffer(bytes, alignment_mask)
+                        .map_err(|_| Error::Allocation)?;
+                    sample.AddBuffer(&buffer).map_err(|_| Error::Allocation)?;
+                    Some(sample)
+                }
+            }
+        };
+        let mut buffers = [MFT_OUTPUT_DATA_BUFFER {
+            dwStreamID: 0,
+            pSample: ManuallyDrop::new(provided),
+            dwStatus: 0,
+            pEvents: ManuallyDrop::new(None),
+        }];
+        let mut status = 0_u32;
+        // SAFETY: one output buffer descriptor for stream 0; ownership of
+        // its sample and events returns to this function below.
+        let result = unsafe {
+            self.transform
+                .ProcessOutput(0, &mut buffers, &raw mut status)
+        };
+        let [buffer] = buffers;
+        let sample = ManuallyDrop::into_inner(buffer.pSample);
+        let events = ManuallyDrop::into_inner(buffer.pEvents);
+        // SAFETY: the returned collection is owned until it is dropped.
+        let has_events = events
+            .as_ref()
+            .is_some_and(|events| unsafe { events.GetElementCount() != Ok(0) });
+        drop(events);
+        Ok(Output {
+            result,
+            sample,
+            stream_status: buffer.dwStatus,
+            status,
+            has_events,
+        })
     }
 
     fn validate_output(&self, sample: &IMFSample) -> Result<(), Error> {
@@ -610,6 +927,98 @@ impl RawDecoder {
         }
         Ok(())
     }
+}
+
+/// One `ProcessOutput` result with the sample and status it returned.
+struct Output {
+    result: windows::core::Result<()>,
+    sample: Option<IMFSample>,
+    stream_status: u32,
+    status: u32,
+    has_events: bool,
+}
+
+/// A locked system-memory NV12 picture: `rows` luma rows of `pitch` bytes
+/// from `scanline`, then `rows / 2` interleaved chroma rows.
+#[derive(Clone, Copy)]
+struct Source {
+    scanline: *const u8,
+    start: *const u8,
+    length: u32,
+    pitch: i32,
+    rows: u32,
+}
+
+/// Copies the visible `size` (even) of `source` into the mapped staging
+/// texture. Every source row is checked against the locked byte range first.
+///
+/// # Safety
+/// `source` must describe a buffer locked for reading for this call, with
+/// `length` bytes readable from `start`.
+unsafe fn copy_to_staging(
+    device: &ID3D11Device,
+    staging: &ID3D11Texture2D,
+    source: Source,
+    size: (u32, u32),
+) -> Result<(), Error> {
+    let pitch = usize::try_from(source.pitch).map_err(|_| Error::Geometry)?;
+    let width = size.0 as usize;
+    let height = size.1 as usize;
+    if source.scanline.is_null() || source.start.is_null() || pitch < width {
+        return Err(Error::Geometry);
+    }
+    // The planes must lie inside the locked range: scanline is at or after
+    // the buffer start, and luma plus chroma rows end within its length.
+    let offset = (source.scanline as usize)
+        .checked_sub(source.start as usize)
+        .ok_or(Error::Geometry)?;
+    let rows = source.rows as usize;
+    let chroma_start = rows.checked_mul(pitch).ok_or(Error::Geometry)?;
+    let needed = rows
+        .checked_add(rows / 2)
+        .and_then(|total| total.checked_mul(pitch))
+        .and_then(|bytes| bytes.checked_add(offset))
+        .ok_or(Error::Geometry)?;
+    if needed > source.length as usize || height > rows {
+        return Err(Error::Geometry);
+    }
+    // SAFETY: (caller) the locked range covers `needed` bytes from `start`,
+    // which contains every row read below.
+    let plane = |first: usize, row: usize| unsafe {
+        core::slice::from_raw_parts(source.scanline.add(first + row * pitch), width)
+    };
+    // SAFETY: Map yields a CPU-writable pointer to the staging subresource:
+    // `height` luma rows then `height / 2` chroma rows of `RowPitch` bytes.
+    unsafe {
+        let context = device.GetImmediateContext().map_err(|_| Error::Codec)?;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        context
+            .Map(staging, 0, D3D11_MAP_WRITE, 0, Some(&raw mut mapped))
+            .map_err(|_| Error::Codec)?;
+        let target_pitch = mapped.RowPitch as usize;
+        if mapped.pData.is_null() || target_pitch < width {
+            context.Unmap(staging, 0);
+            return Err(Error::Geometry);
+        }
+        let target = mapped.pData.cast::<u8>();
+        for row in 0..height {
+            core::ptr::copy_nonoverlapping(
+                plane(0, row).as_ptr(),
+                target.add(row * target_pitch),
+                width,
+            );
+        }
+        let chroma_target = target.add(height * target_pitch);
+        for row in 0..height / 2 {
+            core::ptr::copy_nonoverlapping(
+                plane(chroma_start, row).as_ptr(),
+                chroma_target.add(row * target_pitch),
+                width,
+            );
+        }
+        context.Unmap(staging, 0);
+    }
+    Ok(())
 }
 
 /// The first synchronous HEVC-to-NV12 decoder transform Media Foundation

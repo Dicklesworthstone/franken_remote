@@ -39,6 +39,84 @@ Run the resulting executable in the interactive desktop session. Tailscale
 must be installed, signed in and running on this machine. The remote host must
 be running FrankenRemote and its own admission policy must allow this viewer.
 
+## Install and use the desktop app
+
+The release build produces two programs from one library:
+
+- `FrankenRemote.exe`: the desktop app, a window with no console.
+- `fr-windows.exe`: the command line described in the rest of this page.
+
+Both embed an application manifest (visual styles, per-monitor DPI
+awareness, `asInvoker`), the app icon and version information. The build
+compiles that resource with `windres` (or `$RC`) for GNU targets and `rc` or
+`llvm-rc` for MSVC targets; without a resource compiler it prints a warning
+and the programs run with default visuals.
+
+Install for the current user:
+
+```powershell
+.\FrankenRemote.exe --install
+```
+
+Installation needs no administrator rights and changes nothing outside the
+user's profile:
+
+- Both programs are copied to `%LOCALAPPDATA%\Programs\FrankenRemote`.
+- A FrankenRemote shortcut is added to the Start menu.
+- An Apps & features entry is registered for this user, with a quiet
+  uninstall command.
+- The folder is added to the user `Path`, so a new terminal finds
+  `fr-windows`.
+
+`--install --quiet` shows no dialogs and returns exit code 0 on success.
+Installing again from a newer build replaces the programs in place; close a
+running FrankenRemote first. Started from anywhere else, the app shows an
+**Install for this user** button that performs the same installation and
+opens the installed copy.
+
+To remove it, use **Settings > Apps > Installed apps**, or run
+`FrankenRemote --uninstall` (`--quiet` skips the confirmation). Uninstall
+removes the shortcut, the Apps & features entry, the `Path` entry, the saved
+settings and both programs. Files that the running app was started from are
+deleted a moment after it exits. Tailscale is not changed.
+
+### Choose a machine in the app
+
+The app opens a list of machines read from the installed Tailscale service.
+Its columns are machine, status, system, connection path and Tailscale
+address. Online machines that can host a desktop come first, then machines
+whose state is unknown, then offline ones, then phones and tablets. Offline
+machines and phones are dimmed but stay selectable, because the list
+describes the Tailscale snapshot only. A listed machine is not necessarily
+running FrankenRemote, and a listing does not mean it will admit this viewer.
+
+- Type in the search box (Ctrl+F) to filter on any column.
+- **Refresh** (F5) reads a new snapshot and keeps the selected machine
+  selected when it is still listed. The list also refreshes itself after 90
+  seconds without a choice, inside the two-minute choice budget described
+  below.
+- Choose **View only** or **View and control**. **Share clipboard text**
+  applies to control sessions. **Ask which display to show** opens the
+  remote display picker after connecting.
+- Press Enter, double-click the machine or choose **Connect**.
+
+The viewer opens in its own window and runs as a child process of the app,
+with the same options the command line would use. When it closes, the list
+returns with one line about the session. It reports how long the session
+lasted and whether pictures were decoded on the GPU or the CPU, or the reason
+it could not start. Starting a view-only session leaves control requests
+disabled in the viewer. Its control status names the app's **View and
+control** choice instead of F8.
+
+The last machine and the three options are saved in
+`%LOCALAPPDATA%\FrankenRemote\settings.json`. That file holds only the
+machine's stable ID and the option values.
+
+The status area's second line names the decoder this PC offers (see
+[Decoder selection](#decoder-selection)). When Windows has no HEVC decoder, a
+**Get the HEVC decoder** button opens Microsoft's HEVC Video Extensions in
+the Microsoft Store.
+
 ## Find and select a host
 
 Run `fr-windows` or `fr-windows view` without a destination to open the native
@@ -90,6 +168,9 @@ LocalAPI. Its JSON document contains:
 
 - `machines`: each eligible peer's `stable_id`, canonical `name`, current
   Tailscale `addresses`, and sampled `path` (`direct`, `relayed` or `unknown`).
+  `os` (for example `"windows"`, `"macOS"`, `"linux"`) and `online` are the
+  daemon's own display metadata when it reports them, otherwise `null`. They
+  label and order rows only and never admit or refuse a machine.
 - `readiness: "not_probed"`: listing a machine says nothing about whether
   FrankenRemote is running or whether its desktop is available.
 - `excluded`: counts of shared, expired and otherwise unusable peers.
@@ -721,6 +802,45 @@ It performs one bounded fetch, prints the shared directory JSON document, and
 exits successfully only when the host returned a listing. The host must enable
 directory service; its refusal remains visible in the result.
 
+## Decoder selection
+
+The viewer decodes HEVC with the Media Foundation transform that Windows
+provides. When the transform accepts this viewer's D3D11 device, decoding
+runs on the GPU (DXVA). Each decoded NV12 surface goes straight to the D3D11
+video processor that draws the window. Otherwise the same transform decodes
+on the CPU. Its NV12 pictures are copied into a small ring of GPU textures
+for the same presentation path.
+
+```text
+fr-windows view <machine> --decoder auto       # default: GPU when available
+fr-windows view <machine> --decoder hardware   # GPU or refuse
+fr-windows view <machine> --decoder software   # CPU decode
+```
+
+`--decoder hardware` refuses at decoder setup when the transform cannot use
+the GPU. It never falls back. The completion document's `dxva` field reports
+what the session used: `1` for GPU decode, `0` for CPU decode and `-1` when
+no decoder was opened.
+
+The HEVC transform is part of Microsoft's HEVC Video Extensions (or the
+device manufacturer's equivalent), not of every Windows installation. Without
+it, the session ends at decoder setup, and the app's status line offers the
+Store page.
+
+Live on 2026-11-16 on one Surface Laptop 3 (Windows 11, Intel Iris Plus,
+150% scaling), viewing a macOS host's 5120x2880 display as a 2008x1128
+picture for 15 seconds per run:
+
+| Decoder | Pictures drawn | Mean decode | Frame interval p50 / p95 / p99 |
+|---|---|---|---|
+| `hardware` (`dxva: 1`) | 705 | 0.55 ms | 16 / 32 / 47 ms |
+| `software` (`dxva: 0`) | 708 | 10.5 ms | 16 / 32 / 47 ms |
+
+These are single runs on one machine (a hardware measurement, not a
+qualification). The CPU row shows that this processor keeps up at this
+picture size. Larger pictures or slower processors will cost proportionally
+more CPU time.
+
 ## HEVC decoder requirements
 
 The viewer requires the system HEVC decoder to return each admitted frame's
@@ -738,6 +858,14 @@ boundaries and heights padded to 64-line boundaries; returned texture arrays
 are limited to 16 surfaces with a valid slice. Larger requests, changed
 geometry and oversized returned memory are refused. These checks also apply
 when the decoder renegotiates its output type.
+
+The CPU path keeps the same one-input, one-picture contract. Microsoft's
+software decoder completes a picture only when the next access unit starts,
+so the viewer ends each CPU-decoded access unit with an HEVC access unit
+delimiter (NAL type 35). Each picture is then returned for its own input,
+with no extra delay. The GPU path sends access units unchanged. Caller-allocated
+output buffers may be contiguous rather than two-dimensional. Those are read
+with the negotiated output stride, and the same row and length bounds apply.
 
 ## Local capture probe
 

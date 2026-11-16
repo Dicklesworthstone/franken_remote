@@ -1,11 +1,13 @@
+pub mod app;
 mod hosts;
+mod install;
 mod probe;
 mod render;
 mod viewer;
 
 use crate::{
     USAGE,
-    options::{ConnectionCommand, DisplayChoice, Family, ReceiveConflict},
+    options::{ConnectionCommand, Decoder, DisplayChoice, Family, ReceiveConflict},
 };
 use fr_mobile_ffi::directory::{Request, fetch};
 use fr_mobile_ffi::session::{
@@ -15,6 +17,10 @@ use fr_mobile_ffi::session::{
 use fr_tailnet::{DEFAULT_SERVICE_PORT, Error, PeerTransportPath};
 use std::{io::Write, process::ExitCode};
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one command line's ordered selection and session setup"
+)]
 pub fn run(args: &[String]) -> ExitCode {
     if let [command, rest @ ..] = args
         && command == "capture-probe"
@@ -34,30 +40,38 @@ pub fn run(args: &[String]) -> ExitCode {
     else {
         return usage();
     };
-    // Native setup and cleanup must not renew the original discovery budget.
-    let choice_started = hosts::ticks();
-    let snapshot = match connection::discover() {
-        Ok(snapshot) => snapshot,
-        Err(error) => return discovery_failed(error),
-    };
+    fr_mobile_ffi::video::set_decoder_preference(match options.decoder {
+        Decoder::Automatic => fr_mobile_ffi::video::DecoderPreference::Automatic,
+        Decoder::Hardware => fr_mobile_ffi::video::DecoderPreference::Hardware,
+        Decoder::Software => fr_mobile_ffi::video::DecoderPreference::Software,
+    });
     let family = match options.family {
         Family::Automatic => AddressFamily::Automatic,
         Family::Ipv4 => AddressFamily::Ipv4,
         Family::Ipv6 => AddressFamily::Ipv6,
     };
     let selected = if let Some(selection) = selection {
-        Target::installed(&snapshot, selection, options.addresses, family)
-    } else {
-        let catalog = match connection::candidates(&snapshot) {
-            Ok(catalog) => catalog,
+        let snapshot = match connection::discover() {
+            Ok(snapshot) => snapshot,
             Err(error) => return discovery_failed(error),
         };
-        let peer = match hosts::choose(catalog, choice_started) {
-            Ok(Some(peer)) => peer,
-            Ok(None) => return ExitCode::SUCCESS,
-            Err(error) => return choice_failed(error),
+        Target::installed(&snapshot, selection, options.addresses, family)
+    } else {
+        let request = hosts::Request {
+            mode: hosts::Mode::Command,
+            settings: crate::settings::Settings::default(),
+            notice: None,
+            support: None,
+            offer_install: false,
         };
-        Target::selected(&snapshot, &peer, options.addresses, family)
+        match hosts::pick(&request) {
+            Ok(hosts::Picked::Machine(chosen)) => {
+                Target::selected(&chosen.snapshot, &chosen.peer, options.addresses, family)
+            }
+            Ok(hosts::Picked::Closed | hosts::Picked::Install) => return ExitCode::SUCCESS,
+            Err(hosts::PickError::Discovery(error)) => return discovery_failed(error),
+            Err(hosts::PickError::Choice(error)) => return choice_failed(error),
+        }
     };
     let target = match selected {
         Ok(target) => target,
@@ -200,6 +214,8 @@ fn hosts() -> ExitCode {
                 "name": peer.certificate_name(),
                 "addresses": peer.addresses().iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "path": path,
+                "os": peer.os(),
+                "online": peer.online(),
             })
         })
         .collect();
@@ -234,5 +250,47 @@ fn directory(target: Target, port: u16) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+static APPLICATION_SESSION: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// This process is a session the desktop application started (its texts
+/// name the application's choices instead of command-line flags).
+pub(crate) fn application_session() -> bool {
+    APPLICATION_SESSION.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The executable's icon (resource 1, embedded by build.rs) at the system's
+/// large or small icon size; a null icon (the system default) without it.
+pub(crate) fn app_icon(small: bool) -> windows::Win32::UI::WindowsAndMessaging::HICON {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, HICON, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW, SM_CXICON, SM_CXSMICON,
+        SM_CYICON, SM_CYSMICON,
+    };
+    // SAFETY: resource lookups in this module's own image; the returned
+    // shared icon handle is owned by the system for the process lifetime.
+    unsafe {
+        let (cx, cy) = if small {
+            (GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON))
+        } else {
+            (GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON))
+        };
+        GetModuleHandleW(None)
+            .ok()
+            .and_then(|module| {
+                LoadImageW(
+                    Some(module.into()),
+                    windows::core::PCWSTR(std::ptr::without_provenance(1)),
+                    IMAGE_ICON,
+                    cx,
+                    cy,
+                    LR_DEFAULTCOLOR | windows::Win32::UI::WindowsAndMessaging::LR_SHARED,
+                )
+                .ok()
+            })
+            .map_or_else(HICON::default, |handle| HICON(handle.0))
     }
 }

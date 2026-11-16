@@ -66,8 +66,9 @@ impl<'de, const N: usize> Deserialize<'de> for Text<N> {
 
 /// Equality is IDENTITY equality: `CurAddr` and `Relay` are Tailscale path
 /// observations (direct endpoint, home DERP region) that change when a dial
-/// wakes an idle path or the path migrates, so they never decide whether a
-/// snapshot names the same node. Every other field still must match exactly.
+/// wakes an idle path or the path migrates, and `OS`/`Online` are display
+/// observations, so none of them decides whether a snapshot names the same
+/// node. Every other field still must match exactly.
 #[derive(Deserialize, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Mirrors LocalAPI PeerStatus fields 1:1.
 pub(crate) struct Peer {
@@ -105,6 +106,66 @@ pub(crate) struct Peer {
     /// Path observation: recent traffic exists to this peer.
     #[serde(rename = "Active", default)]
     pub active: bool,
+    /// Display observation: the operating system the node reports ("windows",
+    /// "macOS", "linux", "iOS", "android", ...). Missing, empty, oversized or
+    /// control-character values read as absent instead of refusing the
+    /// snapshot. Never identity, capability or authority.
+    #[serde(rename = "OS", default, deserialize_with = "lenient_os")]
+    pub os: Option<Text<OS_BYTES>>,
+    /// Display observation: the coordination server's current reachability
+    /// view. It does not say `FrankenRemote` runs there or that a desktop exists.
+    #[serde(rename = "Online", default)]
+    pub online: Option<bool>,
+}
+/// Bound for the display-only `OS` observation.
+pub(crate) const OS_BYTES: usize = 32;
+/// The `OS` string is presentation metadata: an unexpected value (wrong type,
+/// too long, control characters, empty) becomes `None` so it can never refuse
+/// an otherwise valid identity snapshot.
+fn lenient_os<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Text<OS_BYTES>>, D::Error> {
+    struct Lenient;
+    impl<'de> Visitor<'de> for Lenient {
+        type Value = Option<Text<OS_BYTES>>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("an optional display string")
+        }
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            Ok((!value.is_empty()
+                && value.len() <= OS_BYTES
+                && !value.chars().any(char::is_control))
+            .then(|| Text(value.to_owned())))
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D2: Deserializer<'de>>(self, d: D2) -> Result<Self::Value, D2::Error> {
+            d.deserialize_any(Lenient)
+        }
+        fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
+            while a.next_element::<de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut a: A) -> Result<Self::Value, A::Error> {
+            while a.next_entry::<de::IgnoredAny, de::IgnoredAny>()?.is_some() {}
+            Ok(None)
+        }
+    }
+    d.deserialize_option(Lenient)
 }
 impl PartialEq for Peer {
     fn eq(&self, other: &Self) -> bool {
@@ -126,6 +187,8 @@ impl PartialEq for Peer {
             cur_addr: _,
             relay: _,
             active: _,
+            os: _,
+            online: _,
         } = self;
         *id == other.id
             && *dns_name == other.dns_name

@@ -31,8 +31,27 @@ pub struct DiscoveredPeer {
     name: String,
     addresses: Vec<IpAddr>,
     transport_path: PeerTransportPath,
+    os: Option<String>,
+    online: Option<bool>,
 }
 impl DiscoveredPeer {
+    /// The operating system the node reports, for display only (for example
+    /// to label phones that cannot host). Absent when not reported.
+    pub fn os(&self) -> Option<&str> {
+        self.os.as_deref()
+    }
+    /// The coordination server's reachability view, for display and sorting
+    /// only. `Some(true)` does not mean `FrankenRemote` is running there.
+    pub const fn online(&self) -> Option<bool> {
+        self.online
+    }
+    /// Attach the display observations to a peer built with `from_parts`.
+    #[must_use]
+    pub fn with_status(mut self, os: Option<String>, online: Option<bool>) -> Self {
+        self.os = os;
+        self.online = online;
+        self
+    }
     pub fn stable_id(&self) -> &str {
         &self.id
     }
@@ -56,6 +75,8 @@ impl DiscoveredPeer {
             name,
             addresses,
             transport_path,
+            os: None,
+            online: None,
         }
     }
 }
@@ -142,6 +163,8 @@ impl Discovery {
         let mut excluded = DiscoveryExclusions::default();
         for peer in status.peers.values() {
             let transport_path = transport_path(peer);
+            let os = peer.os.as_ref().map(|os| os.0.clone());
+            let online = peer.online;
 
             let result = metadata::outbound::resolve(&status, PeerSelector::StableId(&peer.id.0))
                 .and_then(|target| {
@@ -151,6 +174,8 @@ impl Discovery {
                         name: target.certificate_name,
                         addresses: target.peer.ips.0,
                         transport_path,
+                        os,
+                        online,
                     })
                 });
             match result {
@@ -360,6 +385,63 @@ mod tests {
                 Error::MalformedMetadata
             );
         }
+    }
+    #[test]
+    fn display_observations_are_projected_and_never_refuse_a_snapshot() {
+        fn peer_of(source: &mut Value) -> &mut Value {
+            source["Peer"]
+                .as_object_mut()
+                .unwrap()
+                .values_mut()
+                .next()
+                .unwrap()
+        }
+        let mut source = status();
+        peer_of(&mut source)["OS"] = json!("windows");
+        peer_of(&mut source)["Online"] = json!(true);
+        let snapshot = read(&source).unwrap();
+        let [peer] = snapshot.peers() else {
+            panic!("one candidate")
+        };
+        assert_eq!((peer.os(), peer.online()), (Some("windows"), Some(true)));
+        assert!(!format!("{peer:?}").contains("windows"));
+        // Unexpected display values read as absent; identity still projects.
+        for odd in [
+            json!(""),
+            json!("x".repeat(metadata::OS_BYTES + 1)),
+            json!("lin\nux"),
+            json!(7),
+            json!(["linux"]),
+            json!({"name": "linux"}),
+            Value::Null,
+        ] {
+            let mut source = status();
+            peer_of(&mut source)["OS"] = odd;
+            peer_of(&mut source)["Online"] = Value::Null;
+            let snapshot = read(&source).unwrap();
+            let [peer] = snapshot.peers() else {
+                panic!("one candidate")
+            };
+            assert_eq!((peer.os(), peer.online()), (None, None));
+            assert_eq!(peer.certificate_name(), "remote.fixture.ts.net");
+        }
+        let mut source = status();
+        peer_of(&mut source).as_object_mut().unwrap().remove("OS");
+        peer_of(&mut source)
+            .as_object_mut()
+            .unwrap()
+            .remove("Online");
+        let snapshot = read(&source).unwrap();
+        assert_eq!(snapshot.peers()[0].os(), None);
+        // Display observations never change node identity equality.
+        let mut a = status();
+        let mut b = status();
+        peer_of(&mut a)["OS"] = json!("linux");
+        peer_of(&mut a)["Online"] = json!(true);
+        peer_of(&mut b)["OS"] = json!("windows");
+        peer_of(&mut b)["Online"] = json!(false);
+        let parse = |v: &Value| metadata::Status::parse(&serde_json::to_vec(v).unwrap()).unwrap();
+        assert!(parse(&a) == parse(&b));
     }
     #[test]
     fn parsing_cannot_publish_a_late_cancelled_or_reversed_clock_snapshot() {

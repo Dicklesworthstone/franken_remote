@@ -54,6 +54,7 @@ impl Choice {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn candidates(&self) -> &[Candidate] {
         self.catalog.candidates()
     }
@@ -81,6 +82,16 @@ impl Choice {
         } else {
             Decision::Chosen { row, message }
         };
+    }
+
+    /// The refusal that completed this choice, if any. A pending or chosen
+    /// row reports `None`.
+    pub(crate) fn refusal(&self) -> Option<Error> {
+        match self.decision {
+            Decision::Refused(error) => Some(error),
+            Decision::Consumed => Some(Error::AlreadyUsed),
+            Decision::Waiting | Decision::Chosen { .. } => None,
+        }
     }
 
     /// A chosen row is provisional until the queued native batch and cleanup
@@ -157,12 +168,15 @@ mod tests {
     fn exact_original_row_is_consumed_once() {
         let mut choice = shown();
         assert_eq!(choice.candidates()[0].stable_id(), "n-a");
+        assert_eq!(choice.refusal(), None);
         choice.choose(0, 1_020, 1_021);
         assert!(choice.complete(1_022));
+        assert_eq!(choice.refusal(), None);
         let peer = choice.take(1_023).unwrap();
         assert_eq!(peer.stable_id(), "n-a");
         assert_eq!(peer.certificate_name(), "a.tail.ts.net");
         assert_eq!(peer.path_hint(), PathHint::Direct);
+        assert_eq!(choice.refusal(), Some(Error::AlreadyUsed));
         assert_eq!(choice.take(1_024), Err(Error::AlreadyUsed));
     }
 
@@ -193,6 +207,7 @@ mod tests {
             choice.choose(0, 1_020, 1_021);
             choice.refuse(error);
             choice.choose(1, 1_022, 1_023);
+            assert_eq!(choice.refusal(), Some(error));
             assert_eq!(choice.take(1_024), Err(error));
         }
     }

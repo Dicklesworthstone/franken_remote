@@ -40,7 +40,10 @@ mod backend;
 pub use backend::Image;
 /// The Windows client presents from the decoder's own device.
 #[cfg(windows)]
-pub use backend::{Gpu, gpu, texture_of};
+pub use backend::{
+    DecoderPreference, DecoderSupport, Gpu, decoder_preference, decoder_support, gpu,
+    set_decoder_preference, texture_of,
+};
 
 /// `kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange` ('420v').
 pub const NV12_VIDEO_RANGE: u32 = 0x3432_3076;
