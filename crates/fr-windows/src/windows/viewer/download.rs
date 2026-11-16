@@ -1,5 +1,6 @@
-//! One explicit receive destination on the original controlling connection.
-//! Native menu callbacks can only stop that owner and inspect bounded evidence.
+//! Receive status and file-only cancellation for one original local destination.
+//! The session owns the disk worker. This menu never opens paths or grants it
+//! authority, and remains attached to its original receipts across view changes.
 use crate::control::Choice;
 use fr_mobile_ffi::session::{Download, DownloadReport};
 use std::{
@@ -20,18 +21,18 @@ use windows::{
 
 pub(super) const CANCEL: usize = 0x4690;
 const PHASE: usize = 0x4691;
-const BYTES: usize = 0x4692;
+const PROGRESS: usize = 0x4692;
 const RECEIPTS: usize = 0x4693;
 const CLEANUP: usize = 0x4694;
 
 thread_local! {
-    // A queued native command retains the original displayed receiver. Viewing
-    // replacements cannot redirect it to another destination or grant.
+    // A nested callback can stop only the destination named by its original
+    // popup, without waiting for a borrow of the native viewer.
     static ACTION: RefCell<Option<Choice<Weak<Download>>>> = const { RefCell::new(None) };
 }
 
 pub(super) fn cancel() {
-    // SAFETY: original queued command timestamp on this UI thread.
+    // SAFETY: the current command's original timestamp on this UI thread.
     let message = unsafe { GetMessageTime() }.cast_unsigned();
     let selected = ACTION.with(|slot| {
         slot.borrow_mut()
@@ -54,8 +55,8 @@ pub(super) struct Menu {
 
 impl Menu {
     pub(super) fn install(hwnd: HWND, original: Arc<Download>) -> Result<Self> {
-        // SAFETY: this UI thread's existing menu. The window owns the popup
-        // only after successful attachment; an unattached popup is destroyed.
+        // SAFETY: this UI thread's viewer owns the parent menu. The new popup
+        // is destroyed on failure or transferred to that window on success.
         let popup = unsafe {
             let menu = GetMenu(hwnd);
             if menu.is_invalid() {
@@ -64,21 +65,18 @@ impl Menu {
                 ));
             }
             let popup = CreatePopupMenu()?;
-            let attached = AppendMenuW(popup, MF_STRING | MF_GRAYED, PHASE, w!("Selected"))
-                .and_then(|()| AppendMenuW(popup, MF_STRING | MF_GRAYED, BYTES, w!("Staged: none")))
+            let attached = AppendMenuW(popup, MF_STRING | MF_GRAYED, PHASE, w!("Receive state"))
                 .and_then(|()| {
-                    AppendMenuW(popup, MF_STRING | MF_GRAYED, RECEIPTS, w!("Published: none"))
+                    AppendMenuW(popup, MF_STRING | MF_GRAYED, PROGRESS, w!("Staged bytes"))
                 })
                 .and_then(|()| {
-                    AppendMenuW(
-                        popup,
-                        MF_STRING | MF_GRAYED,
-                        CLEANUP,
-                        w!("Cleanup: not started"),
-                    )
+                    AppendMenuW(popup, MF_STRING | MF_GRAYED, RECEIPTS, w!("Local receipts"))
+                })
+                .and_then(|()| {
+                    AppendMenuW(popup, MF_STRING | MF_GRAYED, CLEANUP, w!("Disk cleanup"))
                 })
                 .and_then(|()| AppendMenuW(popup, MF_SEPARATOR, 0, w!("")))
-                .and_then(|()| AppendMenuW(popup, MF_STRING, CANCEL, w!("&Cancel receiving")))
+                .and_then(|()| AppendMenuW(popup, MF_STRING, CANCEL, w!("Stop &receiving files")))
                 .and_then(|()| AppendMenuW(menu, MF_POPUP, popup.0 as usize, w!("&Receive files")));
             if let Err(error) = attached {
                 let _ = DestroyMenu(popup);
@@ -100,13 +98,23 @@ impl Menu {
         self.popup.0 as usize == popup
     }
 
-    pub(super) fn opened(&self) {
+    pub(super) fn opened(&mut self) {
         ACTION.with(|slot| {
             *slot.borrow_mut() = Some(Choice::new(
                 Arc::downgrade(&self.original),
                 super::input_ticks(),
             ));
         });
+        self.displayed = None;
+        self.refresh();
+    }
+
+    pub(super) fn succeeded(&self) -> bool {
+        self.original.report().is_success()
+    }
+
+    pub(super) fn cleanup_complete(&self) -> bool {
+        self.original.report().cleanup_complete()
     }
 
     pub(super) fn refresh(&mut self) {
@@ -114,48 +122,55 @@ impl Menu {
         if self.displayed.as_ref() == Some(&report) {
             return;
         }
-        let progress = report.status.as_ref().and_then(|status| status.progress);
-        let bytes = progress.map_or_else(
-            || "No file in progress".to_owned(),
-            |progress| {
-                format!(
-                    "Staged: {} / {} bytes (await publication)",
-                    progress.staged_bytes, progress.total_bytes,
-                )
-            },
-        );
-        let phase = report.reason().map_or_else(
+        let phase = report.reason_code().map_or_else(
             || format!("State: {}", report.phase_name().replace('_', " ")),
             |reason| {
                 format!(
-                    "State: {} ({reason:?})",
-                    report.phase_name().replace('_', " "),
+                    "State: {} ({reason})",
+                    report.phase_name().replace('_', " ")
                 )
             },
         );
+        let progress = report
+            .status
+            .as_ref()
+            .and_then(|status| status.progress)
+            .map_or_else(
+                || "No file currently staging".to_owned(),
+                |progress| {
+                    format!(
+                        "Staged: {} / {} bytes (not yet published)",
+                        progress.staged_bytes, progress.total_bytes,
+                    )
+                },
+            );
         let receipts = report.receipts();
         let published = receipts
             .iter()
-            .filter(|receipt| receipt.outcome == "locally_published")
+            .filter(|receipt| receipt.bytes.is_some())
             .count();
         let unconfirmed = receipts
             .iter()
             .filter(|receipt| receipt.durable == Some(false))
             .count();
+        let mut receipt_summary = format!(
+            "Published: {published} ({unconfirmed} durability unconfirmed); other outcomes: {}",
+            receipts.len() - published,
+        );
+        if report.results_truncated() {
+            receipt_summary.push_str("; result limit reached");
+        }
         let entries = [
             (PHASE, phase),
-            (BYTES, bytes),
-            (
-                RECEIPTS,
-                format!("Published: {published} ({unconfirmed} durability unconfirmed)"),
-            ),
-            (CLEANUP, format!("Receiver cleanup: {}", report.cleanup_name())),
+            (PROGRESS, progress),
+            (RECEIPTS, receipt_summary),
+            (CLEANUP, format!("Disk cleanup: {}", report.cleanup_name())),
         ];
         let mut updated = true;
         for (id, text) in entries {
             let text = HSTRING::from(text);
-            // SAFETY: the live window owns this popup; text is copied now.
-            // The receiver's lock was released before any native call.
+            // SAFETY: window-owned popup; Win32 copies the bounded text before
+            // return. No receive-state lock spans a native call.
             updated &= unsafe {
                 ModifyMenuW(
                     self.popup,
@@ -169,7 +184,8 @@ impl Menu {
         }
         let terminal =
             report.cancel_requested || report.reason().is_some() || report.phase_name() == "ended";
-        // SAFETY: a local negative-authority action against the original owner.
+        // SAFETY: local menu state only. Even a previously queued command can
+        // only cancel its original receiver, never a replacement connection.
         unsafe {
             let _ = EnableMenuItem(
                 self.popup,
@@ -186,25 +202,24 @@ impl Menu {
 
 impl Drop for Menu {
     fn drop(&mut self) {
-        self.original.cancel();
+        if self.original.report().phase_name() != "ended" {
+            self.original.cancel();
+        }
         ACTION.with(|slot| *slot.borrow_mut() = None);
-        // The window owns the popup. Cancellation does not assert disk cleanup.
+        // The native window owns the popup; the original session owns cleanup.
+        // A completed owner's retained evidence is not changed by menu teardown.
     }
 }
 
-const fn item(id: usize) -> u32 {
-    assert!(id <= 0xffff);
-    #[allow(clippy::cast_possible_truncation)]
-    {
-        id as u32
-    }
+fn item(id: usize) -> u32 {
+    u32::try_from(id).expect("fixed native receive menu identifier")
 }
 
 pub(super) fn document(menu: Option<&Menu>) -> serde_json::Value {
     menu.map_or(serde_json::Value::Null, |menu| {
         let report = menu.original.report();
         let progress = report.status.as_ref().and_then(|status| status.progress);
-        let receipts = report
+        let receipts: Vec<_> = report
             .receipts()
             .iter()
             .map(|receipt| {
@@ -212,25 +227,31 @@ pub(super) fn document(menu: Option<&Menu>) -> serde_json::Value {
                     "index": receipt.index,
                     "outcome": receipt.outcome,
                     "bytes": receipt.bytes,
+                    "id": receipt.id,
+                    "receipt": receipt.receipt,
+                    "published_bytes": receipt.bytes,
                     "durable": receipt.durable,
                     "reason": receipt.reason,
                 })
             })
-            .collect::<Vec<_>>();
+            .collect();
         serde_json::json!({
             "requested": true,
             "configured": report.configured,
             "phase": report.phase_name(),
             "cancel_requested": report.cancel_requested,
-            "cleanup": report.cleanup_name(),
-            "reason": report.reason().map(|reason| format!("{reason:?}")),
             "progress": progress.map(|progress| serde_json::json!({
                 "index": progress.id.checked_sub(1),
+                "id": progress.id,
                 "staged_bytes": progress.staged_bytes,
                 "total_bytes": progress.total_bytes,
             })),
             "receipts": receipts,
             "results_truncated": report.results_truncated(),
+            "cleanup": report.cleanup_name(),
+            "reason": report.reason().map(|reason| format!("{reason:?}")),
+            "reason_code": report.reason_code(),
+            "succeeded": report.is_success(),
         })
     })
 }

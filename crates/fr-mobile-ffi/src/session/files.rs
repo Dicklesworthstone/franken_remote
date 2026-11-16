@@ -177,23 +177,7 @@ fn file_capability(name: &str) -> bool {
 /// attachment/ATP capabilities belong to both directions; retiring an upload
 /// cannot remove those while an explicit download still needs them.
 pub(super) fn offer(original: &Offer, upload: bool, download: bool) -> Result<Offer, ()> {
-    let keep = |name: &str| match name {
-        fr_wire::attachment::FILES_CAPABILITY | fr_wire::files::CAPABILITY => upload || download,
-        fr_wire::files::CHANNEL_SCOPE_CAPABILITY => upload,
-        fr_wire::files::DOWNLOAD_CAPABILITY => download,
-        fr_wire::files::DUPLEX_CAPABILITY => upload && download,
-        _ => true,
-    };
-    if original
-        .capabilities
-        .iter()
-        .any(|cap| cap.required && !keep(&cap.name))
-    {
-        return Err(());
-    }
-    let mut offered = original.clone();
-    offered.capabilities.retain(|cap| keep(&cap.name));
-    Ok(offered)
+    super::file_offer::retain(original, upload, download)
 }
 
 /// One command retains at most nine explicit files and their original receipts.
@@ -597,7 +581,10 @@ mod tests {
             fr_client::native::control_offer_with_auxiliary(true, true, false),
         )
         .unwrap();
-        assert_eq!(offer(&original, upload.available(), false).unwrap(), original);
+        assert_eq!(
+            offer(&original, upload.available(), false).unwrap(),
+            original
+        );
         upload.configure_with(|_| Err(Absence::NotNegotiated));
         let pruned = offer(&original, upload.available(), false).unwrap();
         assert!(
@@ -638,7 +625,10 @@ mod tests {
             assert_eq!(selected(fr_wire::files::CAPABILITY), upload || download);
             assert_eq!(selected(fr_wire::files::CHANNEL_SCOPE_CAPABILITY), upload);
             assert_eq!(selected(fr_wire::files::DOWNLOAD_CAPABILITY), download);
-            assert_eq!(selected(fr_wire::files::DUPLEX_CAPABILITY), upload && download);
+            assert_eq!(
+                selected(fr_wire::files::DUPLEX_CAPABILITY),
+                upload && download
+            );
             assert!(selected(fr_wire::clipboard::CAPABILITY));
             assert!(selected(fr_wire::control::TEXT_CAPABILITY));
             assert!(

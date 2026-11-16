@@ -19,6 +19,7 @@ mod control_policy;
 mod control_request;
 mod display;
 mod download;
+mod file_offer;
 mod files;
 mod focus_close;
 mod key_capture;
@@ -40,6 +41,10 @@ pub use display::{
 };
 pub use download::{Download, Receipt as DownloadReceipt, Report as DownloadReport};
 pub use files::{MAX_UPLOADS, PreparedUpload, Report as UploadReport, Upload};
+pub use frd::native_files::{
+    ConflictPolicy as DownloadConflictPolicy, DirectoryRefusal as DownloadRefusal,
+    Limits as DownloadLimits,
+};
 pub use text::{CapturedText, TextDraft};
 
 use crate::{
@@ -179,8 +184,8 @@ pub struct Config {
     /// One explicit, already selected local file. Clones retain its original
     /// one-use owner; replacement sessions must omit it rather than replay it.
     pub upload: Option<Arc<Upload>>,
-    /// One explicit private destination. Registration consumes this original
-    /// consent; a replacement connection must not approve it again.
+    /// An explicitly selected, pinned local destination for this original
+    /// controlled session. Replacements must omit it rather than replay consent.
     pub download: Option<Arc<Download>>,
     /// The largest picture this device shows 1:1 (`scaled-picture`); `None`
     /// keeps the host's native pixels.
@@ -831,13 +836,25 @@ impl Shared {
     pub fn cancel_upload(&self) -> bool {
         self.upload.as_ref().is_some_and(|upload| upload.cancel())
     }
-    /// Cancel only this original receive permission. Published files and
-    /// their receipts remain; no destination is granted to a replacement.
-    pub fn cancel_download(&self) -> bool {
-        self.download.as_ref().is_some_and(|download| download.cancel())
-    }
+    /// Original download publication and cleanup evidence, containing no path
+    /// or file contents. Closing the view cannot erase a committed result.
     pub fn download_report(&self) -> Option<DownloadReport> {
         self.download.as_ref().map(|download| download.report())
+    }
+    /// Stop only this original destination. No new destination or later session
+    /// may inherit the local receive permission.
+    pub fn cancel_download(&self) -> bool {
+        self.download
+            .as_ref()
+            .is_some_and(|download| download.cancel())
+    }
+    fn files_cleaned(&self, result: Result<(), frd::session_startup::FileSendError>) {
+        if let Some(upload) = &self.upload {
+            upload.cleaned(result);
+        }
+        if let Some(download) = &self.download {
+            download.cleaned(result);
+        }
     }
     /// Bind native file selection before opening the OS chooser. A compositor
     /// gap is unavailable; it never authorizes carrying a choice into a later
@@ -1468,33 +1485,33 @@ impl Session {
         Self::start_inner(config, true)
     }
     fn start_inner(config: Config, native_cursor: bool) -> std::io::Result<Self> {
-        if let Some(upload) = &config.upload {
-            if !config.control {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "file upload requires control",
-                ));
-            }
-            if !upload.bind() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "file selection already belongs to its original session",
-                ));
-            }
+        if !config.control && (config.upload.is_some() || config.download.is_some()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "file transfer requires control",
+            ));
         }
-        if let Some(download) = &config.download {
-            if !config.control {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "file receiving requires control",
-                ));
+        if let Some(upload) = &config.upload
+            && !upload.bind()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "file selection already belongs to its original session",
+            ));
+        }
+        if let Some(download) = &config.download
+            && !download.bind()
+        {
+            // Only this newly bound upload belongs to the failed start. The
+            // already-bound download may serve another original session and
+            // must never be cancelled by a rejected clone of its configuration.
+            if let Some(upload) = &config.upload {
+                upload.finish();
             }
-            if !download.bind() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    "receive destination already belongs to its original session",
-                ));
-            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "receive destination already belongs to its original session",
+            ));
         }
         let mut shared = Shared::with_auxiliary(
             config.control,
@@ -1523,6 +1540,16 @@ impl Session {
                     worker.clear_presentation();
                     finish(&worker, end::INTERNAL, Some("Panic".into()));
                 }
+            })
+            .inspect_err(|_| {
+                // No native session thread or disk owner exists. Spend and
+                // release only the selections just bound by this failed start;
+                // retained UI handles observe a terminal original outcome.
+                finish(
+                    &shared,
+                    end::INTERNAL,
+                    Some("SessionThreadUnavailable".into()),
+                );
             })?;
         Ok(Self { shared, control })
     }
@@ -2100,12 +2127,7 @@ impl Mobile {
                 && let Some(result) = observer.collect_files()
             {
                 self.files_pending = false;
-                if let Some(upload) = &self.shared.upload {
-                    upload.cleaned(result);
-                }
-                if let Some(download) = &self.shared.download {
-                    download.cleaned(result);
-                }
+                self.shared.files_cleaned(result);
             }
             for _ in 0..2 {
                 let _ = observer.collect_clipboard();
@@ -2410,25 +2432,19 @@ impl Application for Mobile {
                     let media = observer.reap_media(cx, deadline).await;
                     let input = observer.reap_input_capture(cx, deadline).await;
                     let files = observer.reap_files(cx, deadline).await;
-                    if let (Some(upload), Err(error)) = (&self.shared.upload, files) {
+                    if let Err(error) = files {
                         // Retain the original bounded cleanup failure even if
                         // the source finishes immediately afterward. A later
                         // join is collection, not a repaired transfer result.
-                        upload.cleaned(Err(error));
-                    }
-                    if let (Some(download), Err(error)) = (&self.shared.download, files) {
-                        download.cleaned(Err(error));
+                        self.shared.files_cleaned(Err(error));
                     }
                     // Reap may time out before polling a just-finished source.
                     // Collect without a renewed wait budget, retaining the
                     // original timeout as failure even if joining now succeeds.
                     let collected_files = observer.collect_files();
                     self.files_pending = collected_files.is_none();
-                    if let (Some(upload), Some(result)) = (&self.shared.upload, collected_files) {
-                        upload.cleaned(result);
-                    }
-                    if let (Some(download), Some(result)) = (&self.shared.download, collected_files) {
-                        download.cleaned(result);
+                    if let Some(result) = collected_files {
+                        self.shared.files_cleaned(result);
                     }
                     let clipboard = observer.reap_clipboard(cx, deadline).await;
                     for _ in 0..2 {

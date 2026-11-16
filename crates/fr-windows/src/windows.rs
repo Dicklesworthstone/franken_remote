@@ -5,7 +5,7 @@ mod viewer;
 
 use crate::{
     USAGE,
-    options::{ConnectionCommand, DisplayChoice, Family},
+    options::{ConnectionCommand, DisplayChoice, Family, ReceiveConflict},
 };
 use fr_mobile_ffi::directory::{Request, fetch};
 use fr_mobile_ffi::session::{
@@ -74,6 +74,16 @@ pub fn run(args: &[String]) -> ExitCode {
     if !view {
         return directory(target, options.port);
     }
+    let download = match select_download(options.receive.as_ref()) {
+        Ok(download) => download,
+        Err(error) => {
+            eprintln!(
+                "fr-windows: {}. Select an existing absolute local directory owned by you, without links or other writers, and valid receive limits; no remote session was opened.",
+                error.code(),
+            );
+            return ExitCode::from(2);
+        }
+    };
     let upload = if let Some(path) = &options.send {
         match fr_mobile_ffi::session::Upload::select(path) {
             Ok(upload) => Some(upload),
@@ -88,24 +98,6 @@ pub fn run(args: &[String]) -> ExitCode {
         options
             .control
             .then(fr_mobile_ffi::session::Upload::interactive)
-    };
-    let download = match &options.receive {
-        Some(receive) => match fr_mobile_ffi::session::Download::select(
-            &receive.directory,
-            receive.max_file_bytes,
-            receive.max_session_bytes,
-            receive.keep_both,
-        ) {
-            Ok(download) => Some(download),
-            Err(reason) => {
-                eprintln!(
-                    "fr-windows: {}. Choose an existing absolute private directory on a local drive, without reparse points or an unsafe DACL. No remote session was opened.",
-                    reason.code(),
-                );
-                return ExitCode::from(2);
-            }
-        },
-        None => None,
     };
     let title = format!("FrankenRemote - {}", target.certificate_name());
     let config = Config {
@@ -124,6 +116,30 @@ pub fn run(args: &[String]) -> ExitCode {
         },
     };
     viewer::run(config, &title, options.seconds)
+}
+
+fn select_download(
+    receive: Option<&crate::options::ReceiveOptions>,
+) -> Result<
+    Option<std::sync::Arc<fr_mobile_ffi::session::Download>>,
+    fr_mobile_ffi::session::DownloadRefusal,
+> {
+    use fr_mobile_ffi::session::{Download, DownloadConflictPolicy, DownloadLimits};
+    let Some(receive) = receive else {
+        return Ok(None);
+    };
+    let defaults = DownloadLimits::default();
+    let limits = DownloadLimits {
+        max_file_bytes: receive.max_file_bytes.unwrap_or(defaults.max_file_bytes),
+        max_session_bytes: receive
+            .max_session_bytes
+            .unwrap_or(defaults.max_session_bytes),
+    };
+    let conflict = match receive.conflict {
+        ReceiveConflict::Reject => DownloadConflictPolicy::Reject,
+        ReceiveConflict::KeepBoth => DownloadConflictPolicy::KeepBoth,
+    };
+    Download::select_with_limits(&receive.directory, limits, conflict).map(Some)
 }
 
 fn usage() -> ExitCode {

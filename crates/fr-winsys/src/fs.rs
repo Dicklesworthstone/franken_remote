@@ -628,6 +628,19 @@ mod tests {
             b"original received bytes"
         );
         assert!(!dir.join(".fr-part-native").exists());
+
+        // Exercise the native record with the shortest and longest accepted
+        // components, including structure padding beyond the UTF-16 payload.
+        for name in ["x".to_owned(), "n".repeat(255)] {
+            let file = create_receive_file(root.as_handle(), ".fr-part-native").unwrap();
+            prepare_receive_rename(file.as_handle(), root.as_handle(), &name)
+                .unwrap()
+                .commit()
+                .unwrap();
+            drop(file);
+            assert_eq!(std::fs::metadata(dir.join(name)).unwrap().len(), 0);
+            assert!(!dir.join(".fr-part-native").exists());
+        }
     }
 
     #[test]

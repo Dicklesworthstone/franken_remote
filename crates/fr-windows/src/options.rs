@@ -36,12 +36,21 @@ impl DisplayChoice {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReceiveConflict {
+    #[default]
+    Reject,
+    KeepBoth,
+}
+
+/// Explicit local destination consent. Native validation pins the directory
+/// before connecting; these options cannot select a path on the host.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ReceiveOptions {
     pub directory: PathBuf,
     pub max_file_bytes: Option<u64>,
     pub max_session_bytes: Option<u64>,
-    pub keep_both: bool,
+    pub conflict: ReceiveConflict,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -58,7 +67,7 @@ pub(crate) struct Options {
     pub display: DisplayChoice,
     /// One explicit regular file; consumed once by the original control grant.
     pub send: Option<PathBuf>,
-    /// An explicit private destination; requires a controlling connection.
+    /// Receive host-selected files only under this command's original grant.
     pub receive: Option<ReceiveOptions>,
 }
 
@@ -95,7 +104,7 @@ impl<'a> ConnectionCommand<'a> {
 }
 
 impl Options {
-    #[allow(clippy::too_many_lines)] // one bounded parser with no partial configuration
+    #[allow(clippy::too_many_lines, reason = "one bounded command parser")]
     pub(crate) fn parse(mut rest: &[String], view: bool, default_port: u16) -> Option<Self> {
         let mut options = Self {
             port: default_port,
@@ -111,37 +120,34 @@ impl Options {
         let mut port_set = false;
         let mut display_set = false;
         let mut receive_directory = None;
-        let mut receive_file_bytes = None;
-        let mut receive_session_bytes = None;
+        let mut receive_max_file_bytes = None;
+        let mut receive_max_session_bytes = None;
         let mut receive_conflict = None;
         loop {
             match rest {
                 [] => {
-                    if (options.send.is_some() || receive_directory.is_some()) && !options.control {
-                        return None;
-                    }
-                    if matches!(
-                        (receive_file_bytes, receive_session_bytes),
-                        (Some(file), Some(session)) if session < file
-                    ) {
-                        return None;
-                    }
-                    options.receive = match receive_directory {
-                        Some(directory) => Some(ReceiveOptions {
-                            directory,
-                            max_file_bytes: receive_file_bytes,
-                            max_session_bytes: receive_session_bytes,
-                            keep_both: receive_conflict.unwrap_or(false),
-                        }),
-                        None if receive_file_bytes.is_some()
-                            || receive_session_bytes.is_some()
-                            || receive_conflict.is_some() =>
+                    if let Some(directory) = receive_directory {
+                        if receive_max_file_bytes
+                            .zip(receive_max_session_bytes)
+                            .is_some_and(|(file, session)| session < file)
                         {
                             return None;
                         }
-                        None => None,
-                    };
-                    return Some(options);
+                        options.receive = Some(ReceiveOptions {
+                            directory,
+                            max_file_bytes: receive_max_file_bytes,
+                            max_session_bytes: receive_max_session_bytes,
+                            conflict: receive_conflict.unwrap_or_default(),
+                        });
+                    } else if receive_max_file_bytes.is_some()
+                        || receive_max_session_bytes.is_some()
+                        || receive_conflict.is_some()
+                    {
+                        return None;
+                    }
+                    return ((options.send.is_none() && options.receive.is_none())
+                        || options.control)
+                        .then_some(options);
                 }
                 [flag, tail @ ..] if view && flag == "--control" && !options.control => {
                     options.control = true;
@@ -193,18 +199,18 @@ impl Options {
                         "--receive" if view && receive_directory.is_none() && !value.is_empty() => {
                             receive_directory = Some(PathBuf::from(value));
                         }
-                        "--receive-max-file-bytes" if view && receive_file_bytes.is_none() => {
-                            receive_file_bytes = Some(byte_limit(value)?);
+                        "--receive-max-file-bytes" if view && receive_max_file_bytes.is_none() => {
+                            receive_max_file_bytes = Some(byte_limit(value)?);
                         }
                         "--receive-max-session-bytes"
-                            if view && receive_session_bytes.is_none() =>
+                            if view && receive_max_session_bytes.is_none() =>
                         {
-                            receive_session_bytes = Some(byte_limit(value)?);
+                            receive_max_session_bytes = Some(byte_limit(value)?);
                         }
                         "--receive-conflict" if view && receive_conflict.is_none() => {
                             receive_conflict = Some(match value.as_str() {
-                                "reject" => false,
-                                "keep-both" => true,
+                                "reject" => ReceiveConflict::Reject,
+                                "keep-both" => ReceiveConflict::KeepBoth,
                                 _ => return None,
                             });
                         }
@@ -222,7 +228,7 @@ fn byte_limit(value: &str) -> Option<u64> {
     if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
-    value.parse().ok().filter(|bytes| *bytes != 0)
+    value.parse().ok().filter(|limit| *limit != 0)
 }
 
 #[cfg(test)]
@@ -238,94 +244,6 @@ mod tests {
             view,
             47819,
         )
-    }
-
-    #[test]
-    fn explicit_downloads_require_control_and_keep_local_policy_independent() {
-        let selected = parse(&["--control", "--receive", r"C:\Received"], true).unwrap();
-        assert_eq!(
-            selected.receive,
-            Some(ReceiveOptions {
-                directory: PathBuf::from(r"C:\Received"),
-                max_file_bytes: None,
-                max_session_bytes: None,
-                keep_both: false,
-            })
-        );
-        let duplex = parse(
-            &[
-                "--receive-max-file-bytes",
-                "20",
-                "--receive-conflict",
-                "keep-both",
-                "--send",
-                r"C:\outbound.txt",
-                "--control",
-                "--receive",
-                r"C:\Received",
-                "--receive-max-session-bytes",
-                "80",
-            ],
-            true,
-        )
-        .unwrap();
-        let receive = duplex.receive.unwrap();
-        assert_eq!(receive.max_file_bytes, Some(20));
-        assert_eq!(receive.max_session_bytes, Some(80));
-        assert!(receive.keep_both);
-        assert!(duplex.send.is_some());
-        assert!(duplex.clipboard);
-    }
-
-    #[test]
-    fn invalid_download_policies_do_not_open_an_unapproved_destination() {
-        for args in [
-            vec!["--receive", r"C:\Received"],
-            vec!["--control", "--receive", ""],
-            vec!["--control", "--receive-max-file-bytes", "20"],
-            vec!["--control", "--receive-max-session-bytes", "20"],
-            vec!["--control", "--receive-conflict", "reject"],
-        ] {
-            assert!(parse(&args, true).is_none(), "{args:?}");
-        }
-        for tail in [
-            vec!["--receive", r"C:\other"],
-            vec!["--receive-conflict", "replace"],
-            vec!["--receive-max-file-bytes", "0"],
-            vec!["--receive-max-file-bytes", "+1"],
-            vec!["--receive-max-session-bytes", "-1"],
-            vec!["--receive-max-file-bytes", "18446744073709551616"],
-            vec![
-                "--receive-max-file-bytes",
-                "20",
-                "--receive-max-session-bytes",
-                "10",
-            ],
-            vec![
-                "--receive-conflict",
-                "reject",
-                "--receive-conflict",
-                "keep-both",
-            ],
-            vec![
-                "--receive-max-file-bytes",
-                "1",
-                "--receive-max-file-bytes",
-                "2",
-            ],
-            vec![
-                "--receive-max-session-bytes",
-                "20",
-                "--receive-max-session-bytes",
-                "40",
-            ],
-        ] {
-            let mut args = vec!["--control", "--receive", r"C:\Received"];
-            args.extend(tail);
-            assert!(parse(&args, true).is_none(), "{args:?}");
-        }
-        assert!(parse(&["--receive", r"C:\Received"], false).is_none());
-        assert!(parse(&["--receive-conflict", "keep-both"], false).is_none());
     }
 
     #[test]
@@ -446,6 +364,141 @@ mod tests {
             assert!(parse(&args, true).is_none());
         }
         assert!(parse(&["--send", "file.txt"], false).is_none());
+    }
+
+    #[test]
+    fn receiving_is_explicit_local_consent_and_composes_with_uploads() {
+        let directory = "C:\\Users\\me\\Documents\\Reçus";
+        for args in [
+            vec!["--control", "--receive", directory],
+            vec!["--receive", directory, "--control"],
+        ] {
+            let options = parse(&args, true).unwrap();
+            assert!(options.control);
+            assert!(options.send.is_none());
+            assert_eq!(
+                options.receive,
+                Some(ReceiveOptions {
+                    directory: PathBuf::from(directory),
+                    max_file_bytes: None,
+                    max_session_bytes: None,
+                    conflict: ReceiveConflict::Reject,
+                })
+            );
+        }
+        let args = [
+            "view",
+            "--receive-conflict",
+            "keep-both",
+            "--receive-max-session-bytes",
+            "300",
+            "--receive",
+            directory,
+            "--control",
+            "--send",
+            "C:\\Users\\me\\draft.txt",
+            "--receive-max-file-bytes",
+            "100",
+            "--no-clipboard",
+        ]
+        .map(str::to_owned);
+        let command = ConnectionCommand::parse(&args, 8443).unwrap();
+        assert_eq!(command.selection, None);
+        assert!(!command.options.clipboard);
+        assert!(command.options.send.is_some());
+        assert_eq!(
+            command.options.receive,
+            Some(ReceiveOptions {
+                directory: PathBuf::from(directory),
+                max_file_bytes: Some(100),
+                max_session_bytes: Some(300),
+                conflict: ReceiveConflict::KeepBoth,
+            })
+        );
+    }
+
+    #[test]
+    fn receive_settings_cannot_enable_authority_or_silently_change_conflict_policy() {
+        for args in [
+            vec!["--receive", "C:\\Drop"],
+            vec!["--control", "--receive"],
+            vec!["--control", "--receive", ""],
+            vec!["--control", "--receive", "C:\\One", "--receive", "C:\\Two"],
+            vec!["--control", "--receive-max-file-bytes", "1"],
+            vec!["--control", "--receive-max-session-bytes", "1"],
+            vec!["--control", "--receive-conflict", "keep-both"],
+            vec![
+                "--control",
+                "--receive",
+                "C:\\Drop",
+                "--receive-conflict",
+                "overwrite",
+            ],
+            vec![
+                "--control",
+                "--receive",
+                "C:\\Drop",
+                "--receive-conflict",
+                "reject",
+                "--receive-conflict",
+                "keep-both",
+            ],
+            vec![
+                "--control",
+                "--receive",
+                "C:\\Drop",
+                "--receive-max-file-bytes",
+                "2",
+                "--receive-max-session-bytes",
+                "1",
+            ],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        for flag in [
+            "--receive",
+            "--receive-max-file-bytes",
+            "--receive-max-session-bytes",
+            "--receive-conflict",
+        ] {
+            assert!(parse(&[flag, "1"], false).is_none());
+        }
+    }
+
+    #[test]
+    fn receive_byte_limits_reject_zero_overflow_and_duplicate_budgets() {
+        for flag in ["--receive-max-file-bytes", "--receive-max-session-bytes"] {
+            for value in ["0", "-1", "+1", "1MiB", " 1", "", "18446744073709551616"] {
+                assert!(
+                    parse(&["--control", "--receive", "C:\\Drop", flag, value], true).is_none()
+                );
+            }
+            assert!(
+                parse(
+                    &["--control", "--receive", "C:\\Drop", flag, "1", flag, "2"],
+                    true
+                )
+                .is_none()
+            );
+            let options = parse(
+                &[
+                    "--control",
+                    "--receive",
+                    "C:\\Drop",
+                    flag,
+                    "18446744073709551615",
+                ],
+                true,
+            )
+            .unwrap();
+            let receive = options.receive.unwrap();
+            let limit = if flag == "--receive-max-file-bytes" {
+                receive.max_file_bytes
+            } else {
+                receive.max_session_bytes
+            };
+            assert_eq!(limit, Some(u64::MAX));
+        }
     }
 
     #[test]

@@ -77,6 +77,36 @@ mod tests {
     use frd::session_startup::{host_offer, host_offer_with, with_line_scroll};
 
     #[test]
+    fn selected_download_and_duplex_profiles_keep_text_clipboard_and_input_gates() {
+        use fr_wire::{attachment, files};
+        for clipboard in [false, true] {
+            for upload in [false, true] {
+                let offered = offer_with_download(true, clipboard, upload, true).unwrap();
+                let has = |name: &str| offered.capabilities.iter().any(|cap| cap.name == name);
+                assert!(has(files::DOWNLOAD_CAPABILITY));
+                assert!(has(files::CAPABILITY));
+                assert!(has(attachment::FILES_CAPABILITY));
+                assert!(has(TEXT_CAPABILITY));
+                assert_eq!(has(files::CHANNEL_SCOPE_CAPABILITY), upload);
+                assert_eq!(has(files::DUPLEX_CAPABILITY), upload);
+                assert_eq!(has(attachment::CLIPBOARD_CAPABILITY), clipboard);
+                assert!(offered.capabilities.len() <= fr_wire::negotiation::MAX_CAPABILITIES);
+                assert!(
+                    fr_client::native::control_offer()
+                        .capabilities
+                        .iter()
+                        .filter(|cap| cap.required)
+                        .all(|cap| offered.capabilities.contains(cap))
+                );
+            }
+        }
+        assert_eq!(
+            offer_with_download(false, true, true, true).unwrap(),
+            fr_client::native::observation_offer()
+        );
+    }
+
+    #[test]
     fn original_control_offer_adds_only_optional_text_and_preserves_required_gates() {
         let original = fr_client::native::control_offer();
         let selected = offer(true, false, false).unwrap();

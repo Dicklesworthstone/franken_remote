@@ -15,7 +15,7 @@
 //!       [--display primary|only|choose|HANDLE]
 //!       [--send FILE] (requires --control; one regular file, sent once)
 //!       [--receive DIR] [--receive-max-file-bytes N] [--receive-max-session-bytes N]
-//!       [--receive-conflict reject|keep-both] (requires --control)
+//!       [--receive-conflict reject|keep-both] (requires --control and local consent)
 //!       one session in a native window: Media Foundation (DXVA) decode and
 //!       a D3D11 swap chain, 1:1 when the picture fits. Prints a JSON
 //!       completion document (counts and timings, no content) at the end.

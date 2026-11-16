@@ -115,7 +115,7 @@ struct Viewer {
     input_menu: control::Menu,
     /// Original selected file and its evidence survive every viewing replacement.
     upload_menu: Option<upload::Menu>,
-    /// Original receive consent and disk receipts survive viewing replacements.
+    /// Original destination consent and publication receipts never follow a new session.
     download_menu: Option<download::Menu>,
     /// First parent-close cleanup sample for the original native file chooser.
     /// Neither repeated close callbacks nor later session completion renew it.
@@ -205,7 +205,10 @@ struct Stats {
     display: (u32, u32),
 }
 
-#[allow(clippy::too_many_lines)] // one original window and its explicitly selected owners
+#[allow(
+    clippy::too_many_lines,
+    reason = "one original window and its selected owners"
+)]
 pub fn run(mut config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     CLOSE_PENDING.with(|pending| pending.set(false));
     CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
@@ -440,7 +443,10 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         finished
             && v.upload_menu
                 .as_ref()
-                .is_none_or(upload::Menu::cleanup_complete),
+                .is_none_or(upload::Menu::cleanup_complete)
+            && v.download_menu
+                .as_ref()
+                .is_none_or(download::Menu::cleanup_complete),
         cleaned,
     ) {
         Action::Open(opening) => opening,
@@ -464,9 +470,11 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         return Reopen::No;
     }
     let mut next = config.clone();
-    // A replacement view cannot resend a file or approve the selected receive
-    // directory again. Menus retain only original cancellation and evidence.
+    // A replacement view cannot resend the original explicit file. Its menu
+    // retains only the original transfer's cancellation and receipt evidence.
     next.upload = None;
+    // Local destination consent, too, belongs only to the original session.
+    // Keep its receipts in the original menu without approving new transfers.
     next.download = None;
     if matches!(opening.cause, Cause::StopControl | Cause::FocusLost) {
         next.clipboard = false;
@@ -945,6 +953,10 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         .as_ref()
         .is_none_or(upload::Menu::succeeded);
     let upload = upload::document(viewer.upload_menu.as_ref());
+    let download_ok = viewer
+        .download_menu
+        .as_ref()
+        .is_none_or(download::Menu::succeeded);
     let download = download::document(viewer.download_menu.as_ref());
     let focus_end = stats.focus_end.as_ref().map(|(code, detail)| {
         serde_json::json!({
@@ -1008,6 +1020,7 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         && matches!(code, end::OK | end::CANCELLED)
         && viewer.reopen_refusal.is_none()
         && upload_ok
+        && download_ok
     {
         ExitCode::SUCCESS
     } else {
@@ -1711,6 +1724,12 @@ extern "system" fn window_proc(
         WM_INITMENUPOPUP => {
             with_viewer(|v| {
                 let file_available = v.can_choose_file() && !v.choosing_file();
+                if let Some(menu) = &mut v.download_menu {
+                    menu.refresh();
+                    if menu.is_popup(wparam.0) {
+                        menu.opened();
+                    }
+                }
                 if let Some(menu) = &mut v.upload_menu {
                     menu.refresh();
                     if menu.is_popup(wparam.0) {
@@ -1719,12 +1738,6 @@ extern "system" fn window_proc(
                             control::lifetime(),
                             file_available,
                         );
-                    }
-                }
-                if let Some(menu) = &mut v.download_menu {
-                    menu.refresh();
-                    if menu.is_popup(wparam.0) {
-                        menu.opened();
                     }
                 }
                 if v.input_menu.is_popup(wparam.0) {
@@ -1740,16 +1753,16 @@ extern "system" fn window_proc(
             with_viewer(|v| v.open_file(time));
             true
         }
+        WM_COMMAND if wparam.0 & 0xffff == download::CANCEL => {
+            // File-only cancellation is bound to the popup's original owner
+            // and stays available during nested native viewer callbacks.
+            download::cancel();
+            true
+        }
         WM_COMMAND if wparam.0 & 0xffff == upload::CANCEL => {
             // Stop the original file even during a nested native callback.
             // This cannot request control, close the desktop, or start a retry.
             upload::cancel();
-            true
-        }
-        WM_COMMAND if wparam.0 & 0xffff == download::CANCEL => {
-            // This original receive owner remains addressable even when the
-            // viewer is borrowed by a nested Win32 callback.
-            download::cancel();
             true
         }
         WM_COMMAND if wparam.0 & 0xffff == upload::PAUSE => {

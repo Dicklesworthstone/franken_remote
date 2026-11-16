@@ -260,11 +260,12 @@ pub fn prepare_receive_rename<'a>(
         .len()
         .checked_mul(size_of::<u16>())
         .ok_or(io::ErrorKind::InvalidInput)?;
-    let bytes = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName)
+    // The native contract requires the complete structure plus the name's
+    // bytes, including any trailing structure padding. The existing FileName
+    // slot also leaves room for the zero terminator beyond the copied name.
+    let bytes = size_of::<FILE_RENAME_INFORMATION>()
         .checked_add(name_bytes)
-        .and_then(|bytes| bytes.checked_add(size_of::<u16>()))
-        .ok_or(io::ErrorKind::InvalidInput)?
-        .max(size_of::<FILE_RENAME_INFORMATION>());
+        .ok_or(io::ErrorKind::InvalidInput)?;
     let mut buffer = Vec::<u64>::new();
     buffer
         .try_reserve_exact(bytes.div_ceil(size_of::<u64>()))

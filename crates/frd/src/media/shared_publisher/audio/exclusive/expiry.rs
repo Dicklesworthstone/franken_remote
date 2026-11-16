@@ -359,7 +359,11 @@ fn stopped_audio_consumes_only_its_exact_original_reply_route_until_parent_revok
         };
         let (owner, original, packets) = {
             let state = shared.lock().unwrap();
-            (state.owner.clone(), state.lanes.replies, state.lanes.packets)
+            (
+                state.owner.clone(),
+                state.lanes.replies,
+                state.lanes.packets,
+            )
         };
         feed.close_exclusive();
         let bytes = acknowledgement(1, lanes.binding);

@@ -1,5 +1,48 @@
 # Implementation status
 
+## Windows download cleanup and completion (2026-11-16 UTC)
+
+`fr-windows view --control --receive DIR` now connects an explicitly selected
+local destination to the existing ATP receive owner. It can receive regular
+files selected by a Linux, macOS or Windows host and combine them with its
+original upload on a positively negotiated duplex session. The Windows
+directory is pinned and validated before connecting; per-file and cumulative
+session limits and reject/keep-both conflict policy use the existing safe
+receiver. There is no new transfer protocol or native filesystem implementation.
+The reused Windows rename record now also reserves the complete native structure
+plus the filename bytes, with short and maximum-length publication cases added
+to the existing native regression.
+
+The Receive files menu exposes staged progress, publication counts, durability
+uncertainty and file-only cancellation. Completion JSON retains bounded original
+receipts and actual disk cleanup without filenames, paths or contents. A
+committed Windows rename with unconfirmed directory durability remains distinct
+from an unknown publication effect. Reconnects and replacement views cannot
+inherit receive consent or replay transfers, and original cleanup failures
+prevent replacement. A failed session-thread spawn releases newly bound choices.
+The original selection API and receipt JSON fields remain compatible with the
+concurrent Windows download integration; stable reason/publication codes and
+an explicit success result are additive. Overall command success now also
+requires the original receive lane's successful publication and cleanup evidence.
+
+The underlying receive path also preserves its first cleanup failure through
+later collection, while keeping late real publication evidence. Setup refusal
+before a disk worker starts now ends the original receive status and confirms
+no-worker cleanup instead of leaving an indefinite negotiating/pending report.
+
+The final reconciled Windows package passed 120 portable tests, including the
+receive flags, quota and consent refusals, and strict all-target Clippy.
+Pinned formatting, documentation links and whitespace checks pass. Added
+shared-owner, capability-intersection and real TLS/UDP receive regressions are
+present, but runtime execution was blocked before changed code compiled: rustc
+was killed while compiling unchanged pinned Asupersync with one build job and
+debug information disabled. Windows all-target cross checks were likewise
+killed in unchanged `windows 0.62.2`, including a retry with single-threaded
+compiler settings. Native directory/UI/transfer qualification remains pending;
+no live Windows result is claimed by the portable checks.
+See [Windows client usage](docs/windows-client.md#receive-files-selected-by-the-host).
+Tracks `fr-p2-file-transfer-m7o`, which remains open for broader acceptance.
+
 ## Windows hosts can opt in to regular-file receiving (2026-11-15 UTC)
 
 `frd run --encoder mediafoundation --control --files C:\Users\me\FrankenRemoteDrop` now reaches the

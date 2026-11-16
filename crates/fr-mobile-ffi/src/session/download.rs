@@ -1,16 +1,18 @@
-//! One explicit destination and the original controller's bounded ATP receiver.
-//! The session owns disk work and authority. This UI owner only registers the
-//! selected directory once, requests cancellation and retains actual receipts.
+//! One explicitly selected local destination on the original native session.
+//! The observer retains ATP, authority and disk ownership; this handle exposes
+//! only bounded progress, committed publication receipts and file-only cancel.
 #![forbid(unsafe_code)]
 
 use fr_files::{
     receive::Publication,
+    session,
+    wire::ResultReceipt,
     worker::{Completion, Error as WorkerError},
 };
 use frd::{
     native_files::{
-        Absence, ConflictPolicy, Directory, DirectoryRefusal, Limits, ReceiveControl, ReceivePhase,
-        ReceiveRequest, ReceiveStatus,
+        Absence, ConflictPolicy, Directory, DirectoryRefusal, Limits, MAX_RECEIVE_RESULTS,
+        ReceiveControl, ReceivePhase, ReceiveRequest, ReceiveStatus,
     },
     session_startup::{FileSendError, NativeObserver},
 };
@@ -19,36 +21,44 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-/// Content-free evidence. Staged bytes never count as published files, and a
-/// late disk result cannot repair an earlier bounded cleanup failure.
+/// One original terminal result. `bytes` appears only for an actual atomic
+/// publication, never for progress or a fully staged but unpublished object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Receipt {
+    pub id: u64,
+    /// Preserve the zero-based selection index used by the native result document.
+    pub index: Option<u64>,
+    pub outcome: &'static str,
+    pub receipt: &'static str,
+    pub bytes: Option<u64>,
+    pub durable: Option<bool>,
+    pub reason: Option<String>,
+}
+
+/// Content-free original receive evidence, retained after its view closes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Report {
     pub configured: bool,
     pub cancel_requested: bool,
     pub absence: Option<Absence>,
     pub status: Option<ReceiveStatus>,
+    /// The original aggregate file cleanup result. Its first failure cannot be
+    /// repaired by a later successful collection of the retained disk owner.
     pub cleanup: Option<Result<(), FileSendError>>,
-}
-
-/// Only metadata from one retained terminal disk receipt. No pathname, file
-/// name, content hash or contents enter this report.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Receipt {
-    pub index: Option<u64>,
-    pub outcome: &'static str,
-    pub bytes: Option<u64>,
-    pub durable: Option<bool>,
-    pub reason: Option<String>,
 }
 
 impl Report {
     fn observe(&mut self, mut status: ReceiveStatus) {
-        // Collect late publication evidence, but never repair a native cleanup
-        // failure already observed for this original receiver.
+        self.cancel_requested |= status.cancel_requested;
         if let Some(Err(error)) = self.status.as_ref().and_then(|previous| previous.cleanup) {
             status.cleanup = Some(Err(error));
         }
-        self.cancel_requested |= status.cancel_requested;
+        // Retain bounded publication evidence even if a producer violates its
+        // own result bound. An explicit omission can never report success.
+        if status.results.len() > MAX_RECEIVE_RESULTS {
+            status.results.truncate(MAX_RECEIVE_RESULTS);
+            status.results_truncated = true;
+        }
         self.status = Some(status);
     }
 
@@ -65,89 +75,174 @@ impl Report {
     }
 
     pub fn cleanup_name(&self) -> &'static str {
-        let native = self.status.as_ref().and_then(|status| status.cleanup);
-        if matches!(self.cleanup, Some(Err(_))) || matches!(native, Some(Err(_))) {
+        if matches!(self.cleanup, Some(Err(_)))
+            || self
+                .status
+                .as_ref()
+                .is_some_and(|status| matches!(status.cleanup, Some(Err(_))))
+        {
             return "failed";
         }
-        if self.cleanup == Some(Ok(())) || native == Some(Ok(())) {
-            return "finished";
-        }
-        if self
-            .status
-            .as_ref()
-            .is_some_and(ReceiveStatus::may_have_started)
-        {
-            "pending"
-        } else {
-            "not_started"
+        match self.status.as_ref() {
+            Some(status) if status.cleanup == Some(Ok(())) => "finished",
+            Some(status) if status.may_have_started() => "pending",
+            _ if self.configured && self.cleanup.is_none() => "pending",
+            _ => "not_started",
         }
     }
 
-    pub fn receipts(&self) -> Vec<Receipt> {
-        let Some(status) = &self.status else {
-            return Vec::new();
-        };
-        status
-            .results
-            .iter()
-            .take(frd::native_files::MAX_RECEIVE_RESULTS)
-            .filter_map(|result| {
-                if matches!(
-                    result.outcome,
-                    Ok(Completion::Begun(_) | Completion::Written(_))
-                ) {
-                    return None;
-                }
-                let index = result.id.checked_sub(1);
-                let mut receipt = Receipt {
-                    index,
-                    outcome: "publication_unknown",
-                    bytes: None,
-                    durable: None,
-                    reason: None,
-                };
-                match result.outcome {
-                    Ok(Completion::Published(published))
-                        if index.is_some() && published.id == result.id =>
-                    {
-                        receipt.outcome = "locally_published";
-                        receipt.bytes = Some(published.bytes);
-                        receipt.durable = Some(published.publication == Publication::Durable);
-                    }
-                    Ok(Completion::Cancelled) => receipt.outcome = "cancelled",
-                    Err(error) => {
-                        receipt.outcome = match error {
-                            WorkerError::UnknownEffect
-                            | WorkerError::Poisoned
-                            | WorkerError::Panicked
-                            | WorkerError::Session(fr_files::session::Error::UnknownEffect) => {
-                                "publication_unknown"
-                            }
-                            WorkerError::Cancelled
-                            | WorkerError::Closed
-                            | WorkerError::Session(fr_files::session::Error::Closed) => "cancelled",
-                            _ => "refused",
-                        };
-                        receipt.reason = Some(format!("{error:?}"));
-                    }
-                    _ => {}
-                }
-                Some(receipt)
-            })
-            .collect()
+    /// Positive original cleanup evidence, or a pre-start refusal with no disk
+    /// owner. A receive failure before its first progress sample stays pending.
+    pub fn cleanup_complete(&self) -> bool {
+        matches!(self.cleanup_name(), "finished" | "not_started")
+    }
+
+    pub fn reason(&self) -> Option<Absence> {
+        self.absence
+            .or_else(|| self.status.as_ref().and_then(|status| status.absence))
+    }
+
+    pub fn reason_code(&self) -> Option<&'static str> {
+        self.reason().map(absence_code)
     }
 
     pub fn results_truncated(&self) -> bool {
         self.status.as_ref().is_some_and(|status| {
-            status.results_truncated
-                || status.results.len() > frd::native_files::MAX_RECEIVE_RESULTS
+            status.results_truncated || status.results.len() > MAX_RECEIVE_RESULTS
         })
     }
 
-    /// Failure and absence remain inspectable after the receive lane ends.
-    pub fn reason(&self) -> Option<Absence> {
-        self.absence
-            .or_else(|| self.status.as_ref().and_then(|status| status.absence))
+    pub fn receipts(&self) -> Vec<Receipt> {
+        self.status
+            .as_ref()
+            .into_iter()
+            .flat_map(|status| status.results.iter().take(MAX_RECEIVE_RESULTS))
+            .filter_map(|result| receipt(*result))
+            .collect()
+    }
+
+    /// Receipt permission needs no particular number of host selections. When
+    /// an actual transfer did occur, only verified atomic publication counts.
+    /// Windows' unconfirmed directory durability is separately visible and is
+    /// never reported as a durable publication or unknown publication effect.
+    pub fn is_success(&self) -> bool {
+        self.configured
+            && self.cleanup_name() == "finished"
+            && self.reason().is_none()
+            && !self.results_truncated()
+            && self.status.as_ref().is_some_and(|status| {
+                status.phase == ReceivePhase::Ended
+                    && status.progress.is_none()
+                    && status.results.iter().all(|result| {
+                        matches!(
+                            result.outcome,
+                            Ok(Completion::Published(published))
+                                if result.id != 0 && published.id == result.id
+                        )
+                    })
+            })
+    }
+}
+
+fn receipt(result: ResultReceipt) -> Option<Receipt> {
+    let mut receipt = Receipt {
+        id: result.id,
+        index: result.id.checked_sub(1),
+        outcome: "publication_unknown",
+        receipt: "publication_unknown",
+        bytes: None,
+        durable: None,
+        reason: None,
+    };
+    match result.outcome {
+        Ok(Completion::Begun(_) | Completion::Written(_)) => return None,
+        Ok(Completion::Published(published)) if result.id != 0 && published.id == result.id => {
+            let durable = published.publication == Publication::Durable;
+            receipt.outcome = "locally_published";
+            receipt.receipt = if durable {
+                "published"
+            } else {
+                "published_durability_unknown"
+            };
+            receipt.bytes = Some(published.bytes);
+            receipt.durable = Some(durable);
+        }
+        Ok(Completion::Published(_)) => {
+            receipt.reason = Some("receive_invalid_result".into());
+        }
+        Ok(Completion::Cancelled) => {
+            receipt.outcome = "cancelled";
+            receipt.receipt = "cancelled";
+            receipt.reason = Some("receive_cancelled".into());
+        }
+        Err(error) => {
+            receipt.outcome = match worker_code(error) {
+                "publication_unknown" => "publication_unknown",
+                "receive_cancelled" => "cancelled",
+                _ => "refused",
+            };
+            receipt.receipt = receipt.outcome;
+            receipt.reason = Some(format!("{error:?}"));
+        }
+    }
+    Some(receipt)
+}
+
+fn absence_code(absence: Absence) -> &'static str {
+    match absence {
+        Absence::NotNegotiated => "host_download_unavailable",
+        Absence::WithClipboard => "files_with_clipboard_unsupported",
+        Absence::Unavailable => "files_receive_unavailable",
+        Absence::Refused(FileSendError::Cancelled) => "receive_cancelled",
+        Absence::Refused(_) => "files_receive_refused_locally",
+        Absence::SetupFailed(_) => "files_receive_setup_failed",
+        Absence::ReceiveFailed(error) => match error {
+            fr_files::quic::Error::Cancelled => "receive_cancelled",
+            fr_files::quic::Error::Limits => "receive_limit",
+            fr_files::quic::Error::Transport(fr_transport::quic::Error::SendExpired) => {
+                "send_expired"
+            }
+            fr_files::quic::Error::Transport(
+                fr_transport::quic::Error::Expired
+                | fr_transport::quic::Error::Stream(fr_wire::stream::StreamError::Expired),
+            ) => "receive_expired",
+            fr_files::quic::Error::File(fr_files::wire::Error::Atp(
+                fr_files::atp::receive::Error::Worker(error),
+            )) => worker_code(error),
+            _ => "files_receive_failed",
+        },
+    }
+}
+
+fn worker_code(error: WorkerError) -> &'static str {
+    match error {
+        WorkerError::UnknownEffect
+        | WorkerError::Poisoned
+        | WorkerError::Panicked
+        | WorkerError::Session(session::Error::UnknownEffect) => "publication_unknown",
+        WorkerError::Cancelled
+        | WorkerError::Closed
+        | WorkerError::Session(session::Error::Closed) => "receive_cancelled",
+        WorkerError::Session(session::Error::Storage(fr_files::receive::Error::Conflict)) => {
+            "receive_conflict"
+        }
+        WorkerError::Session(session::Error::Storage(fr_files::receive::Error::Integrity)) => {
+            "receive_integrity"
+        }
+        WorkerError::Session(session::Error::Storage(fr_files::receive::Error::Incomplete)) => {
+            "receive_incomplete"
+        }
+        WorkerError::Session(session::Error::Expired) => "receive_expired",
+        WorkerError::Session(session::Error::Permission | session::Error::Authority(_)) => {
+            "receive_permission"
+        }
+        WorkerError::Allocation
+        | WorkerError::Session(
+            session::Error::Quota
+            | session::Error::RateLimited
+            | session::Error::Storage(fr_files::receive::Error::Quota),
+        ) => "receive_limit",
+        _ => "receive_failed",
     }
 }
 
@@ -156,31 +251,34 @@ struct State {
     bound: bool,
     attempted: bool,
     retired: bool,
+    control: Option<ReceiveControl>,
     report: Report,
-    source: Option<ReceiveControl>,
 }
 
 impl State {
     fn collect(&mut self) {
-        if let Some(source) = &self.source {
-            self.report.observe(source.status());
+        if let Some(control) = &self.control {
+            self.report.observe(control.status());
         }
     }
 
     fn cancel(&mut self) -> bool {
         self.collect();
-        let changed = match &self.source {
-            Some(source) => source.cancel(),
+        let changed = match &self.control {
+            Some(control) => control.cancel(),
             None => self.request.is_some() && !self.report.cancel_requested,
         };
-        self.report.cancel_requested |= changed;
+        if changed {
+            self.report.cancel_requested = true;
+        }
         self.collect();
         changed
     }
 }
 
-/// One explicitly selected private root. Clones retain this same consumable
-/// owner; a resize, new grant or reconnect can never approve it again.
+/// An explicit pinned directory approved once for one native session. Clones
+/// inspect or cancel the original lane; they cannot reopen a pathname, renew a
+/// deadline, grant authority or approve another connection.
 pub struct Download(Mutex<State>);
 
 impl Download {
@@ -200,16 +298,23 @@ impl Download {
         } else {
             ConflictPolicy::Reject
         };
-        let directory = Directory::open(path, limits)?.with_conflict_policy(conflict);
-        Ok(Self::new(ReceiveRequest::new(&directory)))
+        Self::select_with_limits(path, limits, conflict)
     }
 
-    fn new(request: ReceiveRequest) -> Arc<Self> {
-        Arc::new(Self(Mutex::new(State {
-            request: Some(request),
+    /// Pin an explicitly chosen directory with typed byte and conflict policy.
+    /// Both constructors produce the same original, consumable receive owner.
+    pub fn select_with_limits(
+        path: &Path,
+        limits: Limits,
+        conflict: ConflictPolicy,
+    ) -> Result<Arc<Self>, DirectoryRefusal> {
+        let directory = Directory::open(path, limits)?.with_conflict_policy(conflict);
+        Ok(Arc::new(Self(Mutex::new(State {
+            request: Some(ReceiveRequest::new(&directory)),
             bound: false,
             attempted: false,
             retired: false,
+            control: None,
             report: Report {
                 configured: false,
                 cancel_requested: false,
@@ -217,8 +322,7 @@ impl Download {
                 status: None,
                 cleanup: None,
             },
-            source: None,
-        })))
+        }))))
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -262,15 +366,16 @@ impl Download {
         let Some(request) = state.request.take() else {
             return;
         };
-        // Synchronous registration only: the observer starts disk work after
-        // its real grant and one-use attachment. No filesystem call runs here.
+        // Registration performs no native I/O or wait. Cancellation after
+        // negotiation still installs the original attachment expectation with
+        // its stop set before the first controller turn can admit disk work.
         match configure(request) {
-            Ok(source) => {
+            Ok(control) => {
                 if state.report.cancel_requested {
-                    source.cancel();
+                    control.cancel();
                 }
                 state.report.configured = true;
-                state.source = Some(source);
+                state.control = Some(control);
             }
             Err(absence) => {
                 state.report.absence.get_or_insert(absence);
@@ -283,8 +388,6 @@ impl Download {
         self.lock().cancel()
     }
 
-    /// Pre-observer dial retries spend no destination. Once the original
-    /// observer registers it, every later attempt is permanently unapproved.
     pub(super) fn retire(&self) {
         let mut state = self.lock();
         if state.attempted {
@@ -323,228 +426,4 @@ impl Drop for Download {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use fr_files::{session, wire::ResultReceipt};
-
-    fn selected() -> Arc<Download> {
-        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let random = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
-        let path = root.join(format!(
-            "fr-native-download-{}-{random}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir(&path).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        Download::select(&path, None, None, false).unwrap()
-    }
-
-    #[test]
-    fn the_selected_destination_belongs_to_one_session_and_one_observer() {
-        let owner = selected();
-        let clone = Arc::clone(&owner);
-        assert!(!owner.available());
-        assert!(owner.bind());
-        assert!(!clone.bind());
-        owner.retire(); // no observer has registered it; original dial can retry
-        assert!(owner.available());
-        owner.configure_with(|_| Err(Absence::NotNegotiated));
-        assert!(!owner.available());
-        clone.configure_with(|_| panic!("destination was reapproved"));
-        assert_eq!(owner.report().reason(), Some(Absence::NotNegotiated));
-    }
-
-    #[test]
-    fn cancel_before_registration_cannot_reapprove_the_original_destination() {
-        let owner = selected();
-        assert!(owner.bind());
-        assert!(owner.cancel());
-        assert!(!owner.cancel());
-        assert!(!owner.available());
-        // The original optional attachment may already have been offered.
-        // Consume its registration once; cancellation precedes worker service.
-        owner.configure_with(|_| Err(Absence::Unavailable));
-        owner.configure_with(|_| panic!("cancelled destination reused"));
-        owner.retire();
-        assert!(owner.report().cancel_requested);
-        assert!(!owner.available());
-    }
-
-    #[test]
-    fn finish_releases_unstarted_consent_and_cannot_restart_it() {
-        let owner = selected();
-        assert!(owner.bind());
-        owner.finish();
-        assert!(!owner.bind());
-        assert!(!owner.available());
-        assert!(owner.lock().request.is_none());
-        owner.configure_with(|_| panic!("finished destination reused"));
-        assert_eq!(owner.report().phase_name(), "cancelled_before_start");
-        assert_eq!(owner.report().cleanup_name(), "not_started");
-    }
-
-    fn status() -> ReceiveStatus {
-        ReceiveStatus {
-            phase: ReceivePhase::Receiving,
-            absence: None,
-            progress: None,
-            results: Vec::new(),
-            results_truncated: false,
-            cancel_requested: false,
-            cleanup: None,
-        }
-    }
-
-    #[test]
-    fn original_publication_survives_cancellation_and_failed_cleanup() {
-        let owner = selected();
-        owner.lock().report.configured = true;
-        let mut original = status();
-        original.results.push(ResultReceipt {
-            id: 1,
-            outcome: Ok(Completion::Published(session::Receipt {
-                id: 1,
-                bytes: 7,
-                publication: Publication::DurabilityUnknown,
-            })),
-        });
-        owner.lock().report.status = Some(original);
-        owner.cleaned(Err(FileSendError::Expired));
-        owner.cleaned(Ok(()));
-        owner.finish();
-        let report = owner.report();
-        assert_eq!(report.cleanup, Some(Err(FileSendError::Expired)));
-        assert_eq!(report.cleanup_name(), "failed");
-        let receipts = report.receipts();
-        assert_eq!(receipts.len(), 1);
-        assert_eq!(receipts[0].outcome, "locally_published");
-        assert_eq!(receipts[0].bytes, Some(7));
-        assert_eq!(receipts[0].durable, Some(false));
-    }
-
-    #[test]
-    fn fully_staged_bytes_never_become_a_publication_receipt() {
-        let owner = selected();
-        let mut original = status();
-        original.results.push(ResultReceipt {
-            id: 1,
-            outcome: Ok(Completion::Written(session::Progress {
-                id: 1,
-                staged_bytes: 5,
-                total_bytes: 5,
-            })),
-        });
-        owner.lock().report.status = Some(original);
-        let report = owner.report();
-        assert!(report.receipts().is_empty());
-        assert_eq!(report.cleanup_name(), "pending");
-    }
-
-    #[test]
-    fn a_native_cleanup_failure_and_unknown_effect_never_become_success() {
-        let owner = selected();
-        let mut original = status();
-        original.cleanup = Some(Err(WorkerError::Cleanup));
-        original.results.push(ResultReceipt {
-            id: 1,
-            outcome: Err(WorkerError::UnknownEffect),
-        });
-        {
-            let mut state = owner.lock();
-            state.report.configured = true;
-            state.report.status = Some(original);
-        }
-        owner.cleaned(Ok(()));
-        let report = owner.report();
-        assert_eq!(report.cleanup_name(), "failed");
-        assert_eq!(report.receipts()[0].outcome, "publication_unknown");
-        assert_eq!(report.receipts()[0].bytes, None);
-    }
-
-    #[test]
-    fn ended_receivers_without_receipts_still_require_actual_cleanup() {
-        let owner = selected();
-        let mut original = status();
-        original.phase = ReceivePhase::Ended;
-        owner.lock().report.observe(original.clone());
-        assert_eq!(owner.report().cleanup_name(), "pending");
-        original.absence = Some(Absence::NotNegotiated);
-        owner.lock().report.observe(original.clone());
-        assert_eq!(owner.report().cleanup_name(), "not_started");
-        original.absence = Some(Absence::ReceiveFailed(fr_files::quic::Error::Cancelled));
-        owner.lock().report.observe(original);
-        assert_eq!(owner.report().cleanup_name(), "pending");
-    }
-
-    #[test]
-    fn late_native_collection_keeps_cleanup_failure_and_real_publication() {
-        let owner = selected();
-        let mut failed = status();
-        failed.cleanup = Some(Err(WorkerError::Cleanup));
-        owner.lock().report.observe(failed);
-        let mut joined = status();
-        joined.cleanup = Some(Ok(()));
-        joined.results.push(ResultReceipt {
-            id: 1,
-            outcome: Ok(Completion::Published(session::Receipt {
-                id: 1,
-                bytes: 0,
-                publication: Publication::DurabilityUnknown,
-            })),
-        });
-        owner.lock().report.observe(joined);
-        let report = owner.report();
-        assert_eq!(report.cleanup_name(), "failed");
-        assert_eq!(report.receipts()[0].outcome, "locally_published");
-        assert_eq!(report.receipts()[0].bytes, Some(0));
-    }
-
-    #[test]
-    fn report_bounds_and_original_result_ids_never_invent_publication() {
-        let owner = selected();
-        let mut original = status();
-        let bound = frd::native_files::MAX_RECEIVE_RESULTS;
-        for id in 1..=u64::try_from(bound + 1).unwrap() {
-            original.results.push(ResultReceipt {
-                id,
-                outcome: Ok(Completion::Published(session::Receipt {
-                    id,
-                    bytes: 1,
-                    publication: Publication::Durable,
-                })),
-            });
-        }
-        original.results[0].id = 0;
-        original.results[1].id = 3; // receipt still belongs to 2
-        owner.lock().report.observe(original);
-        let report = owner.report();
-        let receipts = report.receipts();
-        assert_eq!(receipts.len(), bound);
-        assert!(report.results_truncated());
-        assert_eq!(receipts[0].index, None);
-        assert_eq!(receipts[0].outcome, "publication_unknown");
-        assert_eq!(receipts[1].outcome, "publication_unknown");
-        assert_eq!(receipts[2].outcome, "locally_published");
-    }
-
-    #[test]
-    fn invalid_roots_and_limits_refuse_before_registration() {
-        assert!(matches!(
-            Download::select(Path::new("relative"), None, None, false),
-            Err(DirectoryRefusal::Relative)
-        ));
-        assert!(matches!(
-            Download::select(&std::env::temp_dir(), Some(10), Some(5), false),
-            Err(DirectoryRefusal::Limits)
-        ));
-    }
-}
+mod tests;

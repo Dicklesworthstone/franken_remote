@@ -1,6 +1,6 @@
 # Native file downloads
 
-A controlling native Linux or macOS viewer can receive files explicitly selected
+A controlling native Linux, macOS or Windows viewer can receive files explicitly selected
 by a Linux, macOS or Windows host operator. Linux and macOS hosts can also select
 portable directories. The transfer uses the existing ATP profiles on the original
 session's independently admitted, one-use file attachment.
@@ -30,8 +30,8 @@ denies write and delete sharing until its original transfer owner closes it;
 another process cannot replace that file while it is selected. Ancestor junction
 resolution remains an OS path operation, so a drive letter is not evidence that
 every ancestor stays on the same local volume. The current Windows host supports
-this initial batch; `--send-control` and the `--files` receive directory remain
-unavailable.
+this initial batch; `--send-control` remains unavailable. Its explicit `--files`
+receive directory can independently accept regular files on a duplex session.
 
 On the client, select an existing private destination and request control:
 
@@ -39,6 +39,12 @@ On the client, select an existing private destination and request control:
 fr connect NODE_ID --control --experimental-native --display only \
   --receive /home/bob/received --json
 ```
+
+The native Windows viewer exposes the same explicit consent with
+`fr-windows view NODE_ID --control --receive C:\Users\me\FrankenRemoteDrop`.
+It receives regular files through the existing Windows handle-pinned directory
+owner. Local limits, conflict choices, cancellation, publication receipts and
+validation scope are described in the [Windows client guide](docs/windows-client.md#receive-files-selected-by-the-host).
 
 The existing tailnet, ingress, executable-trust and display prerequisites in
 [README.md](README.md) still apply. The destination must be absolute, owned by

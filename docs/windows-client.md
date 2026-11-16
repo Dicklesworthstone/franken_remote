@@ -575,6 +575,7 @@ controlling viewer:
 ```powershell
 fr-windows view remote.example.ts.net --control --receive 'C:\Users\me\FrankenRemoteDrop'
 fr-windows view --control --receive 'C:\Users\me\FrankenRemoteDrop' --receive-conflict keep-both
+fr-windows view --control --send 'C:\Users\me\Documents\draft.txt' --receive 'C:\Users\me\FrankenRemoteDrop'
 ```
 
 The host operator separately selects the files. On a configured Linux or macOS
@@ -616,7 +617,7 @@ capabilities still needed by the other.
 
 The native **Receive files** menu shows the original lane's state, staged bytes,
 published-file count, unconfirmed durability count and receiver-cleanup state.
-**Cancel receiving** stops that original receive permission without closing the
+**Stop receiving files** stops that original receive permission without closing the
 desktop. It cannot undo an already published file, erase a receipt, request new
 control or approve a new destination. An old menu command still names the owner
 shown when that popup opened.
@@ -630,17 +631,27 @@ existing authority checks; returning to the window never replays a transfer.
 
 The completion JSON adds a `download` object for this explicit destination, or
 `null` when receiving was not requested. It contains `configured`, `phase`,
-`cancel_requested`, `cleanup`, a typed `reason`, current `progress`, bounded
-`receipts` and `results_truncated`. Each receipt has an index and outcome, plus
-published bytes and durability when actual publication was observed; no paths,
-filenames or file contents enter this report.
+`cancel_requested`, `cleanup`, a typed `reason`, a stable `reason_code`, current
+`progress`, bounded `receipts`, `results_truncated` and `succeeded`. Existing
+receipt `index`, `outcome` and `bytes` fields remain available. Additive `id`,
+`receipt` and `published_bytes` fields expose the original transfer ID and
+publication classification. Bytes and durability appear only when actual
+publication was observed; no paths, filenames or file contents enter this report.
 
 Fully staged bytes are not a publication receipt. A successful Windows rename
-is reported as `locally_published` with `durable: false` because crash durability
-is unconfirmed. That file was committed and must not be retried as though no
-file was saved. Refusals, cancellation and unknown publication remain distinct.
-The command's video exit status does not claim that a host chose or completed
-any particular file; inspect the retained download receipts for those outcomes.
+keeps `outcome: locally_published` and adds
+`receipt: published_durability_unknown`, with `durable: false`, because crash
+durability is unconfirmed. That file was committed and must not be retried as
+though no file was saved. Refusals, cancellation and `publication_unknown` remain
+distinct. Staging all bytes, including a zero-byte file, does not establish
+publication.
+
+When receiving was requested, successful command completion also requires the
+original receive lane to end with confirmed cleanup and verified publication for
+every attempted file. A failure, unknown publication or truncated result set
+cannot become success. This does not claim crash durability or demand that the
+host select a particular number of files; permission without any host selection
+is allowed.
 
 Receive cleanup shares the session's original deadline. Pending or failed
 cleanup prevents replacement; late native collection cannot repair an earlier
@@ -722,10 +733,12 @@ ownership, registration refusal, pre-start cancellation, original cleanup failur
 and publication evidence. The existing Windows clipboard/offer and upload
 targets exercise optional download/duplex composition and independent capability
 retirement; `fr-windows` parser tests cover destination consent and byte/conflict
-policy. These additions were authored while the execution environment was
-unavailable and have not been run locally. Hosted CI and a Windows desktop
-transfer are still required; they do not establish Windows DACL, menu, focus or
-filesystem behavior merely by existing.
+policy. Additional regressions cover setup refusal before disk-worker creation,
+retention of the first cleanup failure, original receipt bounds and independently
+retired file capabilities. See [implementation status](../IMPLEMENTATION_STATUS.md)
+for the current check results. Native Windows DACL, menu, focus and filesystem
+behavior still require an actual Windows desktop transfer; source review and
+portable tests do not establish that qualification.
 
 For the native host-shaped cursor slice (`fr-s6qi`), the actual
 `cargo test --locked -p fr-windows --bin fr-windows` run passed all 117 portable
