@@ -46,9 +46,12 @@ struct SessionToolbar: View {
                     }
                     if session.controlCapable {
                         Divider()
+                        Text("Creates a local copy, up to 256 MiB.")
+                        Text("May download from your file provider.")
                         Button(action: chooseFile) {
-                            Label("Choose a file to send…", systemImage: "doc.badge.plus")
+                            Label("Choose upload copy…", systemImage: "doc.badge.plus")
                         }
+                        .accessibilityHint("Creates a local copy up to 256 mebibytes and may download the file. Nothing is sent until you choose Send once.")
                         .disabled(!session.canChooseUpload)
                         if session.phase == .controlled || session.phase == .requestingControl {
                             Text("Give back control to choose another file.")

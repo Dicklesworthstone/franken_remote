@@ -7,9 +7,16 @@ async fn quiet_pair(viewer_cx: &Cx, host_cx: &Cx) -> (HostSession, ViewerSession
     let mut next_nonce = 0;
     let until = now(host_cx).unwrap() + 2_000_000;
     loop {
-        assert!(now(host_cx).unwrap() < until, "initial exchange did not drain");
+        assert!(
+            now(host_cx).unwrap() < until,
+            "initial exchange did not drain"
+        );
         let (host_result, viewer_result) = Box::pin(support::both(
-            host.drive(Duration::from_millis(1), || nonce(&mut next_nonce), no_other),
+            host.drive(
+                Duration::from_millis(1),
+                || nonce(&mut next_nonce),
+                no_other,
+            ),
             viewer.drive(Duration::from_millis(1), no_other),
         ))
         .await;

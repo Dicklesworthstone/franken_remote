@@ -417,7 +417,10 @@ final class RemoteSession: ObservableObject, InputSink {
     }
 
     var uploadBlocksControl: Bool {
-        preparingUpload || uploadChoice?.phase == .choosing
+        // Discard retires the choice immediately. Provider work may finish
+        // later without blocking Control. canChooseUpload still prevents
+        // a second preparation worker until the original operation returns.
+        (preparingUpload && uploadChoice != nil) || uploadChoice?.phase == .choosing
     }
 
     @MainActor
@@ -459,14 +462,14 @@ final class RemoteSession: ObservableObject, InputSink {
                 if uploadChoice?.token == originalToken {
                     uploadChoice = nil
                     uploadChoiceResource = nil
-                    notice = "That file could not be prepared for this session. No file was sent."
+                    notice = "Could not prepare an upload copy. Choose one regular file up to 256 MiB from a supported provider. No file was sent."
                 }
                 pollUploads(force: true)
                 return
             }
             uploadChoiceResource = resource
             _ = uploadChoice?.prepared(token: originalToken)
-            notice = "File selected locally. Request control, then choose Send once."
+            notice = "Local upload copy ready. Request control, then choose Send once."
             pollUploads(force: true)
         }
     }

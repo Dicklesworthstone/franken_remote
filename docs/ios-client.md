@@ -274,15 +274,19 @@ native qualification; source policy is not hardware evidence.
 
 ## Send a selected file to the host
 
-A control-capable session now offers **View options → Choose a file to send…**
-while it is viewing, before control is requested. The system document picker
-selects one regular file from an installed file provider. The picker can cover
-the desktop, so the app marks the remote view hidden throughout its actual
-presentation and dismissal. It never keeps an obscured controlling session
-alive or claims that frames behind the picker were seen.
+A control-capable session now offers **View options → Choose upload copy…**
+while it is viewing, before control is requested. Before that action the menu
+explains that choosing creates a local copy, up to **256 MiB**, and may download
+the file from its provider. The system document picker selects one regular
+file; folders, packages, symbolic links and unknown metadata are refused. The
+picker can cover the desktop, so the app marks the remote view hidden
+throughout its actual presentation and dismissal. It never keeps an obscured
+controlling session alive or claims that frames behind the picker were seen.
 
-Selection prepares a pinned native descriptor on a background task; it sends
-no file bytes. After the picker closes and a fresh picture is visible, choose
+Selection asks the OS to make an upload snapshot on the one preparation worker
+and pins that snapshot's native descriptor. This local copy and any provider
+download happen before Send; no file bytes are sent to the remote host. After
+the picker closes and a fresh picture is visible, choose
 **Control**, wait for the host grant and file channel, then press **Send once**
 in the small transfer panel. The host must separately enable receiving files
 through its existing `frd run --files DIR` configuration. A host that declines
@@ -311,9 +315,11 @@ current granted input view and original native deadline, consumes the prepared
 descriptor even if refused, and never queues a retry with a renewed ticket.
 The current session cannot replay a chosen file after reconnect or display
 switch. Files are uploaded through the existing bounded ATP lane and original
-disk worker; Swift never reads or buffers their contents. Source validation,
-host quotas, safe staging and atomic publication remain in the existing Rust
-file implementation. A published file is not opened automatically.
+disk worker. Swift does not hash or buffer contents; the OS prepares the
+disclosed local copy, and native content reads require the later granted Send.
+Source validation, host quotas, safe staging and atomic publication remain in
+the existing Rust file implementation. The host's receiving quota can be lower
+than the iOS copy limit. A published file is not opened automatically.
 
 The transfer panel distinguishes bytes **queued** from the host's actual
 publication receipt. It also preserves host refusal, interrupted or uncertain
@@ -327,12 +333,27 @@ outcomes independently of the current transfer.
 
 ### Document-provider access and cleanup
 
-The picker uses open-in-place access rather than copying entire files into
-Swift or creating persistent bookmarks. Preparation coordinates a read and
-pins the selected descriptor away from the UI and session threads. The
-original security-scoped URL remains retained for every accepted upload until
-the native session reports that all of its original file sources have actually
-been released. A terminal event or a cleanup deadline is insufficient proof.
+The picker obtains open-in-place access without creating persistent bookmarks.
+On the preparation worker, an ordinary coordinated read keeps the original
+file protected while its type and known size are checked. A nested
+`NSFileCoordinator.ReadingOptions.forUploading` read then creates the OS-owned
+snapshot. Both the original and snapshot must be regular non-package files,
+at most 256 MiB, with the same byte count and exact basename. A provider that
+renames the snapshot is refused instead of publishing a temporary filename.
+
+The native bridge opens the snapshot descriptor inside its accessor. Apple
+explicitly permits later upload from that descriptor after the OS unlinks the
+snapshot when the accessor returns. No coordination claim remains open while
+the user requests control or the network transfer runs; the original document
+can be edited without changing this selected upload copy. The app does not
+implement its own temporary-file copying or deletion. Ordinary coordination
+may itself download a provider placeholder before size preflight, so the copy
+limit does not promise a limit on provider download traffic.
+
+The original security-scoped URL remains retained for every accepted upload
+until the native session reports that all of its original file sources have
+actually been released. A terminal event or a cleanup deadline is insufficient
+proof.
 
 Closing the UI hands the original session handle and its bounded access owners
 to a cleanup task. That task frees the handle and balances document access only
@@ -344,16 +365,19 @@ is discarded. Nothing from a selected URL, local filename or file contents is
 written into diagnostic JSON.
 
 Source regression coverage includes original selection tokens, bounded status
-decoding, one-use picker callbacks, publication versus queue progress, and
-independent cleanup outcomes. The executor became unavailable during this
-implementation; Apple SDK compilation, XCTest execution and live
+decoding, one-use picker callbacks, publication versus queue progress,
+independent cleanup outcomes, and local-copy type, size and name boundaries.
+The executor became unavailable during this implementation; Apple SDK
+compilation, XCTest execution and live
 iPhone/iPad transfers with local, iCloud and third-party providers remain
 unverified. In particular, real picker dismissal, provider cancellation,
 background cleanup and host publication require native qualification.
 
 Apple API contracts:
-[document-picker access](https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller)
-and [balanced security-scoped access](https://developer.apple.com/documentation/foundation/url/startaccessingsecurityscopedresource()).
+[document-picker access](https://developer.apple.com/documentation/uikit/uidocumentpickerviewcontroller),
+[balanced security-scoped access](https://developer.apple.com/documentation/foundation/url/startaccessingsecurityscopedresource()),
+[coordinated reads](https://developer.apple.com/documentation/foundation/nsfilecoordinator/coordinate(readingitemat:options:error:byaccessor:)),
+and [upload snapshots and descriptor lifetime](https://developer.apple.com/documentation/foundation/nsfilecoordinator/readingoptions/foruploading).
 
 ## Input
 

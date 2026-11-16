@@ -66,8 +66,10 @@ struct FileUploadBar: View {
                 } else if choice.phase == .preparing {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
-                        Text("Preparing the selected file…").font(.caption)
+                        Text("Preparing local upload copy…").font(.caption)
                     }
+                    Text("Your provider may download the file. Nothing is sent yet.")
+                        .font(.caption2).foregroundStyle(.secondary)
                 } else if choice.phase == .prepared {
                     HStack(spacing: 10) {
                         Text(session.phase == .controlled
@@ -80,7 +82,7 @@ struct FileUploadBar: View {
                             .disabled(!session.canSendUpload)
                     }
                 } else {
-                    Text("Selection stays local until a separate Send once.")
+                    Text("Creates a local copy, up to 256 MiB. Sending is a separate action.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

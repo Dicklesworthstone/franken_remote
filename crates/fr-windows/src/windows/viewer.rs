@@ -840,7 +840,11 @@ fn draw_latest(
         .as_ref()
         .is_none_or(|mapping| !mapping.same_presentation(presentation, attempt))
     {
-        v.mapping = Some(Mapping::for_presentation(presentation, attempt, input_ticks()));
+        v.mapping = Some(Mapping::for_presentation(
+            presentation,
+            attempt,
+            input_ticks(),
+        ));
         shared.scroll_end();
     }
     if v.scales.is_none() {

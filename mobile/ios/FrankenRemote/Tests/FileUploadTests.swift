@@ -143,6 +143,65 @@ final class FileUploadTests: XCTestCase {
         XCTAssertEqual(FileUploadChoice.displayName("Résumé final.txt"), "Résumé final.txt")
     }
 
+    private func copyMetadata(regular: Bool? = true, directory: Bool? = false,
+                              package: Bool? = false, symbolicLink: Bool? = false,
+                              bytes: Int? = 4) -> FileUploadCopyPolicy.Metadata {
+        FileUploadCopyPolicy.Metadata(regular: regular, directory: directory,
+                                      package: package, symbolicLink: symbolicLink, bytes: bytes)
+    }
+
+    func testUploadCopyRefusesFoldersPackagesLinksAndUnknownFileTypesBeforeSnapshot() {
+        let refused = [
+            copyMetadata(regular: false, directory: true),
+            copyMetadata(regular: false, directory: true, package: true),
+            copyMetadata(package: true),
+            copyMetadata(symbolicLink: true),
+            copyMetadata(regular: nil),
+            copyMetadata(directory: nil),
+            copyMetadata(package: nil),
+            copyMetadata(symbolicLink: nil),
+        ]
+        for item in refused {
+            XCTAssertFalse(FileUploadCopyPolicy.permits(item))
+            XCTAssertFalse(FileUploadCopyPolicy.permitsSnapshot(
+                copyMetadata(), name: "document.txt", original: item, originalName: "document.txt"))
+        }
+    }
+
+    func testUploadCopyBoundsKnownSizeIncludingEmptyAndExactLimit() {
+        for bytes in [0, FileUploadCopyPolicy.maximumBytes] {
+            XCTAssertTrue(FileUploadCopyPolicy.permits(copyMetadata(bytes: bytes)))
+        }
+        for bytes in [nil, -1, FileUploadCopyPolicy.maximumBytes + 1, Int.max] as [Int?] {
+            let oversized = copyMetadata(bytes: bytes)
+            XCTAssertFalse(FileUploadCopyPolicy.permits(oversized))
+            XCTAssertFalse(FileUploadCopyPolicy.permitsSnapshot(
+                oversized, name: "document.txt", original: copyMetadata(), originalName: "document.txt"))
+        }
+    }
+
+    func testUploadSnapshotCannotSilentlyRenameResizeOrTransformTheChosenFile() {
+        let original = copyMetadata()
+        XCTAssertTrue(FileUploadCopyPolicy.permitsSnapshot(
+            original, name: "Résumé.txt", original: original, originalName: "Résumé.txt"))
+        XCTAssertFalse(FileUploadCopyPolicy.permitsSnapshot(
+            original, name: "temporary-upload.txt", original: original, originalName: "document.txt"))
+        XCTAssertFalse(FileUploadCopyPolicy.permitsSnapshot(
+            original, name: "folder.zip", original: copyMetadata(regular: false, directory: true),
+            originalName: "folder"))
+        XCTAssertFalse(FileUploadCopyPolicy.permitsSnapshot(
+            copyMetadata(bytes: 5), name: "document.txt", original: original, originalName: "document.txt"))
+        XCTAssertFalse(FileUploadCopyPolicy.permitsSnapshot(
+            copyMetadata(regular: false, directory: true), name: "document.txt",
+            original: original, originalName: "document.txt"))
+        XCTAssertFalse(FileUploadCopyPolicy.preservesName("", original: ""))
+        XCTAssertFalse(FileUploadCopyPolicy.preservesName(".", original: "."))
+        XCTAssertFalse(FileUploadCopyPolicy.preservesName("..", original: ".."))
+        // Swift String equality accepts canonical equivalents; filenames must
+        // retain the exact UTF-8 bytes that the native remote name will use.
+        XCTAssertFalse(FileUploadCopyPolicy.preservesName("Re\u{301}sume\u{301}.txt", original: "Résumé.txt"))
+    }
+
     @MainActor
     func testNativePickerConsumesExactlyOneOriginalCallback() {
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)

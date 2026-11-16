@@ -392,14 +392,9 @@ fn a_native_size_window_accepts_smaller_shared_pictures_in_original_display_spac
         assert_eq!(&output.pixels()[8..12], &[11, 22, 33, 255]);
         // Mapping a true native picture retains the allocation-free path.
         assert!(
-            crate::FittedFrame::for_mapped_viewport(
-                320,
-                240,
-                mapping,
-                ProtocolLimits::ABSOLUTE,
-            )
-            .unwrap()
-            .is_none()
+            crate::FittedFrame::for_mapped_viewport(320, 240, mapping, ProtocolLimits::ABSOLUTE,)
+                .unwrap()
+                .is_none()
         );
     }
 }

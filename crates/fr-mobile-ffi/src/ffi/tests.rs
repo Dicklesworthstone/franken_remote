@@ -185,11 +185,26 @@ fn upload_bridge_refuses_stale_choices_and_invalid_start_without_changing_output
             fr_session_start_with_upload(core::ptr::null(), FR_DISPLAY_CHOOSE, &raw mut handle),
             FR_INVALID,
         );
-        assert_eq!(fr_session_begin_upload_selection(0, &raw mut token), FR_STALE);
-        assert_eq!(fr_session_begin_upload_selection(0, core::ptr::null_mut()), FR_INVALID);
-        assert_eq!(fr_session_prepare_upload(0, 92, core::ptr::null()), FR_STALE);
-        assert_eq!(fr_session_copy_upload_status(0, buffer.as_mut_ptr(), buffer.len()), 0);
-        assert_eq!(fr_session_copy_upload_status(0, core::ptr::null_mut(), 0), 0);
+        assert_eq!(
+            fr_session_begin_upload_selection(0, &raw mut token),
+            FR_STALE
+        );
+        assert_eq!(
+            fr_session_begin_upload_selection(0, core::ptr::null_mut()),
+            FR_INVALID
+        );
+        assert_eq!(
+            fr_session_prepare_upload(0, 92, core::ptr::null()),
+            FR_STALE
+        );
+        assert_eq!(
+            fr_session_copy_upload_status(0, buffer.as_mut_ptr(), buffer.len()),
+            0
+        );
+        assert_eq!(
+            fr_session_copy_upload_status(0, core::ptr::null_mut(), 0),
+            0
+        );
     }
     assert_eq!((handle, token), (91, 92));
     assert_eq!(buffer[0], 0);

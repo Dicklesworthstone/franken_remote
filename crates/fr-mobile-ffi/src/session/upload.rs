@@ -63,7 +63,11 @@ impl Shared {
                 {
                     return Err(Error::Input(InputResult::NotControlled));
                 }
-                if !self.upload.as_ref().is_some_and(|upload| upload.can_select()) {
+                if !self
+                    .upload
+                    .as_ref()
+                    .is_some_and(|upload| upload.can_select())
+                {
                     return Err(Error::Unavailable);
                 }
                 self.upload_selection
@@ -179,7 +183,9 @@ impl Shared {
     }
 
     pub(crate) fn cancel_upload_batch(&self, batch: u8) -> bool {
-        self.upload.as_ref().is_some_and(|upload| upload.cancel_batch(batch))
+        self.upload
+            .as_ref()
+            .is_some_and(|upload| upload.cancel_batch(batch))
     }
 
     pub(crate) fn pause_upload_batch(&self, batch: u8, paused: bool) -> bool {
@@ -199,24 +205,28 @@ impl Shared {
     /// the local native picker; none enter diagnostics or this JSON document.
     pub(crate) fn upload_document(&self) -> serde_json::Value {
         let attempt = self.frames.app_id(0);
-        let selection = self.upload_selection.lock().ok().and_then(|mut selections| {
-            let now = Instant::now();
-            let status = selections.status(attempt, now).ok().flatten()?;
-            let bytes = selections
-                .prepared(status.token, attempt, now)
-                .ok()
-                .map(PreparedUpload::selected_bytes);
-            Some(serde_json::json!({
-                "token": status.token,
-                "attempt": status.attempt,
-                "state": match status.phase {
-                    Phase::AwaitingPreparation => "choosing",
-                    Phase::Preparing => "preparing",
-                    Phase::Ready => "prepared",
-                },
-                "selected_bytes": bytes,
-            }))
-        });
+        let selection = self
+            .upload_selection
+            .lock()
+            .ok()
+            .and_then(|mut selections| {
+                let now = Instant::now();
+                let status = selections.status(attempt, now).ok().flatten()?;
+                let bytes = selections
+                    .prepared(status.token, attempt, now)
+                    .ok()
+                    .map(PreparedUpload::selected_bytes);
+                Some(serde_json::json!({
+                    "token": status.token,
+                    "attempt": status.attempt,
+                    "state": match status.phase {
+                        Phase::AwaitingPreparation => "choosing",
+                        Phase::Preparing => "preparing",
+                        Phase::Ready => "prepared",
+                    },
+                    "selected_bytes": bytes,
+                }))
+            });
         let upload = self.upload.as_ref();
         serde_json::json!({
             "version": 1,
@@ -286,7 +296,10 @@ mod tests {
     fn sessions_without_uploads_need_no_external_source_permission() {
         let shared = Shared::new();
         assert!(shared.upload_sources_released());
-        assert_eq!(shared.upload_document()["transfer"], serde_json::Value::Null);
+        assert_eq!(
+            shared.upload_document()["transfer"],
+            serde_json::Value::Null
+        );
         assert_eq!(shared.upload_document()["available"], false);
     }
 }

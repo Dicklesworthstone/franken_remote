@@ -23,10 +23,7 @@
     test,
     all(
         feature = "session",
-        any(
-            target_os = "ios",
-            all(target_os = "macos", feature = "macos-session")
-        )
+        any(target_os = "ios", all(target_os = "macos", feature = "macos-session"))
     )
 ))]
 mod upload_selection;

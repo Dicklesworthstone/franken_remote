@@ -88,10 +88,7 @@ fn odd_original_displays_and_asymmetric_bars_keep_exact_input_bounds() {
     assert_eq!(scaled.destination, rect(1, 0, 638, 358));
     let scaled = Mapping::for_presentation(scaled, 3, 10);
     assert_eq!(scaled.point(11, 1, 0, false), Ok(Some((1.5, 0.5))));
-    assert_eq!(
-        scaled.point(11, 637, 357, false),
-        Ok(Some((637.5, 357.5)))
-    );
+    assert_eq!(scaled.point(11, 637, 357, false), Ok(Some((637.5, 357.5))));
     assert_eq!(scaled.point(11, 638, 357, false), Ok(None));
 }
 

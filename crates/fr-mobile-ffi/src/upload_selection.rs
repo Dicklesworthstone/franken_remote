@@ -112,12 +112,7 @@ impl<T> Selections<T> {
     }
 
     /// Claim the original choice for exactly one off-thread preparation.
-    pub fn begin_prepare(
-        &mut self,
-        token: u64,
-        attempt: u64,
-        now: Instant,
-    ) -> Result<(), Error> {
+    pub fn begin_prepare(&mut self, token: u64, attempt: u64, now: Instant) -> Result<(), Error> {
         let selected = self.checked(token, attempt, now)?;
         if !matches!(selected.value, Value::AwaitingPreparation) {
             return Err(Error::PreparationStarted);
@@ -293,10 +288,7 @@ mod tests {
         let owned = selections.take(token, 2, now).unwrap();
         assert_eq!(owned.id, 4);
         assert_eq!(dropped.load(Ordering::SeqCst), 0);
-        assert!(matches!(
-            selections.take(token, 2, now),
-            Err(Error::Stale)
-        ));
+        assert!(matches!(selections.take(token, 2, now), Err(Error::Stale)));
         assert!(!selections.discard(token));
         drop(owned); // A downstream authority refusal drops, never requeues.
         assert_eq!(dropped.load(Ordering::SeqCst), 1);
@@ -397,11 +389,7 @@ mod tests {
     fn exact_expiry_is_terminal_in_every_preparation_phase() {
         let now = Instant::now();
         let until = now + SELECTION_LIFETIME;
-        for phase in [
-            Phase::AwaitingPreparation,
-            Phase::Preparing,
-            Phase::Ready,
-        ] {
+        for phase in [Phase::AwaitingPreparation, Phase::Preparing, Phase::Ready] {
             let mut selections = Selections::new();
             let token = selections.begin(1, now).unwrap();
             if phase != Phase::AwaitingPreparation {
@@ -423,10 +411,7 @@ mod tests {
                     )
                     .unwrap();
             }
-            assert_eq!(
-                selections.current(token, 1, until),
-                Err(Error::Expired)
-            );
+            assert_eq!(selections.current(token, 1, until), Err(Error::Expired));
             assert_eq!(selections.status(1, until), Ok(None));
             assert_eq!(
                 selections.finish_prepare(token, 1, until, 5),
@@ -445,11 +430,7 @@ mod tests {
         let mut selections = Selections::new();
         let token = selections.begin(1, now).unwrap();
         selections
-            .begin_prepare(
-                token,
-                1,
-                until.checked_sub(Duration::from_secs(1)).unwrap(),
-            )
+            .begin_prepare(token, 1, until.checked_sub(Duration::from_secs(1)).unwrap())
             .unwrap();
         assert_eq!(
             selections
@@ -476,10 +457,7 @@ mod tests {
             if preparing {
                 selections.begin_prepare(token, 1, now).unwrap();
             }
-            assert_eq!(
-                selections.take(token, 1, now),
-                Err(Error::NotPrepared)
-            );
+            assert_eq!(selections.take(token, 1, now), Err(Error::NotPrepared));
             assert_eq!(
                 selections.finish_prepare(token, 1, now, 8),
                 Err(Error::Stale)
@@ -515,10 +493,7 @@ mod tests {
             selections.prepared(token + 1, 1, now),
             Err(Error::Stale)
         ));
-        for at in [
-            now,
-            until.checked_sub(Duration::from_nanos(1)).unwrap(),
-        ] {
+        for at in [now, until.checked_sub(Duration::from_nanos(1)).unwrap()] {
             assert_eq!(
                 selections.prepared(token, 1, at).map(|value| value.id),
                 Ok(3)
@@ -587,10 +562,7 @@ mod tests {
             selections.finish_prepare(token, 1, now + Duration::from_secs(2), 1),
             Err(Error::Stale)
         );
-        assert_eq!(
-            selections.status(1, now + Duration::from_secs(2)),
-            Ok(None)
-        );
+        assert_eq!(selections.status(1, now + Duration::from_secs(2)), Ok(None));
     }
 
     #[test]

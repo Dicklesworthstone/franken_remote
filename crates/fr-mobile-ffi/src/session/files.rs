@@ -421,8 +421,7 @@ impl Upload {
             && state.report.configured
             && state.report.absence.is_none()
             && usize::from(state.report.batch) < MAX_UPLOADS
-            && (state.report.batch == 0
-                || state.intake.as_ref().is_some_and(SendIntake::ready))
+            && (state.report.batch == 0 || state.intake.as_ref().is_some_and(SendIntake::ready))
     }
 
     /// A failed attempt before observer creation has spent no file selection.

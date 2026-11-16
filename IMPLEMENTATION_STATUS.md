@@ -31,48 +31,53 @@ The scaling umbrella `fr-foub` remains in progress.
 
 ## iOS explicit file uploads (2026-11-16 UTC)
 
-The shipping iOS app now connects its native document picker and explicit
-Send controls to the existing ATP upload owner. One non-reused token identifies
-a local choice on
-the original connection attempt for at most 120 seconds. A bounded worker pins
-the selected regular file without reading or sending its contents. A separate
-Send consumes that choice once and rechecks the original input source, current
-control, visible presentation, live attempt and 250 ms gesture deadline. Refused
-or expired choices cannot be retried or rebound to a later session.
+The shipping app now offers an explicit upload-copy picker while observing,
+then requires a separate Control grant and Send once action. It uses the
+existing ATP upload owner and host drop directory. One non-reused local token
+binds preparation to the original connection attempt for at most 120 seconds.
+Send consumes that choice once and rechecks its original input source,
+visible current view, live session and 250 ms gesture deadline. A refused
+choice cannot be retried or rebound to a replacement session.
 
-The C ABI adds optional empty upload negotiation, selection/preparation,
-explicit Send, original-batch Pause/Resume/Cancel, and bounded versioned JSON
-status. Existing start functions and FrConfig layout retain their behavior.
-Queued bytes, actual host publication, uncertain durability and original
-cleanup remain separate. No selected path or filename enters status or errors.
-Hiding an observing view to choose a file does not spend the empty upload lane.
+Document-provider preparation creates a disclosed local upload copy, up to
+256 MiB, on one background worker. Ordinary coordinated access protects
+regular-file preflight; Apple's forUploading coordination makes a snapshot
+whose descriptor is pinned before its accessor returns. The OS may unlink
+that snapshot before the later native sender starts; the descriptor remains
+the source, without pathname reopening or weaker identity checks. No
+coordinator stays active while waiting for user input or transferring data.
+Folders, packages, links, unknown metadata, changed names and changed sizes
+are refused. Provider materialization and the local copy can happen before
+Send; no file contents go to the remote host before that explicit action.
+The cap does not promise a limit on provider hydration traffic.
 
-A positive source-release witness follows actual original worker collection
-and owner destruction, including collection after a failed bounded cleanup.
-Session termination alone does not release an external security-scoped URL.
-Pending preparation is independently bounded and also fences release evidence.
-The Swift owner retains security-scoped file-provider access through native
-source collection, including after the screen disappears. The system picker
-opens only while observing; its actual dismissal restores view visibility.
+The C ABI adds optional empty upload negotiation, original selection and
+preparation, explicit Send, exact-batch Pause/Resume/Cancel and bounded JSON
+status without changing FrConfig. Queued progress, actual host publication,
+uncertain durability and original cleanup remain distinct. An unused or
+declined optional lane cannot invent an upload or a receipt. Paths, filenames
+and contents stay out of diagnostics.
 
-The interface shows local preparation, explicit Send, queued-byte progress,
-actual host receipts, durability uncertainty and cleanup failure. Pause,
-Resume and Cancel address the displayed original batch. An unused lane or a
-host that declines files reports that no file was sent. Give back control
-reuses the original host pin and cleanup-confirmed reconnect path to open a
-fresh observing session without carrying file choices or automatic control.
+A separate positive source-release witness follows actual original worker
+collection, including after failed bounded cleanup. Terminal reporting alone
+cannot release the Swift owner's security-scoped permission. Pending provider
+work remains bounded after Discard, and Discard restores ordinary Control
+without permitting another preparation worker. Picker dismissal addresses
+only its original session. Give back control waits for successful original
+cleanup and reopens the same pinned host for viewing, without carrying files
+or automatic control intent.
 
-Validation: the original 11 standalone selection-owner tests compiled with the
-repository-pinned Rust toolchain and -D warnings and passed before the local
-executor disconnected. The twelfth metadata-accessor test, integrated
-session/FFI/status regressions and eleven Swift regressions remain unexecuted.
-Independent source review
-caught and corrected final-Send visibility and late-picker ownership races.
-A focused Apple workflow now targets the actual macos-session/C ABI and the
-shipping Xcode Simulator target; both jobs were queued on the bridge commit,
-and their results remain required. No Apple device, native file-provider or
-live host-publication qualification is claimed.
-Tracks `fr-ios-file-upload`, which remains in progress.
+Validation: all 12 exact committed selection-owner tests passed with the
+repository-pinned rustc and -D warnings. Strict all/pedantic Clippy passed for
+that real private module. Pinned workspace formatting and diff checks passed
+on the reconciled source, including the added real-source regression for an
+unlinked descriptor. The full portable Cargo test build was attempted but
+rustc received SIGKILL while compiling pinned Asupersync, before project tests
+ran. The subsequent lower-memory integrated check remains pending. Fourteen
+Swift regressions and integrated Apple session/C ABI/Xcode tests remain
+unexecuted; Apple jobs are queued. Live iPhone/iPad provider and host-publication
+qualification is not claimed. Tracks `fr-ios-file-upload`, still in progress.
+See [upload flow and provider contracts](docs/ios-client.md#send-a-selected-file-to-the-host).
 
 ## Original-display mapping for scaled native pictures (2026-11-16 UTC)
 

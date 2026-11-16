@@ -846,7 +846,10 @@ fn retained_frame_display_never_uses_a_replacement_attempt_even_at_the_same_size
         .publish_configuration(replacement, (5120, 2880), (1582, 888), false, None)
         .unwrap();
     assert_eq!(shared.display_for_frame(retained), None);
-    assert_eq!(shared.display_for_frame(replacement | 17), Some((5120, 2880)));
+    assert_eq!(
+        shared.display_for_frame(replacement | 17),
+        Some((5120, 2880))
+    );
     shared.clear_presentation();
     assert_eq!(shared.display_for_frame(replacement | 17), None);
 }
@@ -913,7 +916,10 @@ fn cursor_metadata_requires_a_picture_after_the_original_decoder_reset() {
         (first.frame, 0),
         (first.frame, first.sequence + 1),
     ] {
-        assert_eq!(shared.with_cursor_for_frame(frame, sequence, |_| true), None);
+        assert_eq!(
+            shared.with_cursor_for_frame(frame, sequence, |_| true),
+            None
+        );
     }
 
     // A fresh shape in the SAME attempt must not repaint the retained picture

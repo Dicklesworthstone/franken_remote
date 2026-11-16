@@ -169,3 +169,35 @@ struct FileUploadChoice: Equatable, Identifiable {
         return cleaned.isEmpty ? "Selected file" : cleaned
     }
 }
+
+/// User-directed local upload copies are bounded before asking the provider
+/// for a snapshot. Missing metadata and transformed names fail closed.
+enum FileUploadCopyPolicy {
+    static let maximumBytes = 256 * 1024 * 1024
+
+    struct Metadata: Equatable {
+        let regular: Bool?
+        let directory: Bool?
+        let package: Bool?
+        let symbolicLink: Bool?
+        let bytes: Int?
+    }
+
+    static func permits(_ item: Metadata) -> Bool {
+        guard item.regular == true, item.directory == false,
+              item.package == false, item.symbolicLink == false,
+              let bytes = item.bytes else { return false }
+        return bytes >= 0 && bytes <= maximumBytes
+    }
+
+    static func preservesName(_ name: String, original: String) -> Bool {
+        !original.isEmpty && original != "." && original != ".."
+            && name.utf8.elementsEqual(original.utf8)
+    }
+
+    static func permitsSnapshot(_ snapshot: Metadata, name: String,
+                                original: Metadata, originalName: String) -> Bool {
+        permits(original) && permits(snapshot) && snapshot.bytes == original.bytes
+            && preservesName(name, original: originalName)
+    }
+}
