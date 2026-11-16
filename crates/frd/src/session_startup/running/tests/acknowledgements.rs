@@ -2,19 +2,19 @@
 //! the explicit local fixture; these tests do not qualify native input or a tailnet.
 use super::*;
 
-async fn quiet_pair(c: &Cx, h: &Cx) -> (HostSession, ViewerSession) {
-    let (mut host, mut viewer) = pair(c, h).await;
-    let mut n = 0;
-    let until = now(h).unwrap() + 2_000_000;
+async fn quiet_pair(viewer_cx: &Cx, host_cx: &Cx) -> (HostSession, ViewerSession) {
+    let (mut host, mut viewer) = pair(viewer_cx, host_cx).await;
+    let mut next_nonce = 0;
+    let until = now(host_cx).unwrap() + 2_000_000;
     loop {
-        assert!(now(h).unwrap() < until, "initial exchange did not drain");
-        let (a, b) = Box::pin(support::both(
-            host.drive(Duration::from_millis(1), || nonce(&mut n), no_other),
+        assert!(now(host_cx).unwrap() < until, "initial exchange did not drain");
+        let (host_result, viewer_result) = Box::pin(support::both(
+            host.drive(Duration::from_millis(1), || nonce(&mut next_nonce), no_other),
             viewer.drive(Duration::from_millis(1), no_other),
         ))
         .await;
-        a.unwrap();
-        b.unwrap();
+        host_result.unwrap();
+        viewer_result.unwrap();
         if host.renewed_until().is_some()
             && host.opened.transport.usage().retained_send_records == 0
             && viewer.io().unwrap().0.usage().retained_send_records == 0

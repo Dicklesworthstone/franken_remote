@@ -274,7 +274,7 @@ fn refused_download_setup_finishes_its_original_status_without_a_disk_worker() {
                 );
                 assert_eq!(status.cleanup, Some(Ok(())));
                 assert_eq!(status.progress, None);
-                assert!(status.results.is_empty());
+                assert_eq!(status.results, [] as [fr_files::wire::ResultReceipt; 0]);
                 assert!(state.viewer.file_receive_state().is_none());
                 assert_eq!(
                     state.viewer.file_receive_setup_failure(),

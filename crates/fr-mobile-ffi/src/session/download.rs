@@ -425,5 +425,7 @@ impl Drop for Download {
     }
 }
 
+// Also included through an explicit path by portable test hosts.
 #[cfg(test)]
+#[path = "download/tests.rs"]
 mod tests;

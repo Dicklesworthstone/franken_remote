@@ -86,7 +86,7 @@ mod tests {
         for (upload, download) in [(true, true), (true, false), (false, true), (false, false)] {
             let offered = retain(&original, upload, download).unwrap();
             for (host_kind, host) in hosts.iter().enumerate() {
-                let selected = host.intersect(&offered).unwrap();
+                let selected = host.intersect(&offered).unwrap().select().unwrap();
                 assert_eq!(
                     files::duplex_selected(&selected),
                     host_kind == 2 && upload && download,
