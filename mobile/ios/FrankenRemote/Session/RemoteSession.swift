@@ -316,6 +316,16 @@ final class RemoteSession: ObservableObject, InputSink {
         return Frame(buffer: buffer, info: info)
     }
 
+    /// Original display geometry for this retained frame's live owner.
+    /// VIDEO events are informational and may be split or dropped.
+    func display(forFrame frame: UInt64) -> CGSize? {
+        var width: UInt32 = 0
+        var height: UInt32 = 0
+        guard fr_session_frame_display(handle, frame, &width, &height),
+              width > 0, height > 0 else { return nil }
+        return CGSize(width: Int(width), height: Int(height))
+    }
+
     /// The picture with frame id `frame` reached the screen.
     func drawn(_ frame: UInt64) {
         fr_session_frame_drawn(handle, frame)
@@ -336,16 +346,33 @@ final class RemoteSession: ObservableObject, InputSink {
         var rgba: [UInt8]
     }
 
-    /// The host-drawn cursor when the host sends it separately.
-    func cursor(knownGeneration: UInt64) -> CursorShape? {
+    enum CursorRead {
+        case unavailable
+        case unchanged
+        case shape(CursorShape)
+    }
+
+    /// A cursor belongs to this exact frame owner and must follow the
+    /// decoder's reset floor. A refused scope clears the renderer's cache;
+    /// it is distinct from an unchanged generation in the same scope.
+    func cursor(for frame: FrFrameInfo, knownGeneration: UInt64) -> CursorRead {
         var state = FrCursor()
-        guard fr_session_cursor(handle, &state), state.generation != knownGeneration else { return nil }
+        guard fr_session_frame_cursor(handle, frame.frame, frame.sequence, &state) else {
+            return .unavailable
+        }
+        if state.generation == knownGeneration { return .unchanged }
         let length = fr_session_copy_cursor_rgba(handle, nil, 0)
+        guard length == Int(state.width) * Int(state.height) * 4 else { return .unavailable }
         var rgba = [UInt8](repeating: 0, count: length)
         if length > 0 {
-            _ = fr_session_copy_cursor_rgba(handle, &rgba, rgba.count)
+            guard fr_session_copy_cursor_rgba(handle, &rgba, rgba.count) == length else {
+                return .unavailable
+            }
         }
-        return CursorShape(state: state, rgba: rgba)
+        var after = FrCursor()
+        guard fr_session_frame_cursor(handle, frame.frame, frame.sequence, &after),
+              after.generation == state.generation else { return .unavailable }
+        return .shape(CursorShape(state: state, rgba: rgba))
     }
 
     // MARK: Control

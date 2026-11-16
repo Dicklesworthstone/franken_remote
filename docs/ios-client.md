@@ -139,6 +139,12 @@ against the Rust side (also asserted in `ffi/tests.rs`).
   so; the end event is never dropped.
 - Pictures cross by reference: `fr_session_copy_frame` returns a +1
   IOSurface-backed NV12 `CVPixelBuffer` (no pixel copies).
+- `fr_session_frame_display` supplies the approved original display for a
+  retained frame's live connection attempt. The app uses that lookup and the
+  frame's own picture dimensions for mapping; lossy VIDEO events remain
+  notifications. `fr_session_frame_cursor` also requires the frame's sequence
+  to follow the cursor's decoder reset. Both additions preserve the existing
+  `FrFrameInfo` and `FrCursor` layouts and write nothing on refusal.
 - Nothing in the core logs. Error detail (`fr_session_copy_detail`) is the
   typed failure's name only: no names, addresses, pixels, keys or text.
 
@@ -181,6 +187,37 @@ frame as drawn only from the drawable's presented handler (`presentedTime >
 simulator's Metal has no presentation feedback, so simulator builds report a
 frame when the GPU completes the command buffer that presents it (the
 nearest evidence there; device builds never use it).
+
+### Scaled picture, touch and cursor geometry
+
+The original display supplies the image aspect and cursor coordinate space.
+The encoded picture supplies the texture samples and the input area's size.
+`PictureMapper` fits the original display into that area using the shared Rust
+viewport's integer dimensions and centered offsets, then applies local zoom,
+pan and safe-area placement. Metal draws the complete texture into that same
+image rectangle. Direct touches in the internal bars are refused; trackpad
+movement stays inside the image.
+
+For example, a 5120-by-2880 display encoded as 1582-by-888 has an input image
+rectangle starting at x=2 with width 1578. Drawing across all 1582 columns
+would make visible edge clicks fall outside the shared input viewport.
+The mapper retains those offsets explicitly. Host cursor positions, shape
+dimensions and hotspots start in original display pixels and scale through
+that same rectangle before drawing or seeding the trackpad pointer.
+
+Each mapping belongs to a live retained frame owner. An identical-size
+reconnect still retires its predecessor's gestures, pointer and queued typing.
+A decoder reset within one attempt cannot place its new cursor on an earlier
+picture: the scoped cursor accessor requires a later publication sequence.
+Cursor metadata is checked again after copying shape bytes so a concurrent
+shape update cannot pair one revision's geometry with another revision's data.
+
+The added Rust/C and Swift regressions cover geometry, ownership and refusal
+policy. They are source-reviewed changes, not a live device result. The
+`macos-session` Rust suite and the Xcode builds/tests below still require
+execution after the 2026-11-16 changes. The dedicated
+[iOS client workflow](../.github/workflows/ios-client.yml) now targets the
+Apple session and shipping Simulator app; its results remain required.
 
 ## Approved display selection
 
@@ -328,10 +365,11 @@ the host's negotiated profile before the control request: a host without text
 support keeps physical-key control, and a text call returns
 `FR_UNSUPPORTED`. Pixel-precise scrolling remains unrequested.
 
-- Positions are encoded picture pixels. The app undoes its own zoom, pan,
-  letterbox, rotation and safe-area placement (`PictureMapper`); a point
-  outside the picture is refused (`FR_OUTSIDE`), never moved onto an edge.
-  A drag that leaves the picture releases at its last point inside.
+- Positions use the encoded-picture-sized input area. The app undoes its
+  local zoom, pan, rotation and safe-area placement (`PictureMapper`) and
+  keeps the original display's integer image rectangle within that area.
+  Points in its letterbox bars or outside it are refused (`FR_OUTSIDE`).
+  A drag that leaves the image releases at its last point inside.
 - Scrolling sends whole 16.16 lines, at most 16 per axis in one event.
   Fractional carry retains its earliest input deadline and clears when it
   expires or other input intervenes. Oversized whole actions are refused;

@@ -27,6 +27,12 @@ struct PictureMapper: Equatable {
     var insets = Insets()
     /// Encoded picture size in pixels; zero until the first picture.
     var picture: CGSize = .zero
+    /// Original selected display pixels. Encoded rounding never changes the
+    /// input or cursor coordinate space.
+    private(set) var display: CGSize = .zero
+    /// The retained frame whose owner supplied this geometry; 0 in pure
+    /// geometry fixtures. Native callers revalidate it before use.
+    private(set) var frame: UInt64 = 0
     /// Device pixels per view point (the drawable's scale); 0 = unknown: no
     /// grid snapping, and the zoom stays between fit and the maximum.
     var deviceScale: CGFloat = 0
@@ -41,15 +47,81 @@ struct PictureMapper: Equatable {
     /// Most view points one picture pixel may cover when zoomed in.
     static let maxPointsPerPixel: CGFloat = 6
 
-    init(viewSize: CGSize = .zero, insets: Insets = Insets(), picture: CGSize = .zero) {
+    init(viewSize: CGSize = .zero, insets: Insets = Insets(), picture: CGSize = .zero,
+         display: CGSize? = nil) {
         self.viewSize = viewSize
         self.insets = insets
         self.picture = picture
-        self.center = CGPoint(x: picture.width / 2, y: picture.height / 2)
+        self.display = display ?? picture
+        self.center = CGPoint(x: imageBounds.midX, y: imageBounds.midY)
     }
 
     var isReady: Bool {
-        picture.width > 0 && picture.height > 0 && content.width > 0 && content.height > 0
+        !imageBounds.isEmpty && content.width > 0 && content.height > 0
+    }
+
+    /// Rust's viewport fits the original display into this encoded-size
+    /// input area using integer division, including its half-open bars.
+    /// Products of two UInt32 dimensions fit UInt64.
+    var imageBounds: CGRect {
+        guard let sw = UInt32(exactly: display.width), sw > 0,
+              let sh = UInt32(exactly: display.height), sh > 0,
+              let aw = UInt32(exactly: picture.width), aw > 0,
+              let ah = UInt32(exactly: picture.height), ah > 0 else { return .zero }
+        let width: UInt64
+        let height: UInt64
+        if UInt64(aw) * UInt64(sh) <= UInt64(ah) * UInt64(sw) {
+            width = UInt64(aw)
+            height = UInt64(aw) * UInt64(sh) / UInt64(sw)
+        } else {
+            width = UInt64(ah) * UInt64(sw) / UInt64(sh)
+            height = UInt64(ah)
+        }
+        guard width > 0, height > 0 else { return .zero }
+        return CGRect(x: CGFloat((UInt64(aw) - width) / 2),
+                      y: CGFloat((UInt64(ah) - height) / 2),
+                      width: CGFloat(width), height: CGFloat(height))
+    }
+
+    /// The actual image in view points. The full decoded texture is sampled
+    /// into this rectangle; encoded-space rounding bars stay black.
+    var imageRect: CGRect {
+        guard isReady else { return .zero }
+        let image = imageBounds
+        return CGRect(origin: toView(image.origin),
+                      size: CGSize(width: image.width * scale, height: image.height * scale))
+    }
+
+    func containsPicture(_ point: CGPoint) -> Bool {
+        let image = imageBounds
+        return isReady && point.x.isFinite && point.y.isFinite
+            && point.x >= image.minX && point.y >= image.minY
+            && point.x < image.maxX && point.y < image.maxY
+    }
+
+    /// A cursor hotspot in original display pixels, expressed in the same
+    /// encoded-size input area used by Rust. Outside cursors may be clipped.
+    func picturePoint(forDisplay point: CGPoint) -> CGPoint? {
+        guard isReady, point.x.isFinite, point.y.isFinite else { return nil }
+        let image = imageBounds
+        return CGPoint(x: image.minX + point.x * image.width / display.width,
+                       y: image.minY + point.y * image.height / display.height)
+    }
+
+    /// Cursor shape and hotspot dimensions are original display pixels,
+    /// while its chosen position is in the encoded-size input area.
+    func cursorRect(at point: CGPoint, size: CGSize, hotspot: CGPoint) -> CGRect? {
+        guard isReady, point.x.isFinite, point.y.isFinite,
+              size.width.isFinite, size.height.isFinite,
+              size.width > 0, size.height > 0,
+              hotspot.x.isFinite, hotspot.y.isFinite else { return nil }
+        let image = imageBounds
+        let sx = image.width / display.width
+        let sy = image.height / display.height
+        let origin = toView(CGPoint(x: point.x - hotspot.x * sx,
+                                   y: point.y - hotspot.y * sy))
+        return CGRect(origin: origin,
+                      size: CGSize(width: size.width * sx * scale, height: size.height * sy * scale))
     }
 
     /// The safe area, in view points.
@@ -64,7 +136,8 @@ struct PictureMapper: Equatable {
     /// View points per picture pixel at zoom 1.
     var fitScale: CGFloat {
         guard isReady else { return 1 }
-        return min(content.width / picture.width, content.height / picture.height)
+        let image = imageBounds
+        return min(content.width / image.width, content.height / image.height)
     }
 
     /// View points per picture pixel now.
@@ -102,25 +175,27 @@ struct PictureMapper: Equatable {
     /// Device pixels per picture pixel; an integer means pixel-exact drawing.
     func devicePixelsPerPixel(screenScale: CGFloat) -> CGFloat { scale * screenScale }
 
-    /// Where the picture is drawn, in view points; its origin on the device
-    /// pixel grid when `deviceScale` is known.
+    /// The encoded-size coordinate canvas in view points. Only `imageRect`
+    /// is drawn; its origin sits on the device pixel grid when known.
     var pictureRect: CGRect {
         guard isReady else { return .zero }
         let s = scale
-        let size = CGSize(width: picture.width * s, height: picture.height * s)
+        let image = imageBounds
         let grid = deviceScale
-        func origin(_ length: CGFloat, _ contentMin: CGFloat, _ contentLength: CGFloat,
-                    _ center: CGFloat) -> CGFloat {
+        func origin(_ imageMin: CGFloat, _ imageLength: CGFloat,
+                    _ contentMin: CGFloat, _ contentLength: CGFloat, _ center: CGFloat) -> CGFloat {
+            let length = imageLength * s
             let exact = length <= contentLength
                 ? contentMin + (contentLength - length) / 2
-                : contentMin + contentLength / 2 - center * s
-            return grid > 0 ? (exact * grid).rounded() / grid : exact
+                : contentMin + contentLength / 2 - (center - imageMin) * s
+            let snapped = grid > 0 ? (exact * grid).rounded() / grid : exact
+            return snapped - imageMin * s
         }
         return CGRect(
-            x: origin(size.width, content.minX, content.width, center.x),
-            y: origin(size.height, content.minY, content.height, center.y),
-            width: size.width,
-            height: size.height)
+            x: origin(image.minX, image.width, content.minX, content.width, center.x),
+            y: origin(image.minY, image.height, content.minY, content.height, center.y),
+            width: picture.width * s,
+            height: picture.height * s)
     }
 
     /// The picture pixel under a view point, or nil outside the picture
@@ -128,7 +203,7 @@ struct PictureMapper: Equatable {
     func toPicture(_ point: CGPoint) -> CGPoint? {
         guard isReady else { return nil }
         let p = toPictureUnbounded(point)
-        guard p.x >= 0, p.y >= 0, p.x < picture.width, p.y < picture.height else { return nil }
+        guard containsPicture(p) else { return nil }
         return p
     }
 
@@ -179,14 +254,18 @@ struct PictureMapper: Equatable {
     /// Back to the resting zoom, centred.
     mutating func reset() {
         zoom = restingZoom
-        center = CGPoint(x: picture.width / 2, y: picture.height / 2)
+        center = CGPoint(x: imageBounds.midX, y: imageBounds.midY)
         resting = true
     }
 
-    /// A new picture size: a different size starts again at rest.
-    mutating func setPicture(_ size: CGSize) {
-        guard size != picture else { return }
+    /// A changed picture or original display starts again at rest. A newer
+    /// frame from the same owner and geometry preserves zoom and pan.
+    mutating func setPicture(_ size: CGSize, display original: CGSize? = nil, frame: UInt64 = 0) {
+        let original = original ?? size
+        self.frame = frame
+        guard size != picture || original != display else { return }
         picture = size
+        display = original
         reset()
     }
 
@@ -208,7 +287,8 @@ struct PictureMapper: Equatable {
     /// The whole picture is inside the content area.
     private var fitsBoth: Bool {
         let s = scale
-        return picture.width * s <= content.width + 1e-9 && picture.height * s <= content.height + 1e-9
+        let image = imageBounds
+        return image.width * s <= content.width + 1e-9 && image.height * s <= content.height + 1e-9
     }
 
     /// Keep the content area covered on every axis the picture overfills.
@@ -217,16 +297,18 @@ struct PictureMapper: Equatable {
         let s = scale
         let halfW = content.width / (2 * s)
         let halfH = content.height / (2 * s)
-        center.x = picture.width * s <= content.width
-            ? picture.width / 2 : min(max(center.x, halfW), picture.width - halfW)
-        center.y = picture.height * s <= content.height
-            ? picture.height / 2 : min(max(center.y, halfH), picture.height - halfH)
+        let image = imageBounds
+        center.x = image.width * s <= content.width
+            ? image.midX : min(max(center.x, image.minX + halfW), image.maxX - halfW)
+        center.y = image.height * s <= content.height
+            ? image.midY : min(max(center.y, image.minY + halfH), image.maxY - halfH)
     }
 
     /// The visible part of the picture, in picture pixels.
     var visiblePicture: CGRect {
         guard isReady else { return .zero }
-        let rect = pictureRect.intersection(content)
+        let rect = imageRect.intersection(content)
+        guard !rect.isNull, !rect.isEmpty else { return .zero }
         let a = toPictureUnbounded(CGPoint(x: rect.minX, y: rect.minY))
         let b = toPictureUnbounded(CGPoint(x: rect.maxX, y: rect.maxY))
         return CGRect(x: a.x, y: a.y, width: b.x - a.x, height: b.y - a.y)

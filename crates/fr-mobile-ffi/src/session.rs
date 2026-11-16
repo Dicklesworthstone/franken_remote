@@ -365,6 +365,46 @@ impl Shared {
         self.display_for(attempt)
     }
 
+    /// Copy only bounded cursor metadata for the original retained picture.
+    /// The callback runs under the frame and cursor gates: it must not allocate,
+    /// call native code or acquire any other session lock.
+    #[cfg(any(target_os = "ios", target_os = "macos", test))]
+    pub(crate) fn with_cursor_for_frame<T>(
+        &self,
+        frame: u64,
+        sequence: u64,
+        bounded_copy: impl FnOnce(&Cursor) -> T,
+    ) -> Option<T> {
+        let attempt = self.frames.app_id(0);
+        self.frames
+            .with_current(attempt, || {
+                if self.close.load(Ordering::SeqCst)
+                    || self.finished()
+                    || frame == 0
+                    || frame != self.frames.app_id(frame)
+                    || sequence == 0
+                    || sequence > self.frames.sequence()
+                {
+                    return None;
+                }
+                let display = {
+                    let display = self.display.lock().ok()?;
+                    display.filter(|display| display.attempt == attempt)?.size
+                };
+                let cursor = self.cursor.lock().ok()?;
+                if cursor.attempt != attempt
+                    || cursor.generation == 0
+                    || (cursor.source_width, cursor.source_height) != display
+                    || sequence <= cursor.frame_after
+                {
+                    return None;
+                }
+                Some(bounded_copy(&cursor))
+            })
+            .ok()
+            .flatten()
+    }
+
     fn clear_presentation(&self) {
         self.frames.clear();
         if let Ok(mut cursor) = self.cursor.lock() {
@@ -396,7 +436,8 @@ impl Shared {
                     .lock()
                     .map_err(|_| WorkerError::NativeFailure)?;
                 if !fr_wire::display::picture::is_picture(display, picture)
-                    || original.is_some_and(|value| value.attempt == attempt && value.size != display)
+                    || original
+                        .is_some_and(|value| value.attempt == attempt && value.size != display)
                 {
                     return Err(WorkerError::GeometryChanged);
                 }

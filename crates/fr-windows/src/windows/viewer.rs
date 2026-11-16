@@ -35,9 +35,7 @@ mod upload;
 use super::render::Renderer;
 use crate::{
     change_display::{self, Action, Activation, Cause, Refusal, Replacements},
-    geometry::{
-        Mapping, Presentation, Rect as PictureRect, StaleMapping, host_scales, reopen_for,
-    },
+    geometry::{Mapping, Presentation, Rect as PictureRect, StaleMapping, host_scales, reopen_for},
     keys,
 };
 use fr_mobile_ffi::{
@@ -961,7 +959,8 @@ fn report(viewer: &Viewer, stats: &Stats, elapsed: Duration) -> ExitCode {
         "samples": stats.intervals.gaps(),
     });
     let mean_decode = decode_micros.checked_div(decoded).map_or(0.0, micros_to_ms);
-    let clipboard = clipboard_document(stats.clipboard.unwrap_or_else(|| shared.clipboard_report()));
+    let clipboard =
+        clipboard_document(stats.clipboard.unwrap_or_else(|| shared.clipboard_report()));
     let upload_ok = viewer
         .upload_menu
         .as_ref()

@@ -1,5 +1,34 @@
 # Implementation status
 
+## iOS scaled-picture input and cursor ownership (2026-11-16 UTC)
+
+The active iOS app now maps the original approved display into the encoded
+picture's input area, then applies its local zoom and pan. Metal samples the
+whole picture into that same integer image rectangle; direct touches refuse
+its bars and trackpad movement stays inside it. Cursor position, shape size
+and hotspot are converted from original display pixels before drawing or
+seeding the trackpad pointer.
+
+The app obtains geometry from the retained frame's original live attempt,
+using additive C accessors rather than relying on lossy VIDEO notifications.
+Existing C frame/cursor layouts remain unchanged. Identical-size reconnects
+retire the earlier mapping and queued input. The scoped cursor accessor also
+requires a picture published after its decoder reset, so a newer cursor
+cannot appear on an older retained image within the same attempt. A post-copy
+generation check refuses mixed cursor metadata and bitmap revisions.
+
+Rust/C regressions exercise original-owner lookup, output preservation on
+refusal, same-size reconnects, cursor publication floors and retirement;
+Swift regressions cover scaled and odd geometry, image bars, touch/trackpad
+bounds and original-display cursor conversion. Independent source review is
+distinct from execution: the local executor was unavailable for these
+changes, and no new Apple SDK build, XCTest run or live device session is
+claimed. The dedicated iOS client workflow added alongside the concurrent
+upload integration now targets the actual `macos-session` and shipping Xcode
+Simulator suites; completed results for the reconciled revision remain required.
+See [iOS geometry and validation](docs/ios-client.md#scaled-picture-touch-and-cursor-geometry).
+The scaling umbrella `fr-foub` remains in progress.
+
 ## iOS explicit file uploads (2026-11-16 UTC)
 
 The shipping iOS app now connects its native document picker and explicit

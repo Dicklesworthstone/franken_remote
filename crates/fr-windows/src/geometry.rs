@@ -30,11 +30,7 @@ impl Presentation {
     /// Construct only from the current attempt's selected display and the
     /// retained picture's own dimensions. Negotiation validates the canonical
     /// picture rule separately; invalid/oversized local geometry refuses here.
-    pub fn new(
-        display: (u32, u32),
-        picture: (u32, u32),
-        window: (u32, u32),
-    ) -> Option<Self> {
+    pub fn new(display: (u32, u32), picture: (u32, u32), window: (u32, u32)) -> Option<Self> {
         let limits = fr_core::limits::ProtocolLimits::ABSOLUTE;
         for (width, height) in [display, picture, window] {
             limits.validate_coded_dimensions(width, height).ok()?;

@@ -141,7 +141,7 @@ typedef struct FrStats {
 
 typedef struct FrCursor {
     uint64_t generation;
-    int32_t x;               /* picture pixels */
+    int32_t x;               /* original selected display pixels */
     int32_t y;
     uint16_t width;
     uint16_t height;
@@ -280,6 +280,14 @@ int32_t fr_session_text(FrHandle session, const char *_Nullable utf8);
 int32_t fr_session_release_all(FrHandle session);
 
 bool fr_session_cursor(FrHandle session, FrCursor *_Nullable out);
+/* Metadata for one retained picture: pass its FrFrameInfo.frame and sequence.
+ * Position, shape and hotspot use original selected display pixels. Refuses
+ * stale attempts and pictures at/below the latest decoder reset's sequence.
+ * false leaves out untouched; discard any cached cursor overlay on refusal.
+ * After copying RGBA separately, re-read this metadata and require the same
+ * generation before rendering the copied shape. */
+bool fr_session_frame_cursor(FrHandle session, uint64_t frame, uint64_t sequence,
+                             FrCursor *_Nullable out);
 size_t fr_session_copy_cursor_rgba(FrHandle session, uint8_t *_Nullable buffer,
                                    size_t capacity);
 bool fr_session_stats(FrHandle session, FrStats *_Nullable out);

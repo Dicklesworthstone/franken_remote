@@ -11,7 +11,7 @@
 use crate::{
     directory,
     session::{Config, InputResult, Session, connection::Target},
-    video::FrameInfo,
+    video::{Cursor, FrameInfo},
 };
 use core::ffi::{c_char, c_void};
 use fr_tailnet::{HostName, HostPin};
@@ -736,6 +736,20 @@ pub extern "C" fn fr_session_release_all(handle: FrHandle) -> i32 {
     input(handle, |s| s.shared().release_all())
 }
 
+fn cursor_info(cursor: &Cursor) -> FrCursor {
+    FrCursor {
+        generation: cursor.generation,
+        x: cursor.x,
+        y: cursor.y,
+        width: cursor.width,
+        height: cursor.height,
+        hotspot_x: cursor.hotspot_x,
+        hotspot_y: cursor.hotspot_y,
+        visible: u32::from(cursor.visible),
+        reserved: 0,
+    }
+}
+
 /// The remote cursor's state (for hosts that send it apart from the
 /// picture). Returns false before any cursor is known.
 ///
@@ -752,18 +766,40 @@ pub unsafe extern "C" fn fr_session_cursor(handle: FrHandle, out: *mut FrCursor)
     if out.is_null() || cursor.generation == 0 {
         return false;
     }
-    let value = FrCursor {
-        generation: cursor.generation,
-        x: cursor.x,
-        y: cursor.y,
-        width: cursor.width,
-        height: cursor.height,
-        hotspot_x: cursor.hotspot_x,
-        hotspot_y: cursor.hotspot_y,
-        visible: u32::from(cursor.visible),
-        reserved: 0,
-    };
+    let value = cursor_info(&cursor);
     // SAFETY: non-null and writable per contract.
+    unsafe { out.write(value) };
+    true
+}
+
+/// Cursor metadata for the retained picture's original display and attempt.
+/// Supply both identifiers from that picture's `FrFrameInfo`. A decoder reset
+/// refuses pictures at or below its publication floor. On refusal, `out` is
+/// unchanged and the app must discard its cached cursor overlay.
+///
+/// # Safety
+/// `out` is NULL or writable for one `FrCursor`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fr_session_frame_cursor(
+    handle: FrHandle,
+    frame: u64,
+    sequence: u64,
+    out: *mut FrCursor,
+) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    let Some(session) = lookup(handle) else {
+        return false;
+    };
+    let Some(value) = session
+        .shared()
+        .with_cursor_for_frame(frame, sequence, cursor_info)
+    else {
+        return false;
+    };
+    // SAFETY: non-null and writable per contract. The bounded metadata copy
+    // finished and released both authority locks before touching this output.
     unsafe { out.write(value) };
     true
 }

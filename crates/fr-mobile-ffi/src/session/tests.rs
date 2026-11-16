@@ -850,3 +850,192 @@ fn retained_frame_display_never_uses_a_replacement_attempt_even_at_the_same_size
     shared.clear_presentation();
     assert_eq!(shared.display_for_frame(replacement | 17), None);
 }
+
+fn reset_frame_cursor(shared: &Shared, attempt: u64) {
+    let mut cursor = shared.cursor.lock().unwrap();
+    cursor.reset(attempt, shared.frames.sequence()).unwrap();
+    cursor.source_width = 1920;
+    cursor.source_height = 1440;
+    cursor
+        .apply_for(
+            attempt,
+            &fr_media::worker::overlay::Update::Shape {
+                x: 4,
+                y: 5,
+                width: 2,
+                height: 2,
+                hotspot_x: 1,
+                hotspot_y: 1,
+                rgba: &[255; 16],
+            },
+        )
+        .unwrap();
+}
+
+fn begin_cursor_attempt(shared: &Shared) -> u64 {
+    shared.frames.begin_attempt().unwrap();
+    let attempt = shared.frames.app_id(0);
+    shared
+        .publish_configuration(attempt, (1920, 1440), (128, 96), false, None)
+        .unwrap();
+    reset_frame_cursor(shared, attempt);
+    attempt
+}
+
+fn publish_cursor_picture(shared: &Shared, raw_frame: u64) -> crate::video::FrameInfo {
+    shared
+        .frames
+        .publish_for(
+            shared.frames.app_id(0),
+            crate::video::tests::picture(false),
+            raw_frame,
+        )
+        .unwrap();
+    let (raw, info) = shared.frames.take_newer(0).unwrap();
+    crate::video::tests::release(raw);
+    info
+}
+
+#[test]
+fn cursor_metadata_requires_a_picture_after_the_original_decoder_reset() {
+    let shared = Shared::new();
+    let attempt = begin_cursor_attempt(&shared);
+    let first = publish_cursor_picture(&shared, 7);
+    assert_eq!(
+        shared.with_cursor_for_frame(first.frame, first.sequence, |cursor| {
+            (cursor.x, cursor.y, cursor.visible)
+        }),
+        Some((4, 5, true))
+    );
+    for (frame, sequence) in [
+        (0, first.sequence),
+        (7, first.sequence),
+        (first.frame, 0),
+        (first.frame, first.sequence + 1),
+    ] {
+        assert_eq!(shared.with_cursor_for_frame(frame, sequence, |_| true), None);
+    }
+
+    // A fresh shape in the SAME attempt must not repaint the retained picture
+    // from before configure. Only an actually published later picture admits it.
+    reset_frame_cursor(&shared, attempt);
+    assert_eq!(
+        shared.with_cursor_for_frame(first.frame, first.sequence, |_| true),
+        None
+    );
+    let next = publish_cursor_picture(&shared, 8);
+    assert_eq!(
+        shared.with_cursor_for_frame(next.frame, next.sequence, |cursor| cursor.visible),
+        Some(true)
+    );
+    shared
+        .cursor
+        .lock()
+        .unwrap()
+        .apply_for(attempt, &fr_media::worker::overlay::Update::Hidden)
+        .unwrap();
+    assert_eq!(
+        shared.with_cursor_for_frame(next.frame, next.sequence, |cursor| cursor.visible),
+        Some(false),
+        "a current hidden cursor must clear the app's previous overlay"
+    );
+}
+
+#[test]
+fn retained_cursor_metadata_never_crosses_an_identical_size_reconnect() {
+    let shared = Shared::new();
+    let original = begin_cursor_attempt(&shared);
+    let retained = publish_cursor_picture(&shared, 7);
+    shared.frames.begin_attempt().unwrap();
+    let replacement = shared.frames.app_id(0);
+    assert_ne!(original, replacement);
+    let unconfigured = publish_cursor_picture(&shared, 7);
+    assert_eq!(
+        shared.with_cursor_for_frame(unconfigured.frame, unconfigured.sequence, |_| true),
+        None,
+        "the previous display's metadata is not a replacement configuration"
+    );
+    shared
+        .publish_configuration(replacement, (1920, 1440), (128, 96), false, None)
+        .unwrap();
+    assert_eq!(
+        shared.with_cursor_for_frame(unconfigured.frame, unconfigured.sequence, |_| true),
+        None,
+        "identical source dimensions do not authenticate an old cursor attempt"
+    );
+    reset_frame_cursor(&shared, replacement);
+    assert_eq!(
+        shared.with_cursor_for_frame(unconfigured.frame, unconfigured.sequence, |_| true),
+        None
+    );
+    let current = publish_cursor_picture(&shared, 8);
+    assert_eq!(
+        shared.with_cursor_for_frame(retained.frame, retained.sequence, |_| true),
+        None
+    );
+    assert_eq!(
+        shared.with_cursor_for_frame(current.frame, current.sequence, |_| true),
+        Some(true)
+    );
+}
+
+#[test]
+fn cursor_metadata_refuses_mismatched_source_or_uninitialized_revision() {
+    let shared = Shared::new();
+    let attempt = begin_cursor_attempt(&shared);
+    let picture = publish_cursor_picture(&shared, 7);
+    shared.cursor.lock().unwrap().source_width = 128;
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+    {
+        let mut cursor = shared.cursor.lock().unwrap();
+        cursor.source_width = 1920;
+        cursor.source_height = 96;
+    }
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+    {
+        let mut cursor = shared.cursor.lock().unwrap();
+        cursor.source_height = 1440;
+        cursor.attempt = 0;
+    }
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+    {
+        let mut cursor = shared.cursor.lock().unwrap();
+        cursor.attempt = attempt;
+        cursor.generation = 0;
+    }
+    assert_eq!(
+        shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+        None
+    );
+}
+
+#[test]
+fn closing_finished_and_retired_sessions_refuse_retained_cursor_metadata() {
+    for terminal in 0..3 {
+        let shared = Shared::new();
+        begin_cursor_attempt(&shared);
+        let picture = publish_cursor_picture(&shared, 7);
+        assert_eq!(
+            shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+            Some(true)
+        );
+        match terminal {
+            0 => shared.close(),
+            1 => finish(&shared, end::OK, None),
+            _ => shared.clear_presentation(),
+        }
+        assert_eq!(
+            shared.with_cursor_for_frame(picture.frame, picture.sequence, |_| true),
+            None
+        );
+    }
+}

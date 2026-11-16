@@ -234,6 +234,45 @@ fn frame_display_refuses_unknown_owners_and_null_outputs_without_writing() {
 }
 
 #[test]
+fn frame_cursor_refuses_unknown_owners_and_null_outputs_without_writing() {
+    let _: unsafe extern "C" fn(FrHandle, u64, u64, *mut FrCursor) -> bool =
+        fr_session_frame_cursor;
+    let sentinel = FrCursor {
+        generation: 91,
+        x: -3,
+        y: 37,
+        width: 11,
+        height: 13,
+        hotspot_x: 2,
+        hotspot_y: 7,
+        visible: 1,
+        reserved: 19,
+    };
+    let mut out = sentinel;
+    // SAFETY: output is writable or NULL; all handles are deliberately invalid.
+    unsafe {
+        for handle in [0, 1, u64::MAX] {
+            for (frame, sequence) in [(0, 0), (1, 1), (u64::MAX, u64::MAX)] {
+                assert!(!fr_session_frame_cursor(
+                    handle,
+                    frame,
+                    sequence,
+                    &raw mut out
+                ));
+                assert_eq!(out, sentinel);
+            }
+            assert!(!fr_session_frame_cursor(
+                handle,
+                1,
+                1,
+                core::ptr::null_mut()
+            ));
+        }
+    }
+    assert_eq!(out, sentinel);
+}
+
+#[test]
 fn captured_typing_rejects_stale_handles_without_writing_or_allocating_a_token() {
     let mut token = 91;
     // SAFETY: the first output is valid; the null output is explicitly refused.

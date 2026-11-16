@@ -78,6 +78,9 @@ _Static_assert(_Generic(&fr_session_copy_upload_status,
 _Static_assert(_Generic(&fr_session_frame_display,
     bool (*_Nonnull)(FrHandle, uint64_t, uint32_t *_Nullable, uint32_t *_Nullable): 1, default: 0),
     "fr_session_frame_display signature");
+_Static_assert(_Generic(&fr_session_frame_cursor,
+    bool (*_Nonnull)(FrHandle, uint64_t, uint64_t, FrCursor *_Nullable): 1, default: 0),
+    "fr_session_frame_cursor signature");
 _Static_assert(_Generic(&fr_session_reopen_status,
     int32_t (*_Nonnull)(FrHandle): 1, default: 0),
     "fr_session_reopen_status signature");
