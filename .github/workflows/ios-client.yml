@@ -1,0 +1,146 @@
+name: iOS client
+
+# Exercise the shipping app and the Rust C ABI it calls. Simulator and host
+# tests are source/runtime evidence, not physical-device or tailnet qualification.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'mobile/ios/FrankenRemote/**'
+      - 'mobile/ios/scripts/build-rust.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - '.cargo/config.toml'
+      - '.github/workflows/ios-client.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-client-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: '1'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_INCREMENTAL: '0'
+  RUST_MIN_STACK: '16777216'
+  FR_CARGO_JOBS: '1'
+
+jobs:
+  rust-core:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out the exact source without retained credentials
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install the repository-pinned toolchain and inspect the Apple SDK
+        run: |
+          rustup show active-toolchain
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+      - name: Test the real shared session, file owner and C ABI
+        run: |
+          set -euo pipefail
+          cargo test -p fr-mobile-ffi --features macos-session --locked \
+            2>&1 | tee "$RUNNER_TEMP/ios-core-tests.log"
+      - name: Check the complete Apple session with strict Clippy
+        run: |
+          set -euo pipefail
+          cargo clippy -p fr-mobile-ffi --features macos-session --all-targets --locked -- -D warnings \
+            2>&1 | tee "$RUNNER_TEMP/ios-core-clippy.log"
+      - name: Retain the original Rust validation logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-core-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ios-core-tests.log
+            ${{ runner.temp }}/ios-core-clippy.log
+          retention-days: 7
+          if-no-files-found: warn
+
+  ios-simulator:
+    # Independent of rust-core so an ABI/test failure cannot hide Swift
+    # compilation and XCTest results from the actual application target.
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Check out the exact source without retained credentials
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
+        with:
+          persist-credentials: false
+      - name: Install the repository-pinned simulator toolchains
+        run: |
+          rustup show active-toolchain
+          rustup target add aarch64-apple-ios-sim x86_64-apple-ios
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
+      - name: Select an installed iPhone simulator at the app's deployment floor
+        id: simulator
+        run: |
+          set -euo pipefail
+          xcrun simctl list devices available --json > "$RUNNER_TEMP/ios-devices.json"
+          python3 - <<'PYTHON'
+          import json
+          import os
+          import re
+          import uuid
+          from pathlib import Path
+
+          devices = json.loads(Path(os.environ["RUNNER_TEMP"], "ios-devices.json").read_text())
+          candidates = []
+          for runtime, entries in devices["devices"].items():
+              match = re.search(r"\.iOS-(\d+(?:-\d+)*)$", runtime)
+              if not match:
+                  continue
+              version = tuple(int(part) for part in match.group(1).split("-"))
+              if version < (17,):
+                  continue
+              for device in entries:
+                  if device.get("isAvailable") and device["name"].startswith("iPhone"):
+                      uuid.UUID(device["udid"])
+                      candidates.append((version, device["name"], device["udid"]))
+          if not candidates:
+              raise SystemExit("No available iPhone simulator with iOS 17 or later; install the matching Xcode runtime.")
+          version, name, identifier = max(candidates)
+          print(f"Selected {name}, iOS {'.'.join(map(str, version))}, {identifier}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"udid={identifier}\n")
+          PYTHON
+      - name: Build the shipping app and run its complete Swift test target
+        env:
+          IOS_SIMULATOR_ID: ${{ steps.simulator.outputs.udid }}
+        run: |
+          set -euo pipefail
+          # The project invokes mobile/ios/scripts/build-rust.sh with the
+          # selected SDK/architecture, linking its original Rust static library.
+          xcodebuild \
+            -project mobile/ios/FrankenRemote/FrankenRemote.xcodeproj \
+            -scheme FrankenRemote \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -destination-timeout 120 \
+            -parallel-testing-enabled NO \
+            -maximum-concurrent-test-simulator-destinations 1 \
+            -derivedDataPath "$RUNNER_TEMP/ios-derived" \
+            -resultBundlePath "$RUNNER_TEMP/ios-simulator.xcresult" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO DEVELOPMENT_TEAM= \
+            test 2>&1 | tee "$RUNNER_TEMP/ios-simulator.log"
+      - name: Retain the original Simulator results and build log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ios-simulator-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/ios-simulator.xcresult
+            ${{ runner.temp }}/ios-simulator.log
+            ${{ runner.temp }}/ios-devices.json
+          retention-days: 7
+          if-no-files-found: warn

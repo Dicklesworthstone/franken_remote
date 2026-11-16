@@ -7,6 +7,7 @@
 
 #include <stddef.h>
 
+_Static_assert(FR_UPLOAD_STATUS_MAX_BYTES == 16384, "upload status bound");
 _Static_assert(sizeof(FrEvent) == 32, "FrEvent size");
 _Static_assert(offsetof(FrEvent, picture_height) == 24, "FrEvent layout");
 _Static_assert(sizeof(FrFrameInfo) == 32, "FrFrameInfo size");
@@ -47,6 +48,33 @@ _Static_assert(_Generic(&fr_session_select_display,
 _Static_assert(_Generic(&fr_session_cancel_display,
     int32_t (*_Nonnull)(FrHandle, uint64_t): 1, default: 0),
     "fr_session_cancel_display signature");
+_Static_assert(_Generic(&fr_session_start_with_upload,
+    int32_t (*_Nonnull)(const FrConfig *_Nullable, uint32_t, FrHandle *_Nullable): 1, default: 0),
+    "fr_session_start_with_upload signature");
+_Static_assert(_Generic(&fr_session_begin_upload_selection,
+    int32_t (*_Nonnull)(FrHandle, uint64_t *_Nullable): 1, default: 0),
+    "fr_session_begin_upload_selection signature");
+_Static_assert(_Generic(&fr_session_prepare_upload,
+    int32_t (*_Nonnull)(FrHandle, uint64_t, const char *_Nullable): 1, default: 0),
+    "fr_session_prepare_upload signature");
+_Static_assert(_Generic(&fr_session_discard_upload_selection,
+    int32_t (*_Nonnull)(FrHandle, uint64_t): 1, default: 0),
+    "fr_session_discard_upload_selection signature");
+_Static_assert(_Generic(&fr_session_send_upload,
+    int32_t (*_Nonnull)(FrHandle, uint64_t): 1, default: 0),
+    "fr_session_send_upload signature");
+_Static_assert(_Generic(&fr_session_cancel_upload,
+    int32_t (*_Nonnull)(FrHandle, uint32_t): 1, default: 0),
+    "fr_session_cancel_upload signature");
+_Static_assert(_Generic(&fr_session_pause_upload,
+    int32_t (*_Nonnull)(FrHandle, uint32_t, bool): 1, default: 0),
+    "fr_session_pause_upload signature");
+_Static_assert(_Generic(&fr_session_upload_sources_released,
+    bool (*_Nonnull)(FrHandle): 1, default: 0),
+    "fr_session_upload_sources_released signature");
+_Static_assert(_Generic(&fr_session_copy_upload_status,
+    size_t (*_Nonnull)(FrHandle, char *_Nullable, size_t): 1, default: 0),
+    "fr_session_copy_upload_status signature");
 _Static_assert(_Generic(&fr_session_frame_display,
     bool (*_Nonnull)(FrHandle, uint64_t, uint32_t *_Nullable, uint32_t *_Nullable): 1, default: 0),
     "fr_session_frame_display signature");

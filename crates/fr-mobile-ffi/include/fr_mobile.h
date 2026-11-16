@@ -53,6 +53,7 @@ extern "C" {
 #define FR_DISPLAY_PRIMARY 0  /* desktop origin, else first approved display */
 #define FR_DISPLAY_CHOOSE 1   /* one display: open; several: ask the user */
 #define FR_MAX_DISPLAYS 8
+#define FR_UPLOAD_STATUS_MAX_BYTES 16384
 
 /* Event kinds. */
 #define FR_EVENT_STATE 1      /* value: FR_STATE_* */
@@ -177,6 +178,44 @@ bool fr_host_name_valid(const char *_Nullable name);
 int32_t fr_session_start(const FrConfig *_Nullable config, FrHandle *_Nullable out);
 int32_t fr_session_start_with_display(const FrConfig *_Nullable config,
                                       uint32_t mode, FrHandle *_Nullable out);
+/* Optional, empty upload negotiation on a control-capable session. No file
+ * is selected or sent, and no control is requested by this call. Existing
+ * start entry points and FrConfig retain their original ABI/behavior. */
+int32_t fr_session_start_with_upload(const FrConfig *_Nullable config,
+                                    uint32_t mode, FrHandle *_Nullable out);
+
+/* Choose while observing, before the native picker covers the view. Tokens
+ * belong to one connection attempt, expire after 120 s and are never reused.
+ * Observe real visibility throughout the picker. No file contents are read
+ * without a later fresh Send gesture and the host's current control grant. */
+int32_t fr_session_begin_upload_selection(FrHandle session, uint64_t *_Nullable out);
+/* Synchronous filesystem work: call only on a bounded background worker.
+ * path is an absolute UTF-8 local regular-file path (at most 4096 bytes).
+ * Keep the selected URL's security-scoped permission through preparation.
+ * On successful Send keep it until upload_sources_released returns true. */
+int32_t fr_session_prepare_upload(FrHandle session, uint64_t token,
+                                  const char *_Nullable path);
+/* Discard only this token. An outstanding prepare call must still return
+ * before its native permission is released or another worker is launched. */
+int32_t fr_session_discard_upload_selection(FrHandle session, uint64_t token);
+/* Explicit once-only Send on a current controlled view. Every attempted Send
+ * consumes the selection, including FR_BUSY/refusal; never retry it. */
+int32_t fr_session_send_upload(FrHandle session, uint64_t token);
+/* File-only commands for the exact displayed original batch (1..9). */
+int32_t fr_session_cancel_upload(FrHandle session, uint32_t batch);
+int32_t fr_session_pause_upload(FrHandle session, uint32_t batch, bool paused);
+/* Positive source collection, even after an original cleanup failure.
+ * A terminal event alone is insufficient. Retain this exact handle and the
+ * native scopes until true, then free; free itself does not join workers.
+ * False for a stale handle. A later collection never repairs a failure. */
+bool fr_session_upload_sources_released(FrHandle session);
+/* Bounded version-1 JSON: selection, current transfer, at most nine receipts,
+ * ready and sources_released. No paths, names or file contents. Queued bytes
+ * are not host publication. Returns required bytes EXCLUDING NUL, like
+ * copy_pin; use FR_UPLOAD_STATUS_MAX_BYTES bytes including termination.
+ * 0 means stale/unavailable, never successful transfer. */
+size_t fr_session_copy_upload_status(FrHandle session, char *_Nullable buffer, size_t capacity);
+
 /* Poll before the first frame, while startup/approval expiry still runs.
  * false leaves out untouched. Copy every row with this same token; if any
  * copy fails, discard the entire snapshot. Never replay a choice against

@@ -18,6 +18,19 @@
     allow(unused)
 )]
 
+// The real bounded file-choice owner is shared with portable policy tests.
+#[cfg(any(
+    test,
+    all(
+        feature = "session",
+        any(
+            target_os = "ios",
+            all(target_os = "macos", feature = "macos-session")
+        )
+    )
+))]
+mod upload_selection;
+
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
 pub mod events;
 #[cfg(any(target_os = "ios", target_os = "macos", windows))]
@@ -63,6 +76,14 @@ mod download;
 ))]
 #[path = "session/file_offer.rs"]
 mod file_offer;
+
+#[cfg(all(
+    test,
+    feature = "session",
+    not(any(target_os = "ios", target_os = "macos", windows))
+))]
+#[path = "session/files.rs"]
+mod files;
 
 #[cfg(all(
     feature = "session",

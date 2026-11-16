@@ -26,6 +26,8 @@ mod key_capture;
 mod local_cursor_adapter;
 mod text;
 mod typing;
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+mod upload;
 
 pub use clipboard::Report as ClipboardReport;
 #[cfg(test)]
@@ -46,6 +48,8 @@ pub use frd::native_files::{
     Limits as DownloadLimits,
 };
 pub use text::{CapturedText, TextDraft};
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+pub(crate) use upload::Error as UploadError;
 
 use crate::{
     events::{self, Event, Events, kind, state},
@@ -279,6 +283,13 @@ pub struct Shared {
     focus_owner: Mutex<Option<FocusOwner>>,
     clipboard: clipboard::Clipboard,
     upload: Option<Arc<Upload>>,
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    upload_selection: Mutex<crate::upload_selection::Selections<PreparedUpload>>,
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    upload_preparing: AtomicBool,
+    /// Positive collection of original source owners, distinct from the
+    /// terminal result published before a failed bounded cleanup completes.
+    upload_sources_released: AtomicBool,
     download: Option<Arc<Download>>,
     close: AtomicBool,
     want_control: AtomicBool,
@@ -441,7 +452,12 @@ impl Shared {
             granted: Mutex::default(),
             focus_owner: Mutex::default(),
             clipboard: clipboard::Clipboard::new(control_capable && clipboard && cfg!(windows)),
+            upload_sources_released: AtomicBool::new(upload.is_none()),
             upload,
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            upload_selection: Mutex::default(),
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            upload_preparing: AtomicBool::new(false),
             download,
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
@@ -474,6 +490,8 @@ impl Shared {
     /// is cancelled by the supervisor. Idempotent.
     pub fn close(&self) {
         self.close.store(true, Ordering::SeqCst);
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        self.clear_upload_selection();
         // Fence new native input immediately, but retain the original source
         // and its receipts until the existing close exchange and cleanup run.
         // Source::stop cancels in-flight service; using it here would turn an
@@ -1593,9 +1611,14 @@ impl Session {
                 let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run(&worker, config);
                 }));
-                if ran.is_err() && !worker.finished() {
+                if ran.is_ok() {
+                    // Normal early refusal never created a source; a serving
+                    // run returns only after retaining all auxiliary cleanup.
+                    worker.upload_sources_released.store(true, Ordering::SeqCst);
+                } else if !worker.finished() {
                     worker.clear_presentation();
                     finish(&worker, end::INTERNAL, Some("Panic".into()));
+                    // A panic is not proof that a native source was collected.
                 }
             })
             .inspect_err(|_| {
@@ -1607,6 +1630,7 @@ impl Session {
                     end::INTERNAL,
                     Some("SessionThreadUnavailable".into()),
                 );
+                shared.upload_sources_released.store(true, Ordering::SeqCst);
             })?;
         Ok(Self { shared, control })
     }
@@ -1633,6 +1657,8 @@ impl Drop for Session {
 }
 
 fn finish(shared: &Shared, code: u32, detail: Option<String>) {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    shared.clear_upload_selection();
     shared.clipboard.stop();
     if let Some(upload) = &shared.upload {
         upload.finish();
@@ -1779,6 +1805,11 @@ fn run(shared: &Arc<Shared>, config: Config) {
     // clipboard/file workers actually return; dropping pending handles would
     // detach native teardown. This never restores success or permits another attempt.
     runtime.block_on(app.retain_auxiliary());
+    // A security-scoped permission must outlive a timed-out source worker too.
+    // Publish collection only after its retained owner returns and all original
+    // observer descriptors have been dropped. This never repairs the outcome.
+    drop(app);
+    shared.upload_sources_released.store(true, Ordering::SeqCst);
 }
 
 fn publish_pin(shared: &Shared, watch: Option<&PinWatch>) {
@@ -2466,7 +2497,9 @@ impl Application for Mobile {
         cx: &Cx,
         deadline: Deadline,
     ) -> impl Future<Output = Result<(), CallbackError>> {
-        // Fence at call time: no input outlives the attempt.
+        // Fence at call time: no input or local file choice outlives the attempt.
+        #[cfg(any(target_os = "ios", target_os = "macos"))]
+        self.shared.clear_upload_selection();
         self.shared.retire_control_request();
         self.shared
             .requesting_control

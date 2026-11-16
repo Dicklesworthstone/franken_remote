@@ -1,5 +1,38 @@
 # Implementation status
 
+## iOS explicit file upload bridge (2026-11-16 UTC)
+
+The native mobile core now exposes explicit local file selection over its
+existing ATP upload owner. One non-reused token identifies a local choice on
+the original connection attempt for at most 120 seconds. A bounded worker pins
+the selected regular file without reading or sending its contents. A separate
+Send consumes that choice once and rechecks the original input source, current
+control, visible presentation, live attempt and 250 ms gesture deadline. Refused
+or expired choices cannot be retried or rebound to a later session.
+
+The C ABI adds optional empty upload negotiation, selection/preparation,
+explicit Send, original-batch Pause/Resume/Cancel, and bounded versioned JSON
+status. Existing start functions and FrConfig layout retain their behavior.
+Queued bytes, actual host publication, uncertain durability and original
+cleanup remain separate. No selected path or filename enters status or errors.
+Hiding an observing view to choose a file does not spend the empty upload lane.
+
+A positive source-release witness follows actual original worker collection
+and owner destruction, including collection after a failed bounded cleanup.
+Session termination alone does not release an external security-scoped URL.
+Pending preparation is independently bounded and also fences release evidence.
+The shipping Swift picker and transfer controls are the next integration slice.
+
+Validation: the original 11 standalone selection-owner tests compiled with the
+repository-pinned Rust toolchain and -D warnings and passed before the local
+executor disconnected. The twelfth metadata-accessor test and integrated
+session, FFI and status regressions remain unexecuted. Independent source review
+caught and corrected final-Send visibility and late-picker ownership races.
+A focused Apple workflow now exercises the actual macos-session/C ABI and the
+shipping Xcode Simulator target; its results remain required. No Apple device,
+native file-provider or live host-publication qualification is claimed.
+Tracks `fr-ios-file-upload`, which remains in progress.
+
 ## Original-display mapping for scaled native pictures (2026-11-16 UTC)
 
 The Linux desktop now chooses its original-display mapped renderer whenever a

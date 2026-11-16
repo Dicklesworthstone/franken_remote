@@ -68,6 +68,10 @@ fn every_header_constant_matches_the_rust_value() {
         "FR_MAX_DISPLAYS".into(),
         i64::try_from(FR_MAX_DISPLAYS).unwrap(),
     ));
+    expected.push((
+        "FR_UPLOAD_STATUS_MAX_BYTES".into(),
+        i64::try_from(FR_UPLOAD_STATUS_MAX_BYTES).unwrap(),
+    ));
     let mut found = defines();
     found.sort();
     expected.sort();
@@ -156,6 +160,47 @@ fn display_bridge_rejects_bad_handles_and_modes_without_changing_outputs() {
     assert_eq!(fr_session_select_display(0, 91, 0), FR_STALE);
     assert_eq!(fr_session_cancel_display(0, 91), FR_STALE);
     assert_eq!(fr_session_reopen_status(0), FR_STALE);
+}
+
+#[test]
+fn upload_bridge_refuses_stale_choices_and_invalid_start_without_changing_outputs() {
+    let host = CString::new("mac.tailtest.ts.net").unwrap();
+    let mut config = config(&host, 18443, None);
+    config.control = false;
+    let mut handle = 91;
+    let mut token = 92;
+    let mut buffer = [0x55 as c_char; 4];
+    // SAFETY: inputs and outputs are live or explicitly NULL. No valid session
+    // or file path is supplied, so none of these calls starts a source.
+    unsafe {
+        assert_eq!(
+            fr_session_start_with_upload(&raw const config, FR_DISPLAY_CHOOSE, &raw mut handle),
+            FR_INVALID,
+        );
+        assert_eq!(
+            fr_session_start_with_upload(&raw const config, u32::MAX, &raw mut handle),
+            FR_INVALID,
+        );
+        assert_eq!(
+            fr_session_start_with_upload(core::ptr::null(), FR_DISPLAY_CHOOSE, &raw mut handle),
+            FR_INVALID,
+        );
+        assert_eq!(fr_session_begin_upload_selection(0, &raw mut token), FR_STALE);
+        assert_eq!(fr_session_begin_upload_selection(0, core::ptr::null_mut()), FR_INVALID);
+        assert_eq!(fr_session_prepare_upload(0, 92, core::ptr::null()), FR_STALE);
+        assert_eq!(fr_session_copy_upload_status(0, buffer.as_mut_ptr(), buffer.len()), 0);
+        assert_eq!(fr_session_copy_upload_status(0, core::ptr::null_mut(), 0), 0);
+    }
+    assert_eq!((handle, token), (91, 92));
+    assert_eq!(buffer[0], 0);
+    assert_eq!(buffer[1], 0x55 as c_char);
+    assert_eq!(fr_session_discard_upload_selection(0, 92), FR_STALE);
+    assert_eq!(fr_session_send_upload(0, 92), FR_STALE);
+    assert_eq!(fr_session_cancel_upload(0, 1), FR_STALE);
+    assert_eq!(fr_session_pause_upload(0, 1, true), FR_STALE);
+    assert_eq!(fr_session_cancel_upload(0, 0), FR_INVALID);
+    assert_eq!(fr_session_pause_upload(0, 10, false), FR_INVALID);
+    assert!(!fr_session_upload_sources_released(0));
 }
 
 #[test]

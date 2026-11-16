@@ -97,6 +97,35 @@ impl Report {
         }
     }
 
+    /// Bounded content-free UI evidence. Byte progress never stands in for
+    /// the original host's publication receipt or the source's cleanup.
+    #[cfg(any(test, target_os = "ios", target_os = "macos"))]
+    pub(crate) fn document(&self) -> serde_json::Value {
+        let snapshot = self.snapshot;
+        let progress = snapshot.and_then(|value| value.current);
+        let complete = snapshot
+            .and_then(|value| value.status.report)
+            .is_some_and(|report| report.complete);
+        serde_json::json!({
+            "batch": self.batch,
+            "selected_bytes": self.selected_bytes,
+            "phase": self.phase_name(),
+            "stage": snapshot.and_then(|value| value.stage).map(stage_name),
+            "queued_bytes": progress.map(|value| value.queued_bytes),
+            "total_bytes": progress.and_then(|value| value.total_bytes),
+            "cancel_requested": self.cancel_requested,
+            "pause_requested": snapshot.is_some_and(|value| value.pause_requested),
+            "paused": snapshot.and_then(|value| value.paused),
+            "receipt": self.receipt_name(),
+            "receipt_detail": self.receipt_detail(),
+            "published_bytes": self.published_bytes(),
+            "cleanup": self.cleanup_name(),
+            "complete": complete,
+            "success": self.is_success(),
+            "absence": self.absence.map(|reason| format!("{reason:?}")),
+        })
+    }
+
     pub fn cleanup_name(&self) -> &'static str {
         match self
             .cleanup
@@ -113,6 +142,21 @@ impl Report {
             None if self.configured => "pending",
             None => "not_started",
         }
+    }
+}
+
+#[cfg(any(test, target_os = "ios", target_os = "macos"))]
+fn stage_name(stage: fr_files::sender::Stage) -> &'static str {
+    use fr_files::sender::Stage;
+    match stage {
+        Stage::Idle => "idle",
+        Stage::Queued => "queued",
+        Stage::Preparing => "preparing",
+        Stage::AwaitingAcceptance => "awaiting_acceptance",
+        Stage::Streaming => "streaming",
+        Stage::AwaitingProof => "awaiting_proof",
+        Stage::Finished => "finished",
+        Stage::Closed => "closed",
     }
 }
 
@@ -188,6 +232,13 @@ pub const MAX_UPLOADS: usize = 9;
 pub struct PreparedUpload {
     request: SendRequest,
     bytes: u64,
+}
+
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+impl PreparedUpload {
+    pub(crate) const fn selected_bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
 struct State {
@@ -351,7 +402,27 @@ impl Upload {
     /// File-only cancellation. A negotiated but unstarted attachment still
     /// settles under its original deadline; no selected contents are read.
     pub fn cancel(&self) -> bool {
-        self.lock().cancel()
+        let mut state = self.lock();
+        // Hiding an observing view to choose its first file must not cancel an
+        // empty negotiated lane. Terminal retire/finish still stop that setup
+        // owner through State::cancel.
+        state.report.batch != 0 && state.cancel()
+    }
+
+    /// Local selection capacity, including before the first control grant.
+    /// Opens no source and grants no permission to read or send its contents.
+    #[cfg(any(test, target_os = "ios", target_os = "macos"))]
+    pub(crate) fn can_select(&self) -> bool {
+        let mut state = self.lock();
+        state.collect();
+        state.bound
+            && state.attempted
+            && !state.retired
+            && state.report.configured
+            && state.report.absence.is_none()
+            && usize::from(state.report.batch) < MAX_UPLOADS
+            && (state.report.batch == 0
+                || state.intake.as_ref().is_some_and(SendIntake::ready))
     }
 
     /// A failed attempt before observer creation has spent no file selection.
@@ -691,6 +762,76 @@ mod tests {
         assert_eq!(upload.reports(), [] as [Report; 0]);
         assert!(upload.is_success(), "no file was requested");
         upload.configure_with(|_| panic!("refused intake replayed"));
+    }
+
+    #[test]
+    fn hiding_without_a_file_does_not_spend_an_interactive_lane() {
+        let upload = Upload::interactive();
+        assert!(upload.bind());
+        assert!(!upload.cancel());
+        assert!(upload.available());
+        assert!(!upload.report().cancel_requested);
+        assert_eq!(upload.report().batch, 0);
+        upload.finish();
+        assert!(!upload.available());
+        assert!(!upload.can_select());
+    }
+
+    #[test]
+    fn upload_status_contains_only_original_bounded_evidence() {
+        let upload = selected();
+        assert!(upload.bind());
+        let report = upload.report();
+        let document = report.document();
+        assert_eq!(document["batch"], 1);
+        assert_eq!(document["selected_bytes"], 13);
+        assert_eq!(document["phase"], "selected");
+        assert_eq!(document["receipt"], "none");
+        assert_eq!(document["published_bytes"], serde_json::Value::Null);
+        assert_eq!(document["queued_bytes"], serde_json::Value::Null);
+        assert_eq!(document["cleanup"], "not_started");
+        assert_eq!(document["complete"], false);
+        assert_eq!(document["success"], false);
+        let encoded = document.to_string();
+        assert!(!encoded.contains("fr-selected-upload"));
+        assert!(!encoded.contains("chosen source"));
+        assert!(encoded.len() < 1024);
+        assert!(upload.cancel());
+        assert_eq!(upload.report().document()["cancel_requested"], true);
+        assert_eq!(upload.report().document()["receipt"], "none");
+    }
+
+    #[test]
+    fn status_never_upgrades_queued_bytes_to_host_publication() {
+        let upload = selected();
+        let mut report = upload.report();
+        report.configured = true;
+        report.snapshot = Some(SendSnapshot {
+            status: frd::native_files::SendStatus {
+                phase: SendPhase::Sending,
+                absence: None,
+                report: None,
+            },
+            stage: Some(fr_files::sender::Stage::AwaitingProof),
+            current: Some(fr_files::sender::Progress {
+                id: 1,
+                queued_bytes: 13,
+                total_bytes: Some(13),
+            }),
+            cancel_requested: false,
+            pause_requested: false,
+            paused: Some(false),
+            cleanup: None,
+        });
+        let document = report.document();
+        assert_eq!(document["queued_bytes"], 13);
+        assert_eq!(document["total_bytes"], 13);
+        assert_eq!(document["stage"], "awaiting_proof");
+        assert_eq!(document["published_bytes"], serde_json::Value::Null);
+        assert_eq!(document["receipt"], "none");
+        assert_eq!(document["complete"], false);
+        assert_eq!(document["success"], false);
+        assert_eq!(document["cleanup"], "pending");
     }
 
     #[test]

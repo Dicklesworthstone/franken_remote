@@ -25,10 +25,18 @@ use std::{
 };
 
 mod display;
+mod upload;
 pub use display::{
     FR_DISPLAY_CHOOSE, FR_DISPLAY_PRIMARY, FR_MAX_DISPLAYS, FrDisplayInfo, FrDisplayRequest,
     fr_session_cancel_display, fr_session_display_info, fr_session_display_request,
     fr_session_reopen_status, fr_session_select_display,
+};
+
+pub use upload::{
+    FR_UPLOAD_STATUS_MAX_BYTES, fr_session_begin_upload_selection, fr_session_cancel_upload,
+    fr_session_copy_upload_status, fr_session_discard_upload_selection, fr_session_pause_upload,
+    fr_session_prepare_upload, fr_session_send_upload, fr_session_start_with_upload,
+    fr_session_upload_sources_released,
 };
 
 pub const FR_OK: i32 = 0;
@@ -238,7 +246,7 @@ pub unsafe extern "C" fn fr_host_name_valid(name: *const c_char) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fr_session_start(config: *const FrConfig, out: *mut FrHandle) -> i32 {
     // SAFETY: forwarded contract; preserve the original ABI's display policy.
-    unsafe { start(config, crate::session::DisplayChoice::Primary, out) }
+    unsafe { start(config, crate::session::DisplayChoice::Primary, false, out) }
 }
 
 /// Start with the given display policy, without changing `FrConfig`'s ABI.
@@ -260,7 +268,7 @@ pub unsafe extern "C" fn fr_session_start_with_display(
         _ => return FR_INVALID,
     };
     // SAFETY: forwarded contract.
-    unsafe { start(config, choice, out) }
+    unsafe { start(config, choice, false, out) }
 }
 
 /// # Safety
@@ -268,12 +276,16 @@ pub unsafe extern "C" fn fr_session_start_with_display(
 unsafe fn start(
     config: *const FrConfig,
     display: crate::session::DisplayChoice,
+    upload: bool,
     out: *mut FrHandle,
 ) -> i32 {
     // SAFETY: NULL or valid per contract.
     let (Some(config), false) = (unsafe { config.as_ref() }, out.is_null()) else {
         return FR_INVALID;
     };
+    if upload && !config.control {
+        return FR_INVALID;
+    }
     // SAFETY: forwarded contract.
     let Some((host, pin)) = (unsafe { destination(config) }) else {
         return FR_INVALID;
@@ -298,7 +310,7 @@ unsafe fn start(
         port: config.port,
         control: config.control,
         clipboard: false,
-        upload: None,
+        upload: upload.then(crate::session::Upload::interactive),
         download: None,
         picture,
         display,
