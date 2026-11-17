@@ -16,6 +16,18 @@
   arrives in 0.7-0.9 s, and full-size view and control sessions worked.
   Startup still has only about 0.3 s of margin at that size.
 
+## 2026-11-18 — the Windows source install builds with TDM-GCC on PATH
+
+- `install.ps1` took the first `gcc.exe` on PATH. TDM-GCC ships no
+  `libgcc_eh.a`, which Rust's GNU target links, so the first build script
+  failed with `cannot find -lgcc_eh`. The installer now checks each GCC it
+  finds, skips the ones without that library, and puts the chosen one first
+  on PATH for the build.
+- rustup's stdout no longer leaks into the build step's return value, which
+  had failed the install with `Cannot find drive` after a successful build.
+- The pinned ISRG root PEMs are written only when they change, so a rerun no
+  longer rebuilds fr-mobile-ffi and fr-windows from scratch.
+
 ## 2026-11-08 — the host log names how a controlled viewer ended
 
 - When a controlled share's viewer ended on its own side, `frd` kept only a

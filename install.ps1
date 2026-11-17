@@ -494,14 +494,31 @@ function Update-SessionPath {
   $env:Path = (@($machine, $user, $env:Path) | Where-Object { $_ }) -join ";"
 }
 
+# Rust's x86_64-pc-windows-gnu target links every program, build scripts
+# included, against libgcc_eh.a. TDM-GCC does not ship it, so a TDM-GCC first
+# on PATH fails the very first build-script link. Accept only a GCC that
+# resolves the library to a real file.
+function Test-RustGnuGcc([string]$Gcc) {
+  try {
+    # Collect all output first: Select-Object -First would stop gcc early and
+    # leave PowerShell 7 with a nonzero $LASTEXITCODE.
+    $out = @(& $Gcc "-print-file-name=libgcc_eh.a" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $out.Count -eq 0) { return $false }
+    $eh = ([string]$out[0]).Trim()
+    return ([IO.Path]::IsPathRooted($eh) -and (Test-Path -LiteralPath $eh))
+  } catch { return $false }
+}
+
 function Find-Gcc {
-  $gcc = Get-Command gcc.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ($gcc) { return $gcc.Source }
+  $candidates = @(Get-Command gcc.exe -CommandType Application -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
   $root = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
   if (Test-Path -LiteralPath $root) {
-    $found = Get-ChildItem -LiteralPath $root -Directory -Filter "BrechtSanders.WinLibs*" -ErrorAction SilentlyContinue |
-      ForEach-Object { Join-Path $_.FullName "mingw64\bin\gcc.exe" } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-    if ($found) { return $found }
+    $candidates += @(Get-ChildItem -LiteralPath $root -Directory -Filter "BrechtSanders.WinLibs*" -ErrorAction SilentlyContinue |
+      ForEach-Object { Join-Path $_.FullName "mingw64\bin\gcc.exe" } | Where-Object { Test-Path -LiteralPath $_ })
+  }
+  foreach ($gcc in ($candidates | Select-Object -Unique)) {
+    if (Test-RustGnuGcc $gcc) { return $gcc }
+    Write-Warn "Skipping ${gcc}: it has no libgcc_eh.a, which Rust's GNU target links (TDM-GCC lacks it)"
   }
   return $null
 }
@@ -520,7 +537,7 @@ function Install-BuildTools([string]$TempDir) {
       Invoke-Download "$url.sha256" "$init.sha256"
       Assert-Checksum $init ((Get-Content -LiteralPath "$init.sha256" -TotalCount 1).Trim().Split(' ')[0])
       # The GNU host toolchain matches the release artifact and needs no Visual Studio.
-      & $init -y --default-host x86_64-pc-windows-gnu --default-toolchain none --profile minimal --no-modify-path
+      & $init -y --default-host x86_64-pc-windows-gnu --default-toolchain none --profile minimal --no-modify-path | Out-Host
       if ($LASTEXITCODE -ne 0) { throw "rustup-init failed" }
       $env:Path = "$cargoBin;$env:Path"
       Write-Ok "rustup installed"
@@ -530,13 +547,17 @@ function Install-BuildTools([string]$TempDir) {
   if (-not $gcc) {
     if (-not $winget) { throw "A MinGW-w64 GCC is required (winget is unavailable; install WinLibs from https://winlibs.com and add its bin folder to PATH)" }
     if (-not (Read-YesNo "Install the WinLibs MinGW-w64 GCC toolchain with winget (about 1 GB)?" $true)) { throw "GCC is required to build from source" }
-    & $winget.Source install --exact --id BrechtSanders.WinLibs.POSIX.UCRT --accept-source-agreements --accept-package-agreements --silent
+    & $winget.Source install --exact --id BrechtSanders.WinLibs.POSIX.UCRT --accept-source-agreements --accept-package-agreements --silent | Out-Host
     Update-SessionPath
     $gcc = Find-Gcc
-    if (-not $gcc) { throw "GCC was installed but not found; open a new PowerShell and run the installer again" }
+    if (-not $gcc) { throw "WinLibs GCC was installed but no GCC with libgcc_eh.a was found; open a new PowerShell and run the installer again" }
   }
-  $gccDir = Split-Path -Parent $gcc
-  if (($env:Path -split ';') -notcontains $gccDir) { $env:Path = "$gccDir;$env:Path" }
+  # rustc runs x86_64-w64-mingw32-gcc and cc-rs runs gcc/windres by PATH
+  # order, so the chosen folder goes first even when it is already listed
+  # behind another GCC (TDM-GCC, Strawberry Perl, Anaconda).
+  $gccDir = (Split-Path -Parent $gcc).TrimEnd('\')
+  $rest = @($env:Path -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ne $gccDir })
+  $env:Path = (@($gccDir) + $rest) -join ';'
   Write-Ok "Build tools: rustup, $gcc"
 }
 
@@ -572,7 +593,14 @@ function Get-IsrgRoots([string]$Dir) {
       Remove-Item -LiteralPath $pemPath -Force
     }
     if ((Get-DerSha256 $der) -ne $root.Sha256) { throw "$($root.File) does not match its pinned digest" }
-    [System.IO.File]::WriteAllText((Join-Path $Dir $root.File), (ConvertTo-Pem $der), (New-Object System.Text.UTF8Encoding $false))
+    # Write only on change: fr-mobile-ffi's build script tracks these files
+    # (rerun-if-changed), so a fresh mtime rebuilds fr-mobile-ffi and
+    # fr-windows (minutes of LTO) on every installer run.
+    $pemPath = Join-Path $Dir $root.File
+    $pem = ConvertTo-Pem $der
+    if (-not (Test-Path -LiteralPath $pemPath -PathType Leaf) -or [System.IO.File]::ReadAllText($pemPath) -ne $pem) {
+      [System.IO.File]::WriteAllText($pemPath, $pem, (New-Object System.Text.UTF8Encoding $false))
+    }
   }
   Write-Ok "ISRG roots verified against the build's pinned digests"
 }
@@ -616,11 +644,15 @@ function Build-FromSource([string]$TempDir) {
   $toolchain = "$($Matches[1])-x86_64-pc-windows-gnu"
   Push-Location $src
   try {
+    # Native stdout must go to the host, not the pipeline: rustup prints
+    # "<toolchain> installed|unchanged - rustc ..." on stdout, and anything
+    # left in the pipeline joins this function's return value (the payload
+    # path), which then fails as "Cannot find drive".
     Write-Info "Installing the pinned Rust toolchain ($toolchain)"
-    & rustup.exe toolchain install $toolchain --profile minimal
+    & rustup.exe toolchain install $toolchain --profile minimal | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "rustup could not install $toolchain" }
     Write-Info "Building FrankenRemote (release profile; later updates reuse $($env:CARGO_TARGET_DIR))"
-    & cargo.exe "+$toolchain" build --release --locked -p fr-windows --bin FrankenRemote --bin fr-windows
+    & cargo.exe "+$toolchain" build --release --locked -p fr-windows --bin FrankenRemote --bin fr-windows | Out-Host
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed (exit $LASTEXITCODE)" }
   } finally { Pop-Location }
   $script:InstalledVersion = "source:$sourceRef@$($sha.Substring(0, 10))"
