@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-11-18 — a large first view starts over a slower link
+
+- A viewer's first picture (the startup IDR) arrives as 1150-byte records on
+  the recovery stream, and the viewer set that stream's QUIC receive window
+  to the 8 KiB per-record allowance. That allowed one 8 KiB window per round
+  trip. On 11-17, a Windows laptop on a 75 ms, 23 Mbit/s cellular path asked a
+  5120x2880 Mac for 2890x1624: the ~230 KB IDR came in at about 110 KB/s,
+  missed the host's two-second startup deadline, and the host stopped the
+  share (the viewer showed `ended internal`). Only pictures of about
+  1600x900 or smaller worked.
+- The recovery lane now gets the full stream window, as the clipboard lane
+  already did. Record framing, negotiated record sizes, the aggregate
+  connection window and lifetimes are unchanged. On the same path the IDR now
+  arrives in 0.7-0.9 s, and full-size view and control sessions worked.
+  Startup still has only about 0.3 s of margin at that size.
+
 ## 2026-11-08 — the host log names how a controlled viewer ended
 
 - When a controlled share's viewer ended on its own side, `frd` kept only a
