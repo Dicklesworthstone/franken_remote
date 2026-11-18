@@ -58,6 +58,7 @@ pub struct ObservationRenewal {
     bytes: [u8; OBSERVATION_CHALLENGE_BYTES],
     renewed_until: Option<HostInstant>,
     closure_reason: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+    refusal_reported: std::sync::atomic::AtomicBool,
 }
 impl ObservationRenewal {
     /// Routes come from the already admitted/approved startup owner. Numeric
@@ -119,7 +120,28 @@ impl ObservationRenewal {
             bytes: [0; OBSERVATION_CHALLENGE_BYTES],
             renewed_until: None,
             closure_reason: None,
+            refusal_reported: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+    /// `Transport(Unauthorized)` names no cause, and these ends (14 in one
+    /// installed host's log) were indistinguishable: an observation authority
+    /// that lapsed because a challenge's round trip outlived its deadline, a
+    /// revoked authority, or a session permission check. Print which, once.
+    fn refused(&self, error: TransportError, permission: bool) -> Error {
+        if error == TransportError::Unauthorized
+            && !self.refusal_reported.swap(true, Ordering::AcqRel)
+        {
+            match self.control.check() {
+                Err(cause) => eprintln!("frd: observation renewal refused: {cause:?}"),
+                Ok(_) if permission => {
+                    eprintln!("frd: observation renewal refused: the session permission check");
+                }
+                Ok(_) => eprintln!(
+                    "frd: observation renewal refused: the connection's authority (see connection authority ended)"
+                ),
+            }
+        }
+        Error::Transport(error)
     }
     pub(crate) fn retain_closure_reason(
         &mut self,
@@ -233,7 +255,7 @@ impl ObservationRenewal {
                         Event::ChallengeQueued
                     }
                     Err(TransportError::Backpressure) => Event::Backpressure,
-                    Err(error) => return Err(Error::Transport(error)),
+                    Err(error) => return Err(self.refused(error, false)),
                 }
             }
         } else {
@@ -341,7 +363,7 @@ impl ObservationRenewal {
         if let Some(error) = failure {
             return Err(error);
         }
-        let count = result.map_err(Error::Transport)?;
+        let count = result.map_err(|error| self.refused(error, false))?;
         self.live(io.connection)?;
         io.complete = true;
         Ok(count)
@@ -378,7 +400,7 @@ impl ObservationRenewal {
                     permitted() && self.control.check().is_ok()
                 })
                 .await
-                .map_err(Error::Transport)?;
+                .map_err(|error| self.refused(error, true))?;
             self.live(io.connection)?;
             io.complete = true;
             Ok(())
@@ -406,10 +428,10 @@ impl ObservationRenewal {
                     permitted() && self.control.check().is_ok()
                 })
                 .await
-                .map_err(Error::Transport)?;
+                .map_err(|error| self.refused(error, true))?;
             self.live(io.connection)?;
             if !permitted() {
-                return Err(Error::Transport(TransportError::Unauthorized));
+                return Err(self.refused(TransportError::Unauthorized, true));
             }
             io.complete = true;
             Ok(())

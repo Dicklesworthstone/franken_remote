@@ -1,5 +1,20 @@
 # Changelog
 
+## 2026-11-18 — the host names why it refused an observation renewal
+
+- One installed host's log shows 14 shares ending with
+  `Renewal(Transport(Unauthorized))`, which can mean several things:
+  - the observation authority lapsed because a challenge's round trip
+    outlived its deadline (each answered challenge extends authority to its
+    issue time plus 3 s, with one challenge in flight at a time);
+  - the authority was revoked;
+  - a session permission check failed;
+  - the connection's own authority check failed.
+- frd now prints which, once per share: `frd: observation renewal refused:
+  <cause>`, beside the `frd: connection authority ended: <check>` line from
+  the previous entry. Behavior is unchanged. Once the hosts are rebuilt, this
+  decides whether the fix belongs in authority timing or elsewhere.
+
 ## 2026-11-18 — one slow clock probe no longer ends the session
 
 - The viewer measures the host clock with a probe every second on the
