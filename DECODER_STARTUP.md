@@ -44,8 +44,13 @@ cannot release that update until the matching `DecoderConfigured` arrives.
 Configuration backpressure preserves the exact bytes and original deadline;
 there is no alternate packet queue or silently refreshed authorization.
 
-Startup is bounded to at most two seconds. The host also caps its deadline at
-the original capture time plus two seconds. Polling, revalidation, delayed
+Startup is bounded to at most six seconds (`MAX_STARTUP_US`). The host also
+caps its deadline at the original capture time plus six seconds. It was two
+seconds until 2026-11-18, when a 3240x1822 first picture over a 23 Mbit/s,
+75 ms path took 1.9-2.0 s and large first views failed intermittently. The
+host's sender recovery horizon, which bounds the same capture-anchored IDR,
+moved to six seconds with it; the viewer's receive recovery budget stays two
+seconds from configuration. Polling, revalidation, delayed
 acknowledgements, and handoff do not change that capture timestamp. Expired
 startup requires an explicitly new attempt and, when needed, a fresh capture;
 it cannot reissue an old IDR as newly captured. The enclosing session must keep

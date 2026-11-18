@@ -1,5 +1,34 @@
 # Changelog
 
+## 2026-11-18 — a large first picture gets six seconds to start
+
+- A first view gets six seconds, up from two, from capturing its startup
+  IDR to the viewer's decoded-picture report.
+  - On 11-18 a full-screen 3240x1822 first picture from a Windows laptop on a
+    23 Mbit/s, 75 ms path took 1.9-2.0 s, so large first views failed
+    intermittently even after the recovery-window fix.
+  - The limits that bound that one picture move together:
+    - frd `decoder_startup::MAX_STARTUP_US`, the host's capture-anchored cap
+      and the largest decoder setup timeout;
+    - a new decoder `startup()` stage on the host (shared and controlled
+      publishers) and on the viewer; attachment stages keep 2 s;
+    - the first viewer's source budget (`shared_viewers::FIRST_VIEW_TIMEOUT`);
+      late joins keep `Policy::join_timeout`, 2 s;
+    - the host's sender recovery horizon (capture to QUIC hand-off of the
+      startup IDR, which is sent as a recovery picture), now 6 s through
+      `decoder_startup::host_send_policy()`. Mid-session recovery IDRs get
+      the same horizon. fr-media's own default stays 2 s; its validation now
+      allows up to 10 s (was 5 s);
+    - the unattended host startup deadline, from admission to first picture,
+      now 10 s (was 5 s). Approval sessions keep their 30 s budget.
+  - Unchanged: preparation, attachments, the source bootstrap (`BOOTSTRAP_US`)
+    and late joins stay at 2 s. So does the viewer's receive recovery budget,
+    2 s from decoder configuration to a complete IDR; on the 11-18 path the
+    IDR crossed in 0.7-0.9 s. Raising it pins many fr-media timing tests.
+  - The viewer's decoder stage takes effect when a client is rebuilt; the
+    host-side limits, which were the binding ones, take effect when the host
+    is reinstalled.
+
 ## 2026-11-18 — Windows: one late key or click no longer ends the session
 
 - The viewer refuses input older than its 100 ms freshness budget (about

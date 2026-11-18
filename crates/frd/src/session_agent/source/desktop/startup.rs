@@ -4,7 +4,7 @@ use crate::{
     media::{ObservationControl, SharedCaptureUpdate, shared_publisher::Publisher},
     session_startup::{
         Approval, Host,
-        shared_viewers::{Entropy, Hub, Policy},
+        shared_viewers::{Entropy, FIRST_VIEW_TIMEOUT, Hub, Policy},
     },
 };
 use asupersync::{
@@ -83,7 +83,7 @@ impl SessionAgent {
                 .start_shared_display_capped(
                     publisher,
                     initial,
-                    policy.join_timeout,
+                    FIRST_VIEW_TIMEOUT,
                     until,
                     policy.send,
                     move || tickets(),

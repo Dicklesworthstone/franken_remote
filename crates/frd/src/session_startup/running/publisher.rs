@@ -13,7 +13,7 @@ use crate::{
     worker::{Deadline, Launch},
 };
 use asupersync::cx::Cx;
-use fr_media::{delivery::SendPolicy, worker::Configuration};
+use fr_media::worker::Configuration;
 use fr_transport::quic::{self, ChannelRequest, Disposition, MediaChannel, QuicRecords, Route};
 use fr_wire::{
     attachment::{MediaRole, Ticket},
@@ -158,6 +158,11 @@ impl Budget {
     }
     fn stage(&self) -> Result<Duration, Error> {
         Ok(Duration::from_secs(2).min(self.remaining()?))
+    }
+    /// The decoder startup stage (first picture), which may take longer than
+    /// an attachment stage: up to [`decoder_startup::MAX_STARTUP`].
+    fn startup(&self) -> Result<Duration, Error> {
+        Ok(decoder_startup::MAX_STARTUP.min(self.remaining()?))
     }
     fn live(&self) -> bool {
         self.remaining().is_ok()
@@ -853,7 +858,7 @@ async fn bootstrap(
         .decoder_setup(
             host.io().map_err(|e| budget.fail(Error::Session(e)))?.0,
             &media,
-            budget.stage()?,
+            budget.startup()?,
         )
         .map_err(|e| budget.fail(Error::Display(e)))?;
     let mut startup = decoder_startup::Host::new(
@@ -868,7 +873,7 @@ async fn bootstrap(
         .sender(
             host.io().map_err(|e| budget.fail(Error::Session(e)))?.0,
             control.clone(),
-            SendPolicy::default(),
+            decoder_startup::host_send_policy(),
         )
         .map_err(|e| budget.fail(Error::Routes(e)))?;
     {

@@ -121,6 +121,11 @@ impl Budget {
     fn stage(&self) -> Result<Duration, Error> {
         Ok(Duration::from_secs(2).min(self.remaining()?))
     }
+    /// The decoder startup stage (first picture): up to
+    /// [`decoder_startup::MAX_STARTUP`], longer than an attachment stage.
+    fn startup(&self) -> Result<Duration, Error> {
+        Ok(decoder_startup::MAX_STARTUP.min(self.remaining()?))
+    }
     fn live(&self) -> bool {
         self.remaining().is_ok()
     }
@@ -1013,7 +1018,7 @@ async fn bootstrap<F: Future<Output = Result<Launch, ()>>>(
     receive_record(&mut session, budget, &mut config).await?;
     let (q, _) = session.io().map_err(Error::Session)?;
     let setup = selected
-        .decoder_setup(q, &media, budget.stage()?)
+        .decoder_setup(q, &media, budget.startup()?)
         .map_err(Error::Display)?;
     let receive = media
         .receiver_config(q, ReceivePolicy::default())

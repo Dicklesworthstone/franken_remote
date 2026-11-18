@@ -43,8 +43,10 @@ configuration, including the first subscriber before a cohort anchor exists.
 The host and viewer selection proofs must remain alive after the attachment
 handoff. The canonical host now retains its proof until closure.
 
-The original call-time budget, at most two seconds, covers display selection,
-attachments, waiting for a late-join IDR, configuration and first decode. Stage
+The original call-time budget covers display selection, attachments, waiting
+for a late-join IDR, configuration and first decode. It is at most six seconds
+for the first viewer (`FIRST_VIEW_TIMEOUT`) and two seconds for a late join
+(`Policy::join_timeout`). Stage
 handoff clamps deadlines; it cannot create a new window. Unpolled cancellation
 revokes the joining viewer. A failed initial attempt can leave a still-authorized,
 unstarted source available only within its original source bootstrap budget.

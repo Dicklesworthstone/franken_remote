@@ -2,14 +2,15 @@
 //! Reuse the existing canonical host driver; never make a per-viewer capture worker.
 use super::{
     Attempt, Budget, CatalogService, Duration, Error, Future, HostSession, MediaRole,
-    NegotiatedMedia, ObservationControl, Policy, SelectedDisplay, SendPolicy, attach, block,
-    decoder_startup, drive, native_control,
+    NegotiatedMedia, ObservationControl, Policy, SelectedDisplay, attach, block, decoder_startup,
+    drive, native_control,
 };
 use crate::media::{
     SharedCaptureUpdate,
     shared_publisher::{JoinQueue, Publisher},
 };
 use crate::session_startup::running::SharedHost;
+use fr_media::delivery::SendPolicy;
 
 impl HostSession {
     /// Start the first observer of a locally selected, independently authorized
@@ -60,7 +61,7 @@ impl HostSession {
                 budget.remaining()?;
                 let q = host.io().map_err(Error::Session)?.0;
                 let setup = selected
-                    .decoder_setup(q, &media, budget.stage()?)
+                    .decoder_setup(q, &media, budget.startup()?)
                     .map_err(Error::Display)?
                     .capped_at(budget.until);
                 let startup = decoder_startup::Host::new_shared(
@@ -142,7 +143,9 @@ fn source_budget(
     source: JoinQueue,
     timeout: Duration,
 ) -> Result<Budget, Error> {
-    if timeout > Duration::from_secs(2) {
+    // The first viewer's source budget covers display selection, attachments
+    // and decoder startup (FIRST_VIEW_TIMEOUT); late joins pass 2 s or less.
+    if timeout > decoder_startup::MAX_STARTUP {
         return Err(Error::InvalidConfiguration);
     }
     let mut budget = Budget::new(

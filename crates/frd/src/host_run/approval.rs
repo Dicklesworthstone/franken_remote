@@ -447,7 +447,7 @@ mod tests {
         .unwrap();
         let before = request.session.clone();
         assert!(!before.require_approval);
-        assert_eq!(before.startup_timeout, Duration::from_secs(5));
+        assert_eq!(before.startup_timeout, Duration::from_secs(10));
         require(&mut request);
         assert!(request.session.require_approval);
         assert_eq!(request.session.startup_timeout, STARTUP_BUDGET);
