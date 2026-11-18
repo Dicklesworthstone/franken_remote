@@ -45,16 +45,35 @@ jobs:
     name: check the tag
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    outputs:
+      build: ${{ steps.check.outputs.build }}
     steps:
-      - name: Release tags are vX.Y.Z
+      - name: Release tags are vX.Y.Z, each built once
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           if ! [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
             echo "::error::release tag '$RELEASE_TAG' is not vX.Y.Z"
             exit 1
           fi
+          if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+              # Publishing a draft creates its tag, and that tag push starts
+              # this workflow again: the release exists, so build nothing.
+              echo "Release $RELEASE_TAG already exists; nothing to build"
+              echo "build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::release $RELEASE_TAG already exists"
+            exit 1
+          fi
+          echo "build=true" >> "$GITHUB_OUTPUT"
 
   linux:
     needs: tag
+    if: needs.tag.outputs.build == 'true'
     name: linux (${{ matrix.target }}, ${{ matrix.distro }})
     strategy:
       fail-fast: true
@@ -63,14 +82,21 @@ jobs:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             distro: ubuntu24.04
+            optional: false
           - runner: ubuntu-26.04
             target: x86_64-unknown-linux-gnu
             distro: ubuntu26.04
+            optional: false
+          # aarch64 Linux has never been built in CI; when it fails, the
+          # release ships without it and install.sh builds from source there.
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             distro: ubuntu24.04
+            optional: true
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    continue-on-error: ${{ matrix.optional }}
+    # Fat LTO with one codegen unit, on 4-core hosted runners.
+    timeout-minutes: 240
     steps:
       - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -111,9 +137,10 @@ jobs:
 
   macos:
     needs: tag
+    if: needs.tag.outputs.build == 'true'
     name: macos (aarch64-apple-darwin)
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -154,9 +181,10 @@ jobs:
 
   windows:
     needs: tag
+    if: needs.tag.outputs.build == 'true'
     name: windows (x86_64-pc-windows-gnu, cross-built)
     runs-on: macos-15
-    timeout-minutes: 120
+    timeout-minutes: 240
     steps:
       - name: Check out the release commit
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11
@@ -189,8 +217,12 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [linux, macos, windows]
+    needs: [tag, linux, macos, windows]
+    # The Linux matrix may lose its optional aarch64 leg; the artifact check
+    # below still requires every x86_64, macOS and Windows archive.
+    if: ${{ !cancelled() && needs.tag.outputs.build == 'true' && needs.macos.result == 'success' && needs.windows.result == 'success' }}
     runs-on: ubuntu-26.04
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -209,14 +241,15 @@ jobs:
           set -euo pipefail
           cp install.sh install.ps1 dist/
           cd dist
-          expected="franken_remote-${RELEASE_TAG}-x86_64-unknown-linux-gnu-ubuntu24.04.tar.gz
+          required="franken_remote-${RELEASE_TAG}-x86_64-unknown-linux-gnu-ubuntu24.04.tar.gz
           franken_remote-${RELEASE_TAG}-x86_64-unknown-linux-gnu-ubuntu26.04.tar.gz
-          franken_remote-${RELEASE_TAG}-aarch64-unknown-linux-gnu-ubuntu24.04.tar.gz
           franken_remote-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz
           franken_remote-${RELEASE_TAG}-x86_64-pc-windows-gnu.zip"
-          for f in $expected; do
+          for f in $required; do
             [ -s "$f" ] || { echo "::error::missing release artifact $f"; exit 1; }
           done
+          optional="franken_remote-${RELEASE_TAG}-aarch64-unknown-linux-gnu-ubuntu24.04.tar.gz"
+          [ -s "$optional" ] || echo "::warning::$optional was not built; aarch64 Linux installs build from source"
           sha256sum franken_remote-* install.sh install.ps1 > SHA256SUMS
           for f in franken_remote-* install.sh install.ps1; do
             sha256sum "$f" > "$f.sha256"
