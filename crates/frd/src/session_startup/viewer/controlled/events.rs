@@ -580,9 +580,15 @@ fn native_deadline_expired(captured: &Captured, current: ClientInstant) -> bool 
     !matches!(captured.event, Event::Text(_))
         && captured.send_until.is_some_and(|until| current >= until)
 }
-fn aged(sampled: ClientInstant, current: ClientInstant) -> Result<bool, Error> {
-    let age = current.0.checked_sub(sampled.0).ok_or(Error::Clock)?;
-    Ok(age >= MAX_EVENT_AGE_US)
+/// `current` is the dispatch turn's own earlier reading of the same monotonic
+/// clock the producer stamps with, and every push refuses a stamp from its own
+/// future (`not_future`). A stamp newer than `current` is therefore an event
+/// the producer pushed while this turn ran between its clock read and the
+/// queue lock (a preempted dispatcher on a saturated CPU): fresh, age zero.
+/// Before 2026-11-18 it was `Clock`, which ended the session
+/// (`Control(Capture(Clock))`).
+fn aged(sampled: ClientInstant, current: ClientInstant) -> bool {
+    current.0.saturating_sub(sampled.0) >= MAX_EVENT_AGE_US
 }
 /// A release of what the host holds, or held-state reconciliation, is cleanup
 /// (AGENTS.md 4: releasing is cleanup, not rollback): delivered late rather
@@ -710,7 +716,7 @@ impl Receiver {
             return Err(Error::Expired);
         }
         if let Some(pending) = &self.pending
-            && aged(pending.sampled, current)?
+            && aged(pending.sampled, current)
             && !cleanup(&pending.event, holds)
         {
             let Captured { event, .. } = self.pending.take().ok_or(Error::Unavailable)?;
@@ -723,7 +729,7 @@ impl Receiver {
                     if native_deadline_expired(first, current) && !cleanup(&first.event, holds) {
                         return Err(Error::Expired);
                     }
-                    if !aged(first.sampled, current)? || cleanup(&first.event, holds) {
+                    if !aged(first.sampled, current) || cleanup(&first.event, holds) {
                         break;
                     }
                     let Captured { event, .. } =

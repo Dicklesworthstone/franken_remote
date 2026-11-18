@@ -1,5 +1,19 @@
 # Changelog
 
+## 2026-11-18 — a key queued during a preempted input turn no longer ends the session
+
+- A key or click the UI thread queued while the input dispatcher was between
+  reading its clock and taking the queue ended the session
+  (`Control(Capture(Clock))`): the event looked stamped in the future. On a
+  saturated CPU the dispatcher is often preempted there; on 11-18 two of the
+  owner's Windows sessions ended this way, after 4 s and 40 s. It was not a
+  clock-correlation fault: both stamps come from the viewer's own clock.
+- Such an event is now fresh. Every push still refuses a stamp from its own
+  future, and the event's 100 ms age limit still applies.
+- The fr-client clock tests that still expected the exchange to end at the
+  1 s bound now expect the previous fix's give-up behavior.
+- No bound changed. Viewer-side only; hosts need no rebuild.
+
 ## 2026-11-18 — the host names why it refused an observation renewal
 
 - One installed host's log shows 14 shares ending with
