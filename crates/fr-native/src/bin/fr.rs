@@ -4,6 +4,14 @@
 // authenticated local close owner; robot automation and screenshots stay Linux-only.
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 //! Native CLI entry point. Hosting is never enabled by installing/running it.
+// `fr app`: the desktop application (machine picker, then a viewer) and its
+// launcher, wherever the native picker and viewer exist.
+#[cfg(any(
+    all(target_os = "linux", feature = "linux-desktop"),
+    all(target_os = "macos", feature = "macos-desktop")
+))]
+#[path = "fr_cli/app.rs"]
+mod app;
 #[cfg(any(
     all(target_os = "linux", feature = "linux-desktop"),
     all(target_os = "macos", feature = "macos-desktop")
@@ -144,6 +152,29 @@ fn main() -> ExitCode {
             );
         };
         args.push(arg);
+    }
+    // The desktop application runs its picker and viewer as child commands of
+    // this executable, each under the ordinary limits and parser below.
+    if args.first().is_some_and(|first| first == "app") {
+        #[cfg(any(
+            all(target_os = "linux", feature = "linux-desktop"),
+            all(target_os = "macos", feature = "macos-desktop")
+        ))]
+        if app::requested(&args) {
+            return finish(app::run(&args), json);
+        }
+        #[cfg(not(any(
+            all(target_os = "linux", feature = "linux-desktop"),
+            all(target_os = "macos", feature = "macos-desktop")
+        )))]
+        return finish(
+            Err(Failure::new(
+                "app_unavailable",
+                "fr app needs a desktop build of fr: the linux-desktop feature on Linux or macos-desktop on macOS.",
+                2,
+            )),
+            json,
+        );
     }
     // Help is local and platform-independent, but never bypasses the original
     // argument limits above or turns a malformed command into a successful one.

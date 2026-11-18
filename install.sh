@@ -1232,9 +1232,28 @@ write_manifest() {
     echo "completions=${INSTALLED_COMPLETIONS[*]+${INSTALLED_COMPLETIONS[*]}}"
     echo "skills=${INSTALLED_SKILLS[*]+${INSTALLED_SKILLS[*]}}"
     echo "path_rc=${PATH_RC_FILES[*]+${PATH_RC_FILES[*]}}"
+    echo "launcher=$APP_LAUNCHER"
     echo "cache=$CACHE_DIR"
   } >"$staged"
   mv -f "$staged" "$MANIFEST"
+}
+
+# The desktop launcher (~/Applications/FrankenRemote.app on macOS, an
+# applications-menu entry on Linux) runs `fr app`: the machine picker with
+# its connection choices. fr writes and removes it itself; a build without a
+# desktop viewer refuses, and the install continues without one.
+APP_LAUNCHER="no"
+install_launcher() {
+  if "$BIN_DIR/fr" app --install >/dev/null 2>&1; then
+    APP_LAUNCHER="yes"
+    if [ "$OS" = "darwin" ]; then
+      ok "Added FrankenRemote to ~/Applications"
+    else
+      ok "Added FrankenRemote to the applications menu"
+    fi
+  else
+    info "No desktop launcher: this fr has no desktop viewer (fr app is unavailable)"
+  fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1717,6 +1736,10 @@ uninstall() {
       rm -f "$dest/$item"
     fi
   done
+  # fr removes only the launcher it wrote; do this while fr still exists.
+  if [ "$(manifest_get launcher || echo no)" = "yes" ] && [ -x "$BIN_DIR/fr" ]; then
+    "$BIN_DIR/fr" app --uninstall >/dev/null 2>&1 && ok "Desktop launcher removed"
+  fi
   for item in $binaries; do rm -f "$BIN_DIR/$item"; done
   rmdir "$BIN_DIR" 2>/dev/null || true
   for item in $completions; do
@@ -1801,6 +1824,13 @@ print_summary() {
   elif [ "$CLIENT_ONLY" -eq 0 ]; then
     lines+=("Host:       not set up (rerun with --host to share this desktop)")
   fi
+  if [ "$APP_LAUNCHER" = "yes" ]; then
+    if [ "$OS" = "darwin" ]; then
+      lines+=("App:        FrankenRemote in ~/Applications (Spotlight, Launchpad)")
+    else
+      lines+=("App:        FrankenRemote in the applications menu")
+    fi
+  fi
   if [ "$NO_CONFIGURE" -eq 0 ]; then
     lines+=("Completions: ${#INSTALLED_COMPLETIONS[@]} shell(s)")
     if [ "${#INSTALLED_SKILLS[@]}" -gt 0 ]; then
@@ -1816,6 +1846,7 @@ print_summary() {
       for line in "${lines[@]}"; do gum style --foreground 245 "$line"; done
       echo ""
       gum style --foreground 39 "Next:"
+      gum style --foreground 245 "  fr app                                     # choose a machine and connect"
       gum style --foreground 245 "  fr hosts                                   # machines on your tailnet"
       gum style --foreground 245 "  fr connect --choose-host --view-only --experimental-native --display only"
     } | gum style --border normal --border-foreground 42 --padding "1 2"
@@ -1824,6 +1855,7 @@ print_summary() {
     echo ""
     draw_box "0;32" "\033[1;32m$PRODUCT is installed\033[0m" "" "${lines[@]}" "" \
       "Next:" \
+      "  fr app                      # choose a machine and connect" \
       "  fr hosts                    # machines on your tailnet" \
       "  fr connect --choose-host --view-only --experimental-native --display only"
     echo -e "\033[0;90mTo uninstall: curl -fsSL ${RAW_BASE}/main/install.sh | bash -s -- --uninstall\033[0m"
@@ -1908,6 +1940,7 @@ main() {
   if [ "$NO_CONFIGURE" -eq 0 ]; then
     maybe_add_path
     install_completions
+    install_launcher
     detect_agents
     install_agent_skills
   else

@@ -1,5 +1,60 @@
 # Changelog
 
+## 2026-11-18 — `fr app`: a desktop app with a machine picker on macOS and Linux
+
+- Windows had a Start-menu app (pick a machine, choose options, connect,
+  return to the list); macOS and Linux only had `fr connect --choose-host`,
+  whose window chose a machine but no options. `fr app` is the counterpart:
+  the native picker now also shows View only / View and control, Share
+  clipboard text and Ask which display to show, plus the previous attempt's
+  outcome above the list. Connect runs the viewer with those choices; closing
+  the viewer returns to the picker. Cancel or Escape quits. Choices are
+  remembered in the same document as the Windows app's (macOS:
+  `~/Library/Application Support/FrankenRemote/settings.json`; Linux:
+  `$XDG_CONFIG_HOME/frankenremote/settings.json`).
+- macOS shows radio buttons and check boxes under the list. The X11 picker
+  has a footer line toggled by F2, F3 and F4 or a click. Toggles only accept
+  fresh, focused input, like row navigation, and never confirm a row; a
+  toggle between a press and its release cancels that confirmation.
+- `fr app` runs two child commands of the same `fr`, so every connection
+  takes the existing path: `fr connect --choose-host --pick-only` reports
+  `host_selected` with the confirmed choices and opens no connection, then a
+  plain `fr connect NODE ...` re-resolves that identity and connects.
+  `--app-notice TEXT` (printable ASCII, at most 384 bytes) carries the
+  outcome into the next picker.
+- `fr app --install` adds `~/Applications/FrankenRemote.app` (macOS) or
+  `~/.local/share/applications/frankenremote.desktop` (Linux); `--uninstall`
+  removes only a launcher it wrote. `install.sh` installs the launcher with
+  the client and removes it on `--uninstall`.
+- On macOS a window from a process that `fr app` spawns directly may stay
+  behind the app the user is in (cooperative activation): on 11-18 a
+  returning picker opened hidden behind other windows. When the installed
+  launcher runs the same `fr`, `fr app` therefore starts each step through
+  Launch Services (`open -n -W -a FrankenRemote.app --args ...`), so macOS
+  brings it forward like any app the user opens. A picker that reopens only
+  because the last one expired unused (every two minutes; the app quits
+  after half an hour unused) starts with `open -g` and stays behind.
+- The macOS picker's rows showed only the node ID: the machine name, set
+  through the table cell's `textField` outlet, never appeared. It is now a
+  plain label, so each row shows the name above its ID.
+- Checked on 11-18:
+  - `cargo fmt`, `clippy --all-targets -D warnings` and tests for fr-native
+    on macOS 27.0.1 (mac-studio: 235 library, 355 `fr`) and on Linux (ts1:
+    470 library, 465 `fr`, and the 5 Xvfb picker tests, including the 2 new
+    choice tests).
+  - On mac-studio, `FrankenRemote.app` opened the picker in front. View
+    only, a keyboard row choice and Connect saved the choices and ran
+    `fr connect NODE --view-only`. That attempt failed (mac-mini-max, whose
+    host still waits for macOS permissions), and the picker came back in
+    front with the outcome and the remembered choices. Cancel quit.
+  - On ts1, an Xvfb screenshot showed the X11 picker with the notice and
+    the choice line.
+- Not tested yet:
+  - a successful session started from `fr app` (no host was reachable from
+    mac-studio);
+  - whether the viewer window comes to the front during a connection;
+  - the Linux desktop entry in a real desktop session.
+
 ## 2026-11-18 — a large first view starts over a slower link
 
 - A viewer's first picture (the startup IDR) arrives as 1150-byte records on
