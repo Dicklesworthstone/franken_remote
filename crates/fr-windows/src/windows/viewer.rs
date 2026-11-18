@@ -170,6 +170,10 @@ thread_local! {
     /// UI cleanup may wait until a nested native callback releases Viewer.
     static CHANGE_PENDING: RefCell<Option<(Cause, change_display::Request<Shared>)>> =
         const { RefCell::new(None) };
+    /// Mouse events dropped for exceeding the input freshness budget.
+    static STALE_INPUT: Cell<u64> = const { Cell::new(0) };
+    /// The longest gap between two turns of the message pump.
+    static LONGEST_TURN: Cell<Duration> = const { Cell::new(Duration::ZERO) };
 }
 /// Runs `f` on the viewer unless it is absent or already borrowed (a
 /// message dispatched from inside another viewer call).
@@ -361,6 +365,11 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
     });
     let started = Instant::now();
     let stats = pump(seconds, hwnd, &config);
+    eprintln!(
+        "fr-windows: longest ui turn {} ms; stale mouse events dropped: {}",
+        LONGEST_TURN.with(Cell::get).as_millis(),
+        STALE_INPUT.with(Cell::get)
+    );
     let mut viewer = VIEWER.with(|cell| cell.borrow_mut().take());
     if let Some(viewer) = &mut viewer {
         cursor::retire(viewer, hwnd);
@@ -392,7 +401,15 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
     let mut last_sequence = 0;
     let mut closing = false;
     let mut msg = MSG::default();
+    // The longest gap between two turns of this loop: input waits that long
+    // in the queue, and anything over the freshness budget is dropped.
+    let mut turn = Instant::now();
+    STALE_INPUT.with(|count| count.set(0));
+    LONGEST_TURN.with(|longest| longest.set(Duration::ZERO));
     loop {
+        let now = Instant::now();
+        LONGEST_TURN.with(|longest| longest.set(longest.get().max(now - turn)));
+        turn = now;
         loop {
             drain_close();
             // SAFETY: the standard message pump on this thread's queue.
@@ -1567,13 +1584,25 @@ impl Viewer {
         let aged = message_age(message_time)
             .ok()
             .and_then(|(at, age)| capture.with_queue_age(age).map(|capture| (capture, at)));
+        // Older than the freshness budget (the UI thread was busy drawing):
+        // the event is dropped, never sent late. The caller releases anything
+        // a dropped release leaves held; the session continues.
         let Some(captured) = aged else {
-            if ordered {
-                self.input_failed();
-            }
+            STALE_INPUT.with(|count| count.set(count.get() + 1));
             return None;
         };
         self.after_keys(ordered).then_some(captured)
+    }
+    /// Drop one input event the session must not send (stale, unmapped or
+    /// refused). A dropped press needs nothing: the core ignores the release
+    /// of a key or button it never pressed. A dropped release would leave a
+    /// hold on the host, so every hold is released instead.
+    fn drop_input(&mut self, release: bool) {
+        if release {
+            self.release_everything();
+            // SAFETY: release this UI thread's mouse capture; no button is held.
+            let _ = unsafe { ReleaseCapture() };
+        }
     }
     fn pointer(&mut self, x: i32, y: i32, message_time: u32) {
         // Replaceable motion may wait for a busy key; it must not overtake
@@ -1597,14 +1626,17 @@ impl Viewer {
         (x, y): (i32, i32),
         message_time: u32,
     ) {
+        let held = self.buttons.get(index).copied().unwrap_or(false);
         let Some((captured, at)) = self.capture_mouse(message_time, true) else {
+            self.drop_input(!pressed && held);
             return;
         };
         let (px, py) = match self.point(at, x, y) {
             Ok(Some(point)) => point,
             Ok(None) => return,
+            // The mapping is being re-established after a move or resize.
             Err(StaleMapping) => {
-                self.input_failed();
+                self.drop_input(!pressed && held);
                 return;
             }
         };
@@ -1621,8 +1653,12 @@ impl Viewer {
             | InputResult::Inactive
             | InputResult::Unsupported
             | InputResult::Outside => return,
-            _ => {
+            InputResult::ControlLost => {
                 self.input_failed();
+                return;
+            }
+            _ => {
+                self.drop_input(!pressed && held);
                 return;
             }
         }
@@ -1648,19 +1684,23 @@ impl Viewer {
         let shared = self.session.shared();
         let captured = match shared.capture_key(usage, pressed) {
             Ok(captured) => captured,
-            // Queued before an app switch: dropped, never failed or replayed.
-            Err(InputResult::Inactive) => return,
-            Err(_) => {
+            Err(InputResult::ControlLost) => {
                 self.input_failed();
                 return;
             }
+            // Queued before an app switch, a key the host has no slot for
+            // (media and vendor keys), or not controlled: dropped, never fatal.
+            Err(_) => return,
         };
-        let Ok((at, age)) = message_age(message_time) else {
-            self.input_failed();
-            return;
-        };
-        let Some(captured) = captured.with_queue_age(age) else {
-            self.input_failed();
+        // Older than the freshness budget (the UI thread was busy): dropped,
+        // never sent late. A dropped release releases every held key instead.
+        let Some((at, captured)) = message_age(message_time)
+            .ok()
+            .and_then(|(at, age)| captured.with_queue_age(age).map(|captured| (at, captured)))
+        else {
+            if !pressed {
+                let _ = shared.release_all();
+            }
             return;
         };
         if self
@@ -1670,8 +1710,15 @@ impl Viewer {
             })
             .is_err()
         {
-            self.input_failed();
+            self.keys_expired();
         }
+    }
+    /// The paced key queue could not deliver in time: drop what is queued and
+    /// release every held key, keeping the session and its control.
+    fn keys_expired(&mut self) {
+        eprintln!("fr-windows: input_queue_expired (queued keys dropped, holds released)");
+        self.keys.clear();
+        let _ = self.session.shared().release_all();
     }
     /// Retry the same captures; neither the native queue nor frd receives a
     /// fresh deadline when transport pacing releases a slot.
@@ -1684,7 +1731,7 @@ impl Viewer {
             })
             .is_err()
         {
-            self.input_failed();
+            self.keys_expired();
         }
     }
     /// An ordered button/scroll cannot bypass an unsent key. If the bounded
@@ -1697,13 +1744,10 @@ impl Viewer {
         if self.closing {
             return false;
         }
-        if self.keys.is_empty() {
-            return true;
-        }
-        if ordered {
-            self.input_failed();
-        }
-        false
+        // An ordered event behind a still-paced key is dropped rather than
+        // reordered (the caller releases what a dropped release leaves held).
+        let _ = ordered;
+        self.keys.is_empty()
     }
     fn scroll(&mut self, hwnd: HWND, (dx, dy): (f64, f64), (x, y): (i32, i32), message_time: u32) {
         let Some((captured, at)) = self.capture_mouse(message_time, true) else {
@@ -1717,22 +1761,24 @@ impl Viewer {
             self.input_failed();
             return;
         }
-        match self.point(at, point.x, point.y) {
-            Ok(Some((px, py))) => {
-                if self
-                    .session
-                    .shared()
-                    .captured_scroll(captured, dx, dy, px, py)
-                    == InputResult::ControlLost
-                {
-                    self.input_failed();
-                }
-            }
-            Ok(None) => {}
-            Err(StaleMapping) => self.input_failed(),
+        // Outside the picture, or the mapping is being re-established after a
+        // move or resize: the scroll is dropped (a scroll needs no release).
+        if let Ok(Some((px, py))) = self.point(at, point.x, point.y)
+            && self
+                .session
+                .shared()
+                .captured_scroll(captured, dx, dy, px, py)
+                == InputResult::ControlLost
+        {
+            self.input_failed();
         }
     }
+    #[track_caller]
     fn input_failed(&mut self) {
+        // Name the call site: a session that ends this way otherwise reports
+        // only a bare failure. A source location is content-free.
+        let at = std::panic::Location::caller();
+        eprintln!("fr-windows: input_failed at {}:{}", at.file(), at.line());
         // Mark the local owner terminal before stopping its source. Dropping
         // that source wakes frd's independent held-state cleanup; attempting
         // more keys or re-stamping a release is never the recovery path.
@@ -1748,7 +1794,12 @@ impl Viewer {
         let _ = unsafe { ReleaseCapture() };
     }
     /// Closes for good: no reopen follows.
+    #[track_caller]
     fn close(&mut self) {
+        if !self.closing {
+            let at = std::panic::Location::caller();
+            eprintln!("fr-windows: closing from {}:{}", at.file(), at.line());
+        }
         self.closing = true;
         self.retire_file_choice();
         self.reopen.cancel();

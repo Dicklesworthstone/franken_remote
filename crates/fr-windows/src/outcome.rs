@@ -70,12 +70,30 @@ pub(crate) fn summarize(completion: &str, machine: &str) -> Summary {
             "The session with {machine} failed before a picture was shown. Check that this PC can decode HEVC."
         ),
         "session_failed" => format!(
-            "The session with {machine} failed after {}.",
-            duration(seconds)
+            "The session with {machine} failed after {}{}.",
+            duration(seconds),
+            detail(&document)
         ),
         _ => format!("The session with {machine} ended unexpectedly ({end})."),
     };
     Summary { ok, message }
+}
+
+/// The completion's typed, content-free failure detail, e.g.
+/// ` (Renewal(Transport(Expired)))`; empty when absent or implausible.
+fn detail(document: &Value) -> String {
+    match document["detail"].as_str() {
+        Some(text)
+            if !text.is_empty()
+                && text.len() <= 160
+                && text
+                    .bytes()
+                    .all(|byte| byte.is_ascii_graphic() || byte == b' ') =>
+        {
+            format!(" ({text})")
+        }
+        _ => String::new(),
+    }
 }
 
 fn refused(reason: &str, machine: &str) -> String {

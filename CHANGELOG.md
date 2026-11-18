@@ -1,5 +1,36 @@
 # Changelog
 
+## 2026-11-18 — Windows: one late key or click no longer ends the session
+
+- The viewer refuses input older than its 100 ms freshness budget (about
+  84 ms after the 16 ms tick margin). A stale key, click or scroll, an
+  unmapped key (media and vendor keys), a key the core refused, or a paced
+  key queue that timed out each called `input_failed`, which closed the
+  whole session.
+  - On 11-18 the owner's sessions from the Windows app kept ending after
+    tens of seconds; the host logged the viewer closing with a failure.
+  - Mouse motion in full screen did nothing: stale motion is dropped
+    silently, and a 3240-wide picture on the laptop's integrated GPU keeps
+    the UI thread busy long enough for most motion to go stale.
+- Now such an event is dropped and never sent late, and the session and its
+  control continue. A dropped press needs nothing, because the core already
+  ignores the release of a key or button it never pressed. A dropped
+  release releases every hold instead, so nothing stays pressed on the
+  host. Only a lost control grant (`ControlLost`) still ends control.
+- Diagnostics:
+  - Every forced close and input failure prints its source location
+    (`fr-windows: closing from ...`, `input_failed at ...`).
+  - At the end the viewer prints its longest message-pump turn and how many
+    stale mouse events it dropped.
+  - The app appends each session's arguments, status lines and completion
+    document to `%LOCALAPPDATA%\FrankenRemote\sessions.log` (about 1 MB
+    kept).
+  - A failed session's notice now includes the typed detail, e.g. "failed
+    after 32 s (Renewal(...))".
+- Not fixed yet: if the UI thread really is that slow in full screen, motion
+  still drops. The new numbers will show whether presentation needs to stop
+  blocking input.
+
 ## 2026-11-18 — Windows: automatic control, full screen, shortcuts to the host
 
 - Control is automatic in a `--control` (View and control) session: every

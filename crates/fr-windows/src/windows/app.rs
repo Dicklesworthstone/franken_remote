@@ -261,6 +261,45 @@ fn application() -> ExitCode {
     }
 }
 
+/// The session log keeps roughly this much; older text is dropped first.
+const LOG_LIMIT: usize = 1024 * 1024;
+
+/// Append one session's arguments, status lines and completion document to
+/// `sessions.log` beside the settings, so a failed session can be explained
+/// afterwards. The viewer's own output is content-free: typed states, counts
+/// and timings, never keys, pixels, clipboard text or file paths.
+fn log_session(args: &[String], output: &std::process::Output) {
+    let Some(path) =
+        install::settings_path().map(|settings| settings.with_file_name("sessions.log"))
+    else {
+        return;
+    };
+    let mut text = std::fs::read(&path).unwrap_or_default();
+    if text.len() > LOG_LIMIT {
+        let cut = text.len() - LOG_LIMIT / 2;
+        let start = text[cut..]
+            .iter()
+            .position(|&byte| byte == b'\n')
+            .map_or(cut, |line| cut + line + 1);
+        text.drain(..start);
+    }
+    let started = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    text.extend_from_slice(
+        format!(
+            "=== session ended at unix {started}, exit {}: {}\n",
+            output.status.code().unwrap_or(-1),
+            args.join(" ")
+        )
+        .as_bytes(),
+    );
+    text.extend_from_slice(&output.stderr);
+    text.extend_from_slice(&output.stdout);
+    text.push(b'\n');
+    let _ = std::fs::write(&path, text);
+}
+
 fn session(chosen: &Chosen) -> Notice {
     let name = machines::short_name(chosen.peer.certificate_name()).to_owned();
     let failed = |text: String| Notice {
@@ -289,6 +328,10 @@ fn session(chosen: &Chosen) -> Notice {
         Ok(output) => output,
         Err(error) => return failed(format!("The viewer could not be followed ({error}).")),
     };
+    log_session(
+        &chosen.settings.viewer_args(chosen.peer.stable_id()),
+        &output,
+    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     if let Some(document) = stdout
         .lines()
