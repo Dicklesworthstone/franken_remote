@@ -1227,6 +1227,20 @@ install_payload() {
   if [ "$OS" = "darwin" ]; then info "Signature: $SIGNED_WITH"; fi
 }
 
+# Every program installed in BIN_DIR, so --uninstall removes them all: this
+# run's, plus any an earlier run recorded that are still there (a rerun that
+# installs nothing new on macOS lists no fr-opus-worker; a --client-only
+# reinstall leaves the earlier host programs in place).
+manifest_binaries() {
+  local name list=("${BINARIES[@]}")
+  for name in $(manifest_get binaries 2>/dev/null || true); do
+    case "$name" in *[!A-Za-z0-9_-]*) continue ;; esac
+    case " ${list[*]} " in *" $name "*) continue ;; esac
+    if [ -e "$BIN_DIR/$name" ]; then list+=("$name"); fi
+  done
+  echo "${list[*]}"
+}
+
 write_manifest() {
   local staged="$MANIFEST.new"
   {
@@ -1238,7 +1252,7 @@ write_manifest() {
     echo "mode=$([ "$CLIENT_ONLY" -eq 1 ] && echo client || echo full)"
     echo "installed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     echo "bin_dir=$BIN_DIR"
-    echo "binaries=${BINARIES[*]}"
+    echo "binaries=$(manifest_binaries)"
     echo "dest=$DEST"
     echo "host=$HOST_SERVICE"
     echo "host_unit=$HOST_UNIT"
