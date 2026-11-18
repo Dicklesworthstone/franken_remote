@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-11-18 — a host's mid-session picture recovery no longer ends the session
+
+- Since the first-view limit went to 6 s, every recovery a host admitted
+  failed at once, and the session ended. The viewer saw
+  `LeaseRevoked { reason: HostFailure }`, and the host logged
+  `ReferenceRecovery(Expired)`. On mac-studio every session ended about 3 s
+  in, at its first lost reference.
+- The cause: the host's recovery deadline is now its 6 s sender horizon, but
+  starting the replacement media channels still refused any deadline more
+  than 5 s away. That cap is now the same 6 s first-view limit.
+- A recovery test now runs with the shipped hosts' sender policy.
+- Host-side: hosts need a rebuild.
+
 ## 2026-11-18 — a key queued during a preempted input turn no longer ends the session
 
 - A key or click the UI thread queued while the input dispatcher was between

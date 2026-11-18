@@ -218,11 +218,18 @@ async fn fixture_with_input(
     let hm = NegotiatedMedia::new(host.io().unwrap().0, &selected, &hc, &hr, &hv).unwrap();
     let vm = NegotiatedMedia::new(viewer.io().unwrap().0, &selected, &vc, &vr, &vv).unwrap();
     let control = host.observation().unwrap();
-    let mut source = source(&control, mode).await;
-    let mut send_policy = SendPolicy {
-        recovery_horizon_micros: budget,
-        ..SendPolicy::default()
+    // "host-policy" is the healthy capture with the shipped hosts' sender
+    // policy, whose recovery horizon (6 s) exceeds what a viewer may use.
+    let (mode, mut send_policy) = if mode == "host-policy" {
+        ("healthy", crate::media::decoder_startup::host_send_policy())
+    } else {
+        let policy = SendPolicy {
+            recovery_horizon_micros: budget,
+            ..SendPolicy::default()
+        };
+        (mode, policy)
     };
+    let mut source = source(&control, mode).await;
     if mode == "late-repeat" {
         // One completed recovery followed by refusal BEFORE another attachment
         // allocation. Do not raise the separate connection namespace limit.
@@ -366,6 +373,10 @@ async fn fixture_with_input(
 #[test]
 fn both_running_peers_recover_and_continue_on_the_original_workers_and_connection() {
     recover_on_original_owners(true, "healthy", None);
+}
+#[test]
+fn recovery_completes_under_the_shipped_hosts_six_second_recovery_horizon() {
+    recover_on_original_owners(true, "host-policy", None);
 }
 #[test]
 fn shipped_observer_recovers_when_the_host_omits_optional_decoder_metrics() {
