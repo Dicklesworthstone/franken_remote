@@ -1155,12 +1155,16 @@ choose_signing_identity() {
 sign_binary() {
   local file="$1" name="$2"
   [ "$OS" = "darwin" ] || return 0
-  if [ "$SIGNED_WITH" = "ad-hoc" ]; then
-    codesign --force --options runtime --timestamp=none --identifier "com.frankenremote.$name" --sign - "$file" >/dev/null 2>&1
-  else
-    codesign --force --options runtime --timestamp --identifier "com.frankenremote.$name" --sign "$SIGNING_IDENTITY" "$file" >/dev/null 2>&1
+  local identity="-" timestamp="--timestamp=none"
+  if [ "$SIGNED_WITH" != "ad-hoc" ]; then
+    identity="$SIGNING_IDENTITY"
+    timestamp="--timestamp"
   fi
-  codesign --verify --strict "$file" >/dev/null 2>&1
+  # Both must succeed: --verify alone also passes on the linker's own ad-hoc
+  # signature that a failed signing leaves in place.
+  codesign --force --options runtime "$timestamp" --identifier "com.frankenremote.$name" \
+    --sign "$identity" "$file" >/dev/null 2>&1 &&
+    codesign --verify --strict "$file" >/dev/null 2>&1
 }
 
 # A POSIX-sh single-quoted literal.
@@ -1198,8 +1202,16 @@ install_payload() {
     cp "$PAYLOAD_DIR/$name" "$staged"
     chmod 0755 "$staged"
     if ! sign_binary "$staged" "$name"; then
-      rm -f "$staged"
-      die "Could not sign $name"
+      # A Developer ID whose keychain is locked (an ssh session, for one)
+      # fails with errSecInternalComponent; an ad-hoc signature still runs.
+      local failed_identity="$SIGNED_WITH"
+      SIGNED_WITH="ad-hoc"
+      if [ "$failed_identity" = "ad-hoc" ] || ! sign_binary "$staged" "$name"; then
+        rm -f "$staged"
+        die "Could not sign $name"
+      fi
+      warn "Signing with \"$failed_identity\" failed (is the keychain locked? Over ssh, run: security unlock-keychain)"
+      warn "Using an ad-hoc signature instead; macOS then asks for its permissions again after each update."
     fi
     if ! "$staged" --help >/dev/null 2>&1 && [ "$name" = "fr" ]; then
       rm -f "$staged"
