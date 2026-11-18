@@ -24,6 +24,10 @@ use std::{
 /// One original terminal result. `bytes` appears only for an actual atomic
 /// publication, never for progress or a fully staged but unpublished object.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_field_names,
+    reason = "`receipt` is the native result document's own field name"
+)]
 pub struct Receipt {
     pub id: u64,
     /// Preserve the zero-based selection index used by the native result document.

@@ -1,5 +1,30 @@
 # Changelog
 
+## 2026-11-18 — one slow clock probe no longer ends the session
+
+- The viewer measures the host clock with a probe every second on the
+  control stream, which it shares with the video. A reply later than the
+  1 s exchange bound stopped the exchange and ended the whole session as
+  `ClockSynchronization`, although the last measurement stayed valid for
+  10 s. On a saturated link (the owner's 23 Mbit/s cellular path carrying up
+  to 30 Mbit/s of video) one queued reply is enough. On 11-18 the Windows
+  app's sessions to mac-studio ended after 10-40 s with
+  `ClockSynchronization` and `Capture(Clock)` among the causes, and the
+  host's log shows the viewer closing with a failure in 38 of its recorded
+  shares.
+- Now a probe past its bound is given up: its late reply is recognized and
+  ignored, the next probe measures again, and an unsent probe keeps its
+  sequence so the host still sees consecutive probes. The exchange still
+  ends with `Expired` when the host answers no probe for a whole
+  correlation lifetime (10 s by default), so a silent host still ends the
+  session. The host drops a reply it could not send within its 1 s lifetime
+  instead of ending the session.
+- Diagnostics: the typed cause of a clock failure (`frd: clock
+  synchronization ended: ...`) and of a failed host connection check
+  (`frd: connection authority ended: ...`, behind the 14 host-side
+  `Renewal(Transport(Unauthorized))` ends) are now printed, so the Windows
+  app's sessions.log and frd.log name them.
+
 ## 2026-11-18 — a large first picture gets six seconds to start
 
 - A first view gets six seconds, up from two, from capturing its startup

@@ -470,7 +470,7 @@ impl ViewerSession {
         if let Some(clock) = &mut self.clock {
             clock
                 .service(&mut self.transport)
-                .map_err(|_| Error::ClockSynchronization)?;
+                .map_err(clock_synchronization)?;
         }
         Ok(())
     }
@@ -666,8 +666,8 @@ impl ViewerSession {
                         match clock.dispatch_record(route, bytes) {
                             Ok(Some(disposition)) => return Ok(disposition),
                             Ok(None) => {}
-                            Err(_) => {
-                                failure = Some(Error::ClockSynchronization);
+                            Err(error) => {
+                                failure = Some(clock_synchronization(error));
                                 return Err(());
                             }
                         }
@@ -834,6 +834,14 @@ impl Drop for SessionDrive<'_> {
             self.viewer.close();
         }
     }
+}
+
+/// `Error::ClockSynchronization` carries no cause (the clock error embeds this
+/// error type), so the content-free cause goes to the log: the Windows app
+/// keeps it in sessions.log, frd in frd.log.
+pub(super) fn clock_synchronization(error: clock::Error) -> Error {
+    eprintln!("frd: clock synchronization ended: {error:?}");
+    Error::ClockSynchronization
 }
 
 // Preserve an actual local silence/response deadline failure through the

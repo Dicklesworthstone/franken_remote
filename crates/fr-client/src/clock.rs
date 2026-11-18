@@ -1,6 +1,15 @@
 //! One correlated clock exchange at a time. Queueing, network transit and delayed
 //! callbacks all remain inside the measured uncertainty interval. No host time
 //! is compared directly to viewer time; no successful probe grants input.
+//!
+//! A probe whose reply misses `max_exchange_us` is given up, not fatal: it
+//! measured nothing usable, the last correlation stays usable until its own
+//! fixed expiry, and the next probe measures again. The probe shares the
+//! control stream with the session's video, so on a saturated link one reply
+//! can queue past a second; that used to end the whole session
+//! (`ClockSynchronization`) although the last correlation had nine seconds of
+//! validity left. A host that answers no probe for a whole correlation lifetime
+//! (`valid_for_us`) still ends the exchange with `Expired`.
 use crate::input::ClientInstant;
 use fr_core::limits::ProtocolLimits;
 use fr_media::freshness::{ClockCorrelation, ClockPolicy, ClockSample};
@@ -21,6 +30,9 @@ pub enum Error {
     Busy,
     UnexpectedReply,
     HostClockRegression,
+    /// The reply of a probe already given up. Not a failure: the exchange
+    /// continues, and the caller consumes the record without a correlation.
+    LateReply,
     Wire(WireError),
     Correlation(fr_media::freshness::Error),
 }
@@ -43,6 +55,11 @@ pub struct ClockExchange {
     bytes: [u8; PROBE_BYTES],
     correlation: Option<ClockCorrelation>,
     last_host: Option<u64>,
+    /// The highest sequence of a sent probe that was given up. Its reply still
+    /// arrives on the reliable stream, after which it is ignored.
+    abandoned: Option<u64>,
+    /// When the exchange started or last accepted a reply.
+    heard: u64,
     stopped: bool,
 }
 impl ClockExchange {
@@ -80,6 +97,8 @@ impl ClockExchange {
             bytes: [0; PROBE_BYTES],
             correlation: None,
             last_host: None,
+            abandoned: None,
+            heard: now.0,
             stopped: false,
         })
     }
@@ -94,6 +113,10 @@ impl ClockExchange {
         Err(error)
     }
     pub fn tick(&mut self, now: ClientInstant) -> Result<(), Error> {
+        self.observe(now)?;
+        self.expire(now.0)
+    }
+    fn observe(&mut self, now: ClientInstant) -> Result<(), Error> {
         if self.stopped {
             return Err(Error::Stopped);
         }
@@ -101,7 +124,22 @@ impl ClockExchange {
             return self.fail(Error::ClockRegression);
         }
         self.last_now = now.0;
-        if self.pending.as_ref().is_some_and(|p| now.0 >= p.until) {
+        Ok(())
+    }
+    /// Give up a probe past its exchange bound. A sent one reaches the host on
+    /// the reliable stream, so its reply is expected and ignored later; an
+    /// unsent one never left, so the next probe reuses its sequence and the
+    /// host still sees consecutive sequences.
+    fn expire(&mut self, now: u64) -> Result<(), Error> {
+        if let Some(pending) = self.pending.take_if(|p| now >= p.until) {
+            if pending.queued {
+                self.abandoned = Some(pending.sequence);
+            } else {
+                self.next_sequence = Some(pending.sequence);
+            }
+            self.bytes.fill(0);
+        }
+        if now.saturating_sub(self.heard) >= self.policy.valid_for_us {
             return self.fail(Error::Expired);
         }
         Ok(())
@@ -148,7 +186,9 @@ impl ClockExchange {
     /// Call only after this exact probe entered the authenticated transport.
     /// This does not resample its start time or establish a clock correlation.
     pub fn queued(&mut self, now: ClientInstant) -> Result<(), Error> {
-        self.tick(now)?;
+        // Mark it sent before any expiry: a probe that just entered the
+        // transport must never have its sequence reused.
+        self.observe(now)?;
         let Some(pending) = &mut self.pending else {
             return self.fail(Error::UnexpectedReply);
         };
@@ -156,7 +196,7 @@ impl ClockExchange {
             return self.fail(Error::UnexpectedReply);
         }
         pending.queued = true;
-        Ok(())
+        self.expire(now.0)
     }
     /// The receive timestamp is sampled after the actual reply is available.
     /// Early, duplicate, unsolicited and other-session replies never create data.
@@ -179,6 +219,15 @@ impl ClockExchange {
         else {
             return self.fail(Error::UnexpectedReply);
         };
+        // Replies arrive in probe order, so one at or below the last given-up
+        // sequence (and not the probe in flight) is that late reply.
+        if self
+            .abandoned
+            .is_some_and(|abandoned| sequence <= abandoned)
+            && self.pending.as_ref().is_none_or(|p| p.sequence != sequence)
+        {
+            return Err(Error::LateReply);
+        }
         let Some(pending) = &self.pending else {
             return self.fail(Error::UnexpectedReply);
         };
@@ -206,6 +255,7 @@ impl ClockExchange {
         self.last_host = Some(host_sample_us);
         self.correlation = Some(correlation);
         self.pending = None;
+        self.heard = now.0;
         self.bytes.fill(0);
         Ok(correlation)
     }
@@ -217,5 +267,133 @@ impl ClockExchange {
     }
     pub fn in_flight(&self) -> bool {
         self.pending.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fr_core::ids::{HostBootId, OsSessionId, RemoteSessionId};
+
+    const LIMITS: ProtocolLimits = ProtocolLimits::ABSOLUTE;
+    const START: u64 = 1_000;
+
+    fn binding() -> ControlBinding {
+        ControlBinding {
+            id: 17,
+            host_boot: HostBootId::from_raw(1),
+            os_session: OsSessionId::from_raw(2),
+            remote_session: RemoteSessionId::from_raw(3),
+        }
+    }
+    fn exchange(max_exchange_us: u64, valid_for_us: u64) -> ClockExchange {
+        let policy = ClockPolicy {
+            max_exchange_us,
+            valid_for_us,
+            ..ClockPolicy::default()
+        };
+        ClockExchange::new(binding(), LIMITS, policy, ClientInstant(START)).unwrap()
+    }
+    fn send(exchange: &mut ClockExchange, now: u64) -> u64 {
+        exchange.begin(ClientInstant(now)).unwrap();
+        let (bytes, _) = exchange.pending(ClientInstant(now)).unwrap().unwrap();
+        let Message::Probe { sequence } = clock::decode(
+            bytes,
+            binding(),
+            &LIMITS,
+            InputDirection::ViewerToHost,
+            InputDelivery::Reliable,
+        )
+        .unwrap() else {
+            panic!("a probe");
+        };
+        exchange.queued(ClientInstant(now)).unwrap();
+        sequence
+    }
+    fn reply(sequence: u64, host_sample_us: u64) -> [u8; clock::REPLY_BYTES] {
+        let mut bytes = [0; clock::REPLY_BYTES];
+        clock::encode(
+            Message::Reply {
+                sequence,
+                host_sample_us,
+            },
+            binding(),
+            &LIMITS,
+            &mut bytes,
+            InputDirection::HostToViewer,
+            InputDelivery::Reliable,
+        )
+        .unwrap();
+        bytes
+    }
+
+    #[test]
+    fn a_probe_past_its_bound_is_given_up_and_its_late_reply_ignored() {
+        let mut exchange = exchange(250_000, 10_000_000);
+        assert_eq!(send(&mut exchange, START), 1);
+        let late = START + 300_000;
+        exchange.tick(ClientInstant(late)).unwrap();
+        assert!(!exchange.in_flight());
+        assert_eq!(send(&mut exchange, late), 2);
+        assert_eq!(
+            exchange.accept(&reply(1, 50_000), ClientInstant(late + 10)),
+            Err(Error::LateReply)
+        );
+        assert!(
+            exchange.in_flight(),
+            "the late reply leaves probe 2 waiting"
+        );
+        let correlation = exchange
+            .accept(&reply(2, 60_000), ClientInstant(late + 20))
+            .unwrap();
+        assert_eq!(correlation.received_at_us(), late + 20);
+        assert_eq!(
+            exchange.correlation(ClientInstant(late + 30)).unwrap(),
+            Some(correlation)
+        );
+    }
+
+    #[test]
+    fn an_unsent_probe_past_its_bound_keeps_its_sequence() {
+        let mut exchange = exchange(250_000, 10_000_000);
+        exchange.begin(ClientInstant(START)).unwrap();
+        // Backpressure: the probe never entered the transport.
+        exchange.tick(ClientInstant(START + 300_000)).unwrap();
+        assert!(!exchange.in_flight());
+        assert_eq!(send(&mut exchange, START + 300_000), 1);
+    }
+
+    #[test]
+    fn a_host_that_answers_nothing_for_a_whole_correlation_lifetime_ends_the_exchange() {
+        let mut exchange = exchange(250_000, 1_000_000);
+        let mut now = START;
+        for _ in 0..3 {
+            send(&mut exchange, now);
+            now += 300_000;
+            exchange.tick(ClientInstant(now)).unwrap();
+        }
+        assert_eq!(
+            exchange.tick(ClientInstant(START + 1_000_000)),
+            Err(Error::Expired)
+        );
+        assert_eq!(
+            exchange.tick(ClientInstant(START + 1_000_001)),
+            Err(Error::Stopped)
+        );
+    }
+
+    #[test]
+    fn each_accepted_reply_restarts_the_silence_bound() {
+        let mut exchange = exchange(250_000, 1_000_000);
+        let sequence = send(&mut exchange, START + 900_000);
+        exchange
+            .accept(&reply(sequence, 10), ClientInstant(START + 950_000))
+            .unwrap();
+        // Past START + valid_for, but within it of the last reply.
+        exchange.tick(ClientInstant(START + 1_500_000)).unwrap();
+        assert_eq!(
+            exchange.tick(ClientInstant(START + 1_950_000)),
+            Err(Error::Expired)
+        );
     }
 }

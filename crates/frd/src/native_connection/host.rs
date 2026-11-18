@@ -357,9 +357,15 @@ impl Server {
                 }
                 let gate = inside.clone();
                 let stop = cx.clone();
+                let reported = AtomicBool::new(false);
                 host.retain_connection_checks(
                     Arc::new(move || {
-                        if gate().is_err() {
+                        if let Err(error) = gate() {
+                            // The viewer sees only Unauthorized; say which
+                            // check failed, once (ordinary cancellation aside).
+                            if error != Error::Cancelled && !reported.swap(true, Ordering::AcqRel) {
+                                eprintln!("frd: connection authority ended: {error:?}");
+                            }
                             stop.cancel_fast(CancelKind::User);
                             return false;
                         }

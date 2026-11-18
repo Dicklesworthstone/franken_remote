@@ -390,7 +390,7 @@ impl<S: Services> Services for TimedServices<'_, S> {
         if let Some(clock) = &mut self.clock {
             clock
                 .service(transport)
-                .map_err(|_| Error::ClockSynchronization)?;
+                .map_err(super::viewer::clock_synchronization)?;
         }
         Ok(())
     }
