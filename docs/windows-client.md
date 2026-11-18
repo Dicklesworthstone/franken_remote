@@ -42,7 +42,7 @@ be running FrankenRemote and its own admission policy must allow this viewer.
 ## Install and use the desktop app
 
 The quickest install is the PowerShell one-liner. It downloads the release
-zip (or builds from source while no release exists) and runs the app's own
+zip (or builds from source if no release zip fits) and runs the app's own
 `--install`, described below:
 
 ```powershell

@@ -38,21 +38,31 @@ Beyond the programs themselves:
 
 Running the installer again upgrades in place. `--uninstall` (or `-Uninstall` on Windows) removes everything it added. All options are listed by `install.sh --help` and `install.ps1 -Help`. To pass options on Windows, use `& ([scriptblock]::Create((irm https://raw.githubusercontent.com/Dicklesworthstone/franken_remote/main/install.ps1))) -NoLaunch` or set the `FR_INSTALL_*` environment variables.
 
-**No release has been published yet, so both installers currently build from source.** Building needs about 12 GB free (10 GB on Windows), and the installers ask before installing anything system-wide:
+[Release v0.1.0](https://github.com/Dicklesworthstone/franken_remote/releases/tag/v0.1.0) has archives for:
+
+- macOS on Apple silicon;
+- Linux x86_64 on Ubuntu 24.04 and 26.04;
+- 64-bit ARM Linux on Ubuntu 24.04;
+- Windows x86_64 (the client).
+
+On Ubuntu, a release install took under a minute, runtime packages included. On macOS it took a few seconds.
+
+Other machines build from source. That needs about 12 GB free (10 GB on Windows), and the installers ask before installing anything system-wide:
 
 - **Linux:** the distribution's build packages (apt, dnf, pacman or zypper).
 - **macOS:** the Xcode command line tools.
 - **Windows:** rustup and a MinGW-w64 GCC (WinLibs, through winget).
 
-The first build took about 8 minutes for the Mac client and about 15 minutes for the Linux client and host.
+The first build took about 8 minutes for the Mac client, about 15 minutes for the Linux client and host, and 34 to 42 minutes for the Windows app.
 
 What has been run:
 
+- **v0.1.0:** the plain one-liners installed it in clean Ubuntu 24.04 and 26.04 containers with no Rust toolchain, and every program's libraries resolved. They also installed it on macOS (in a sandboxed home folder) and on Windows 11, where `fr-windows hosts` listed the tailnet's machines. A rerun and an uninstall were checked on each.
 - **Linux:** source installs in clean Ubuntu 24.04 and 26.04 containers.
 - **macOS:** a client-only source install, plus installs from local release archives. Wrong checksums, path traversal and symlinks were all refused.
-- **Windows 11:** installs from a local release zip, covering the app, its Apps & features entry, Start menu shortcut, PATH, `fr-windows hosts` and uninstall. The source-build helpers were also checked on Windows 11.
+- **Windows 11:** installs from a local release zip, covering the app, its Apps & features entry, Start menu shortcut, PATH, `fr-windows hosts` and uninstall. A native source build of the app also ran on a Windows 11 laptop.
 
-Not run yet: `--host` on a live Linux or macOS desktop, a complete native Windows source build, and the release workflow (`.github/workflows/release.yml`, which runs on `v*` tags).
+Not run yet: `--host` on a live Linux or macOS desktop.
 
 ## What runs today
 
