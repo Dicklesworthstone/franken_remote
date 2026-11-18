@@ -89,7 +89,9 @@ $script:InstallDir = $null
 $script:CacheDir = $null
 $script:UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FrankenRemote"
 $script:HevcStore = "ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7"
-$script:CosignIdentity = "^https://github.com/$Owner/$Repo/.github/workflows/release.yml@refs/tags/.*$"
+# The release workflow signs from a v* tag push, or from a manual run on main
+# (a draft published afterwards); only maintainers can start either.
+$script:CosignIdentity = "^https://github.com/$Owner/$Repo/.github/workflows/release.yml@refs/(tags/v.*|heads/main)$"
 $script:CosignIssuer = "https://token.actions.githubusercontent.com"
 $script:Interactive = [Environment]::UserInteractive -and -not ([Environment]::GetCommandLineArgs() -match '^-NonI')
 

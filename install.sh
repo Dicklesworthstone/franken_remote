@@ -90,7 +90,9 @@ QUIET=0
 NO_GUM=0
 KEEP_CACHE=0
 SIGNING_IDENTITY="${FR_SIGNING_IDENTITY:-}"
-COSIGN_IDENTITY_RE="^https://github.com/${OWNER}/${REPO}/.github/workflows/release.yml@refs/tags/.*$"
+# The release workflow signs from a v* tag push, or from a manual run on main
+# (a draft published afterwards); only maintainers can start either.
+COSIGN_IDENTITY_RE="^https://github.com/${OWNER}/${REPO}/.github/workflows/release.yml@refs/(tags/v.*|heads/main)$"
 COSIGN_OIDC_ISSUER="https://token.actions.githubusercontent.com"
 
 # Build sizes: the release profile (fat LTO) needs room for its target dir.
