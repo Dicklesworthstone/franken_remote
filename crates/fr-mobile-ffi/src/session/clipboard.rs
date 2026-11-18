@@ -48,6 +48,14 @@ fn clipboard_capability(name: &str) -> bool {
 }
 
 impl Report {
+    /// Whether a replacement view may start a fresh clipboard owner with the
+    /// user's original choice: the earlier one ended only because its session
+    /// closed (or never started). A refusal, a native failure or a local
+    /// privacy-window stop keeps sharing off for the rest of the window.
+    pub fn restartable(&self) -> bool {
+        matches!(self.reason, None | Some(Error::Closed | Error::Cancelled))
+    }
+
     fn retain_reason(&mut self, reason: Error) {
         if matches!(self.reason, None | Some(Error::Closed)) {
             self.reason = Some(reason);

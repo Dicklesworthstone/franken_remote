@@ -313,6 +313,28 @@ This is evidence of accepted API submission, not measurement of physical
 scanout. Live Direct2D rendering, native cursor handoff, focus changes and
 failed-cleanup qualification on a Windows desktop remain pending.
 
+## Full screen and Windows shortcuts
+
+`--fullscreen` (the app's **Full screen at this screen's resolution**, on by
+default) opens the viewer as a borderless window over its whole monitor, before
+the first picture size is stated. The host is asked for exactly the monitor's
+pixel size (for example 3240x2160 on a Surface Book 2), fitted to its own
+display's shape, and the picture is drawn 1:1: the host scales once and
+nothing is resampled on this PC. **Ctrl+Alt+Enter** switches full screen on or
+off at any time; the view reopens at the new size and control resumes by
+itself. Full screen hides the menu bar; leave it to reach **Input** and **File
+transfer**.
+
+While a session controls the host and its window is in front, Windows
+shortcuts go to the host instead of Windows: the Windows key (Command on a
+Mac), Alt+Tab, Alt+Esc, Ctrl+Esc, Alt+Space, Alt+F4, F10 and the rest. A
+low-level keyboard hook takes the keys from Windows only during that time and
+hands them to the viewer's normal key path. `--no-shortcuts` (or clearing
+**Send Windows shortcuts** in the app) keeps them with Windows. Two keys
+always stay local: **Ctrl+Alt+Enter**, and Ctrl+Alt+Del (and Win+L), which no
+application can take. To leave the viewer, use Ctrl+Alt+Enter and then click
+another window, or Ctrl+Alt+Del.
+
 ## Request or stop control in the viewer
 
 The native **Input** menu now contains **Request control**, **Stop control and
@@ -321,13 +343,16 @@ for a ready view, viewing, requesting control, controlling, or stopping. A
 request is not a grant: keys and pointer actions stay local until the host has
 granted control and the original input producer is attached.
 
-Start with `--control` to make explicit control requests available. If an
-automatic reconnect or a permitted resize opens a replacement view, it retains
-that control-capable profile but starts viewing. Open **Input → Request
-control** to make a fresh choice for that current view. A connection started
-without `--control` remains observation-only, and its Request action is
-disabled. Neither receiving a picture nor reopening a connection restores the
-earlier control request.
+Start with `--control` (the app's **View and control**) and control is
+automatic. The first view requests it, and so does every replacement view of
+that command: after an automatic reconnect, a resize, full screen on or off, a
+display change, or a return to a window that had stopped. Each is a fresh
+request in the new session through the host's normal admission and grant; no
+input from the earlier session is replayed. The text clipboard follows the
+same choice in replacement views, unless an earlier clipboard owner ended
+abnormally (a refusal, a native failure or **Turn off**); then it stays off
+for the rest of the window. A connection started without `--control` remains
+observation-only, and its Request action is disabled.
 
 Request is enabled only while the shared session has current visible-view
 evidence. Each menu choice belongs to its original view and is consumed once.
@@ -342,8 +367,8 @@ It fences that original input source immediately, then closes the controlled
 connection through its existing terminal exchange and bounded cleanup. Only
 positive original service and cleanup results permit a fresh viewing connection
 to the same selected machine. The new view requires the normal host admission
-and approval again. It does not request control, restart the clipboard or send
-any file selection again. **Request control** remains a separate fresh choice.
+and approval again. After your own Stop it does not request control, restart
+the clipboard or send any file selection again; **Request control** resumes.
 
 The Stop choice is bound to the original session, connection attempt, native
 window lifetime and menu gesture. Failed cleanup, a hidden window or expiry
@@ -374,9 +399,9 @@ connection while waiting. Its title shows **Control stopped; return to this
 window to keep viewing**. A fresh foreground event opens a new viewing
 connection to the same selected machine, subject to normal host admission and
 approval. That event has its own bounded opening request; repeated activation
-callbacks do not renew it. Choose **Input → Request control** again to request
-a new grant. Clipboard synchronization and previous file selections are
-retired permanently for that invocation's replacement connections. Closing
+callbacks do not renew it. That new view requests control by itself. Previous
+file selections are retired permanently for that invocation's replacement
+connections. Closing
 the dormant window or reaching `--seconds` ends the invocation. Failed or late
 original cleanup, another hide during an accepted return, a failed picture
 clear, or an exhausted replacement count ends the connection instead of

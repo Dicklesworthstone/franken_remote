@@ -7,7 +7,13 @@ use fr_mobile_ffi::session::{ControlRequest, ControlState, Shared};
 use std::{
     cell::{Cell, RefCell},
     sync::{Arc, Weak},
+    time::{Duration, Instant},
 };
+
+/// A new control state reaches the title and menu bar only after holding
+/// this long. The ready-view token and stale-view suspensions can flip the
+/// state several times a second, which made the title flash.
+const SETTLE: Duration = Duration::from_millis(750);
 use windows::{
     Win32::{
         Foundation::HWND,
@@ -209,6 +215,8 @@ pub(super) struct Menu {
     popup: HMENU,
     title: String,
     displayed: Option<ControlState>,
+    /// A different state seen since `displayed`, and when it was first seen.
+    pending: Option<(ControlState, Instant)>,
     choice: Option<Choice<ControlRequest>>,
     display_available: bool,
     dormant: bool,
@@ -261,6 +269,7 @@ impl Menu {
             popup,
             title: title.to_owned(),
             displayed: None,
+            pending: None,
             choice: None,
             display_available: false,
             dormant: false,
@@ -276,7 +285,8 @@ impl Menu {
         // callback. Neither that callback nor a reconnect renews this popup.
         let attempt = ready_attempt(original);
         let native_lifetime = lifetime();
-        self.refresh(original);
+        // The opening menu shows the current state's items at once.
+        self.update(original.control_state(), true);
         let choice = original.control_request();
         let opened = input_ticks();
         self.choice = choice.map(|request| Choice::new(request, opened));
@@ -346,10 +356,31 @@ impl Menu {
     }
 
     pub(super) fn refresh(&mut self, original: &Shared) {
-        let state = original.control_state();
+        self.update(original.control_state(), false);
+    }
+
+    /// Show `state` once it has held for [`SETTLE`]. The first state, an
+    /// opening menu (`force`) and the end of a session show at once.
+    fn update(&mut self, state: ControlState, force: bool) {
         if self.displayed == Some(state) {
+            self.pending = None;
             return;
         }
+        let now = Instant::now();
+        let settled = match self.pending {
+            Some((seen, since)) if seen == state => now.duration_since(since) >= SETTLE,
+            _ => {
+                self.pending = Some((state, now));
+                false
+            }
+        };
+        let immediate = force
+            || self.displayed.is_none()
+            || matches!(state, ControlState::Closing | ControlState::Ended);
+        if !settled && !immediate {
+            return;
+        }
+        self.pending = None;
         self.displayed = Some(state);
         self.dormant = false;
         let enabled = |available| if available { MF_ENABLED } else { MF_GRAYED };

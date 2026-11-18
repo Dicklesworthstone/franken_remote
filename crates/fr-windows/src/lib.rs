@@ -18,6 +18,7 @@
 //!       a local machine-choice snapshot (JSON), without remote probes.
 //!   fr-windows view [stable-id-or-name] [--port N] [--ipv4|--ipv6]
 //!       [--address IP]... [--control] [--no-clipboard] [--seconds N]
+//!       [--fullscreen] [--no-shortcuts]
 //!       [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software]
 //!       [--send FILE] (requires --control; one regular file, sent once)
 //!       [--receive DIR] [--receive-max-file-bytes N] [--receive-max-session-bytes N]
@@ -104,7 +105,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: fr-windows\n       fr-windows hosts\n       fr-windows view [stable-id-or-full-name] \
      [--port N] [--ipv4|--ipv6] [--address IP]... [--control] [--no-clipboard] [--seconds N] \
-     [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE] [--receive DIR] \
+     [--fullscreen] [--no-shortcuts] [--display primary|only|choose|HANDLE] [--decoder auto|hardware|software] [--send FILE] [--receive DIR] \
      [--receive-max-file-bytes N] [--receive-max-session-bytes N] \
      [--receive-conflict reject|keep-both]\n       \
      fr-windows directory <stable-id-or-full-name> [--port N] [--ipv4|--ipv6] \

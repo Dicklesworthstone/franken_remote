@@ -129,7 +129,11 @@ pub fn run(args: &[String]) -> ExitCode {
             DisplayChoice::Handle(handle) => fr_mobile_ffi::session::DisplayChoice::Handle(handle),
         },
     };
-    viewer::run(config, &title, options.seconds)
+    let view = viewer::View {
+        fullscreen: options.fullscreen,
+        shortcuts: options.shortcuts,
+    };
+    viewer::run(config, &title, options.seconds, view)
 }
 
 fn select_download(

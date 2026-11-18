@@ -15,11 +15,18 @@
 //! fresh source to each new viewer. Only a host seen scaling gets a reopen:
 //! one that sends native pixels would send the same picture again after
 //! seconds without one. Reopen requires successful retirement and the
-//! original requested close; it resumes viewing only. Native requested close
-//! fences input while retaining the original owner through its terminal
-//! exchange. A failed cleanup still terminates instead. A reopened control-capable view
-//! exposes a fresh Input → Request control choice, never replay of the earlier
-//! --control choice.
+//! original requested close. Native requested close fences input while
+//! retaining the original owner through its terminal exchange. A failed
+//! cleanup still terminates instead. A reopened view of a --control command
+//! asks the host for control again by itself, as a fresh request in the new
+//! session (the owner chose automatic control on 2026-11-18); no input from
+//! the earlier session is replayed. Only the user's own Stop control leaves
+//! it viewing, with Input → Request control to resume. The text clipboard
+//! follows the same choice unless an earlier owner ended abnormally.
+//!
+//! Full screen (`--fullscreen`, Ctrl+Alt+Enter) covers the monitor, so the
+//! host is asked for its exact pixel size. While controlling, Windows
+//! shortcuts go to the host unless `--no-shortcuts` (see `screen`).
 //!
 //! Leaving the active controlling window fences that original grant and closes
 //! it in order. After positive bounded cleanup the window can wait dormant for
@@ -29,8 +36,18 @@ mod control;
 mod cursor;
 mod display;
 mod download;
+mod screen;
 mod text;
 mod upload;
+
+/// Window choices for one viewing command.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct View {
+    /// Start full screen at the monitor's own pixel size.
+    pub fullscreen: bool,
+    /// While controlling, send Windows shortcuts to the host.
+    pub shortcuts: bool,
+}
 
 use super::render::Renderer;
 use crate::{
@@ -61,7 +78,9 @@ use windows::Win32::System::SystemInformation::GetTickCount64;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, VK_CONTROL, VK_MENU,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetClientRect,
     GetForegroundWindow, GetMessageTime, HTCLIENT, IDC_ARROW, IsDialogMessageW, IsIconic,
@@ -78,6 +97,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{HSTRING, Interface, w};
 
 /// The window's session, renderer and input state, owned by the UI thread.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent window state flags"
+)]
 struct Viewer {
     session: Session,
     renderer: Renderer,
@@ -129,6 +152,11 @@ struct Viewer {
     /// transition, retaining its original frame and color-range identity.
     repaint_pending: bool,
     local_cursor: cursor::Local,
+    /// Stop control or an abnormal clipboard end: no replacement view
+    /// restarts clipboard sharing for the rest of this window.
+    clipboard_retired: bool,
+    /// Send Windows shortcuts to a controlled host (`View::shortcuts`).
+    shortcuts: bool,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -224,8 +252,8 @@ impl Completion {
     }
 }
 
-pub fn run(config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
-    session(config, title, seconds).print()
+pub fn run(config: Config, title: &str, seconds: Option<u64>, view: View) -> ExitCode {
+    session(config, title, seconds, view).print()
 }
 
 /// One viewer window and session, returning its completion document.
@@ -233,7 +261,7 @@ pub fn run(config: Config, title: &str, seconds: Option<u64>) -> ExitCode {
     clippy::too_many_lines,
     reason = "one original window and its selected owners"
 )]
-pub fn session(mut config: Config, title: &str, seconds: Option<u64>) -> Completion {
+pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View) -> Completion {
     CLOSE_PENDING.with(|pending| pending.set(false));
     CHANGE_PENDING.with(|pending| *pending.borrow_mut() = None);
     // SAFETY: process-wide DPI awareness, set before any window exists, so
@@ -245,6 +273,7 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>) -> Complet
     let Ok(hwnd) = create_window(title) else {
         return refuse("window_unavailable");
     };
+    let _screen = screen::Guard;
     let Ok(input_menu) = control::Menu::install(hwnd, title) else {
         // SAFETY: our UI-thread window, before it owns a session or resources.
         let _ = unsafe { DestroyWindow(hwnd) };
@@ -272,6 +301,12 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>) -> Complet
     } else {
         None
     };
+    // Full screen before the first picture size is stated, so the host is
+    // asked for this monitor's own pixel size from the start (no reopen).
+    if view.fullscreen {
+        screen::enter(hwnd);
+    }
+    let shortcuts = view.shortcuts && config.control && screen::install(hwnd);
     let size = client_size(hwnd);
     config.picture = Some(size);
     let control = config.control;
@@ -309,6 +344,8 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>) -> Complet
             picture_drawn: None,
             repaint_pending: false,
             local_cursor: cursor::Local::default(),
+            clipboard_retired: false,
+            shortcuts,
         });
     });
     // SAFETY: showing the window this thread created.
@@ -499,9 +536,6 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // Local destination consent, too, belongs only to the original session.
     // Keep its receipts in the original menu without approving new transfers.
     next.download = None;
-    if matches!(opening.cause, Cause::StopControl | Cause::FocusLost) {
-        next.clipboard = false;
-    }
     if opening.choose_display {
         next.display = fr_mobile_ffi::session::DisplayChoice::Choose;
     }
@@ -509,13 +543,20 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     if clipboard.configured || clipboard.reason.is_some() {
         stats.clipboard.get_or_insert(clipboard);
     }
-    if stats.clipboard.is_some() {
-        // A replacement view cannot restart the command's retired clipboard,
-        // including after its independent privacy window's Turn off action.
+    // The user's clipboard choice follows each replacement view, as control
+    // does. Stop control, or an earlier owner that ended for any reason but
+    // its session closing (a refusal, a native failure, the privacy window's
+    // Turn off), keeps sharing off for the rest of this window.
+    if opening.cause == Cause::StopControl || !clipboard.restartable() {
+        v.clipboard_retired = true;
+    }
+    if v.clipboard_retired {
         next.clipboard = false;
     }
-    // Retain only the offered profile. Session::start grants and requests
-    // nothing: a resized view needs a new explicit local menu choice.
+    // Control resumes by itself in every replacement view of a --control
+    // command (a resize, full screen, focus return, display change or
+    // reconnect), except after the user's own Stop control.
+    let resume_control = next.control && opening.cause != Cause::StopControl;
     let size = client_size(hwnd);
     // SAFETY: scalar queries of this UI thread's original live viewer. A
     // foreground callback never authorizes opening while it is hidden again.
@@ -571,6 +612,9 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.buttons = [false; 5];
     v.keys = keys::Deferred::default();
     control::visible(true);
+    if resume_control {
+        v.session.shared().request_control();
+    }
     v.input_menu.refresh(v.session.shared());
     Reopen::Started
 }
@@ -695,6 +739,18 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     v.input_menu.display_available(can_change_display);
     v.input_menu.refresh(v.session.shared());
     v.update_display_picker(hwnd);
+    if v.shortcuts {
+        // SAFETY: scalar queries against this UI thread's live viewer.
+        let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
+        screen::set_active(
+            foreground
+                && !v.closing
+                && v.text.is_none()
+                && v.display_picker.is_none()
+                && !v.choosing_file()
+                && v.session.shared().controlled(),
+        );
+    }
     if !v.keys.is_empty() {
         v.send_keys();
     }
@@ -1841,6 +1897,12 @@ extern "system" fn window_proc(
             }
             true
         }
+        screen::TOGGLE_FULLSCREEN => {
+            // Full screen changes the client size; WM_SIZE then reopens the
+            // view at the new size, and control resumes by itself.
+            screen::toggle(hwnd);
+            true
+        }
         WM_COMMAND if wparam.0 & 0xffff == text::OPEN => {
             control::invalidate_display();
             with_viewer(|v| v.open_text(hwnd));
@@ -2045,6 +2107,21 @@ extern "system" fn window_proc(
             // Bit 30: the key was already down (auto-repeat). The session
             // never sends repeats; the host repeats a held key itself.
             let repeat = pressed && (lparam.0 >> 30) & 1 == 1;
+            // Ctrl+Alt+Enter toggles full screen when the shortcut hook is not
+            // taking keys (view only, or --no-shortcuts); never sent.
+            if scan == 0x1C && !extended {
+                // SAFETY: scalar keyboard-state queries for this thread.
+                let chord = unsafe {
+                    GetKeyState(i32::from(VK_CONTROL.0)) < 0
+                        && GetKeyState(i32::from(VK_MENU.0)) < 0
+                };
+                if chord {
+                    if pressed && !repeat {
+                        screen::toggle(hwnd);
+                    }
+                    return LRESULT(0);
+                }
+            }
             // The left Ctrl Windows adds around AltGr never reaches the host
             // (keys::synthetic_ctrl); AltGr itself goes as right Alt.
             let synthetic = scan == 0x1D && !extended && {

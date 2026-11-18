@@ -78,6 +78,10 @@ pub(crate) struct ReceiveOptions {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent command-line flags"
+)]
 pub(crate) struct Options {
     pub port: u16,
     /// Optional complete authenticated address-set constraint, not a DNS override.
@@ -95,6 +99,12 @@ pub(crate) struct Options {
     pub receive: Option<ReceiveOptions>,
     /// Local decode path (`--decoder auto|hardware|software`).
     pub decoder: Decoder,
+    /// `--fullscreen`: a borderless window over the whole monitor, so the
+    /// host is asked for exactly this screen's pixel size (no local scaling).
+    pub fullscreen: bool,
+    /// While controlling, send Windows shortcuts (Win, Alt+Tab, Ctrl+Esc...)
+    /// to the host. Defaults on; `--no-shortcuts` keeps them local.
+    pub shortcuts: bool,
 }
 
 /// A missing viewing destination requests one local native machine choice.
@@ -143,6 +153,8 @@ impl Options {
             send: None,
             receive: None,
             decoder: Decoder::Automatic,
+            fullscreen: false,
+            shortcuts: true,
         };
         let mut port_set = false;
         let mut decoder_set = false;
@@ -183,6 +195,14 @@ impl Options {
                 }
                 [flag, tail @ ..] if view && flag == "--no-clipboard" && options.clipboard => {
                     options.clipboard = false;
+                    rest = tail;
+                }
+                [flag, tail @ ..] if view && flag == "--fullscreen" && !options.fullscreen => {
+                    options.fullscreen = true;
+                    rest = tail;
+                }
+                [flag, tail @ ..] if view && flag == "--no-shortcuts" && options.shortcuts => {
+                    options.shortcuts = false;
                     rest = tail;
                 }
                 [flag, tail @ ..]
@@ -370,9 +390,28 @@ mod tests {
                 decoder: Decoder::Automatic,
                 send: None,
                 receive: None,
+                fullscreen: false,
+                shortcuts: true,
             })
         );
         assert_eq!(parse(&[], false), parse(&[], true));
+    }
+
+    #[test]
+    fn fullscreen_is_opt_in_and_shortcuts_default_on() {
+        let plain = parse(&["--control"], true).unwrap();
+        assert!(!plain.fullscreen && plain.shortcuts);
+        let chosen = parse(&["--control", "--fullscreen", "--no-shortcuts"], true).unwrap();
+        assert!(chosen.fullscreen && !chosen.shortcuts);
+        for args in [
+            vec!["--fullscreen", "--fullscreen"],
+            vec!["--no-shortcuts", "--no-shortcuts"],
+        ] {
+            assert!(parse(&args, true).is_none(), "{args:?}");
+        }
+        // Window choices exist only for viewing, not for directory queries.
+        assert!(parse(&["--fullscreen"], false).is_none());
+        assert!(parse(&["--no-shortcuts"], false).is_none());
     }
 
     #[test]

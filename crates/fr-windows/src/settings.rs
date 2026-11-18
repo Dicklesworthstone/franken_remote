@@ -11,6 +11,10 @@ pub(crate) const MAX_BYTES: usize = 16 * 1024;
 const MAX_ID_BYTES: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent remembered check boxes"
+)]
 pub(crate) struct Settings {
     /// Stable node ID of the machine chosen last (row preselection only).
     pub last_machine: Option<String>,
@@ -20,6 +24,11 @@ pub(crate) struct Settings {
     pub clipboard: bool,
     /// Ask which display to show after the host approves the session.
     pub choose_display: bool,
+    /// Open the view full screen, asking for this monitor's own pixel size.
+    pub fullscreen: bool,
+    /// With control, send Windows shortcuts (Win, Alt+Tab, Ctrl+Esc...) to
+    /// the host instead of letting Windows act on them.
+    pub shortcuts: bool,
 }
 
 impl Default for Settings {
@@ -29,6 +38,8 @@ impl Default for Settings {
             control: true,
             clipboard: true,
             choose_display: false,
+            fullscreen: true,
+            shortcuts: true,
         }
     }
 }
@@ -49,6 +60,8 @@ impl Settings {
         settings.control = flag("control", settings.control);
         settings.clipboard = flag("clipboard", settings.clipboard);
         settings.choose_display = flag("choose_display", settings.choose_display);
+        settings.fullscreen = flag("fullscreen", settings.fullscreen);
+        settings.shortcuts = flag("shortcuts", settings.shortcuts);
         settings.last_machine = map
             .get("last_machine")
             .and_then(Value::as_str)
@@ -63,6 +76,8 @@ impl Settings {
             "control": self.control,
             "clipboard": self.clipboard,
             "choose_display": self.choose_display,
+            "fullscreen": self.fullscreen,
+            "shortcuts": self.shortcuts,
         });
         if let Some(id) = self.last_machine.as_deref().filter(|id| valid_id(id)) {
             document["last_machine"] = json!(id);
@@ -81,9 +96,15 @@ impl Settings {
             if !self.clipboard {
                 args.push("--no-clipboard".to_owned());
             }
+            if !self.shortcuts {
+                args.push("--no-shortcuts".to_owned());
+            }
         }
         if self.choose_display {
             args.extend(["--display".to_owned(), "choose".to_owned()]);
+        }
+        if self.fullscreen {
+            args.push("--fullscreen".to_owned());
         }
         args
     }
@@ -101,11 +122,14 @@ mod tests {
     fn settings_round_trip_and_default_to_control_with_clipboard() {
         let defaults = Settings::default();
         assert!(defaults.control && defaults.clipboard && !defaults.choose_display);
+        assert!(defaults.fullscreen && defaults.shortcuts);
         let chosen = Settings {
             last_machine: Some("nABC123CNTRL".to_owned()),
             control: false,
             clipboard: false,
             choose_display: true,
+            fullscreen: false,
+            shortcuts: false,
         };
         assert_eq!(Settings::from_json(chosen.to_json().as_bytes()), chosen);
         assert_eq!(Settings::from_json(defaults.to_json().as_bytes()), defaults);
@@ -124,25 +148,31 @@ mod tests {
         let view_only = Settings {
             control: false,
             clipboard: true,
+            shortcuts: false,
+            fullscreen: false,
             ..Settings::default()
         };
-        // Clipboard sharing only exists with control, so a view-only
-        // session carries no clipboard flag at all.
+        // Clipboard sharing and shortcuts only exist with control, so a
+        // view-only session carries neither flag.
         assert_eq!(
             view_only.viewer_args("nSTABLE1CNTRL"),
             ["view", "nSTABLE1CNTRL"]
         );
         let options = parse(&view_only);
-        assert!(!options.control);
+        assert!(!options.control && !options.fullscreen);
         assert_eq!(options.display, DisplayChoice::Primary);
         let options = parse(&Settings::default());
         assert!(options.control && options.clipboard);
+        assert!(options.fullscreen && options.shortcuts);
         let options = parse(&Settings {
             clipboard: false,
             choose_display: true,
+            fullscreen: false,
+            shortcuts: false,
             ..Settings::default()
         });
         assert!(options.control && !options.clipboard);
+        assert!(!options.fullscreen && !options.shortcuts);
         assert_eq!(options.display, DisplayChoice::Choose);
     }
 

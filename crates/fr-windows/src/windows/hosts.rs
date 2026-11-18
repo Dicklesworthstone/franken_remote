@@ -90,6 +90,8 @@ const ID_CLIPBOARD: usize = 8;
 const ID_DISPLAY: usize = 9;
 const ID_INSTALL: usize = 10;
 const ID_DECODER: usize = 11;
+const ID_FULLSCREEN: usize = 12;
+const ID_SHORTCUTS: usize = 13;
 
 /// Who opened the picker: the command line keeps its explicit options; the
 /// application also shows connection options and remembers them.
@@ -155,6 +157,8 @@ struct Controls {
     control: HWND,
     clipboard: HWND,
     display: HWND,
+    fullscreen: HWND,
+    shortcuts: HWND,
     status: HWND,
     install: HWND,
     connect: HWND,
@@ -162,7 +166,7 @@ struct Controls {
 }
 
 impl Controls {
-    fn all(&self) -> [HWND; 15] {
+    fn all(&self) -> [HWND; 17] {
         [
             self.heading,
             self.subtitle,
@@ -175,6 +179,8 @@ impl Controls {
             self.control,
             self.clipboard,
             self.display,
+            self.fullscreen,
+            self.shortcuts,
             self.status,
             self.install,
             self.connect,
@@ -313,6 +319,8 @@ impl State {
             settings.control = checked(controls.control);
             settings.clipboard = checked(controls.clipboard);
             settings.choose_display = checked(controls.display);
+            settings.fullscreen = checked(controls.fullscreen);
+            settings.shortcuts = checked(controls.shortcuts);
         }
         settings
     }
@@ -591,17 +599,20 @@ impl State {
         place(c.refresh, margin + inner - s(100), y, s(100), s(28));
         y += s(38);
         let footer = if self.mode == Mode::Application {
-            s(100)
+            s(130)
         } else {
             s(64)
         };
         place(c.list, margin, y, inner, (height - y - footer).max(s(80)));
         if self.mode == Mode::Application {
-            let row = height - s(92);
+            let row = height - s(122);
             place(c.view, margin, row, s(110), s(24));
             place(c.control, margin + s(116), row, s(150), s(24));
             place(c.clipboard, margin + s(280), row, s(180), s(24));
             place(c.display, margin + s(470), row, s(200), s(24));
+            let row = height - s(92);
+            place(c.fullscreen, margin, row, s(266), s(24));
+            place(c.shortcuts, margin + s(280), row, s(390), s(24));
         }
         let bottom = height - s(50);
         let buttons = s(232) + if self.offer_install { s(170) } else { 0 };
@@ -1250,6 +1261,20 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
                 none,
                 ID_DISPLAY,
             )?;
+            controls.fullscreen = child(
+                w!("BUTTON"),
+                w!("Full screen at this screen's resolution"),
+                check,
+                none,
+                ID_FULLSCREEN,
+            )?;
+            controls.shortcuts = child(
+                w!("BUTTON"),
+                w!("Send Windows shortcuts (Win, Alt+Tab, Ctrl+Esc) there"),
+                check,
+                none,
+                ID_SHORTCUTS,
+            )?;
         }
         // Two short lines (counts, decode path) that may wrap: no ellipsis.
         controls.status = child(w!("STATIC"), w!(""), WINDOW_STYLE(0x0080), none, 0)?;
@@ -1330,7 +1355,10 @@ fn open(request: &Request) -> windows::core::Result<Picker> {
             set(controls.control, settings.control);
             set(controls.clipboard, settings.clipboard);
             set(controls.display, settings.choose_display);
+            set(controls.fullscreen, settings.fullscreen);
+            set(controls.shortcuts, settings.shortcuts);
             let _ = EnableWindow(controls.clipboard, settings.control);
+            let _ = EnableWindow(controls.shortcuts, settings.control);
         }
         picker.0.apply_fonts();
         picker.0.show_notice();
@@ -1424,6 +1452,8 @@ unsafe extern "system" fn window_proc(
                             let control = checked(controls.control);
                             // SAFETY: enabling this thread's own checkbox.
                             let _ = unsafe { EnableWindow(controls.clipboard, control) };
+                            // SAFETY: as above; shortcuts only reach a controlled host.
+                            let _ = unsafe { EnableWindow(controls.shortcuts, control) };
                         }
                         _ => {}
                     }

@@ -1,5 +1,32 @@
 # Changelog
 
+## 2026-11-18 — Windows: automatic control, full screen, shortcuts to the host
+
+- Control is automatic in a `--control` (View and control) session: every
+  replacement view requests it by itself as a fresh request in the new
+  session. That covers a resize, full screen on or off, a display change, an
+  automatic reconnect, and a return to a window whose control had stopped.
+  Before, each of these came back view-only until **Input → Request
+  control**. Only the user's own **Stop control** leaves a view without
+  control. The text clipboard follows the same choice, unless an earlier
+  clipboard owner ended abnormally.
+- `--fullscreen` (the app's new **Full screen at this screen's resolution**
+  option, on by default) opens a borderless window over the monitor before the
+  first picture size is stated, so the host is asked for the monitor's exact
+  pixel size and the picture is drawn 1:1. **Ctrl+Alt+Enter** toggles full
+  screen while viewing.
+- While a session controls the host and its window is in front, Windows
+  shortcuts go to the host: the Windows key (Command on a Mac), Alt+Tab,
+  Alt+Esc, Ctrl+Esc, Alt+Space, Alt+F4, F10. A low-level keyboard hook hands
+  them to the viewer's key path. This is on by default; `--no-shortcuts` and
+  the app's **Send Windows shortcuts** option keep them local. Ctrl+Alt+Enter,
+  Ctrl+Alt+Del and Win+L stay local.
+- The window title no longer flashes. The ready-view token and stale-view
+  suspensions can flip the control state several times a second, and the
+  title followed every flip. A new state now reaches the title and menu bar
+  only after it has held for 750 ms; the first state, an opening Input menu
+  and the end of a session still show at once.
+
 ## 2026-11-18 — `fr app`: a desktop app with a machine picker on macOS and Linux
 
 - Windows had a Start-menu app (pick a machine, choose options, connect,
