@@ -102,7 +102,7 @@ fn close_and_invalid_close_fence_before_following_application_records() {
         let c = runtime.request_cx_with_budget(Budget::INFINITE);
         let h = runtime.request_cx_with_budget(Budget::INFINITE);
         runtime.block_on(async {
-            let (mut host, mut viewer) = pair(&c, &h).await;
+            let (mut host, mut viewer) = Box::pin(pair(&c, &h)).await;
             let observation = host.observation().unwrap();
             let mut bytes = request(&host);
             let expected = match case {
@@ -147,8 +147,8 @@ fn closing_one_session_does_not_revoke_another_owner_with_equal_numeric_ids() {
     let c2 = runtime.request_cx_with_budget(Budget::INFINITE);
     let h2 = runtime.request_cx_with_budget(Budget::INFINITE);
     runtime.block_on(async {
-        let (mut host, mut viewer) = pair(&c, &h).await;
-        let (mut sibling, _sibling_viewer) = pair(&c2, &h2).await;
+        let (mut host, mut viewer) = Box::pin(pair(&c, &h)).await;
+        let (mut sibling, _sibling_viewer) = Box::pin(pair(&c2, &h2)).await;
         assert_eq!(host.binding(), sibling.binding()); // deliberate numeric reuse
         let unaffected = sibling.observation().unwrap();
         let bytes = request(&host);
@@ -174,7 +174,7 @@ fn a_failed_renewal_turn_names_its_end_unless_a_local_revoke_came_first() {
         let c = runtime.request_cx_with_budget(Budget::INFINITE);
         let h = runtime.request_cx_with_budget(Budget::INFINITE);
         runtime.block_on(async {
-            let (mut host, _viewer) = pair(&c, &h).await;
+            let (mut host, _viewer) = Box::pin(pair(&c, &h)).await;
             let observation = host.observation().unwrap();
             let (q, _) = host.io().unwrap();
             // An incomplete renewal turn fences observation and the socket.
