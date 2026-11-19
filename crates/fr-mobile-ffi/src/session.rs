@@ -293,6 +293,9 @@ pub struct Shared {
     download: Option<Arc<Download>>,
     close: AtomicBool,
     want_control: AtomicBool,
+    /// Keep control: ask for it again whenever this session can (each new
+    /// attempt after an internal reconnect, the app returning to the front).
+    auto_control: AtomicBool,
     control_capable: bool,
     control_requests: Mutex<control_request::Requests>,
     control_retirement: control_request::Retirement,
@@ -502,6 +505,7 @@ impl Shared {
             download,
             close: AtomicBool::new(false),
             want_control: AtomicBool::new(false),
+            auto_control: AtomicBool::new(false),
             control_capable,
             control_requests: Mutex::default(),
             control_retirement: control_request::Retirement::default(),
@@ -780,6 +784,16 @@ impl Shared {
             return;
         };
         self.request_control_at(original);
+    }
+    /// Keep control for this session's whole life: control is requested
+    /// again each time it can be (a new attempt after an internal reconnect,
+    /// the app back in front), not only once. A shell sets this for a viewer
+    /// the user opened with control; Stop control is a new session without it.
+    pub fn set_auto_control(&self, on: bool) {
+        self.auto_control.store(on, Ordering::SeqCst);
+    }
+    pub fn auto_control(&self) -> bool {
+        self.auto_control.load(Ordering::SeqCst)
     }
     fn request_control_at(&self, original: u64) {
         let Ok(_requests) = self.control_requests.lock() else {
@@ -2436,6 +2450,12 @@ impl Application for Mobile {
                             witness(&view.visible(frame), frame, &mut pending, &mut last_shown);
                         }
                         announce_view(&shared);
+                        // A session that keeps control asks again on every
+                        // attempt (an internal reconnect retired the old
+                        // request) and whenever the app returns to the front.
+                        if !requested && shared.auto_control() {
+                            shared.request_control();
+                        }
                         let ready = !requested
                             && shared.visible.load(Ordering::SeqCst)
                             && view.evidence().is_ok();

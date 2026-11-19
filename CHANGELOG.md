@@ -1,5 +1,33 @@
 # Changelog
 
+## 2026-11-18 — a Windows viewer never closes or loses control on its own
+
+- Only the user (or `--seconds`) ends a viewer window now. When a session
+  ends any other way, the window keeps its last picture and reconnects:
+  - a host or network failure, or a report the host sent;
+  - control lost mid-session, or an input push refused;
+  - a presentation glitch, or a refused or expired replacement.
+  Before, almost all of these closed the window. On 11-18 the owner's
+  mac-studio sessions ended every 20-35 s
+  (`LeaseRevoked { reason: SessionEnded }`, host `Renewal(Transport(Expired))`,
+  `ReferenceRecovery(Transport(Backpressure))`).
+- A reconnect waits 0.4 s after the old session finishes, doubling up to
+  5 s while no picture arrives, with no limit on how many. A hidden window
+  waits until it is shown. The 32-session limit per window is gone.
+- Control comes back by itself. A `--control` session now keeps asking for
+  control: on every internal reconnect attempt, when the app returns to the
+  front, and in every replacement session. Before, an internal reconnect
+  retired the one control request and nothing asked again, so the picture
+  came back with the mouse and keyboard dead. Stop control is still
+  respected until the user asks for control again.
+- The shortcut hook (Windows key, Alt+Tab, Ctrl+Esc) runs on its own
+  high-priority thread. Before, it ran on the window's UI thread, which can
+  stall for hundreds of milliseconds drawing a large picture. Windows skips
+  a low-level hook that answers late, and since Windows 7 removes it
+  silently, so shortcuts could stop working mid-session. The thread also
+  registers the hook again every 2 s.
+- Viewer-side only; hosts need no rebuild.
+
 ## 2026-11-18 — a host's mid-session picture recovery no longer ends the session
 
 - Since the first-view limit went to 6 s, every recovery a host admitted

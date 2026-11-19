@@ -83,11 +83,18 @@ impl<T> MenuChoice<T> {
     }
 }
 
-/// One invocation can open at most this many fresh native session owners.
-/// Each owner's existing bounded connector retry policy remains unchanged.
-pub const MAX_OWNERS: u8 = 32;
 pub const REPLACEMENT_MS: u64 = 10_000;
 pub const REDIAL_MS: u64 = 400;
+/// The longest wait between two reconnects while no picture arrives.
+pub const MAX_RECONNECT_DELAY_MS: u64 = 5_000;
+
+/// How long to wait before reconnecting after `failures` reconnects in a row
+/// that showed no picture: 0.4, 0.8, 1.6, 3.2 s, then every 5 s, forever.
+pub fn reconnect_delay(failures: u32) -> u64 {
+    REDIAL_MS
+        .saturating_mul(1 << failures.min(4))
+        .min(MAX_RECONNECT_DELAY_MS)
+}
 /// A foreground callback cannot wait behind native work and then become a new
 /// viewing request. This is admission age; accepted requests keep their own
 /// original ten-second opening bound.
@@ -102,12 +109,16 @@ pub enum Cause {
     /// Retire control on focus loss, then wait without a connection for a new
     /// foreground event before opening fresh viewing.
     FocusLost,
+    /// The session ended or failed without the user closing the window. A
+    /// window never gives up: once the old session has finished it opens a
+    /// fresh one (after a backoff, and only while the window is shown), with
+    /// no limit on how many times, and control resumes by itself.
+    Reconnect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     Busy,
-    Limit,
     Cancelled,
     Clock,
     Expired,
@@ -120,7 +131,6 @@ impl Refusal {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Busy => "replacement_pending",
-            Self::Limit => "replacement_limit",
             Self::Cancelled => "replacement_cancelled",
             Self::Clock => "replacement_clock_invalid",
             Self::Expired => "replacement_expired",
@@ -172,10 +182,15 @@ struct Pending {
     /// A fresh foreground event is a new viewing choice, never an extension of
     /// the original cleanup. Once accepted, repeats cannot refresh its bound.
     foreground: Option<u64>,
+    /// The wait after the old session finished before dialing again (at
+    /// least the host listener's cooldown, `REDIAL_MS`).
+    delay: u64,
 }
 
 pub struct Replacements {
-    opened: u8,
+    /// Fresh session owners this window has opened (diagnostic only: there
+    /// is no limit, so a window can reconnect for as long as it is open).
+    opened: u32,
     /// After an explicit switch, every replacement reads a new catalog and
     /// asks again instead of silently reverting to an initial CLI handle.
     choose_display: bool,
@@ -198,15 +213,24 @@ impl Replacements {
     }
 
     pub fn available(&self) -> bool {
-        !self.pending() && self.opened < MAX_OWNERS
+        !self.pending()
+    }
+
+    /// Fresh session owners opened so far.
+    pub fn opened(&self) -> u32 {
+        self.opened
+    }
+
+    /// A reconnect is waiting for the old session or its backoff.
+    pub fn reconnecting(&self) -> bool {
+        self.pending
+            .as_ref()
+            .is_some_and(|pending| pending.cause == Cause::Reconnect)
     }
 
     pub fn request(&mut self, cause: Cause, lifetime: u64, at: u64) -> Result<(), Refusal> {
         if self.pending() {
             return Err(Refusal::Busy);
-        }
-        if self.opened >= MAX_OWNERS {
-            return Err(Refusal::Limit);
         }
         self.pending = Some(Pending {
             cause,
@@ -215,8 +239,25 @@ impl Replacements {
             last: at,
             ready_at: None,
             foreground: None,
+            delay: REDIAL_MS,
         });
         Ok(())
+    }
+
+    /// Replace whatever is pending with a reconnect: once the old session has
+    /// finished and `delay_ms` (at least `REDIAL_MS`) has passed, and while
+    /// the window is shown, `poll` opens a fresh session. It never expires
+    /// and is never refused; only the user's close cancels it.
+    pub fn reconnect(&mut self, lifetime: u64, at: u64, delay_ms: u64) {
+        self.pending = Some(Pending {
+            cause: Cause::Reconnect,
+            lifetime,
+            until: u64::MAX,
+            last: at,
+            ready_at: None,
+            foreground: None,
+            delay: delay_ms.max(REDIAL_MS),
+        });
     }
 
     pub fn cancel(&mut self) {
@@ -282,6 +323,28 @@ impl Replacements {
         let Some(pending) = &mut self.pending else {
             return Action::None;
         };
+        if pending.cause == Cause::Reconnect {
+            // Never refused and never expired: wait for the old session to
+            // finish, the backoff to pass and the window to be shown.
+            pending.last = pending.last.max(now);
+            if !finished {
+                return Action::Waiting;
+            }
+            let ready = *pending
+                .ready_at
+                .get_or_insert(now.saturating_add(pending.delay));
+            if !visible || now < ready {
+                return Action::Waiting;
+            }
+            self.pending = None;
+            self.opened = self.opened.saturating_add(1);
+            return Action::Open(Opening {
+                cause: Cause::Reconnect,
+                choose_display: self.choose_display,
+                checked_at: now,
+                until: now.saturating_add(REPLACEMENT_MS),
+            });
+        }
         let focused = pending.cause == Cause::FocusLost;
         let waiting_for_foreground = focused && pending.foreground.is_none();
         let deadline = if focused && pending.ready_at.is_some() {
@@ -312,7 +375,7 @@ impl Replacements {
         }
         let ready = pending
             .ready_at
-            .get_or_insert(now.saturating_add(REDIAL_MS));
+            .get_or_insert(now.saturating_add(pending.delay));
         if waiting_for_foreground {
             return Action::Dormant;
         }
@@ -322,7 +385,7 @@ impl Replacements {
         let cause = pending.cause;
         let until = pending.foreground.unwrap_or(pending.until);
         self.pending = None;
-        self.opened += 1; // request refuses at MAX_OWNERS, well before overflow
+        self.opened = self.opened.saturating_add(1);
         self.choose_display |= cause == Cause::Display;
         Action::Open(Opening {
             cause,
@@ -547,10 +610,10 @@ mod tests {
     }
 
     #[test]
-    fn one_command_has_a_finite_fresh_owner_budget() {
+    fn a_window_can_open_fresh_owners_without_limit() {
         let mut replacements = Replacements::default();
-        for index in 1..MAX_OWNERS {
-            let at = u64::from(index) * 1_000;
+        for index in 1..500_u64 {
+            let at = index * 1_000;
             assert!(replacements.available());
             replacements.request(Cause::Display, 3, at).unwrap();
             assert_eq!(replacements.poll(at, 3, true, true, true), Action::Waiting);
@@ -562,11 +625,83 @@ mod tests {
                 })
             ));
         }
-        assert!(!replacements.available());
+        assert!(replacements.available());
+        assert_eq!(replacements.opened(), 500);
+    }
+
+    #[test]
+    fn a_reconnect_waits_for_the_old_session_then_its_backoff() {
+        let mut replacements = Replacements::default();
+        replacements.reconnect(3, 1_000, 1_600);
+        assert!(replacements.reconnecting());
+        // The old session is still closing: no dial, however long it takes.
         assert_eq!(
-            replacements.request(Cause::Display, 3, 50_000),
-            Err(Refusal::Limit)
+            replacements.poll(90_000, 3, true, false, false),
+            Action::Waiting
         );
+        // Finished (even uncleanly): the backoff starts now.
+        assert_eq!(
+            replacements.poll(90_100, 3, true, true, false),
+            Action::Waiting
+        );
+        assert_eq!(
+            replacements.poll(91_699, 3, true, true, false),
+            Action::Waiting
+        );
+        assert!(matches!(
+            replacements.poll(91_700, 3, true, true, false),
+            Action::Open(Opening {
+                cause: Cause::Reconnect,
+                ..
+            })
+        ));
+        assert!(!replacements.reconnecting());
+    }
+
+    #[test]
+    fn a_reconnect_is_never_refused_and_waits_while_the_window_is_hidden() {
+        let mut replacements = Replacements::default();
+        replacements.reconnect(3, 1_000, 0);
+        // Hidden, a new native lifetime, a failed cleanup, hours later:
+        // still waiting, never refused.
+        for now in [1_100, 50_000, 10_000_000] {
+            assert_eq!(
+                replacements.poll(now, 9, false, true, false),
+                Action::Waiting
+            );
+        }
+        // Shown again: open at once (the listener cooldown passed long ago).
+        let Action::Open(opening) = replacements.poll(10_000_001, 9, true, true, false) else {
+            panic!("a shown window reconnects");
+        };
+        assert_eq!(opening.cause, Cause::Reconnect);
+        assert_eq!(opening.check(10_000_001), Ok(()));
+    }
+
+    #[test]
+    fn a_reconnect_replaces_any_pending_replacement() {
+        let mut replacements = Replacements::default();
+        replacements.request(Cause::Resize, 3, 1_000).unwrap();
+        replacements.reconnect(3, 1_100, REDIAL_MS);
+        assert!(replacements.reconnecting());
+        assert_eq!(
+            replacements.poll(1_200, 3, true, true, false),
+            Action::Waiting
+        );
+        assert!(matches!(
+            replacements.poll(1_200 + REDIAL_MS, 3, true, true, false),
+            Action::Open(Opening {
+                cause: Cause::Reconnect,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn reconnect_backoff_grows_to_five_seconds_and_stays() {
+        let delays: Vec<u64> = (0..8).map(reconnect_delay).collect();
+        assert_eq!(delays, [400, 800, 1_600, 3_200, 5_000, 5_000, 5_000, 5_000]);
+        assert_eq!(reconnect_delay(u32::MAX), MAX_RECONNECT_DELAY_MS);
     }
 
     fn foreground(at: u64) -> Activation {
@@ -737,10 +872,10 @@ mod tests {
     }
 
     #[test]
-    fn repeated_focus_cycles_share_the_existing_native_owner_limit() {
+    fn repeated_focus_cycles_never_run_out_of_owners() {
         let mut replacements = Replacements::default();
-        for index in 1..MAX_OWNERS {
-            let at = u64::from(index) * 100_000;
+        for index in 1..100_u64 {
+            let at = index * 100_000;
             replacements.request(Cause::FocusLost, 3, at).unwrap();
             assert_eq!(
                 replacements.poll(at + 1, 3, false, true, true),
@@ -758,8 +893,8 @@ mod tests {
             ));
         }
         assert_eq!(
-            replacements.request(Cause::FocusLost, 3, 4_000_000),
-            Err(Refusal::Limit)
+            replacements.request(Cause::FocusLost, 3, 40_000_000),
+            Ok(())
         );
     }
 }

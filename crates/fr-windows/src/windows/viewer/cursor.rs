@@ -182,14 +182,15 @@ fn terminal(viewer: &Viewer) -> bool {
     viewer.closing || viewer.reopen.pending() || viewer.session.shared().finished()
 }
 
-/// Fence first. A failed clear must not leave old pixels visible while native
-/// ownership returns. Failure to confirm hiding also prevents completion.
+/// Fence first, then reconnect: a fresh session redraws the whole window, so
+/// a failed clear or cursor update costs a reconnect, never the window. (It
+/// used to close and hide the window for good.)
 fn fail(viewer: &mut Viewer, hwnd: HWND) -> bool {
     viewer.session.shared().presentation_failed();
     viewer.reopen_refusal.get_or_insert(Refusal::Presentation);
-    viewer.close();
-    control::visible(false);
-    native::hide_failed_view(hwnd)
+    viewer.reconnect(Refusal::Presentation.name());
+    let _ = hwnd;
+    true
 }
 
 fn erase(viewer: &mut Viewer, hwnd: HWND) -> Result<(), ()> {

@@ -7,7 +7,7 @@ use windows::Win32::{
     Graphics::Gdi::ScreenToClient,
     UI::WindowsAndMessaging::{
         GetCursor, GetCursorPos, GetForegroundWindow, IDC_ARROW, IsIconic, IsWindowVisible,
-        LoadCursorW, SW_HIDE, SetCursor, ShowWindow, WindowFromPoint,
+        LoadCursorW, SetCursor, WindowFromPoint,
     },
 };
 
@@ -49,15 +49,5 @@ pub(super) fn assign(hidden: bool) -> bool {
             SetCursor(Some(arrow));
             GetCursor() == arrow
         }
-    }
-}
-
-/// A failed renderer cannot leave a stale overlay visible during cleanup.
-pub(super) fn hide_failed_view(hwnd: HWND) -> bool {
-    // SAFETY: this UI thread owns the live viewer window. The caller has
-    // already fenced input and permanently closed its session before hiding.
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_HIDE);
-        !IsWindowVisible(hwnd).as_bool()
     }
 }

@@ -157,6 +157,12 @@ struct Viewer {
     clipboard_retired: bool,
     /// Send Windows shortcuts to a controlled host (`View::shortcuts`).
     shortcuts: bool,
+    /// Reconnects in a row that have not yet shown a new picture; sets the
+    /// backoff before the next one (`change_display::reconnect_delay`).
+    failures: u32,
+    /// The user chose Stop control: replacement views stay view-only until
+    /// the user asks for control again.
+    control_stopped: bool,
 }
 thread_local! {
     static VIEWER: RefCell<Option<Viewer>> = const { RefCell::new(None) };
@@ -350,15 +356,19 @@ pub fn session(mut config: Config, title: &str, seconds: Option<u64>, view: View
             local_cursor: cursor::Local::default(),
             clipboard_retired: false,
             shortcuts,
+            failures: 0,
+            control_stopped: false,
         });
     });
     // SAFETY: showing the window this thread created.
     let _ = unsafe { ShowWindow(hwnd, SW_SHOW) };
     control::visible(true);
     with_viewer(|v| {
-        // Only the original invocation uses --control automatically. Native
-        // window creation and its initial size events have already settled.
+        // --control takes control by itself, and takes it back by itself
+        // after every reconnect or loss of control (`Shared::set_auto_control`).
+        // Native window creation and its initial size events have settled.
         if control {
+            v.session.shared().set_auto_control(true);
             v.session.shared().request_control();
         }
         v.input_menu.refresh(v.session.shared());
@@ -478,11 +488,8 @@ fn pump(seconds: Option<u64>, hwnd: HWND, config: &Config) -> Stats {
             }
         }
         if !drew {
-            let wait = if with_viewer(|v| v.reopen.dormant()).unwrap_or(false) {
-                50
-            } else {
-                2
-            };
+            let idle = with_viewer(|v| v.reopen.dormant() || v.reopen.reconnecting());
+            let wait = if idle.unwrap_or(false) { 50 } else { 2 };
             // SAFETY: waits for input or a bounded timeout; no handles. A
             // disconnected dormant window does not need the presentation tick.
             unsafe { MsgWaitForMultipleObjects(None, false, wait, QS_ALLINPUT) };
@@ -505,6 +512,12 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     };
     if v.closing {
         return no_replacement();
+    }
+    // The session ended without the user closing the window (a host or
+    // network failure, lost control, a lapsed deadline): never close the
+    // window for that. Reconnect, and keep reconnecting, until the user does.
+    if finished && !v.reopen.pending() {
+        v.reconnect("the session ended");
     }
     let lifetime = control::lifetime();
     let focus = v.reopen.focus_pending();
@@ -536,8 +549,8 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
         Action::Refused(reason) => {
             eprintln!("fr-windows: {}", reason.name());
             v.reopen_refusal.get_or_insert(reason);
-            v.close();
-            return no_replacement();
+            v.reconnect(reason.name());
+            return Reopen::Waiting;
         }
     };
     v.text = None;
@@ -563,42 +576,47 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     // The user's clipboard choice follows each replacement view, as control
     // does. Stop control, or an earlier owner that ended for any reason but
     // its session closing (a refusal, a native failure, the privacy window's
-    // Turn off), keeps sharing off for the rest of this window.
-    if opening.cause == Cause::StopControl || !clipboard.restartable() {
+    // Turn off), keeps sharing off for the rest of this window. A reconnect
+    // after a failed session keeps sharing on: a clipboard failure ends only
+    // the clipboard, never the session, so retrying it costs nothing.
+    if opening.cause == Cause::StopControl
+        || (opening.cause != Cause::Reconnect && !clipboard.restartable())
+    {
         v.clipboard_retired = true;
     }
     if v.clipboard_retired {
         next.clipboard = false;
     }
+    if opening.cause == Cause::StopControl {
+        v.control_stopped = true;
+    }
     // Control resumes by itself in every replacement view of a --control
     // command (a resize, full screen, focus return, display change or
     // reconnect), except after the user's own Stop control.
-    let resume_control = next.control && opening.cause != Cause::StopControl;
+    let resume_control = next.control && !v.control_stopped;
     let size = client_size(hwnd);
-    // SAFETY: scalar queries of this UI thread's original live viewer. A
-    // foreground callback never authorizes opening while it is hidden again.
-    let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
-    if CLOSE_PENDING.with(Cell::get)
-        || !control::visible_now()
-        || control::lifetime() != lifetime
-        || (opening.cause == Cause::FocusLost && !foreground)
-    {
-        v.reopen_refusal.get_or_insert(Refusal::Cancelled);
+    if CLOSE_PENDING.with(Cell::get) {
         v.close();
         return Reopen::No;
+    }
+    // Hidden again, or a new native lifetime, since the opening was ready:
+    // wait and reconnect when shown, instead of giving up on the window.
+    if !control::visible_now() || control::lifetime() != lifetime {
+        v.reconnect("the window was hidden");
+        return Reopen::Waiting;
     }
     next.picture = Some(size);
     // Native window queries and the original clipboard report can wait. The
     // ready opening carries the same absolute bound through both of them.
     if let Err(reason) = opening.check(input_ticks()) {
         v.reopen_refusal.get_or_insert(reason);
-        v.close();
-        return Reopen::No;
+        v.reconnect(reason.name());
+        return Reopen::Waiting;
     }
     let Ok(session) = Session::start_with_local_cursor(next) else {
         v.reopen_refusal.get_or_insert(Refusal::Start);
-        v.close();
-        return Reopen::No;
+        v.reconnect(Refusal::Start.name());
+        return Reopen::Waiting;
     };
     v.stated = size;
     let old = std::mem::replace(&mut v.session, session);
@@ -630,9 +648,15 @@ fn reopen(v: &mut Viewer, stats: &mut Stats, hwnd: HWND, config: &Config) -> Reo
     v.keys = keys::Deferred::default();
     control::visible(true);
     if resume_control {
+        v.session.shared().set_auto_control(true);
         v.session.shared().request_control();
     }
     v.input_menu.refresh(v.session.shared());
+    eprintln!(
+        "fr-windows: opened session {} ({:?})",
+        v.reopen.opened(),
+        opening.cause
+    );
     Reopen::Started
 }
 
@@ -695,7 +719,7 @@ fn apply_activation(v: &mut Viewer, hwnd: HWND) {
     let focus = v.reopen.focus_pending();
     if focus && let Err(reason) = v.reopen.resume_focus(activation, input_ticks()) {
         v.reopen_refusal.get_or_insert(reason);
-        v.close();
+        v.reconnect(reason.name());
         return;
     }
     // The retired owner remains permanently closed. Reflect this admitted
@@ -711,7 +735,7 @@ fn apply_activation(v: &mut Viewer, hwnd: HWND) {
     if v.renderer.clear().is_err() {
         v.session.shared().presentation_failed();
         v.reopen_refusal.get_or_insert(Refusal::Presentation);
-        v.close();
+        v.reconnect(Refusal::Presentation.name());
         return;
     }
     if v.renderer.present_accepted() {
@@ -720,12 +744,13 @@ fn apply_activation(v: &mut Viewer, hwnd: HWND) {
     // SAFETY: native rendering above may have dispatched lifecycle callbacks;
     // recheck the same live viewer after it and retain the opening's old bound.
     let foreground = unsafe { GetForegroundWindow() == hwnd && !IsIconic(hwnd).as_bool() };
-    if CLOSE_PENDING.with(Cell::get)
-        || control::activation_scope() != Some((activation.lifetime, activation.attempt))
+    if CLOSE_PENDING.with(Cell::get) {
+        v.close();
+    } else if control::activation_scope() != Some((activation.lifetime, activation.attempt))
         || !foreground
     {
         v.reopen_refusal.get_or_insert(Refusal::Cancelled);
-        v.close();
+        v.reconnect(Refusal::Cancelled.name());
     }
 }
 
@@ -796,7 +821,7 @@ fn step(v: &mut Viewer, stats: &mut Stats, last_sequence: &mut u64, hwnd: HWND) 
     let Ok(cursor_changed) = cursor::synchronize(v, hwnd) else {
         eprintln!("fr-windows: cursor_presentation_failed");
         v.session.shared().presentation_failed();
-        v.close();
+        v.reconnect("presentation failed");
         cursor::retire(v, hwnd);
         stats.draw_failures += 1;
         return (false, false);
@@ -839,7 +864,7 @@ fn draw_latest(
     if cursor::synchronize(v, hwnd).is_err() {
         eprintln!("fr-windows: cursor_presentation_failed");
         v.session.shared().presentation_failed();
-        v.close();
+        v.reconnect("presentation failed");
         cursor::retire(v, hwnd);
         stats.draw_failures += 1;
         return (false, false);
@@ -859,7 +884,7 @@ fn draw_latest(
     let Some(presentation) = Presentation::new(display, picture, v.renderer.size()) else {
         stats.draw_failures += 1;
         v.session.shared().presentation_failed();
-        v.close();
+        v.reconnect("presentation failed");
         cursor::retire(v, hwnd);
         return (false, false);
     };
@@ -870,7 +895,7 @@ fn draw_latest(
     if cursor::before_draw(v, hwnd, overlay).is_err() {
         stats.draw_failures += 1;
         v.session.shared().presentation_failed();
-        v.close();
+        v.reconnect("presentation failed");
         cursor::retire(v, hwnd);
         return (false, false);
     }
@@ -895,7 +920,7 @@ fn draw_latest(
         v.picture_drawn = None;
         stats.draw_failures += 1;
         v.session.shared().presentation_failed();
-        v.close();
+        v.reconnect("presentation failed");
         cursor::retire(v, hwnd);
         return (false, false);
     };
@@ -954,6 +979,8 @@ fn draw_latest(
         cursor::refresh(v, hwnd);
         return (false, true);
     }
+    // A new picture: this session works, so the next reconnect is quick.
+    v.failures = 0;
     let now = Instant::now();
     if let Some(asked) = v.reopen_asked.take() {
         let gap = u64::try_from(now.duration_since(asked).as_micros()).unwrap_or(u64::MAX);
@@ -1427,13 +1454,14 @@ impl Viewer {
                 self.session.shared().frames.app_id(0),
             )
         {
+            // The native handler already fenced this owner: replace it.
             self.reopen_refusal.get_or_insert(Refusal::Cancelled);
-            self.close();
+            self.reconnect(Refusal::Cancelled.name());
             return;
         }
         if let Err(reason) = self.reopen.request(cause, request.lifetime, request.at) {
             self.reopen_refusal.get_or_insert(reason);
-            self.close();
+            self.reconnect(reason.name());
             return;
         }
         self.reopen_asked = Some(Instant::now());
@@ -1451,7 +1479,7 @@ impl Viewer {
             if self.renderer.clear().is_err() {
                 self.session.shared().presentation_failed();
                 self.reopen_refusal.get_or_insert(Refusal::Presentation);
-                self.close();
+                self.reconnect(Refusal::Presentation.name());
             } else if self.renderer.present_accepted() {
                 self.cursor_drawn = None;
             }
@@ -1470,7 +1498,11 @@ impl Viewer {
         {
             return;
         }
-        if !self.input_menu.request(self.session.shared(), message) {
+        if self.input_menu.request(self.session.shared(), message) {
+            // The user asked for control again: keep it from now on.
+            self.control_stopped = false;
+            self.session.shared().set_auto_control(true);
+        } else {
             eprintln!("fr-windows: control_choice_expired_or_unavailable");
         }
         self.input_menu.refresh(self.session.shared());
@@ -1779,18 +1811,54 @@ impl Viewer {
         // only a bare failure. A source location is content-free.
         let at = std::panic::Location::caller();
         eprintln!("fr-windows: input_failed at {}:{}", at.file(), at.line());
-        // Mark the local owner terminal before stopping its source. Dropping
-        // that source wakes frd's independent held-state cleanup; attempting
-        // more keys or re-stamping a release is never the recovery path.
-        self.closing = true;
+        // Stop this owner's source before anything else. Dropping it wakes
+        // frd's independent held-state cleanup; attempting more keys or
+        // re-stamping a release is never the recovery path. The window does
+        // not close: a fresh session takes control back by itself.
         self.retire_file_choice();
-        self.reopen.cancel();
         self.keys.clear();
         self.session.shared().input_failed();
         self.text = None;
         self.buttons.fill(false);
         // SAFETY: release only this UI thread's mouse capture, after the
         // original remote source has been fenced.
+        let _ = unsafe { ReleaseCapture() };
+        self.reconnect("input failed");
+    }
+    /// Never give up on the window: fence the current session (it may still
+    /// be running; its orderly close releases anything held) and replace it
+    /// with a fresh one once it has finished, after a backoff that grows
+    /// only while no picture arrives. Control resumes by itself. Only the
+    /// user's close (or `--seconds`) ends a window; this does nothing then.
+    #[track_caller]
+    fn reconnect(&mut self, why: &str) {
+        // A failure that repeats every turn (a renderer that keeps failing)
+        // must not keep postponing the reconnect already waiting.
+        if self.closing || self.reopen.reconnecting() {
+            return;
+        }
+        let delay = change_display::reconnect_delay(self.failures);
+        self.failures = self.failures.saturating_add(1);
+        let at = std::panic::Location::caller();
+        eprintln!(
+            "fr-windows: reconnecting in {delay} ms: {why} (from {}:{})",
+            at.file(),
+            at.line()
+        );
+        self.reopen
+            .reconnect(control::lifetime(), input_ticks(), delay);
+        self.reopen_asked = Some(Instant::now());
+        self.retire_file_choice();
+        self.keys.clear();
+        let shared = self.session.shared();
+        let _ = shared.release_all();
+        shared.close();
+        self.buttons.fill(false);
+        self.mapping = None;
+        self.text = None;
+        self.display_picker = None;
+        // SAFETY: release only this UI thread's mouse capture; the current
+        // owner's input is fenced by its close.
         let _ = unsafe { ReleaseCapture() };
     }
     /// Closes for good: no reopen follows.
@@ -2063,7 +2131,7 @@ extern "system" fn window_proc(
                     v.session.shared().scroll_end();
                     if v.renderer.resize(size).is_err() {
                         v.session.shared().presentation_failed();
-                        v.close();
+                        v.reconnect("the swap chain could not resize");
                         return;
                     }
                     if settled && !v.sizing {
