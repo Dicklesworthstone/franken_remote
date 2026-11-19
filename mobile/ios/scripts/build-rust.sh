@@ -8,7 +8,8 @@
 #     FR_RUST_LIB_DIR=/tmp/fr-rust mobile/ios/scripts/build-rust.sh
 #
 # Optional environment:
-#   FR_CARGO             cargo to run (default: $HOME/.cargo/bin/cargo)
+#   FR_CARGO             cargo to run (default: $HOME/.cargo/bin/cargo, else the
+#                        cargo on PATH); its directory leads the build's PATH
 #   FR_CARGO_TARGET_DIR  cargo target directory (default: <repo>/target/ios-app)
 #   FR_CARGO_CONFIG      extra `cargo --config` file (e.g. a local [patch])
 #   FR_CARGO_JOBS        maximum concurrent Cargo jobs (default: 2)
@@ -20,7 +21,19 @@ set -eu
 script_dir=$(cd "$(dirname "$0")" && pwd)
 repo=$(cd "$script_dir/../../.." && pwd)
 out=${FR_RUST_LIB_DIR:-${TARGET_TEMP_DIR:?TARGET_TEMP_DIR or FR_RUST_LIB_DIR must be set}/fr-rust}
-cargo=${FR_CARGO:-$HOME/.cargo/bin/cargo}
+if [ -n "${FR_CARGO:-}" ]; then
+    cargo=$FR_CARGO
+elif [ -x "$HOME/.cargo/bin/cargo" ]; then
+    cargo=$HOME/.cargo/bin/cargo
+else
+    cargo=$(command -v cargo || true)
+fi
+if [ -z "$cargo" ] || [ ! -x "$cargo" ]; then
+    echo "error: build-rust.sh: no cargo at '${cargo:-}' (set FR_CARGO)" >&2
+    exit 1
+fi
+# A toolchain's own cargo (`rustup which cargo`) finds rustc beside it.
+cargo_bin=$(cd "$(dirname "$cargo")" && pwd)
 target_dir=${FR_CARGO_TARGET_DIR:-$repo/target/ios-app}
 platform=${PLATFORM_NAME:?PLATFORM_NAME must be set}
 archs=${ARCHS:-arm64}
@@ -59,7 +72,7 @@ for arch in $archs; do
     (cd "$repo" && env -i \
         HOME="$HOME" \
         USER="${USER:-}" \
-        PATH="$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+        PATH="$cargo_bin:$HOME/.cargo/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
         TMPDIR="${TMPDIR:-/tmp}" \
         LANG=en_US.UTF-8 \
         DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p)}" \

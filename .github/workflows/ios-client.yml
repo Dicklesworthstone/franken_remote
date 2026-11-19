@@ -123,6 +123,10 @@ jobs:
           set -euo pipefail
           # The project invokes mobile/ios/scripts/build-rust.sh with the
           # selected SDK/architecture, linking its original Rust static library.
+          # The runner has no ~/.cargo/bin/cargo; hand the script the pinned
+          # toolchain's own cargo (rustc sits beside it).
+          FR_CARGO="$(rustup which cargo)"
+          export FR_CARGO
           xcodebuild \
             -project mobile/ios/FrankenRemote/FrankenRemote.xcodeproj \
             -scheme FrankenRemote \
