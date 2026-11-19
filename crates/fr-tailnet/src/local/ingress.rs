@@ -394,6 +394,35 @@ async fn command_within(
             _ => Error::CommandUncertain,
         })
 }
+/// Drive two futures on this task until BOTH have completed. Neither is
+/// dropped mid-flight because the other finished or failed first: a child read
+/// or helper renewal keeps its own completion and cancellation semantics.
+async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let mut a = pin!(a);
+    let mut b = pin!(b);
+    let (mut first, mut second) = (None, None);
+    poll_fn(|task| {
+        if first.is_none()
+            && let Poll::Ready(value) = a.as_mut().poll(task)
+        {
+            first = Some(value);
+        }
+        if second.is_none()
+            && let Poll::Ready(value) = b.as_mut().poll(task)
+        {
+            second = Some(value);
+        }
+        match (first.take(), second.take()) {
+            (Some(a), Some(b)) => Poll::Ready((a, b)),
+            (a, b) => {
+                first = a;
+                second = b;
+                Poll::Pending
+            }
+        }
+    })
+    .await
+}
 /// Kernel view of one interface: its qualified TUN index and the unprivileged
 /// `ip -j address show` report. Neither value comes from a caller.
 #[cfg(unix)]
@@ -586,24 +615,6 @@ async fn read_back_within(
     command_within(cx, nft, &args, b"", limit).await
 }
 #[cfg(unix)]
-async fn read_rule(
-    cx: &Cx,
-    config: &Configuration,
-    table: &str,
-    index: u32,
-    limit: Duration,
-) -> Result<(), Error> {
-    let bytes = read_back_within(cx, &config.nft, table, limit).await?;
-    validate_rule(
-        &bytes,
-        table,
-        config.address,
-        config.protocols,
-        index,
-        &config.interface,
-    )
-}
-#[cfg(unix)]
 async fn residue_budget(cx: &Cx, config: &Configuration) -> Result<(), Error> {
     let bytes = command(cx, &config.nft, &["-j", "list", "tables", "inet"], b"").await?;
     let value: serde_json::Value =
@@ -707,6 +718,19 @@ impl Lease {
             return Err(error);
         }
         Ok(())
+    }
+    /// Time left until the next periodic refresh. The interval runs from the
+    /// current snapshot's issue, not from the end of the refresh that made it:
+    /// that refresh already spent part of the snapshot's validity on its reads.
+    fn refresh_wait(&self) -> Result<Duration, Error> {
+        let issued = self
+            .state
+            .lock()
+            .map_err(|_| Error::Closed)?
+            .node
+            .issued_us();
+        let age = now(&self.cx)?.saturating_sub(issued);
+        Ok(REFRESH_INTERVAL.saturating_sub(Duration::from_micros(age)))
     }
 }
 /// Owns one exact-address/port drop rule. This type deliberately owns no socket:
@@ -881,40 +905,58 @@ impl Boundary {
                     .revalidate_node(&owner.lease.cx, &old)
                     .await?
             };
-            let index = qualified_interface(&owner.lease.cx, &owner.config, limit(&old)?).await?;
+            // The interface read and the kernel-state read are independent, so
+            // they run together. Under load each command took 0.3-0.9 s (trj,
+            // fr-eny1), and the old snapshot must outlive this refresh: run one
+            // after the other, their sum ended sessions with Identity(Expired).
+            // Both complete before either result is judged, in the old order.
+            let cx = &owner.lease.cx;
+            let config = &owner.config;
+            #[cfg(unix)]
+            let table = owner.table.as_str();
+            let interface = qualified_interface(cx, config, limit(&old)?);
+            let kernel_limit = limit(&old)?;
+            let backend = &mut owner.backend;
+            let kernel = async move {
+                match backend {
+                    #[cfg(unix)]
+                    Backend::Direct => read_back_within(cx, &config.nft, table, kernel_limit)
+                        .await
+                        .map(Some),
+                    // The helper re-qualifies the interface/address and reads the
+                    // kernel ruleset as root; its read-back must pass the same check.
+                    #[cfg(unix)]
+                    Backend::Helper(link) => link.renew(cx).await.map(Some),
+                    // Installation included: the boundary IS this kernel state.
+                    #[cfg(any(target_os = "macos", windows))]
+                    Backend::StrongHost => {
+                        let ipv6 = config.address.is_ipv6();
+                        if strong_host::enforced_within(cx, ipv6, kernel_limit).await? {
+                            Ok(None::<Vec<u8>>)
+                        } else {
+                            Err(Error::StrongHostOff)
+                        }
+                    }
+                }
+            };
+            let (index, kernel) = both(Box::pin(interface), Box::pin(kernel)).await;
+            let index = index?;
             if index != owner.index {
                 return Err(Error::InterfaceChanged);
             }
-            match &mut owner.backend {
-                #[cfg(unix)]
-                Backend::Direct => {
-                    let limit = limit(&old)?;
-                    read_rule(&owner.lease.cx, &owner.config, &owner.table, index, limit).await?;
-                }
-                // The helper re-qualifies the interface/address and reads the
-                // kernel ruleset as root; its read-back must pass the same check.
-                #[cfg(unix)]
-                Backend::Helper(link) => {
-                    let bytes = link.renew(&owner.lease.cx).await?;
-                    validate_rule(
-                        &bytes,
-                        &owner.table,
-                        owner.config.address,
-                        owner.config.protocols,
-                        index,
-                        &owner.config.interface,
-                    )?;
-                }
-                // Installation included: the boundary IS this kernel state.
-                #[cfg(any(target_os = "macos", windows))]
-                Backend::StrongHost => {
-                    let limit = limit(&old)?;
-                    let ipv6 = owner.config.address.is_ipv6();
-                    if !strong_host::enforced_within(&owner.lease.cx, ipv6, limit).await? {
-                        return Err(Error::StrongHostOff);
-                    }
-                }
+            #[cfg(unix)]
+            if let Some(bytes) = kernel? {
+                validate_rule(
+                    &bytes,
+                    table,
+                    config.address,
+                    config.protocols,
+                    index,
+                    &config.interface,
+                )?;
             }
+            #[cfg(windows)]
+            kernel?;
             owner.lease.check(owner.address())?;
             owner.lease.api.check_node(&owner.lease.cx, &node)?;
             let mut state = owner.lease.state.lock().map_err(|_| Error::Closed)?;
@@ -945,8 +987,9 @@ impl Boundary {
             loop {
                 let lease = guard.owner.lease()?;
                 let cx = lease.cx.clone();
+                let wait = lease.refresh_wait()?;
                 let mut refresh = pin!(async {
-                    asupersync::time::sleep(cx.now(), REFRESH_INTERVAL).await;
+                    asupersync::time::sleep(cx.now(), wait).await;
                     guard.owner.revalidate().await
                 });
                 let output = poll_fn(|task| {

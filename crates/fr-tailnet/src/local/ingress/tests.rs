@@ -547,3 +547,35 @@ fn a_periodic_kernel_read_may_use_the_old_snapshot_validity_not_one_second() {
         );
     });
 }
+#[test]
+fn a_refresh_runs_its_two_reads_together_and_finishes_both() {
+    // `both` drives a refresh's interface read and kernel-state read on one
+    // task. Here `a` can only finish after `b` has run, so polling them one
+    // after the other would starve `a` (it gives up after 1000 polls). `b`
+    // failing first must not drop `a` mid-flight either.
+    let ran = Arc::new(AtomicBool::new(false));
+    let polls = Arc::new(AtomicUsize::new(0));
+    let (seen, counted) = (ran.clone(), polls.clone());
+    let a = poll_fn(move |task| {
+        let n = counted.fetch_add(1, Ordering::SeqCst);
+        if seen.load(Ordering::SeqCst) {
+            Poll::Ready("interface read")
+        } else if n >= 1000 {
+            Poll::Ready("starved")
+        } else {
+            task.waker().wake_by_ref();
+            Poll::Pending
+        }
+    });
+    let b = poll_fn(move |_| {
+        ran.store(true, Ordering::SeqCst);
+        Poll::Ready(Err::<(), _>(Error::CommandUncertain))
+    });
+    let result = runtime().block_on(both(a, b));
+    assert_eq!(result, ("interface read", Err(Error::CommandUncertain)));
+    assert_eq!(
+        polls.load(Ordering::SeqCst),
+        2,
+        "one pass each, then a again"
+    );
+}

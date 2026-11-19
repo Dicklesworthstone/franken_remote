@@ -5,6 +5,7 @@ Used only inside the disposable namespace created by the companion runner. Real
 UDP/TLS and the real Boundary/serial/Host owners execute; this fixture models the
 privileged host's interface and rule evidence, not kernel packet filtering.
 """
+import fcntl
 import json
 import pathlib
 import re
@@ -13,6 +14,12 @@ import sys
 root = pathlib.Path(__file__).parent
 assert pathlib.Path('/run/fr-synthetic-ingress').read_text() == 'synthetic-only\n'
 assert str(pathlib.Path('/proc/self/ns/net').readlink()) != pathlib.Path('/run/fr-parent-netns').read_text().strip()
+# One refresh reads the interface and the rule at the same time, and the
+# fixture keeps its counters in one file: serialize the fixture's state, not
+# the production networking or policy (as dual_stack_tools.py does). The lock
+# is held until exit, so tests that patch this script's lines keep working.
+lock = (root / 'state.lock').open('a')
+fcntl.flock(lock, fcntl.LOCK_EX)
 state_path = root / 'state.json'
 state = json.loads(state_path.read_text()) if state_path.exists() else {'table': None, 'created': 0, 'reads': 0, 'deleted': 0}
 args = sys.argv[1:]

@@ -42,6 +42,10 @@ impl NodeIdentity {
     pub const fn expires_us(&self) -> u64 {
         self.expires_us
     }
+    /// Monotonic issue time (the start of the lookup that made this snapshot).
+    pub(crate) const fn issued_us(&self) -> u64 {
+        self.issued_us
+    }
     pub(crate) fn check_at(&self, current: u64, wall: u64) -> Result<(), Error> {
         let wall =
             crate::discovery::effective_wall(self.issued_us, self.wall_issued_us, current, wall)?;
