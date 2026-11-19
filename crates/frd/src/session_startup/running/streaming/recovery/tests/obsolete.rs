@@ -211,6 +211,7 @@ fn admission<'a, S: Services>(
             pacing: stream.pacing.as_mut(),
             bitrate: stream.bitrate.as_mut(),
             rate_in_flight: None,
+            path: &mut stream.path,
             last_work: None,
             last_capture: None,
             next_capture: 0,

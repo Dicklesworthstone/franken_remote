@@ -300,6 +300,28 @@ noise) its defaults emitted P pictures of up to 70 KB; with the bound the larges
 was 24 KB and the IDR fell from 85 to 69 KB. VA-API keeps its libavcodec defaults
 (not measured).
 
+A controlled session (`fr connect --control`) does not use the shared publisher:
+its stream (`session_startup/running/streaming.rs`) captures only while its one
+viewer's path holds no queue, the same `PathQueue` rule (fr-7al9).
+`real_impairment::controlled_session_across_a_narrow_link_episode` (ignored, run
+by hand) keeps the noise window on the host and narrows only the host-to-client
+direction (`Netem::narrow_downlink`, so the viewer's ACKs and input do not wait
+behind the video in loopback's one queue) for 8 s while the viewer keeps moving.
+After the link widens again, the viewer's motion must reach the host. On the trj
+builder image with the test host's 2 Mbit/s target (5 runs per arm,
+interleaved), the noise window put about 2.5 Mbit/s on the wire:
+
+| Narrow downlink | Ungated: held, control resumed | Gated |
+|---|---|---|
+| 3000 kbit/s | 5/5 (first motion after about 480 ms) | 5/5 (usually about 930 ms) |
+| 1000 kbit/s | 0/5 (`transport_deadline_expired`) | 4/5 |
+| 800 kbit/s | 0/5 | 0/5 |
+
+With the host's target at 500 kbit/s (0.8 Mbit/s on the wire), both arms held at
+1000 and 800 kbit/s in each of 2 runs per arm. Skipping captures carries a link of about
+half the encoder's rate; below that only a lower bitrate keeps the session,
+and nothing on the default path lowers it yet.
+
 Remaining work includes live impaired-path qualification of software bitrate
 changes, native VideoToolbox and Media Foundation rate-change qualification,
 runtime resolution changes, NVENC/VA-API bitrate transactions and hardware quantizer control,

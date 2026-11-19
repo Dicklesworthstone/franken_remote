@@ -596,6 +596,7 @@ impl StreamingHost {
                 send_evidence: send_evidence::SendEvidence::default(),
                 pacing: stream.pacing.as_mut(),
                 bitrate: stream.bitrate.as_mut(),
+                path: &mut stream.path,
                 rate_in_flight: None,
                 last_work: None,
                 last_capture,
@@ -827,6 +828,7 @@ struct VideoServices<'a, S> {
     send_evidence: send_evidence::SendEvidence,
     pacing: Option<&'a mut pacing::Controller>,
     bitrate: Option<&'a mut fr_media::bitrate::Controller>,
+    path: &'a mut crate::media::shared_publisher::path_queue::PathQueue,
     rate_in_flight: Option<fr_media::bitrate::Capture>,
     last_work: Option<(u64, u64)>,
     last_capture: Option<u64>,
@@ -1085,6 +1087,10 @@ impl<S: Services> Services for VideoServices<'_, S> {
         }
         let current = self.service_lanes(q, &cx)?;
         self.check_input_target()?;
+        // A capture, input-woken or not, waits while the viewer's path holds a
+        // queue: on a link slower than the encoder, pictures would otherwise
+        // queue until the session's own records expire behind them (fr-7al9).
+        self.path.observe(q.path_load(), current);
         let credit = self.sender.stream_credit(self.capacity);
         let interval = self.capture_interval(current, credit, observation)?;
         let wake = self.input_wake.due(
@@ -1097,6 +1103,7 @@ impl<S: Services> Services for VideoServices<'_, S> {
             && !self.checking_input_target()
             && (current >= self.next_capture || wake)
             && credit
+            && !self.path.queued()
         {
             let capture = self
                 .bitrate

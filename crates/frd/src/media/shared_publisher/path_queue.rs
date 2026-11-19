@@ -8,9 +8,10 @@
 //! Namespace runs at 1 Mbit/s against a 2 Mbit/s encoder held 280 KB in flight
 //! (over 2 s of queue) before the viewer's records expired.
 //!
-//! The publisher skips a capture while every healthy viewer's path is queued,
-//! so a narrow link costs frames instead of the session. Skipping a capture
-//! keeps the reference chain: the next picture still follows the last one sent.
+//! The shared publisher skips a capture while every healthy viewer's path is
+//! queued, and a controlled stream while its one viewer's path is, so a narrow
+//! link costs frames instead of the session. Skipping a capture keeps the
+//! reference chain: the next picture still follows the last one sent.
 //!
 //! A round trip shows a queue only once a packet that waited in it is
 //! acknowledged, and its ACK may wait in the same queue: pictures captured
@@ -57,7 +58,7 @@ pub(super) const MIN_BUSY_US: u64 = 100_000;
 type Delivered = (u64, u64);
 
 #[derive(Debug, Default)]
-pub(super) struct PathQueue {
+pub(crate) struct PathQueue {
     /// The lowest round trip seen: the path's own delay, without a queue.
     base_us: Option<u64>,
     /// When the current baseline window started, and its lowest sample.
@@ -73,11 +74,11 @@ pub(super) struct PathQueue {
     queued: bool,
 }
 impl PathQueue {
-    pub(super) const fn queued(&self) -> bool {
+    pub(crate) const fn queued(&self) -> bool {
         self.queued
     }
     /// Take one sample of the viewer's connection at host time `now`.
-    pub(super) fn observe(&mut self, load: Option<PathLoad>, now: u64) {
+    pub(crate) fn observe(&mut self, load: Option<PathLoad>, now: u64) {
         let Some(load) = load else {
             self.queued = false;
             return;

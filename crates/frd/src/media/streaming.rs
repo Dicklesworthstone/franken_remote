@@ -68,6 +68,8 @@ pub struct Stream {
     pub(crate) served: bool,
     pub(crate) pacing: Option<fr_media::pacing::Controller>,
     pub(crate) bitrate: Option<fr_media::bitrate::Controller>,
+    /// Whether the viewer's path holds a queue (fr-7al9, `path_queue`).
+    pub(crate) path: super::shared_publisher::path_queue::PathQueue,
 }
 impl std::fmt::Debug for Stream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -117,6 +119,7 @@ impl Stream {
             served: false,
             pacing: None,
             bitrate: None,
+            path: super::shared_publisher::path_queue::PathQueue::default(),
         })
     }
     /// Enable adaptive RAW capture admission before service starts. The floor is

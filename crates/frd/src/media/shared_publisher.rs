@@ -906,7 +906,7 @@ mod adaptive;
 mod audio;
 mod cursor;
 mod join;
-mod path_queue;
+pub(crate) mod path_queue;
 mod pending;
 mod service;
 mod session;

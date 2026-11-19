@@ -347,6 +347,7 @@ async fn fixture_with_input(
         served: false,
         pacing: None,
         bitrate: None,
+        path: crate::media::shared_publisher::path_queue::PathQueue::default(),
     };
     let mut host = host.into_streaming(stream).unwrap();
     // Negotiation alone decides: since plan 11.3 suspension, a control

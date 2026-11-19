@@ -140,6 +140,7 @@ async fn media(
     Box::pin(media_with_decoder(host, viewer, c, h, mode, policy, false)).await
 }
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 async fn media_with_decoder(
     host: &mut HostSession,
     viewer: &mut ViewerSession,
@@ -241,6 +242,7 @@ async fn media_with_decoder(
         served: false,
         pacing: None,
         bitrate: None,
+        path: crate::media::shared_publisher::path_queue::PathQueue::default(),
     };
     Media {
         presenter,
@@ -439,6 +441,7 @@ fn stalled_capture_does_not_block_local_revoke_and_unpolled_serve_is_terminal() 
     });
 }
 #[test]
+#[allow(clippy::too_many_lines)]
 fn pending_admission_refresh_services_native_results_before_the_lookup_finishes() {
     run(|c, h| async move {
         let (mut host, mut viewer) = pair_initialized(&c, &h, capabilities(), |_| {}).await;
@@ -478,6 +481,7 @@ fn pending_admission_refresh_services_native_results_before_the_lookup_finishes(
             pacing: None,
             bitrate: None,
             rate_in_flight: None,
+            path: &mut stream.path,
             last_work: None,
             last_capture: None,
             next_capture: 0,

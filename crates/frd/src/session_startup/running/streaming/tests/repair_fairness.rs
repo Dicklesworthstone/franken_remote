@@ -144,6 +144,7 @@ fn native_backpressure_retries_preserve_the_next_repair_turn() {
             pacing: None,
             bitrate: None,
             rate_in_flight: None,
+            path: &mut stream.path,
             last_work: None,
             last_capture: None,
             next_capture: u64::MAX,

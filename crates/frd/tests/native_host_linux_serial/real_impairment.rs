@@ -33,6 +33,43 @@ impl Netem {
         Self
     }
 }
+impl Netem {
+    /// `delay_ms` on both directions, and `rate_kbit` on the host's datagrams
+    /// to the client only: a narrow downlink, as on hotel Wi-Fi, without the
+    /// client's acknowledgements and input waiting behind the host's video in
+    /// loopback's one queue.
+    pub(super) fn narrow_downlink(delay_ms: u32, rate_kbit: u32) -> Self {
+        let delay = format!("{delay_ms}ms");
+        let rate = format!("{rate_kbit}kbit");
+        let port = address().port().to_string();
+        let tc = |args: &[&str]| {
+            let status = Command::new("tc").args(args).status().unwrap();
+            assert!(status.success(), "tc {args:?}");
+        };
+        let all = ["0"; 16];
+        tc(&[
+            &[
+                "qdisc", "replace", "dev", "lo", "root", "handle", "1:", "prio",
+            ][..],
+            &["bands", "2", "priomap"],
+            &all,
+        ]
+        .concat());
+        tc(&[
+            "qdisc", "add", "dev", "lo", "parent", "1:1", "handle", "10:", "netem", "delay", &delay,
+        ]);
+        tc(&[
+            "qdisc", "add", "dev", "lo", "parent", "1:2", "handle", "20:", "netem", "delay",
+            &delay, "rate", &rate,
+        ]);
+        tc(&[
+            "filter", "add", "dev", "lo", "parent", "1:", "protocol", "ip", "prio", "1", "u32",
+            "match", "ip", "protocol", "17", "0xff", "match", "ip", "sport", &port, "0xffff",
+            "flowid", "1:2",
+        ]);
+        Self
+    }
+}
 impl Drop for Netem {
     fn drop(&mut self) {
         let _ = Command::new("tc")
@@ -166,6 +203,117 @@ fn row(delay_ms: u32, loss_percent: f32, rate_kbit: u32) -> Row {
     }
 }
 
+/// How long [`narrow_episode`] keeps the link narrow.
+const EPISODE: Duration = Duration::from_secs(8);
+
+/// One controlled session across a narrow-link episode with incompressible
+/// content on the host.
+struct Episode {
+    rate_kbit: u32,
+    /// Viewer motion that reached the host while the link was narrow.
+    during: usize,
+    /// The client was still running when the link widened.
+    alive: bool,
+    /// Of [`STEPS`] viewer motions after the link widened, those that reached
+    /// the host before the first that did not.
+    resumed: usize,
+    /// From the link widening to the first motion that reached the host.
+    first_motion: Option<Duration>,
+    /// `fr`'s completion when it ended on its own, or how the steps stopped.
+    ended: Option<String>,
+}
+
+/// A fresh controlled session with [`NOISE`] on the host: the link narrows to
+/// `rate_kbit` (host to client, [`Netem::narrow_downlink`]) for [`EPISODE`]
+/// while the viewer keeps moving, as a person would, then widens again and the
+/// viewer's motion must reach the host.
+fn narrow_episode(rate_kbit: u32) -> Episode {
+    let (mut s, _) = start_row();
+    // Clear of the 480x148 control indicator at the host's top left: covering
+    // any of it is a local revoke.
+    let mut painter = Command::new("python3")
+        .args(["-c", NOISE, &s.host.display, "336", "270"])
+        .spawn()
+        .unwrap();
+    // The encoder is at its steady busy rate before the link narrows.
+    thread::sleep(Duration::from_secs(2));
+    let target = |step: usize| (120 + 40 * i32::try_from(step % 8).unwrap(), 150);
+    let netem = Netem::narrow_downlink(3, rate_kbit);
+    let narrowed = Instant::now();
+    let mut step = 0;
+    let mut during = 0;
+    while narrowed.elapsed() < EPISODE && s.client.try_wait().unwrap().is_none() {
+        if s.pointer_follows(target(step), EPISODE.saturating_sub(narrowed.elapsed())) {
+            during += 1;
+        }
+        step += 1;
+    }
+    // Which band carried what: the host's datagrams must be in the narrow one.
+    let qdisc = Command::new("tc")
+        .args(["-s", "qdisc", "show", "dev", "lo"])
+        .output()
+        .unwrap();
+    println!(
+        "EPISODE QDISC {}",
+        String::from_utf8_lossy(&qdisc.stdout).replace('\n', " | ")
+    );
+    drop(netem);
+    let widened = Instant::now();
+    let alive = s.client.try_wait().unwrap().is_none();
+    let mut resumed = 0;
+    let mut first_motion = None;
+    let mut ended = None;
+    for _ in 0..STEPS {
+        step += 1;
+        let followed = s.pointer_follows(target(step), Duration::from_secs(8));
+        if let Some(status) = s.client.try_wait().unwrap() {
+            ended = Some(format!("exited {status}"));
+            break;
+        }
+        if !followed {
+            ended = Some("motion stopped reaching the host".into());
+            break;
+        }
+        first_motion.get_or_insert_with(|| widened.elapsed());
+        resumed += 1;
+        thread::sleep(Duration::from_millis(400));
+    }
+    let _ = painter.kill();
+    let _ = painter.wait();
+    if s.client.try_wait().unwrap().is_none() {
+        super::real_media::close_window(&s.viewer.display, s.window.0);
+    }
+    let output = wait_for(s.client, Duration::from_secs(30));
+    let host = s.daemon.dump();
+    s.daemon.finish();
+    if ended.is_some() {
+        let completion = String::from_utf8_lossy(&output.stdout);
+        let fields: Vec<&str> = [
+            "\"code\":",
+            "\"input_suspended_ms\":",
+            "\"repair_requests\":",
+        ]
+        .iter()
+        .filter_map(|key| completion.find(key).map(|at| &completion[at..]))
+        .map(|rest| rest.split([',', '}']).next().unwrap_or_default())
+        .collect();
+        let peer: String = host
+            .split("PeerFinished")
+            .nth(1)
+            .map(|rest| rest.chars().take(300).collect())
+            .unwrap_or_default();
+        ended = ended.map(|why| format!("{why}; {}; host {peer}", fields.join(" ")));
+    }
+    Episode {
+        rate_kbit,
+        during,
+        alive,
+        resumed,
+        first_motion,
+        ended,
+    }
+}
+
 /// Profiles control must survive: a clean link and a 40 ms RTT.
 const MUST_HOLD: [(u32, f32, u32); 2] = [(0, 0.0, 0), (20, 0.0, 0)];
 
@@ -233,9 +381,10 @@ fn controlled_session_under_namespace_delay_and_loss() {
     }
 }
 
-/// Paints random noise into a 300x200 window over the host root's top-left at
-/// about 30 Hz until killed: content an encoder cannot compress. The measured
-/// root pixel (the viewer window's centre) stays outside it.
+/// Paints random noise into a 300x200 window on the host root at about 30 Hz
+/// until killed: content an encoder cannot compress. Its top-left corner is at
+/// the optional `X Y` arguments, else the root's. The measured root pixel (the
+/// viewer window's centre) stays outside it.
 const NOISE: &str = r#"
 import ctypes as c, os, sys, time
 x = c.CDLL("libX11.so.6")
@@ -254,7 +403,8 @@ x.XFlush.argtypes = [P]
 d = x.XOpenDisplay(sys.argv[1].encode())
 assert d
 W, H = 300, 200
-win = x.XCreateSimpleWindow(d, x.XDefaultRootWindow(d), 0, 0, W, H, 0, 0, 0)
+X, Y = (int(sys.argv[2]), int(sys.argv[3])) if len(sys.argv) > 3 else (0, 0)
+win = x.XCreateSimpleWindow(d, x.XDefaultRootWindow(d), X, Y, W, H, 0, 0, 0)
 x.XMapWindow(d, win)
 buf = c.create_string_buffer(W * H * 4)
 img = x.XCreateImage(d, x.XDefaultVisual(d, 0), 24, 2, 0, c.cast(buf, P), W, H, 32, 0)
@@ -540,4 +690,19 @@ fn view_only_session_whose_route_lengthens_keeps_its_pictures() {
         decoded[1] * 5 >= decoded[0] * 4,
         "a 300 ms route must keep 4/5 of the 120 ms route's pictures: {decoded:?}"
     );
+}
+
+/// Measures [`narrow_episode`] at three rates, below and above the hosts'
+/// 2 Mbit/s target: a narrow link must cost the session's pictures, not the
+/// session (fr-7al9).
+#[test]
+#[ignore = "measurement: about 1.5 min of namespace sessions; run by hand"]
+fn controlled_session_across_a_narrow_link_episode() {
+    for rate_kbit in [3000, 1000, 800] {
+        let e = narrow_episode(rate_kbit);
+        println!(
+            "EPISODE rate {} kbit/s for {:?}: during {}, alive at widening {}, resumed {}/{STEPS}, first motion after {:?}, ended {:?}",
+            e.rate_kbit, EPISODE, e.during, e.alive, e.resumed, e.first_motion, e.ended
+        );
+    }
 }

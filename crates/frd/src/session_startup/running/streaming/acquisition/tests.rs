@@ -219,6 +219,7 @@ async fn fixture_with_presentation(
         served: false,
         pacing: None,
         bitrate: None,
+        path: crate::media::shared_publisher::path_queue::PathQueue::default(),
     };
     let host = host.into_streaming(stream).unwrap();
     let viewer = StreamingViewer::from_test_parts(viewer, vm, presenter, receiver, initial);

@@ -400,6 +400,7 @@ fn empty_original_egress_does_not_report_ready_before_raw_capture_admission() {
             pacing: stream.pacing.as_mut(),
             bitrate: None,
             rate_in_flight: None,
+            path: &mut stream.path,
             last_work: None,
             last_capture: None,
             next_capture: current + 100_000,
