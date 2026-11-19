@@ -91,7 +91,7 @@ dependencies = [
 [[package]]
 name = "asupersync"
 version = "0.6.2"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=6d998da4aee39c35adf789357f3862a19a103933#6d998da4aee39c35adf789357f3862a19a103933"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=0f955f9d87bdef2a4088e830ce6dea2fef89fc94#0f955f9d87bdef2a4088e830ce6dea2fef89fc94"
 dependencies = [
  "aes-gcm",
  "base64",
@@ -120,7 +120,6 @@ dependencies = [
  "rmp-serde",
  "rustls",
  "rustls-pki-types",
- "semver",
  "serde",
  "serde_json",
  "sha1",
@@ -706,7 +705,7 @@ dependencies = [
 [[package]]
 name = "franken-decision"
 version = "0.6.0"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=6d998da4aee39c35adf789357f3862a19a103933#6d998da4aee39c35adf789357f3862a19a103933"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=0f955f9d87bdef2a4088e830ce6dea2fef89fc94#0f955f9d87bdef2a4088e830ce6dea2fef89fc94"
 dependencies = [
  "franken-evidence",
  "franken-kernel",
@@ -716,7 +715,7 @@ dependencies = [
 [[package]]
 name = "franken-evidence"
 version = "0.6.0"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=6d998da4aee39c35adf789357f3862a19a103933#6d998da4aee39c35adf789357f3862a19a103933"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=0f955f9d87bdef2a4088e830ce6dea2fef89fc94#0f955f9d87bdef2a4088e830ce6dea2fef89fc94"
 dependencies = [
  "serde",
  "serde_json",
@@ -725,7 +724,7 @@ dependencies = [
 [[package]]
 name = "franken-kernel"
 version = "0.6.0"
-source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=6d998da4aee39c35adf789357f3862a19a103933#6d998da4aee39c35adf789357f3862a19a103933"
+source = "git+https://github.com/Dicklesworthstone/asupersync.git?rev=0f955f9d87bdef2a4088e830ce6dea2fef89fc94#0f955f9d87bdef2a4088e830ce6dea2fef89fc94"
 dependencies = [
  "serde",
 ]
@@ -1473,10 +1472,6 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
-dependencies = [
- "serde",
- "serde_core",
-]
 
 [[package]]
 name = "serde"

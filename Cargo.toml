@@ -54,10 +54,14 @@ repository = "https://github.com/Dicklesworthstone/franken_remote"
 # 6d998da4a (asupersync main, 2026-11-13) adds discard_outbound_datagrams,
 # so terminal custody drops queued DATAGRAMs unsent instead of refusing the
 # report because of them.
+# 0f955f9d8 (asupersync main, 2026-11-18) lets acknowledge_io_once read the
+# socket after its loss timer is due. Before it, a sender that woke past its
+# PTO never learned its peer's queued ACKs: late-wake reconciliation always
+# expired the record and the terminal settle loop never read (fr-load-ends-cuqi).
 # Owner approval for a Git pin while 0.6.x is unpublished: 2026-10-12
 # ("do everything you think is advisable"). Return to a crates.io release
 # once one contains these fixes. Selecting this revision does not qualify transport.
-asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "6d998da4aee39c35adf789357f3862a19a103933", default-features = false }
+asupersync = { version = "=0.6.2", git = "https://github.com/Dicklesworthstone/asupersync.git", rev = "0f955f9d87bdef2a4088e830ce6dea2fef89fc94", default-features = false }
 # First-party crates, wired by path in exactly one place; consumers write
 # `fr-core.workspace = true`.
 fr-core = { path = "crates/fr-core" }

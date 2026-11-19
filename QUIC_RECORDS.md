@@ -238,6 +238,17 @@ I/O also refuses this path. For eligible work, the pinned Asupersync
 payload, retransmission or PTO probe. It may acknowledge incoming packets, but
 it dispatches no application record. No loop waits for another acknowledgement.
 
+Before Asupersync 0f955f9d8 (pinned 2026-11-19), that ACK-only step capped its
+receive wait at the connection's PTO deadline, like the transmitting drive.
+Only the transmitting drive services that timer, so once a sender had slept
+past its PTO every ACK-only step computed a zero wait and returned without
+reading the socket. Reconciliation then always expired the record, and the
+terminal settle loop (`lifetime/terminal.rs`) spun without reading until its
+own deadline. The ACK-only wait is now bounded only by the caller's timeout
+and the idle deadline. The regressions below failed in every CI run from
+565a0201 (2026-11-14) until that pin. Their negative cases had passed only
+because nothing was ever read.
+
 Cancellation, immutable connection/operation guards, the caller's permission,
 clock monotonicity and attachment lifetime remain checked before and during the
 read. Optional receive expiry and explicit local or peer retirement still win.

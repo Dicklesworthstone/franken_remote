@@ -1,5 +1,31 @@
 # Implementation status
 
+## Late ACK reconciliation reads the socket again (2026-11-19 UTC)
+
+The workspace now pins Asupersync 0f955f9d8. Before it, the ACK-only step
+behind [late sender reconciliation](#late-sender-turns-reconcile-queued-quic-acknowledgements-2026-11-15-utc)
+never read anything once the sender's PTO was due, and that is the only case
+where it runs. Its receive wait was capped at the PTO deadline, but only the
+transmitting drive services that timer, so the wait was zero and the step
+returned at once. Reconciliation therefore always expired the record. The
+closing exchange's settle loop, which uses the same step, spun until its own
+deadline without reading.
+
+This explains the six ACK-family tests that failed in every Rust verification
+run from 565a0201 (2026-11-14) until now: three in fr-transport
+(`native_quic`, `native_quic/reconciliation`, `media_attachment` clipboard
+retirement) and three frd `running::tests::acknowledgements` loops. Their
+negative cases passed only because nothing was ever read.
+
+**Passed:** the new Asupersync regression
+`an_ack_only_step_reads_a_queued_ack_after_the_loss_timer_is_due`, which fails
+with the old wait (no packet received); Asupersync's acknowledge-I/O, native
+QUIC and datagram targets; and, on trj in the builder image at load 35-150, the
+full `cargo test --workspace --all-features --locked --no-fail-fast` with all
+six ACK-family tests passing. The frd clipboard dispatch test that stalled in
+the 2026-11-18 continuous-viewer nightly also passed there. No live
+load-induced session end has yet been attributed to this cause.
+
 ## iOS scaled-picture input and cursor ownership (2026-11-16 UTC)
 
 The active iOS app now maps the original approved display into the encoded
@@ -359,6 +385,9 @@ passing from those runs. The original scheduling-stall reproducer is retained
 as a real network regression, but no live load-induced end has been attributed
 to this cause. `fr-load-ends-cuqi` remains in progress, including its five full
 suites at load above 100. See [QUIC records](QUIC_RECORDS.md).
+Update 2026-11-19: once run, these regressions failed, because the pinned
+Asupersync step never read the socket; see
+[the fix above](#late-ack-reconciliation-reads-the-socket-again-2026-11-19-utc).
 
 ## Connected Windows file selection and control-to-view handoff (2026-11-14 UTC)
 
