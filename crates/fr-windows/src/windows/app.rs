@@ -264,40 +264,67 @@ fn application() -> ExitCode {
 /// The session log keeps roughly this much; older text is dropped first.
 const LOG_LIMIT: usize = 1024 * 1024;
 
-/// Append one session's arguments, status lines and completion document to
-/// `sessions.log` beside the settings, so a failed session can be explained
-/// afterwards. The viewer's own output is content-free: typed states, counts
-/// and timings, never keys, pixels, clipboard text or file paths.
-fn log_session(args: &[String], output: &std::process::Output) {
-    let Some(path) =
-        install::settings_path().map(|settings| settings.with_file_name("sessions.log"))
-    else {
-        return;
-    };
-    let mut text = std::fs::read(&path).unwrap_or_default();
-    if text.len() > LOG_LIMIT {
-        let cut = text.len() - LOG_LIMIT / 2;
-        let start = text[cut..]
-            .iter()
-            .position(|&byte| byte == b'\n')
-            .map_or(cut, |line| cut + line + 1);
-        text.drain(..start);
-    }
-    let started = std::time::SystemTime::now()
+/// One window's lines in `sessions.log` beside the settings, so a session can
+/// be explained while it runs and afterwards. A window now reconnects instead
+/// of closing, so its status lines are appended as they arrive, not only
+/// when it closes. The viewer's own output is content-free: typed states,
+/// counts and timings, never keys, pixels, clipboard text or file paths.
+struct SessionLog(Option<std::path::PathBuf>);
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs());
-    text.extend_from_slice(
-        format!(
-            "=== session ended at unix {started}, exit {}: {}\n",
-            output.status.code().unwrap_or(-1),
-            args.join(" ")
+        .map_or(0, |since| since.as_secs())
+}
+
+impl SessionLog {
+    /// Trim the log to its limit and write this window's header.
+    fn begin(args: &[String]) -> Self {
+        let path = install::settings_path().map(|settings| settings.with_file_name("sessions.log"));
+        if let Some(path) = &path {
+            let mut text = std::fs::read(path).unwrap_or_default();
+            if text.len() > LOG_LIMIT {
+                let cut = text.len() - LOG_LIMIT / 2;
+                let start = text[cut..]
+                    .iter()
+                    .position(|&byte| byte == b'\n')
+                    .map_or(cut, |line| cut + line + 1);
+                text.drain(..start);
+            }
+            text.extend_from_slice(
+                format!(
+                    "=== session started at unix {}: {}\n",
+                    unix_now(),
+                    args.join(" ")
+                )
+                .as_bytes(),
+            );
+            let _ = std::fs::write(path, text);
+        }
+        Self(path)
+    }
+
+    fn append(&self, text: &[u8]) {
+        use std::io::Write as _;
+        if let Some(path) = &self.0
+            && let Ok(mut file) = std::fs::OpenOptions::new().append(true).open(path)
+        {
+            let _ = file.write_all(text);
+        }
+    }
+
+    /// The window closed: its exit code and completion document.
+    fn finish(&self, output: &std::process::Output) {
+        let mut text = format!(
+            "=== session ended at unix {}, exit {}\n",
+            unix_now(),
+            output.status.code().unwrap_or(-1)
         )
-        .as_bytes(),
-    );
-    text.extend_from_slice(&output.stderr);
-    text.extend_from_slice(&output.stdout);
-    text.push(b'\n');
-    let _ = std::fs::write(&path, text);
+        .into_bytes();
+        text.extend_from_slice(&output.stdout);
+        text.push(b'\n');
+        self.append(&text);
+    }
 }
 
 fn session(chosen: &Chosen) -> Notice {
@@ -310,28 +337,53 @@ fn session(chosen: &Chosen) -> Notice {
     let Ok(exe) = std::env::current_exe() else {
         return failed("FrankenRemote could not find its own program file.".to_owned());
     };
+    let args = chosen.settings.viewer_args(chosen.peer.stable_id());
     let child = Command::new(exe)
         .arg("--session")
-        .args(chosen.settings.viewer_args(chosen.peer.stable_id()))
+        .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x0800_0000)
         .spawn();
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         Err(error) => return failed(format!("Could not start the viewer ({error}).")),
     };
     // SAFETY: a scalar foreground-permission grant for the new viewer.
     let _ = unsafe { AllowSetForegroundWindow(child.id()) };
-    let output = match child.wait_with_output() {
+    let log = std::sync::Arc::new(SessionLog::begin(&args));
+    // Status lines go to the log as they arrive. Draining stderr on its own
+    // thread also keeps the viewer from ever blocking on a full pipe.
+    let lines = child.stderr.take().and_then(|stderr| {
+        let log = std::sync::Arc::clone(&log);
+        std::thread::Builder::new()
+            .name("fr-session-log".into())
+            .spawn(move || {
+                use std::io::BufRead as _;
+                let opened = std::time::Instant::now();
+                for line in std::io::BufReader::new(stderr).split(b'\n') {
+                    let Ok(line) = line else { break };
+                    // Seconds since the window opened, so reconnects and
+                    // their gaps can be timed from the log alone.
+                    let mut stamped =
+                        format!("{:8.1}s ", opened.elapsed().as_secs_f64()).into_bytes();
+                    stamped.extend_from_slice(&line);
+                    stamped.push(b'\n');
+                    log.append(&stamped);
+                }
+            })
+            .ok()
+    });
+    let output = child.wait_with_output();
+    if let Some(lines) = lines {
+        let _ = lines.join();
+    }
+    let output = match output {
         Ok(output) => output,
         Err(error) => return failed(format!("The viewer could not be followed ({error}).")),
     };
-    log_session(
-        &chosen.settings.viewer_args(chosen.peer.stable_id()),
-        &output,
-    );
+    log.finish(&output);
     let stdout = String::from_utf8_lossy(&output.stdout);
     if let Some(document) = stdout
         .lines()

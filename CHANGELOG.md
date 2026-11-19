@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-11-18 — the session log is written while a window is open
+
+- The Windows app wrote each window's status lines to `sessions.log` only
+  when the window closed. Now that a window reconnects instead of closing,
+  that could be hours later. Lines are now appended as they arrive, each
+  stamped with seconds since the window opened. The window's header
+  (`=== session started at unix …: args`) comes first; its trailer
+  (`=== session ended at unix …, exit N`) and completion document come last.
+- The launcher drains the viewer's stderr on its own thread, so a full pipe
+  can never block the viewer.
+
 ## 2026-11-18 — a Windows viewer never closes or loses control on its own
 
 - Only the user (or `--seconds`) ends a viewer window now. When a session
