@@ -226,4 +226,5 @@ impl VerifiedTarget {
 }
 
 #[cfg(all(test, target_os = "linux"))]
+#[path = "target_tests.rs"]
 mod tests;
