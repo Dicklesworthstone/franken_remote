@@ -9,7 +9,8 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMedia/CoreMedia.h>
 #include <CoreVideo/CoreVideo.h>
-#include <IOSurface/IOSurface.h>
+// IOSurfaceRef.h, not the IOSurface.h umbrella: iOS SDKs ship only the former.
+#include <IOSurface/IOSurfaceRef.h>
 #include <VideoToolbox/VideoToolbox.h>
 #include <stdint.h>
 #include <stdlib.h>
