@@ -387,6 +387,23 @@ fn late_window_close_after_cleaning_vetoes_retry_without_hiding_cleanup_failure(
     }
 }
 
+/// A fresh directory the receive selection accepts: owned by this user, mode
+/// 0700, under the canonical temporary directory. The checkout itself can be
+/// group-writable (umask 002 is Ubuntu's default), which the selection refuses.
+fn private_receive_directory() -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let directory = std::env::temp_dir().canonicalize().unwrap().join(format!(
+        "fr-reconnect-receive-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    directory
+}
+
 #[test]
 fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() {
     for clipboard in [false, true] {
@@ -414,7 +431,7 @@ fn spent_file_consent_is_omitted_without_changing_control_or_original_reports() 
                         // receive worker or writes into that directory.
                         progress.downloads =
                             files::download::select(Some(&crate::options::ReceiveOptions {
-                                directory: std::env::current_dir().unwrap().canonicalize().unwrap(),
+                                directory: private_receive_directory(),
                                 max_file_bytes: Some(1),
                                 max_session_bytes: Some(1),
                                 keep_both: false,
