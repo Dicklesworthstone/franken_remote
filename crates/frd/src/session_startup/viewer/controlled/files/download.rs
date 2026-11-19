@@ -52,10 +52,11 @@ impl Receiving {
     ) -> Result<(), Error> {
         self.observe();
         if self.control.cancel_requested() {
-            self.receiver.retire(q).map_err(send_error)?;
+            // As in `stop`: a cancelled receive has ended even if its reset fails.
+            let retired = self.receiver.retire(q).map_err(send_error);
             self.control.set_phase(ReceivePhase::Ended);
             let _ = self.collect();
-            return Ok(());
+            return retired;
         }
         if let Err(error) = self.receiver.service(q, authorize) {
             self.failure.get_or_insert(error);
@@ -77,12 +78,16 @@ impl Receiving {
         // An orderly close must not add a reset to an idle pair: its terminal
         // exchange requires an empty sender. In-flight publication is fenced
         // now; actual disk completion is collected after the parent closes.
-        if cleanup.is_none() {
-            self.receiver.retire(q).map_err(send_error)?;
-        }
+        let retired = match cleanup {
+            None => self.receiver.retire(q).map_err(send_error),
+            Some(_) => Ok(()),
+        };
+        // `receiver.stop` already fenced publication, so this receive has
+        // ended even when its pair reset fails (a failed reset closes the
+        // connection). Report that before returning the reset's error.
         self.control.set_phase(ReceivePhase::Ended);
         let _ = self.collect();
-        Ok(())
+        retired
     }
     pub(super) fn collect(&mut self) -> Option<Result<(), worker::Error>> {
         if let Err(error) = self.receiver.collect_after_close() {
