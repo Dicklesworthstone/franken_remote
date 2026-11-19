@@ -70,6 +70,8 @@ struct Entry {
     receiver_sample: adaptive::ReceiverSample,
     /// Ends this viewer's network wait when a picture is published for it.
     doorbell: Option<fr_transport::quic::Doorbell>,
+    /// Whether this viewer's path holds a queue, sampled each service turn.
+    path: path_queue::PathQueue,
 }
 impl Entry {
     fn close(&mut self, error: Error) {
@@ -388,6 +390,7 @@ impl Publisher {
             send_sample: None,
             receiver_sample: adaptive::ReceiverSample::Unknown,
             doorbell: None,
+            path: path_queue::PathQueue::default(),
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),
@@ -663,6 +666,7 @@ impl Subscriber {
     /// packet is retained unchanged, and another connection can run immediately.
     /// Configuration counts against the same send budget as media. This does
     /// not drive UDP, renew observation, execute a decoder or grant input.
+    #[allow(clippy::too_many_lines)]
     pub fn service(
         &mut self,
         cx: &Cx,
@@ -685,6 +689,7 @@ impl Subscriber {
         }
         members.tick()?;
         let owner = members.owner.clone();
+        let now = members.last;
         let Members {
             entries,
             cursor: host_cursor,
@@ -695,6 +700,7 @@ impl Subscriber {
         if let Some(error) = entry.failure {
             return Err(error);
         }
+        entry.path.observe(transport.path_load(), now);
         let result = (|| {
             entry.check_media(transport)?;
             let mut report = SendReport {
@@ -900,6 +906,7 @@ mod adaptive;
 mod audio;
 mod cursor;
 mod join;
+mod path_queue;
 mod pending;
 mod service;
 mod session;

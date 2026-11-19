@@ -282,6 +282,17 @@ pub struct StreamRoute {
     pub outbound: bool,
     pub maximum: usize,
 }
+/// See [`QuicRecords::path_load`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathLoad {
+    /// The round trip of the most recently acknowledged packet, ACK delay
+    /// included: unlike the smoothed estimate it shows a queue as it forms.
+    pub latest_rtt_us: u64,
+    /// Sent and neither acknowledged nor declared lost, datagrams included.
+    pub bytes_in_flight: u64,
+    /// Ack-eliciting packets acknowledged so far on this path.
+    pub packets_acked: u64,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DatagramRoute {
     pub binding: u32,
@@ -588,6 +599,17 @@ impl QuicRecords {
             .connection()
             .path_stats()
             .smoothed_rtt_micros
+    }
+    /// QUIC's latest round-trip sample, bytes in flight and packets
+    /// acknowledged, once a round trip was sampled. Advisory congestion
+    /// evidence for pacing a sender; it grants nothing.
+    pub fn path_load(&self) -> Option<PathLoad> {
+        let path = self.native.as_ref()?.connection().path_stats();
+        Some(PathLoad {
+            latest_rtt_us: path.latest_rtt_micros?,
+            bytes_in_flight: path.bytes_in_flight,
+            packets_acked: path.packets_acked,
+        })
     }
     pub fn binding(&self) -> ConnectionBinding {
         ConnectionBinding(Arc::downgrade(&self.identity))

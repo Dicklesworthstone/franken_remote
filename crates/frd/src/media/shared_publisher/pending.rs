@@ -92,6 +92,7 @@ impl Publisher {
             send_sample: None,
             receiver_sample: super::adaptive::ReceiverSample::Unknown,
             doorbell: None,
+            path: super::path_queue::PathQueue::default(),
         });
         Ok(Subscriber {
             members: Arc::downgrade(&self.members),

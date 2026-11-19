@@ -463,7 +463,14 @@ fn view_only_incompressible_content_over_a_narrow_link() {
     // seconds even on a 3 or 4 Mbit/s link (0/6 and 1/6 shown). 3 Mbit/s must
     // now hold; 2 Mbit/s (no headroom) is a printed limit that must hold, show
     // a change late, or end with a named cause.
-    for (rate_kbit, required) in [(3000, true), (2000, false)] {
+    //
+    // Links at half and 0.4 times the target (a hotel's, fr-7al9) must hold
+    // too. Before capture waited for a queued path (path_queue.rs), no such
+    // row held on trj (0 of 26, 1-4 of 6 changes shown): QUIC lost nothing,
+    // so 280 KB of pictures queued at the bottleneck and the viewer's records
+    // expired behind them. With it, 48 of 48 held at load 11-37. One large
+    // change picture still queues for about 0.7 s at 1 Mbit/s.
+    for (rate_kbit, required) in [(3000, true), (2000, false), (1000, true), (800, true)] {
         let (steps, mut times, ended, media) = view_row(3, 0.0, rate_kbit, 0, true);
         times.sort();
         let line = format!(

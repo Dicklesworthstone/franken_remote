@@ -123,6 +123,7 @@ impl JoinQueue {
             send_sample: None,
             receiver_sample: super::adaptive::ReceiverSample::Unknown,
             doorbell: None,
+            path: super::path_queue::PathQueue::default(),
             join: Some(PendingJoin {
                 setup,
                 cfg,
@@ -347,7 +348,11 @@ impl Members {
                         // a healthy cohort retains it as before. A recovering
                         // viewer is demand only until its recovery IDR is
                         // captured; then it is decoding it, the same wait.
+                        // A viewer whose path holds a queue is demand only
+                        // once it drains (path_queue.rs), and stays ready:
+                        // another viewer's capture still reaches it.
                         healthy_credit |= credit
+                            && !entry.path.queued()
                             && entry.starting.is_none()
                             && (entry.join.is_none()
                                 || entry.recovery.is_some() && entry.waiting());
